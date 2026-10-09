@@ -102,15 +102,6 @@ bool tsp_2opt_improve(std::vector<size_t>& path, const Points& centers, int max_
     return improved;
 }
 
-// Fast bounding-box overlap test (rejects most non-intersecting pairs).
-static inline bool bboxes_overlap(const Point& a, const Point& b, const Point& c, const Point& d)
-{
-    return !(std::max(a.x(), b.x()) < std::min(c.x(), d.x()) ||
-             std::max(c.x(), d.x()) < std::min(a.x(), b.x()) ||
-             std::max(a.y(), b.y()) < std::min(c.y(), d.y()) ||
-             std::max(c.y(), d.y()) < std::min(a.y(), b.y()));
-}
-
 bool tsp_remove_crossings(std::vector<size_t>& path, const Points& centers)
 {
     size_t pn = path.size();
@@ -121,15 +112,27 @@ bool tsp_remove_crossings(std::vector<size_t>& path, const Points& centers)
     size_t n_edges = pn;
     constexpr size_t npos = std::numeric_limits<size_t>::max();
 
-    // Edge k runs from path[k] to path[(k + 1) % pn]; j > i + 1.
+    // Bounding box of edge k, which runs from path[k] to path[(k + 1) % pn]. Kept in path order in
+    // flat arrays, so the scans below reject most edge pairs without touching centers.
+    struct EdgeBox { coord_t min_x, max_x, min_y, max_y; };
+    std::vector<EdgeBox> edge_boxes(n_edges);
+    auto update_edge_box = [&](size_t k) {
+        const Point& a = centers[path[k]];
+        const Point& b = centers[path[(k + 1) % pn]];
+        edge_boxes[k] = { std::min(a.x(), b.x()), std::max(a.x(), b.x()), std::min(a.y(), b.y()), std::max(a.y(), b.y()) };
+    };
+    for (size_t k = 0; k < n_edges; ++k)
+        update_edge_box(k);
+
+    // j > i + 1. A bounding-box overlap test rejects most non-intersecting pairs.
     auto edges_cross = [&](size_t i, size_t j) {
         // Skip the (0, pn-1) pair: edges (0,1) and (pn-1,0) share node 0.
         if (i == 0 && j == pn - 1) return false;
-        const Point& ai = centers[path[i]];
-        const Point& bi = centers[path[(i + 1) % pn]];
-        const Point& aj = centers[path[j]];
-        const Point& bj = centers[path[(j + 1) % pn]];
-        return bboxes_overlap(ai, bi, aj, bj) && Geometry::segments_intersect(ai, bi, aj, bj);
+        const EdgeBox& bi = edge_boxes[i];
+        const EdgeBox& bj = edge_boxes[j];
+        if (bi.max_x < bj.min_x || bj.max_x < bi.min_x || bi.max_y < bj.min_y || bj.max_y < bi.min_y)
+            return false;
+        return Geometry::segments_intersect(centers[path[i]], centers[path[(i + 1) % pn]], centers[path[j]], centers[path[(j + 1) % pn]]);
     };
 
     // Scan rows from first_row on for the first crossing in (i, j) order; {npos, npos} if none.
@@ -167,6 +170,10 @@ bool tsp_remove_crossings(std::vector<size_t>& path, const Points& centers)
         improved = true;
         std::tie(ci, cj) = crossing;
         std::reverse(path.begin() + ci + 1, path.begin() + cj + 1);
+        // Edges between ci and cj keep their segments in reverse order; ci and cj are new.
+        std::reverse(edge_boxes.begin() + ci + 1, edge_boxes.begin() + cj);
+        update_edge_box(ci);
+        update_edge_box(cj);
     }
     return improved;
 }
