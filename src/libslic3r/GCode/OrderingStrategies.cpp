@@ -14,6 +14,7 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -118,36 +119,53 @@ bool tsp_remove_crossings(std::vector<size_t>& path, const Points& centers)
     // Treat path as a cycle: include the closing edge (pn-1 -> 0), consistent with the other
     // TSP helpers (2-opt, closing-edge rotation) that operate on the full cycle.
     size_t n_edges = pn;
+    constexpr size_t npos = std::numeric_limits<size_t>::max();
 
-    // Scan for first crossing; returns {i, j} or {npos, npos} if none.
-    auto find_crossing = [&]() -> std::pair<size_t, size_t> {
-        for (size_t i = 0; i < n_edges; ++i) {
-            const Point& ai = centers[path[i]];
-            const Point& bi = centers[path[(i + 1) % pn]];
-
-            for (size_t j = i + 2; j < n_edges; ++j) {
-                // Skip the (0, pn-1) pair: edges (0,1) and (pn-1,0) share node 0.
-                if (i == 0 && j == pn - 1) continue;
-
-                const Point& aj = centers[path[j]];
-                const Point& bj = centers[path[(j + 1) % pn]];
-
-                if (!bboxes_overlap(ai, bi, aj, bj)) continue;
-                if (Geometry::segments_intersect(ai, bi, aj, bj))
-                    return {i, j};
-            }
-        }
-        return {std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max()};
+    // Edge k runs from path[k] to path[(k + 1) % pn]; j > i + 1.
+    auto edges_cross = [&](size_t i, size_t j) {
+        // Skip the (0, pn-1) pair: edges (0,1) and (pn-1,0) share node 0.
+        if (i == 0 && j == pn - 1) return false;
+        const Point& ai = centers[path[i]];
+        const Point& bi = centers[path[(i + 1) % pn]];
+        const Point& aj = centers[path[j]];
+        const Point& bj = centers[path[(j + 1) % pn]];
+        return bboxes_overlap(ai, bi, aj, bj) && Geometry::segments_intersect(ai, bi, aj, bj);
     };
 
-    // Process crossings one at a time: find first, reverse it, restart scan.
+    // Scan rows from first_row on for the first crossing in (i, j) order; {npos, npos} if none.
+    auto find_crossing = [&](size_t first_row) -> std::pair<size_t, size_t> {
+        for (size_t i = first_row; i < n_edges; ++i)
+            for (size_t j = i + 2; j < n_edges; ++j)
+                if (edges_cross(i, j))
+                    return {i, j};
+        return {npos, npos};
+    };
+
+    // Process crossings one at a time: find the first in (i, j) order, reverse it, repeat.
     // Cap iterations to prevent infinite loops on collinear/overlapping segments.
     int max_iters = static_cast<int>(pn * pn);
     bool improved = false;
+    size_t ci = npos, cj = npos;
     while (max_iters-- > 0) {
-        auto [ci, cj] = find_crossing();
-        if (ci == std::numeric_limits<size_t>::max()) break;
+        std::pair<size_t, size_t> crossing{npos, npos};
+        if (ci != npos) {
+            // Rows before ci had no crossing before the last reversal of path[ci+1..cj]. The
+            // reversal replaced only edges ci and cj: edges between them keep their segments in
+            // reverse order, and segments_intersect() ignores segment direction. So a row before ci
+            // can only cross one of the two new edges, and rows from ci on are scanned in full,
+            // finding the same crossing a scan from row 0 would.
+            for (size_t i = 0; i < ci && crossing.first == npos; ++i) {
+                if (ci >= i + 2 && edges_cross(i, ci))
+                    crossing = {i, ci};
+                else if (edges_cross(i, cj))
+                    crossing = {i, cj};
+            }
+        }
+        if (crossing.first == npos)
+            crossing = find_crossing(ci == npos ? 0 : ci);
+        if (crossing.first == npos) break;
         improved = true;
+        std::tie(ci, cj) = crossing;
         std::reverse(path.begin() + ci + 1, path.begin() + cj + 1);
     }
     return improved;
