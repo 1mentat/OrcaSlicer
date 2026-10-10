@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_all.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <vector>
 #include <cstddef>
 #include <math.h>
@@ -130,6 +131,46 @@ TEST_CASE("tsp_remove_crossings eliminates crossings", "[TSPPostProcessing]") {
     tsp_remove_crossings(path, centers);
     CHECK(!has_crossings(path, centers));
     REQUIRE(is_permutation(path, centers.size()));
+}
+
+TEST_CASE("tsp_remove_crossings reverses the same crossings as a scan from the first edge", "[TSPPostProcessing]") {
+    // Reference: rescan every edge pair after each reversal and fix the first crossing found.
+    auto remove_crossings_by_full_rescan = [](std::vector<size_t> path, const Points& centers) {
+        const size_t pn = path.size();
+        for (int iters = static_cast<int>(pn * pn); iters > 0; --iters) {
+            bool found = false;
+            for (size_t i = 0; i < pn && !found; ++i)
+                for (size_t j = i + 2; j < pn && !found; ++j) {
+                    if (i == 0 && j == pn - 1) continue;
+                    if (Geometry::segments_intersect(centers[path[i]], centers[path[(i + 1) % pn]],
+                                                     centers[path[j]], centers[path[(j + 1) % pn]])) {
+                        std::reverse(path.begin() + i + 1, path.begin() + j + 1);
+                        found = true;
+                    }
+                }
+            if (!found) break;
+        }
+        return path;
+    };
+
+    // Coarse coordinates give duplicate and collinear points, as island centroids quantized to 1 mm do.
+    const coord_t grid = GENERATE(coord_t(1), coord_t(5000));
+    const size_t  n    = GENERATE(size_t(12), size_t(60), size_t(150));
+    Points centers;
+    uint32_t h = 12345u + static_cast<uint32_t>(n) + static_cast<uint32_t>(grid);
+    for (size_t i = 0; i < n; ++i) {
+        h = h * 1664525u + 1013904223u;
+        const coord_t x = static_cast<coord_t>((h >> 8) % 20000u) * 10 / grid * grid;
+        h = h * 1664525u + 1013904223u;
+        const coord_t y = static_cast<coord_t>((h >> 8) % 20000u) * 10 / grid * grid;
+        centers.emplace_back(x, y);
+    }
+    std::vector<size_t> path(n);
+    for (size_t i = 0; i < n; ++i) path[i] = i;
+
+    const std::vector<size_t> expected = remove_crossings_by_full_rescan(path, centers);
+    tsp_remove_crossings(path, centers);
+    CHECK(path == expected);
 }
 
 
