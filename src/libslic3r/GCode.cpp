@@ -10003,14 +10003,21 @@ bool GCode::needs_retraction(const Polyline &travel, ExtrusionRole role, LiftTyp
         std::pair<float, float> z_range;
         z_range.second = m_layer ? m_layer->print_z : 0.f;
         z_range.first = std::max(0.f, z_range.second - protect_z);
-        std::vector<LayerPtrs> layers_of_objects;
-        std::vector<BoundingBox> boundingBox_for_objects;
-        VecOfPoints objects_instances_shift;
-        std::vector<size_t> idx_of_object_sorted = m_curr_print->layers_sorted_for_object(z_range.first, z_range.second, layers_of_objects, boundingBox_for_objects, objects_instances_shift);
+        OverhangCheckCache &cache = m_overhang_check_cache;
+        if (cache.print != m_curr_print || cache.z_range != z_range) {
+            cache = OverhangCheckCache{};
+            cache.print   = m_curr_print;
+            cache.z_range = z_range;
+            cache.idx_of_object_sorted = m_curr_print->layers_sorted_for_object(z_range.first, z_range.second, cache.layers_of_objects,
+                                                                                cache.object_bboxes, cache.objects_instances_shift);
+            cache.layers_sorted.assign(cache.layers_of_objects.size(), false);
+            cache.overhang_bboxes.resize(cache.layers_of_objects.size());
+        }
+        std::vector<LayerPtrs>         &layers_of_objects       = cache.layers_of_objects;
+        const std::vector<BoundingBox> &boundingBox_for_objects = cache.object_bboxes;
+        const VecOfPoints              &objects_instances_shift = cache.objects_instances_shift;
 
-        std::vector<bool> is_layers_of_objects_sorted(layers_of_objects.size(), false);
-
-        for (size_t idx : idx_of_object_sorted) {
+        for (size_t idx : cache.idx_of_object_sorted) {
             for (const Point & instance_shift : objects_instances_shift[idx]) {
                 BoundingBox instance_bbox = boundingBox_for_objects[idx];
                 if (!instance_bbox.defined)  //BBS: Don't need to check when bounding box of overhang area is empty(undefined)
@@ -10026,19 +10033,31 @@ bool GCode::needs_retraction(const Polyline &travel, ExtrusionRole role, LiftTyp
                 if (intersection_pl(travel, temp).empty())
                     continue;
 
-                if (!is_layers_of_objects_sorted[idx]) {
+                if (!cache.layers_sorted[idx]) {
                     std::sort(layers_of_objects[idx].begin(), layers_of_objects[idx].end(), [](auto left, auto right) { return left->loverhangs_bbox.area() > right->loverhangs_bbox.area();});
-                    is_layers_of_objects_sorted[idx] = true;
+                    cache.layers_sorted[idx] = true;
+                    std::vector<std::vector<BoundingBox>> &overhang_bboxes = cache.overhang_bboxes[idx];
+                    overhang_bboxes.reserve(layers_of_objects[idx].size());
+                    for (const Layer *layer : layers_of_objects[idx]) {
+                        std::vector<BoundingBox> &layer_bboxes = overhang_bboxes.emplace_back();
+                        layer_bboxes.reserve(layer->loverhangs.size());
+                        for (const ExPolygon &overhang : layer->loverhangs)
+                            layer_bboxes.emplace_back(get_extents(overhang));
+                    }
                 }
 
-                for (const auto& layer : layers_of_objects[idx]) {
-                    for (ExPolygon overhang : layer->loverhangs) {
-                        overhang.translate(instance_shift);
-                        BoundingBox bbox1 = get_extents(overhang);
+                for (size_t layer_idx = 0; layer_idx < layers_of_objects[idx].size(); ++layer_idx) {
+                    const Layer *layer = layers_of_objects[idx][layer_idx];
+                    for (size_t overhang_idx = 0; overhang_idx < layer->loverhangs.size(); ++overhang_idx) {
+                        // Translating the extents is exact, so only overlapping overhangs are copied.
+                        BoundingBox bbox1 = cache.overhang_bboxes[idx][layer_idx][overhang_idx];
+                        bbox1.translate(instance_shift);
 
                         if (!bbox1.overlap(travel_bbox))
                             continue;
 
+                        ExPolygon overhang = layer->loverhangs[overhang_idx];
+                        overhang.translate(instance_shift);
                         if (intersection_pl(travel, overhang).empty())
                             continue;
 
