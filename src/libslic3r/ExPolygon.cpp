@@ -165,6 +165,9 @@ bool ExPolygon::overlaps(const ExPolygon &other) const
 {
     if (this->empty() || other.empty())
         return false;
+    // Neither test below can succeed for expolygons whose bounding boxes do not touch.
+    if (! get_extents(this->contour).overlap(get_extents(other.contour)))
+        return false;
 
     #if 0
     BoundingBox bbox = get_extents(other);
