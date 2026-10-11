@@ -145,6 +145,25 @@ float LinesBucketQueue::getCurrBottomZ()
     return layerBottomZ;
 }
 
+std::vector<LinesBucketQueue::PileRange> LinesBucketQueue::getCurRanges() const
+{
+    std::vector<PileRange> ranges;
+    for (const LinesBucket &bucket : line_buckets)
+        if (bucket.valid()) {
+            auto [b, e] = bucket.curRange();
+            ranges.push_back({ &bucket, b, e });
+        }
+    return ranges;
+}
+
+LineWithIDs LinesBucketQueue::lines_of(const std::vector<PileRange> &ranges)
+{
+    LineWithIDs lines;
+    for (const PileRange &range : ranges)
+        range.bucket->append_lines(range.begin, range.end, lines);
+    return lines;
+}
+
 LineWithIDs LinesBucketQueue::getCurLines() const
 {
     LineWithIDs lines;
@@ -205,12 +224,21 @@ ObjectExtrusions getAllLayersExtrusionPathsFromObject(PrintObject *obj)
 {
     ObjectExtrusions oe;
 
-    for (auto layerPtr : obj->layers()) {
-        auto perimeters = getExtrusionPathsFromLayer(layerPtr->regions());
-        oe.perimeters.insert(oe.perimeters.end(), perimeters.begin(), perimeters.end());
-    }
+    // The layers are collected in parallel, then appended in order.
+    std::vector<ExtrusionLayers> per_layer(obj->layers().size());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, per_layer.size()), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++i)
+            per_layer[i] = getExtrusionPathsFromLayer(obj->layers()[i]->regions());
+    });
+    for (ExtrusionLayers &perimeters : per_layer)
+        oe.perimeters.insert(oe.perimeters.end(), std::make_move_iterator(perimeters.begin()), std::make_move_iterator(perimeters.end()));
 
-    for (auto supportLayerPtr : obj->support_layers()) { oe.support.push_back(getExtrusionPathsFromSupportLayer(supportLayerPtr)); }
+    std::vector<ExtrusionLayer> support(obj->support_layers().size());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, support.size()), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++i)
+            support[i] = getExtrusionPathsFromSupportLayer(obj->support_layers()[i]);
+    });
+    oe.support.insert(oe.support.end(), std::make_move_iterator(support.begin()), std::make_move_iterator(support.end()));
 
     return oe;
 }
@@ -277,20 +305,20 @@ ConflictResultOpt ConflictChecker::find_inter_of_lines_in_diff_objs(PrintObjectP
         }
     }
 
-    std::vector<LineWithIDs> layersLines;
-    std::vector<float>       bottomZs;
+    // The lines of each layer are collected in the parallel loop below, from the piles recorded here.
+    std::vector<std::vector<LinesBucketQueue::PileRange>> layersRanges;
+    std::vector<float>                                    bottomZs;
     while (conflictQueue.valid()) {
-        LineWithIDs lines = conflictQueue.getCurLines();
+        layersRanges.push_back(conflictQueue.getCurRanges());
         float curBottomZ = conflictQueue.getCurrBottomZ();
         bottomZs.push_back(curBottomZ);
-        layersLines.push_back(std::move(lines));
     }
 
     bool                                                          find = false;
     tbb::concurrent_vector<std::pair<ConflictComputeResult, float>> conflict;
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, layersLines.size()), [&](tbb::blocked_range<size_t> range) {
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, layersRanges.size()), [&](tbb::blocked_range<size_t> range) {
         for (size_t i = range.begin(); i < range.end(); i++) {
-            auto interRes = find_inter_of_lines(layersLines[i]);
+            auto interRes = find_inter_of_lines(LinesBucketQueue::lines_of(layersRanges[i]));
             if (interRes.has_value()) {
                 find = true;
                 conflict.emplace_back(interRes.value(), bottomZs[i]);
