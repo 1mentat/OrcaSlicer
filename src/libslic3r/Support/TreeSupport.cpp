@@ -996,20 +996,26 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 if (is_auto(stype) && config_detect_sharp_tails)
                 {
                     // BBS detect sharp tail
-                    for (const ExPolygon& expoly : curr_polys) {
-                        bool  is_sharp_tail = false;
-                        // 1. nothing below
-                        // this is a sharp tail region if it's floating and non-ignorable.
-                        // On a belt, "below" has to include the belt itself and the
-                        // shear-advanced lower layer, or every belt-contact island reads as
-                        // a sharp tail -- which is what the empty-predecessor skip above was
-                        // really masking. effective_lower is exactly that notion of below.
-                        const ExPolygons &tail_lower = belt_ovh_active ? effective_lower : lower_polys;
-                        if (!overlaps(offset_ex(expoly, 0.1 * extrusion_width_scaled), tail_lower)) {
-                            is_sharp_tail = !offset_ex(expoly, -0.1 * extrusion_width_scaled).empty();
+                    // The islands are tested in parallel, as one large layer would otherwise hold up the others, and
+                    // the sharp tails are recorded in island order.
+                    // On a belt, "below" has to include the belt itself and the
+                    // shear-advanced lower layer, or every belt-contact island reads as
+                    // a sharp tail -- which is what the empty-predecessor skip above was
+                    // really masking. effective_lower is exactly that notion of below.
+                    const ExPolygons &tail_lower = belt_ovh_active ? effective_lower : lower_polys;
+                    std::vector<char> is_sharp_tail(curr_polys.size(), false);
+                    tbb::parallel_for(tbb::blocked_range<size_t>(0, curr_polys.size()), [&](const tbb::blocked_range<size_t> &range) {
+                        for (size_t i = range.begin(); i < range.end(); ++ i) {
+                            const ExPolygon &expoly = curr_polys[i];
+                            // 1. nothing below
+                            // this is a sharp tail region if it's floating and non-ignorable.
+                            if (!overlaps(offset_ex(expoly, 0.1 * extrusion_width_scaled), tail_lower))
+                                is_sharp_tail[i] = !offset_ex(expoly, -0.1 * extrusion_width_scaled).empty();
                         }
-
-                        if (is_sharp_tail) {
+                    });
+                    for (size_t i = 0; i < curr_polys.size(); ++ i) {
+                        if (is_sharp_tail[i]) {
+                            const ExPolygon &expoly = curr_polys[i];
                             layer->sharp_tails.push_back(expoly);
                             layer->sharp_tails_height.push_back(0);
 
@@ -1026,25 +1032,38 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 // lower_layer_offset may be very small, so we need to do max and then add 0.1
                 lower_layer_offseted = offset_ex(lower_layer_offseted, scale_(std::max(extrusion_width - lower_layer_offset, 0.) + 0.1));
                 const std::vector<BoundingBox> lower_layer_offseted_bboxes = get_extents_vector(lower_layer_offseted);
-                for (ExPolygon& poly : overhangs_all_layers[layer_nr]) {
-                    // Only the lower islands whose bounding boxes touch the overhang can intersect it.
-                    const BoundingBox poly_bbox = get_extents(poly.contour);
-                    ExPolygons        lower_near;
-                    for (size_t i = 0; i < lower_layer_offseted.size(); ++i)
-                        if (lower_layer_offseted_bboxes[i].overlap(poly_bbox))
-                            lower_near.emplace_back(lower_layer_offseted[i]);
-                    auto cluster_boundary_ex = intersection_ex(poly, lower_near);
-                    Polygons cluster_boundary = to_polygons(cluster_boundary_ex);
-                    if (cluster_boundary.empty()) continue;
-                    double dist_max = 0;
-                    for (auto& pt : poly.contour.points) {
-                        double dist_pt = std::numeric_limits<double>::max();
-                        for (auto& ply : cluster_boundary) {
-                            double d = ply.distance_to(pt);
-                            dist_pt = std::min(dist_pt, d);
+                // The farthest distance of each overhang from the base, -1 if it does not touch the base. Measured in
+                // parallel, then the cantilevers are recorded in overhang order.
+                ExPolygons         &layer_overhangs = overhangs_all_layers[layer_nr];
+                std::vector<double> overhang_dist_max(layer_overhangs.size(), -1.);
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, layer_overhangs.size()), [&](const tbb::blocked_range<size_t> &range) {
+                    for (size_t ipoly = range.begin(); ipoly < range.end(); ++ ipoly) {
+                        const ExPolygon &poly = layer_overhangs[ipoly];
+                        // Only the lower islands whose bounding boxes touch the overhang can intersect it.
+                        const BoundingBox poly_bbox = get_extents(poly.contour);
+                        ExPolygons        lower_near;
+                        for (size_t i = 0; i < lower_layer_offseted.size(); ++i)
+                            if (lower_layer_offseted_bboxes[i].overlap(poly_bbox))
+                                lower_near.emplace_back(lower_layer_offseted[i]);
+                        auto cluster_boundary_ex = intersection_ex(poly, lower_near);
+                        Polygons cluster_boundary = to_polygons(cluster_boundary_ex);
+                        if (cluster_boundary.empty()) continue;
+                        double dist_max = 0;
+                        for (auto& pt : poly.contour.points) {
+                            double dist_pt = std::numeric_limits<double>::max();
+                            for (auto& ply : cluster_boundary) {
+                                double d = ply.distance_to(pt);
+                                dist_pt = std::min(dist_pt, d);
+                            }
+                            dist_max = std::max(dist_max, dist_pt);
                         }
-                        dist_max = std::max(dist_max, dist_pt);
+                        overhang_dist_max[ipoly] = dist_max;
                     }
+                });
+                for (size_t ipoly = 0; ipoly < layer_overhangs.size(); ++ ipoly) {
+                    ExPolygon   &poly     = layer_overhangs[ipoly];
+                    const double dist_max = overhang_dist_max[ipoly];
+                    if (dist_max < 0) continue;
                     if (dist_max > scale_(3)) {  // is cantilever if the farmost point is larger than 3mm away from base
                         max_cantilever_dist = std::max(max_cantilever_dist, dist_max);
                         layer->cantilevers.emplace_back(poly);
