@@ -2970,6 +2970,12 @@ void PrintObject::bridge_over_infill()
                 if (layer->lower_layer == nullptr) {
                     continue;
                 }
+                // Only internal solid surfaces become candidates, so a layer without any needs no work on the layer below.
+                if (std::none_of(layer->regions().begin(), layer->regions().end(), [](const LayerRegion *region) {
+                        return std::any_of(region->fill_surfaces.begin(), region->fill_surfaces.end(),
+                                           [](const Surface &s) { return s.surface_type == stInternalSolid; });
+                    }))
+                    continue;
                 double spacing = layer->regions().front()->flow(frSolidInfill).scaled_spacing();
                 // unsupported area will serve as a filter for polygons worth bridging.
                 Polygons   unsupported_area;
