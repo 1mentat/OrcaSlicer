@@ -4709,6 +4709,7 @@ struct PrecomputedLayer
 {
     size_t                                    index{size_t(-1)}; // size_t(-1) for the empty layer after the last
     std::vector<PrecomputedOverhangLayer>     overhang_layers;
+    std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> seam_points;
 };
 } // namespace
 
@@ -4739,9 +4740,33 @@ std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vect
     return out;
 }
 
-// Hands out the index of each layer to process_layers(), then computes the layers' overhang data in parallel.
+// The seam placer's closest perimeter point of each perimeter loop of the object layers, which place_seam() starts from.
+static std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> precompute_seam_points(
+    const SeamPlacer &seam_placer, const std::vector<GCode::LayerToPrint> &layers)
+{
+    std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> out;
+    for (const GCode::LayerToPrint &layer : layers) {
+        const Layer *object_layer = layer.object_layer;
+        if (object_layer == nullptr || seam_placer.m_seam_per_object.count(object_layer->object()) == 0)
+            continue;
+        auto visit = [&](auto &self, const ExtrusionEntityCollection &collection) -> void {
+            for (const ExtrusionEntity *ee : collection.entities)
+                if (const auto *loop = dynamic_cast<const ExtrusionLoop*>(ee); loop != nullptr) {
+                    if (! loop->paths.empty() && ! loop->paths.front().polyline.points.empty())
+                        out.emplace(loop, std::make_pair(object_layer, seam_placer.find_closest_perimeter_point(object_layer, *loop)));
+                } else if (const auto *child = dynamic_cast<const ExtrusionEntityCollection*>(ee); child != nullptr)
+                    self(self, *child);
+        };
+        for (const LayerRegion *region : object_layer->regions())
+            visit(visit, region->perimeters);
+    }
+    return out;
+}
+
+// Hands out the index of each layer to process_layers(), then computes the layers' overhang data and, given a seam
+// placer, the seam points of their perimeter loops in parallel.
 template<typename LayersAt>
-static auto precomputed_layers_source(size_t &next_index, size_t layer_count, bool nop_layer, bool overhang_fan, LayersAt layers_at)
+static auto precomputed_layers_source(size_t &next_index, size_t layer_count, bool nop_layer, bool overhang_fan, const SeamPlacer *seam_placer, LayersAt layers_at)
 {
     return tbb::make_filter<void, PrecomputedLayer>(slic3r_tbb_filtermode::serial_in_order,
                [&next_index, layer_count, nop_layer](tbb::flow_control &fc) -> PrecomputedLayer {
@@ -4755,9 +4780,13 @@ static auto precomputed_layers_source(size_t &next_index, size_t layer_count, bo
                    return {};
                }) &
            tbb::make_filter<PrecomputedLayer, PrecomputedLayer>(slic3r_tbb_filtermode::parallel,
-               [layers_at, overhang_fan](PrecomputedLayer layer) -> PrecomputedLayer {
-                   if (layer.index != size_t(-1))
-                       layer.overhang_layers = precompute_overhang_layers(layers_at(layer.index), overhang_fan);
+               [layers_at, overhang_fan, seam_placer](PrecomputedLayer layer) -> PrecomputedLayer {
+                   if (layer.index != size_t(-1)) {
+                       const auto &layers = layers_at(layer.index);
+                       layer.overhang_layers = precompute_overhang_layers(layers, overhang_fan);
+                       if (seam_placer != nullptr)
+                           layer.seam_points = precompute_seam_points(*seam_placer, layers);
+                   }
                    return layer;
                });
 }
@@ -4781,7 +4810,7 @@ void GCode::process_layers(
     // The pipeline is variable: The vase mode filter is optional.
     size_t layer_to_print_idx = 0;
     const auto source = precomputed_layers_source(layer_to_print_idx, layers_to_print.size(), m_pressure_equalizer != nullptr,
-        overhang_fan_enabled(print.config(), m_enable_cooling_markers),
+        overhang_fan_enabled(print.config(), m_enable_cooling_markers), m_config.spiral_mode ? nullptr : &m_seam_placer,
         [&layers_to_print](size_t index) -> const std::vector<LayerToPrint> & { return layers_to_print[index].second; });
     const auto generator = tbb::make_filter<PrecomputedLayer, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
         [this, &print, &tool_ordering, &print_object_instances_ordering, &layers_to_print](PrecomputedLayer precomputed) -> LayerResult {
@@ -4796,6 +4825,7 @@ void GCode::process_layers(
             check_placeholder_parser_failed();
             print.throw_if_canceled();
             m_extrusion_quality_estimator.set_precomputed_layers(std::move(precomputed.overhang_layers));
+            m_precomputed_seam_points = std::move(precomputed.seam_points);
             return this->process_layer(print, layer.second, layer_tools, &layer == &layers_to_print.back(), &print_object_instances_ordering, tool_ordering.get_most_used_extruder(), size_t(-1));
         });
     if (m_spiral_vase) {
@@ -4863,6 +4893,7 @@ void GCode::process_layers(
     	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & output);
     // The estimator's precomputed data points into this print's layers.
     m_extrusion_quality_estimator.set_precomputed_layers({});
+    m_precomputed_seam_points.clear();
 
 }
 
@@ -4881,7 +4912,7 @@ void GCode::process_layers(
     // The pipeline is variable: The vase mode filter is optional.
     size_t layer_to_print_idx = 0;
     const auto source = precomputed_layers_source(layer_to_print_idx, layers_to_print.size(), m_pressure_equalizer != nullptr,
-        overhang_fan_enabled(print.config(), m_enable_cooling_markers),
+        overhang_fan_enabled(print.config(), m_enable_cooling_markers), m_config.spiral_mode ? nullptr : &m_seam_placer,
         [&layers_to_print](size_t index) { return std::vector<LayerToPrint>{layers_to_print[index]}; });
     const auto generator = tbb::make_filter<PrecomputedLayer, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
         [this, &print, &tool_ordering, &layers_to_print, single_object_idx, prime_extruder](PrecomputedLayer precomputed) -> LayerResult {
@@ -4893,6 +4924,7 @@ void GCode::process_layers(
             check_placeholder_parser_failed();
             print.throw_if_canceled();
             m_extrusion_quality_estimator.set_precomputed_layers(std::move(precomputed.overhang_layers));
+            m_precomputed_seam_points = std::move(precomputed.seam_points);
             return this->process_layer(print, { std::move(layer) }, tool_ordering.tools_for_layer(layer.print_z()), &layer == &layers_to_print.back(), nullptr, tool_ordering.get_most_used_extruder(), single_object_idx, prime_extruder);
         });
     if (m_spiral_vase) {
@@ -4957,6 +4989,7 @@ void GCode::process_layers(
     	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & output);
     // The estimator's precomputed data points into this print's layers.
     m_extrusion_quality_estimator.set_precomputed_layers({});
+    m_precomputed_seam_points.clear();
 }
 
 std::string GCode::placeholder_parser_process(const std::string &name, const std::string &templ, unsigned int current_filament_id, const DynamicConfig *config_override)
@@ -8055,7 +8088,9 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     float seam_overhang = std::numeric_limits<float>::lowest();
     if (!m_config.spiral_mode && description == "perimeter") {
         assert(m_layer != nullptr);
-        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang);
+        auto it = m_precomputed_seam_points.find(&loop_ref);
+        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang,
+                                 it != m_precomputed_seam_points.end() && it->second.first == m_layer ? &it->second.second : nullptr);
     } else
         loop.split_at(last_pos, false);
 
