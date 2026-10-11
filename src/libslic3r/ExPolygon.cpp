@@ -86,10 +86,10 @@ bool ExPolygon::contains(const Line &line) const
 
 bool ExPolygon::contains(const Polyline &polyline) const
 {
+    // A polyline reaching out of the bounding box by more than a rounding error has a part outside.
     BoundingBox bbox1 = get_extents(*this);
-    BoundingBox bbox2 = get_extents(polyline);
-    bbox2.inflated(1);
-    if (!bbox1.overlap(bbox2))
+    bbox1.offset(SCALED_EPSILON);
+    if (!bbox1.contains(get_extents(polyline)))
         return false;
 
     return diff_pl(polyline, *this).empty();

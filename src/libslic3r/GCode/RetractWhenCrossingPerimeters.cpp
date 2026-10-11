@@ -42,9 +42,14 @@ bool RetractWhenCrossingPerimeters::travel_inside_internal_regions(const Layer &
     AABBTree::BoundingBox bbox_travel_eigen{ bbox_travel.min, bbox_travel.max };
     int result = -1;
     bbox_travel.offset(SCALED_EPSILON);
+    // A travel inside an island lies inside the island's bounding box, and so inside the boxes of all tree nodes above it.
+    // A travel reaching out of a box by more than a rounding error has a part outside the island.
+    const Point travel_min = Point(bbox_travel_eigen.min()) + Point(coord_t(SCALED_EPSILON), coord_t(SCALED_EPSILON));
+    const Point travel_max = Point(bbox_travel_eigen.max()) - Point(coord_t(SCALED_EPSILON), coord_t(SCALED_EPSILON));
     AABBTreeIndirect::traverse(m_aabbtree_internal_islands, 
-        [&bbox_travel_eigen](const AABBTree::Node &node) {
-            return bbox_travel_eigen.intersects(node.bbox);
+        [&travel_min, &travel_max](const AABBTree::Node &node) {
+            return node.bbox.min().x() <= travel_min.x() && node.bbox.min().y() <= travel_min.y() &&
+                   node.bbox.max().x() >= travel_max.x() && node.bbox.max().y() >= travel_max.y();
         },
         [&travel, &bbox_travel, &result, &islands = m_internal_islands](const AABBTree::Node &node) {
             assert(node.is_leaf());
