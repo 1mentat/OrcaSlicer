@@ -2694,17 +2694,14 @@ std::vector<int> ModelVolume::get_extruders() const
         return std::vector<int>();
 
     if (mmu_segmentation_facets.timestamp() != mmuseg_ts) {
-        std::vector<indexed_triangle_set> its_per_type;
         mmuseg_extruders.clear();
         mmuseg_ts = mmu_segmentation_facets.timestamp();
-        mmu_segmentation_facets.get_facets(*this, its_per_type);
-        for (int idx = 1; idx < its_per_type.size(); idx++) {
-            indexed_triangle_set& its = its_per_type[idx];
-            if (its.indices.empty())
-                continue;
-
-            mmuseg_extruders.push_back(idx);
-        }
+        // The painted extruders are the states of the leaf triangles; their facets are not needed.
+        TriangleSelector selector(this->mesh());
+        selector.deserialize(mmu_segmentation_facets.get_data(), false);
+        for (int idx = 1; idx <= int(EnforcerBlockerType::ExtruderMax); idx++)
+            if (selector.has_facets(EnforcerBlockerType(idx)))
+                mmuseg_extruders.push_back(idx);
     }
 
     std::vector<int> volume_extruders = mmuseg_extruders;
