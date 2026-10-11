@@ -2079,7 +2079,9 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
         layer_bboxes[layer_idx].merge(get_extents(input_expolygons[layer_idx]));
     }
 
-    for (size_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+    // Each layer builds only its own grid.
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, num_layers), [&](const tbb::blocked_range<size_t> &range) {
+    for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
         throw_on_cancel_callback();
         BoundingBox bbox = layer_bboxes[layer_idx];
         // Projected triangles could, in rare cases (as in GH issue #7299), belongs to polygons printed in the previous or the next layer.
@@ -2092,6 +2094,7 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
         edge_grids[layer_idx].set_bbox(bbox);
         edge_grids[layer_idx].create(input_expolygons[layer_idx], coord_t(scale_(10.)));
     }
+    });
 
     BOOST_LOG_TRIVIAL(debug) << "Print object segmentation - Projection of painted triangles - Begin";
     // The layers were sliced in this frame (belt rotation, remap and Z lift included), and it already centers the object.
