@@ -541,6 +541,38 @@ int bbs_get_attribute_value_int(const char** attributes, unsigned int attributes
     return value;
 }
 
+// Appends a <triangle> element: its vertex indices and its painting and face property strings. Missing values are zero or
+// empty. Reads the attributes in one pass, taking the first occurrence of each like bbs_get_attribute_value_charptr().
+template<typename Geometry>
+static void bbs_append_triangle(Geometry &geometry, const char** attributes, unsigned int attributes_size)
+{
+    enum { V1, V2, V3, Supports, Seam, Color, FuzzySkin, FaceProperty, Count };
+    static constexpr const char* keys[Count] = { V1_ATTR, V2_ATTR, V3_ATTR, CUSTOM_SUPPORTS_ATTR, CUSTOM_SEAM_ATTR,
+                                                 MMU_SEGMENTATION_ATTR, CUSTOM_FUZZY_SKIN_ATTR, FACE_PROPERTY_ATTR };
+    const char* values[Count] = {};
+    if (attributes != nullptr && attributes_size % 2 == 0)
+        for (unsigned int a = 0; a < attributes_size; a += 2)
+            for (int k = 0; k < Count; ++ k)
+                if (values[k] == nullptr && ::strcmp(attributes[a], keys[k]) == 0) {
+                    values[k] = attributes[a + 1];
+                    break;
+                }
+    auto to_int = [](const char *text) {
+        int value = 0;
+        if (text != nullptr)
+            boost::spirit::qi::parse(text, text + strlen(text), boost::spirit::qi::int_, value);
+        return value;
+    };
+    auto to_string = [](const char *text) { return text != nullptr ? std::string(text) : std::string(); };
+    geometry.triangles.emplace_back(to_int(values[V1]), to_int(values[V2]), to_int(values[V3]));
+    geometry.custom_supports.push_back(to_string(values[Supports]));
+    geometry.custom_seam.push_back(to_string(values[Seam]));
+    geometry.mmu_segmentation.push_back(to_string(values[Color]));
+    geometry.fuzzy_skin.push_back(to_string(values[FuzzySkin]));
+    // BBS
+    geometry.face_properties.push_back(to_string(values[FaceProperty]));
+}
+
 bool bbs_get_attribute_value_bool(const char** attributes, unsigned int attributes_size, const char* attribute_key)
 {
     const char* text = bbs_get_attribute_value_charptr(attributes, attributes_size, attribute_key);
@@ -3479,7 +3511,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool res = true;
         unsigned int num_attributes = (unsigned int)XML_GetSpecifiedAttributeCount(m_xml_parser);
 
-        if (::strcmp(MODEL_TAG, name) == 0)
+        if (::strcmp(VERTEX_TAG, name) == 0)
+            res = _handle_start_vertex(attributes, num_attributes);
+        else if (::strcmp(TRIANGLE_TAG, name) == 0)
+            res = _handle_start_triangle(attributes, num_attributes);
+        else if (::strcmp(MODEL_TAG, name) == 0)
             res = _handle_start_model(attributes, num_attributes);
         else if (::strcmp(RESOURCES_TAG, name) == 0)
             res = _handle_start_resources(attributes, num_attributes);
@@ -3493,12 +3529,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             res = _handle_start_mesh(attributes, num_attributes);
         else if (::strcmp(VERTICES_TAG, name) == 0)
             res = _handle_start_vertices(attributes, num_attributes);
-        else if (::strcmp(VERTEX_TAG, name) == 0)
-            res = _handle_start_vertex(attributes, num_attributes);
         else if (::strcmp(TRIANGLES_TAG, name) == 0)
             res = _handle_start_triangles(attributes, num_attributes);
-        else if (::strcmp(TRIANGLE_TAG, name) == 0)
-            res = _handle_start_triangle(attributes, num_attributes);
         else if (::strcmp(COMPONENTS_TAG, name) == 0)
             res = _handle_start_components(attributes, num_attributes);
         else if (::strcmp(COMPONENT_TAG, name) == 0)
@@ -3521,7 +3553,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         bool res = true;
 
-        if (::strcmp(MODEL_TAG, name) == 0)
+        if (::strcmp(VERTEX_TAG, name) == 0)
+            res = _handle_end_vertex();
+        else if (::strcmp(TRIANGLE_TAG, name) == 0)
+            res = _handle_end_triangle();
+        else if (::strcmp(MODEL_TAG, name) == 0)
             res = _handle_end_model();
         else if (::strcmp(RESOURCES_TAG, name) == 0)
             res = _handle_end_resources();
@@ -3535,12 +3571,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             res = _handle_end_mesh();
         else if (::strcmp(VERTICES_TAG, name) == 0)
             res = _handle_end_vertices();
-        else if (::strcmp(VERTEX_TAG, name) == 0)
-            res = _handle_end_vertex();
         else if (::strcmp(TRIANGLES_TAG, name) == 0)
             res = _handle_end_triangles();
-        else if (::strcmp(TRIANGLE_TAG, name) == 0)
-            res = _handle_end_triangle();
         else if (::strcmp(COMPONENTS_TAG, name) == 0)
             res = _handle_end_components();
         else if (::strcmp(COMPONENT_TAG, name) == 0)
@@ -3950,17 +3982,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // appends the triangle's vertices indices
         // missing values are set equal to ZERO
         if (m_curr_object) {
-            m_curr_object->geometry.triangles.emplace_back(
-                bbs_get_attribute_value_int(attributes, num_attributes, V1_ATTR),
-                bbs_get_attribute_value_int(attributes, num_attributes, V2_ATTR),
-                bbs_get_attribute_value_int(attributes, num_attributes, V3_ATTR));
-
-            m_curr_object->geometry.custom_supports.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SUPPORTS_ATTR));
-            m_curr_object->geometry.custom_seam.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SEAM_ATTR));
-            m_curr_object->geometry.mmu_segmentation.push_back(bbs_get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
-            m_curr_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_FUZZY_SKIN_ATTR));
-            // BBS
-            m_curr_object->geometry.face_properties.push_back(bbs_get_attribute_value_string(attributes, num_attributes, FACE_PROPERTY_ATTR));
+            bbs_append_triangle(m_curr_object->geometry, attributes, num_attributes);
         }
         return true;
     }
@@ -5783,17 +5805,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // appends the triangle's vertices indices
         // missing values are set equal to ZERO
         if (current_object) {
-            current_object->geometry.triangles.emplace_back(
-                bbs_get_attribute_value_int(attributes, num_attributes, V1_ATTR),
-                bbs_get_attribute_value_int(attributes, num_attributes, V2_ATTR),
-                bbs_get_attribute_value_int(attributes, num_attributes, V3_ATTR));
-
-            current_object->geometry.custom_supports.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SUPPORTS_ATTR));
-            current_object->geometry.custom_seam.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SEAM_ATTR));
-            current_object->geometry.mmu_segmentation.push_back(bbs_get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
-            current_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_FUZZY_SKIN_ATTR));
-            // BBS
-            current_object->geometry.face_properties.push_back(bbs_get_attribute_value_string(attributes, num_attributes, FACE_PROPERTY_ATTR));
+            bbs_append_triangle(current_object->geometry, attributes, num_attributes);
         }
         return true;
     }
@@ -5874,7 +5886,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool res = true;
         unsigned int num_attributes = (unsigned int)XML_GetSpecifiedAttributeCount(object_xml_parser);
 
-        if (::strcmp(MODEL_TAG, name) == 0)
+        if (::strcmp(VERTEX_TAG, name) == 0)
+            res = _handle_object_start_vertex(attributes, num_attributes);
+        else if (::strcmp(TRIANGLE_TAG, name) == 0)
+            res = _handle_object_start_triangle(attributes, num_attributes);
+        else if (::strcmp(MODEL_TAG, name) == 0)
             res = _handle_object_start_model(attributes, num_attributes);
         else if (::strcmp(RESOURCES_TAG, name) == 0)
             res = _handle_object_start_resources(attributes, num_attributes);
@@ -5888,12 +5904,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             res = _handle_object_start_mesh(attributes, num_attributes);
         else if (::strcmp(VERTICES_TAG, name) == 0)
             res = _handle_object_start_vertices(attributes, num_attributes);
-        else if (::strcmp(VERTEX_TAG, name) == 0)
-            res = _handle_object_start_vertex(attributes, num_attributes);
         else if (::strcmp(TRIANGLES_TAG, name) == 0)
             res = _handle_object_start_triangles(attributes, num_attributes);
-        else if (::strcmp(TRIANGLE_TAG, name) == 0)
-            res = _handle_object_start_triangle(attributes, num_attributes);
         else if (::strcmp(COMPONENTS_TAG, name) == 0)
             res = _handle_object_start_components(attributes, num_attributes);
         else if (::strcmp(COMPONENT_TAG, name) == 0)
@@ -5912,7 +5924,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         bool res = true;
 
-        if (::strcmp(MODEL_TAG, name) == 0)
+        if (::strcmp(VERTEX_TAG, name) == 0)
+            res = _handle_object_end_vertex();
+        else if (::strcmp(TRIANGLE_TAG, name) == 0)
+            res = _handle_object_end_triangle();
+        else if (::strcmp(MODEL_TAG, name) == 0)
             res = _handle_object_end_model();
         else if (::strcmp(RESOURCES_TAG, name) == 0)
             res = _handle_object_end_resources();
@@ -5926,12 +5942,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             res = _handle_object_end_mesh();
         else if (::strcmp(VERTICES_TAG, name) == 0)
             res = _handle_object_end_vertices();
-        else if (::strcmp(VERTEX_TAG, name) == 0)
-            res = _handle_object_end_vertex();
         else if (::strcmp(TRIANGLES_TAG, name) == 0)
             res = _handle_object_end_triangles();
-        else if (::strcmp(TRIANGLE_TAG, name) == 0)
-            res = _handle_object_end_triangle();
         else if (::strcmp(COMPONENTS_TAG, name) == 0)
             res = _handle_object_end_components();
         else if (::strcmp(COMPONENT_TAG, name) == 0)
