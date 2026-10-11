@@ -2681,6 +2681,12 @@ void PrintObject::discover_vertical_shells()
                     layerm->export_region_fill_surfaces_to_svg_debug("3_discover_vertical_shells-initial");
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
 
+                    // The shells are trimmed by the internal surfaces below, so a region without any has nothing to do.
+                    if (std::none_of(layerm->fill_surfaces.begin(), layerm->fill_surfaces.end(), [](const Surface &s) {
+                            return s.surface_type == stInternal || s.surface_type == stInternalVoid || s.surface_type == stInternalSolid;
+                        }))
+                        continue;
+
                     Flow         solid_infill_flow   = layerm->flow(frSolidInfill);
                     coord_t      infill_line_spacing = solid_infill_flow.scaled_spacing();
                     // Find a union of perimeters below / above this surface to guarantee a minimum shell thickness.
