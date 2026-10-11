@@ -2502,10 +2502,9 @@ void PrintObject::discover_vertical_shells()
             // The "ensure vertical wall thickness" feature is not applicable to any of the regions. Quit.
             return;
         BOOST_LOG_TRIVIAL(debug) << "Discovering vertical shells in parallel - start : cache top / bottom";
-        //FIXME Improve the heuristics for a grain size.
-        size_t grain_size = std::max(num_layers / 16, size_t(1));
+        // The cost per layer varies a lot (the merged offsets of large layers dominate), so hand out single layers.
         tbb::parallel_for(
-            tbb::blocked_range<size_t>(0, num_layers, grain_size),
+            tbb::blocked_range<size_t>(0, num_layers),
             [this, &cache_top_botom_regions](const tbb::blocked_range<size_t>& range) {
                 const std::initializer_list<SurfaceType> surfaces_bottom { stBottom, stBottomBridge };
                 const size_t num_regions = this->num_printing_regions();
