@@ -1719,9 +1719,16 @@ void GCodeProcessor::run_post_process()
             auto it_bufend = buffer.begin() + cnt_read;
             while (it != it_bufend || (eof && ! gcode_line.empty())) {
                 // Find end of line.
-                bool eol    = false;
-                auto it_end = it;
-                for (; it_end != it_bufend && ! (eol = *it_end == '\r' || *it_end == '\n'); ++ it_end) ;
+                // The first '\r' or '\n', searched for with memchr.
+                const char *line_begin = buffer.data() + (it - buffer.begin());
+                const char *buf_end    = buffer.data() + cnt_read;
+                const char *line_stop  = static_cast<const char*>(::memchr(line_begin, '\n', size_t(buf_end - line_begin)));
+                if (line_stop == nullptr)
+                    line_stop = buf_end;
+                if (const char *cr = static_cast<const char*>(::memchr(line_begin, '\r', size_t(line_stop - line_begin))); cr != nullptr)
+                    line_stop = cr;
+                bool eol    = line_stop != buf_end;
+                auto it_end = it + (line_stop - line_begin);
                 // End of line is indicated also if end of file was reached.
                 eol |= eof && it_end == it_bufend;
                 gcode_line.insert(gcode_line.end(), it, it_end);
