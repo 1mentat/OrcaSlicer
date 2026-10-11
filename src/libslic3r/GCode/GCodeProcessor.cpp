@@ -945,7 +945,7 @@ public:
     void insert_lines(const Backtrace&                                                    backtrace,
                       const std::string&                                                  cmd,
                       std::function<std::string(unsigned int, const std::vector<float>&)> line_inserter,
-                      std::function<std::string(const std::string&)>                      line_replacer)
+                      std::function<void(std::string&)>                                   line_replacer)
     {
         // Orca: find start pos by seaching G28/G29/PRINT_START/START_PRINT commands
         auto is_start_pos = [](const std::string& curr_cmd) {
@@ -965,7 +965,7 @@ public:
             std::string curr_cmd = GCodeReader::GCodeLine::extract_cmd(rev_it->line);
             // backtrace into the cache to find the place where to insert the line
             while (rev_it != m_lines.rend() && rev_it->times[Normal] > time_threshold_i && curr_cmd != cmd && !is_start_pos(curr_cmd)) {
-                rev_it->line = line_replacer(rev_it->line);
+                line_replacer(rev_it->line);
                 ++rev_it;
                 if (rev_it != m_lines.rend())
                     curr_cmd = GCodeReader::GCodeLine::extract_cmd(rev_it->line);
@@ -1516,8 +1516,8 @@ void GCodeProcessor::run_post_process()
                             return GCodeWriter::set_temperature(temperature, this->m_flavor, false, real_tool, comment);
                         }
                     },
-                    // line replacer
-                    [this, tool_number](const std::string& line) {
+                    // line replacer, edits the line in place
+                    [this, tool_number](std::string& line) {
                         if (GCodeReader::GCodeLine::cmd_is(line, "M104")) {
                             GCodeReader::GCodeLine gline;
                             GCodeReader reader;
@@ -1526,10 +1526,9 @@ void GCodeProcessor::run_post_process()
                             float val;
                             if (gline.has_value('T', val) && gline.raw().find("cooldown") != std::string::npos) {
                                 if (static_cast<int>(val) == (tool_number < m_physical_extruder_map.size() ? m_physical_extruder_map[tool_number] : tool_number))
-                                    return std::string("; removed M104\n");
+                                    line = "; removed M104\n";
                             }
                         }
-                        return line;
                     }
                 );
             }
