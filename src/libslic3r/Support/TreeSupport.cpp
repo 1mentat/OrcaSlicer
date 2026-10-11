@@ -1206,7 +1206,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         ExPolygons sharp_tail_overhangs;
         if (lower_layer == nullptr)
             sharp_tail_overhangs = layer->sharp_tails;
-        else {
+        else if (! layer->sharp_tails_height.empty()) {
             ExPolygons lower_layer_expanded = offset_ex(lower_layer->lslices_extrudable, SCALED_RESOLUTION);
             for (size_t i = 0; i < layer->sharp_tails_height.size();i++) {
                 ExPolygons areas = diff_clipped({ layer->sharp_tails[i]}, lower_layer_expanded);
@@ -1243,7 +1243,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
 
 		int nDetected = layer->loverhangs.size();
         // enforcers now follow same logic as normal support. See STUDIO-3692
-        if (layer_nr < enforcers.size() && lower_layer) {
+        if (layer_nr < enforcers.size() && lower_layer && ! enforcers[layer_nr].empty()) {
             ExPolygons enforced_overhangs   = intersection_ex(diff_ex(layer->lslices_extrudable, lower_layer->lslices_extrudable), enforcers[layer_nr]);
             if (!enforced_overhangs.empty()) {
                 // FIXME this is a hack to make enforcers work on steep overhangs. See STUDIO-7538.
