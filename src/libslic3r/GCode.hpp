@@ -406,7 +406,7 @@ protected:
         void close();
 
         // Write a string into a file.
-        void write(const std::string& what) { this->write(what.c_str()); }
+        void write(const std::string& what);
         void write(const char* what);
 
         // Write a string into a file.

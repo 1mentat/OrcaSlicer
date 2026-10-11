@@ -8615,6 +8615,18 @@ void GCode::GCodeOutputStream::write(const char *what)
     }
 }
 
+void GCode::GCodeOutputStream::write(const std::string &what)
+{
+    // Up to the first null character, as write(const char*) does, without copying the buffer when there is none.
+    const size_t len = what.find('\0');
+    if (len != std::string::npos) {
+        this->write(what.c_str());
+        return;
+    }
+    fwrite(what.data(), 1, what.size(), this->f);
+    m_processor.process_buffer(what);
+}
+
 void GCode::GCodeOutputStream::writeln(const std::string &what)
 {
     if (! what.empty())
