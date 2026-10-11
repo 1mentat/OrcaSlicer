@@ -30,6 +30,7 @@
 #include "I18N.hpp"
 #include "GCode.hpp"
 #include <cstdio>
+#include <fast_float/fast_float.h>
 #include "Exception.hpp"
 #include "LifecycleEvents.hpp"
 #include "ExtrusionEntity.hpp"
@@ -1893,58 +1894,101 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         else
             extruder_offset = m_extruder_offsets[tcr.initial_tool].cast<float>();
 
-        std::istringstream gcode_str(tcr.gcode);
         std::string gcode_out;
+        gcode_out.reserve(tcr.gcode.size() + tcr.gcode.size() / 8);
         std::string line;
+        std::string stripped;
         Vec2f pos = tcr.start_pos;
         auto  trans_pos = [wt_rot = Eigen::Rotation2Df(angle), &translation](const Vec2f& p) -> Vec2f { return wt_rot * p + translation; };
         Vec2f transformed_pos = trans_pos(pos);
         Vec2f old_pos(-1000.1f, -1000.1f);
+        const std::string never_skip_tag = WipeTower::never_skip_tag();
 
-        while (gcode_str) {
-            std::getline(gcode_str, line);  // we read the gcode line by line
+        // Appends " X<v>" with 3 decimals, as an ostream in std::fixed with precision 3 prints a float.
+        auto append_axis = [](std::string &out, char axis, float v) {
+            char buf[64];
+            int  n = snprintf(buf, sizeof(buf), " %c%.3f", axis, double(v));
+            out.append(buf, size_t(n));
+        };
 
+        // Removes the X and Y words of a move and reads their values into pos, as reading the line char by char from an
+        // istringstream without skipping whitespace and reading a float after each X or Y does. Returns false for a line
+        // whose numbers are not plain decimals ending at a space or at the end of the line; such a line is left to the
+        // stream.
+        auto strip_xy = [&stripped](const std::string &line, Vec2f &pos) {
+            stripped.clear();
+            Vec2f new_pos = pos;
+            for (size_t i = 0; i < line.size(); ++ i) {
+                const char ch = line[i];
+                if (ch != 'X' && ch != 'Y') {
+                    stripped += ch;
+                    continue;
+                }
+                size_t j = i + 1;
+                if (j < line.size() && line[j] == '-')
+                    ++ j;
+                bool digits = false;
+                for (; j < line.size() && ((line[j] >= '0' && line[j] <= '9') || line[j] == '.'); ++ j)
+                    digits |= line[j] != '.';
+                if (! digits || (j < line.size() && line[j] != ' '))
+                    return false;
+                float v;
+                auto [ptr, ec] = fast_float::from_chars(line.data() + i + 1, line.data() + j, v);
+                if (ec != std::errc() || ptr != line.data() + j)
+                    return false;
+                (ch == 'X' ? new_pos.x() : new_pos.y()) = v;
+                i = j - 1;
+            }
+            pos = new_pos;
+            return true;
+        };
+
+        auto process_line = [&](std::string &line) {
             // All G1 commands should be translated and rotated. X and Y coords are
             // only pushed to the output when they differ from last time.
             // WT generator can override this by appending the never_skip_tag
-            if (line.find("G1 ") == 0 || line.find("G2 ") == 0 || line.find("G3 ") == 0) {
-                std::string cur_gcode_start = line.find("G1 ") == 0 ? "G1 " : (line.find("G2 ") == 0 ? "G2 " : "G3 ");
+            if (boost::starts_with(line, "G1 ") || boost::starts_with(line, "G2 ") || boost::starts_with(line, "G3 ")) {
+                const char *cur_gcode_start = boost::starts_with(line, "G1 ") ? "G1 " : (boost::starts_with(line, "G2 ") ? "G2 " : "G3 ");
                 bool        never_skip      = false;
-                auto        it              = line.find(WipeTower::never_skip_tag());
+                auto        it              = line.find(never_skip_tag);
                 if (it != std::string::npos) {
                     // remove the tag and remember we saw it
                     never_skip = true;
-                    line.erase(it, it + WipeTower::never_skip_tag().size());
+                    line.erase(it, it + never_skip_tag.size());
                 }
-                std::ostringstream line_out;
-                std::istringstream line_str(line);
-                line_str >> std::noskipws; // don't skip whitespace
-                char ch = 0;
-                while (line_str >> ch) {
-                    if (ch == 'X' || ch == 'Y')
-                        line_str >> (ch == 'X' ? pos.x() : pos.y());
-                    else
-                        line_out << ch;
+                if (strip_xy(line, pos)) {
+                    line.swap(stripped);
+                } else {
+                    std::ostringstream line_out;
+                    std::istringstream line_str(line);
+                    line_str >> std::noskipws; // don't skip whitespace
+                    char ch = 0;
+                    while (line_str >> ch) {
+                        if (ch == 'X' || ch == 'Y')
+                            line_str >> (ch == 'X' ? pos.x() : pos.y());
+                        else
+                            line_out << ch;
+                    }
+                    line = line_out.str();
                 }
                 // Strip original wipe tower X/Y even if position unchanged (fixes out of bed moves).
-                line = line_out.str();
 
                 transformed_pos = trans_pos(pos);
 
                 if (transformed_pos != old_pos || never_skip) {
-                    std::ostringstream oss;
-                    oss << std::fixed << std::setprecision(3) << cur_gcode_start;
+                    std::string start = cur_gcode_start;
                     if (transformed_pos.x() != old_pos.x() || never_skip)
-                        oss << " X" << transformed_pos.x() - extruder_offset.x();
+                        append_axis(start, 'X', transformed_pos.x() - extruder_offset.x());
                     if (transformed_pos.y() != old_pos.y() || never_skip)
-                        oss << " Y" << transformed_pos.y() - extruder_offset.y();
-                    oss << " ";
-                    line.replace(line.find(cur_gcode_start), 3, oss.str());
+                        append_axis(start, 'Y', transformed_pos.y() - extruder_offset.y());
+                    start += ' ';
+                    line.replace(line.find(cur_gcode_start), 3, start);
                     old_pos = transformed_pos;
                 }
             }
 
-            gcode_out += line + "\n";
+            gcode_out += line;
+            gcode_out += '\n';
 
             // If this was a toolchange command, we should change current extruder offset
             if (line == "[change_filament_gcode]") {
@@ -1954,19 +1998,31 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
 
                     // If the extruder offset changed, add an extra move so everything is continuous
                     if (extruder_offset != m_extruder_offsets[tcr.initial_tool].cast<float>()) {
-                        std::ostringstream oss;
-                        oss << std::fixed << std::setprecision(3)
-                            << "G1 X" << transformed_pos.x() - extruder_offset.x()
-                            << " Y" << transformed_pos.y() - extruder_offset.y()
-                            << "\n";
-                        gcode_out += oss.str();
+                        gcode_out += "G1";
+                        append_axis(gcode_out, 'X', transformed_pos.x() - extruder_offset.x());
+                        append_axis(gcode_out, 'Y', transformed_pos.y() - extruder_offset.y());
+                        gcode_out += '\n';
                     }
                 }
                 old_pos = Vec2f{-1000.1f, -1000.1f};
                 pos     = tcr.tool_change_start_pos;
                 transformed_pos = trans_pos(pos);
             }
+        };
+
+        // The lines as std::getline() returns them while the stream is good: each line ended by a newline, then an empty line
+        // after a final newline, or else the unterminated last line twice (the second read fails and keeps the line).
+        const std::string &gcode = tcr.gcode;
+        size_t begin = 0;
+        for (size_t eol = gcode.find('\n'); eol != std::string::npos; eol = gcode.find('\n', begin)) {
+            line.assign(gcode, begin, eol - begin);
+            process_line(line);
+            begin = eol + 1;
         }
+        line.assign(gcode, begin, std::string::npos);
+        process_line(line);
+        if (begin < gcode.size())
+            process_line(line);
         return gcode_out;
     }
 
