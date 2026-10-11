@@ -2837,6 +2837,17 @@ void PrintObject::discover_vertical_shells()
                             object_volume = intersection(shrinked_bottom_slice, shrinked_upper_slice);
                             internal_volume = closing(polygonsInternal, SCALED_EPSILON);
                         }
+                        // A polygon whose bounding box misses a region contributes nothing inside that region,
+                        // so the tests below clip each piece only with the polygons whose boxes touch it.
+                        const std::vector<BoundingBox> object_volume_bboxes   = get_extents_vector(object_volume);
+                        const std::vector<BoundingBox> internal_volume_bboxes = get_extents_vector(internal_volume);
+                        auto polygons_touching = [](const Polygons &polygons, const std::vector<BoundingBox> &bboxes, const BoundingBox &bbox) {
+                            Polygons out;
+                            for (size_t i = 0; i < polygons.size(); ++ i)
+                                if (bboxes[i].overlap(bbox))
+                                    out.emplace_back(polygons[i]);
+                            return out;
+                        };
 
                         // The regularization operation may cause scattered tiny drops on the smooth parts of the model, filter them out
                         // If the region checks both following conditions, it is removed:
@@ -2846,14 +2857,18 @@ void PrintObject::discover_vertical_shells()
                         //   2. the area does not fully cover an internal polygon
                         //         This is there mainly for a very thin parts, where the solid layers would be missing if the part area is quite small
                         regularized_shell.erase(std::remove_if(regularized_shell.begin(), regularized_shell.end(),
-                                                               [&internal_volume, &min_perimeter_infill_spacing,
-                                                                &object_volume](const ExPolygon &p) {
-                                                                   return (p.area() < min_perimeter_infill_spacing * scaled(1.5) ||
-                                                                           (p.area() < min_perimeter_infill_spacing * scaled(8.0) &&
-                                                                            diff(to_polygons(p), object_volume).empty())) &&
-                                                                          diff(internal_volume,
-                                                                               expand(to_polygons(p), min_perimeter_infill_spacing))
-                                                                                  .size() >= internal_volume.size();
+                                                               [&](const ExPolygon &p) {
+                                                                   if (!(p.area() < min_perimeter_infill_spacing * scaled(1.5) ||
+                                                                         (p.area() < min_perimeter_infill_spacing * scaled(8.0) &&
+                                                                          diff(to_polygons(p),
+                                                                               polygons_touching(object_volume, object_volume_bboxes, get_extents(p.contour)))
+                                                                              .empty())))
+                                                                       return false;
+                                                                   // The internal polygons away from the piece come out of the difference unchanged,
+                                                                   // so only the ones near it can change the count.
+                                                                   const Polygons expanded = expand(to_polygons(p), min_perimeter_infill_spacing);
+                                                                   const Polygons internal_near = polygons_touching(internal_volume, internal_volume_bboxes, get_extents(expanded));
+                                                                   return diff(internal_near, expanded).size() >= internal_near.size();
                                                                }),
                                                 regularized_shell.end());
                     }
