@@ -19,6 +19,10 @@ namespace Slic3r {
 
 bool RetractWhenCrossingPerimeters::travel_inside_internal_regions(const Layer &layer, const Polyline &travel)
 {
+    // A layer without regions, such as a support layer, has no internal islands. Answering for it without touching the
+    // cache keeps the cache of the object layer that support and object travels of a print layer alternate with.
+    if (layer.regions().empty())
+        return false;
     if (m_layer != &layer) {
         // Update cache.
         m_layer = &layer;
