@@ -407,6 +407,8 @@ protected:
 
         // Write a string into a file.
         void write(const std::string& what) { this->write(what.c_str()); }
+        // As write(what), with the lines of what tokenized ahead by GCodeReader::preparse_buffer().
+        void write(const std::string& what, const std::vector<GCodeReader::PreparsedLine>& lines);
         void write(const char* what);
 
         // Write a string into a file.

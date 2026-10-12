@@ -3838,6 +3838,13 @@ void GCodeProcessor::process_buffer(const std::string &buffer)
     });
 }
 
+void GCodeProcessor::process_preparsed(const std::string &buffer, const std::vector<GCodeReader::PreparsedLine> &lines)
+{
+    m_parser.parse_preparsed(buffer, lines, [this](GCodeReader&, const GCodeReader::GCodeLine& line) {
+        this->process_gcode_line(line, false);
+    });
+}
+
 void GCodeProcessor::finalize(bool post_process)
 {
     m_result.z_offset = m_z_offset;

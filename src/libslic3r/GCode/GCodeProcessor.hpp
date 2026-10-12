@@ -1311,6 +1311,8 @@ class Print;
             m_result.moves.emplace_back(GCodeProcessorResult::MoveVertex());
         }
         void process_buffer(const std::string& buffer);
+        // As process_buffer(), with the lines of buffer tokenized ahead by GCodeReader::preparse_buffer().
+        void process_preparsed(const std::string& buffer, const std::vector<GCodeReader::PreparsedLine>& lines);
         void finalize(bool post_process);
 
         float get_time(PrintEstimatedStatistics::ETimeMode mode) const;

@@ -4553,6 +4553,13 @@ size_t GCode::get_nozzle_config_index(int filament_id) const
 }
 
 namespace {
+// A layer's G-code with its lines tokenized for the G-code processor.
+struct PreparsedGCode
+{
+    std::string                             gcode;
+    std::vector<GCodeReader::PreparsedLine> lines;
+};
+
 struct PrecomputedLayer
 {
     size_t                                    index{size_t(-1)}; // size_t(-1) for the empty layer after the last
@@ -4716,8 +4723,14 @@ void GCode::process_layers(
             }
         );
     
-    const auto output = tbb::make_filter<std::string, void>(slic3r_tbb_filtermode::serial_in_order,
-        [&output_stream](std::string s) { output_stream.write(s); }
+    // The G-code processor runs over the lines in order, but they are tokenized for it in parallel.
+    const auto preparse = tbb::make_filter<std::string, PreparsedGCode>(slic3r_tbb_filtermode::parallel,
+        [](std::string s) -> PreparsedGCode {
+            std::vector<GCodeReader::PreparsedLine> lines = GCodeReader::preparse_buffer(s);
+            return { std::move(s), std::move(lines) };
+        });
+    const auto output = tbb::make_filter<PreparsedGCode, void>(slic3r_tbb_filtermode::serial_in_order,
+        [&output_stream](PreparsedGCode in) { output_stream.write(in.gcode, in.lines); }
     );
 
     const auto fan_mover = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
@@ -4742,13 +4755,13 @@ void GCode::process_layers(
 
     // The pipeline elements are joined using const references, thus no copying is performed.
     if (m_spiral_vase && m_pressure_equalizer)
-        tbb::parallel_pipeline(12, source & generator & spiral_mode & pressure_equalizer & cooling & fan_mover & output);
+        tbb::parallel_pipeline(12, source & generator & spiral_mode & pressure_equalizer & cooling & fan_mover & preparse & output);
     else if (m_spiral_vase)
-    	tbb::parallel_pipeline(12, source & generator & spiral_mode & cooling & fan_mover & output);
+    	tbb::parallel_pipeline(12, source & generator & spiral_mode & cooling & fan_mover & preparse & output);
     else if	(m_pressure_equalizer)
-        tbb::parallel_pipeline(12, source & generator & pressure_equalizer & cooling & fan_mover & pa_processor_filter & output);
+        tbb::parallel_pipeline(12, source & generator & pressure_equalizer & cooling & fan_mover & pa_processor_filter & preparse & output);
     else
-    	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & output);
+    	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & preparse & output);
     // The estimator's precomputed data points into this print's layers.
     m_extrusion_quality_estimator.set_precomputed_layers({});
     m_precomputed_seam_points.clear();
@@ -4814,8 +4827,14 @@ void GCode::process_layers(
         }
     );
     
-    const auto output = tbb::make_filter<std::string, void>(slic3r_tbb_filtermode::serial_in_order,
-        [&output_stream](std::string s) { output_stream.write(s); }
+    // The G-code processor runs over the lines in order, but they are tokenized for it in parallel.
+    const auto preparse = tbb::make_filter<std::string, PreparsedGCode>(slic3r_tbb_filtermode::parallel,
+        [](std::string s) -> PreparsedGCode {
+            std::vector<GCodeReader::PreparsedLine> lines = GCodeReader::preparse_buffer(s);
+            return { std::move(s), std::move(lines) };
+        });
+    const auto output = tbb::make_filter<PreparsedGCode, void>(slic3r_tbb_filtermode::serial_in_order,
+        [&output_stream](PreparsedGCode in) { output_stream.write(in.gcode, in.lines); }
     );
 
     const auto fan_mover = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
@@ -4838,13 +4857,13 @@ void GCode::process_layers(
 
     // The pipeline elements are joined using const references, thus no copying is performed.
     if (m_spiral_vase && m_pressure_equalizer)
-        tbb::parallel_pipeline(12, source & generator & spiral_mode & pressure_equalizer & cooling & fan_mover & output);
+        tbb::parallel_pipeline(12, source & generator & spiral_mode & pressure_equalizer & cooling & fan_mover & preparse & output);
     else if (m_spiral_vase)
-    	tbb::parallel_pipeline(12, source & generator & spiral_mode & cooling & fan_mover & output);
+    	tbb::parallel_pipeline(12, source & generator & spiral_mode & cooling & fan_mover & preparse & output);
     else if	(m_pressure_equalizer)
-        tbb::parallel_pipeline(12, source & generator & pressure_equalizer & cooling & fan_mover & pa_processor_filter & output);
+        tbb::parallel_pipeline(12, source & generator & pressure_equalizer & cooling & fan_mover & pa_processor_filter & preparse & output);
     else
-    	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & output);
+    	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & preparse & output);
     // The estimator's precomputed data points into this print's layers.
     m_extrusion_quality_estimator.set_precomputed_layers({});
     m_precomputed_seam_points.clear();
@@ -8511,6 +8530,14 @@ void GCode::GCodeOutputStream::write(const char *what)
         //FIXME don't allocate a string, maybe process a batch of lines?
         m_processor.process_buffer(std::string(gcode));
     }
+}
+
+void GCode::GCodeOutputStream::write(const std::string &what, const std::vector<GCodeReader::PreparsedLine> &lines)
+{
+    // Up to the first null character, as write(const char*) does; the lines end there too.
+    const size_t len = what.find('\0');
+    fwrite(what.data(), 1, len == std::string::npos ? what.size() : len, this->f);
+    m_processor.process_preparsed(what, lines);
 }
 
 void GCode::GCodeOutputStream::writeln(const std::string &what)
