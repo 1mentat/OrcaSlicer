@@ -760,6 +760,11 @@ protected:
         std::vector<bool>                                    layers_sorted;
         std::vector<std::vector<std::vector<BoundingBox>>>   overhang_bboxes;
     } m_overhang_check_cache;
+    // Bounding boxes of the support islands and base areas of the support layer they were last found for, grown by the
+    // rounding error ExPolygon::contains() allows, so a travel is tested only against islands whose boxes contain it.
+    const Layer             *m_support_boxes_layer = nullptr;
+    std::vector<BoundingBox> m_support_island_boxes;
+    std::vector<BoundingBox> m_support_base_area_boxes;
 
     // Farthest-point timelapse context. Corexy-only refinement layered on top of the existing
     // timelapse_type. All fields default to the inert state; `enabled` is (re)computed each layer in

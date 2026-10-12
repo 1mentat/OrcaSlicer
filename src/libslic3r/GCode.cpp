@@ -9945,17 +9945,29 @@ bool GCode::needs_retraction(const Polyline &travel, ExtrusionRole role, LiftTyp
     if (role == erSupportMaterial || role == erSupportTransition) {
         const SupportLayer* support_layer = dynamic_cast<const SupportLayer*>(m_layer);
         //FIXME support_layer->support_islands.contains should use some search structure!
+        if (support_layer != NULL && m_support_boxes_layer != support_layer) {
+            auto boxes = [](const ExPolygons &expolygons) {
+                std::vector<BoundingBox> out = get_extents_vector(expolygons);
+                for (BoundingBox &bbox : out)
+                    bbox.offset(SCALED_EPSILON);
+                return out;
+            };
+            m_support_island_boxes    = boxes(support_layer->support_islands);
+            m_support_base_area_boxes = boxes(support_layer->base_areas);
+            m_support_boxes_layer     = support_layer;
+        }
+        const BoundingBox travel_bbox = get_extents(travel);
         if (support_layer != NULL)
             // skip retraction if this is a travel move inside a support material island
             //FIXME not retracting over a long path may cause oozing, which in turn may result in missing material
             // at the end of the extrusion path!
-            for (const ExPolygon& support_island : support_layer->support_islands)
-                if (support_island.contains(travel))
+            for (size_t i = 0; i < support_layer->support_islands.size(); ++ i)
+                if (m_support_island_boxes[i].contains(travel_bbox) && support_layer->support_islands[i].contains(travel))
                     return false;
         //reduce the retractions in lightning infills for tree support
         if (support_layer != NULL && support_layer->support_type==stInnerTree)
-            for (auto &area : support_layer->base_areas)
-                if (area.contains(travel))
+            for (size_t i = 0; i < support_layer->base_areas.size(); ++ i)
+                if (m_support_base_area_boxes[i].contains(travel_bbox) && support_layer->base_areas[i].contains(travel))
                     return false;
     }
     //BBS: need retract when long moving to print perimeter to avoid dropping of material
