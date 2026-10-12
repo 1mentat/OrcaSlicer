@@ -3247,7 +3247,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     m_enable_cooling_markers = true;
     this->apply_print_config(print.config());
     m_config.apply(print.default_object_config());
+    m_applied_region = nullptr;
     m_config.apply(print.default_region_config());
+    m_applied_region = nullptr;
 
     //m_volumetric_speed = DoExport::autospeed_volumetric_limit(print);
     print.throw_if_canceled();
@@ -5497,7 +5499,9 @@ std::string GCode::generate_object_brim(const Print &print, const PrintObject &o
         // until later, and the plate brim path deliberately uses (0, 0) because its
         // geometry is already in plate coordinates.
         m_config.apply(print.default_region_config());
+        m_applied_region = nullptr;
         m_config.apply(object.config(), true);
+        m_applied_region = nullptr;
         // m_layer is not switched to this object until after brim emission, so name
         // the belt-floor owner explicitly or the classification borrows whichever
         // object was visited last.
@@ -5679,7 +5683,9 @@ std::string GCode::emit_belt_brim_bands(const Print                     &print,
             continue;
         // Speeds, flow and retraction all read m_config.
         m_config.apply(print.default_region_config());
+        m_applied_region = nullptr;
         m_config.apply(object.config(), true);
+        m_applied_region = nullptr;
         // Apron bands have no Layer at all (m_layer is null here), so the belt
         // floor owner has to be named the same way the object brim names it.
         BeltFloorObjectGuard floor_owner{ m_belt_floor_object, &object };
@@ -6058,6 +6064,7 @@ LayerResult GCode::process_layer(
 
     // Initialize config with the 1st object to be printed at this layer.
     m_config.apply(layer.object()->config(), true);
+    m_applied_region = nullptr;
 
     // Check whether it is possible to apply the spiral vase logic for this layer.
     // Just a reminder: A spiral vase mode is allowed for a single object, single material print only.
@@ -7044,7 +7051,9 @@ LayerResult GCode::process_layer(
                 bool object_layer_over_raft = layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
                     instance_to_print.print_object.slicing_parameters().raft_layers() == layer_to_print.object_layer->id();
                 m_config.apply(print.default_region_config());
+                m_applied_region = nullptr;
                 m_config.apply(instance_to_print.print_object.config(), true);
+                m_applied_region = nullptr;
                 m_layer = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
                 if (m_config.reduce_crossing_wall)
@@ -7278,7 +7287,9 @@ LayerResult GCode::process_layer(
                 bool object_layer_over_raft = layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
                     instance_to_print.print_object.slicing_parameters().raft_layers() == layer_to_print.object_layer->id();
                 m_config.apply(print.default_region_config());
+                m_applied_region = nullptr;
                 m_config.apply(instance_to_print.print_object.config(), true);
+                m_applied_region = nullptr;
                 m_layer = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
                 if (m_config.reduce_crossing_wall)
@@ -7655,6 +7666,7 @@ void GCode::apply_print_config(const PrintConfig &print_config)
 {
     m_writer.apply_print_config(print_config);
     m_config.apply(print_config);
+    m_applied_region = nullptr;
     m_scaled_resolution = scaled<double>(print_config.resolution.value);
     m_enable_exclude_object = m_config.exclude_object;
 
@@ -8278,7 +8290,11 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
     std::string gcode;
     for (const ObjectByExtruder::Island::Region &region : by_region)
         if (! region.perimeters.empty()) {
-            m_config.apply(print.get_print_region(&region - &by_region.front()).config());
+            if (const PrintRegion &print_region = print.get_print_region(&region - &by_region.front()); &print_region != m_applied_region) {
+                // Applying the configuration the last applied region left in place changes nothing.
+                m_config.apply(print_region.config());
+                m_applied_region = &print_region;
+            }
             // BBS: for first layer, we always print wall firstly to get better bed adhesive force
             // This behaviour is same with cura
             const bool should_print = is_first_layer ? !is_infill_first
@@ -8334,7 +8350,11 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
                 if ((ee->role() == erIroning) == ironing)
                     extrusions.emplace_back(ee);
             if (! extrusions.empty()) {
-                m_config.apply(print.get_print_region(&region - &by_region.front()).config());
+                if (const PrintRegion &print_region = print.get_print_region(&region - &by_region.front()); &print_region != m_applied_region) {
+                // Applying the configuration the last applied region left in place changes nothing.
+                m_config.apply(print_region.config());
+                m_applied_region = &print_region;
+            }
                 reversed.clear();
                 chain_and_reorder_extrusion_entities(extrusions, m_last_pos.to_point(), reversed);
                 // The reversed copies are in chain order.
@@ -8636,7 +8656,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, const std::string &path_d
 
     // compensate retraction
     gcode += this->unretract();
-    m_config.apply(m_calib_config);
+    if (! m_calib_config.empty()) {
+        m_config.apply(m_calib_config);
+        m_applied_region = nullptr;
+    }
 
     // Orca: optimize for Klipper, set acceleration and jerk in one command
     unsigned int acceleration_i = 0;

@@ -763,6 +763,8 @@ protected:
     // Bounding boxes of the support islands and base areas of the support layer they were last found for, grown by the
     // rounding error ExPolygon::contains() allows, so a travel is tested only against islands whose boxes contain it.
     const Layer             *m_support_boxes_layer = nullptr;
+    // The print region whose configuration was applied to m_config last, unless anything changed m_config since.
+    const PrintRegion       *m_applied_region = nullptr;
     std::vector<BoundingBox> m_support_island_boxes;
     std::vector<BoundingBox> m_support_base_area_boxes;
 
