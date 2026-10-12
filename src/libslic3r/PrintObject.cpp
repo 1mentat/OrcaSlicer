@@ -164,6 +164,20 @@ PrintObject::~PrintObject()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": this=%1%, m_shared_object %2%")%this%m_shared_object;
     if (m_shared_regions && -- m_shared_regions->m_ref_cnt == 0) delete m_shared_regions;
+    if (! m_shared_object) {
+        // Nothing else uses the layers of an object being destroyed, and each layer frees only its own data, so they are
+        // freed in parallel before the rest is cleared.
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, m_layers.size()), [this](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++ i)
+                delete m_layers[i];
+        });
+        m_layers.clear();
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, m_support_layers.size()), [this](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++ i)
+                delete m_support_layers[i];
+        });
+        m_support_layers.clear();
+    }
     clear_layers();
     clear_support_layers();
 }
