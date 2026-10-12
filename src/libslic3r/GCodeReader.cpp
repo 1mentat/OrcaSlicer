@@ -50,7 +50,7 @@ void GCodeReader::apply_config(const DynamicPrintConfig &config)
     m_config                   = std::move(applied);
 }
 
-const char* GCodeReader::parse_line_internal(const char *ptr, const char *end, GCodeLine &gline, std::pair<const char*, const char*> &command)
+const char* GCodeReader::tokenize_line(const char *ptr, const char *end, GCodeLine &gline, std::pair<const char*, const char*> &command)
 {
     PROFILE_FUNC();
 
@@ -107,9 +107,6 @@ const char* GCodeReader::parse_line_internal(const char *ptr, const char *end, G
         }
     }
     
-    if (gline.has(E) && m_use_relative_e_distances)
-        m_position[E] = 0;
-
     // Skip the rest of the line.
     for (; ! is_end_of_line(*c); ++ c);
 
@@ -125,10 +122,38 @@ const char* GCodeReader::parse_line_internal(const char *ptr, const char *end, G
 	if (*c == '\n')
 		++ c;
 
+    return c;
+}
+
+const char* GCodeReader::parse_line_internal(const char *ptr, const char *end, GCodeLine &gline, std::pair<const char*, const char*> &command)
+{
+    const char *line_end = tokenize_line(ptr, end, gline, command);
+    this->apply_line_state(gline);
+    return line_end;
+}
+
+void GCodeReader::apply_line_state(const GCodeLine &gline)
+{
+    if (gline.has(E) && m_use_relative_e_distances)
+        m_position[E] = 0;
+
     if (m_verbose)
         std::cout << gline.m_raw << std::endl;
+}
 
-    return c;
+std::vector<GCodeReader::PreparsedLine> GCodeReader::preparse_buffer(const std::string &buffer)
+{
+    std::vector<PreparsedLine> out;
+    const char *ptr = buffer.c_str();
+    const char *end = ptr + buffer.size();
+    while (*ptr != 0) {
+        PreparsedLine &line = out.emplace_back();
+        std::pair<const char*, const char*> cmd;
+        ptr = tokenize_line(ptr, end, line.gline, cmd);
+        line.cmd_begin = cmd.first - buffer.c_str();
+        line.cmd_end   = cmd.second - buffer.c_str();
+    }
+    return out;
 }
 
 void GCodeReader::update_coordinates(GCodeLine &gline, std::pair<const char*, const char*> &command)

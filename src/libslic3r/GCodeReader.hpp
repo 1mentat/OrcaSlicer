@@ -130,6 +130,32 @@ public:
     void parse_buffer(const std::string &buffer)
         { this->parse_buffer(buffer, [](GCodeReader&, const GCodeReader::GCodeLine&){}); }
 
+    // A line of a buffer tokenized ahead by preparse_buffer(), with the offsets of its command word in the buffer.
+    struct PreparsedLine
+    {
+        GCodeLine gline;
+        size_t    cmd_begin;
+        size_t    cmd_end;
+    };
+    // Tokenizes the lines of a buffer as parse_buffer() does, without using the reader's state, so it can run on
+    // another thread ahead of parse_preparsed().
+    static std::vector<PreparsedLine> preparse_buffer(const std::string &buffer);
+    // Runs the callback over the lines preparse_buffer() tokenized from buffer and updates the reader's state between
+    // them, as parse_buffer() does for the buffer.
+    template<typename Callback>
+    void parse_preparsed(const std::string &buffer, const std::vector<PreparsedLine> &lines, Callback callback)
+    {
+        m_parsing = true;
+        for (const PreparsedLine &line : lines) {
+            if (! m_parsing)
+                break;
+            this->apply_line_state(line.gline);
+            callback(*this, line.gline);
+            std::pair<const char*, const char*> cmd(buffer.data() + line.cmd_begin, buffer.data() + line.cmd_end);
+            update_coordinates(const_cast<GCodeLine&>(line.gline), cmd);
+        }
+    }
+
     template<typename Callback>
     const char* parse_line(const char *ptr, const char *end, GCodeLine &gline, Callback &callback)
     {
@@ -183,6 +209,10 @@ private:
     bool        parse_file_internal(const std::string &filename, ParseLineCallback parse_line_callback, LineEndCallback line_end_callback);
 
     const char* parse_line_internal(const char *ptr, const char *end, GCodeLine &gline, std::pair<const char*, const char*> &command);
+    // The part of parse_line_internal() that changes the reader's state for a tokenized line.
+    void apply_line_state(const GCodeLine &gline);
+    // The part of parse_line_internal() that reads only the line.
+    static const char* tokenize_line(const char *ptr, const char *end, GCodeLine &gline, std::pair<const char*, const char*> &command);
     void        update_coordinates(GCodeLine &gline, std::pair<const char*, const char*> &command);
 
     static bool         is_whitespace(char c)           { return c == ' ' || c == '\t'; }

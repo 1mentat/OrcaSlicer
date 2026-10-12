@@ -396,8 +396,8 @@ public:
 protected:
     class GCodeOutputStream {
     public:
-        GCodeOutputStream(FILE *f, GCodeProcessor &processor) : f(f), m_processor(processor) {}
-        ~GCodeOutputStream() { this->close(); }
+        GCodeOutputStream(FILE *f, GCodeProcessor &processor);
+        ~GCodeOutputStream();
 
         bool is_open() const { return f; }
         bool is_error() const;
@@ -407,6 +407,15 @@ protected:
 
         // Write a string into a file.
         void write(const std::string& what) { this->write(what.c_str()); }
+        // As write(what), with the lines of what tokenized ahead by GCodeReader::preparse_buffer().
+        void write(std::string&& what, std::vector<GCodeReader::PreparsedLine>&& lines);
+
+        // Between begin_async() and end_async(), the strings written are passed through the G-code processor on a
+        // thread of its own, in the order written, so a writer does not wait for the processor. end_async() waits until
+        // the processor has run over all of them and rethrows its exception, if any; abort_async() discards it.
+        void begin_async();
+        void end_async();
+        void abort_async();
         void write(const char* what);
 
         // Write a string into a file.
@@ -418,8 +427,11 @@ protected:
         void write_format(const char* format, ...);
 
     private:
+        class AsyncProcessor;
+
         FILE *f = nullptr;
         GCodeProcessor &m_processor;
+        std::unique_ptr<AsyncProcessor> m_async;
     };
 
     // Virtual hooks for belt printer subclass (BeltGCode).
@@ -652,7 +664,7 @@ protected:
     SeamPlacer                          m_seam_placer;
     // SeamPlacer::find_closest_perimeter_point() of the perimeter loops of the layer being generated, found ahead in
     // parallel, keyed by the loop with the layer it belongs to.
-    std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> m_precomputed_seam_points;
+    std::unordered_map<const ExtrusionLoop*, PrecomputedSeam> m_precomputed_seam_points;
 
     // One stop of the island-level tour: consecutive islands of a single instance. An instance
     // can have several visits per layer when its islands are toured non-consecutively.

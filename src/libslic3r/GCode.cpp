@@ -67,7 +67,11 @@
 #include <chrono>
 #include <iomanip>
 #include <cstring>
+#include <condition_variable>
+#include <deque>
 #include <exception>
+#include <mutex>
+#include <thread>
 #include <functional>
 #include <iostream>
 #include <iterator>
@@ -4553,11 +4557,18 @@ size_t GCode::get_nozzle_config_index(int filament_id) const
 }
 
 namespace {
+// A layer's G-code with its lines tokenized for the G-code processor.
+struct PreparsedGCode
+{
+    std::string                             gcode;
+    std::vector<GCodeReader::PreparsedLine> lines;
+};
+
 struct PrecomputedLayer
 {
     size_t                                    index{size_t(-1)}; // size_t(-1) for the empty layer after the last
     std::vector<PrecomputedOverhangLayer>     overhang_layers;
-    std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> seam_points;
+    std::unordered_map<const ExtrusionLoop*, PrecomputedSeam> seam_points;
 };
 } // namespace
 
@@ -4588,20 +4599,30 @@ std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vect
     return out;
 }
 
-// The seam placer's closest perimeter point of each perimeter loop of the object layers, which place_seam() starts from.
-static std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> precompute_seam_points(
+// The seam of each perimeter loop of the object layers: the closest perimeter point place_seam() starts from and, unless
+// the seam depends on the position the loop is approached from, the loop split at its seam.
+static std::unordered_map<const ExtrusionLoop*, PrecomputedSeam> precompute_seam_points(
     const SeamPlacer &seam_placer, const std::vector<GCode::LayerToPrint> &layers)
 {
-    std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> out;
+    std::unordered_map<const ExtrusionLoop*, PrecomputedSeam> out;
     for (const GCode::LayerToPrint &layer : layers) {
         const Layer *object_layer = layer.object_layer;
         if (object_layer == nullptr || seam_placer.m_seam_per_object.count(object_layer->object()) == 0)
             continue;
+        const bool place = ! SeamPlacer::seam_depends_on_last_pos(object_layer);
         auto visit = [&](auto &self, const ExtrusionEntityCollection &collection) -> void {
             for (const ExtrusionEntity *ee : collection.entities)
                 if (const auto *loop = dynamic_cast<const ExtrusionLoop*>(ee); loop != nullptr) {
-                    if (! loop->paths.empty() && ! loop->paths.front().polyline.points.empty())
-                        out.emplace(loop, std::make_pair(object_layer, seam_placer.find_closest_perimeter_point(object_layer, *loop)));
+                    if (! loop->paths.empty() && ! loop->paths.front().polyline.points.empty()) {
+                        PrecomputedSeam seam;
+                        seam.layer                   = object_layer;
+                        seam.closest_perimeter_point = seam_placer.find_closest_perimeter_point(object_layer, *loop);
+                        if (place) {
+                            seam.placed.emplace(*loop);
+                            seam_placer.place_seam(object_layer, *seam.placed, Point::Zero(), seam.overhang, &seam.closest_perimeter_point);
+                        }
+                        out.emplace(loop, std::move(seam));
+                    }
                 } else if (const auto *child = dynamic_cast<const ExtrusionEntityCollection*>(ee); child != nullptr)
                     self(self, *child);
         };
@@ -4706,8 +4727,14 @@ void GCode::process_layers(
             }
         );
     
-    const auto output = tbb::make_filter<std::string, void>(slic3r_tbb_filtermode::serial_in_order,
-        [&output_stream](std::string s) { output_stream.write(s); }
+    // The G-code processor runs over the lines in order, but they are tokenized for it in parallel.
+    const auto preparse = tbb::make_filter<std::string, PreparsedGCode>(slic3r_tbb_filtermode::parallel,
+        [](std::string s) -> PreparsedGCode {
+            std::vector<GCodeReader::PreparsedLine> lines = GCodeReader::preparse_buffer(s);
+            return { std::move(s), std::move(lines) };
+        });
+    const auto output = tbb::make_filter<PreparsedGCode, void>(slic3r_tbb_filtermode::serial_in_order,
+        [&output_stream](PreparsedGCode in) { output_stream.write(std::move(in.gcode), std::move(in.lines)); }
     );
 
     const auto fan_mover = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
@@ -4730,15 +4757,23 @@ void GCode::process_layers(
         return in;
     });
 
-    // The pipeline elements are joined using const references, thus no copying is performed.
-    if (m_spiral_vase && m_pressure_equalizer)
-        tbb::parallel_pipeline(12, source & generator & spiral_mode & pressure_equalizer & cooling & fan_mover & output);
-    else if (m_spiral_vase)
-    	tbb::parallel_pipeline(12, source & generator & spiral_mode & cooling & fan_mover & output);
-    else if	(m_pressure_equalizer)
-        tbb::parallel_pipeline(12, source & generator & pressure_equalizer & cooling & fan_mover & pa_processor_filter & output);
-    else
-    	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & output);
+    // The G-code processor runs on a thread of its own meanwhile, so the pipeline does not wait for it.
+    output_stream.begin_async();
+    try {
+        // The pipeline elements are joined using const references, thus no copying is performed.
+        if (m_spiral_vase && m_pressure_equalizer)
+            tbb::parallel_pipeline(12, source & generator & spiral_mode & pressure_equalizer & cooling & fan_mover & preparse & output);
+        else if (m_spiral_vase)
+        	tbb::parallel_pipeline(12, source & generator & spiral_mode & cooling & fan_mover & preparse & output);
+        else if	(m_pressure_equalizer)
+            tbb::parallel_pipeline(12, source & generator & pressure_equalizer & cooling & fan_mover & pa_processor_filter & preparse & output);
+        else
+        	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & preparse & output);
+    } catch (...) {
+        output_stream.abort_async();
+        throw;
+    }
+    output_stream.end_async();
     // The estimator's precomputed data points into this print's layers.
     m_extrusion_quality_estimator.set_precomputed_layers({});
     m_precomputed_seam_points.clear();
@@ -4804,8 +4839,14 @@ void GCode::process_layers(
         }
     );
     
-    const auto output = tbb::make_filter<std::string, void>(slic3r_tbb_filtermode::serial_in_order,
-        [&output_stream](std::string s) { output_stream.write(s); }
+    // The G-code processor runs over the lines in order, but they are tokenized for it in parallel.
+    const auto preparse = tbb::make_filter<std::string, PreparsedGCode>(slic3r_tbb_filtermode::parallel,
+        [](std::string s) -> PreparsedGCode {
+            std::vector<GCodeReader::PreparsedLine> lines = GCodeReader::preparse_buffer(s);
+            return { std::move(s), std::move(lines) };
+        });
+    const auto output = tbb::make_filter<PreparsedGCode, void>(slic3r_tbb_filtermode::serial_in_order,
+        [&output_stream](PreparsedGCode in) { output_stream.write(std::move(in.gcode), std::move(in.lines)); }
     );
 
     const auto fan_mover = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
@@ -4826,15 +4867,23 @@ void GCode::process_layers(
         return in;
     });
 
-    // The pipeline elements are joined using const references, thus no copying is performed.
-    if (m_spiral_vase && m_pressure_equalizer)
-        tbb::parallel_pipeline(12, source & generator & spiral_mode & pressure_equalizer & cooling & fan_mover & output);
-    else if (m_spiral_vase)
-    	tbb::parallel_pipeline(12, source & generator & spiral_mode & cooling & fan_mover & output);
-    else if	(m_pressure_equalizer)
-        tbb::parallel_pipeline(12, source & generator & pressure_equalizer & cooling & fan_mover & pa_processor_filter & output);
-    else
-    	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & output);
+    // The G-code processor runs on a thread of its own meanwhile, so the pipeline does not wait for it.
+    output_stream.begin_async();
+    try {
+        // The pipeline elements are joined using const references, thus no copying is performed.
+        if (m_spiral_vase && m_pressure_equalizer)
+            tbb::parallel_pipeline(12, source & generator & spiral_mode & pressure_equalizer & cooling & fan_mover & preparse & output);
+        else if (m_spiral_vase)
+        	tbb::parallel_pipeline(12, source & generator & spiral_mode & cooling & fan_mover & preparse & output);
+        else if	(m_pressure_equalizer)
+            tbb::parallel_pipeline(12, source & generator & pressure_equalizer & cooling & fan_mover & pa_processor_filter & preparse & output);
+        else
+        	tbb::parallel_pipeline(12, source & generator & cooling & fan_mover & pa_processor_filter & preparse & output);
+    } catch (...) {
+        output_stream.abort_async();
+        throw;
+    }
+    output_stream.end_async();
     // The estimator's precomputed data points into this print's layers.
     m_extrusion_quality_estimator.set_precomputed_layers({});
     m_precomputed_seam_points.clear();
@@ -7937,8 +7986,13 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     if (!m_config.spiral_mode && description == "perimeter") {
         assert(m_layer != nullptr);
         auto it = m_precomputed_seam_points.find(&loop_ref);
-        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang,
-                                 it != m_precomputed_seam_points.end() && it->second.first == m_layer ? &it->second.second : nullptr);
+        if (it != m_precomputed_seam_points.end() && it->second.layer == m_layer && it->second.placed) {
+            // Placed ahead from the same loop on the same layer; a loop is extruded once per instance, so it is copied.
+            loop          = *it->second.placed;
+            seam_overhang = it->second.overhang;
+        } else
+            m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang,
+                                     it != m_precomputed_seam_points.end() && it->second.layer == m_layer ? &it->second.closest_perimeter_point : nullptr);
     } else
         loop.split_at(last_pos, false);
 
@@ -8479,6 +8533,117 @@ void GCode::GCodeOutputStream::flush()
     ::fflush(this->f);
 }
 
+// Runs the G-code processor over the written strings on a thread of its own, in the order they were written.
+class GCode::GCodeOutputStream::AsyncProcessor
+{
+public:
+    explicit AsyncProcessor(GCodeProcessor &processor) : m_processor(processor), m_thread([this] { this->run(); }) {}
+    ~AsyncProcessor() { this->stop(); }
+
+    void push(std::string &&gcode, std::vector<GCodeReader::PreparsedLine> &&lines, bool preparsed)
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        // Bounded, so a writer far ahead of the processor does not hold the whole G-code in memory.
+        m_space.wait(lock, [this] { return m_queue.size() < max_queued || m_error; });
+        if (m_error)
+            return;
+        m_queue.push_back({ std::move(gcode), std::move(lines), preparsed });
+        m_ready.notify_one();
+    }
+
+    // Waits for the processor to run over everything pushed, then rethrows its exception, if any.
+    void finish()
+    {
+        this->stop();
+        if (m_error)
+            std::rethrow_exception(m_error);
+    }
+
+private:
+    struct Item
+    {
+        std::string                             gcode;
+        std::vector<GCodeReader::PreparsedLine> lines;
+        bool                                    preparsed;
+    };
+    static constexpr size_t max_queued = 256;
+
+    void stop()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_done = true;
+        }
+        m_ready.notify_one();
+        if (m_thread.joinable())
+            m_thread.join();
+    }
+
+    void run()
+    {
+        for (;;) {
+            Item item;
+            {
+                std::unique_lock<std::mutex> lock(m_mutex);
+                m_ready.wait(lock, [this] { return ! m_queue.empty() || m_done; });
+                if (m_queue.empty())
+                    return;
+                item = std::move(m_queue.front());
+                m_queue.pop_front();
+            }
+            m_space.notify_one();
+            if (m_error)
+                continue;
+            try {
+                if (item.preparsed)
+                    m_processor.process_preparsed(item.gcode, item.lines);
+                else
+                    m_processor.process_buffer(item.gcode);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_error = std::current_exception();
+                m_space.notify_all();
+            }
+        }
+    }
+
+    GCodeProcessor          &m_processor;
+    std::mutex               m_mutex;
+    std::condition_variable  m_ready;
+    std::condition_variable  m_space;
+    std::deque<Item>         m_queue;
+    bool                     m_done = false;
+    std::exception_ptr       m_error;
+    std::thread              m_thread;
+};
+
+GCode::GCodeOutputStream::GCodeOutputStream(FILE *f, GCodeProcessor &processor) : f(f), m_processor(processor) {}
+
+GCode::GCodeOutputStream::~GCodeOutputStream()
+{
+    this->abort_async();
+    this->close();
+}
+
+void GCode::GCodeOutputStream::begin_async()
+{
+    assert(! m_async);
+    m_async = std::make_unique<AsyncProcessor>(m_processor);
+}
+
+void GCode::GCodeOutputStream::end_async()
+{
+    if (m_async) {
+        std::unique_ptr<AsyncProcessor> async = std::move(m_async);
+        async->finish();
+    }
+}
+
+void GCode::GCodeOutputStream::abort_async()
+{
+    m_async.reset();
+}
+
 void GCode::GCodeOutputStream::close()
 {
     if (this->f) {
@@ -8494,8 +8659,22 @@ void GCode::GCodeOutputStream::write(const char *what)
         // writes string to file
         fwrite(gcode, 1, ::strlen(gcode), this->f);
         //FIXME don't allocate a string, maybe process a batch of lines?
-        m_processor.process_buffer(std::string(gcode));
+        if (m_async)
+            m_async->push(std::string(gcode), {}, false);
+        else
+            m_processor.process_buffer(std::string(gcode));
     }
+}
+
+void GCode::GCodeOutputStream::write(std::string &&what, std::vector<GCodeReader::PreparsedLine> &&lines)
+{
+    // Up to the first null character, as write(const char*) does; the lines end there too.
+    const size_t len = what.find('\0');
+    fwrite(what.data(), 1, len == std::string::npos ? what.size() : len, this->f);
+    if (m_async)
+        m_async->push(std::move(what), std::move(lines), true);
+    else
+        m_processor.process_preparsed(what, lines);
 }
 
 void GCode::GCodeOutputStream::writeln(const std::string &what)
