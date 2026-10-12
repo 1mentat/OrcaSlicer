@@ -4557,7 +4557,7 @@ struct PrecomputedLayer
 {
     size_t                                    index{size_t(-1)}; // size_t(-1) for the empty layer after the last
     std::vector<PrecomputedOverhangLayer>     overhang_layers;
-    std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> seam_points;
+    std::unordered_map<const ExtrusionLoop*, PrecomputedSeam> seam_points;
 };
 } // namespace
 
@@ -4588,20 +4588,30 @@ std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vect
     return out;
 }
 
-// The seam placer's closest perimeter point of each perimeter loop of the object layers, which place_seam() starts from.
-static std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> precompute_seam_points(
+// The seam of each perimeter loop of the object layers: the closest perimeter point place_seam() starts from and, unless
+// the seam depends on the position the loop is approached from, the loop split at its seam.
+static std::unordered_map<const ExtrusionLoop*, PrecomputedSeam> precompute_seam_points(
     const SeamPlacer &seam_placer, const std::vector<GCode::LayerToPrint> &layers)
 {
-    std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> out;
+    std::unordered_map<const ExtrusionLoop*, PrecomputedSeam> out;
     for (const GCode::LayerToPrint &layer : layers) {
         const Layer *object_layer = layer.object_layer;
         if (object_layer == nullptr || seam_placer.m_seam_per_object.count(object_layer->object()) == 0)
             continue;
+        const bool place = ! SeamPlacer::seam_depends_on_last_pos(object_layer);
         auto visit = [&](auto &self, const ExtrusionEntityCollection &collection) -> void {
             for (const ExtrusionEntity *ee : collection.entities)
                 if (const auto *loop = dynamic_cast<const ExtrusionLoop*>(ee); loop != nullptr) {
-                    if (! loop->paths.empty() && ! loop->paths.front().polyline.points.empty())
-                        out.emplace(loop, std::make_pair(object_layer, seam_placer.find_closest_perimeter_point(object_layer, *loop)));
+                    if (! loop->paths.empty() && ! loop->paths.front().polyline.points.empty()) {
+                        PrecomputedSeam seam;
+                        seam.layer                   = object_layer;
+                        seam.closest_perimeter_point = seam_placer.find_closest_perimeter_point(object_layer, *loop);
+                        if (place) {
+                            seam.placed.emplace(*loop);
+                            seam_placer.place_seam(object_layer, *seam.placed, Point::Zero(), seam.overhang, &seam.closest_perimeter_point);
+                        }
+                        out.emplace(loop, std::move(seam));
+                    }
                 } else if (const auto *child = dynamic_cast<const ExtrusionEntityCollection*>(ee); child != nullptr)
                     self(self, *child);
         };
@@ -7937,8 +7947,13 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     if (!m_config.spiral_mode && description == "perimeter") {
         assert(m_layer != nullptr);
         auto it = m_precomputed_seam_points.find(&loop_ref);
-        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang,
-                                 it != m_precomputed_seam_points.end() && it->second.first == m_layer ? &it->second.second : nullptr);
+        if (it != m_precomputed_seam_points.end() && it->second.layer == m_layer && it->second.placed) {
+            // Placed ahead from the same loop on the same layer; a loop is extruded once per instance, so it is copied.
+            loop          = *it->second.placed;
+            seam_overhang = it->second.overhang;
+        } else
+            m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang,
+                                     it != m_precomputed_seam_points.end() && it->second.layer == m_layer ? &it->second.closest_perimeter_point : nullptr);
     } else
         loop.split_at(last_pos, false);
 

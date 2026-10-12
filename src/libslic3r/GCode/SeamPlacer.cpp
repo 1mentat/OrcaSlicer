@@ -1745,6 +1745,11 @@ size_t SeamPlacer::find_closest_perimeter_point(const Layer *layer, const Extrus
   return closest_perimeter_point_index;
 }
 
+bool SeamPlacer::seam_depends_on_last_pos(const Layer *layer) {
+  // Only a nearest seam of a perimeter without an aligned seam position is picked by the position.
+  return layer->object()->config().seam_position == spNearest;
+}
+
 void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,
                             const Point &last_pos, float& overhang, const size_t *closest_perimeter_point) const {
   using namespace SeamPlacerImpl;

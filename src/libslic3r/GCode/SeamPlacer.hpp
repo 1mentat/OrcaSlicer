@@ -15,6 +15,7 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/KDTreeIndirect.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 
 namespace Slic3r {
 
@@ -23,6 +24,19 @@ namespace PreciseSeam { struct PreciseSeamWarnings; }
 class ExtrusionLoop;
 class Print;
 class Layer;
+
+// A perimeter loop's seam, found ahead of G-code generation for the layer the loop belongs to.
+struct PrecomputedSeam
+{
+  const Layer *layer = nullptr;
+  // SeamPlacer::find_closest_perimeter_point() of the layer and the loop.
+  size_t       closest_perimeter_point = 0;
+  // The loop split at its seam by SeamPlacer::place_seam() and the seam's overhang, when they do not depend on the
+  // position the loop is approached from.
+  std::optional<ExtrusionLoop> placed;
+  float        overhang = 0.f;
+};
+
 
 namespace EdgeGrid {
 class Grid;
@@ -162,6 +176,9 @@ public:
   // closest_perimeter_point, when given, is find_closest_perimeter_point() of the layer and the loop.
   void place_seam(const Layer *layer, ExtrusionLoop &loop, const Point &last_pos, float& overhang,
                   const size_t *closest_perimeter_point = nullptr) const;
+  // Whether place_seam() uses last_pos for loops of the layer's object. Otherwise the loop with its seam placed
+  // depends only on the layer and the loop.
+  static bool seam_depends_on_last_pos(const Layer *layer);
 private:
   std::string m_precise_seam_warning;
 
