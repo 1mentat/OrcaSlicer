@@ -111,6 +111,7 @@
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/SL1.hpp"
 #include "libslic3r/Utils.hpp"
+#include <thread>
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BlacklistedLibraryCheck.hpp"
@@ -2001,6 +2002,12 @@ int CLI::run(int argc, char **argv)
         }
     }
 
+    // Frees the preset bundles below on a thread of its own once the settings are resolved, joined on any return.
+    std::thread preset_bundles_release;
+    ScopeGuard  join_preset_bundles_release([&preset_bundles_release] {
+        if (preset_bundles_release.joinable())
+            preset_bundles_release.join();
+    });
     std::unique_ptr<PresetBundle> cli_preset_bundle;
     auto ensure_cli_preset_bundle = [&cli_preset_bundle](std::string &error) -> PresetBundle * {
         if (cli_preset_bundle)
@@ -4785,6 +4792,11 @@ int CLI::run(int argc, char **argv)
     ArrangeParams arrange_cfg;
 
     BOOST_LOG_TRIVIAL(info) << "will start transforms, commands count " << m_transforms.size() << "\n";
+    // The preset bundles only resolved the loaded settings. Freeing them takes a while, so it overlaps the slicing.
+    preset_bundles_release = std::thread([bundles = std::make_pair(std::move(cli_preset_bundle), std::move(system_preset_resolver))]() mutable {
+        bundles.first.reset();
+        bundles.second.reset();
+    });
 #if defined(__linux__) || defined(__LINUX__)
     if (g_cli_callback_mgr.is_started()) {
         PrintBase::SlicingStatus slicing_status{2, "Loading files finished"};
