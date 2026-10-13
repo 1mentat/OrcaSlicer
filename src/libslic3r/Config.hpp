@@ -2800,8 +2800,14 @@ public:
     bool set_deserialize_nothrow(const t_config_option_key &opt_key_src, const std::string &value_src, ConfigSubstitutionContext& substitutions, bool append = false);
 	// May throw BadOptionTypeException() if the operation fails.
     void set_deserialize(const t_config_option_key &opt_key, const std::string &str, ConfigSubstitutionContext& config_substitutions, bool append = false);
+    // Like set_deserialize(), but also throws UnknownOptionException when handle_legacy() would drop the key or
+    // rename it to another option, so a caller can't silently set something other than what it names.
     void set_deserialize_strict(const t_config_option_key &opt_key, const std::string &str, bool append = false)
-        { ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable }; this->set_deserialize(opt_key, str, ctxt, append); }
+    {
+        this->throw_if_not_current_key(opt_key, str);
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+        this->set_deserialize(opt_key, str, ctxt, append);
+    }
     struct SetDeserializeItem {
     	SetDeserializeItem(const char *opt_key, const char *opt_value, bool append = false) : opt_key(opt_key), opt_value(opt_value), append(append) {}
     	SetDeserializeItem(const std::string &opt_key, const std::string &opt_value, bool append = false) : opt_key(opt_key), opt_value(opt_value), append(append) {}
@@ -2818,7 +2824,21 @@ public:
 	// May throw BadOptionTypeException() if the operation fails.
     void set_deserialize(std::initializer_list<SetDeserializeItem> items, ConfigSubstitutionContext& substitutions);
     void set_deserialize_strict(std::initializer_list<SetDeserializeItem> items)
-        { ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable }; this->set_deserialize(items, ctxt); }
+    {
+        for (const SetDeserializeItem &item : items)
+            this->throw_if_not_current_key(item.opt_key, item.opt_value);
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+        this->set_deserialize(items, ctxt);
+    }
+    // Throws UnknownOptionException when handle_legacy() would drop opt_key or rename it.
+    void throw_if_not_current_key(const t_config_option_key &opt_key, const std::string &value) const
+    {
+        t_config_option_key key        = opt_key;
+        std::string         value_copy = value;
+        this->handle_legacy(key, value_copy);
+        if (key != opt_key)
+            throw UnknownOptionException(opt_key);
+    }
 
     double get_abs_value_at(const t_config_option_key &opt_key, size_t index) const;
     double get_abs_value(const t_config_option_key &opt_key) const;
