@@ -1594,8 +1594,10 @@ TEST_CASE("An object slices the same whether or not an identical object shares t
         DynamicPrintConfig changed;
         changed.set_deserialize_strict({{"sparse_infill_density", "80%"}, {"wall_loops", 4}});
         if (difference == "height range") {
+            // The GUI always gives a height range its own layer height.
             ModelConfig range;
             range.apply(changed);
+            range.set("layer_height", FullPrintConfig::defaults().layer_height.value);
             second->layer_config_ranges[{2., 6.}] = range;
         } else if (difference == "modifier") {
             second->add_volume(cube(5), ModelVolumeType::PARAMETER_MODIFIER, false)->config.apply(changed);
@@ -1616,6 +1618,7 @@ TEST_CASE("An object slices the same whether or not an identical object shares t
         for (ModelObject *object : model.objects)
             print.auto_assign_extruders(object);
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n")); // validate() relative-E reset
         print.apply(model, config);
         REQUIRE(print.validate().string.empty());
         print.set_status_silent();

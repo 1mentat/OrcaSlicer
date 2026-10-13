@@ -62,6 +62,8 @@ DynamicPrintConfig full_config(const DynamicPrintConfig &base)
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.apply(base);
     config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    // Print::validate() rejects relative extrusion without an extruder reset at each layer.
+    config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n"));
     return config;
 }
 
@@ -247,7 +249,17 @@ std::optional<std::string> other_value(const ConfigOptionDef &def, const ConfigO
     return option->serialize();
 }
 
-// Every key a print, object or region reads.
+// Whether loading a config keeps `key` as it is. Some defined keys are dropped on load, so a profile
+// can't set them.
+bool is_current_key(const std::string &key)
+{
+    t_config_option_key loaded = key;
+    std::string         value;
+    PrintConfigDef::handle_legacy(loaded, value);
+    return loaded == key;
+}
+
+// Every key a print, object or region reads that a config can set.
 std::vector<std::string> print_keys()
 {
     std::vector<std::string> keys;
@@ -255,6 +267,7 @@ std::vector<std::string> print_keys()
         keys.insert(keys.end(), group.begin(), group.end());
     std::sort(keys.begin(), keys.end());
     keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    keys.erase(std::remove_if(keys.begin(), keys.end(), [](const std::string &key) { return !is_current_key(key); }), keys.end());
     return keys;
 }
 

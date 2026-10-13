@@ -51,14 +51,6 @@ TestMesh test_mesh(const std::string &name)
     throw std::invalid_argument("unknown mesh " + name);
 }
 
-DynamicPrintConfig config_from(const json &items)
-{
-    DynamicPrintConfig config;
-    for (const auto &[key, value] : items.items())
-        config.set_deserialize_strict(key, value.get<std::string>());
-    return config;
-}
-
 // A cube modifier volume over the middle third of `object` in X and Y and its full height.
 void add_center_volume(ModelObject &object, ModelVolumeType type, const DynamicPrintConfig &config)
 {
@@ -88,7 +80,7 @@ void paint(ModelVolume &volume, FacetsAnnotation ModelVolume::*facets,
 }
 
 // Builds the case's model: its objects and the features of the last object.
-void build_model(Model &model, const json &c, int filaments)
+void build_model(Model &model, const json &c, int filaments, double layer_height)
 {
     const TestMesh     shape_id = test_mesh(c.at("mesh"));
     const std::string &objects  = c.at("objects");
@@ -140,11 +132,13 @@ void build_model(Model &model, const json &c, int filaments)
     const std::string range = c.value("height_range", "none");
     if (range != "none") {
         const double height = last.raw_mesh_bounding_box().size().z();
-        ModelConfig  range_config;
+        // The GUI always gives a height range its own layer height.
+        ModelConfig range_config;
+        range_config.set("layer_height", layer_height);
         if (range == "dense")
             range_config.apply(dense);
         else if (range == "fine_layers")
-            range_config.apply(config_from({{"layer_height", "0.1"}}));
+            range_config.set("layer_height", 0.1);
         else
             throw std::invalid_argument("unknown height_range " + range);
         last.layer_config_ranges[{height * 0.3, height * 0.6}] = range_config;
@@ -210,7 +204,8 @@ DynamicPrintConfig build_config(const json &c, int filaments)
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     if (filaments > 1)
         config.apply(multifilament_config(unsigned(filaments)));
-    for (const auto &[key, value] : c.value("config", json::object()).items()) {
+    const json overrides = c.value("config", json::object());
+    for (const auto &[key, value] : overrides.items()) {
         std::string serialized = value.get<std::string>();
         const ConfigOptionDef *def = print_config_def.get(key);
         if (def != nullptr && (def->type & coVectorType) && def->type != coStrings && serialized.find(',') == std::string::npos)
@@ -219,6 +214,8 @@ DynamicPrintConfig build_config(const json &c, int filaments)
         config.set_deserialize_strict(key, serialized);
     }
     config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    // Print::validate() rejects relative extrusion without an extruder reset at each layer.
+    config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n"));
     return config;
 }
 
@@ -229,7 +226,7 @@ json slice_case(const json &c, const boost::filesystem::path &out_dir)
         const int          filaments = c.value("filaments", 1);
         DynamicPrintConfig config    = build_config(c, filaments);
         Model              model;
-        build_model(model, c, filaments);
+        build_model(model, c, filaments, config.opt_float("layer_height"));
         arrange_objects(model, InfiniteBed{}, ArrangeParams{scaled(min_object_distance(config))});
         Print print;
         for (ModelObject *object : model.objects) {
