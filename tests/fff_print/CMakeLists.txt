@@ -20,6 +20,7 @@ add_executable(${_TEST_NAME}_tests
 	test_precise_seam.cpp
 	test_print.cpp
 	test_printobject.cpp
+	test_scenario_matrix.cpp
 	test_mixed_filament.cpp
 	test_seam_placer.cpp
 	test_skirt_brim.cpp
