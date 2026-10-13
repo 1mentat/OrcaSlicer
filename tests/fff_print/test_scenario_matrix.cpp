@@ -216,6 +216,8 @@ DynamicPrintConfig build_config(const json &c, int filaments)
     config.set_key_value("gcode_comments", new ConfigOptionBool(true));
     // Print::validate() rejects relative extrusion without an extruder reset at each layer.
     config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n"));
+    // The default prime tower position (y 220) is off the 200x200 test bed.
+    config.set_deserialize_strict({{"wipe_tower_x", "20"}, {"wipe_tower_y", "20"}});
     return config;
 }
 

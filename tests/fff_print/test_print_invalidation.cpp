@@ -104,7 +104,7 @@ std::vector<Scenario> scenarios()
     out.push_back({"tree support under an overhang with a skirt", tree_support, [](Model &model) {
         add_object(model, mesh(TestMesh::overhang), {100., 100.});
     }});
-    out.push_back({"two filaments with a prime tower", multifilament_config(2, {{"enable_prime_tower", true}}), [](Model &model) {
+    out.push_back({"two filaments with a prime tower", multifilament_config(2, {{"enable_prime_tower", true}, {"wipe_tower_x", "20"}, {"wipe_tower_y", "20"}}), [](Model &model) {
         add_object(model, cube(20), {75., 100.})->config.set("extruder", 1);
         add_object(model, cube(20), {125., 100.})->config.set("extruder", 2);
     }});
