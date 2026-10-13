@@ -97,6 +97,11 @@ std::vector<Scenario> scenarios()
         object->add_volume(std::move(modifier), ModelVolumeType::PARAMETER_MODIFIER, false)->config.apply(modifier_config);
         add_object(model, cube(20), {125., 100.});
     }});
+    DynamicPrintConfig tree_support;
+    tree_support.set_deserialize_strict({{"enable_support", "1"}, {"support_type", "tree(auto)"}, {"skirt_loops", "1"}});
+    out.push_back({"tree support under an overhang with a skirt", tree_support, [](Model &model) {
+        add_object(model, mesh(TestMesh::overhang), {100., 100.});
+    }});
     out.push_back({"two filaments with a prime tower", multifilament_config(2, {{"enable_prime_tower", true}}), [](Model &model) {
         add_object(model, cube(20), {75., 100.})->config.set("extruder", 1);
         add_object(model, cube(20), {125., 100.})->config.set("extruder", 2);
@@ -279,6 +284,47 @@ void check_reslice_matches_fresh(const std::string &key)
     }
 }
 
+// A cube with a modifier in its middle. The modifier's region differs from the cube's in `separator`,
+// which keeps the two regions apart, and in `key`, which is set to `modifier_value`.
+Scenario modifier_scenario(const DynamicPrintConfig &separator, const std::string &key, const std::string &modifier_value)
+{
+    DynamicPrintConfig modifier_config = separator;
+    modifier_config.set_deserialize_strict(key, modifier_value);
+    return {"a cube with a modifier", DynamicPrintConfig{}, [modifier_config](Model &model) {
+        ModelObject *object   = add_object(model, cube(20), {100., 100.});
+        TriangleMesh modifier = cube(10);
+        modifier.translate(5., 5., 5.);
+        object->add_volume(std::move(modifier), ModelVolumeType::PARAMETER_MODIFIER, false)->config.apply(modifier_config);
+    }};
+}
+
+// Regions whose settings for `key` match are processed together: their walls in one perimeter pass, or
+// their fills in one group. Changing the object's value of `key` to or from the modifier's value
+// changes that grouping, so the step that groups them has to run again.
+void check_regrouping_reslice_matches_fresh(const std::string &key, const DynamicPrintConfig &separator)
+{
+    const ConfigOptionDef *def = print_config_def.get(key);
+    REQUIRE(def != nullptr);
+    const DynamicPrintConfig defaults = full_config({});
+    const ConfigOption      *current  = defaults.option(key);
+    REQUIRE(current != nullptr);
+    const std::optional<std::string> modifier_value = other_value(*def, *current);
+    REQUIRE(modifier_value);
+    const Scenario scenario = modifier_scenario(separator, key, *modifier_value);
+
+    DynamicPrintConfig matching;
+    matching.set_deserialize_strict(key, *modifier_value);
+    const bool becomes_equal = GENERATE(true, false);
+    const DynamicPrintConfig config_a = becomes_equal ? defaults : full_config(matching);
+    const DynamicPrintConfig config_b = becomes_equal ? full_config(matching) : defaults;
+    CAPTURE(key, *modifier_value, becomes_equal);
+    const Outcome outcome = reslice_against_fresh(scenario, config_a, config_b);
+    if (outcome.kind == Outcome::Skipped)
+        SKIP(outcome.detail);
+    INFO("first difference at " << outcome.detail);
+    CHECK(outcome.kind == Outcome::Same);
+}
+
 } // namespace
 
 // The keys most settings panels change; the full sweep below is too slow for every run.
@@ -298,4 +344,23 @@ TEST_CASE("Re-slicing after any settings change gives the same G-code as a fresh
 {
     const std::string key = GENERATE_REF(from_range(print_keys()));
     check_reslice_matches_fresh(key);
+}
+
+TEST_CASE("Re-slicing after a change that regroups walls gives the same G-code as a fresh slice", "[Print][Invalidation]")
+{
+    DynamicPrintConfig separator;
+    separator.set_deserialize_strict("sparse_infill_density", "80%");
+    const std::string key = GENERATE(as<std::string>{},
+        "outer_wall_speed", "inner_wall_speed", "small_perimeter_speed", "seam_slope_type", "scarf_joint_speed",
+        "seam_slope_entire_loop");
+    check_regrouping_reslice_matches_fresh(key, separator);
+}
+
+TEST_CASE("Re-slicing after a change that regroups fills gives the same G-code as a fresh slice", "[Print][Invalidation]")
+{
+    DynamicPrintConfig separator;
+    separator.set_deserialize_strict("wall_loops", "4");
+    const std::string key = GENERATE(as<std::string>{},
+        "sparse_infill_speed", "internal_solid_infill_speed", "top_surface_speed", "bridge_speed");
+    check_regrouping_reslice_matches_fresh(key, separator);
 }
