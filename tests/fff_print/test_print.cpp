@@ -33,6 +33,7 @@
 #include "libslic3r/Support/BeltFloorContext.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Polyline.hpp"
 #include <limits>
 #include <cmath>
@@ -1531,5 +1532,102 @@ TEST_CASE("Belt supports reach the belt under a leading overhang", "[Print][belt
         // ...and resting on the belt: within a few layers of the floor beneath its own lines.
         CHECK(lowest->print_z - floor_under_lowest < 4. * 0.2 + EPSILON);
         CHECK(lowest->print_z - floor_under_lowest > -0.2 - EPSILON);
+    }
+}
+
+namespace {
+
+// The role and points of every extrusion of `object`, layer by layer, in object coordinates, so the
+// object's position on the plate doesn't matter.
+std::vector<std::string> object_toolpaths(const PrintObject &object)
+{
+    std::vector<std::string> layers;
+    for (const Layer *layer : object.layers()) {
+        std::ostringstream out;
+        out << "z " << layer->print_z << '\n';
+        for (const LayerRegion *region : layer->regions())
+            for (const ExtrusionEntityCollection *collection : {&region->perimeters, &region->fills}) {
+                const ExtrusionEntityCollection flat = collection->flatten();
+                for (const ExtrusionEntity *entity : flat.entities) {
+                    out << ExtrusionEntity::role_to_string(entity->role());
+                    for (const Point &point : entity->as_polyline().points)
+                        out << ' ' << point.x() << ',' << point.y();
+                    out << '\n';
+                }
+            }
+        layers.push_back(out.str());
+    }
+    return layers;
+}
+
+ModelObject *add_object_at(Model &model, TriangleMesh mesh, const Vec2d &position)
+{
+    ModelObject *object = model.add_object();
+    object->name        = "object.stl";
+    object->add_volume(std::move(mesh));
+    object->add_instance()->set_offset(Vec3d(position.x(), position.y(), 0.));
+    object->ensure_on_bed();
+    return object;
+}
+
+} // namespace
+
+// Print::process() lets an object reuse the slices of an identical object instead of slicing its own.
+// Whatever it reuses, an object must come out the same with or without the identical object beside it.
+TEST_CASE("An object slices the same whether or not an identical object shares the plate", "[Print]")
+{
+    const bool        copied     = GENERATE(false, true);
+    const std::string difference = GENERATE(as<std::string>{}, "height range", "modifier", "object setting", "material setting");
+    CAPTURE(copied, difference);
+
+    // The second object differs from the first only by `difference`.
+    const auto build = [copied, &difference](Model &model, bool with_first) {
+        const TriangleMesh shape  = Slic3r::Test::mesh(TestMesh::cube_with_hole);
+        ModelObject       *first  = add_object_at(model, shape, {60., 100.});
+        ModelObject       *second = nullptr;
+        if (copied) {
+            // A copy shares the first object's mesh, as copy and paste does in the GUI.
+            second = model.add_object(*first);
+            second->instances.front()->set_offset(Vec3d(140., 100., first->instances.front()->get_offset().z()));
+        } else
+            second = add_object_at(model, shape, {140., 100.});
+        DynamicPrintConfig changed;
+        changed.set_deserialize_strict({{"sparse_infill_density", "80%"}, {"wall_loops", 4}});
+        if (difference == "height range") {
+            ModelConfig range;
+            range.apply(changed);
+            second->layer_config_ranges[{2., 6.}] = range;
+        } else if (difference == "modifier") {
+            second->add_volume(cube(5), ModelVolumeType::PARAMETER_MODIFIER, false)->config.apply(changed);
+        } else if (difference == "object setting") {
+            second->config.apply(changed);
+        } else {
+            model.add_material("changed")->config.apply(changed);
+            second->volumes.front()->set_material_id("changed");
+        }
+        if (!with_first)
+            model.delete_object(first);
+    };
+
+    const auto second_object_toolpaths = [&build](bool with_first) {
+        Model model;
+        Print print;
+        build(model, with_first);
+        for (ModelObject *object : model.objects)
+            print.auto_assign_extruders(object);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        print.apply(model, config);
+        REQUIRE(print.validate().string.empty());
+        print.set_status_silent();
+        print.process();
+        return object_toolpaths(*print.objects().back());
+    };
+
+    const std::vector<std::string> beside_first = second_object_toolpaths(true);
+    const std::vector<std::string> alone        = second_object_toolpaths(false);
+    REQUIRE(beside_first.size() == alone.size());
+    for (size_t layer = 0; layer < alone.size(); ++layer) {
+        INFO("layer " << layer);
+        CHECK(beside_first[layer] == alone[layer]);
     }
 }

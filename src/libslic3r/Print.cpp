@@ -3036,12 +3036,25 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 return false;
             if (model_volume1.config.get() != model_volume2.config.get())
                 return false;
+            // Region configs apply the volume's material config after the volume config.
+            const ModelMaterial *material1 = model_volume1.material();
+            const ModelMaterial *material2 = model_volume2.material();
+            if ((material1 != nullptr) != (material2 != nullptr)
+                || (material1 && material1->config.get() != material2->config.get()))
+                return false;
         }
         //if (!object1->config().equals(object2->config()))
         //    return false;
         if (model_obj1->layer_height_profile.get() != model_obj2->layer_height_profile.get())
             return false;
         if (model_obj1->config.get() != model_obj2->config.get())
+            return false;
+        // Height range modifiers change the regions, and with them the slices, of the layers they cover.
+        if (!std::equal(model_obj1->layer_config_ranges.begin(), model_obj1->layer_config_ranges.end(),
+                        model_obj2->layer_config_ranges.begin(), model_obj2->layer_config_ranges.end(),
+                        [](const auto &range1, const auto &range2) {
+                            return range1.first == range2.first && range1.second.get() == range2.second.get();
+                        }))
             return false;
         return true;
     };
