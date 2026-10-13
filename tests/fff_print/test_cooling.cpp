@@ -16,15 +16,48 @@
 using namespace Slic3r;
 using namespace Slic3r::Test;
 
-// The fan is held off for the first close_fan_the_first_x_layers layers, so an explicit
-// fan-off command is emitted.
+// The fan is held off for the first close_fan_the_first_x_layers layers. Every layer of a 20 mm cube
+// prints faster than fan_cooling_layer_time, and fan_min_speed equals fan_max_speed, so the part fan
+// runs at 100% on every layer it is allowed to run on, with no ramp.
 TEST_CASE("Fan is held off for the initial layers", "[Cooling]")
 {
-    const std::string gcode = slice({ cube(20) }, {
-        { "cooling",                      true },
-        { "close_fan_the_first_x_layers", 5 },
-    });
-    CHECK(gcode.find("M106 S0") != std::string::npos);
+    constexpr double layer_height = 0.2;
+    // Z of the layer during which the part fan is first switched on, 0 for the first layer.
+    const auto first_fan_on_z = [](int close_fan_layers) {
+        const std::string gcode = slice({ cube(20) }, {
+            { "layer_height",                 layer_height },
+            { "initial_layer_print_height",   layer_height },
+            { "close_fan_the_first_x_layers", close_fan_layers },
+            { "full_fan_speed_layer",         0 },
+            { "initial_layer_fan_speed",      -1 },
+            { "reduce_fan_stop_start_freq",   false },
+            { "fan_min_speed",                100 },
+            { "fan_max_speed",                100 },
+            { "slow_down_layer_time",         1 },
+            { "fan_cooling_layer_time",       1000 },
+            { "layer_change_gcode",           ";TEST_LAYER_Z=[layer_z]" },
+        });
+        std::istringstream input(gcode);
+        std::string line;
+        double z = 0.;
+        while (std::getline(input, line)) {
+            if (line.rfind(";TEST_LAYER_Z=", 0) == 0)
+                z = std::stod(line.substr(14));
+            else if (line.rfind("M106 S", 0) == 0 && std::stoi(line.substr(6)) > 0)
+                return z;
+        }
+        return -1.;
+    };
+
+    const double without_gate = first_fan_on_z(0);
+    const double with_gate    = first_fan_on_z(5);
+    // The fan is used at all, and from the first layers when nothing holds it off.
+    REQUIRE(without_gate >= 0.);
+    CHECK(without_gate <= 2 * layer_height + EPSILON);
+    // Held off for layers 1 to 5. The command that switches it on for layer 6 may be emitted
+    // just before that layer's change, at the end of layer 5.
+    REQUIRE(with_gate >= 0.);
+    CHECK(with_gate >= 5 * layer_height - EPSILON);
 }
 
 // The cooling pass resolves and strips its internal speed placeholders; none leak into

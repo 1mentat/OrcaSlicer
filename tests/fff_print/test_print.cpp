@@ -119,6 +119,9 @@ SCENARIO("Changing the number of solid shell layers does not make all surfaces i
 		config.set_deserialize_strict({
             { "top_shell_layers",           2 },
             { "bottom_shell_layers",        1 },
+            // The shell thicknesses would otherwise add solid layers of their own, hiding the layer counts.
+            { "top_shell_thickness",        0 },
+            { "bottom_shell_thickness",     0 },
             { "layer_height",               0.25 }, // get a known number of layers
             { "initial_layer_print_height", 0.25 }
 			});
@@ -136,10 +139,20 @@ SCENARIO("Changing the number of solid shell layers does not make all surfaces i
 		            CHECK(surface.is_solid());
 		    }
 		};
+        auto has_sparse_infill = [&print](size_t obj_id, size_t layer_id) {
+            const Layer &layer = *(print.objects().at(obj_id)->get_layer((int)layer_id));
+            for (const LayerRegion *region : layer.regions())
+                for (const Surface &surface : region->fill_surfaces.surfaces)
+                    if (!surface.is_solid())
+                        return true;
+            return false;
+        };
         print.process();
         test_is_solid_infill(0,  0); // should be solid
         test_is_solid_infill(0, 79); // should be solid
         test_is_solid_infill(0, 78); // should be solid
+        // Otherwise the re-slice below could ignore the new shell count and still pass.
+        REQUIRE(has_sparse_infill(0, 77));
         WHEN("Model is re-sliced with top_shell_layers == 3") {
 			config.set("top_shell_layers", 3);
 			print.apply(model, config);
