@@ -523,7 +523,6 @@ SCENARIO("Skirt and brim generation", "[SkirtBrim]") {
             { "initial_layer_print_height", 0.3 },
             // avoid altering speeds unexpectedly
             { "slow_down_for_layer_cooling", false },
-            { "initial_layer_speed",         "100%" },
             // remove noise from top/solid layers
             { "top_shell_layers",    0 },
             { "bottom_shell_layers", 1 },

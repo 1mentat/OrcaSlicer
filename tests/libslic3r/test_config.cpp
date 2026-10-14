@@ -58,6 +58,33 @@ SCENARIO("Generic config validation performs as expected.", "[Config]") {
     }
 }
 
+TEST_CASE("Strict deserialization rejects keys that are not current option names", "[Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    SECTION("an unknown key") {
+        CHECK_THROWS_AS(config.set_deserialize_strict("dont_support_bridges", "0"), UnknownOptionException);
+        CHECK_THROWS_AS(config.set_deserialize_strict({{"dont_support_bridges", false}}), UnknownOptionException);
+    }
+    SECTION("a legacy key that is renamed to another option") {
+        // handle_legacy() turns "cooling" into "slow_down_for_layer_cooling".
+        CHECK_THROWS_AS(config.set_deserialize_strict("cooling", "1"), UnknownOptionException);
+    }
+    SECTION("a legacy value that makes the key be dropped") {
+        // handle_legacy() erases percentage first layer speeds, so the default would apply.
+        CHECK_THROWS_AS(config.set_deserialize_strict("initial_layer_speed", "100%"), UnknownOptionException);
+    }
+    SECTION("nothing is set when any key of a list is rejected") {
+        const bool before = config.opt_bool("gcode_comments");
+        CHECK_THROWS_AS(config.set_deserialize_strict({{"gcode_comments", !before}, {"dont_support_bridges", false}}),
+                        UnknownOptionException);
+        CHECK(config.opt_bool("gcode_comments") == before);
+    }
+    SECTION("a current key") {
+        CHECK_NOTHROW(config.set_deserialize_strict("bridge_no_support", "1"));
+        CHECK(config.opt_bool("bridge_no_support"));
+    }
+}
+
 SCENARIO("Config accessor functions perform as expected.", "[Config]") {
     GIVEN("A config generated from default options") {
         Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
