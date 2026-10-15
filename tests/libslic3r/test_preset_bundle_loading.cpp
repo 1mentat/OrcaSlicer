@@ -1,3 +1,6 @@
+#include "libslic3r_version.h"
+#include <boost/nowide/fstream.hpp>
+#include <boost/format.hpp>
 #include <string_view>
 #include "libslic3r/Semver.hpp"
 #include <ios>
@@ -9074,3 +9077,391 @@ TEST_CASE("Vendor configuration retains the system filament when a default print
 }
 
 } // namespace preset_bundle_ams_contracts
+
+namespace preset_bundle_lifecycle_extended_contracts {
+using namespace Slic3r;
+namespace fs = boost::filesystem;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+using preset_extended_contracts::make_print_collection;
+using preset_extended_contracts::load_local_preset;
+using preset_extended_contracts::set_variant;
+
+void write_marker(const fs::path &path, const std::string &contents)
+{
+    fs::create_directories(path.parent_path());
+    boost::nowide::ofstream out(path.string(), std::ios::binary);
+    REQUIRE(out.good());
+    out << contents;
+    out.close();
+    REQUIRE(out.good());
+}
+
+std::string read_marker(const fs::path &path)
+{
+    boost::nowide::ifstream in(path.string(), std::ios::binary);
+    // A missing file yields an empty string and fails the caller's nonempty
+    // content expectation without nesting a fatal Catch assertion.
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+} // namespace
+
+TEST_CASE("PresetBundle copy repairs vendor pointers and preserves selected configurations",
+          "[Preset][PresetBundleLifecycleExtended]")
+{
+    PresetBundle original;
+    VendorProfile vendor("Acme");
+    vendor.name = "Acme";
+    original.vendors.emplace(vendor.id, vendor);
+    Preset &printer = original.printers.load_preset({}, "Acme Printer",
+                                                    original.printers.default_preset().config, false);
+    printer.vendor = &original.vendors.at("Acme");
+    set_variant(printer.config, "Acme One", "0.4");
+    original.printers.select_preset_by_name("Acme Printer", true);
+    original.filament_presets = {"Acme PLA"};
+    original.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#112233"};
+
+    PresetBundle copied(original);
+    REQUIRE(copied.printers.find_preset("Acme Printer", false, true) != nullptr);
+    CHECK(copied.printers.get_selected_preset_name() == "Acme Printer");
+    CHECK(copied.printers.find_preset("Acme Printer", false, true)->vendor == &copied.vendors.at("Acme"));
+    CHECK(copied.printers.find_preset("Acme Printer", false, true)->vendor != printer.vendor);
+    CHECK(copied.filament_presets == std::vector<std::string>{"Acme PLA"});
+    CHECK(copied.project_config.option<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#112233"});
+
+    PresetBundle assigned;
+    assigned = original;
+    REQUIRE(assigned.printers.find_preset("Acme Printer", false, true) != nullptr);
+    CHECK(assigned.printers.find_preset("Acme Printer", false, true)->vendor == &assigned.vendors.at("Acme"));
+    original.vendors.at("Acme").name = "Changed original";
+    CHECK(copied.vendors.at("Acme").name == "Acme");
+    CHECK(assigned.vendors.at("Acme").name == "Acme");
+}
+
+TEST_CASE("PresetBundle setup_directories creates the owned data layout", "[Preset][PresetBundleLifecycleExtended]")
+{
+    ScopedTemporaryDir temp("preset-bundle-layout");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.setup_directories();
+    CHECK(fs::is_directory(temp.path() / "data"));
+    CHECK(fs::is_directory(temp.path() / "data" / "ota"));
+    CHECK(fs::is_directory(temp.path() / "data" / PRESET_SYSTEM_DIR));
+    CHECK(fs::is_directory(temp.path() / "data" / PRESET_USER_DIR));
+}
+
+TEST_CASE("PresetBundle copy_files preserves only the supported preset trees", "[Preset][PresetBundleLifecycleExtended]")
+{
+    ScopedTemporaryDir temp("preset-bundle-copy");
+    ScopedDataDir data(temp.path() / "data");
+    const fs::path source = temp.path() / "source";
+    fs::create_directories(temp.path() / "data" / "old");
+    write_marker(source / PRESET_PRINT_NAME / "base" / "process.json", "print");
+    write_marker(source / PRESET_FILAMENT_NAME / "base" / "filament.json", "filament");
+    write_marker(source / PRESET_PRINTER_NAME / "base" / "printer.json", "printer");
+    write_marker(source / "vendor" / "ignored.json", "ignored");
+
+    PresetBundle bundle;
+    bundle.copy_files(source.string());
+    CHECK(read_marker(temp.path() / "data" / "old" / PRESET_PRINT_NAME / "base" / "process.json") == "print");
+    CHECK(read_marker(temp.path() / "data" / "old" / PRESET_FILAMENT_NAME / "base" / "filament.json") == "filament");
+    CHECK(read_marker(temp.path() / "data" / "old" / PRESET_PRINTER_NAME / "base" / "printer.json") == "printer");
+    CHECK_FALSE(fs::exists(temp.path() / "data" / "old" / "vendor"));
+}
+
+TEST_CASE("PresetBundle backup_user_folder is successful once and idempotent", "[Preset][PresetBundleLifecycleExtended]")
+{
+    ScopedTemporaryDir temp("preset-bundle-backup");
+    ScopedDataDir data(temp.path() / "data");
+    write_marker(temp.path() / "data" / PRESET_USER_DIR / "default" / "sentinel.json", "owned");
+    PresetBundle bundle;
+    REQUIRE(bundle.backup_user_folder());
+    const fs::path backup = temp.path() / "data" / (boost::format("user_backup-v%1%") % SoftFever_VERSION).str();
+    CHECK(read_marker(backup / "default" / "sentinel.json") == "owned");
+    write_marker(temp.path() / "data" / PRESET_USER_DIR / "default" / "sentinel.json", "changed");
+    CHECK_FALSE(bundle.backup_user_folder());
+    CHECK(read_marker(backup / "default" / "sentinel.json") == "owned");
+}
+
+TEST_CASE("PresetBundle vendor version and current vendor type follow the configured model", "[Preset][PresetBundleLifecycleExtended]")
+{
+    PresetBundle bundle;
+    VendorProfile bbl("BBL");
+    bbl.name = "BBL";
+    bbl.config_version = *Semver::parse("3.2.1");
+    VendorProfile::PrinterModel model;
+    model.name = "X1 Carbon";
+    model.id = "X1C";
+    model.variants.emplace_back("0.4");
+    bbl.models.push_back(model);
+    bundle.vendors.emplace(bbl.id, bbl);
+    set_variant(bundle.printers.get_edited_preset().config, "X1 Carbon", "0.4");
+    auto &config = bundle.printers.get_edited_preset().config;
+    CHECK(bundle.get_vendor_profile_version("BBL").to_string() == "3.2.0.1");
+    CHECK_FALSE(bundle.get_vendor_profile_version("Missing").valid());
+    CHECK(bundle.get_current_vendor_type() == VendorType::Marlin_BBL);
+    for (bool local_host : {false, true}) {
+        for (const std::string &url : {std::string{}, std::string{"http://printer.local"}}) {
+            CAPTURE(local_host, url);
+            config.option<ConfigOptionBool>("bbl_use_printhost", true)->value = local_host;
+            config.option<ConfigOptionString>("print_host_webui", true)->value = url;
+            CHECK(bundle.use_bbl_network() == !local_host);
+            const bool expect_device_tab = !local_host || url.empty();
+            CHECK(bundle.use_bbl_device_tab() == expect_device_tab);
+        }
+    }
+    set_variant(bundle.printers.get_edited_preset().config, "Unlisted Model", "0.4");
+    config.option<ConfigOptionBool>("bbl_use_printhost", true)->value = false;
+    config.option<ConfigOptionString>("print_host_webui", true)->value.clear();
+    CHECK(bundle.get_current_vendor_type() == VendorType::Unknown);
+    CHECK_FALSE(bundle.use_bbl_network());
+    CHECK_FALSE(bundle.use_bbl_device_tab());
+
+}
+
+TEST_CASE("PresetBundle custom vendor models retain distinct variants", "[Preset][PresetBundleLifecycleExtended]")
+{
+    PresetBundle bundle;
+    Preset &a = bundle.printers.load_preset({}, "Custom A", bundle.printers.default_preset().config, false);
+    set_variant(a.config, "Maker", "0.4");
+    a.is_system = false;
+    Preset &b = bundle.printers.load_preset({}, "Custom B", bundle.printers.default_preset().config, false);
+    set_variant(b.config, "Maker", "0.6");
+    b.is_system = false;
+    VendorProfile custom = bundle.get_custom_vendor_models();
+    REQUIRE(custom.id == PRESET_CUSTOM_VENDOR);
+    REQUIRE(custom.models.size() == 1);
+    CHECK(custom.models.front().name == "Maker");
+    CHECK(custom.models.front().variants.size() == 2);
+    CHECK(custom.models.front().variant("0.4") != nullptr);
+    CHECK(custom.models.front().variant("0.6") != nullptr);
+}
+
+TEST_CASE("PresetBundle filament lookup returns typed compatibility metadata", "[Preset][PresetBundleLifecycleExtended]")
+{
+    PresetBundle bundle;
+    Preset &filament = bundle.filaments.load_preset({}, "Acme PLA", bundle.filaments.default_preset().config, false);
+    filament.filament_id = "fil-42";
+    filament.alias = "PLA alias";
+    auto &config = filament.config;
+    config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA"};
+    config.option<ConfigOptionStrings>("filament_vendor", true)->values = {"Acme"};
+    config.option<ConfigOptionStrings>("compatible_printers", true)->values = {"X1"};
+    config.option<ConfigOptionInts>("filament_printable", true)->values = {2};
+    config.option<ConfigOptionInts>("filament_extruder_compatibility", true)->values = {17};
+    CHECK_FALSE(bundle.get_filament_by_filament_id("").has_value());
+    CHECK_FALSE(bundle.get_filament_by_filament_id("missing").has_value());
+    auto any_printer = bundle.get_filament_by_filament_id("fil-42");
+    REQUIRE(any_printer.has_value());
+    CHECK(any_printer->filament_name == "PLA alias");
+    CHECK(any_printer->filament_type == "PLA");
+    CHECK(any_printer->vendor == "Acme");
+    auto compatible = bundle.get_filament_by_filament_id("fil-42", "X1");
+    REQUIRE(compatible.has_value());
+    CHECK(compatible->filament_printable == 2);
+    CHECK(compatible->get_filament_extruder_compatibility() == 17);
+    CHECK_FALSE(bundle.get_filament_by_filament_id("fil-42", "Other").has_value());
+}
+
+TEST_CASE("PresetBundle dispatches differed saves only for supported preset types", "[Preset][PresetBundleLifecycleExtended]")
+{
+    PresetBundle bundle;
+    Preset &parent = load_local_preset(bundle.prints, "Parent");
+    parent.config.opt<ConfigOptionFloat>("layer_height")->value = 0.2;
+    Preset &child = load_local_preset(bundle.prints, "Child", "Parent");
+    child.config.opt<ConfigOptionFloat>("layer_height")->value = 0.31;
+    std::unique_ptr<Preset> diff(bundle.get_preset_differed_for_save(child));
+    REQUIRE(diff != nullptr);
+    CHECK_THAT(diff->config.opt_float("layer_height"), WithinAbs(0.31, 1e-6));
+    CHECK_FALSE(diff->config.has("wall_loops"));
+    std::map<std::string, std::string> values;
+    CHECK(bundle.get_differed_values_to_update(child, values) == 0);
+    REQUIRE(values.count("layer_height") == 1);
+    CHECK(values.at("layer_height") == "0.31");
+    Preset invalid(Preset::TYPE_INVALID, "invalid");
+    CHECK(bundle.get_preset_differed_for_save(invalid) == nullptr);
+    CHECK(bundle.get_differed_values_to_update(invalid, values) == -1);
+}
+
+TEST_CASE("PresetBundle project embedded enumeration and reset are bundle-wide", "[Preset][PresetBundleLifecycleExtended]")
+{
+    PresetBundle bundle;
+    Preset &parent = load_local_preset(bundle.prints, "Embedded Parent");
+    auto embedded = std::make_unique<Preset>(Preset::TYPE_PRINT, "Embedded Process");
+    embedded->is_project_embedded = true;
+    embedded->config = bundle.prints.default_preset().config;
+    embedded->inherits() = parent.name;
+    embedded->config.opt<ConfigOptionFloat>("layer_height")->value = 0.33;
+    std::vector<Preset *> project{embedded.get()};
+    PresetsConfigSubstitutions substitutions = bundle.load_project_embedded_presets(
+        project, ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(substitutions.empty());
+    auto current = bundle.get_current_project_embedded_presets();
+    REQUIRE(current.size() == 1);
+    CHECK(current.front()->name == "Embedded Process");
+    CHECK_THAT(current.front()->config.opt_float("layer_height"), WithinAbs(0.33, 1e-9));
+    bundle.reset_project_embedded_presets();
+    CHECK(bundle.get_current_project_embedded_presets().empty());
+}
+
+TEST_CASE("PresetBundle save_user_presets writes all selected collection roots", "[Preset][PresetBundleLifecycleExtended]")
+{
+    ScopedTemporaryDir temp("preset-bundle-save-user");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("alice");
+    std::vector<std::pair<PresetCollection *, std::string>> collections{
+        {&bundle.prints, "Alice Process"}, {&bundle.filaments, "Alice Filament"},
+        {&bundle.printers, "Alice Printer"}};
+    for (const auto &[collection, name] : collections) {
+        Preset &preset = load_local_preset(*collection, name);
+        preset.sync_info = "save";
+        preset.file = collection->path_for_preset(preset);
+    }
+    AppConfig app;
+    app.set("preset_folder", "alice");
+    std::map<std::string, std::string> deletions;
+    bundle.save_user_presets(app, deletions);
+    for (const auto &[collection, name] : collections) {
+        const Preset *preset = collection->find_preset(name, false);
+        REQUIRE(preset != nullptr);
+        CHECK(fs::exists(preset->file));
+        CHECK(preset->sync_info.empty());
+        CHECK(read_marker(preset->file).find(name) != std::string::npos);
+    }
+
+}
+
+TEST_CASE("PresetBundle sync cleanup repairs invalid user metadata", "[Preset][PresetBundleLifecycleExtended]")
+{
+    ScopedTemporaryDir temp("preset-bundle-sync-fix");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("alice");
+    Preset &print = load_local_preset(bundle.prints, "Alice Process");
+    print.file = bundle.prints.path_for_preset(print);
+    REQUIRE(print.save(nullptr));
+    print.user_id.clear();
+    print.setting_id = "legacy-id";
+    print.sync_info.clear();
+    bundle.check_and_fix_user_presets_syncinfo("alice");
+    CHECK(print.user_id == "alice");
+    CHECK(print.setting_id.empty());
+    CHECK(print.sync_info == "create");
+}
+
+TEST_CASE("PresetBundle removes only the selected user's deleted cloud profiles", "[Preset][PresetBundleLifecycleExtended]")
+{
+    ScopedTemporaryDir temp("preset-bundle-remove-user");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("alice");
+    Preset &print = load_local_preset(bundle.prints, "To Remove");
+    print.user_id = "alice";
+    print.setting_id = "cloud-id";
+    print.file = bundle.prints.path_for_preset(print);
+    REQUIRE(print.save(nullptr));
+    const fs::path removed_file = print.file;
+    Preset &other = load_local_preset(bundle.prints, "Other User");
+    other.user_id = "bob";
+    other.setting_id = "other-cloud-id";
+    other.file = bundle.prints.path_for_preset(other);
+    REQUIRE(other.save(nullptr));
+    const fs::path retained_file = other.file;
+    AppConfig app;
+    app.set("preset_folder", "alice");
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+    bundle.remove_users_preset(app, &cloud);
+    CHECK(bundle.prints.find_preset("To Remove", false) == nullptr);
+    CHECK_FALSE(fs::exists(removed_file));
+    CHECK(bundle.prints.find_preset("Other User", false) != nullptr);
+    CHECK(fs::exists(retained_file));
+
+}
+
+TEST_CASE("PresetBundle removes a user directory without touching an empty-folder request", "[Preset][PresetBundleLifecycleExtended]")
+{
+    ScopedTemporaryDir temp("preset-bundle-remove-dir");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("alice");
+    write_marker(temp.path() / "data" / PRESET_USER_DIR / "alice" / "sentinel", "owned");
+    bundle.remove_user_presets_directory("");
+    CHECK(read_marker(temp.path() / "data" / PRESET_USER_DIR / "alice" / "sentinel") == "owned");
+    bundle.remove_user_presets_directory("alice");
+    CHECK_FALSE(fs::exists(temp.path() / "data" / PRESET_USER_DIR / "alice"));
+}
+
+TEST_CASE("PresetBundle validates printer, filament, and modified G-code references", "[Preset][PresetBundleLifecycleExtended]")
+{
+    PresetBundle bundle;
+    load_local_preset(bundle.prints, "Process");
+    Preset &filament = bundle.filaments.load_preset({}, "PLA", bundle.filaments.default_preset().config, false);
+    filament.inherits().clear();
+    filament.is_system = true;
+    Preset &filament_two = bundle.filaments.load_preset({}, "PETG", bundle.filaments.default_preset().config, false);
+    filament_two.inherits().clear();
+    filament_two.is_system = true;
+    Preset &printer = bundle.printers.load_preset({}, "Printer", bundle.printers.default_preset().config, false);
+    printer.inherits().clear();
+    printer.is_system = true;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_settings_id", true)->values = {"PLA", "PETG"};
+    config.option<ConfigOptionString>("printer_settings_id", true)->value = "Printer";
+    config.option<ConfigOptionStrings>("inherits_group", true)->values = {"", "", "", ""};
+    config.option<ConfigOptionStrings>("different_settings_to_system", true)->values = {"", "", "", ""};
+    std::set<std::string> different;
+    CHECK(bundle.validate_presets("project.3mf", config, different) == VALIDATE_PRESETS_SUCCESS);
+    config.option<ConfigOptionStrings>("different_settings_to_system", true)->values = {"", "machine_end_gcode", "", ""};
+    different.clear();
+    CHECK(bundle.validate_presets("project.3mf", config, different) == VALIDATE_PRESETS_MODIFIED_GCODES);
+    CHECK(different.count("machine_end_gcode") == 1);
+    config.option<ConfigOptionString>("printer_settings_id", true)->value = "Missing Printer";
+    different.clear();
+    CHECK(bundle.validate_presets("project.3mf", config, different) == VALIDATE_PRESETS_PRINTER_NOT_FOUND);
+    config.option<ConfigOptionString>("printer_settings_id", true)->value = "Printer";
+    config.option<ConfigOptionStrings>("different_settings_to_system", true)->values = {"", "", "", ""};
+    config.option<ConfigOptionStrings>("filament_settings_id", true)->values = {"PLA", "Missing Filament"};
+    different.clear();
+    CHECK(bundle.validate_presets("project.3mf", config, different) == VALIDATE_PRESETS_FILAMENTS_NOT_FOUND);
+}
+
+TEST_CASE("PresetBundle alias lookup and conversion keep canonical identities", "[Preset][PresetBundleLifecycleExtended]")
+{
+    PresetBundle bundle;
+    Preset &print = load_local_preset(bundle.prints, "Canonical Process");
+    print.alias.clear();
+    CHECK(bundle.prints.get_preset_alias(print, true) == "Canonical Process");
+    CHECK(bundle.get_preset_name_by_alias(Preset::TYPE_PRINT, "Canonical Process") == "Canonical Process");
+    CHECK(bundle.get_preset_name_by_alias(Preset::TYPE_INVALID, "literal") == "literal");
+    std::string converted = "Generic PLA";
+    PresetBundle::convert_filament_preset_name("Unknown Machine", converted);
+    CHECK(converted == "Generic PLA");
+}
+
+TEST_CASE("PresetCollection sync repair reconciles a child base id", "[Preset][PresetBundleLifecycleExtended]")
+{
+    ScopedTemporaryDir temp("preset-collection-sync-child");
+    PresetCollection collection = make_print_collection();
+    collection.update_user_presets_directory(temp.path().string(), PRESET_PRINT_NAME);
+    Preset &parent = load_local_preset(collection, "Parent");
+    parent.setting_id = "parent-id-123";
+    Preset &child = load_local_preset(collection, "Child", "Parent");
+    child.setting_id = "child-id-123";
+    child.user_id = "alice";
+    child.base_id = "stale-base";
+    child.file = collection.path_for_preset(child);
+    Preset *stored_parent = collection.find_preset("Parent", false);
+    REQUIRE(stored_parent != nullptr);
+    REQUIRE(child.save(&stored_parent->config));
+    collection.check_and_fix_syncinfo(child, "alice");
+    CHECK(child.base_id == "parent-id-123");
+    CHECK(child.sync_info == "update");
+}
+
+} // namespace preset_bundle_lifecycle_extended_contracts

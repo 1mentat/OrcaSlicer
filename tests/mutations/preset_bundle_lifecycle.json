@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "description": "Preset bundle lifecycle, vendor selection and cloud metadata contracts.",
+  "mutants": [
+    {
+      "id": "vendor-version-defaults-empty",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    return result_ver;",
+      "new": "    return Semver();",
+      "test_filter": "PresetBundleLifecycleExtended"
+    },
+    {
+      "id": "bbl-network-printhost-negation",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "const bool use_bbl_network = is_bbl_vendor() && !cfg.opt_bool(\"bbl_use_printhost\");",
+      "new": "const bool use_bbl_network = is_bbl_vendor() && cfg.opt_bool(\"bbl_use_printhost\");",
+      "test_filter": "PresetBundleLifecycleExtended"
+    },
+    {
+      "id": "bbl-device-webui-empty-predicate",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    return cfg.opt_string(\"print_host_webui\").empty();",
+      "new": "    return !cfg.opt_string(\"print_host_webui\").empty();",
+      "test_filter": "PresetBundleLifecycleExtended"
+    },
+    {
+      "id": "custom-vendor-skips-user-models",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        if (preset.is_system) continue;",
+      "new": "        if (!preset.is_system) continue;",
+      "test_filter": "PresetBundleLifecycleExtended"
+    },
+    {
+      "id": "filament-empty-id-guard-inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "std::optional<FilamentBaseInfo> PresetBundle::get_filament_by_filament_id(const std::string& filament_id, const std::string& printer_name) const\n{\n    if (filament_id.empty())",
+      "new": "std::optional<FilamentBaseInfo> PresetBundle::get_filament_by_filament_id(const std::string& filament_id, const std::string& printer_name) const\n{\n    if (!filament_id.empty())",
+      "test_filter": "PresetBundleLifecycleExtended"
+    },
+    {
+      "id": "remove-empty-user-folder-guard-inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    if (preset_folder.empty()) {",
+      "new": "    if (!preset_folder.empty()) {",
+      "test_filter": "PresetBundleLifecycleExtended"
+    },
+    {
+      "id": "validate-missing-printer-return-success",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    if (ret)\n    {\n        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(\":file_name %1%, found self defined presets, count %2%\") %file_name %different_gcodes.size();\n        return ret;\n    }",
+      "new": "    if (ret)\n    {\n        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(\":file_name %1%, found self defined presets, count %2%\") %file_name %different_gcodes.size();\n        return 0;\n    }",
+      "test_filter": "PresetBundleLifecycleExtended"
+    },
+    {
+      "id": "preset-diff-child-base-comparison-inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        if (preset.base_id != expected) {",
+      "new": "        if (preset.base_id == expected) {",
+      "test_filter": "PresetBundleLifecycleExtended"
+    },
+    {
+      "id": "user-save-sync-selection-inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        if (preset->sync_info != \"save\") continue;",
+      "new": "        if (preset->sync_info == \"save\") continue;",
+      "test_filter": "PresetBundleLifecycleExtended"
+    }
+  ]
+}
