@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Production mutations for preset files behavioral contracts.",
+  "mutants": [
+    {
+      "id": "preset-cloud-child-base-id-not-derived",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "based_id = inherit_preset->setting_id;",
+      "new": "/* mutation: do not derive based_id from the resolved parent */",
+      "description": "Exercise preset cloud child base id not derived.",
+      "test_filter": "PresetFiles"
+    },
+    {
+      "id": "preset-cloud-filament-null-does-not-inherit",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (cloud_filament_id == \"null\")",
+      "new": "if (false) /* mutation: retain null filament identity */",
+      "description": "Exercise preset cloud filament null does not inherit.",
+      "test_filter": "PresetFiles"
+    },
+    {
+      "id": "preset-bundle-does-not-load-roots-first",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if ((pass == 1) == (inherits_iter == value_map.end() || inherits_iter->second.empty()))",
+      "new": "if (false) /* mutation: disable two-pass root/child ordering */",
+      "description": "Exercise preset bundle does not load roots first.",
+      "test_filter": "PresetFiles"
+    },
+    {
+      "id": "preset-cloud-missing-user-id-accepted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (preset_values.find(BBL_JSON_KEY_USER_ID) == preset_values.end())",
+      "new": "if (false) /* mutation: accept cloud profiles without user_id */",
+      "description": "Exercise preset cloud missing user id accepted.",
+      "test_filter": "PresetFiles"
+    }
+  ]
+}

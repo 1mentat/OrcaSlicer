@@ -1,5 +1,9 @@
 # Add individual tests as executables in separate directories at the bottom of this file
 
+# Parallel slicer code writes to stdout. Catch's default JUnit capture replaces
+# cout with an unsynchronized string buffer; capture file descriptors instead
+# so native parallel tests keep the standard streams' synchronization.
+set(CATCH_CONFIG_EXPERIMENTAL_REDIRECT ON CACHE BOOL "Use file descriptor capture for parallel slicer tests" FORCE)
 add_subdirectory(catch2)
 
 # The top-level project defines _UNICODE globally, which makes Catch2's bundled

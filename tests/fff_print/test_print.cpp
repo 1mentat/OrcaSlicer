@@ -1520,3 +1520,258 @@ TEST_CASE("Belt supports reach the belt under a leading overhang", "[Print][belt
         CHECK(lowest->print_z - floor_under_lowest > -0.2 - EPSILON);
     }
 }
+
+namespace {
+
+DynamicPrintConfig validation_contract_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "nozzle_diameter", "0.4" },
+        { "layer_height", 0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "line_width", 0.45 },
+        { "wall_loops", 2 },
+        { "top_shell_layers", 2 },
+        { "bottom_shell_layers", 2 },
+        { "sparse_infill_density", "15%" },
+        { "enable_support", false },
+        { "enable_prime_tower", false },
+        { "spiral_mode", false },
+        { "belt_printer", false },
+        { "printable_height", 100.0 },
+        { "gcode_flavor", "marlin2" },
+        { "use_relative_e_distances", true },
+        { "before_layer_change_gcode", "" },
+        { "layer_change_gcode", "G92 E0\n" },
+    });
+    return config;
+}
+
+void check_validation_option(const DynamicPrintConfig &config, const std::string &expected_key,
+                             bool valid)
+{
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    const auto error = print.validate();
+    CAPTURE(expected_key, error.string, error.opt_key);
+    if (valid) {
+        CHECK(error.string.empty());
+    } else {
+        REQUIRE_FALSE(error.string.empty());
+        CHECK(error.opt_key == expected_key);
+        CHECK_FALSE(error.is_warning);
+    }
+}
+
+} // namespace
+
+TEST_CASE("Print validation bounds line widths by layer height and nozzle size", "[Print][ValidationContracts]")
+{
+    const std::string key = GENERATE("line_width", "support_line_width", "inner_wall_line_width",
+        "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
+        "top_surface_line_width", "skin_infill_line_width", "skeleton_infill_line_width");
+    struct WidthCase { double width; bool valid; };
+    const auto part = GENERATE(WidthCase{0.0, true}, WidthCase{0.2, false},
+                              WidthCase{0.45, true}, WidthCase{4.0, false});
+    CAPTURE(key, part.width);
+    auto config = validation_contract_config();
+    // Support width is meaningful only while support or a raft is enabled.
+    config.set_deserialize_strict({ { "enable_support", true }, { "support_type", "normal(auto)" } });
+    config.set_key_value(key, new ConfigOptionFloatOrPercent(part.width, false));
+    check_validation_option(config, key, part.valid);
+}
+
+TEST_CASE("Print validation resolves relative line widths against nozzle diameter", "[Print][ValidationContracts]")
+{
+    const double percent = GENERATE(50.0, 112.5, 1000.0);
+    auto config = validation_contract_config();
+    config.set_key_value("outer_wall_line_width", new ConfigOptionFloatOrPercent(percent, true));
+    check_validation_option(config, "outer_wall_line_width", percent > 50.0 && percent < 1000.0);
+}
+
+TEST_CASE("Print validation rejects layer heights larger than the nozzle", "[Print][ValidationContracts]")
+{
+    const std::string key = GENERATE("layer_height", "initial_layer_print_height");
+    const double height = GENERATE(0.2, 0.41);
+    auto config = validation_contract_config();
+    config.set_key_value(key, new ConfigOptionFloat(height));
+    check_validation_option(config, key, height < 0.4);
+}
+
+TEST_CASE("Print validation permits thin bridge widths only with both thick bridge modes", "[Print][ValidationContracts]")
+{
+    const bool external_thick = GENERATE(false, true);
+    const bool internal_thick = GENERATE(false, true);
+    const double width = GENERATE(0.15, 0.3, 0.5);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "thick_bridges", external_thick },
+        { "thick_internal_bridges", internal_thick },
+        { "bridge_line_width", width },
+    });
+    const bool valid = width <= 0.4 && (width > 0.2 || (external_thick && internal_thick));
+    check_validation_option(config, "bridge_line_width", valid);
+}
+
+TEST_CASE("Print validation identifies unsafe organic support dimensions", "[Print][ValidationContracts]")
+{
+    struct SupportCase { double tip; double branch; const char *error_key; };
+    const auto part = GENERATE(SupportCase{0.2, 2.0, "tree_support_tip_diameter"},
+        SupportCase{0.6, 0.7, "tree_support_branch_diameter_organic"},
+        SupportCase{2.0, 1.2, "tree_support_branch_diameter_organic"}, SupportCase{0.6, 2.0, ""});
+    CAPTURE(part.tip, part.branch);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "enable_support", true }, { "support_type", "tree(auto)" }, { "support_style", "organic" },
+        { "support_line_width", 0.45 }, { "tree_support_tip_diameter", part.tip },
+        { "tree_support_branch_diameter_organic", part.branch },
+    });
+    check_validation_option(config, part.error_key, std::string(part.error_key).empty());
+}
+
+TEST_CASE("Print validation reports a support pattern fallback without blocking slicing", "[Print][ValidationContracts]")
+{
+    const std::string pattern = GENERATE("hollow", "lightning");
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "enable_support", true }, { "support_type", "normal(auto)" },
+        { "support_base_pattern", pattern },
+    });
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    std::vector<StringObjectException> warnings;
+    REQUIRE(print.validate(&warnings).string.empty());
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.opt_key == "support_base_pattern";
+    });
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->is_warning);
+    CHECK_FALSE(warning->string.empty());
+}
+
+TEST_CASE("Print validation checks reset commands in both layer hooks and extrusion modes", "[Print][ValidationContracts]")
+{
+    const std::string hook = GENERATE("before_layer_change_gcode", "layer_change_gcode");
+    const bool relative = GENERATE(false, true);
+    const std::string command = GENERATE("G92 E0", "  G92 E0.00 ; reset", "g92 E0", "G92 e0", "");
+    CAPTURE(hook, relative, command);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "before_layer_change_gcode", "" }, { "layer_change_gcode", "" },
+        { "use_relative_e_distances", relative },
+    });
+    config.set_key_value(hook, new ConfigOptionString(command));
+    const bool exact = command == "G92 E0" || command == "  G92 E0.00 ; reset";
+    const bool valid = relative ? exact : command.empty();
+    const std::string error_key = relative && command.empty() ? "before_layer_change_gcode" : hook;
+    check_validation_option(config, error_key, valid);
+}
+
+TEST_CASE("Print validation requires per-layer resets only for relative Marlin output", "[Print][ValidationContracts]")
+{
+    const std::string flavor = GENERATE("marlin", "marlin2", "klipper", "reprapfirmware");
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({ { "gcode_flavor", flavor }, { "layer_change_gcode", "" } });
+    const bool marlin = flavor == "marlin" || flavor == "marlin2";
+    check_validation_option(config, "before_layer_change_gcode", !marlin);
+}
+
+TEST_CASE("Print validation enforces build height after vertical shrinkage compensation", "[Print][ValidationContracts]")
+{
+    const double max_height = GENERATE(9.0, 10.0, 20.0);
+    const double compensation = GENERATE(100.0, 95.0);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "printable_height", max_height }, { "filament_shrinkage_compensation_z", std::to_string(compensation) },
+    });
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    const auto error = print.validate();
+    CAPTURE(max_height, compensation, error.string);
+    const bool fits = 10.0 * 100.0 / compensation <= max_height;
+    CHECK(error.string.empty() == fits);
+    if (!fits) {
+        CHECK(error.object == print.objects().front()->model_object());
+        CHECK_FALSE(error.is_warning);
+    }
+}
+
+TEST_CASE("Print validation checks filament temperature support for every bed family", "[Print][ValidationContracts]")
+{
+    struct BedCase { BedType type; const char *temperature_key; };
+    const auto bed = GENERATE(BedCase{btPC, "cool_plate_temp"}, BedCase{btEP, "eng_plate_temp"},
+        BedCase{btPEI, "hot_plate_temp"}, BedCase{btPTE, "textured_plate_temp"},
+        BedCase{btPCT, "textured_cool_plate_temp"}, BedCase{btSuperTack, "supertack_plate_temp"});
+    const bool multiple_beds = GENERATE(false, true);
+    const int temperature = GENERATE(0, 60);
+    auto config = validation_contract_config();
+    config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed.type));
+    config.set_key_value("support_multi_bed_types", new ConfigOptionBool(multiple_beds));
+    config.set_key_value(bed.temperature_key, new ConfigOptionInts{temperature});
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    const auto error = print.validate();
+    CAPTURE(bed.temperature_key, multiple_beds, temperature, error.string);
+    if (multiple_beds && temperature == 0) {
+        REQUIRE_FALSE(error.string.empty());
+        CHECK(error.type == STRING_EXCEPT_FILAMENT_NOT_MATCH_BED_TYPE);
+        REQUIRE(error.params.size() == 3);
+        CHECK(error.params[2] == "1"); // The incompatible filament is identified to the caller.
+    } else {
+        CHECK(error.string.empty());
+    }
+}
+
+TEST_CASE("Print validation identifies the jerk setting that exceeds machine limits", "[Print][ValidationContracts]")
+{
+    const std::string key = GENERATE("default_jerk", "outer_wall_jerk", "inner_wall_jerk",
+        "infill_jerk", "top_surface_jerk", "initial_layer_jerk", "travel_jerk");
+    const double jerk = GENERATE(5.0, 30.0);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "machine_max_junction_deviation", "0,0" },
+        { "machine_max_jerk_x", "20,20" }, { "machine_max_jerk_y", "20,20" },
+        { "default_jerk", "10" }, { "outer_wall_jerk", "10" }, { "inner_wall_jerk", "10" },
+        { "infill_jerk", "10" }, { "top_surface_jerk", "10" },
+        { "initial_layer_jerk", "10" }, { "travel_jerk", "10" },
+    });
+    config.set_key_value(key, new ConfigOptionFloats{jerk});
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    std::vector<StringObjectException> warnings;
+    REQUIRE(print.validate(&warnings).string.empty());
+    const auto count = std::count_if(warnings.begin(), warnings.end(), [&key](const auto &entry) {
+        return entry.opt_key == key && entry.is_warning;
+    });
+    CAPTURE(key, jerk);
+    CHECK(count == (jerk > 20.0 ? 1 : 0));
+}
+
+TEST_CASE("Print validation gates junction-deviation warnings on firmware support", "[Print][ValidationContracts]")
+{
+    const std::string flavor = GENERATE("marlin2", "klipper");
+    const double deviation = GENERATE(0.01, 0.1);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "gcode_flavor", flavor }, { "machine_max_junction_deviation", "0.02,0.02" },
+        { "default_junction_deviation", std::to_string(deviation) },
+        { "default_acceleration", "0" },
+        { "default_jerk", "0" }, { "outer_wall_jerk", "0" }, { "inner_wall_jerk", "0" },
+    });
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    std::vector<StringObjectException> warnings;
+    REQUIRE(print.validate(&warnings).string.empty());
+    const auto count = std::count_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.opt_key == "default_junction_deviation" && entry.is_warning;
+    });
+    CAPTURE(flavor, deviation);
+    CHECK(count == (flavor == "marlin2" && deviation > 0.02 ? 1 : 0));
+}

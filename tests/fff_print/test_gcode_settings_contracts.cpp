@@ -256,7 +256,7 @@ TEST_CASE("Exporter settings emit thermal cooling and machine limit commands", "
 {
     DynamicPrintConfig config = exporter_config(gcfMarlinFirmware, true, true);
     config.set_deserialize_strict({
-        { "cooling",                       true },
+        { "slow_down_for_layer_cooling",    true },
         { "nozzle_temperature_initial_layer", 211 },
         { "nozzle_temperature",            203 },
         { "initial_layer_fan_speed",       0 },

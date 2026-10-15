@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Production mutations for orientation geometry contracts.",
+  "mutants": [
+    {
+      "id": "orient-sequential-rotation-direction",
+      "old": "mesh_.orientation = orienter.process();\n            Geometry::rotation_from_two_vectors(mesh_.orientation, { 0,0,1 }, mesh_.axis, mesh_.angle, &mesh_.rotation_matrix);\n            BOOST_LOG_TRIVIAL",
+      "new": "mesh_.orientation = orienter.process();\n            Geometry::rotation_from_two_vectors({ 0,0,1 }, mesh_.orientation, mesh_.axis, mesh_.angle, &mesh_.rotation_matrix);\n            BOOST_LOG_TRIVIAL",
+      "description": "Build the sequential rotation in the opposite direction.",
+      "path": "src/libslic3r/Orient.cpp",
+      "test_filter": "Orient"
+    },
+    {
+      "id": "orient-parallel-euler-export",
+      "old": "mesh_.euler_angles = Geometry::extract_euler_angles(mesh_.rotation_matrix);",
+      "new": "mesh_.euler_angles = Vec3d::Zero();",
+      "description": "Drop the Euler angles exported by the parallel path.",
+      "path": "src/libslic3r/Orient.cpp",
+      "test_filter": "Orient"
+    },
+    {
+      "id": "orient-no-fan-early-return",
+      "old": "if (fan_dir == FanDirection::fdUndefine)",
+      "new": "if (fan_dir != FanDirection::fdUndefine)",
+      "description": "Run the cooling rotation path when no fan is configured.",
+      "path": "src/libslic3r/Orient.cpp",
+      "test_filter": "Orient"
+    },
+    {
+      "id": "orient-symmetric-cooling-return",
+      "old": "if (std::abs(overhang_projected_origin - overhang_projected_max) < 1.0f)\n    {\n        return;\n    }\n\n    // rotate the mesh",
+      "new": "if (std::abs(overhang_projected_origin - overhang_projected_max) >= 1.0f)\n    {\n        return;\n    }\n\n    // rotate the mesh",
+      "description": "Rotate a symmetric solid when the cooling projection is already equivalent.",
+      "path": "src/libslic3r/Orient.cpp",
+      "test_filter": "Orient"
+    }
+  ]
+}

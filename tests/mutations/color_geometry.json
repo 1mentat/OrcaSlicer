@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Production mutations for color mesh and UV contracts.",
+  "mutants": [
+    {
+      "id": "color-utils-closed-inversion",
+      "old": "return CGAL::is_closed(cgal_mesh);",
+      "new": "return !CGAL::is_closed(cgal_mesh);",
+      "description": "Invert the watertightness result.",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "test_filter": "ColorUtils"
+    },
+    {
+      "id": "color-utils-components-uv-guard",
+      "old": "if (bbs_mesh.vertices.size() != bbs_vertex_uvs.size()) {",
+      "new": "if (bbs_mesh.vertices.size() == bbs_vertex_uvs.size()) {",
+      "description": "Accept a vertex UV array whose length does not match the mesh.",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "test_filter": "ColorUtils"
+    },
+    {
+      "id": "color-utils-smoothing-face-count-guard",
+      "old": "if (mesh.number_of_faces() != face_labels.size()) {",
+      "new": "if (mesh.number_of_faces() == face_labels.size()) {",
+      "description": "Reject valid smoothing label cardinality instead of rejecting mismatched cardinality.",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "test_filter": "ColorUtils"
+    },
+    {
+      "id": "color-utils-cluster-center-empty-guard",
+      "old": "if (cluster_centers.empty()) {",
+      "new": "if (!cluster_centers.empty()) {",
+      "description": "Allow mesh clustering to continue without any supplied center.",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "test_filter": "ColorUtils"
+    },
+    {
+      "id": "color-utils-nearest-color-direction",
+      "old": "if (dist < min_dist) {\n            min_dist = dist;\n            nearest_color_id = i;",
+      "new": "if (dist > min_dist) {\n            min_dist = dist;\n            nearest_color_id = i;",
+      "description": "Choose a farther CIEDE2000 color instead of the nearest color.",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "test_filter": "ColorUtils"
+    }
+  ]
+}

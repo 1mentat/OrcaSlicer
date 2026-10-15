@@ -6605,3 +6605,171 @@ TEST_CASE("A user filament whose derived compatible printer cannot be written ba
     CHECK(read_file(file) == before);
 }
 #endif
+
+namespace {
+
+namespace fs = boost::filesystem;
+
+void write_process(const fs::path &file, const std::string &name, const std::string &inherits,
+                   const std::string &layer_height = {}, const std::string &density = {})
+{
+    fs::create_directories(file.parent_path());
+    std::ofstream out(file.string());
+    out << R"({"type":"process","name":")" << name
+        << R"(","from":"User","version":"1.0.0")";
+    if (!inherits.empty())
+        out << R"(,"inherits":")" << inherits << R"(")";
+    if (!layer_height.empty())
+        out << R"(,"layer_height":")" << layer_height << R"(")";
+    if (!density.empty())
+        out << R"(,"sparse_infill_density":")" << density << R"(")";
+    out << "}\n";
+}
+
+std::map<std::string, std::string> cloud_values(const std::string &type, const std::string &setting_id,
+                                                const std::string &user_id, const std::string &inherits = {})
+{
+    std::map<std::string, std::string> values{
+        { BBL_JSON_KEY_TYPE, type },
+        { BBL_JSON_KEY_VERSION, "1.0.0" },
+        { BBL_JSON_KEY_SETTING_ID, setting_id },
+        { BBL_JSON_KEY_USER_ID, user_id },
+        { ORCA_JSON_KEY_UPDATE_TIME, "10" },
+    };
+    if (!inherits.empty())
+        values.emplace(BBL_JSON_KEY_INHERITS, inherits);
+    return values;
+}
+
+} // namespace
+
+TEST_CASE("File preset loading resolves a three-level base chain", "[PresetFiles]")
+{
+    ScopedTemporaryDir temp_dir;
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    const fs::path print_dir = temp_dir.path() / PRESET_PRINT_NAME;
+
+    // load_presets() intentionally reads each nested <type>/base directory
+    // before its parent directory. Keep each inheritance edge in a completed
+    // traversal level; sibling files are resolved concurrently.
+    write_process(print_dir / "base" / "base" / "Base.json", "Base", {}, "0.24", "20%");
+    write_process(print_dir / "base" / "Middle.json", "Middle", "Base", "0.28");
+    write_process(print_dir / "Leaf.json", "Leaf", "Middle", {}, "42%");
+
+    PresetsConfigSubstitutions substitutions;
+    collection.load_presets(temp_dir.path().string(), PRESET_PRINT_NAME, substitutions,
+                            ForwardCompatibilitySubstitutionRule::Disable);
+
+    const Preset *base = collection.find_preset("Base");
+    const Preset *middle = collection.find_preset("Middle");
+    const Preset *leaf = collection.find_preset("Leaf");
+    REQUIRE(base != nullptr);
+    REQUIRE(middle != nullptr);
+    REQUIRE(leaf != nullptr);
+    CHECK(collection.error_count() == 0);
+    CHECK(middle->inherits() == "Base");
+    CHECK(leaf->inherits() == "Middle");
+    CHECK_THAT(middle->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.28, 1e-9));
+    CHECK_THAT(leaf->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.28, 1e-9));
+    CHECK_THAT(leaf->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(42.0, 1e-9));
+}
+
+TEST_CASE("Cloud preset loading performs two-pass inheritance and forward substitution", "[PresetFiles]")
+{
+    PresetBundle bundle;
+    AppConfig app_config;
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+
+    // Lexicographic order puts the child first. PresetBundle's two-pass load
+    // must still install the root before resolving the child.
+    auto root = cloud_values(PRESET_IOT_PRINT_TYPE, "cloud-root-id", "account-1");
+    root.emplace("layer_height", "0.24");
+    root.emplace("wall_generator", "future-generator");
+    cloud.emplace("A Child", cloud_values(PRESET_IOT_PRINT_TYPE, "cloud-child-id", "account-1", "Z Root"));
+    cloud.emplace("Z Root", std::move(root));
+    cloud.emplace("Ignored Type", cloud_values("future-profile", "ignored-id", "account-1"));
+    cloud.emplace("Missing Type", std::map<std::string, std::string>{{ BBL_JSON_KEY_VERSION, "1.0.0" }});
+
+    const PresetsConfigSubstitutions substitutions = bundle.load_user_presets(
+        app_config, cloud, ForwardCompatibilitySubstitutionRule::Enable);
+
+    const Preset *root_preset = bundle.prints.find_preset("Z Root");
+    const Preset *child_preset = bundle.prints.find_preset("A Child");
+    REQUIRE(root_preset != nullptr);
+    REQUIRE(child_preset != nullptr);
+    CHECK(bundle.prints.find_preset("Ignored Type") == nullptr);
+    CHECK(bundle.prints.find_preset("Missing Type") == nullptr);
+    CHECK(child_preset->inherits() == "Z Root");
+    CHECK(child_preset->base_id == root_preset->setting_id);
+    CHECK_THAT(child_preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    REQUIRE(substitutions.size() == 1);
+    CHECK(substitutions.front().preset_name == "Z Root");
+    CHECK(substitutions.front().substitutions.size() == 1);
+    CHECK(substitutions.front().substitutions.front().old_value == "future-generator");
+}
+
+TEST_CASE("Cloud filament loading inherits null filament identity and rejects bad metadata", "[PresetFiles]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    PresetsConfigSubstitutions substitutions;
+
+    auto parent_values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "filament-setting-id", "account-1");
+    parent_values.emplace(BBL_JSON_KEY_FILAMENT_ID, "filament-family-id");
+    parent_values.emplace("filament_diameter", "1.75,2.85");
+    REQUIRE(collection.load_user_preset("Cloud Filament", std::move(parent_values), substitutions,
+                                        ForwardCompatibilitySubstitutionRule::EnableSilent));
+
+    auto child_values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "filament-child-id", "account-1", "Cloud Filament");
+    child_values.emplace(BBL_JSON_KEY_FILAMENT_ID, "null");
+    REQUIRE(collection.load_user_preset("Cloud Filament Child", std::move(child_values), substitutions,
+                                        ForwardCompatibilitySubstitutionRule::EnableSilent));
+    const Preset *child = collection.find_preset("Cloud Filament Child");
+    REQUIRE(child != nullptr);
+    CHECK(child->filament_id == "filament-family-id");
+    CHECK(child->base_id == "filament-setting-id");
+    REQUIRE(child->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
+    CHECK(child->config.option<ConfigOptionFloats>("filament_diameter")->values.size() == 2);
+
+    const size_t size_before_invalid = collection.size();
+    auto missing_parent = cloud_values(PRESET_IOT_FILAMENT_TYPE, "missing-parent-id", "account-1", "No Such Filament");
+    CHECK_FALSE(collection.load_user_preset("Orphan Filament", std::move(missing_parent), substitutions,
+                                            ForwardCompatibilitySubstitutionRule::EnableSilent));
+    CHECK(collection.find_preset("Orphan Filament") == nullptr);
+    CHECK(collection.size() == size_before_invalid);
+
+    auto missing_version = std::map<std::string, std::string>{
+        { BBL_JSON_KEY_SETTING_ID, "no-version-id" },
+        { BBL_JSON_KEY_USER_ID, "account-1" },
+    };
+    CHECK_FALSE(collection.load_user_preset("No Version", std::move(missing_version), substitutions,
+                                            ForwardCompatibilitySubstitutionRule::EnableSilent));
+    CHECK(collection.find_preset("No Version") == nullptr);
+
+    auto missing_user = std::map<std::string, std::string>{
+        { BBL_JSON_KEY_VERSION, "1.0.0" },
+        { BBL_JSON_KEY_SETTING_ID, "no-user-id" },
+    };
+    CHECK_FALSE(collection.load_user_preset("No User", std::move(missing_user), substitutions,
+                                            ForwardCompatibilitySubstitutionRule::EnableSilent));
+    CHECK(collection.find_preset("No User") == nullptr);
+}
+
+TEST_CASE("File loading rejects an inheritance cycle without installing either node", "[PresetFiles]")
+{
+    ScopedTemporaryDir temp_dir;
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    const fs::path print_dir = temp_dir.path() / PRESET_PRINT_NAME;
+    write_process(print_dir / "Cycle A.json", "Cycle A", "Cycle B");
+    write_process(print_dir / "Cycle B.json", "Cycle B", "Cycle A");
+
+    PresetsConfigSubstitutions substitutions;
+    collection.load_presets(temp_dir.path().string(), PRESET_PRINT_NAME, substitutions,
+                            ForwardCompatibilitySubstitutionRule::EnableSilent);
+
+    CHECK(collection.find_preset("Cycle A") == nullptr);
+    CHECK(collection.find_preset("Cycle B") == nullptr);
+    CHECK(collection.error_count() == 2);
+}

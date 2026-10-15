@@ -604,8 +604,7 @@
       "test": "tests/fff_print/test_gcodewriter.cpp",
       "tag": "[GCodeWriter]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle"
+        "fixture_only"
       ],
       "reason": "Machine-envelope tests set junction deviation values and require their selected maximum in M205 J output; numeric boundaries are not claimed."
     },
@@ -975,6 +974,339 @@
         "pipeline_oracle"
       ],
       "reason": "Zero and a 1 mm Z-hop are checked directly in emitted G-code; the numeric domain is not claimed."
+    },
+    "line_width": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values"
+      ],
+      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "inner_wall_line_width": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values"
+      ],
+      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed. Separate representative fresh/incremental slicing evidence for 0.42 and 0.60 mm inner-wall geometry/filament is in tests/fff_print/test_motion_flow_variance.cpp [MotionFlowVariance]; this entry retains its narrower validation declaration."
+    },
+    "outer_wall_line_width": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values"
+      ],
+      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed. Separate representative fresh/incremental slicing evidence for 0.42 and 0.60 mm outer-wall geometry/filament is in tests/fff_print/test_motion_flow_variance.cpp [MotionFlowVariance]; this entry retains its narrower validation declaration."
+    },
+    "sparse_infill_line_width": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values"
+      ],
+      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed. Separate representative fresh/incremental slicing evidence for 0.55 and 0.70 mm sparse-infill geometry/filament is in tests/fff_print/test_motion_flow_variance.cpp [MotionFlowVariance]; this entry retains its narrower validation declaration."
+    },
+    "internal_solid_infill_line_width": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values"
+      ],
+      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "top_surface_line_width": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values"
+      ],
+      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "skin_infill_line_width": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values"
+      ],
+      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "skeleton_infill_line_width": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values"
+      ],
+      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "bridge_line_width": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values",
+        "interaction_matrix"
+      ],
+      "reason": "Thin, nominal, and nozzle-exceeding bridge widths are paired with both external and internal thick-bridge switches. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "tree_support_tip_diameter": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Organic support dimensions are varied below the extrusion width, below twice that width, below the tip, and at a legal nominal pair; errors identify the responsible option. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "tree_support_branch_diameter_organic": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Organic support dimensions are varied below the extrusion width, below twice that width, below the tip, and at a legal nominal pair; errors identify the responsible option. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "support_base_pattern": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Normal support with Hollow and Lightning patterns emits a typed fallback warning without a blocking error. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "printable_height": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values",
+        "interaction_matrix"
+      ],
+      "reason": "A 10 mm cube is validated against 9, 10, and 20 mm build heights with 100% and 95% vertical shrinkage, preserving the error object identity. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "filament_shrinkage_compensation_z": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix"
+      ],
+      "reason": "A 10 mm cube is validated against 9, 10, and 20 mm build heights with 100% and 95% vertical shrinkage, preserving the error object identity. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "curr_bed_type": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix"
+      ],
+      "reason": "All six concrete bed families are paired with zero and 60 C filament temperatures and both multi-bed-support switch states; incompatible settings identify the filament. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "support_multi_bed_types": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boolean_values",
+        "interaction_matrix"
+      ],
+      "reason": "The validation gate is disabled and enabled across all six concrete bed families with zero and 60 C filament temperatures. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "cool_plate_temp": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values",
+        "interaction_matrix"
+      ],
+      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "eng_plate_temp": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values",
+        "interaction_matrix"
+      ],
+      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "hot_plate_temp": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values",
+        "interaction_matrix"
+      ],
+      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "textured_plate_temp": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values",
+        "interaction_matrix"
+      ],
+      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "textured_cool_plate_temp": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values",
+        "interaction_matrix"
+      ],
+      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "supertack_plate_temp": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "boundary_values",
+        "interaction_matrix"
+      ],
+      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "default_jerk": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "outer_wall_jerk": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "inner_wall_jerk": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "infill_jerk": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "top_surface_jerk": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "initial_layer_jerk": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "travel_jerk": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "default_junction_deviation": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ValidationContracts]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix"
+      ],
+      "reason": "Requested 0.01 and 0.1 mm deviations are checked against an explicit 0.02 mm machine limit in Marlin2 and Klipper; only supported above-limit settings warn. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+    },
+    "outer_wall_speed": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The matrix varies 30 and 90 mm/s outer-wall feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+    },
+    "inner_wall_speed": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The matrix varies 35 and 110 mm/s inner-wall feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+    },
+    "sparse_infill_speed": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The matrix varies 50 and 150 mm/s sparse-infill feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+    },
+    "top_surface_speed": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The matrix varies 40 and 120 mm/s top-surface feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+    },
+    "travel_speed": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The matrix varies 70 and 180 mm/s travel feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+    },
+    "outer_wall_acceleration": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The matrix varies 250 and 1000 mm/s\u00b2 outer-wall acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+    },
+    "sparse_infill_acceleration": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The matrix varies 500 and 12000 mm/s\u00b2 sparse-infill acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+    },
+    "print_flow_ratio": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The matrix varies 0.95 and 1.05 print flow ratios with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+    },
+    "infill_wall_overlap": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The matrix varies 5% and 35% infill/wall overlap with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
     }
   }
 }

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "TextureBakeRegularize mutants paired with sliver-collapse, parent propagation, exclusion, and link-condition contracts.",
+  "mutants": [
+    {
+      "id": "texture-bake-regularize-aspect-candidate-gate",
+      "path": "src/libslic3r/TextureBake/TextureBakeRegularize.cpp",
+      "old": "if (aspect2 >= aspect_thr2)\n                    round_aspect[t] = aspect2;",
+      "new": "if (aspect2 < aspect_thr2)\n                    round_aspect[t] = aspect2;",
+      "description": "Invert sliver candidate selection so thin faces are omitted and ordinary faces become candidates.",
+      "test_filter": "TextureBakeRegularize"
+    },
+    {
+      "id": "texture-bake-regularize-link-membership",
+      "path": "src/libslic3r/TextureBake/TextureBakeRegularize.cpp",
+      "old": "vert_stamp[size_t(x)] == stamp_gen",
+      "new": "vert_stamp[size_t(x)] != stamp_gen",
+      "description": "Invert the one-ring membership test so a valid sliver collapse is rejected or a non-manifold link is accepted.",
+      "test_filter": "TextureBakeRegularize"
+    },
+    {
+      "id": "texture-bake-regularize-exclusion-freeze",
+      "path": "src/libslic3r/TextureBake/TextureBakeRegularize.cpp",
+      "old": "if (opts.preserve_excluded && !geometry.exclude_weight.empty())",
+      "new": "if (!opts.preserve_excluded && !geometry.exclude_weight.empty())",
+      "description": "Apply the excluded-face vertex freeze when preservation is disabled and omit it when preservation is requested.",
+      "test_filter": "TextureBakeRegularize"
+    },
+    {
+      "id": "texture-bake-regularize-midpoint-collapse",
+      "path": "src/libslic3r/TextureBake/TextureBakeRegularize.cpp",
+      "old": "const Vec3d m = (vert[size_t(u)] + vert[size_t(v)]) * 0.5;",
+      "new": "const Vec3d m = vert[size_t(u)];",
+      "description": "Collapse an edge onto one endpoint instead of its midpoint, changing the surviving geometry contract.",
+      "test_filter": "TextureBakeRegularize"
+    },
+    {
+      "id": "texture-bake-regularize-parent-propagation",
+      "path": "src/libslic3r/TextureBake/TextureBakeRegularize.cpp",
+      "old": "out_parent.push_back(result.face_parent_id[t]);",
+      "new": "out_parent.push_back(0);",
+      "description": "Drop the surviving input-face provenance when compacting the regularized soup.",
+      "test_filter": "TextureBakeRegularize"
+    }
+  ]
+}

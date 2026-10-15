@@ -24,6 +24,9 @@ add_executable(${_TEST_NAME}_tests
     test_config_variant_expansion.cpp
     test_cut_surface_contracts.cpp
     test_cut_utils.cpp
+    test_texture_painting.cpp
+    test_texture_bake_regularize.cpp
+    test_orient.cpp
     test_locales_utils.cpp
     test_drc.cpp
     test_gcodereader.cpp

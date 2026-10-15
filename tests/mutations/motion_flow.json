@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Production mutations for motion flow behavioral contracts.",
+  "mutants": [
+    {
+      "id": "motion-flow-invalidation-omits-flow-ratio",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "|| opt_key == \"print_flow_ratio\"",
+      "new": "/* mutation: omit print_flow_ratio invalidation */",
+      "description": "Retain stale extrusion geometry after applying a changed print flow ratio.",
+      "test_filter": "MotionFlowVariance"
+    },
+    {
+      "id": "motion-flow-sparse-acceleration-fallback",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "m_config.sparse_infill_acceleration.get_at(nozzle).get_abs_value(m_config.default_acceleration.get_at(nozzle))",
+      "new": "0.0 /* mutation: ignore sparse acceleration */",
+      "description": "Ignore the configured sparse-infill acceleration while exporting G-code.",
+      "test_filter": "MotionFlowVariance"
+    },
+    {
+      "id": "motion-flow-acceleration-emission-disabled",
+      "path": "src/libslic3r/PrintApply.cpp",
+      "old": "std::max<unsigned int>(apply_status, invalidated ? APPLY_STATUS_INVALIDATED : APPLY_STATUS_CHANGED)",
+      "new": "std::max<unsigned int>(apply_status, PrintBase::APPLY_STATUS_CHANGED) /* mutation */",
+      "description": "Report only a changed config after invalidating processed slicing steps.",
+      "test_filter": "MotionFlowVariance"
+    },
+    {
+      "id": "motion-flow-retains-stale-no-overlap-fill",
+      "path": "src/libslic3r/Layer.cpp",
+      "old": "// Perimeter generation appends no-overlap regions. Clear the\n\t            // previous run before regenerating after a config-only apply.\n\t            (*layerm)->fill_no_overlap_expolygons.clear();",
+      "new": "// Perimeter generation appends no-overlap regions. Clear the\n\t            // previous run before regenerating after a config-only apply.\n\t            /* mutation: retain stale no-overlap regions */",
+      "description": "Retain previous no-overlap infill regions when regenerating perimeters after a wall-width change.",
+      "test_filter": "MotionFlowVariance"
+    }
+  ]
+}

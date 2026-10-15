@@ -7,6 +7,10 @@ Two files here rather than there, because coding agents only read what is in the
 - [AGENTS.md](AGENTS.md) is the same guidance in short form, and is what an agent working under `tests/` picks up.
 - [CATCH2.md](CATCH2.md) is the Catch2 reference, including the mistakes that break a test at runtime.
 
+Catch2 uses file-descriptor output capture so parallel slicer diagnostics can
+be collected safely by the JUnit reporter. Worker threads must finish before
+test assertions run, and tests must not depend on diagnostic line ordering.
+
 ## Confidence runs
 
 The checked-in harnesses keep coverage and mutation evidence tied to the real
@@ -69,6 +73,14 @@ hit counts, so completely unexecuted functions remain in the denominator. The re
 `Print` and inspect geometry or G-code; that is **actual settings execution**.
 An option serialization loop alone is schema evidence and does not establish
 pipeline behavior.
+
+`[MotionFlowVariance]` compares a fresh slice with a processed print after
+applying the same changed setting. It checks separate geometry and parsed
+G-code evidence, deposited material, feature feedrates, and acceleration
+states. Its speed/width/flow partitions have explicit companion settings so
+cooling or volumetric limits cannot silently mask the tested effect.
+`[ValidationContracts]` exercises rejected configurations and warning gates;
+that evidence is declared separately from sliced-output coverage.
 
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
