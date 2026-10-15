@@ -73,9 +73,39 @@ class SettingsInventoryTests(unittest.TestCase):
         self.assertEqual(options["sparse_infill_pattern"]["status"], "declared_covered")
         self.assertEqual(options["layer_height"]["status"], "declared_partial")
         self.assertEqual(options["gcode_comments"]["status"], "declared_covered")
-        self.assertEqual(options["printer_technology"]["status"], "uncovered")
-        self.assertIn("do not establish behavior", options["printer_technology"]["reason"])
+        self.assertEqual(options["printer_technology"]["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: enum_values.", options["printer_technology"]["reason"])
+        self.assertEqual(options["supports_enable"]["status"], "declared_partial")
+        self.assertIn("boolean_values", options["supports_enable"]["reason"])
+        uncovered = [option for option in options.values() if option["status"] == "uncovered"]
+        self.assertTrue(uncovered)
+        self.assertTrue(all("do not establish behavior" in option["reason"] for option in uncovered))
         self.assertFalse(report["execution_verified"])
+
+    def test_schema_roundtrip_is_an_explicit_non_pipeline_dimension(self):
+        self.assertIn("schema_roundtrip", settings_inventory._DIMENSIONS)
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            evidence.write_text(json.dumps({
+                "schema_version": 1,
+                "entries": {
+                    "printer_technology": {
+                        "test": "tests/libslic3r/test_config.cpp",
+                        "tag": "[Config]",
+                        "dimensions": ["schema_roundtrip"],
+                        "reason": "The registry-wide config contract round-trips its serialized default.",
+                    },
+                },
+            }))
+            report = settings_inventory.build_report(
+                root=ROOT,
+                source_path=ROOT / "src/libslic3r/PrintConfig.cpp",
+                evidence_path=evidence,
+            )
+        option = next(item for item in report["options"] if item["key"] == "printer_technology")
+        self.assertEqual(option["evidence_dimensions"], ["schema_roundtrip"])
+        self.assertEqual(option["status"], "declared_partial")
+        self.assertIn("pipeline_oracle", option["reason"])
 
 
 if __name__ == "__main__":

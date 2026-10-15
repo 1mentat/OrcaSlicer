@@ -51,6 +51,9 @@ _ENUM_ALIAS = re.compile(r"enum_values\s*=\s*([A-Za-z_]\w*)->enum_values")
 _QUOTED = re.compile(r'\"([^\"]*)\"')
 _NUMBER_ASSIGN = re.compile(r"def->(?:min|max)\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
 _DIMENSIONS = {
+    # Schema round-trips are registry-wide serialization evidence and remain
+    # separate from pipeline behavior claims.
+    "schema_roundtrip",
     "enum_values",
     "boolean_values",
     "boundary_values",

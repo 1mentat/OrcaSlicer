@@ -180,9 +180,11 @@ def validate_clean_repo(repo: Path) -> str:
     return head.stdout.strip()
 
 
-def _load_mutants(path: str | None, root: Path | None = None) -> list[Mutant]:
+def _load_mutants(path: str | list[str] | None, root: Path | None = None) -> list[Mutant]:
     if not path:
         return list(DEFAULT_MUTANTS)
+    if isinstance(path, list):
+        return [mutant for manifest in path for mutant in _load_mutants(manifest, root)]
     manifest_arg = Path(path)
     manifest = ((root / manifest_arg) if root is not None and not manifest_arg.is_absolute()
                 else manifest_arg).resolve()
@@ -413,7 +415,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--configure-command", help="optional CMake configure argv for the fresh worktree")
     run.add_argument("--build-command", required=True)
     run.add_argument("--test-command", required=True)
-    run.add_argument("--mutants", help="JSON mutant manifest; defaults to the three Flow smoke mutants")
+    run.add_argument("--mutants", action="append",
+                     help="JSON mutant manifest; repeat to share one build across manifests (default: three Flow smoke mutants)")
     run.add_argument("--max-mutants", type=int, default=DEFAULT_MAX_MUTANTS)
     run.add_argument("--out", default="build/slicer-mutation")
     run.add_argument("--work-root", help="parent directory for disposable worktree")

@@ -1,6 +1,9 @@
 #include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "catch2/catch_test_macros.hpp"
+#include "catch2/catch_message.hpp"
+#include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCodeReader.hpp"
@@ -15,6 +18,10 @@
 #include <cstddef>
 #include <cstdlib>
 #include <initializer_list>
+#include <libslic3r/TriangleMesh.hpp>
+#include <libslic3r/Surface.hpp>
+#include <libslic3r/libslic3r.h>
+#include <libslic3r/Config.hpp>
 #include <optional>
 #include <string>
 #include <string_view>

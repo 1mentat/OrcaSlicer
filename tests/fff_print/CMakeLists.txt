@@ -15,6 +15,8 @@ add_executable(${_TEST_NAME}_tests
 	test_gcodewriter.cpp
 	test_model.cpp
 	test_multifilament.cpp
+    test_layer_height_variance.cpp
+    test_painted_segmentation.cpp
 	test_perimeters.cpp
     test_pipeline_invariants.cpp
     test_boolean_settings.cpp

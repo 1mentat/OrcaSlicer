@@ -18,9 +18,11 @@
 
 #include <boost/nowide/fstream.hpp>
 #include "libslic3r/Config.hpp"
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <iomanip>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -1538,6 +1540,81 @@ template<class Source> void check_member_apply_matches_key_apply(const Source &s
     CHECK_FALSE(differing_keys(by_member, FullPrintConfig()).empty());
 }
 
+bool is_numeric_option_type(const ConfigOptionType type)
+{
+    switch (type) {
+    case coFloat:
+    case coFloats:
+    case coInt:
+    case coInts:
+    case coPercent:
+    case coPercents:
+    case coFloatOrPercent:
+    case coFloatsOrPercents:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_integer_option_type(const ConfigOptionType type)
+{
+    return type == coInt || type == coInts;
+}
+
+bool is_percent_option_type(const ConfigOptionType type)
+{
+    return type == coPercent || type == coPercents;
+}
+
+std::string serialize_numeric_boundary(const ConfigOptionType type, const double value)
+{
+    std::ostringstream stream;
+    if (is_integer_option_type(type))
+        stream << static_cast<long long>(std::llround(value));
+    else
+        stream << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    if (is_percent_option_type(type))
+        stream << '%';
+    return stream.str();
+}
+
+// An empty aggregate has no unambiguous serialized representation: its
+// deserializer treats empty input as one empty group. Keep the one registered
+// case explicit while exercising every other default below.
+const std::set<std::string> expected_empty_aggregate_defaults = {"extruder_printable_area"};
+
+std::string representative_serialization(const ConfigOptionDef &def, const ConfigOption &option)
+{
+    const std::string serialized = option.serialize();
+    if (!serialized.empty())
+        return serialized;
+
+    switch (def.type) {
+    case coString:
+        return "schema-roundtrip";
+    case coStrings:
+        return "schema-roundtrip;second-value";
+    case coPoint:
+        return "1,2";
+    case coPoints:
+        return "1x2,3x4";
+    case coPointsGroups:
+        return "1x2,3x4#5x6";
+    case coIntsGroups:
+        return "1,2#3";
+    case coBools:
+        return "0,1";
+    case coFloats:
+    case coInts:
+    case coPercents:
+    case coFloatsOrPercents:
+        return is_percent_option_type(def.type) ? "0%" : "0";
+    default:
+        return serialized;
+    }
+}
+
 } // namespace
 
 TEST_CASE("A static config applies itself onto a config of its type as a lookup by name would", "[Config]")
@@ -1666,6 +1743,59 @@ TEST_CASE("Every registered print option has a complete schema contract", "[Conf
     CHECK(actual_defaultless == expected_defaultless);
 }
 
+TEST_CASE("Every registered option has a strict default serialization round-trip", "[Config][Schema][RoundTrip]")
+{
+    std::set<std::string> empty_aggregate_defaults;
+    size_t                roundtripped = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        INFO(key);
+        const std::unique_ptr<ConfigOption> source(def.create_default_option());
+        REQUIRE(source != nullptr);
+        const std::string serialized = source->serialize();
+
+        if (serialized.empty() && (def.type == coPointsGroups || def.type == coIntsGroups)) {
+            empty_aggregate_defaults.insert(key);
+            continue;
+        }
+
+        const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+        REQUIRE(restored != nullptr);
+        REQUIRE(restored->deserialize(serialized));
+        // A few legacy vector defaults originate from float literals (for
+        // example 0.01f) but are stored as doubles.  Their decimal wire form
+        // is intentionally shorter than the promoted binary value, so the
+        // object equality operator is too strict for this serialization
+        // contract.  Stable canonical serialization is the invariant here.
+        CHECK(restored->serialize() == serialized);
+        ++roundtripped;
+    }
+
+    CHECK(empty_aggregate_defaults == expected_empty_aggregate_defaults);
+    CHECK(roundtripped + empty_aggregate_defaults.size() == print_config_def.options.size());
+}
+
+TEST_CASE("Registered option representatives serialize and deserialize strictly", "[Config][Schema][RoundTrip]")
+{
+    size_t roundtripped = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        INFO(key);
+        const std::unique_ptr<ConfigOption> source(def.create_default_option());
+        REQUIRE(source != nullptr);
+        const std::string representative = representative_serialization(def, *source);
+        REQUIRE_FALSE(representative.empty());
+
+        const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+        REQUIRE(restored != nullptr);
+        REQUIRE(restored->deserialize(representative));
+        CHECK(restored->serialize() == representative);
+        ++roundtripped;
+    }
+
+    CHECK(roundtripped == print_config_def.options.size());
+}
+
 TEST_CASE("All registered enum values round-trip through their serialized form", "[Config][Schema][Enum]")
 {
     size_t enum_options = 0;
@@ -1759,6 +1889,44 @@ TEST_CASE("Numeric option definitions enforce their declared finite boundaries",
     }
 
     CHECK(bounded_options > 0);
+}
+
+TEST_CASE("Registered numeric boundaries round-trip through strict serialization", "[Config][Schema][Numeric][RoundTrip]")
+{
+    const double float_limit = static_cast<double>(std::numeric_limits<float>::max()) / 2.;
+    size_t       boundary_values = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        if (!is_numeric_option_type(def.type))
+            continue;
+
+        const bool has_min = static_cast<double>(def.min) > -float_limit;
+        const bool has_max = static_cast<double>(def.max) < float_limit;
+        const std::array<double, 2> boundaries = {
+            has_min ? static_cast<double>(def.min) : std::numeric_limits<double>::quiet_NaN(),
+            has_max ? static_cast<double>(def.max) : std::numeric_limits<double>::quiet_NaN(),
+        };
+        for (const double boundary : boundaries) {
+            if (!std::isfinite(boundary))
+                continue;
+
+            INFO(key << " boundary=" << boundary);
+            CHECK(def.is_value_valid(boundary));
+            const std::string serialized_boundary = serialize_numeric_boundary(def.type, boundary);
+            const std::unique_ptr<ConfigOption> source(def.create_default_option());
+            REQUIRE(source != nullptr);
+            REQUIRE(source->deserialize(serialized_boundary));
+
+            const std::string canonical = source->serialize();
+            const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+            REQUIRE(restored != nullptr);
+            REQUIRE(restored->deserialize(canonical));
+            CHECK(restored->serialize() == canonical);
+            ++boundary_values;
+        }
+    }
+
+    CHECK(boundary_values > 0);
 }
 
 TEST_CASE("Core FFF numeric validation rejects values below their semantic floors", "[Config][Schema][Validation]")

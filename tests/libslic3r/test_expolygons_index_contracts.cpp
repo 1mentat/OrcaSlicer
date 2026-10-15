@@ -2,8 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <libslic3r/Point.hpp>
 #include <vector>
 
+#include "catch2/catch_test_macros.hpp"
+#include "catch2/catch_message.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExPolygonsIndex.hpp"
 

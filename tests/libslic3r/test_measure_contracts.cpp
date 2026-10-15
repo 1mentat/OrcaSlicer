@@ -1,6 +1,8 @@
 #include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "catch2/matchers/catch_matchers.hpp"
+#include "catch2/catch_test_macros.hpp"
 #include "libslic3r/Measure.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -8,6 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <libslic3r/Point.hpp>
+#include <libslic3r/libslic3r.h>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <set>

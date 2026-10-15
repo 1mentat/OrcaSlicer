@@ -1,5 +1,6 @@
 #include <catch2/catch_all.hpp>
 
+#include "catch2/catch_test_macros.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCodeReader.hpp"
@@ -15,6 +16,11 @@
 #include <cmath>
 #include <cstddef>
 #include <initializer_list>
+#include <libslic3r/TriangleMesh.hpp>
+#include <libslic3r/libslic3r.h>
+#include <libslic3r/Point.hpp>
+#include <libslic3r/Surface.hpp>
+#include <libslic3r/Polygon.hpp>
 #include <limits>
 #include <string>
 #include <vector>

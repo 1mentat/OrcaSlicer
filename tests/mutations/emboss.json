@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Bounded Emboss geometry mutants checked by projected shell area, duplicate-point dispatch, and surface orientation contracts.",
+  "mutants": [
+    {
+      "id": "emboss-polygons-duplicate-dispatch",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "return (duplicits.empty()) ?\n        polygons2model_unique(shape2d, projection, points) :\n        polygons2model_duplicit(shape2d, projection, points, duplicits);",
+      "new": "return (duplicits.empty()) ?\n        polygons2model_duplicit(shape2d, projection, points, duplicits) :\n        polygons2model_unique(shape2d, projection, points);",
+      "description": "Use the duplicate-point triangulation path for unique inputs and the unique path for shared points.",
+      "test_filter": "Emboss"
+    },
+    {
+      "id": "emboss-suggest-up-axis-selection",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "(std::fabs(normal.z()) > up_limit)?\n        Vec3d::UnitY() : Vec3d::UnitZ();",
+      "new": "(std::fabs(normal.z()) > up_limit)?\n        Vec3d::UnitZ() : Vec3d::UnitY();",
+      "description": "Swap the stable up-axis choices for near-vertical and side-facing emboss normals.",
+      "test_filter": "Emboss"
+    }
+  ]
+}

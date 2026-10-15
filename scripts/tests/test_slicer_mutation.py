@@ -55,6 +55,22 @@ class MutationSelectionTests(unittest.TestCase):
             mutants = slicer_mutation._load_mutants("tests/mutations.json", root)
             self.assertEqual([item.id for item in mutants], ["one"])
 
+    def test_repeated_manifests_keep_each_filter_in_selection_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name in ("first", "second"):
+                (root / f"{name}.json").write_text(json.dumps({"mutants": [{
+                    "id": name, "path": "source.cpp", "old": "before", "new": "after",
+                    "test_filter": name.title(),
+                }]}), encoding="utf-8")
+            args = slicer_mutation._parser().parse_args([
+                "run", "--build-command", "build", "--test-command", "ctest",
+                "--mutants", "first.json", "--mutants", "second.json",
+            ])
+            mutants = slicer_mutation._load_mutants(args.mutants, root)
+            self.assertEqual([(item.id, item.test_filter) for item in mutants],
+                             [("first", "First"), ("second", "Second")])
+
 
 class MutationResultTests(unittest.TestCase):
     def result(self, returncode, *, output="1 tests passed", timed_out=False):

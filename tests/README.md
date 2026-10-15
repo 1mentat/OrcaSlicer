@@ -101,6 +101,13 @@ match and replacement, build/test commands, and separate statuses for build
 errors, timeouts, killed mutants, and survivors. A mutant is counted only
 after its selected unmutated baseline passes with executed test evidence.
 
+Repeat `--mutants` to combine subsystem manifests in one configured build;
+`--max-mutants` bounds the total across all selected manifests. For example,
+`--mutants tests/mutations/cut_surface.json --mutants tests/mutations/emboss.json
+--max-mutants 4` checks both geometry contracts without a second clean build.
+The manifest filters are CTest labels; a test name is not a label unless it
+has explicitly been registered as one.
+
 The settings inventory keeps schema accounting separate from source coverage.
 It derives the effective `PrintConfigDef` option set from
 `src/libslic3r/PrintConfig.cpp`, including literal generated overrides and

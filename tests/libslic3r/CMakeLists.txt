@@ -22,6 +22,7 @@ add_executable(${_TEST_NAME}_tests
     test_color_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
+    test_cut_surface_contracts.cpp
     test_locales_utils.cpp
     test_drc.cpp
     test_gcodereader.cpp
@@ -33,8 +34,10 @@ add_executable(${_TEST_NAME}_tests
     test_vendor_cache.cpp
     test_preset_options.cpp
     test_elephant_foot_compensation.cpp
+    test_emboss_contracts.cpp
     test_expolygon_contracts.cpp
     test_expolygons_index_contracts.cpp
+    test_extrusion_simulator.cpp
     test_flush_volume_contracts.cpp
     test_intersection_points_contracts.cpp
     test_fill_corner_smoothing.cpp

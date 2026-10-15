@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Extrusion simulator metamorphic and reset contracts across all rendering modes.",
+  "mutants": [
+    {
+      "id": "extrusion-simulator-shift-axes",
+      "path": "src/libslic3r/ExtrusionSimulator.cpp",
+      "old": "float((*it)(0)+shift.x()-bbox.min.x()) * scalex, float((*it)(1)+shift.y()-bbox.min.y()) * scaley",
+      "new": "float((*it)(0)+shift.y()-bbox.min.x()) * scalex, float((*it)(1)+shift.x()-bbox.min.y()) * scaley",
+      "description": "Exchange the two shift axes so unequal XY translations place material incorrectly.",
+      "test_filter": "ExtrusionSimulator"
+    },
+    {
+      "id": "extrusion-simulator-reset",
+      "path": "src/libslic3r/ExtrusionSimulator.cpp",
+      "old": "memset(&pimpl->accumulator[0][0], 0, sizeof(float) * sz.x() * sz.y());",
+      "new": "/* Mutation: leave accumulated material in place. */",
+      "description": "Leave previously extruded material visible after reset.",
+      "test_filter": "ExtrusionSimulator"
+    }
+  ]
+}

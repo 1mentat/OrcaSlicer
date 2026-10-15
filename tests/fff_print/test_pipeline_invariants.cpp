@@ -1,12 +1,16 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <libslic3r/libslic3r.h>
+#include <libslic3r/Config.hpp>
 #include <string>
 #include <vector>
 
 #include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "catch2/catch_test_macros.hpp"
+#include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"

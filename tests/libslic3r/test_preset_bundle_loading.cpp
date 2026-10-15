@@ -88,11 +88,12 @@ void write_preset_with_inherits(const DynamicPrintConfig &default_config, const 
 
 // A user preset file stating nothing but the preset it inherits, so every value it
 // ends up with came from resolving that parent.
-void write_minimal_child(const fs::path &file, const std::string &name, const std::string &inherits)
+void write_minimal_child(const fs::path &file, const std::string &name, const std::string &inherits,
+                         const std::string &type = "process")
 {
     fs::create_directories(file.parent_path());
     std::ofstream(file.string())
-        << R"({"type":"process","name":")" << name << R"(","from":"User","version":"1.0.0","inherits":")"
+        << R"({"type":")" << type << R"(","name":")" << name << R"(","from":"User","version":"1.0.0","inherits":")"
         << inherits << R"("})";
 }
 
@@ -1598,6 +1599,92 @@ TEST_CASE("Filaments offered for a machine follow the app's compatibility rule",
         CHECK_FALSE(f.offers("My PLA", /*include_user_presets=*/false));
         CHECK(f.offers("My PLA", /*include_user_presets=*/true));
     }
+}
+
+TEST_CASE("Switching a printer reselects a compatible process and every filament slot", "[Preset][Bundle][Compatibility][FilamentMixer][PresetSelection]")
+{
+    PresetBundle bundle;
+
+    Preset &printer_a = add_inmemory_preset(bundle.printers, "Printer A");
+    Preset &printer_b = add_inmemory_preset(bundle.printers, "Printer B");
+    for (Preset *printer : { &printer_a, &printer_b }) {
+        printer->is_system = true;
+        printer->config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = { 0.4, 0.4 };
+    }
+    printer_a.config.option<ConfigOptionString>("default_print_profile", true)->value = "Process A";
+    printer_a.config.option<ConfigOptionStrings>("default_filament_profile", true)->values = { "Filament A", "Filament A" };
+    printer_b.config.option<ConfigOptionString>("default_print_profile", true)->value = "Process B";
+    printer_b.config.option<ConfigOptionStrings>("default_filament_profile", true)->values = { "Filament B", "Filament B" };
+
+    Preset &process_a = add_inmemory_preset(bundle.prints, "Process A");
+    Preset &process_b = add_inmemory_preset(bundle.prints, "Process B");
+    compatible_list(bundle.prints, process_a.name, "compatible_printers") = { printer_a.name };
+    compatible_list(bundle.prints, process_b.name, "compatible_printers") = { printer_b.name };
+    process_a.config.option<ConfigOptionFloat>("layer_height", true)->value = 0.16;
+    process_b.config.option<ConfigOptionFloat>("layer_height", true)->value = 0.24;
+
+    Preset &filament_a = add_inmemory_preset(bundle.filaments, "Filament A");
+    Preset &filament_b = add_inmemory_preset(bundle.filaments, "Filament B");
+    compatible_list(bundle.filaments, filament_a.name, "compatible_printers") = { printer_a.name };
+    compatible_list(bundle.filaments, filament_a.name, "compatible_prints") = { process_a.name };
+    compatible_list(bundle.filaments, filament_b.name, "compatible_printers") = { printer_b.name };
+    compatible_list(bundle.filaments, filament_b.name, "compatible_prints") = { process_b.name };
+
+    bundle.printers.select_preset_by_name(printer_a.name, true);
+    bundle.prints.select_preset_by_name(process_a.name, true);
+    bundle.filaments.select_preset_by_name(filament_a.name, true);
+    bundle.filament_presets = { filament_a.name, filament_a.name };
+    bundle.update_compatible(PresetSelectCompatibleType::Always);
+
+    bundle.printers.select_preset_by_name(printer_b.name, true);
+    bundle.update_compatible(PresetSelectCompatibleType::Always);
+
+    CHECK(bundle.prints.get_selected_preset_name() == process_b.name);
+    CHECK_THAT(bundle.prints.get_selected_preset().config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK(bundle.filaments.get_selected_preset_name() == filament_b.name);
+    CHECK(bundle.filament_presets == std::vector<std::string>{ filament_b.name, filament_b.name });
+    CHECK_FALSE(bundle.filaments.find_preset(filament_a.name, false, true)->is_compatible);
+    CHECK(bundle.filaments.find_preset(filament_b.name, false, true)->is_compatible);
+}
+
+TEST_CASE("A user filament preset round-trips inherited multi-variant vectors", "[Preset][Bundle][RoundTrip]")
+{
+    ScopedTemporaryDir temp_dir;
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    DynamicPrintConfig parent_config = collection.default_preset().config;
+    parent_config.option<ConfigOptionFloats>("filament_diameter", true)->values = { 1.75, 2.85 };
+    parent_config.option<ConfigOptionStrings>("filament_type", true)->values = { "PLA", "PETG" };
+    parent_config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"
+    };
+    const fs::path filament_dir = temp_dir.path() / PRESET_FILAMENT_NAME;
+    const fs::path parent_file = filament_dir / "base" / "Multi Base.json";
+    const fs::path child_file = filament_dir / "Multi Child.json";
+    write_preset_with_inherits(parent_config, parent_file, "Multi Base", "");
+    write_minimal_child(child_file, "Multi Child", "Multi Base", "filament");
+
+    PresetsConfigSubstitutions substitutions;
+    collection.load_presets(temp_dir.path().string(), PRESET_FILAMENT_NAME, substitutions,
+                            ForwardCompatibilitySubstitutionRule::Disable);
+    const Preset *child = collection.find_preset("Multi Child");
+    REQUIRE(child != nullptr);
+    CHECK(child->inherits() == "Multi Base");
+    check_double_vector(child->config.option<ConfigOptionFloats>("filament_diameter")->values, { 1.75, 2.85 });
+    CHECK(child->config.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{ "PLA", "PETG" });
+    CHECK(child->config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{ "Direct Drive Standard", "Direct Drive High Flow" });
+
+    PresetCollection reloaded(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                              static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    PresetsConfigSubstitutions reload_substitutions;
+    reloaded.load_presets(temp_dir.path().string(), PRESET_FILAMENT_NAME, reload_substitutions,
+                          ForwardCompatibilitySubstitutionRule::Disable);
+    const Preset *reloaded_child = reloaded.find_preset("Multi Child");
+    REQUIRE(reloaded_child != nullptr);
+    check_double_vector(reloaded_child->config.option<ConfigOptionFloats>("filament_diameter")->values, { 1.75, 2.85 });
+    CHECK(reloaded_child->config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          child->config.option<ConfigOptionStrings>("filament_extruder_variant")->values);
 }
 
 

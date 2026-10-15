@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed BBS 3MF metadata mutants for validating text and embossed SVG round trips.",
+  "mutants": [
+    {
+      "id": "3mf-text-metadata-escape",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "stream << TEXT_DATA_ATTR << \"=\\\"\" << xml_escape_double_quotes_attribute_value(tc.text) << \"\\\" \";",
+      "new": "stream << TEXT_DATA_ATTR << \"=\\\"\" << tc.text << \"\\\" \";",
+      "description": "Drop XML escaping for text configuration content containing quotes and ampersands.",
+      "test_filter": "EmbossMetadata"
+    },
+    {
+      "id": "3mf-emboss-svg-entry-path",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "return mz_zip_writer_add_mem(&archive, svg.path_in_3mf.c_str(), \n        (const void *) file_data_str.c_str(), file_data_str.size(), MZ_DEFAULT_COMPRESSION);",
+      "new": "return mz_zip_writer_add_mem(&archive, svg.path.c_str(), \n        (const void *) file_data_str.c_str(), file_data_str.size(), MZ_DEFAULT_COMPRESSION);",
+      "description": "Write the local SVG filename instead of the declared archive path, breaking the source reference on reload.",
+      "test_filter": "EmbossMetadata"
+    },
+    {
+      "id": "3mf-font-property-xml-escaping",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "stream << FONT_FAMILY_ATTR << \"=\\\"\" << xml_escape_double_quotes_attribute_value(*fp.family) << \"\\\" \";",
+      "new": "stream << FONT_FAMILY_ATTR << \"=\\\"\" << *fp.family << \"\\\" \";",
+      "description": "Drop XML escaping for font family metadata containing XML-significant characters.",
+      "test_filter": "EmbossMetadata"
+    }
+  ]
+}

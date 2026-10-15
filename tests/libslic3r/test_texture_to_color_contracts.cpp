@@ -2,10 +2,14 @@
 
 #include <array>
 #include <cstddef>
+#include <opencv2/core/types.hpp>
 #include <vector>
 
 #include <opencv2/core.hpp>
 
+#include "TextureToColor/TriMesh.hpp"
+#include "Point.hpp"
+#include "catch2/catch_test_macros.hpp"
 #include "libslic3r/TextureToColor/TextureToColor.hpp"
 
 using namespace Slic3r;

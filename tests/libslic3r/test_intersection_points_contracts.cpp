@@ -1,5 +1,8 @@
 #include <catch2/catch_all.hpp>
+#include <libslic3r/Line.hpp>
+#include <libslic3r/Polygon.hpp>
 
+#include "catch2/catch_test_macros.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/IntersectionPoints.hpp"
 

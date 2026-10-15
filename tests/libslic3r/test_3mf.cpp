@@ -5,6 +5,8 @@
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/TextConfiguration.hpp"
+#include "libslic3r/EmbossShape.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
@@ -1733,6 +1735,161 @@ SCENARIO("bbs_3mf_is_published detects only genuinely published 3MFs", "[3mf]") 
             }
         }
     }
+}
+
+TEST_CASE("BBS 3MF round-trips text configuration metadata", "[3MF][EmbossMetadata]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *volume = object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+
+    TextConfiguration expected;
+    expected.text = "A<&\"'\tline\nnext";
+    expected.style.name = "Round-trip style";
+    expected.style.path = "MacFontDescriptor<&\"";
+    expected.style.type = EmbossStyle::Type::wx_mac_font_descr;
+    expected.style.prop.char_gap = 3;
+    expected.style.prop.line_gap = -2;
+    expected.style.prop.boldness = 0.25f;
+    expected.style.prop.skew = -0.125f;
+    expected.style.prop.collection_number = 4;
+    expected.style.prop.per_glyph = true;
+    expected.style.prop.align = {FontProp::HorizontalAlign::right, FontProp::VerticalAlign::bottom};
+    expected.style.prop.size_in_mm = 12.5f;
+    expected.style.prop.family = "Noto & Sans";
+    expected.style.prop.face_name = "Display<>\"";
+    expected.style.prop.style = "Italic & Oblique";
+    expected.style.prop.weight = "Semi&Bold";
+    volume->text_configuration = expected;
+
+    ScopedTemporaryDir backup_dir("orca_text_metadata");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path = temp.string().c_str();
+    store_params.model = &model;
+    store_params.config = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_text_metadata_loaded");
+    loaded_model.set_backup_path(loaded_backup_dir.string());
+    DynamicPrintConfig loaded_config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;
+    std::vector<Preset*> project_presets;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset *preset : project_presets)
+            delete preset;
+    });
+    bool is_bbl_3mf = false;
+    bool is_orca_3mf = false;
+    Semver file_version;
+    REQUIRE(load_bbs_3mf(temp.string().c_str(), &loaded_config, &substitutions, &loaded_model, &plates,
+                         &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    const ModelVolume &loaded_volume = *loaded_model.objects.front()->volumes.front();
+    REQUIRE(loaded_volume.text_configuration.has_value());
+    const TextConfiguration &actual = *loaded_volume.text_configuration;
+    CHECK(actual.text == expected.text);
+    CHECK(actual.style.name == expected.style.name);
+    CHECK(actual.style.path == expected.style.path);
+    CHECK(actual.style.type == expected.style.type);
+    CHECK(actual.style.prop.char_gap == expected.style.prop.char_gap);
+    CHECK(actual.style.prop.line_gap == expected.style.prop.line_gap);
+    REQUIRE(expected.style.prop.boldness.has_value());
+    REQUIRE(actual.style.prop.boldness.has_value());
+    CHECK_THAT(*actual.style.prop.boldness, Catch::Matchers::WithinAbs(*expected.style.prop.boldness, 1e-5f));
+    REQUIRE(expected.style.prop.skew.has_value());
+    REQUIRE(actual.style.prop.skew.has_value());
+    CHECK_THAT(*actual.style.prop.skew, Catch::Matchers::WithinAbs(*expected.style.prop.skew, 1e-5f));
+    CHECK(actual.style.prop.collection_number == expected.style.prop.collection_number);
+    CHECK(actual.style.prop.per_glyph == expected.style.prop.per_glyph);
+    CHECK(actual.style.prop.align == expected.style.prop.align);
+    CHECK_THAT(actual.style.prop.size_in_mm, Catch::Matchers::WithinAbs(expected.style.prop.size_in_mm, 1e-5f));
+    CHECK(actual.style.prop.family == expected.style.prop.family);
+    CHECK(actual.style.prop.face_name == expected.style.prop.face_name);
+    CHECK(actual.style.prop.style == expected.style.prop.style);
+    CHECK(actual.style.prop.weight == expected.style.prop.weight);
+}
+
+TEST_CASE("BBS 3MF round-trips an embossed SVG source and projection metadata", "[3MF][EmbossMetadata]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *volume = object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+
+    // Emboss SVGs are discovered by the importer only below the 3D/ folder.
+    const std::string svg_entry = "3D/emboss_source.svg";
+    const std::string svg_data = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0h1v1z\"/></svg>";
+    EmbossShape shape;
+    shape.scale = 2.5;
+    shape.projection.depth = 1.75;
+    shape.projection.use_surface = true;
+    shape.final_shape.is_healed = false;
+    EmbossShape::SvgFile svg_file;
+    svg_file.path = "source.svg";
+    svg_file.path_in_3mf = svg_entry;
+    svg_file.file_data = std::make_shared<std::string>(svg_data);
+    shape.svg_file = std::move(svg_file);
+    volume->emboss_shape = std::move(shape);
+
+    ScopedTemporaryDir backup_dir("orca_emboss_metadata");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path = temp.string().c_str();
+    store_params.model = &model;
+    store_params.config = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    std::string archived_svg;
+    REQUIRE(read_cad_recipe_entry(temp.string(), archived_svg, svg_entry));
+    CHECK(archived_svg == svg_data);
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_emboss_metadata_loaded");
+    loaded_model.set_backup_path(loaded_backup_dir.string());
+    DynamicPrintConfig loaded_config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;
+    std::vector<Preset*> project_presets;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset *preset : project_presets)
+            delete preset;
+    });
+    bool is_bbl_3mf = false;
+    bool is_orca_3mf = false;
+    Semver file_version;
+    REQUIRE(load_bbs_3mf(temp.string().c_str(), &loaded_config, &substitutions, &loaded_model, &plates,
+                         &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    const ModelVolume &loaded_volume = *loaded_model.objects.front()->volumes.front();
+    REQUIRE(loaded_volume.emboss_shape.has_value());
+    const EmbossShape &actual = *loaded_volume.emboss_shape;
+    CHECK_THAT(actual.scale, Catch::Matchers::WithinAbs(2.5, 1e-6));
+    CHECK_THAT(actual.projection.depth, Catch::Matchers::WithinAbs(1.75, 1e-6));
+    CHECK(actual.projection.use_surface);
+    CHECK_FALSE(actual.final_shape.is_healed);
+    REQUIRE(actual.svg_file.has_value());
+    CHECK(actual.svg_file->path == "source.svg");
+    CHECK(actual.svg_file->path_in_3mf == svg_entry);
+    REQUIRE(actual.svg_file->file_data != nullptr);
+    CHECK(*actual.svg_file->file_data == svg_data);
 }
 
 // Writes a single-entry zip whose central directory carries a zip64 record declaring an

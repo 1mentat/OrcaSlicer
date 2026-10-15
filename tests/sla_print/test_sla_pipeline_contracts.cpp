@@ -1,11 +1,21 @@
 #include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <cmath>
 #include <cstddef>
+#include <libslic3r/Config.hpp>
+#include <utility>
+#include <libslic3r/Point.hpp>
 #include <vector>
 
+#include "catch2/catch_test_macros.hpp"
+#include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/libslic3r.h"
+#include "libslic3r/SLA/SupportPoint.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -44,10 +54,18 @@ DynamicPrintConfig sla_config(double layer_height)
 class SlaCubeFixture
 {
 public:
-    explicit SlaCubeFixture(DynamicPrintConfig config)
+    explicit SlaCubeFixture(DynamicPrintConfig config,
+                            TriangleMesh          mesh = {},
+                            sla::SupportPoints    support_points = {})
     {
         ModelObject *object = model.add_object();
-        object->add_volume(make_cube(10.0, 10.0, 4.0));
+        if (mesh.empty())
+            mesh = make_cube(10.0, 10.0, 4.0);
+        object->add_volume(std::move(mesh));
+        if (!support_points.empty()) {
+            object->sla_support_points = std::move(support_points);
+            object->sla_points_status = sla::PointsStatus::UserModified;
+        }
         object->add_instance();
         object->ensure_on_bed();
         apply_status = print.apply(model, std::move(config));
@@ -57,6 +75,15 @@ public:
     SLAPrint           print;
     SLAPrint::ApplyStatus apply_status = SLAPrint::APPLY_STATUS_UNCHANGED;
 };
+
+double support_slice_area(const SLAPrintObject &object)
+{
+    double result = 0.;
+    for (const SLAPrintObject::SliceRecord &record : object.get_slice_index())
+        for (const ExPolygon &expolygon : record.get_slice(soSupport))
+            result += std::abs(expolygon.area());
+    return result;
+}
 
 struct SlaRunSummary
 {
@@ -137,4 +164,82 @@ TEST_CASE("SLA exposure validation rejects values outside printer bounds", "[SLA
     invalid_config.set_key_value("exposure_time", new ConfigOptionFloat(6.0));
     SlaCubeFixture invalid(std::move(invalid_config));
     CHECK_FALSE(invalid.print.validate().string.empty());
+}
+
+TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("hollowing_enable", new ConfigOptionBool(true));
+    config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(1.0));
+    config.set_key_value("hollowing_quality", new ConfigOptionFloat(0.2));
+    config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(0.25));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(20.0, 20.0, 10.0));
+    const double solid_volume = fixture.model.objects.front()->raw_mesh().volume();
+
+    // The production drill_holes step is currently disabled, so stop after
+    // hollowing rather than asserting on the empty downstream hollow mesh.
+    PrintBase::TaskParams task;
+    task.to_object_step = slaposHollowing;
+    fixture.print.set_task(task);
+    fixture.print.process();
+
+    REQUIRE(fixture.print.objects().size() == 1);
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposHollowing));
+
+    const indexed_triangle_set &interior = object->hollowed_interior_mesh();
+    REQUIRE_FALSE(interior.empty());
+    TriangleMesh interior_mesh(interior);
+    const double interior_volume = std::abs(interior_mesh.volume());
+    CHECK(interior_volume > 0.);
+    CHECK(interior_volume < solid_volume);
+}
+
+TEST_CASE("SLA pad processing creates printable pad geometry and slices", "[SLAFeatures]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("pad_enable", new ConfigOptionBool(true));
+    config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_brim_size", new ConfigOptionFloat(2.0));
+
+    SlaCubeFixture fixture(std::move(config));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    fixture.print.process();
+
+    REQUIRE(fixture.print.finished());
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposPad));
+    REQUIRE_FALSE(object->pad_mesh().empty());
+    TriangleMesh pad_mesh = object->pad_mesh();
+    CHECK(pad_mesh.volume() > 0.f);
+    CHECK(support_slice_area(*object) > 0.);
+}
+
+TEST_CASE("SLA manual supports elevate the object and emit support slices", "[SLAFeatures]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    config.set_key_value("support_object_elevation", new ConfigOptionFloat(5.0));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+
+    sla::SupportPoints points{sla::SupportPoint(5.f, 5.f, 0.f, 0.5f, true)};
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    fixture.print.process();
+
+    REQUIRE(fixture.print.finished());
+    const SLAPrintObject *object = fixture.print.objects().front();
+    CHECK_THAT(object->get_elevation(), Catch::Matchers::WithinAbs(5.0, 1e-6));
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    REQUIRE(object->get_support_points().size() == 1);
+    REQUIRE_FALSE(object->support_mesh().empty());
+    TriangleMesh support_mesh = object->support_mesh();
+    CHECK(support_mesh.volume() > 0.f);
+    CHECK(object->support_mesh().bounding_box().min.z() < -EPSILON);
+    CHECK(support_slice_area(*object) > 0.);
 }
