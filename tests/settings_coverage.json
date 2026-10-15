@@ -1574,6 +1574,88 @@
         "pipeline_oracle"
       ],
       "reason": "Values 0 and 2 change each material geometry by positive symmetric-difference area while conserving the combined union. Representative values only."
+    },
+    "file_start_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeExportWorkflows]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A custom executable file-start marker is required before the machine-start marker and layer body; the file-start suppression mutation is checked against the same contract."
+    },
+    "time_lapse_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeExportWorkflows]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A traditional timelapse template expands layer placeholders and emits one executable snapshot marker per layer; no other timelapse modes are claimed."
+    },
+    "timelapse_type": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeExportWorkflows]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The traditional mode is exercised with a per-layer snapshot command oracle; the complete enum domain and mode interactions remain unclaimed."
+    },
+    "input_shaping_emit": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeExportWorkflows]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Enabled input shaping emits executable M593 commands for Marlin 2 and omits them for legacy Marlin with machine-limit emission enabled. The boolean-off dimension remains unclaimed."
+    },
+    "use_firmware_retraction": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeExportWorkflows]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Paired ordinary and firmware retraction exports distinguish explicit negative-E retractions from G10 commands. The firmware fixture uses zero configured retraction length and nonzero Z hop to reach the supported firmware path."
+    },
+    "wipe": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeExportWorkflows]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Wipe off/on exports require additional wipe motion markers while preserving deposited path length, material, and extrusion move count."
+    },
+    "retraction_minimum_travel": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeExportWorkflows]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zero and 1000 mm travel thresholds produce a strict decrease in emitted retraction moves on a separated two-object fixture. Numeric bounds and intermediate thresholds remain unclaimed."
+    },
+    "skirt_loops": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeExportWorkflows]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zero and two loops distinguish emitted skirt-role paths and increased deposited path length. The complete numeric boundary domain remains unclaimed."
+    },
+    "hot_plate_temp_initial_layer": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeExportWorkflows]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Configured first-layer hot-plate temperature is observed in executable M140/M190 commands, with custom start temperatures suppressing the configured command. Numeric boundaries remain unclaimed."
     }
   }
 }

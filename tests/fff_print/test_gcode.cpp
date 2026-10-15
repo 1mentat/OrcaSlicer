@@ -473,4 +473,302 @@ TEST_CASE("Z hop changes travel height while preserving material paths", "[GCode
 }
 
 
+ExportedPrint fresh_custom_mesh_export(const DynamicPrintConfig &config, TriangleMesh mesh)
+{
+    Print print;
+    Model model;
+    Test::init_print({std::move(mesh)}, print, model, config);
+    require_valid(print);
+    return export_print(print);
+}
+
+TriangleMesh support_fixture()
+{
+    TriangleMesh base = make_cube(40., 40., 2.);
+    TriangleMesh stem = make_cube(8., 8., 12.);
+    stem.translate(Vec3f(16.f, 16.f, 1.f));
+    TriangleMesh cap = make_cube(40., 40., 2.);
+    cap.translate(Vec3f(0.f, 0.f, 12.f));
+    base.merge(stem);
+    base.merge(cap);
+    return base;
+}
+
+
+size_t temperature_commands(const std::string &text, const DynamicPrintConfig &config,
+                            const std::string &command, float expected)
+{
+    size_t count = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        float value = 0.f;
+        if (line.cmd_is(command.c_str()) && line.has_value('S', value) && std::abs(value - expected) < 0.01f)
+            ++count;
+    });
+    return count;
+}
+
+size_t rising_extrusions(const std::string &text, const DynamicPrintConfig &config)
+{
+    size_t count = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > EPSILON && line.dist_Z(self) > EPSILON)
+            ++count;
+    });
+    return count;
+}
+
+TEST_CASE("File and machine lifecycle hooks preserve source order", "[GCode][GCodeExportWorkflows]")
+{
+    auto config = base_config();
+    config.set_deserialize_strict({
+        {"file_start_gcode", "M117 FILE_MARK\n"},
+        {"machine_start_gcode", "M117 MACHINE_MARK\n"},
+        {"machine_end_gcode", "M117 END_MARK\n"},
+    });
+    const auto out = fresh_export(config);
+    const auto file = first_executable_command(out.text, config, "M117", "FILE_MARK");
+    const auto machine = first_executable_command(out.text, config, "M117", "MACHINE_MARK");
+    const auto body = out.text.find(";LAYER_CHANGE");
+    const auto end = first_executable_command(out.text, config, "M117", "END_MARK");
+    REQUIRE(file.has_value());
+    REQUIRE(machine.has_value());
+    REQUIRE(body != std::string::npos);
+    REQUIRE(end.has_value());
+    CHECK(*file < *machine);
+    CHECK(*machine < body);
+    CHECK(*end > body);
+}
+
+TEST_CASE("Custom start temperature is respected without a duplicate initial nozzle command", "[GCode][GCodeExportWorkflows]")
+{
+    auto config = base_config();
+    config.set_deserialize_strict({
+        {"machine_start_gcode", "M104 S177\nM140 S41\n"},
+        {"nozzle_temperature_initial_layer", 211},
+        {"bed_temperature_initial_layer", 61},
+        {"hot_plate_temp_initial_layer", 61},
+    });
+    const auto out = fresh_export(config);
+    REQUIRE(temperature_commands(out.text, config, "M104", 177.f) >= 1);
+    CHECK(temperature_commands(out.text, config, "M104", 211.f) == 0);
+    REQUIRE(temperature_commands(out.text, config, "M140", 41.f) >= 1);
+    CHECK(temperature_commands(out.text, config, "M190", 61.f) == 0);
+}
+
+TEST_CASE("Custom layer placeholders expose layer index and height", "[GCode][GCodeExportWorkflows]")
+{
+    auto config = base_config();
+    config.set_deserialize_strict({
+        {"before_layer_change_gcode", "G92 E0\nM117 IDX-[layer_num]-Z-[layer_z]\n"},
+        {"layer_change_gcode", "M117 CHANGED-[layer_num]\n"},
+    });
+    const auto out = fresh_export(config);
+    const size_t layers = count_text(out.text, ";LAYER_CHANGE");
+    REQUIRE(layers > 2);
+    REQUIRE(executable_command_count(out.text, config, "M117", "IDX-") == layers);
+    REQUIRE(executable_command_count(out.text, config, "M117", "-Z-") == layers);
+    REQUIRE(executable_command_count(out.text, config, "M117", "CHANGED-") == layers);
+    CHECK(out.text.find("M117 IDX-0-Z-0.2") != std::string::npos);
+}
+
+TEST_CASE("Bed temperature formula emits the configured first-layer command", "[GCode][GCodeExportWorkflows]")
+{
+    auto config = base_config();
+    config.set_deserialize_strict({
+        {"nozzle_temperature_initial_layer", 208},
+        {"nozzle_temperature", 202},
+        {"curr_bed_type", "High Temp Plate"},
+        {"bed_temperature_initial_layer", 57},
+                {"hot_plate_temp_initial_layer", 57},
+        {"bed_temperature", 47},
+        {"hot_plate_temp", 47},
+    });
+    const auto out = fresh_export(config);
+    REQUIRE(temperature_commands(out.text, config, "M190", 57.f) + temperature_commands(out.text, config, "M140", 57.f) > 0);
+    REQUIRE(temperature_commands(out.text, config, "M109", 208.f) + temperature_commands(out.text, config, "M104", 208.f) > 0);
+    CHECK(temperature_commands(out.text, config, "M109", 202.f) + temperature_commands(out.text, config, "M104", 202.f) > 0);
+}
+
+TEST_CASE("Klipper omits Marlin machine envelope while preserving motion", "[GCode][GCodeExportWorkflows]")
+{
+    auto marlin = base_config();
+    marlin.set_deserialize_strict({{"emit_machine_limits_to_gcode", true}, {"gcode_flavor", "marlin2"}});
+    auto klipper = marlin;
+    klipper.set_deserialize_strict({{"gcode_flavor", "klipper"}});
+    const auto a = fresh_export(marlin);
+    const auto b = fresh_export(klipper);
+    REQUIRE(count_text(a.text, "M201 ") > 0);
+    CHECK(count_text(b.text, "M201 ") == 0);
+    require_same_material(motion_evidence(a.text, marlin), motion_evidence(b.text, klipper));
+}
+
+TEST_CASE("RepRap machine limits use millimeters per minute for speed and jerk", "[GCode][GCodeExportWorkflows]")
+{
+    auto config = base_config();
+    config.set_deserialize_strict({
+        {"gcode_flavor", "reprapfirmware"},
+        {"emit_machine_limits_to_gcode", true},
+        {"machine_max_speed_x", "11,11"},
+        {"machine_max_speed_y", "12,12"},
+        {"machine_max_speed_z", "3,3"},
+        {"machine_max_speed_e", "4,4"},
+        {"machine_max_jerk_x", "1,1"},
+        {"machine_max_jerk_y", "2,2"},
+        {"machine_max_jerk_z", "0.5,0.5"},
+        {"machine_max_jerk_e", "0.75,0.75"},
+    });
+    const auto out = fresh_export(config);
+    REQUIRE(count_text(out.text, "M203 X660 Y720 Z180 E240") > 0);
+    REQUIRE(count_text(out.text, "M566 X60.00 Y120.00 Z30.00 E45.00") > 0);
+}
+
+TEST_CASE("Skirt and outer brim add distinct boundary metadata", "[GCode][GCodeExportWorkflows]")
+{
+    auto skirt = base_config();
+    skirt.set_deserialize_strict({{"skirt_loops", 2}, {"skirt_distance", 3.0}});
+    auto brim = base_config();
+    brim.set_deserialize_strict({{"brim_type", "outer_only"}, {"brim_width", 4.0}});
+    const auto s = fresh_export(skirt);
+    const auto b = fresh_export(brim);
+    const auto plain = fresh_export(base_config());
+    REQUIRE(count_text(s.text, ";TYPE:Skirt") > 0);
+    REQUIRE(count_text(b.text, ";TYPE:Brim") > 0);
+    CHECK(motion_evidence(s.text, skirt).xy_path > motion_evidence(plain.text, base_config()).xy_path);
+}
+
+TEST_CASE("Support-enabled overhang export preserves typed toolpaths", "[GCode][GCodeExportWorkflows]")
+{
+    auto config = base_config();
+    config.set_deserialize_strict({
+                {"enable_support", true},
+        {"support_type", "normal(auto)"},
+        {"support_on_build_plate_only", false},
+        {"support_base_pattern", "rectilinear"},
+    });
+    const auto out = fresh_custom_mesh_export(config, support_fixture());
+    REQUIRE_FALSE(out.text.empty());
+    REQUIRE(count_text(out.text, ";TYPE:Support") > 0);
+    auto disabled = config;
+    disabled.set_deserialize_strict({{"enable_support", false}});
+    const auto without_support = fresh_custom_mesh_export(disabled, support_fixture());
+    CHECK(count_text(without_support.text, ";TYPE:Support") == 0);
+    REQUIRE(motion_evidence(out.text, config).extrusion_moves > 0);
+}
+
+TEST_CASE("Wipe while retracting adds wipe travel without changing deposited material", "[GCode][GCodeExportWorkflows]")
+{
+    auto off = base_config();
+    off.set_deserialize_strict({{"wipe", false}, {"retraction_length", 1.2}});
+    auto on = off;
+    on.set_deserialize_strict({{"wipe", true}, {"wipe_distance", 2.0}});
+    const auto a = fresh_export(off);
+    const auto b = fresh_export(on);
+    REQUIRE(motion_evidence(a.text, off).extrusion_moves > 0);
+    require_same_material(motion_evidence(a.text, off), motion_evidence(b.text, on));
+    CHECK(count_text(b.text, "; wipe") > count_text(a.text, "; wipe"));
+}
+
+TEST_CASE("Firmware retraction changes emitted retraction commands", "[GCode][GCodeExportWorkflows]")
+{
+    auto regular = base_config();
+    regular.set_deserialize_strict({{"use_firmware_retraction", false}, {"retraction_length", 1.1}});
+    auto firmware = regular;
+    firmware.set_deserialize_strict({{"use_firmware_retraction", true}, {"retraction_length", 0.0}, {"z_hop", 1.0}});
+    const auto a = fresh_export(regular, true);
+    const auto b = fresh_export(firmware, true);
+    REQUIRE(count_text(a.text, "G1 E-") > 0);
+    REQUIRE(count_text(b.text, "G10") > 0);
+    CHECK(count_text(b.text, "G1 E-") < count_text(a.text, "G1 E-"));
+    CHECK(motion_evidence(b.text, firmware).z_only_moves > 0);
+}
+
+TEST_CASE("Retraction travel threshold partitions short and long moves", "[GCode][GCodeExportWorkflows]")
+{
+    auto low = base_config();
+    low.set_deserialize_strict({{"retraction_minimum_travel", 0.0}});
+    auto high = low;
+    high.set_deserialize_strict({{"retraction_minimum_travel", 1000.0}});
+    const auto a = fresh_export(low, true);
+    const auto b = fresh_export(high, true);
+    REQUIRE(motion_evidence(a.text, low).extrusion_moves > 0);
+    REQUIRE(count_text(a.text, "G1 E-") > count_text(b.text, "G1 E-"));
+    CHECK(motion_evidence(a.text, low).filament > 0.0);
+}
+
+TEST_CASE("Timelapse custom G-code is emitted at layer boundaries", "[GCode][GCodeExportWorkflows]")
+{
+    auto config = base_config();
+    config.set_deserialize_strict({{"time_lapse_gcode", "M117 SNAP-[layer_num]\n"}, {"timelapse_type", "0"}});
+    const auto out = fresh_export(config);
+    REQUIRE(executable_command_count(out.text, config, "M117", "SNAP-") > 0);
+    CHECK(executable_command_count(out.text, config, "M117", "SNAP-") == count_text(out.text, ";LAYER_CHANGE"));
+}
+
+TEST_CASE("Spiral vase raises Z during deposited perimeter motion", "[GCode][GCodeExportWorkflows]")
+{
+    auto config = base_config();
+    config.set_deserialize_strict({
+        {"spiral_mode", true},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+    });
+    const auto out = fresh_export(config);
+    const auto ordinary = fresh_export(base_config());
+    REQUIRE(motion_evidence(out.text, config).extrusion_moves > 0);
+    CHECK(count_text(out.text, ";LAYER_CHANGE") >= 1);
+    CHECK(rising_extrusions(out.text, config) > 0);
+    CHECK(rising_extrusions(ordinary.text, base_config()) == 0);
+}
+
+TEST_CASE("Arc fitting converts eligible perimeter motion to arcs", "[GCode][GCodeExportWorkflows]")
+{
+    auto off = base_config();
+    off.set_deserialize_strict({{"enable_arc_fitting", false}});
+    auto on = off;
+    on.set_deserialize_strict({{"enable_arc_fitting", true}, {"arc_fitting_tolerance", 0.01}});
+    const auto a = fresh_custom_mesh_export(off, make_cylinder(10., 4., PI / 90.));
+    const auto b = fresh_custom_mesh_export(on, make_cylinder(10., 4., PI / 90.));
+    REQUIRE(motion_evidence(a.text, off).extrusion_moves > 0);
+    REQUIRE(motion_evidence(b.text, on).extrusion_moves > 0);
+    const size_t arcs_off = count_text(a.text, "G2 ") + count_text(a.text, "G3 ");
+    const size_t arcs_on = count_text(b.text, "G2 ") + count_text(b.text, "G3 ");
+    REQUIRE(arcs_on > 0);
+    CHECK(arcs_on > arcs_off);
+}
+
+TEST_CASE("Layer-change code is ordered after the layer marker and before next extrusion", "[GCode][GCodeExportWorkflows]")
+{
+    auto config = base_config();
+    config.set_deserialize_strict({{"layer_change_gcode", "G92 E0\nM117 ORDER-[layer_num]\n"}});
+    const auto out = fresh_export(config);
+    const size_t marker = out.text.find(";LAYER_CHANGE");
+    const size_t hook = out.text.find("M117 ORDER-");
+    REQUIRE(marker != std::string::npos);
+    REQUIRE(hook != std::string::npos);
+    CHECK(hook > marker);
+    const auto motion = out.text.find("G1", hook);
+    REQUIRE(motion != std::string::npos);
+    CHECK(hook < motion);
+}
+
+TEST_CASE("Input shaping emission follows the configured firmware gate", "[GCode][GCodeExportWorkflows]")
+{
+    auto marlin = base_config();
+    marlin.set_deserialize_strict({{"emit_machine_limits_to_gcode", true}, {"input_shaping_emit", true}, {"input_shaping_freq_x", 45.0}, {"input_shaping_freq_y", 50.0}});
+    auto legacy = marlin;
+    legacy.set_deserialize_strict({{"gcode_flavor", "marlin"}});
+    const auto a = fresh_export(marlin);
+    const auto b = fresh_export(legacy);
+    REQUIRE(motion_evidence(a.text, marlin).extrusion_moves > 0);
+    REQUIRE(executable_command_count(a.text, marlin, "M593", "") > 0);
+    CHECK(executable_command_count(b.text, legacy, "M593", "") == 0);
+}
+
+
 } // namespace gcode_print_variance_contracts

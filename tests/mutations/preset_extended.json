@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "description": "Preset visibility, cloud metadata, inheritance, compatibility, and ownership regression mutations.",
+  "mutants": [
+    {
+      "id": "preset-installed-variant-visibility-reversed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "is_visible = app_config.get_variant(vendor->id, model, variant);",
+      "new": "is_visible = !app_config.get_variant(vendor->id, model, variant);",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-bed-legacy-zero-boundary-accepted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (bed_type_value > 0 && bed_type_value < BedType::btCount)",
+      "new": "if (bed_type_value >= 0 && bed_type_value < BedType::btCount)",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-diff-save-parent-gate-reversed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (parent_preset) {\n        new_preset = new Preset();",
+      "new": "if (!parent_preset) {\n        new_preset = new Preset();",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-json-missing-key-condition-reversed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (j.contains(keys[i]))",
+      "new": "if (!j.contains(keys[i]))",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-sync-time-direction-reversed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "preset->updated_time < update_time",
+      "new": "preset->updated_time > update_time",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-user-hold-filter-reversed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (preset.sync_info == \"hold\") continue;",
+      "new": "if (preset.sync_info != \"hold\") continue;",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-cloud-user-id-missing-accepted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (preset_values.find(BBL_JSON_KEY_USER_ID) == preset_values.end())",
+      "new": "if (preset_values.find(BBL_JSON_KEY_USER_ID) != preset_values.end())",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-physical-membership-empty-gate-reversed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (values.empty())\n        preset_names.clear();",
+      "new": "if (!values.empty())\n        preset_names.clear();",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-detached-path-base-flag-reversed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "return path_from_name(get_preset_bare_name(preset.name), is_base_preset(preset));",
+      "new": "return path_from_name(get_preset_bare_name(preset.name), !is_base_preset(preset));",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-project-duplicate-check-reversed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (this->find_preset(name, false))",
+      "new": "if (!this->find_preset(name, false))",
+      "test_filter": "PresetExtendedVariance"
+    },
+    {
+      "id": "preset-current-printer-selection-reversed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "auto config = &(this->config);",
+      "new": "auto config = &(preset_bundle->printers.get_edited_preset().config);",
+      "test_filter": "PresetExtendedVariance"
+    }
+  ]
+}

@@ -8196,3 +8196,506 @@ TEST_CASE("Preset bundle resets embedded presets without deleting user presets",
 }
 
 } // namespace preset_workflow_contracts
+
+namespace preset_extended_contracts {
+using Catch::Matchers::WithinAbs;
+namespace fs = boost::filesystem;
+
+namespace {
+
+PresetCollection make_print_collection()
+{
+    return PresetCollection(Preset::TYPE_PRINT, Preset::print_options(),
+                            static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+}
+
+Preset &stored_preset(PresetCollection &collection, const std::string &name)
+{
+    Preset *preset = collection.find_preset(name, false, true);
+    REQUIRE(preset != nullptr);
+    return *preset;
+}
+
+Preset &load_local_preset(PresetCollection &collection, const std::string &name, const std::string &inherits = {})
+{
+    DynamicPrintConfig config = collection.default_preset().config;
+    config.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true)->value = inherits;
+    return collection.load_preset({}, name, std::move(config), false);
+}
+
+void set_string(DynamicPrintConfig &config, const std::string &key, const std::string &value)
+{
+    config.option<ConfigOptionString>(key, true)->value = value;
+}
+
+void set_strings(DynamicPrintConfig &config, const std::string &key, const std::vector<std::string> &values)
+{
+    config.option<ConfigOptionStrings>(key, true)->values = values;
+}
+
+void set_floats(DynamicPrintConfig &config, const std::string &key, const std::vector<double> &values)
+{
+    config.option<ConfigOptionFloats>(key, true)->values = values;
+}
+
+void set_variant(DynamicPrintConfig &config, const std::string &model, const std::string &variant)
+{
+    set_string(config, "printer_model", model);
+    set_string(config, "printer_variant", variant);
+}
+
+VendorProfile::PrinterModel vendor_model(const std::string &name, const std::string &id,
+                                         const std::string &family = {})
+{
+    VendorProfile::PrinterModel model;
+    model.name = name;
+    model.model_id = id;
+    model.family = family;
+    model.variants.emplace_back("0.4");
+    model.variants.emplace_back("0.6");
+    return model;
+}
+
+} // namespace
+
+TEST_CASE("Preset visibility follows installed printer variants and renamed filament entries", "[Preset][PresetExtendedVariance]")
+{
+    PresetBundle bundle;
+    VendorProfile vendor("Acme");
+    vendor.name = "Acme";
+    vendor.models.push_back(vendor_model("Acme One", "ACME-1"));
+    bundle.vendors.emplace(vendor.id, vendor);
+
+    Preset printer(Preset::TYPE_PRINTER, "Acme One");
+    printer.vendor = &bundle.vendors.at("Acme");
+    printer.config = DynamicPrintConfig::full_print_config();
+    set_variant(printer.config, "Acme One", "0.4");
+    AppConfig app;
+    app.set_variant("Acme", "Acme One", "0.4", true);
+    printer.set_visible_from_appconfig(app);
+    CHECK(printer.is_visible);
+    app.set_variant("Acme", "Acme One", "0.4", false);
+    printer.set_visible_from_appconfig(app);
+    CHECK_FALSE(printer.is_visible);
+
+    Preset filament(Preset::TYPE_FILAMENT, "New PLA");
+    filament.vendor = &bundle.vendors.at("Acme");
+    filament.config = DynamicPrintConfig::full_print_config();
+    filament.renamed_from = {"Old PLA"};
+    app.set_section(AppConfig::SECTION_FILAMENTS, {{"Old PLA", "1"}});
+    filament.set_visible_from_appconfig(app);
+    CHECK(filament.is_visible);
+    app.set_section(AppConfig::SECTION_FILAMENTS, {{"Old PLA", ""}});
+    filament.set_visible_from_appconfig(app);
+    CHECK_FALSE(filament.is_visible);
+}
+
+TEST_CASE("Preset printer model metadata drives current type lidar calibration and bed fallback", "[Preset][PresetExtendedVariance]")
+{
+    PresetBundle bundle;
+    VendorProfile bbl("BBL");
+    bbl.name = "BBL";
+    bbl.models.push_back(vendor_model("X1", "BL-P001"));
+    bundle.vendors.emplace(bbl.id, bbl);
+    set_variant(bundle.printers.get_edited_preset().config, "X1", "0.4");
+
+    Preset process(Preset::TYPE_PRINT, "Process");
+    process.config = DynamicPrintConfig::full_print_config();
+    set_variant(process.config, "X1", "0.4");
+    CHECK(process.get_printer_type(&bundle) == "BL-P001");
+    CHECK(process.get_current_printer_type(&bundle) == "BL-P001");
+    set_string(process.config, "printer_model", "Other");
+    CHECK(process.get_current_printer_type(&bundle).empty());
+    set_string(process.config, "printer_model", "X1");
+    CHECK(process.has_lidar(&bundle));
+    CHECK(process.has_cali_lines(&bundle));
+    set_string(process.config, "default_bed_type", "3");
+    CHECK(process.get_default_bed_type(&bundle) == btPEI);
+    set_string(process.config, "default_bed_type", "0");
+    CHECK(process.get_default_bed_type(&bundle) == btPEI);
+    set_string(process.config, "default_bed_type", "bad-bed");
+    CHECK(process.get_default_bed_type(&bundle) == btPEI);
+    set_string(process.config, "default_bed_type", "");
+    CHECK(process.get_default_bed_type(&bundle) == btPC);
+
+    VendorProfile other("Acme");
+    other.name = "Acme";
+    other.models.push_back(vendor_model("Other", "OTHER"));
+    bundle.vendors.clear();
+    bundle.vendors.emplace(other.id, other);
+    CHECK_FALSE(process.has_lidar(&bundle));
+    CHECK_FALSE(process.has_cali_lines(&bundle));
+}
+
+TEST_CASE("Preset extruder keyset selection is explicit for supported and unknown types", "[Preset][PresetExtendedVariance]")
+{
+    for (const auto type : {Preset::TYPE_PRINT, Preset::TYPE_PRINTER, Preset::TYPE_FILAMENT, Preset::TYPE_INVALID}) {
+        std::string id, variant;
+        std::set<std::string> *one = nullptr, *two = nullptr;
+        Preset::get_extruder_names_and_keysets(type, id, variant, &one, &two);
+        REQUIRE(one != nullptr);
+        REQUIRE(two != nullptr);
+        if (type == Preset::TYPE_PRINT) {
+            CHECK(id == "print_extruder_id");
+            CHECK(variant == "print_extruder_variant");
+            CHECK(two->empty());
+        } else if (type == Preset::TYPE_PRINTER) {
+            CHECK(id == "printer_extruder_id");
+            CHECK(variant == "printer_extruder_variant");
+            CHECK_FALSE(one->empty());
+            CHECK_FALSE(two->empty());
+        } else if (type == Preset::TYPE_FILAMENT) {
+            CHECK(id.empty());
+            CHECK(variant == "filament_extruder_variant");
+            CHECK(two->empty());
+        } else {
+            CHECK(id.empty());
+            CHECK(variant.empty());
+            CHECK(one->empty());
+            CHECK(two->empty());
+        }
+    }
+}
+
+TEST_CASE("Preset differed save emits only child changes and rejects built-in presets", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection = make_print_collection();
+    Preset &parent = load_local_preset(collection, "Parent");
+    parent.setting_id = "parent-id";
+    Preset &child = load_local_preset(collection, "Child", "Parent");
+    child.config.opt<ConfigOptionFloat>("layer_height")->value = 0.31;
+
+    std::unique_ptr<Preset> diff(collection.get_preset_differed_for_save(child));
+    REQUIRE(diff != nullptr);
+    CHECK(diff->name == "Child");
+    CHECK_THAT(diff->config.opt_float("layer_height"), WithinAbs(0.31, 1e-6));
+    CHECK_FALSE(diff->config.has("wall_loops"));
+    CHECK(collection.get_preset_differed_for_save(collection.default_preset()) == nullptr);
+    std::unique_ptr<Preset> root_diff(collection.get_preset_differed_for_save(stored_preset(collection, "Parent")));
+    CHECK(root_diff == nullptr);
+}
+
+TEST_CASE("Preset differed value export carries cloud metadata and changed density", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &parent = load_local_preset(collection, "Base");
+    parent.setting_id = "base-id";
+    Preset &child = load_local_preset(collection, "Child", "Base");
+    child.type = Preset::TYPE_FILAMENT;
+    child.base_id = parent.setting_id;
+    set_floats(parent.config, "filament_density", {1.75});
+    child.config = parent.config;
+    child.inherits() = "Base";
+    child.setting_id = "cloud-id";
+    child.version = *Semver::parse("1.2.3");
+    child.updated_time = 77;
+    set_floats(child.config, "filament_density", {1.24});
+    std::map<std::string, std::string> values;
+    CHECK(collection.get_differed_values_to_update(child, values) == 0);
+    CHECK(values.count("filament_density") == 1);
+    CHECK(values.at(BBL_JSON_KEY_VERSION) == "1.2.0.3");
+    CHECK(values.at(ORCA_JSON_KEY_UPDATE_TIME) == "77");
+    CHECK(values.at(BBL_JSON_KEY_TYPE) == PRESET_IOT_FILAMENT_TYPE);
+    CHECK(values.at(BBL_JSON_KEY_BASE_ID) == "base-id");
+    CHECK(collection.get_differed_values_to_update(collection.default_preset(), values) == -1);
+}
+
+TEST_CASE("Project embedded presets resolve their parent and reject duplicate or unrelated entries", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection = make_print_collection();
+    Preset &parent = load_local_preset(collection, "Parent");
+    parent.config.opt<ConfigOptionFloat>("layer_height")->value = 0.2;
+    auto embedded = std::make_unique<Preset>(Preset::TYPE_PRINT, "Embedded");
+    embedded->is_project_embedded = true;
+    embedded->config = parent.config;
+    embedded->inherits() = "Parent";
+    embedded->config.opt<ConfigOptionFloat>("layer_height")->value = 0.33;
+    auto duplicate = std::make_unique<Preset>(*embedded);
+    duplicate->name = "Parent";
+    auto other = std::make_unique<Preset>(Preset::TYPE_FILAMENT, "Other");
+    other->is_project_embedded = true;
+    other->config = DynamicPrintConfig::full_print_config();
+    std::vector<Preset*> project{embedded.get(), duplicate.get(), other.get()};
+    PresetsConfigSubstitutions substitutions;
+    collection.load_project_embedded_presets(project, PRESET_PRINT_NAME, substitutions,
+                                              ForwardCompatibilitySubstitutionRule::Disable);
+    REQUIRE(collection.find_preset("Embedded") != nullptr);
+    CHECK_THAT(collection.find_preset("Embedded")->config.opt_float("layer_height"), WithinAbs(0.33, 1e-6));
+    CHECK(collection.size() == collection.num_default_presets() + 2);
+}
+
+TEST_CASE("Cloud sync metadata updates a base and inherited child and reports freshness", "[Preset][PresetExtendedVariance]")
+{
+    ScopedTemporaryDir dir("preset-extended-sync");
+    PresetCollection collection = make_print_collection();
+    collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+    Preset &base = load_local_preset(collection, "Base");
+    base.file = collection.path_for_preset(base);
+    base.setting_id = "old-base";
+    REQUIRE(base.save(nullptr));
+    Preset &child = load_local_preset(collection, "Child", "Base");
+    child.file = collection.path_for_preset(child);
+    child.setting_id = "child-id";
+    REQUIRE(child.save(&base.config));
+
+    CHECK(collection.need_sync("Child", "child-id", 1));
+    collection.set_sync_info_and_save("Base", "new-base", "update", 12, "user-7");
+    CHECK(base.setting_id == "new-base");
+    CHECK(base.user_id == "user-7");
+    CHECK(base.updated_time == 12);
+    CHECK(child.base_id == "new-base");
+    CHECK_FALSE(collection.need_sync("Child", "child-id", 0));
+    CHECK_FALSE(collection.need_sync("Base", "new-base", 12));
+}
+
+TEST_CASE("User preset export filters cloud states and saves root and inherited profiles", "[Preset][PresetExtendedVariance]")
+{
+    ScopedTemporaryDir dir("preset-extended-user-export");
+    PresetCollection collection = make_print_collection();
+    collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+    Preset &base = load_local_preset(collection, "Base");
+    base.setting_id = "base-id";
+    base.file = collection.path_for_preset(base);
+    REQUIRE(base.save(nullptr));
+    load_local_preset(collection, "Root").sync_info = "save";
+    load_local_preset(collection, "Child", "Base");
+    stored_preset(collection, "Child").sync_info = "save";
+    stored_preset(collection, "Child").base_id = "base-id";
+    stored_preset(collection, "Child").config.opt<ConfigOptionFloat>("layer_height")->value = 0.29;
+    Preset &hold = load_local_preset(collection, "Hold");
+    hold.setting_id = "hold-id";
+    hold.sync_info = "hold";
+
+    std::vector<Preset> users;
+    CHECK(collection.get_user_presets(nullptr, users) == 2);
+    CHECK(std::count_if(users.begin(), users.end(), [](const Preset &p) { return p.name == "Root"; }) == 1);
+    std::map<std::string, std::string> deletes;
+    collection.save_user_presets(dir.path().string(), PRESET_PRINT_NAME, deletes);
+    const Preset &root = stored_preset(collection, "Root");
+    const Preset &child = stored_preset(collection, "Child");
+    CHECK(fs::exists(root.file));
+    CHECK(fs::exists(child.file));
+    CHECK(child.base_id == "base-id");
+    CHECK(root.sync_info.empty());
+    CHECK(child.sync_info.empty());
+}
+
+TEST_CASE("Cloud user loading rejects incomplete metadata and installs a canonical root", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection = make_print_collection();
+    PresetsConfigSubstitutions substitutions;
+    CHECK_FALSE(collection.load_user_preset("MissingVersion", {{BBL_JSON_KEY_SETTING_ID, "id"}, {BBL_JSON_KEY_USER_ID, "u"}}, substitutions,
+                                            ForwardCompatibilitySubstitutionRule::Disable));
+    CHECK_FALSE(collection.load_user_preset("BadVersion", {{BBL_JSON_KEY_VERSION, "bad"}, {BBL_JSON_KEY_SETTING_ID, "id"}, {BBL_JSON_KEY_USER_ID, "u"}}, substitutions,
+                                            ForwardCompatibilitySubstitutionRule::Disable));
+    CHECK_FALSE(collection.load_user_preset("MissingId", {{BBL_JSON_KEY_VERSION, "1.0.0"}, {BBL_JSON_KEY_USER_ID, "u"}}, substitutions,
+                                            ForwardCompatibilitySubstitutionRule::Disable));
+    CHECK_FALSE(collection.load_user_preset("MissingUser", {{BBL_JSON_KEY_VERSION, "1.0.0"}, {BBL_JSON_KEY_SETTING_ID, "id"}}, substitutions,
+                                            ForwardCompatibilitySubstitutionRule::Disable));
+    std::map<std::string, std::string> values{{BBL_JSON_KEY_VERSION, "1.0.0"}, {BBL_JSON_KEY_SETTING_ID, "id"},
+                                               {BBL_JSON_KEY_USER_ID, "u"}, {ORCA_JSON_KEY_UPDATE_TIME, "4"},
+                                               {"layer_height", "0.27"}};
+    CHECK(collection.load_user_preset("CloudRoot", values, substitutions, ForwardCompatibilitySubstitutionRule::Disable));
+    const Preset *root = collection.find_preset("CloudRoot");
+    REQUIRE(root != nullptr);
+    CHECK(root->setting_id == "id");
+    CHECK(root->sync_info == "save");
+    CHECK_THAT(root->config.opt_float("layer_height"), WithinAbs(0.27, 1e-6));
+}
+
+TEST_CASE("Cloud user loading updates newer profiles while preserving dirty local options", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection = make_print_collection();
+    Preset &local = load_local_preset(collection, "Cloud");
+    local.setting_id = "old";
+    local.updated_time = 2;
+    local.config.opt<ConfigOptionFloat>("layer_height")->value = 0.31;
+    collection.select_preset_by_name("Cloud", true);
+    collection.get_edited_preset().config.opt<ConfigOptionInt>("wall_loops")->value = 7;
+    local.is_dirty = true;
+    collection.get_edited_preset().set_dirty(true);
+    std::map<std::string, std::string> values{{BBL_JSON_KEY_VERSION, "1.0.0"}, {BBL_JSON_KEY_SETTING_ID, "new"},
+                                               {BBL_JSON_KEY_USER_ID, "u"}, {ORCA_JSON_KEY_UPDATE_TIME, "3"},
+                                               {"layer_height", "0.22"}, {"wall_loops", "3"}};
+    PresetsConfigSubstitutions substitutions;
+    CHECK_FALSE(collection.load_user_preset("Cloud", values, substitutions, ForwardCompatibilitySubstitutionRule::Disable));
+    CHECK(local.setting_id == "new");
+    CHECK(local.updated_time == 3);
+    CHECK_THAT(local.config.opt_float("layer_height"), WithinAbs(0.22, 1e-6));
+    CHECK(collection.get_edited_preset().config.opt_int("wall_loops") == 7);
+}
+
+TEST_CASE("Preset validation rejects unknown inheritance and trusts system profiles", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection = make_print_collection();
+    Preset &system = load_local_preset(collection, "System");
+    system.is_system = true;
+    Preset &child = load_local_preset(collection, "Child", "System");
+    std::string inherit = "System";
+    CHECK(collection.validate_preset("System", inherit));
+    CHECK(collection.validate_preset("Child", inherit));
+    inherit = "Missing";
+    CHECK_FALSE(collection.validate_preset("Child", inherit));
+    inherit = "System";
+    CHECK(collection.validate_preset("Missing", inherit));
+    inherit.clear();
+    CHECK_FALSE(collection.validate_preset("Missing", inherit));
+    (void)child;
+}
+
+TEST_CASE("Filament grouping and type lookup prefer visible compatible system bases", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &pla = load_local_preset(collection, "PLA Base");
+    pla.type = Preset::TYPE_FILAMENT;
+    pla.is_system = true;
+    pla.filament_id = "pla-id";
+    set_strings(pla.config, "filament_type", {"PLA"});
+    Preset &high = load_local_preset(collection, "PETG Base");
+    high.type = Preset::TYPE_FILAMENT;
+    high.is_system = true;
+    high.filament_id = "petg-id";
+    set_strings(high.config, "filament_type", {"PETG"});
+    const size_t pla_idx = collection.first_visible_idx_by_type("PLA High Speed");
+    CHECK(collection.preset(pla_idx, true).name == "PLA Base");
+    CHECK(collection.filament_id_by_type("PLA High Speed") == "pla-id");
+    std::map<std::string, std::vector<Preset const *>> grouped = collection.get_filament_presets();
+    CHECK(grouped.count("pla-id") == 1);
+    CHECK(grouped.at("pla-id").size() == 1);
+    (void)high;
+}
+
+TEST_CASE("Printer diameter lookup and forced selection use actual edited printer state", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection(Preset::TYPE_PRINTER, Preset::printer_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &a = load_local_preset(collection, "A");
+    a.type = Preset::TYPE_PRINTER;
+    set_variant(a.config, "Model", "0.4");
+    Preset &b = load_local_preset(collection, "B");
+    b.type = Preset::TYPE_PRINTER;
+    set_variant(b.config, "Model", "0.6");
+    Preset &other = load_local_preset(collection, "Other");
+    other.type = Preset::TYPE_PRINTER;
+    set_variant(other.config, "Other", "1.0");
+    collection.select_preset_by_name("A", true);
+    CHECK(collection.diameters_of_selected_printer() == std::vector<std::string>{"0.4", "0.6"});
+    CHECK(collection.select_preset_by_name("B", false));
+    CHECK_FALSE(collection.select_preset_by_name("B", false));
+    CHECK(collection.select_preset_by_name("B", true));
+}
+
+TEST_CASE("Preset parent vendor lookup follows inheritance and base identity", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection = make_print_collection();
+    VendorProfile vendor("Acme");
+    vendor.name = "Acme";
+    collection.load_preset({}, "Parent", collection.default_preset().config, false);
+    Preset *parent_before = collection.find_preset("Parent", false, true);
+    REQUIRE(parent_before != nullptr);
+    parent_before->vendor = &vendor;
+    Preset &child = load_local_preset(collection, "Child", "Parent");
+    Preset *parent = collection.find_preset("Parent", false, true);
+    REQUIRE(parent != nullptr);
+    CHECK(collection.get_preset_parent(child) == parent);
+    CHECK(collection.get_preset_base(child) == parent);
+    CHECK(collection.get_preset_with_vendor_profile(child).vendor == &vendor);
+    CHECK(collection.get_preset_with_vendor_profile(collection.default_preset()).vendor == nullptr);
+}
+
+TEST_CASE("Printer hold aliases are added and removed without changing preset identity", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &filament = load_local_preset(collection, "PLA");
+    filament.type = Preset::TYPE_FILAMENT;
+    filament.alias.clear();
+    filament.config.opt<ConfigOptionStrings>("compatible_printers", true)->values = {"Printer A"};
+    CHECK(collection.get_preset_alias(filament) == "PLA");
+    collection.set_printer_hold_alias("PLA", filament);
+    CHECK(collection.is_alias_exist("PLA", &filament));
+    CHECK(filament.name == "PLA");
+    collection.set_printer_hold_alias("PLA", filament, true);
+    CHECK_FALSE(collection.is_alias_exist("PLA", &filament));
+}
+
+TEST_CASE("Compatibility conditions accept valid predicates and fail open for malformed predicates", "[Preset][PresetExtendedVariance]")
+{
+    Preset filament(Preset::TYPE_FILAMENT, "PLA");
+    filament.config = DynamicPrintConfig::full_print_config();
+    set_strings(filament.config, "compatible_printers", {});
+    set_string(filament.config, "compatible_printers_condition", R"(printer_model == "X1")");
+    Preset printer(Preset::TYPE_PRINTER, "X1");
+    printer.config = DynamicPrintConfig::full_print_config();
+    set_string(printer.config, "printer_model", "X1");
+    CHECK(is_compatible_with_printer(PresetWithVendorProfile(filament, nullptr), PresetWithVendorProfile(printer, nullptr)));
+    set_string(printer.config, "printer_model", "Other");
+    CHECK_FALSE(is_compatible_with_printer(PresetWithVendorProfile(filament, nullptr), PresetWithVendorProfile(printer, nullptr)));
+    set_string(printer.config, "printer_model", "X1");
+    set_string(filament.config, "compatible_printers_condition", "(");
+    CHECK(is_compatible_with_printer(PresetWithVendorProfile(filament, nullptr), PresetWithVendorProfile(printer, nullptr)));
+    CHECK(is_compatible_with_printer(filament.config, Preset::TYPE_FILAMENT, printer.config, "X1"));
+}
+
+TEST_CASE("Physical printer config updates preserve typed fields and membership serialization", "[Preset][PresetExtendedVariance]")
+{
+    PhysicalPrinter printer("Office", PhysicalPrinterCollection(PhysicalPrinter::printer_options()).default_config());
+    printer.add_preset("0.4");
+    DynamicPrintConfig update = printer.config;
+    update.opt<ConfigOptionString>("print_host")->value = "new-host";
+    update.opt<ConfigOptionStrings>("preset_names")->values = {"0.6"};
+    printer.update_from_config(update);
+    CHECK(printer.config.opt_string("print_host") == "new-host");
+    CHECK(printer.preset_names == std::set<std::string>{"0.4", "0.6"});
+    printer.update_preset_names_in_config();
+    CHECK(printer.config.opt_string("preset_name") == "0.4;0.6");
+}
+
+TEST_CASE("Preset paths canonicalize names under the configured user directory", "[Preset][PresetExtendedVariance]")
+{
+    ScopedTemporaryDir dir("preset-extended-paths");
+    PresetCollection collection = make_print_collection();
+    collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+    CHECK(collection.path_from_name("Fine") == (dir.path() / PRESET_PRINT_NAME / "Fine.json").string());
+    CHECK(collection.path_from_name("Fine.json") == (dir.path() / PRESET_PRINT_NAME / "Fine.json").string());
+    CHECK(collection.path_from_name("Fine", true).find("Fine.json") != std::string::npos);
+    Preset &preset = load_local_preset(collection, "Fine");
+    CHECK(collection.path_for_preset(preset) == (dir.path() / PRESET_PRINT_NAME / "base" / "Fine.json").string());
+}
+
+TEST_CASE("Project embedded export returns independent diffs and reset only removes embedded entries", "[Preset][PresetExtendedVariance]")
+{
+    PresetCollection collection = make_print_collection();
+    Preset &parent = load_local_preset(collection, "Parent");
+    Preset &embedded = load_local_preset(collection, "Embedded", "Parent");
+    embedded.is_project_embedded = true;
+    embedded.config.opt<ConfigOptionFloat>("layer_height")->value = 0.28;
+    std::vector<Preset*> exported = collection.get_project_embedded_presets();
+    ScopeGuard cleanup([&exported] { for (Preset *preset : exported) delete preset; });
+    REQUIRE(exported.size() == 1);
+    CHECK(exported.front() != &embedded);
+    CHECK_THAT(exported.front()->config.opt_float("layer_height"), WithinAbs(0.28, 1e-6));
+    collection.select_preset_by_name("Embedded", true);
+    CHECK(collection.reset_project_embedded_presets());
+    CHECK(collection.find_preset("Embedded") == nullptr);
+    const Preset *retained_parent = collection.find_preset("Parent");
+    REQUIRE(retained_parent != nullptr);
+    CHECK_THAT(retained_parent->config.opt_float("layer_height"), WithinAbs(0.2, 1e-6));
+}
+
+TEST_CASE("Preset JSON value extraction reports missing and malformed files without partial success", "[Preset][PresetExtendedVariance]")
+{
+    ScopedTemporaryDir dir("preset-extended-json");
+    std::vector<std::string> keys{"name", "version"};
+    std::map<std::string, std::string> values;
+    CHECK(get_values_from_json((dir.path() / "missing.json").string(), keys, values) == 0);
+    std::ofstream((dir.path() / "bad.json").string()) << "not-json";
+    CHECK(get_values_from_json((dir.path() / "bad.json").string(), keys, values) == 0);
+    std::ofstream((dir.path() / "good.json").string()) << R"({"name":"One","version":"1.0.0"})";
+    CHECK(get_values_from_json((dir.path() / "good.json").string(), keys, values) == 2);
+    CHECK(values.at("name") == "One");
+}
+
+} // namespace preset_extended_contracts
