@@ -8699,3 +8699,378 @@ TEST_CASE("Preset JSON value extraction reports missing and malformed files with
 }
 
 } // namespace preset_extended_contracts
+
+namespace preset_bundle_ams_contracts {
+namespace {
+
+DynamicPrintConfig tray(const std::string &filament_id, const std::string &color,
+                        const std::string &type, const std::string &ams_id,
+                        const std::string &slot_id, bool changed = true,
+                        bool placeholder = false,
+                        std::vector<std::string> multi = {})
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_id", new ConfigOptionStrings({filament_id}));
+    config.set_key_value("filament_colour", new ConfigOptionStrings({color}));
+    config.set_key_value("filament_colour_type", new ConfigOptionStrings({"1"}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({type}));
+    config.set_key_value("filament_multi_colour", new ConfigOptionStrings(std::move(multi)));
+    config.set_key_value("ams_id", new ConfigOptionStrings({ams_id}));
+    config.set_key_value("slot_id", new ConfigOptionStrings({slot_id}));
+    config.set_key_value("filament_changed", new ConfigOptionBool(changed));
+    config.set_key_value("filament_slot_placeholder", new ConfigOptionBools({placeholder}));
+    return config;
+}
+
+Preset &system_filament(PresetBundle &bundle, const std::string &name,
+                        const std::string &id, const std::string &type)
+{
+    Preset &preset = bundle.filaments.load_preset({}, name,
+                                                  bundle.filaments.default_preset().config,
+                                                  false);
+    preset.is_system = true;
+    preset.is_visible = true;
+    preset.is_compatible = true;
+    preset.filament_id = id;
+    preset.config.option<ConfigOptionStrings>("filament_type", true)->values = { type };
+    return preset;
+}
+
+void project_slots(PresetBundle &bundle, std::vector<std::string> names,
+                   std::vector<std::string> colors)
+{
+    REQUIRE(names.size() == colors.size());
+    bundle.project_config.apply(FullPrintConfig::defaults());
+    bundle.prints.get_edited_preset().config.apply(FullPrintConfig::defaults());
+    bundle.filament_presets = std::move(names);
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = colors;
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour_type", true)->values.assign(colors.size(), "1");
+    bundle.project_config.option<ConfigOptionInts>("filament_map", true)->values.assign(colors.size(), 1);
+    bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values.assign(colors.size(), 0);
+    bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour", true)->values = colors;
+}
+
+void add_tray(PresetBundle &bundle, int index, DynamicPrintConfig config)
+{
+    bundle.filament_ams_list.emplace(index, std::move(config));
+}
+
+} // namespace
+
+TEST_CASE("AMS sync replaces physical slots with matched IDs and parallel metadata",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
+    project_slots(bundle, {"Old A", "Old B"}, {"#000000", "#000000"});
+    add_tray(bundle, 0, tray("PLA-ID", "#112233", "PLA", "0", "0", true, false, {"#112233"}));
+    add_tray(bundle, 1, tray("PETG-ID", "#445566", "PETG", "0", "1", true, false, {"#445566"}));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA", "Generic PETG"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#112233", "#445566"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour_type")->values ==
+          std::vector<std::string>{"1", "1"});
+    CHECK(unknowns.empty());
+}
+
+TEST_CASE("AMS sync retains the previous preset and reports an unknown material",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing"}, {"#AAAAAA"});
+    add_tray(bundle, 0, tray("MISSING-ID", "#123456", "Nylon", "0", "2"));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    REQUIRE(bundle.filament_presets.size() == 1);
+    CHECK(bundle.filament_presets.front() == "Existing");
+    REQUIRE(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values.size() == 1);
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values.front() == "#123456");
+    REQUIRE(unknowns.size() == 1);
+    CHECK(unknowns.front().first == &bundle.filament_ams_list.begin()->second);
+    CHECK_FALSE(unknowns.front().second.empty());
+}
+
+TEST_CASE("AMS unchanged slots preserve their selected preset while refreshing color",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing"}, {"#AAAAAA"});
+    add_tray(bundle, 0, tray("PLA-ID", "#ABCDEF", "PLA", "0", "0", false));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#ABCDEF"});
+}
+
+TEST_CASE("AMS placeholders preserve empty trays while loaded trays replace them",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing A", "Existing B"}, {"#AAAAAA", "#BBBBBB"});
+    add_tray(bundle, 0, tray("", "", "", "0", "0", true, true));
+    add_tray(bundle, 1, tray("PLA-ID", "#123456", "PLA", "0", "1"));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing A", "Generic PLA"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#AAAAAA", "#123456"});
+}
+
+TEST_CASE("AMS color-only index synchronization preserves names and mapped multi-colors",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
+    project_slots(bundle, {"PLA selected", "PETG selected"}, {"#000000", "#000000"});
+    add_tray(bundle, 0, tray("PLA-ID", "#101010", "PLA", "A", "0", true, false, {"#101010", "#202020"}));
+    add_tray(bundle, 1, tray("PETG-ID", "#303030", "PETG", "A", "1", true, false, {"#303030"}));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "0"}}, {1, {"A", "1"}}};
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, false, merge, true);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"PLA selected", "PETG selected"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#101010", "#303030"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_multi_colour")->values ==
+          std::vector<std::string>{"#101010 #202020", "#303030"});
+    CHECK(merge.is_empty());
+}
+
+TEST_CASE("AMS color-only synchronization falls back to tray order without a map",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"A", "B"}, {"#000000", "#000000"});
+    add_tray(bundle, 0, tray("PLA-ID", "#111111", "PLA", "A", "0"));
+    add_tray(bundle, 1, tray("PLA-ID", "#222222", "PLA", "A", "1"));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge, true);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"A", "B"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#111111", "#222222"});
+}
+
+TEST_CASE("AMS mapped synchronization appends unassigned trays and records duplicate mappings",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    add_tray(bundle, 0, tray("PLA-ID", "#111111", "PLA", "A", "0"));
+    add_tray(bundle, 1, tray("PETG-ID", "#222222", "PETG", "A", "0"));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "0"}}, {1, {"A", "0"}}};
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, true, merge);
+    REQUIRE(bundle.filament_presets.size() == 2);
+    CHECK(bundle.filament_presets.front() == "Generic PLA");
+    CHECK(bundle.filament_presets.back() == "Generic PETG");
+    REQUIRE(merge.merges.size() == 1);
+    CHECK(merge.merges.front() == std::vector<int>{0, 1});
+}
+
+TEST_CASE("AMS mapped synchronization does not append when append is disabled",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    add_tray(bundle, 0, tray("PLA-ID", "#111111", "PLA", "A", "0"));
+    add_tray(bundle, 1, tray("PETG-ID", "#222222", "PETG", "A", "1"));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "0"}}};
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, false, merge);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#111111"});
+}
+
+TEST_CASE("AMS unknown tray mapping is removed without corrupting existing slots",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    add_tray(bundle, 0, tray("", "#111111", "PLA", "A", "0"));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "0"}}};
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, false, merge);
+    CHECK(maps.empty());
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#000000"});
+}
+
+TEST_CASE("AMS multi-color vectors are serialized back into project configuration",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    add_tray(bundle, 0, tray("PLA-ID", "#AABBCC", "PLA", "A", "0", true, false,
+                             {"#AABBCC", "#CCDDEE", "#EEFF00"}));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_multi_colour")->values ==
+          std::vector<std::string>{"#AABBCC #CCDDEE #EEFF00"});
+}
+
+TEST_CASE("AMS empty input is a no-op for existing project slots",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    project_slots(bundle, {"Existing"}, {"#ABCDEF"});
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    CHECK(bundle.sync_ams_list(unknowns, false, maps, false, merge) == 0);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#ABCDEF"});
+}
+
+TEST_CASE("AMS overwrite clamps support selections beyond the synchronized slot count",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"A"}, {"#000000"});
+    const int selected = GENERATE(0, 1, 9);
+    bundle.prints.get_edited_preset().config.set_key_value("support_filament", new ConfigOptionInt(selected));
+    bundle.prints.get_edited_preset().config.set_key_value("support_interface_filament", new ConfigOptionInt(selected));
+    add_tray(bundle, 0, tray("PLA-ID", "#111111", "PLA", "A", "0"));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.prints.get_edited_preset().config.opt_int("support_filament") == (selected > 1 ? 0 : selected));
+    CHECK(bundle.prints.get_edited_preset().config.opt_int("support_interface_filament") == (selected > 1 ? 0 : selected));
+}
+
+TEST_CASE("Vendor configuration overwrite replaces app selections and filament values",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    AppConfig app;
+    app.set_section(AppConfig::SECTION_FILAMENTS, {{"Old PLA", "#000000"}});
+    app.set_vendors({{"OldVendor", {{"Old Model", {"0.4"}}}}});
+    const std::map<std::string, std::map<std::string, std::set<std::string>>> vendors{{"Custom", {}}};
+    const std::map<std::string, std::string> filaments{{"New PLA", "#123456"}};
+    ScopedTemporaryDir temporary("preset-bundle-vendor-overwrite");
+    ScopedDataDir data(temporary.path() / "data");
+    ScopedResourcesDir resources(temporary.path() / "resources");
+    fs::create_directories(temporary.path() / "resources" / PRESET_PROFILES_DIR);
+    fs::create_directories(temporary.path() / "data" / PRESET_SYSTEM_DIR);
+    REQUIRE(bundle.apply_vendor_config(vendors, filaments, &app, true));
+    CHECK(app.get_section(AppConfig::SECTION_FILAMENTS) ==
+          std::map<std::string, std::string>{{"New PLA", "#123456"}});
+    CHECK(app.vendors() == vendors);
+}
+
+TEST_CASE("Vendor configuration merge preserves old selections while adding new values",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    AppConfig app;
+    app.set_section(AppConfig::SECTION_FILAMENTS, {{"Old PLA", "#000000"}});
+    app.set_vendors({{"OldVendor", {{"Old Model", {"0.4"}}}}});
+    const std::map<std::string, std::map<std::string, std::set<std::string>>> vendors{{"Custom", {}}};
+    const std::map<std::string, std::string> filaments{{"New PLA", "#123456"}};
+    ScopedTemporaryDir temporary("preset-bundle-vendor-merge");
+    ScopedDataDir data(temporary.path() / "data");
+    ScopedResourcesDir resources(temporary.path() / "resources");
+    fs::create_directories(temporary.path() / "resources" / PRESET_PROFILES_DIR);
+    fs::create_directories(temporary.path() / "data" / PRESET_SYSTEM_DIR);
+    REQUIRE(bundle.apply_vendor_config(vendors, filaments, &app, false));
+    CHECK(app.get_section(AppConfig::SECTION_FILAMENTS) ==
+          std::map<std::string, std::string>{{"Old PLA", "#000000"}, {"New PLA", "#123456"}});
+    CHECK(app.vendors().at("OldVendor").at("Old Model") == std::set<std::string>{"0.4"});
+    CHECK(app.vendors().count("Custom") == 1);
+}
+
+TEST_CASE("Vendor configuration replaces a system filament when a vendor printer is selected",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    ScopedTemporaryDir temporary("preset-bundle-vendor");
+    ScopedDataDir data(temporary.path() / "data");
+    ScopedResourcesDir resources(temporary.path() / "resources");
+    fs::create_directories(temporary.path() / "resources" / PRESET_PROFILES_DIR);
+    fs::create_directories(temporary.path() / "data" / PRESET_SYSTEM_DIR);
+    std::ofstream((temporary.path() / "data" / PRESET_SYSTEM_DIR / "Acme.json").string())
+        << R"({"version":"1.0.0","name":"Acme","machine_model_list":[{"name":"Acme One","sub_path":"machine/model.json"}],"machine_list":[],"filament_list":[{"name":"Acme PLA","sub_path":"filament/pla.json"}]})";
+    fs::create_directories(temporary.path() / "data" / PRESET_SYSTEM_DIR / "Acme" / "machine");
+    fs::create_directories(temporary.path() / "data" / PRESET_SYSTEM_DIR / "Acme" / "filament");
+    std::ofstream((temporary.path() / "data" / PRESET_SYSTEM_DIR / "Acme" / "machine" / "model.json").string())
+        << R"({"type":"machine_model","name":"Acme One","nozzle_diameter":"0.4","default_materials":"Acme PLA"})";
+    std::ofstream((temporary.path() / "data" / PRESET_SYSTEM_DIR / "Acme" / "filament" / "pla.json").string())
+        << R"({"type":"filament","name":"Acme PLA","from":"system","instantiation":"true","filament_id":"ACME-PLA","filament_type":"PLA"})";
+    AppConfig app;
+    PresetBundle bundle;
+    bundle.vendors["Acme"].default_filaments.insert("Generic PLA");
+    const std::map<std::string, std::map<std::string, std::set<std::string>>> vendors{
+        {"Acme", {{"Acme One", {"0.4"}}}}};
+    const std::map<std::string, std::string> filaments{{"Generic PLA @System", "#101010"}};
+    REQUIRE(bundle.apply_vendor_config(vendors, filaments, &app, true));
+    CHECK(app.get_section(AppConfig::SECTION_FILAMENTS).count("Generic PLA @System") == 0);
+    CHECK(app.get_section(AppConfig::SECTION_FILAMENTS).count("Generic PLA") == 1);
+}
+
+
+TEST_CASE("Vendor configuration retains the system filament when a default printer is also selected",
+          "[Preset][PresetBundleAmsVariance]")
+{
+    ScopedTemporaryDir temporary("preset-bundle-vendor-default");
+    ScopedDataDir data(temporary.path() / "data");
+    ScopedResourcesDir resources(temporary.path() / "resources");
+    fs::create_directories(temporary.path() / "resources" / PRESET_PROFILES_DIR);
+    const fs::path system = temporary.path() / "data" / PRESET_SYSTEM_DIR;
+    fs::create_directories(system);
+    for (const std::string &vendor : {std::string("Acme"), std::string("Custom")}) {
+        fs::create_directories(system / vendor / "machine");
+        std::ofstream((system / (vendor + ".json")).string())
+            << "{\"version\":\"1.0.0\",\"name\":\"" << vendor
+            << "\",\"machine_model_list\":[{\"name\":\"" << vendor
+            << " One\",\"sub_path\":\"machine/model.json\"}]}";
+        std::ofstream((system / vendor / "machine" / "model.json").string())
+            << "{\"type\":\"machine_model\",\"name\":\"" << vendor
+            << " One\",\"nozzle_diameter\":\"0.4\"}";
+    }
+
+    AppConfig app;
+    PresetBundle bundle;
+    bundle.vendors["Acme"].default_filaments.insert("Generic PLA");
+    const std::map<std::string, std::map<std::string, std::set<std::string>>> vendors{
+        {"Acme", {{"Acme One", {"0.4"}}}},
+        {"Custom", {{"Custom One", {"0.4"}}}}};
+    const std::map<std::string, std::string> filaments{{"Generic PLA @System", "#101010"}};
+    REQUIRE(bundle.apply_vendor_config(vendors, filaments, &app, true));
+    CHECK(app.get_section(AppConfig::SECTION_FILAMENTS).count("Generic PLA @System") == 1);
+    CHECK(app.get_section(AppConfig::SECTION_FILAMENTS).count("Generic PLA") == 1);
+}
+
+} // namespace preset_bundle_ams_contracts

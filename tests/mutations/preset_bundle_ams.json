@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "AMS slot synchronization and vendor-selection contracts.",
+  "mutants": [
+    {
+      "id": "ams-unchanged-slot-branch-reversed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (!filament_changed && this->filament_presets.size() > ams_filament_presets.size()) {",
+      "new": "if (filament_changed && this->filament_presets.size() > ams_filament_presets.size()) {",
+      "test_filter": "PresetBundleAmsVariance"
+    },
+    {
+      "id": "ams-append-gate-reversed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (need_append_colors.size() > 0 && enable_append) {",
+      "new": "if (need_append_colors.size() > 0 && !enable_append) {",
+      "test_filter": "PresetBundleAmsVariance"
+    },
+    {
+      "id": "ams-placeholder-merge-gate-reversed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (has_placeholders) {",
+      "new": "if (!has_placeholders) {",
+      "test_filter": "PresetBundleAmsVariance"
+    },
+    {
+      "id": "ams-support-filament-clamp-reversed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (support_filament_opt->value > filament_color_type->values.size())",
+      "new": "if (support_filament_opt->value < filament_color_type->values.size())",
+      "test_filter": "PresetBundleAmsVariance"
+    },
+    {
+      "id": "ams-color-only-fallback-gate-reversed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (!use_map || maps.empty() || !mapped_any) {",
+      "new": "if (use_map && !maps.empty() && mapped_any) {",
+      "test_filter": "PresetBundleAmsVariance"
+    },
+    {
+      "id": "vendor-overwrite-gate-reversed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (overwrite) {",
+      "new": "if (!overwrite) {",
+      "test_filter": "PresetBundleAmsVariance"
+    },
+    {
+      "id": "vendor-printer-detection-reversed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (vendor != PresetBundle::ORCA_DEFAULT_BUNDLE && !models.empty()) {",
+      "new": "if (vendor == PresetBundle::ORCA_DEFAULT_BUNDLE && !models.empty()) {",
+      "test_filter": "PresetBundleAmsVariance"
+    },
+    {
+      "id": "vendor-default-printer-retention-reversed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (has_default_bundle_printer) {",
+      "new": "if (!has_default_bundle_printer) {",
+      "test_filter": "PresetBundleAmsVariance"
+    }
+  ]
+}
