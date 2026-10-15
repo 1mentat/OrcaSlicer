@@ -1278,7 +1278,10 @@ elseif (MSVC AND NOT IS_CLANG_CL)
     add_compile_options(/W3 /we4715)
 endif ()
 
+include(cmake/SlicerCoverage.cmake)
 add_subdirectory(src)
+slicer_enable_llvm_source_coverage(libslic3r)
+slicer_enable_llvm_source_coverage(libslic3r_cgal)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT OrcaSlicer_app_gui)
 
 add_dependencies(gettext_make_pot hintsToPot)
@@ -1289,6 +1292,26 @@ endif()
 
 if(BUILD_TESTS)
     add_subdirectory(tests)
+    if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+        # FlushVolCalc normally obtains this implementation from the UI
+        # library. Retaining every slicer object exposes that dependency in
+        # headless tests too; link the real conversion implementation.
+        find_package(wxWidgets REQUIRED COMPONENTS base core)
+        add_library(slicer_coverage_support STATIC src/slic3r/Utils/ColorSpaceConvert.cpp)
+        target_include_directories(slicer_coverage_support SYSTEM PRIVATE ${wxWidgets_INCLUDE_DIRS})
+        target_compile_definitions(slicer_coverage_support PRIVATE ${wxWidgets_DEFINITIONS})
+        separate_arguments(_slicer_coverage_wx_flags NATIVE_COMMAND "${wxWidgets_CXX_FLAGS}")
+        target_compile_options(slicer_coverage_support PRIVATE ${_slicer_coverage_wx_flags})
+        target_link_libraries(slicer_coverage_support PRIVATE Boost::headers ${wxWidgets_LIBRARIES})
+    endif()
+    foreach(_slicer_test IN ITEMS libslic3r_tests fff_print_tests sla_print_tests libnest2d_tests filament_group_tests)
+        slicer_enable_llvm_source_coverage(${_slicer_test})
+        slicer_force_link_static_library(${_slicer_test} libslic3r)
+        slicer_force_link_static_library(${_slicer_test} libslic3r_cgal)
+        if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+            target_link_libraries(${_slicer_test} slicer_coverage_support)
+        endif()
+    endforeach()
     if (NOT SLIC3R_BUNDLED_WARNINGS)
         # Catch2 is vendored under tests/ and sets its own warning flags too.
         orcaslicer_silence_third_party_warnings("${CMAKE_CURRENT_SOURCE_DIR}/tests/catch2")

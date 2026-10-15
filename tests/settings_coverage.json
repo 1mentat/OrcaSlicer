@@ -1,0 +1,403 @@
+{
+  "schema_version": 1,
+  "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
+  "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
+  "entries": {
+    "sparse_infill_pattern": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["enum_values", "pipeline_oracle", "interaction_matrix"],
+      "reason": "Every registered sparse pattern is deserialized and required to emit sparse-role geometry; rectilinear and gyroid are also exercised with both wall generators as a bounded interaction pair."
+    },
+    "top_surface_pattern": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["enum_values", "pipeline_oracle"],
+      "reason": "Every registered top pattern is deserialized and required to emit top-solid geometry, with monotonic and concentric output compared."
+    },
+    "bottom_surface_pattern": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["enum_values", "pipeline_oracle"],
+      "reason": "Every registered bottom pattern is deserialized and required to emit bottom-surface geometry, with monotonic and concentric output compared."
+    },
+    "wall_generator": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["enum_values", "pipeline_oracle", "interaction_matrix"],
+      "reason": "Classic and Arachne are deserialized, sliced on a ledged fixture, and required to produce distinct perimeter evidence; each is paired with two sparse patterns."
+    },
+    "ensure_vertical_shell_thickness": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["enum_values", "pipeline_oracle"],
+      "reason": "Every registered shell-thickness mode is deserialized and sliced; none and all must produce distinct solid-infill evidence."
+    },
+    "seam_position": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["enum_values", "pipeline_oracle"],
+      "reason": "Every registered seam position is deserialized and sliced; nearest and random must move the first outer-wall start in emitted G-code."
+    },
+    "sparse_infill_density": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["boundary_values", "pipeline_oracle"],
+      "reason": "Zero, nominal, and full density are applied to a real slice and checked for absent sparse geometry, sparse geometry, and solid geometry respectively."
+    },
+    "wall_loops": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["boundary_values", "pipeline_oracle"],
+      "reason": "Zero, one, and four wall loops are applied to a real slice; perimeter counts and lengths distinguish disabled, nominal, and expanded behavior."
+    },
+    "top_shell_layers": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["boundary_values", "pipeline_oracle"],
+      "reason": "Zero, one, and two top-shell layers are applied to a real slice; top-role layer counts and lengths are checked."
+    },
+    "bottom_shell_layers": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["boundary_values", "pipeline_oracle"],
+      "reason": "Zero, one, and two bottom-shell layers are applied to a real slice; bottom-role layer counts and lengths are checked."
+    },
+    "layer_height": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["fixture_only"],
+      "reason": "The fixture sets a valid layer height so other settings can reach the slicing pipeline; it does not claim boundary or interaction coverage for layer height."
+    },
+    "initial_layer_print_height": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["fixture_only"],
+      "reason": "The fixture supplies a valid initial-layer height; no dedicated variance oracle claims its boundary behavior."
+    },
+    "top_shell_thickness": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["fixture_only"],
+      "reason": "The fixture sets top-shell thickness to zero to make layer-count behavior deterministic; no dedicated thickness variance oracle is claimed."
+    },
+    "bottom_shell_thickness": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["fixture_only"],
+      "reason": "The fixture sets bottom-shell thickness to zero to make layer-count behavior deterministic; no dedicated thickness variance oracle is claimed."
+    },
+    "top_surface_density": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["fixture_only"],
+      "reason": "The fixture enables top-surface material so surface-pattern tests have an observable role; no density boundary claim is made."
+    },
+    "bottom_surface_density": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["fixture_only"],
+      "reason": "The fixture enables bottom-surface material so surface-pattern tests have an observable role; no density boundary claim is made."
+    },
+    "gcode_comments": {
+      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
+      "tag": "[GCodeSettings]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "The exporter is run with comments enabled and disabled; the test requires comment text to change while the parsed motion stream remains identical."
+    },
+    "layer_change_gcode": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": ["fixture_only"],
+      "reason": "The fixture supplies a self-contained layer-change command for G-code generation; it does not claim custom-G-code boundary or interaction coverage."
+    },
+    "ironing_type": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The pipeline comparison covers no ironing and topmost ironing, requiring the latter to emit ironing paths; the top and solid enum values are covered elsewhere but are not claimed here."
+    },
+    "ironing_spacing": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The test compares zero and sub-minimum spacing with IRONING_SPACING_MIN in emitted ironing paths; it establishes the lower clamp behavior without claiming the full numeric boundary domain."
+    },
+    "filament_ironing_spacing": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The filament override path is compared at zero and sub-minimum spacing with IRONING_SPACING_MIN in emitted ironing paths; upper and per-filament boundary coverage is not claimed."
+    },
+    "solid_infill_rotate_template": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Layered solid-fill angle output is checked for a fixed step, a seven-angle list, and a two-layer run modifier; arbitrary template syntax is not claimed exhaustive."
+    },
+    "sparse_infill_rotate_template": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "A seven-angle sparse-fill template is required to repeat in the emitted layer sequence; other template forms and malformed strings are not claimed."
+    },
+    "solid_infill_direction": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Solid-fill angles at directions zero and thirty degrees are compared layer by layer, establishing the configured offset without claiming angular boundary coverage."
+    },
+    "sparse_infill_smooth_factor": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Multiple fill families compare unsmoothed and fully smoothed paths using point, turn, and connectivity oracles; intermediate percentages are not claimed exhaustive."
+    },
+    "fill_multiline": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Multiline fill tests exercise one, two, and three lines and check path connectivity and shape invariants; the complete integer range is not claimed."
+    },
+    "separated_infills": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "The same multi-body fixtures run with separation disabled and enabled, requiring body-local infill matching or the expected shared-origin difference."
+    },
+    "tpms_adaptive": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Adaptive TPMS tests exercise disabled, lobes, stepped shells, smooth blend, distance warp, and normal-axis modes with density and invariance oracles; normal_y and the full enum domain are not claimed exhaustive."
+    },
+    "tpms_interior_density": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Adaptive TPMS fixtures use five, twenty-five, and forty percent interior density and compare measured core and shell infill; numeric boundaries are not claimed."
+    },
+    "tpms_adaptive_gradient": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["enum_values", "pipeline_oracle"],
+      "reason": "The adaptive-gradient test runs linear, quadratic, and exponential and checks their measured surface-to-core ordering, covering every registered enum value."
+    },
+    "gyroid_optimized": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "Adaptive gyroid output is generated with optimization disabled and enabled and the complete printed sequence is compared."
+    },
+    "infill_direction": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The sparse anchor test sets a forty-five-degree direction and matches generated anchors against printed infill; angular boundaries are not claimed."
+    },
+    "align_infill_direction_to_model": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "The sparse anchor matrix runs both model-aligned states, including a rotated instance, and checks the emitted paths against generated anchors."
+    },
+    "only_one_wall_top": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "A three-wall fixture is sliced with the option disabled and enabled; the top-layer perimeter count must decrease when only one wall is allowed."
+    },
+    "only_one_wall_first_layer": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "A three-wall fixture is sliced with the option disabled and enabled; the first-layer perimeter count must decrease when only one wall is allowed."
+    },
+    "extra_perimeters_on_overhangs": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "An overhang fixture is sliced with extra overhang perimeters disabled and enabled; the enabled result must contain more perimeter paths."
+    },
+    "overhang_reverse": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "The overhang direction checksum is compared with reversal disabled and enabled, requiring a changed perimeter orientation."
+    },
+    "is_infill_first": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "Both ordering states are sliced and the emitted role sequence must begin with perimeter or infill accordingly."
+    },
+    "thick_bridges": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "A bridge fixture is sliced with thick bridges disabled and enabled; both emit bridge paths and the enabled path height must be larger."
+    },
+    "enable_arc_fitting": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "The same fixture is exported with arc fitting disabled and enabled; the G-code must contain zero versus positive G2/G3 moves."
+    },
+    "detect_thin_wall": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "A narrow wall fixture is sliced with thin-wall detection disabled and enabled; the enabled result must add thin-fill paths."
+    },
+    "fuzzy_skin_first_layer": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "External fuzzy skin is sliced with first-layer fuzz disabled and enabled; the emitted perimeter length must change."
+    },
+    "hole_to_polyhole": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "A cube-with-hole fixture is sliced with conversion disabled and enabled; the resulting hole vertex count must differ."
+    },
+    "hole_to_polyhole_twisted": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "A converted hole is sliced with twisted conversion disabled and enabled; the first-hole checksum must change."
+    },
+    "brim_use_efc_outline": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "A compensated brim fixture is sliced with EFC outline compensation disabled and enabled; both brims must exist and their outline checksum must differ."
+    },
+    "center_of_surface_pattern": {
+      "test": "tests/fff_print/test_printobject.cpp",
+      "tag": "[PrintObject][SurfaceInfill][Regression]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The surface-centering regression generates each_surface, each_model, and each_assembly and requires a changed center to alter paths while a reslice matches a fresh slice; it does not claim every enum transition independently."
+    },
+    "enable_support": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "Support-disabled and support-enabled overhang slices are compared and require zero versus positive support points."
+    },
+    "support_on_build_plate_only": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "Both states are sliced on a two-tier fixture and must produce different positive support-point counts."
+    },
+    "support_interface_top_layers": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Configured top interface counts one, two, three, four, and six are checked against emitted support-interface layers; the full integer range is not claimed."
+    },
+    "support_interface_bottom_layers": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Bottom interface counts zero, one, three, and six plus the top-count sentinel are checked in emitted support layers; full boundary coverage is not claimed."
+    },
+    "support_interface_pattern": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Support interface tests exercise auto, rectilinear, rectilinear interlaced, concentric, and grid mappings through direct and emitted-angle oracles; spiralinset is not claimed."
+    },
+    "support_bottom_interface_spacing": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Bottom interface spacing zero and four are compared across support styles and require denser output at zero; numeric boundaries are not claimed."
+    },
+    "gcode_flavor": {
+      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
+      "tag": "[GCodeSettings]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Relative and absolute extrusion are checked for Marlin, Klipper, and RepRapFirmware with parsed deposition and path totals; the remaining registered firmware flavors are not claimed."
+    },
+    "use_relative_e_distances": {
+      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
+      "tag": "[GCodeSettings]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "Both relative and absolute extrusion modes are exported and parsed, requiring M83 versus M82 and equal positive deposited material and XY path length."
+    },
+    "nozzle_temperature_initial_layer": {
+      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
+      "tag": "[GCodeSettings]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The exporter sets an initial-layer temperature of 211 and requires that value in emitted thermal commands; the integer range is not claimed."
+    },
+    "nozzle_temperature": {
+      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
+      "tag": "[GCodeSettings]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The exporter sets a regular nozzle temperature of 203 and requires that value in emitted thermal commands; the integer range is not claimed."
+    },
+    "initial_layer_fan_speed": {
+      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
+      "tag": "[GCodeSettings]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The exporter sets initial-layer fan speed zero and requires an emitted fan-off command; the full percent domain is not claimed."
+    },
+    "full_fan_speed_layer": {
+      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
+      "tag": "[GCodeSettings]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The exporter sets the full-speed transition at layer two and requires full-speed fan output; other transition counts are not claimed."
+    },
+    "close_fan_the_first_x_layers": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The cooling pipeline holds the fan off for five configured initial layers and requires an explicit M106 S0 command; boundary counts are not claimed."
+    },
+    "fan_min_speed": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The multifilament cooling matrix varies minimum fan speeds by extruder variant and requires the corresponding emitted PWM percentages; numeric boundaries are not claimed."
+    },
+    "fan_max_speed": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "The multifilament cooling matrix varies maximum fan speeds by extruder variant and requires the corresponding emitted PWM percentages; numeric boundaries are not claimed."
+    },
+    "emit_machine_limits_to_gcode": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[GCodeWriter]",
+      "dimensions": ["pipeline_oracle"],
+      "reason": "Machine-envelope tests enable the option and require M201, M203, M204, and M205 limits in emitted G-code; the disabled branch is not claimed."
+    },
+    "machine_max_acceleration_extruding": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[GCodeWriter]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Single- and multi-extruder machine-envelope tests set extruding acceleration values and require the selected maximum in M204 output; numeric boundaries are not claimed."
+    },
+    "machine_max_acceleration_retracting": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[GCodeWriter]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Single- and multi-extruder machine-envelope tests set retracting acceleration values and require the selected maximum in M204 output; numeric boundaries are not claimed."
+    },
+    "machine_max_acceleration_travel": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[GCodeWriter]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Single- and multi-extruder machine-envelope tests set travel acceleration values and require the selected maximum in M204 output; numeric boundaries are not claimed."
+    },
+    "machine_max_junction_deviation": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[GCodeWriter]",
+      "dimensions": ["representative_values", "pipeline_oracle"],
+      "reason": "Machine-envelope tests set junction deviation values and require their selected maximum in M205 J output; numeric boundaries are not claimed."
+    }
+  }
+}

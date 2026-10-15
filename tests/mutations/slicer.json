@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Small source-reviewed production mutants for the ExPolygon, settings, pipeline, and wipe contracts.",
+  "mutants": [
+    {
+      "id": "expolygon-area-adds-hole-area",
+      "path": "src/libslic3r/ExPolygon.cpp",
+      "old": "a -= - hole.area();",
+      "new": "a -= hole.area();",
+      "description": "Treat a clockwise hole as positive area when subtracting it from the contour.",
+      "test_filter": "ExPolygon"
+    },
+    {
+      "id": "expolygon-contains-accepts-hole",
+      "path": "src/libslic3r/ExPolygon.cpp",
+      "old": "if (Slic3r::contains(hole, point, ! border_result))",
+      "new": "if (! Slic3r::contains(hole, point, ! border_result))",
+      "description": "Invert the hole containment guard so points inside a hole are accepted.",
+      "test_filter": "ExPolygon"
+    },
+    {
+      "id": "config-vector-resize-uses-last-value",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "T v = this->values./*back*/front();",
+      "new": "T v = this->values./*back*/back();",
+      "description": "Duplicate the last vector value during extension instead of the documented first value.",
+      "test_filter": "Config"
+    },
+    {
+      "id": "settings-vertical-shell-enum-renamed",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "def->enum_values.push_back(\"ensure_critical_only\");",
+      "new": "def->enum_values.push_back(\"ensure_critical\");",
+      "description": "Rename a registered shell mode so the settings matrix cannot deserialize the production enum.",
+      "test_filter": "SettingsVariance"
+    },
+    {
+      "id": "pipeline-top-shell-zero-still-fills",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "return config.top_shell_layers.value > 0;",
+      "new": "return config.top_shell_layers.value >= 0;",
+      "description": "Treat zero top shell layers as a top shell and emit top surface material.",
+      "test_filter": "SettingsVariance"
+    },
+    {
+      "id": "pipeline-bottom-shell-zero-still-fills",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "return config.bottom_shell_layers.value > 0;",
+      "new": "return config.bottom_shell_layers.value >= 0;",
+      "description": "Treat zero bottom shell layers as a bottom shell and emit bottom surface material.",
+      "test_filter": "SettingsVariance"
+    },
+    {
+      "id": "gcode-wipe-clip-grows-path",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "wipe_path.clip_end(wipe_path.length() - wipe_dist);",
+      "new": "wipe_path.clip_end(wipe_path.length() + wipe_dist);",
+      "description": "Clip the wipe path from the wrong end distance, changing the exported wipe trajectory.",
+      "test_filter": "Wipe"
+    }
+  ]
+}

@@ -2,6 +2,8 @@
 
 Rules for writing tests under `tests/`. [CATCH2.md](CATCH2.md) is the Catch2 reference. Building and running the suites is covered on the wiki, at <https://www.orcaslicer.com/wiki/developer_reference/how_to_test.html>.
 
+For LLVM coverage, settings inventory, and bounded mutation validation, follow the [Confidence runs](README.md#confidence-runs) commands and reports; keep their production source manifests, evidence map, and exact test filters aligned with the suite tags.
+
 ## The suites
 
 - `libslic3r`: the core library. Geometry, meshes, file formats, config and presets, Clipper, algorithms, data structures.
