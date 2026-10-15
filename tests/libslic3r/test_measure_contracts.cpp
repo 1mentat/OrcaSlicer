@@ -1,3 +1,6 @@
+#include "libslic3r/MeasureUtils.hpp"
+#include <initializer_list>
+#include <cstdint>
 #include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -282,3 +285,170 @@ TEST_CASE("Measuring groups cube facets into planar features and honors world tr
     CHECK(edge_pick->get_type() == SurfaceFeatureType::Edge);
     CHECK(measuring.get_feature(cube_mesh.indices.size(), Vec3d::Zero(), Transform3d::Identity(), false) == std::nullopt);
 }
+
+namespace measure_utils_contracts {
+using Catch::Matchers::WithinRel;
+namespace {
+void check_poly(const Polynomial1 &p, std::initializer_list<double> expected)
+{
+    REQUIRE(p.GetDegree() + 1 == expected.size());
+    std::size_t i = 0;
+    for (double coefficient : expected)
+        CHECK_THAT(p[static_cast<uint32_t>(i++)], WithinAbs(coefficient, 1e-12));
+}
+
+double eval_reference(std::initializer_list<double> coefficients, double x)
+{
+    double result = 0.0;
+    double power = 1.0;
+    for (double coefficient : coefficients) {
+        result += coefficient * power;
+        power *= x;
+    }
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("MeasureUtils polynomials retain coefficients and evaluate independently", "[Measure][MeasureUtilsExtended]")
+{
+    Polynomial1 p{2.0, -3.0, 0.5};
+    CHECK(p.GetDegree() == 2);
+    for (double x : {-2.0, -0.25, 0.0, 1.5, 4.0})
+        CHECK_THAT(p(x), WithinRel(eval_reference({2.0, -3.0, 0.5}, x), 1e-12));
+
+    Polynomial1 reduced{4.0, 0.0, 0.0};
+    CHECK(reduced.GetDegree() == 0);
+    CHECK_THAT(reduced(2.5), WithinAbs(4.0, 1e-12));
+    Polynomial1 zero_leading{0.0, 0.0, 0.0};
+    CHECK(zero_leading.GetDegree() == 0);
+    CHECK_THAT(zero_leading(11.0), WithinAbs(0.0, 1e-12));
+}
+
+TEST_CASE("MeasureUtils polynomial arithmetic matches convolution and pointwise sums", "[Measure][MeasureUtilsExtended]")
+{
+    const Polynomial1 p{1.0, 2.0, 3.0};
+    const Polynomial1 q{4.0, -1.0, 0.0, 2.0};
+    const Polynomial1 sum = q + p;
+    const Polynomial1 difference = q - p;
+    const Polynomial1 product = p * q;
+    check_poly(sum, {5.0, 1.0, 3.0, 2.0});
+    check_poly(difference, {3.0, -3.0, -3.0, 2.0});
+    check_poly(product, {4.0, 7.0, 10.0, -1.0, 4.0, 6.0});
+    for (double x : {-1.0, 0.5, 2.0})
+        CHECK_THAT(product(x), WithinRel(p(x) * q(x), 1e-12));
+
+    const Polynomial1 scaled = 2.5 * p;
+    check_poly(scaled, {2.5, 5.0, 7.5});
+}
+
+TEST_CASE("MeasureUtils mutable polynomial degree and coefficient reset are explicit", "[Measure][MeasureUtilsExtended]")
+{
+    Polynomial1 p(4);
+    CHECK(p.GetDegree() == 4);
+    p.SetCoefficients(3.0);
+    CHECK(p.GetDegree() == 4);
+    CHECK_THAT(p(2.0), WithinAbs(3.0 * 31.0, 1e-12));
+    p[4] = 0.0;
+    p.EliminateLeadingZeros();
+    CHECK(p.GetDegree() == 3);
+    p[3] = 0.0;
+    p.EliminateLeadingZeros();
+    CHECK(p.GetDegree() == 2);
+}
+
+TEST_CASE("MeasureUtils root finder handles linear, constant, and zero polynomials", "[Measure][MeasureUtilsExtended]")
+{
+    const double linear[] = {-6.0, 2.0};
+    double roots[4] = {};
+    CHECK(RootsPolynomial::Find(1, linear, 64, roots) == 1);
+    CHECK_THAT(roots[0], WithinAbs(3.0, 1e-12));
+
+    const double constant[] = {7.0};
+    CHECK(RootsPolynomial::Find(0, constant, 64, roots) == 0);
+    const double zero[] = {0.0, 0.0, 0.0};
+    CHECK(RootsPolynomial::Find(2, zero, 64, roots) == 1);
+    CHECK_THAT(roots[0], WithinAbs(0.0, 1e-12));
+    CHECK(RootsPolynomial::Find(-1, linear, 64, roots) == 0);
+    CHECK(RootsPolynomial::Find(1, nullptr, 64, roots) == 0);
+}
+
+TEST_CASE("MeasureUtils root finder returns all simple quadratic roots", "[Measure][MeasureUtilsExtended]")
+{
+    const double coefficients[] = {6.0, -5.0, 1.0};
+    double roots[4] = {};
+    const int count = RootsPolynomial::Find(2, coefficients, 128, roots);
+    REQUIRE(count == 2);
+    std::sort(roots, roots + count);
+    CHECK_THAT(roots[0], WithinAbs(2.0, 1e-8));
+    CHECK_THAT(roots[1], WithinAbs(3.0, 1e-8));
+    CHECK_THAT(coefficients[0] + coefficients[1] * roots[0] + roots[0] * roots[0], WithinAbs(0.0, 1e-7));
+    CHECK_THAT(coefficients[0] + coefficients[1] * roots[1] + roots[1] * roots[1], WithinAbs(0.0, 1e-7));
+}
+
+TEST_CASE("MeasureUtils root finder handles repeated and leading-zero equations", "[Measure][MeasureUtilsExtended]")
+{
+    const double repeated[] = {-4.0, 4.0, -1.0};
+    double roots[4] = {};
+    const int repeated_count = RootsPolynomial::Find(2, repeated, 128, roots);
+    REQUIRE(repeated_count >= 1);
+    REQUIRE(repeated_count <= 2);
+    for (int i = 0; i < repeated_count; ++i)
+        CHECK_THAT(roots[i], WithinAbs(2.0, 1e-7));
+
+    const double leading_zero[] = {-2.0, 1.0, 0.0};
+    const int count = RootsPolynomial::Find(2, leading_zero, 128, roots);
+    REQUIRE(count == 1);
+    CHECK_THAT(roots[0], WithinAbs(2.0, 1e-8));
+}
+
+TEST_CASE("MeasureUtils interval root finder honors endpoint and bracket contracts", "[Measure][MeasureUtilsExtended]")
+{
+    const double coefficients[] = {-2.0, 1.0};
+    double root = -1.0;
+    CHECK(RootsPolynomial::Find(1, coefficients, 2.0, 4.0, 64, root));
+    CHECK_THAT(root, WithinAbs(2.0, 1e-12));
+    CHECK_FALSE(RootsPolynomial::Find(1, coefficients, 3.0, 4.0, 64, root));
+    CHECK_FALSE(RootsPolynomial::Find(1, coefficients, 4.0, 3.0, 64, root));
+
+    const double quadratic[] = {-6.0, 0.0, 1.0};
+    CHECK(RootsPolynomial::Find(2, quadratic, 0.0, 3.0, 64, root));
+    CHECK_THAT(root, WithinAbs(std::sqrt(6.0), 1e-8));
+}
+
+TEST_CASE("MeasureUtils bisection converges on a narrow root interval", "[Measure][MeasureUtilsExtended]")
+{
+    const double coefficients[] = {-0.125, 0.0, 1.0};
+    double root = 0.0;
+    REQUIRE(RootsPolynomial::Find(2, coefficients, 0.0, 1.0, 128, root));
+    CHECK_THAT(root, WithinAbs(0.3535533905932738, 1e-8));
+}
+
+TEST_CASE("MeasureUtils orthogonal vectors satisfy dot and length invariants", "[Measure][MeasureUtilsExtended]")
+{
+    for (const Vec3d &v : {Vec3d(5.0, 1.0, 2.0), Vec3d(1.0, 5.0, 2.0), Vec3d(1.0, 2.0, 5.0), Vec3d(-3.0, 4.0, -2.0)}) {
+        const Vec3d u = get_orthogonal(v, false);
+        const Vec3d unit = get_orthogonal(v, true);
+        CHECK_THAT(u.dot(v), WithinAbs(0.0, 1e-12));
+        CHECK_THAT(unit.dot(v), WithinAbs(0.0, 1e-12));
+        CHECK_THAT(unit.norm(), WithinAbs(1.0, 1e-12));
+        int max_index = 0;
+        if (std::abs(v[1]) > std::abs(v[max_index])) max_index = 1;
+        if (std::abs(v[2]) > std::abs(v[max_index])) max_index = 2;
+        const int next_index = (max_index + 1) % 3;
+        CHECK_THAT(u.norm(), WithinAbs(std::sqrt(v[max_index] * v[max_index] +
+                                                  v[next_index] * v[next_index]), 1e-12));
+    }
+}
+
+TEST_CASE("MeasureUtils orthogonal choice is deterministic at tied maxima", "[Measure][MeasureUtilsExtended]")
+{
+    const Vec3d v(3.0, 3.0, 1.0);
+    const Vec3d u = get_orthogonal(v, false);
+    CHECK_THAT(u[0], WithinAbs(3.0, 1e-12));
+    CHECK_THAT(u[1], WithinAbs(-3.0, 1e-12));
+    CHECK_THAT(u[2], WithinAbs(0.0, 1e-12));
+}
+
+
+} // namespace measure_utils_contracts
