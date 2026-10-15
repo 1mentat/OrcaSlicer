@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "description": "Stream project metadata, paths, indices and encoded thumbnail contracts.",
+  "mutants": [
+    {
+      "id": "pick-path-copy-to-bool",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "            plate->pick_file = it->second->pick_file;",
+      "new": "            plate->pick_file = it->second->pick_file.empty();",
+      "test_filter": "3MFStream"
+    },
+    {
+      "id": "bbox-path-copy-to-bool",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "            plate->pattern_bbox_file = it->second->pattern_bbox_file;",
+      "new": "            plate->pattern_bbox_file = it->second->pattern_bbox_file.empty();",
+      "test_filter": "3MFStream"
+    },
+    {
+      "id": "plate-lock-copy-dropped",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "            plate->locked = it->second->locked;",
+      "new": "            plate->locked = false;",
+      "test_filter": "3MFStream"
+    },
+    {
+      "id": "plate-index-unshifted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "            plate->plate_index = it->second->plate_index-1;",
+      "new": "            plate->plate_index = it->second->plate_index;",
+      "test_filter": "3MFStream"
+    },
+    {
+      "id": "thumbnail-path-dropped",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "            plate->thumbnail_file = it->second->thumbnail_file;",
+      "new": "            plate->thumbnail_file = it->second->gcode_file;",
+      "test_filter": "3MFStream"
+    }
+  ]
+}

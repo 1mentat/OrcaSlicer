@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "description": "SLA orientation objectives, scaled instances, pads and cancellation.",
+  "mutants": [
+    {
+      "id": "rotfinder-misalignment-minimizes",
+      "path": "src/libslic3r/SLA/Rotfinder.cpp",
+      "old": "solver.to_max().optimize(",
+      "new": "solver.to_min().optimize(",
+      "test_filter": "Rotfinder"
+    },
+    {
+      "id": "rotfinder-elevated-support-maximizes",
+      "path": "src/libslic3r/SLA/Rotfinder.cpp",
+      "old": "auto result = solver.to_min().optimize(",
+      "new": "auto result = solver.to_max().optimize(",
+      "test_filter": "Rotfinder"
+    },
+    {
+      "id": "rotfinder-floor-support-direction",
+      "path": "src/libslic3r/SLA/Rotfinder.cpp",
+      "old": "return get_supportedness_onfloor_score(bp.mesh, tr);",
+      "new": "return -get_supportedness_onfloor_score(bp.mesh, tr);",
+      "test_filter": "Rotfinder"
+    },
+    {
+      "id": "rotfinder-min-z-uses-x-height",
+      "path": "src/libslic3r/SLA/Rotfinder.cpp",
+      "old": "return bounding_box_with_tr(chull.its, tr).size().z();",
+      "new": "return bounding_box_with_tr(chull.its, tr).size().x();",
+      "test_filter": "Rotfinder"
+    },
+    {
+      "id": "rotfinder-cancellation-ignored",
+      "path": "src/libslic3r/SLA/Rotfinder.cpp",
+      "old": "return ! params.statuscb()(-1);",
+      "new": "return false;",
+      "test_filter": "Rotfinder"
+    },
+    {
+      "id": "rotfinder-instance-scaling-ignored",
+      "path": "src/libslic3r/SLA/Rotfinder.cpp",
+      "old": "        mesh.transform(trafo_instance);",
+      "new": "        (void)trafo_instance;",
+      "test_filter": "Rotfinder"
+    },
+    {
+      "id": "rotfinder-pad-around-ignored",
+      "path": "src/libslic3r/SLA/Rotfinder.cpp",
+      "old": "    return opt_elevation < EPSILON || opt_padaround;",
+      "new": "    return opt_elevation < EPSILON;",
+      "test_filter": "Rotfinder"
+    }
+  ]
+}
