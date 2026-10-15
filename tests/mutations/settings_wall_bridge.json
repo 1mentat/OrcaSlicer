@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "description": "Bounded mutations for wall ordering, infill combination, and bridge setting behavior.",
+  "mutants": [
+    {
+      "id": "settings-alternate-extra-wall-gate",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "int loop_number = this->config->wall_loops + surface.extra_perimeters - 1;  // 0-indexed loops\n        int sparse_infill_density = this->config->sparse_infill_density.value;\n        if (this->config->alternate_extra_wall && this->layer_id % 2 == 1 && !m_spiral_vase && sparse_infill_density > 0) // add alternating extra wall",
+      "new": "int loop_number = this->config->wall_loops + surface.extra_perimeters - 1;  // 0-indexed loops\n        int sparse_infill_density = this->config->sparse_infill_density.value;\n        if (false) // add alternating extra wall",
+      "description": "Disables the alternating extra loop; the enabled odd-layer perimeter count contract should fail.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-combine-infill-enable-gate",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (enable_combine_infill == false || region.config().sparse_infill_density == 0.)",
+      "new": "if (false)",
+      "description": "Removes the setting gate so the disabled baseline would incorrectly combine sparse layers.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-combine-infill-height-cap",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "nozzle_diameter = infill_combination_max_layer_height > 0 ? std::min(infill_combination_max_layer_height, nozzle_diameter) : nozzle_diameter;",
+      "new": "nozzle_diameter = std::max(infill_combination_max_layer_height, nozzle_diameter);",
+      "description": "Discards the configured combined-infill height cap; positive sparse path heights must stay below 0.2, 0.4, or 0.6 mm as configured.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-thick-internal-bridge-flow",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "const bool is_thick_bridge = surface.is_bridge() && (surface.is_internal_bridge() ? object_config.thick_internal_bridges : object_config.thick_bridges);",
+      "new": "const bool is_thick_bridge = false;",
+      "description": "Forces normal bridge flow for internal bridges; the thick toggle must change deposited bridge volume.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-internal-bridge-angle-override",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (candidate.region->region().config().internal_bridge_angle.value > 0) {",
+      "new": "if (false) {",
+      "description": "Drops the explicit internal bridge angle override; the 30 and 120 degree partitions require their requested bridge direction.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-overhang-wall-detection",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "const Polygon polygon = apply_fuzzy_skin(loop.polygon, perimeter_generator, loop.depth, loop.is_contour);\n\n        ExtrusionPaths paths;\n        if (perimeter_generator.config->detect_overhang_wall && perimeter_generator.layer_id > perimeter_generator.object_config->raft_layers) {",
+      "new": "const Polygon polygon = apply_fuzzy_skin(loop.polygon, perimeter_generator, loop.depth, loop.is_contour);\n\n        ExtrusionPaths paths;\n        if (false) {",
+      "description": "Disables overhang perimeter classification; the overhang fixture must expose erOverhangPerimeter only when enabled.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-wall-sequence-outer-first",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "bool is_outer_wall_first = this->config->wall_sequence == WallSequence::OuterInner;",
+      "new": "bool is_outer_wall_first = false;",
+      "description": "Removes the outer-first wall ordering branch; the outer wall/inner wall case must differ from the baseline and match a fresh slice.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-bridge-density-parameter",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "params.density = layerm->region().config().bridge_density.get_abs_value(1.0);",
+      "new": "params.density = 1.0;",
+      "description": "Drops the configured external bridge density; the 50 versus 100 percent fixture must change deposited bridge volume.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-bridge-flow-parameter",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "const double                      bridge_flow_ratio = region_config.bridge_flow;",
+      "new": "const double                      bridge_flow_ratio = 1.0;",
+      "description": "Drops the configured external bridge flow ratio; the 0.5 versus 1.0 fixture must change deposited bridge volume.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-internal-bridge-density",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "params.density = f->print_object_config->internal_bridge_density.get_abs_value(1.0);",
+      "new": "params.density = 1.0;",
+      "description": "Drops the configured internal bridge density; the 25 versus 100 percent bridge-volume partition should collapse.",
+      "test_filter": "SettingsWallBridgeVariance"
+    },
+    {
+      "id": "settings-bridge-line-width",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "const bool                        has_bridge_width  = bridge_width > 0.;",
+      "new": "const bool                        has_bridge_width  = false;",
+      "description": "Drops the configured bridge width from bridging-flow selection; the 0.25 versus 0.35 mm external bridge-volume contract should fail.",
+      "test_filter": "SettingsWallBridgeVariance"
+    }
+  ]
+}

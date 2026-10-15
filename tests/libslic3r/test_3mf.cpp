@@ -3064,3 +3064,70 @@ TEST_CASE("BBS 3MF rejects malformed project JSON without accepting a fake confi
 }
 
 } // namespace archive_variant_contracts
+
+namespace archive_variant_contracts {
+
+// The central-directory name and Info-ZIP Unicode Path extra field can differ.
+// Keep both explicit so the outer filename filter cannot stand in for the
+// containment check performed after decoding the extra field.
+void append_unicode_auxiliary(const std::string &archive_path, const std::string &decoded_name)
+{
+    const std::string stored_name = "Auxiliaries/docs/ascii.txt";
+    const std::string payload = "unicode-auxiliary-contract";
+    std::string extra;
+    auto append_u16 = [&extra](uint16_t value) {
+        extra.push_back(static_cast<char>(value & 0xff));
+        extra.push_back(static_cast<char>(value >> 8));
+    };
+    append_u16(0x7075); // Info-ZIP Unicode Path extra field.
+    append_u16(static_cast<uint16_t>(5 + decoded_name.size()));
+    extra.push_back('\x01');
+    const mz_ulong crc = mz_crc32(0, reinterpret_cast<const unsigned char *>(stored_name.data()), stored_name.size());
+    for (unsigned int byte = 0; byte < 4; ++byte)
+        extra.push_back(static_cast<char>((crc >> (8 * byte)) & 0xff));
+    extra += decoded_name;
+    // A second, empty private field exercises a Unicode field that is not last.
+    append_u16(0xcafe);
+    append_u16(0);
+
+    mz_zip_archive zip{};
+    REQUIRE(mz_zip_reader_init_file(&zip, archive_path.c_str(), 0));
+    ScopeGuard close_zip([&zip] { mz_zip_end(&zip); });
+    REQUIRE(mz_zip_writer_init_from_reader(&zip, archive_path.c_str()));
+    REQUIRE(mz_zip_writer_add_mem_ex_v2(&zip, stored_name.c_str(), payload.data(), payload.size(),
+        nullptr, 0, MZ_DEFAULT_LEVEL | MZ_ZIP_FLAG_ASCII_FILENAME, 0, 0, nullptr,
+        extra.data(), static_cast<mz_uint>(extra.size()), extra.data(), static_cast<mz_uint>(extra.size())));
+    REQUIRE(mz_zip_writer_finalize_archive(&zip));
+}
+
+TEST_CASE("BBS 3MF validates auxiliary paths after decoding Unicode metadata",
+          "[3MFArchiveVariants][Bbs3mfVariants][AuxiliaryUnicode][Security]")
+{
+    const bool traversal = GENERATE(false, true);
+    const std::string decoded_name = traversal ? "Auxiliaries/../escaped-unicode.txt" : "Auxiliaries/docs/unicode-é.txt";
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+    append_unicode_auxiliary(archive.string(), decoded_name);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
+                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const std::filesystem::path auxiliary_root = loaded_model.get_auxiliary_file_temp_path();
+    REQUIRE(auxiliary_root.parent_path() == std::filesystem::path(loaded.backup->string()));
+    CHECK_FALSE(std::filesystem::exists(auxiliary_root / "docs/ascii.txt"));
+    if (traversal) {
+        const std::filesystem::path escaped = auxiliary_root.parent_path() / "escaped-unicode.txt";
+        REQUIRE(escaped.parent_path() == std::filesystem::path(loaded.backup->string()));
+        CHECK_FALSE(std::filesystem::exists(escaped));
+    } else {
+        const std::filesystem::path extracted = auxiliary_root / "docs/unicode-é.txt";
+        REQUIRE(std::filesystem::exists(extracted));
+        CHECK(read_file(extracted.string()) == "unicode-auxiliary-contract");
+    }
+}
+
+} // namespace archive_variant_contracts

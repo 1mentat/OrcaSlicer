@@ -1042,13 +1042,13 @@
       "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
     },
     "bridge_line_width": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
       "dimensions": [
-        "boundary_values",
-        "interaction_matrix"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Thin, nominal, and nozzle-exceeding bridge widths are paired with both external and internal thick-bridge switches. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "External bridge widths 0.25 and 0.35 mm produce positive, distinct deposited volumes. Numeric representatives only; validation-boundary tests also exist under ValidationContracts in test_print.cpp."
     },
     "tree_support_tip_diameter": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1430,6 +1430,150 @@
         "pipeline_oracle"
       ],
       "reason": "A configured 12-second M702 C unload is charged exactly once to both elapsed time and unload statistics; the command without C is inert. The setting numeric boundary domain is not fully varied."
+    },
+    "wall_sequence": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "All three wall orders are applied to a three-wall cube; every middle layer places its external wall at the expected index. Incremental settings changes must match fresh-slice role order and counts."
+    },
+    "alternate_extra_wall": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A sparse-filled cube is sliced with the option off and on; enabled odd-numbered layers have three walls, while every other layer retains two."
+    },
+    "infill_combination": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Enabled combination reduces sparse-filled layers and creates void surfaces compared with the disabled slice. Changing the setting incrementally must match fresh sparse paths and surfaces."
+    },
+    "infill_combination_max_layer_height": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Caps of 0.2, 0.4, and 0.6 mm bound every sparse path height; the 0.6 mm case must emit a path taller than 0.2 mm. Numeric representatives only, not a complete boundary or interaction matrix."
+    },
+    "thick_internal_bridges": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A stepped sparse-filled object produces internal bridges with both values; enabling thick internal bridges increases deposited bridge volume."
+    },
+    "internal_bridge_angle": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Explicit 30- and 120-degree directions are checked against every internal bridge surface angle on a stepped fixture. Other angles and automatic direction remain outside this claim."
+    },
+    "detect_overhang_wall": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "An overhang mesh emits perimeter geometry with both values; overhang-role paths occur when detection is on and are absent when it is off."
+    },
+    "bridge_density": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "External bridges at 50% and 100% density have positive output, and full density deposits more volume. Numeric representatives only."
+    },
+    "bridge_flow": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "External bridge flow ratios 0.5 and 1.0 produce positive but distinct deposited volumes; spacing compensation makes a monotonic-volume claim inappropriate. Numeric representatives only."
+    },
+    "internal_bridge_density": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsWallBridgeVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Internal bridges at 25% and 100% density have positive output, and full density deposits more volume. Numeric representatives only."
+    },
+    "interlocking_beam": {
+      "test": "tests/fff_print/test_interlocking.cpp",
+      "tag": "[InterlockingVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Adjacent two-extruder boxes are sliced with interlocking off and on. The analytic 400 mm\u00b2 union is conserved in every layer while enabled ownership changes."
+    },
+    "interlocking_beam_width": {
+      "test": "tests/fff_print/test_interlocking.cpp",
+      "tag": "[InterlockingVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zero width preserves baseline geometry. Positive 0.65, 0.8, and 1.35 mm widths alter the periodic interface while conserving union area; a partial cell exercises unequal ownership. Representative values only."
+    },
+    "interlocking_orientation": {
+      "test": "tests/fff_print/test_interlocking.cpp",
+      "tag": "[InterlockingVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zero and 90-degree orientations change per-region area/boundary signatures while conserving the total material union. Other angles remain outside this claim."
+    },
+    "interlocking_beam_layer_count": {
+      "test": "tests/fff_print/test_interlocking.cpp",
+      "tag": "[InterlockingVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "One- and two-layer beam groups change both materials\u2019 vertical ownership signatures. A 21-layer object with two-layer groups preserves the final partial group. Representative counts only."
+    },
+    "interlocking_depth": {
+      "test": "tests/fff_print/test_interlocking.cpp",
+      "tag": "[InterlockingVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zero depth preserves the baseline geometry by symmetric difference; depth 2 produces interlocking between adjacent materials. Representative values only."
+    },
+    "interlocking_boundary_avoidance": {
+      "test": "tests/fff_print/test_interlocking.cpp",
+      "tag": "[InterlockingVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Values 0 and 2 change each material geometry by positive symmetric-difference area while conserving the combined union. Representative values only."
     }
   }
 }

@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "Bounded bed-containment and multipart interlocking geometry mutations.",
+  "mutants": [
+    {
+      "id": "buildvolume-circle-radius-shrunk",
+      "path": "src/libslic3r/BuildVolume.cpp",
+      "old": "Geometry::Circlef circle { unscaled<float>(m_circle.center), unscaled<float>(m_circle.radius + SceneEpsilon) };",
+      "new": "Geometry::Circlef circle { unscaled<float>(m_circle.center), unscaled<float>(m_circle.radius - scale_(1.)) };",
+      "description": "Shrink the configured circular bed radius by one millimeter; a near-boundary interior witness must remain inside.",
+      "test_filter": "BuildVolumeVariance"
+    },
+    {
+      "id": "buildvolume-missing-extruder-height-falls-to-zero",
+      "path": "src/libslic3r/BuildVolume.cpp",
+      "old": "const double extruder_height = index < extruder_printable_heights.size() ? extruder_printable_heights[index] : printable_height;",
+      "new": "const double extruder_height = index < extruder_printable_heights.size() ? extruder_printable_heights[index] : 0.;",
+      "description": "A short per-extruder height vector must fall back to the bed height.",
+      "test_filter": "BuildVolumeVariance"
+    },
+    {
+      "id": "buildvolume-shared-bed-height-comparison-dropped",
+      "path": "src/libslic3r/BuildVolume.cpp",
+      "old": "if ((extruder_shape == printable_area)&&(extruder_height == printable_height)) {",
+      "new": "if (extruder_shape == printable_area) {",
+      "description": "Same XY area with a different height is a limited extruder volume, not the shared bed volume.",
+      "test_filter": "BuildVolumeVariance"
+    },
+    {
+      "id": "buildvolume-shared-max-x-update-reversed",
+      "path": "src/libslic3r/BuildVolume.cpp",
+      "old": "if (m_shared_volume.data[2] > extruder_volume.bboxf.max.x())",
+      "new": "if (m_shared_volume.data[2] < extruder_volume.bboxf.max.x())",
+      "description": "The shared volume must respect the narrower extruder maximum-X limit.",
+      "test_filter": "BuildVolumeVariance"
+    },
+    {
+      "id": "buildvolume-rectangle-classification-comparison-reversed",
+      "path": "src/libslic3r/BuildVolume.cpp",
+      "old": "std::abs((m_area - double(m_bbox.size().x()) * double(m_bbox.size().y()))) < sqr(SCALED_EPSILON)",
+      "new": "std::abs((m_area - double(m_bbox.size().x()) * double(m_bbox.size().y()))) > sqr(SCALED_EPSILON)",
+      "description": "Rectangular beds must take the fast rectangle path when their polygon area equals their bounding box.",
+      "test_filter": "BuildVolumeVariance"
+    },
+    {
+      "id": "interlocking-disabled-gate-inverted",
+      "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
+      "old": "if (!config.interlocking_beam || config.interlocking_beam_layer_count < 1 || config.interlocking_depth < 1 || config.interlocking_beam_width < EPSILON ) {",
+      "new": "if (config.interlocking_beam || config.interlocking_beam_layer_count < 1 || config.interlocking_depth < 1 || config.interlocking_beam_width < EPSILON ) {",
+      "description": "The disabled boolean gate must leave adjacent multipart geometry untouched.",
+      "test_filter": "InterlockingVariance"
+    },
+    {
+      "id": "interlocking-same-extruder-gate-inverted",
+      "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
+      "old": "if (extruder_nr_a == extruder_nr_b) {",
+      "new": "if (extruder_nr_a != extruder_nr_b) {",
+      "description": "Interlocking applies only where adjacent regions use different external-perimeter extruders.",
+      "test_filter": "InterlockingVariance"
+    },
+    {
+      "id": "interlocking-empty-overlap-return-inverted",
+      "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
+      "old": "if (has_all_meshes.empty()) {",
+      "new": "if (!has_all_meshes.empty()) {",
+      "description": "A real shared interface must reach microstructure application; the empty-overlap guard must not suppress it.",
+      "test_filter": "InterlockingVariance"
+    },
+    {
+      "id": "interlocking-cell-width-halved",
+      "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
+      "old": "const coord_t cell_width = beam_width + beam_width;",
+      "new": "const coord_t cell_width = beam_width;",
+      "description": "The cell must contain two beam widths so the two materials partition each cell without changing the configured beam width.",
+      "test_filter": "InterlockingVariance"
+    },
+    {
+      "id": "interlocking-layer-count-ceil-dropped",
+      "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
+      "old": "size_t num_interlocking_layers = (max_layer_count + static_cast<size_t>(beam_layer_count) - 1ul) /\n                                     static_cast<size_t>(beam_layer_count);",
+      "new": "size_t num_interlocking_layers = max_layer_count / static_cast<size_t>(beam_layer_count);",
+      "description": "The structure vector must use ceiling division so a partial final beam group remains addressable.",
+      "test_filter": "InterlockingVariance"
+    }
+  ]
+}

@@ -14,6 +14,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcodeprocessor.cpp
     test_small_area_infill_flow_compensator.cpp
 	test_gcodewriter.cpp
+	test_interlocking.cpp
 	test_model.cpp
 	test_multifilament.cpp
     test_layer_height_variance.cpp
