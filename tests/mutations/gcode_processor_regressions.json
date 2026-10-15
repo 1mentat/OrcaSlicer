@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Bounded source mutations for gcode processor regressions. Outcomes are reported by the native mutation runner.",
+  "mutants": [
+    {
+      "id": "gcp-m702-state-before-time",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "const float unload_time = get_filament_unload_time(filament_id);\n        m_time_processor.extruder_unloaded = true;",
+      "new": "m_time_processor.extruder_unloaded = true;\n        const float unload_time = get_filament_unload_time(filament_id);",
+      "description": "Regression should fail if M702 again marks the filament unloaded before reading its configured unload duration.",
+      "test_filter": "GCodeProcessorUnloadRegression"
+    },
+    {
+      "id": "gcp-m702-unload-stat-dropped",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "m_result.print_statistics.total_filament_unload_time += unload_time;",
+      "new": "m_result.print_statistics.total_filament_unload_time += 0.0f;",
+      "description": "Regression should fail if M702's configured unload duration is omitted from the same statistic used by tool changes.",
+      "test_filter": "GCodeProcessorUnloadRegression"
+    },
+    {
+      "id": "gcp-m402-end-position-not-restored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "m_end_position = m_start_position;\n}\n\nvoid GCodeProcessor::process_M566",
+      "new": "// Restored position discarded.\n}\n\nvoid GCodeProcessor::process_M566",
+      "description": "Regression should fail if M402 restores only the transient start position and leaves the next command's baseline endpoint unchanged.",
+      "test_filter": "GCodeProcessorRepetierRegression"
+    }
+  ]
+}

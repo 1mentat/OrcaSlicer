@@ -30,8 +30,8 @@
       "id": "measure-circle-transform-loses-radius",
       "path": "src/libslic3r/Measure.cpp",
       "old": "            value                = (radius_pt - world_center).norm();",
-      "new": "            value                = 0.0;",
-      "description": "Discard the circle radius while applying a rigid feature transform.",
+      "new": "            value                = (radius_pt + world_center).norm();",
+      "description": "Measure radius from the wrong translated center; the analytic transformed-circle radius must change without making the capture unused.",
       "test_filter": "MeasureContracts"
     },
     {

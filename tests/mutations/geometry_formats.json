@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "description": "Bounded source mutations for geometry formats. Outcomes are reported by the native mutation runner.",
+  "mutants": [
+    {
+      "id": "edge-grid-radius-boundary",
+      "path": "src/libslic3r/EdgeGrid.cpp",
+      "old": "if (d_min >= search_radius)\n\t\treturn false;",
+      "new": "if (d_min > search_radius)\n\t\treturn false;",
+      "description": "Treat a point exactly at the requested search radius as a hit, changing the documented bounded-search contract.",
+      "test_filter": "EdgeGrid"
+    },
+    {
+      "id": "edge-grid-signed-distance-result",
+      "path": "src/libslic3r/EdgeGrid.cpp",
+      "old": "result.distance = d_min * sign_min;",
+      "new": "result.distance = d_min;",
+      "description": "Drop the inside/outside sign from closest-point results; the inside-point contract must kill this mutant.",
+      "test_filter": "EdgeGrid"
+    },
+    {
+      "id": "edge-grid-open-line-order",
+      "path": "src/libslic3r/EdgeGrid.cpp",
+      "old": "bool \t\t open  = open_polylines;",
+      "new": "bool \t\t open  = !open_polylines;",
+      "description": "Invert open-versus-closed contour classification for polyline input.",
+      "test_filter": "EdgeGrid"
+    },
+    {
+      "id": "assimp-face-triangle-filter",
+      "path": "src/libslic3r/Format/AssimpImport.cpp",
+      "old": "if (face.mNumIndices != 3)",
+      "new": "if (face.mNumIndices == 3)",
+      "description": "Reject triangles instead of non-triangular faces; valid triangle and quad imports must fail the result contract.",
+      "test_filter": "AssimpImport"
+    },
+    {
+      "id": "assimp-material-texture-default",
+      "path": "src/libslic3r/Format/AssimpImport.cpp",
+      "old": "out.material_texture_map.assign(scene.mNumMaterials, -1);",
+      "new": "out.material_texture_map.assign(scene.mNumMaterials, 0);",
+      "description": "Mark every material as using texture zero even when no texture was loaded.",
+      "test_filter": "AssimpImport"
+    },
+    {
+      "id": "assimp-empty-mesh-validation",
+      "path": "src/libslic3r/Format/AssimpImport.cpp",
+      "old": "if (out.vertices.empty() || out.indices.empty())",
+      "new": "if (out.vertices.empty() && out.indices.empty())",
+      "description": "Allow a scene with vertices but no valid triangles to report success.",
+      "test_filter": "AssimpImport"
+    },
+    {
+      "id": "assimp-position-mesh-filter",
+      "path": "src/libslic3r/Format/AssimpImport.cpp",
+      "old": "if (!mesh || !mesh->HasPositions())",
+      "new": "if (!mesh || mesh->HasPositions())",
+      "description": "Skip every positioned mesh during collection, losing valid geometry from supported scenes.",
+      "test_filter": "AssimpImport"
+    },
+    {
+      "id": "assimp-glb-uv-convention",
+      "path": "src/libslic3r/Format/AssimpImport.cpp",
+      "old": "flags |= aiProcess_FlipUVs;",
+      "new": "flags |= 0;",
+      "description": "Omit the GLB-specific V-coordinate conversion; the independently known fixture UVs must change.",
+      "test_filter": "AssimpImport"
+    },
+    {
+      "id": "assimp-scene-transform-bake",
+      "path": "src/libslic3r/Format/AssimpImport.cpp",
+      "old": "| aiProcess_PreTransformVertices",
+      "new": "| 0",
+      "description": "Leave scene-node translation unapplied; imported vertices must match the analytic translated triangle.",
+      "test_filter": "AssimpImport"
+    },
+    {
+      "id": "assimp-embedded-texture-bytes",
+      "path": "src/libslic3r/Format/AssimpImport.cpp",
+      "old": "reinterpret_cast<const unsigned char*>(texture.pcData) + texture.mWidth);",
+      "new": "reinterpret_cast<const unsigned char*>(texture.pcData) + texture.mWidth - 1);",
+      "description": "Truncate one byte from the embedded compressed PNG; compare exact fixture bytes.",
+      "test_filter": "AssimpImport"
+    },
+    {
+      "id": "assimp-texture-material-assignment",
+      "path": "src/libslic3r/Format/AssimpImport.cpp",
+      "old": "out.material_texture_map[material_index] = static_cast<int>(out.textures.size());",
+      "new": "out.material_texture_map[material_index] = -1;",
+      "description": "Lose the material-to-texture assignment despite loading its image.",
+      "test_filter": "AssimpImport"
+    }
+  ]
+}

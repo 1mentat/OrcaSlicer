@@ -1,3 +1,10 @@
+#include "libslic3r/libslic3r.h"
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include "test_utils.hpp"
+#include <boost/nowide/fstream.hpp>
+#include <cmath>
+#include <string>
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
@@ -181,3 +188,294 @@ TEST_CASE("cut_surface clips a cube to a projected polygon without invalid topol
             CHECK(vertex_index < cut.vertices.size());
     }
 }
+
+namespace cut_surface_extended_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+Polygon rectangle(coord_t x0, coord_t y0, coord_t x1, coord_t y1)
+{
+    return Polygon(Points{Point(x0, y0), Point(x1, y0), Point(x1, y1), Point(x0, y1)});
+}
+
+void check_mesh_indices(const indexed_triangle_set &mesh)
+{
+    for (const auto &face : mesh.indices) {
+        REQUIRE(face[0] < mesh.vertices.size());
+        REQUIRE(face[1] < mesh.vertices.size());
+        REQUIRE(face[2] < mesh.vertices.size());
+        CHECK(face[0] != face[1]);
+        CHECK(face[1] != face[2]);
+        CHECK(face[0] != face[2]);
+        const Vec3f edge_a = mesh.vertices[face[1]] - mesh.vertices[face[0]];
+        const Vec3f edge_b = mesh.vertices[face[2]] - mesh.vertices[face[0]];
+        CHECK(edge_a.cross(edge_b).squaredNorm() > 1e-10f);
+    }
+}
+
+double projected_area(const indexed_triangle_set &mesh)
+{
+    double area = 0.;
+    for (const auto &face : mesh.indices) {
+        const Vec3f &a = mesh.vertices[face[0]];
+        const Vec3f &b = mesh.vertices[face[1]];
+        const Vec3f &c = mesh.vertices[face[2]];
+        area += std::abs(double(b.x() - a.x()) * (c.y() - a.y()) -
+                         double(b.y() - a.y()) * (c.x() - a.x())) / 2.;
+    }
+    return area;
+}
+
+indexed_triangle_set shifted(indexed_triangle_set mesh, const Vec3f &delta)
+{
+    for (Vec3f &vertex : mesh.vertices)
+        vertex += delta;
+    return mesh;
+}
+
+void write_cube_off(const std::string &path, float side)
+{
+    boost::nowide::ofstream out(path);
+    out << "OFF\n8 12 0\n"
+        << "0 0 0\n" << side << " 0 0\n" << side << " " << side << " 0\n" << "0 " << side << " 0\n"
+        << "0 0 " << side << "\n" << side << " 0 " << side << "\n" << side << " " << side << " " << side << "\n"
+        << "0 " << side << " " << side << "\n"
+        << "3 0 2 1\n3 0 3 2\n3 4 5 6\n3 4 6 7\n"
+        << "3 0 1 5\n3 0 5 4\n3 1 2 6\n3 1 6 5\n"
+        << "3 2 3 7\n3 2 7 6\n3 3 0 4\n3 3 4 7\n";
+}
+
+Emboss::OrthoProject cube_projection(float depth = 30.f)
+{
+    Transform3d matrix = Transform3d::Identity();
+    matrix.translate(Vec3d(0., 0., -10.));
+    return Emboss::OrthoProject(matrix, Vec3d(0., 0., depth));
+}
+
+} // namespace
+
+TEST_CASE("its_mask keeps all selected faces and preserves volume", "[CutSurface][CutSurfaceExtended]")
+{
+    const indexed_triangle_set input = its_make_cube(10., 20., 30.);
+    const indexed_triangle_set selected = its_mask(input, std::vector<bool>(input.indices.size(), true));
+
+    REQUIRE(selected.indices.size() == input.indices.size());
+    REQUIRE(selected.vertices.size() <= input.vertices.size());
+    CHECK_THAT(std::abs(its_volume(selected)), WithinAbs(std::abs(its_volume(input)), 1e-4));
+    check_mesh_indices(selected);
+}
+
+TEST_CASE("its_mask compacts disjoint selected faces without retaining unreferenced vertices", "[CutSurface][CutSurfaceExtended]")
+{
+    const indexed_triangle_set input = its_make_cube(10., 10., 10.);
+    std::vector<bool> mask(input.indices.size(), false);
+    for (size_t i = 0; i < mask.size(); i += 3)
+        mask[i] = true;
+
+    const indexed_triangle_set selected = its_mask(input, mask);
+    REQUIRE(selected.indices.size() == std::count(mask.begin(), mask.end(), true));
+    REQUIRE_FALSE(selected.vertices.empty());
+    CHECK(selected.vertices.size() <= selected.indices.size() * 3);
+    check_mesh_indices(selected);
+}
+
+TEST_CASE("its_cut_AoI retains the complete mesh when the projected bounds contain it", "[CutSurface][CutSurfaceExtended]")
+{
+    const indexed_triangle_set input = its_make_cube(10., 10., 10.);
+    const Emboss::ProjectZ projection(20.);
+    const indexed_triangle_set selected = its_cut_AoI(input, BoundingBox(Point(-1, -1), Point(11, 11)), projection);
+
+    REQUIRE(selected.indices.size() == input.indices.size());
+    CHECK_THAT(std::abs(its_volume(selected)), WithinAbs(std::abs(its_volume(input)), 1e-4));
+    check_mesh_indices(selected);
+}
+
+TEST_CASE("its_cut_AoI returns an empty compact mesh for a disjoint projected box", "[CutSurface][CutSurfaceExtended]")
+{
+    const indexed_triangle_set input = its_make_cube(10., 10., 10.);
+    const Emboss::ProjectZ projection(20.);
+    const indexed_triangle_set selected = its_cut_AoI(input, BoundingBox(Point(20, 20), Point(30, 30)), projection);
+
+    CHECK(selected.indices.empty());
+    CHECK(selected.vertices.empty());
+}
+
+TEST_CASE("its_cut_AoI keeps a triangle crossing one side of the projected bounds", "[CutSurface][CutSurfaceExtended]")
+{
+    indexed_triangle_set input = {
+        {{0, 1, 2}},
+        {stl_vertex(-2.f, 1.f, 0.f), stl_vertex(2.f, 1.f, 0.f), stl_vertex(0.f, 4.f, 0.f)}};
+    const Emboss::ProjectZ projection(5.);
+    const indexed_triangle_set selected = its_cut_AoI(input, BoundingBox(Point(0, 0), Point(3, 3)), projection);
+
+    REQUIRE(selected.indices.size() == 1);
+    REQUIRE(selected.vertices.size() == 3);
+    check_mesh_indices(selected);
+}
+
+TEST_CASE("cut2model transforms both sides and closes multiple contour loops", "[CutSurface][CutSurfaceExtended]")
+{
+    SurfaceCut cut;
+    cut.vertices = {
+        stl_vertex(0.f, 0.f, 0.f), stl_vertex(4.f, 0.f, 0.f), stl_vertex(4.f, 4.f, 0.f), stl_vertex(0.f, 4.f, 0.f),
+        stl_vertex(1.f, 1.f, 0.f), stl_vertex(3.f, 1.f, 0.f), stl_vertex(3.f, 3.f, 0.f), stl_vertex(1.f, 3.f, 0.f)};
+    // Triangulate the ring, leaving the inner square open on both caps.
+    cut.indices = {{0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5},
+                   {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}};
+    cut.contours = {{0, 1, 2, 3}, {4, 7, 6, 5}};
+
+    const Emboss::OrthoProject3d projection(Vec3d(0., 0., 5.));
+    const indexed_triangle_set result = cut2model(cut, projection);
+    REQUIRE(result.vertices.size() == cut.vertices.size() * 2);
+    REQUIRE(result.indices.size() == cut.indices.size() * 2 + 2 * (4 + 4));
+    check_mesh_indices(result);
+    for (size_t i = 0; i < cut.vertices.size(); ++i) {
+        CHECK(result.vertices[i].isApprox(cut.vertices[i]));
+        CHECK_THAT(result.vertices[i + cut.vertices.size()].z() - cut.vertices[i].z(), WithinAbs(5., 1e-6));
+    }
+    REQUIRE(result.indices.size() > cut.indices.size());
+    CHECK(result.indices[cut.indices.size()][0] == cut.indices[0][0] + cut.vertices.size());
+    CHECK(result.indices[cut.indices.size()][1] == cut.indices[0][2] + cut.vertices.size());
+    CHECK(result.indices[cut.indices.size()][2] == cut.indices[0][1] + cut.vertices.size());
+    CHECK_THAT(std::abs(its_volume(result)), WithinAbs((16. - 4.) * 5., 1e-4));
+}
+
+TEST_CASE("cut2model follows a non-axis projection vector", "[CutSurface][CutSurfaceExtended]")
+{
+    SurfaceCut cut;
+    cut.vertices = {stl_vertex(0.f, 0.f, 0.f), stl_vertex(2.f, 0.f, 0.f), stl_vertex(0.f, 2.f, 0.f)};
+    cut.indices = {{0, 1, 2}};
+    cut.contours = {{0, 1, 2}};
+    const Vec3d direction(1., -2., 4.);
+    const indexed_triangle_set result = cut2model(cut, Emboss::OrthoProject3d(direction));
+
+    REQUIRE(result.vertices.size() == 6);
+    for (size_t i = 0; i < cut.vertices.size(); ++i) {
+        const Vec3f delta = result.vertices[i + cut.vertices.size()] - result.vertices[i];
+        CHECK(delta.isApprox(direction.cast<float>(), 1e-5f));
+    }
+    check_mesh_indices(result);
+}
+
+TEST_CASE("cut_surface keeps a central cube patch inside the projected shape", "[CutSurface][CutSurfaceExtended]")
+{
+    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 9, 9))};
+    const indexed_triangle_set model = its_make_cube(10., 10., 10.);
+    const Emboss::OrthoProject projection = cube_projection();
+    const SurfaceCut cut = cut_surface(shapes, {model}, projection, 0.f);
+
+    REQUIRE_FALSE(cut.vertices.empty());
+    REQUIRE_FALSE(cut.indices.empty());
+    for (const Vec3f &vertex : cut.vertices) {
+        CHECK(vertex.x() >= 1.f);
+        CHECK(vertex.x() <= 9.f);
+        CHECK(vertex.y() >= 1.f);
+        CHECK(vertex.y() <= 9.f);
+        CHECK(vertex.z() >= 0.f);
+        CHECK(vertex.z() <= 10.f);
+    }
+    check_mesh_indices(cut);
+    CHECK_THAT(projected_area(cut), WithinAbs(64.0, 1e-4));
+}
+
+TEST_CASE("cut_surface returns an empty result for an empty model or shape set", "[CutSurface][CutSurfaceExtended]")
+{
+    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 9, 9))};
+    const indexed_triangle_set model = its_make_cube(10., 10., 10.);
+    const Emboss::OrthoProject projection = cube_projection();
+    CHECK(cut_surface({}, {model}, projection, .5f).empty());
+    CHECK(cut_surface(shapes, {}, projection, .5f).empty());
+}
+
+TEST_CASE("cut_surface returns no patch for a projected shape outside the model", "[CutSurface][CutSurfaceExtended]")
+{
+    const ExPolygons shapes{ExPolygon(rectangle(20, 20, 30, 30))};
+    const indexed_triangle_set model = its_make_cube(10., 10., 10.);
+    const Emboss::OrthoProject projection = cube_projection();
+    const SurfaceCut cut = cut_surface(shapes, {model}, projection, .5f);
+    CHECK(cut.empty());
+}
+
+TEST_CASE("cut_surface supports a hole as a separate projected boundary", "[CutSurface][CutSurfaceExtended]")
+{
+    ExPolygon shape(rectangle(1, 1, 9, 9));
+    shape.holes.emplace_back(rectangle(4, 4, 6, 6));
+    shape.holes.back().reverse();
+    const indexed_triangle_set model = its_make_cube(10., 10., 10.);
+    const Emboss::OrthoProject projection = cube_projection();
+    const SurfaceCut cut = cut_surface({shape}, {model}, projection, .5f);
+
+    REQUIRE_FALSE(cut.vertices.empty());
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(cut.contours.size() >= 2);
+    for (const auto &contour : cut.contours) {
+        REQUIRE(contour.size() >= 3);
+        for (const auto index : contour)
+            CHECK(index < cut.vertices.size());
+    }
+    check_mesh_indices(cut);
+    CHECK_THAT(projected_area(cut), WithinAbs(60.0, 1e-4));
+}
+
+TEST_CASE("cut_surface accepts multiple disjoint projected shapes", "[CutSurface][CutSurfaceExtended]")
+{
+    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 3, 3)), ExPolygon(rectangle(7, 7, 9, 9))};
+    const indexed_triangle_set model = its_make_cube(10., 10., 10.);
+    const Emboss::OrthoProject projection = cube_projection();
+    const SurfaceCut cut = cut_surface(shapes, {model}, projection, .25f);
+
+    REQUIRE_FALSE(cut.vertices.empty());
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(cut.contours.size() >= 2);
+    check_mesh_indices(cut);
+    CHECK_THAT(projected_area(cut), WithinAbs(8.0, 1e-4));
+}
+
+TEST_CASE("cut_surface handles two disjoint source meshes in one projection", "[CutSurface][CutSurfaceExtended]")
+{
+    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 29, 9))};
+    const indexed_triangle_set first = its_make_cube(10., 10., 10.);
+    const indexed_triangle_set second = shifted(its_make_cube(10., 10., 10.), Vec3f(20.f, 0.f, 0.f));
+    const Emboss::OrthoProject projection = cube_projection(30.f);
+    const SurfaceCut cut = cut_surface(shapes, {first, second}, projection, .5f);
+
+    REQUIRE_FALSE(cut.vertices.empty());
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(cut.contours.size() == 2);
+    check_mesh_indices(cut);
+    CHECK_THAT(projected_area(cut), WithinAbs(2. * 9. * 8., 1e-4));
+    bool left = false;
+    bool right = false;
+    for (const Vec3f &vertex : cut.vertices) {
+        CHECK(vertex.z() >= 0.f);
+        CHECK(vertex.z() <= 10.f);
+        CHECK((vertex.x() <= 10.f || vertex.x() >= 20.f));
+        left = left || vertex.x() < 10.f;
+        right = right || vertex.x() > 20.f;
+    }
+    CHECK(left);
+    CHECK(right);
+}
+
+TEST_CASE("corefine_test accepts two valid OFF meshes", "[CutSurface][CutSurfaceExtended]")
+{
+    ScopedTemporaryFile model(".off"), shape(".off");
+    write_cube_off(model.string(), 10.f);
+    write_cube_off(shape.string(), 4.f);
+    CHECK(corefine_test(model.string(), shape.string()));
+}
+
+TEST_CASE("corefine_test rejects missing or malformed OFF inputs", "[CutSurface][CutSurfaceExtended]")
+{
+    ScopedTemporaryFile malformed(".off");
+    {
+        boost::nowide::ofstream out(malformed.string());
+        out << "not an OFF mesh\n";
+    }
+    CHECK_FALSE(corefine_test(malformed.string(), malformed.string()));
+    CHECK_FALSE(corefine_test("/path/that/does/not/exist.off", malformed.string()));
+}
+
+} // namespace cut_surface_extended_contracts

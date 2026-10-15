@@ -57,7 +57,7 @@
         "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "Every registered seam position is deserialized and sliced; nearest and random must move the first outer-wall start in emitted G-code."
+      "reason": "Every registered seam position is deserialized and sliced. A seeded random-seam fixture must visit multiple sides of rectangular outer walls, normalized against actual emitted extrusion bounds; nearest and random are also compared."
     },
     "sparse_infill_density": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -1379,6 +1379,57 @@
         "pipeline_oracle"
       ],
       "reason": "Both boolean values are sliced with Marlin2: enabled output has executable M486 object delimiters and processor label state. Other firmware dialects remain outside this case."
+    },
+    "display_orientation": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Landscape and portrait SLA raster profiles import to meshes with transposed analytic XY extents."
+    },
+    "display_mirror_x": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Independent off/on X mirroring imports to bounds reflected about the configured 32 mm display width."
+    },
+    "display_mirror_y": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Independent off/on Y mirroring imports to bounds reflected about the configured 24 mm display height."
+    },
+    "display_width": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1]",
+      "dimensions": [
+        "pipeline_oracle"
+      ],
+      "reason": "The 32 mm display establishes imported mesh coordinates; changing width to 33 mm invalidates cached encoded layers. Other numeric boundaries remain untested."
+    },
+    "display_height": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1]",
+      "dimensions": [
+        "pipeline_oracle"
+      ],
+      "reason": "The 24 mm display establishes independent Y reflection bounds; other numeric boundary values remain untested."
+    },
+    "machine_unload_filament_time": {
+      "test": "tests/fff_print/test_gcodeprocessor.cpp",
+      "tag": "[GCodeProcessorUnloadRegression]",
+      "dimensions": [
+        "pipeline_oracle"
+      ],
+      "reason": "A configured 12-second M702 C unload is charged exactly once to both elapsed time and unload statistics; the command without C is inert. The setting numeric boundary domain is not fully varied."
     }
   }
 }

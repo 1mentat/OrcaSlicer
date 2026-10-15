@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <set>
 #include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -594,3 +596,122 @@ TEST_CASE("Wall generator and sparse infill remain valid across a bounded pairwi
         CHECK(std::abs(first_evidence.sparse_length - second_evidence.sparse_length) > 0.01);
     }
 }
+
+namespace seam_distribution_contract {
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace {
+
+struct OuterWallGeometry {
+    struct Start { double x; double y; double z; };
+    std::vector<Start> starts;
+    double min_x = 0.0;
+    double max_x = 0.0;
+    double min_y = 0.0;
+    double max_y = 0.0;
+};
+
+DynamicPrintConfig seam_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height", 0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops", 2 },
+        { "top_shell_layers", 2 },
+        { "bottom_shell_layers", 2 },
+        { "top_shell_thickness", 0.0 },
+        { "bottom_shell_thickness", 0.0 },
+        { "sparse_infill_density", "15%" },
+        { "top_surface_density", "100%" },
+        { "bottom_surface_density", "100%" },
+        { "gcode_comments", true },
+        { "layer_change_gcode", "G92 E0\n" },
+        { "seam_position", "random" },
+    });
+    return config;
+}
+
+std::string slice_without_arrangement(TriangleMesh shape)
+{
+    shape.scale(Vec3f(1.5f, 1.0f, 0.2f));
+    Print print;
+    Model model;
+    DynamicPrintConfig config = seam_config();
+    init_print(std::vector<TriangleMesh>{ std::move(shape) }, print, model, config, nullptr, false);
+    REQUIRE(print.validate().string.empty());
+    print.process();
+    return gcode(print);
+}
+
+OuterWallGeometry outer_wall_geometry(const std::string &output)
+{
+    OuterWallGeometry result;
+    bool outer_wall = false;
+    bool bounds_initialized = false;
+    GCodeReader reader;
+    reader.parse_buffer(output, [&result, &outer_wall, &bounds_initialized](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("Outer wall") != std::string_view::npos)
+            outer_wall = true;
+        else if (comment.find("FEATURE:") != std::string_view::npos ||
+                 comment.find("TYPE:") != std::string_view::npos)
+            outer_wall = false;
+        if (!outer_wall || !line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+
+        const double x0 = self.x();
+        const double y0 = self.y();
+        const double x1 = line.has_x() ? line.x() : self.x();
+        const double y1 = line.has_y() ? line.y() : self.y();
+        if (result.starts.empty() || std::abs(result.starts.back().z - self.z()) > 1e-4)
+            result.starts.push_back({ x0, y0, self.z() });
+        if (!bounds_initialized) {
+            result.min_x = std::min(x0, x1);
+            result.max_x = std::max(x0, x1);
+            result.min_y = std::min(y0, y1);
+            result.max_y = std::max(y0, y1);
+            bounds_initialized = true;
+        } else {
+            result.min_x = std::min({ result.min_x, x0, x1 });
+            result.max_x = std::max({ result.max_x, x0, x1 });
+            result.min_y = std::min({ result.min_y, y0, y1 });
+            result.max_y = std::max({ result.max_y, y0, y1 });
+        }
+    });
+    return result;
+}
+
+int nearest_side(const OuterWallGeometry &geometry, const OuterWallGeometry::Start &start)
+{
+    const double distances[] = {
+        std::abs(start.x - geometry.max_x), std::abs(start.x - geometry.min_x),
+        std::abs(start.y - geometry.max_y), std::abs(start.y - geometry.min_y)
+    };
+    return static_cast<int>(std::min_element(distances, distances + 4) - distances);
+}
+
+} // namespace
+
+TEST_CASE("Random seams visit multiple sides of emitted outer walls", "[SettingsVariance][SeamDistribution]")
+{
+    // Seed the process PRNG so the same geometry produces a reproducible distribution.
+    std::srand(0x5EEDu);
+    std::set<int> selected_sides;
+    for (const Vec3f &offset : {
+             Vec3f(0.0f, 0.0f, 0.0f), Vec3f(17.0f, 13.0f, 0.0f),
+             Vec3f(-23.0f, 19.0f, 0.0f), Vec3f(31.0f, -15.0f, 0.0f) }) {
+        TriangleMesh shape = cube(20.0);
+        shape.translate(offset);
+        const OuterWallGeometry geometry = outer_wall_geometry(slice_without_arrangement(std::move(shape)));
+        REQUIRE(geometry.starts.size() > 1);
+        REQUIRE(geometry.max_x > geometry.min_x);
+        REQUIRE(geometry.max_y > geometry.min_y);
+        for (const OuterWallGeometry::Start &start : geometry.starts)
+            selected_sides.insert(nearest_side(geometry, start));
+    }
+    CHECK(selected_sides.size() >= 2);
+}
+
+} // namespace seam_distribution_contract

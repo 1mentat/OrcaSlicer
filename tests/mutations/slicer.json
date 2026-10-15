@@ -39,16 +39,16 @@
       "path": "src/libslic3r/PerimeterGenerator.cpp",
       "old": "return config.top_shell_layers.value > 0;",
       "new": "return config.top_shell_layers.value >= 0;",
-      "description": "Treat zero top shell layers as a top shell and emit top surface material.",
-      "test_filter": "SettingsVariance"
+      "description": "Treat zero shell layers as a shell and incorrectly reduce a flat face to one perimeter when its only-one-wall option is enabled.",
+      "test_filter": "ZeroShellWalls"
     },
     {
       "id": "pipeline-bottom-shell-zero-still-fills",
       "path": "src/libslic3r/PerimeterGenerator.cpp",
       "old": "return config.bottom_shell_layers.value > 0;",
       "new": "return config.bottom_shell_layers.value >= 0;",
-      "description": "Treat zero bottom shell layers as a bottom shell and emit bottom surface material.",
-      "test_filter": "SettingsVariance"
+      "description": "Treat zero shell layers as a shell and incorrectly reduce a flat face to one perimeter when its only-one-wall option is enabled.",
+      "test_filter": "ZeroShellWalls"
     },
     {
       "id": "gcode-wipe-clip-grows-path",

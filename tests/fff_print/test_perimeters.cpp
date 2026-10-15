@@ -117,6 +117,33 @@ double perimeter_length_at(const Print &print, double print_z)
     return 0.;
 }
 
+double zero_shell_cube_perimeter_length(bool top, bool one_wall)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "wall_generator",             "classic" },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops",                 3 },
+        { "top_shell_layers",           top ? 0 : 3 },
+        { "bottom_shell_layers",        top ? 3 : 0 },
+        { "top_shell_thickness",        0.0 },
+        { "bottom_shell_thickness",     0.0 },
+        { "top_surface_density",        "100%" },
+        { "sparse_infill_density",       "15%" },
+        { "only_one_wall_top",          top && one_wall },
+        { "only_one_wall_first_layer",  !top && one_wall },
+    });
+    TriangleMesh shape = cube(20.0);
+    shape.scale(Vec3f(1.f, 1.f, 0.2f));
+    Print print;
+    init_and_process_print({ shape }, print, config);
+    REQUIRE_FALSE(print.objects().empty());
+    const SliceLengths lengths = slice_lengths(print);
+    REQUIRE(lengths.perimeters.size() > 1);
+    return top ? lengths.perimeters.back() : lengths.perimeters.front();
+}
+
 // Largest per-layer difference between two series; a negative result means they are not comparable.
 double max_difference(const std::vector<double> &a, const std::vector<double> &b)
 {
@@ -993,4 +1020,20 @@ TEST_CASE("A hole whose outer wall touches the contour's runs with it", "[Perime
         CHECK(layers[i].contours_ccw.front() == ccw);
         CHECK(layers[i].holes_ccw.front() == ccw);
     }
+}
+
+TEST_CASE("Zero top shells keep every wall on a flat top face", "[Perimeters][ZeroShellWalls]")
+{
+    const double normal = zero_shell_cube_perimeter_length(true, false);
+    const double one_wall_enabled = zero_shell_cube_perimeter_length(true, true);
+    REQUIRE(normal > 0.);
+    CHECK_THAT(one_wall_enabled, Catch::Matchers::WithinAbs(normal, 1.0));
+}
+
+TEST_CASE("Zero bottom shells keep every wall on a flat first layer", "[Perimeters][ZeroShellWalls]")
+{
+    const double normal = zero_shell_cube_perimeter_length(false, false);
+    const double one_wall_enabled = zero_shell_cube_perimeter_length(false, true);
+    REQUIRE(normal > 0.);
+    CHECK_THAT(one_wall_enabled, Catch::Matchers::WithinAbs(normal, 1.0));
 }

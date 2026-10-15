@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
     test_arachne_walls.cpp
     test_arrange.cpp
     test_assemble_list.cpp
+    test_assimp_import.cpp
     test_bambu_networking.cpp
     test_belt_brim.cpp
     test_bridge_detector.cpp
@@ -30,6 +31,7 @@ add_executable(${_TEST_NAME}_tests
     test_orient.cpp
     test_locales_utils.cpp
     test_drc.cpp
+    test_edge_grid.cpp
     test_gcodereader.cpp
     test_toolordering_nozzle_group.cpp
     test_parallel_resolve.cpp
@@ -59,8 +61,10 @@ add_executable(${_TEST_NAME}_tests
     test_minimum_spanning_tree.cpp
     test_nozzle_volume_type.cpp
     test_obj.cpp
+    test_sl1.cpp
     test_step.cpp
     test_stl.cpp
+    test_svg.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp
     test_trianglemesh_slicer.cpp

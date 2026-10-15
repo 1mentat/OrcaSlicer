@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "description": "Bounded source mutations for cut surface extended. Outcomes are reported by the native mutation runner.",
+  "mutants": [
+    {
+      "id": "cut-surface-extended-mask-selection",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "size_t index = &t - &its.indices.front();\n        if (!mask[index]) continue;",
+      "new": "size_t index = &t - &its.indices.front();\n        if (mask[index]) continue;",
+      "description": "Invert its_mask face selection; complete and sparse-mask contracts should expose dropped requested faces.",
+      "test_filter": "CutSurfaceExtended"
+    },
+    {
+      "id": "cut-surface-extended-empty-mask-guard",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "if (faces_count == 0) return {};",
+      "new": "if (faces_count != 0) return {};",
+      "description": "Invert the empty-mask guard so a selected mesh is returned without a compact face allocation.",
+      "test_filter": "CutSurfaceExtended"
+    },
+    {
+      "id": "cut-surface-extended-aoi-mask-inversion",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "skip_indicies.flip();",
+      "new": "// Mutation: retain the out-of-AOI mask without inverting it.",
+      "description": "Stop converting the skip mask into the retain mask; contained, disjoint, and crossing AOI cases should distinguish this.",
+      "test_filter": "CutSurfaceExtended"
+    },
+    {
+      "id": "cut-surface-extended-empty-inputs",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "if (models.empty() || shapes.empty() ) return {};",
+      "new": "if (!models.empty() || !shapes.empty() ) return {};",
+      "description": "Reverse the empty-input fast path so valid cut requests are discarded while the empty request proceeds.",
+      "test_filter": "CutSurfaceExtended"
+    },
+    {
+      "id": "cut-surface-extended-no-patches",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "if (patches.empty()) return {};",
+      "new": "if (!patches.empty()) return {};",
+      "description": "Reverse the no-patch guard so an out-of-model projected shape is processed as if it had a surface patch.",
+      "test_filter": "CutSurfaceExtended"
+    },
+    {
+      "id": "cut-surface-extended-project-back-vertices",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "result.vertices.push_back(vd2.cast<float>());",
+      "new": "result.vertices.push_back(v.cast<float>());",
+      "description": "Use the source vertex instead of the projected back vertex; the non-axis projection contract checks the requested displacement.",
+      "test_filter": "CutSurfaceExtended"
+    },
+    {
+      "id": "cut-surface-extended-back-winding",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "result.indices.emplace_back(i.x() + back_offset,\n                                    i.z() + back_offset,\n                                    i.y() + back_offset);",
+      "new": "result.indices.emplace_back(i.x() + back_offset,\n                                    i.y() + back_offset,\n                                    i.z() + back_offset);",
+      "description": "Stop reversing the back-face winding; the explicit back-face index contract detects the orientation change.",
+      "test_filter": "CutSurfaceExtended"
+    },
+    {
+      "id": "cut-surface-extended-corefine-model-read",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "if (!CGAL::IO::read_OFF(model_path, model)) return false;",
+      "new": "if (CGAL::IO::read_OFF(model_path, model)) return false;",
+      "description": "Invert model OFF read validation; valid model input should no longer be accepted by corefine_test.",
+      "test_filter": "CutSurfaceExtended"
+    },
+    {
+      "id": "cut-surface-extended-corefine-shape-read",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "if (!CGAL::IO::read_OFF(shape_path, shape)) return false;",
+      "new": "if (CGAL::IO::read_OFF(shape_path, shape)) return false;",
+      "description": "Invert shape OFF read validation; valid shape input should no longer be accepted by corefine_test.",
+      "test_filter": "CutSurfaceExtended"
+    }
+  ]
+}

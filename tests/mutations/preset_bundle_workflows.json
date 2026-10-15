@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed PresetBundle workflow mutants retained by the reviewed PresetBundleWorkflowsExtended cases. Outcomes are omitted until isolated mutation runs.",
+  "mutants": [
+    {
+      "id": "preset-export-edited-selection",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "const Preset &print_preset    = include_modify ? prints.get_edited_preset() : prints.get_selected_preset();",
+      "new": "const Preset &print_preset    = include_modify ? prints.get_selected_preset() : prints.get_selected_preset();",
+      "description": "Ignore include_modify for the process export; selected-versus-edited roundtrip should detect the stale value.",
+      "test_filter": "PresetBundleWorkflowsExtended"
+    },
+    {
+      "id": "preset-export-system-default-filter",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if ((preset->is_system  && !export_system_settings) || preset->is_default)",
+      "new": "if ((preset->is_system  && !export_system_settings) && preset->is_default)",
+      "description": "Change the export filter from system-or-default to system-and-default; the selected user profile set should expose the altered eligibility rule.",
+      "test_filter": "PresetBundleWorkflowsExtended"
+    },
+    {
+      "id": "preset-import-printer-type-dispatch",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (config.has(\"printer_settings_id\")) {\n            collection = &printers;\n            type_subdir = PRESET_PRINTER_NAME;",
+      "new": "if (!config.has(\"printer_settings_id\")) {\n            collection = &printers;\n            type_subdir = PRESET_PRINTER_NAME;",
+      "description": "Invert JSON printer type dispatch; a valid print import should no longer be assigned to the printer collection.",
+      "test_filter": "PresetBundleWorkflowsExtended"
+    },
+    {
+      "id": "preset-import-name-confinement",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (!is_path_within_root(name, fs::path(collection->m_dir_path))) {\n            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << \" Preset name escapes the preset directory, not loading: \" << name;\n            return false;\n        }",
+      "new": "if (is_path_within_root(name, fs::path(collection->m_dir_path))) {\n            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << \" Preset name escapes the preset directory, not loading: \" << name;\n            return false;\n        }",
+      "description": "Invert the import path confinement guard; the scoped JSON import contract should reject an escaping preset name.",
+      "test_filter": "PresetBundleWorkflowsExtended"
+    },
+    {
+      "id": "preset-import-overwrite-decision",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (overwrite == 0 || overwrite == 2) {\n            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << \" Preset already present, not loading: \" << preset_name;\n            return false;\n        }",
+      "new": "if (overwrite == 0 && overwrite == 2) {\n            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << \" Preset already present, not loading: \" << preset_name;\n            return false;\n        }",
+      "description": "Break the no/skip overwrite decision; re-importing with a rejecting callback should preserve the existing file.",
+      "test_filter": "PresetBundleWorkflowsExtended"
+    },
+    {
+      "id": "preset-subscribed-prune-obsolete",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (remote_names.find(preset.name) == remote_names.end())\n                to_delete.push_back(preset.name);",
+      "new": "if (remote_names.find(preset.name) != remote_names.end())\n                to_delete.push_back(preset.name);",
+      "description": "Invert subscribed bundle pruning; an empty update must remove the prior canonical preset while retaining unrelated profiles.",
+      "test_filter": "PresetBundleWorkflowsExtended"
+    },
+    {
+      "id": "preset-local-bundle-discovery",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (fs::exists(local_dir)) {",
+      "new": "if (!fs::exists(local_dir)) {",
+      "description": "Invert local bundle discovery; a scoped local metadata directory should still load its canonical bundle preset.",
+      "test_filter": "PresetBundleWorkflowsExtended"
+    }
+  ]
+}

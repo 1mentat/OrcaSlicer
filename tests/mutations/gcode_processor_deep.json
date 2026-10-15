@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "Bounded source mutations for gcode processor deep. Outcomes are reported by the native mutation runner.",
+  "mutants": [
+    {
+      "id": "gcp-custom-color-time-not-recorded",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "process_custom_gcode_time(CustomGCode::ColorChange);",
+      "new": "process_custom_gcode_time(CustomGCode::Custom);",
+      "description": "Record a color-change stop under the wrong custom-code type; the typed custom time partition should reject the substitution.",
+      "test_filter": "GCodeProcessorDeep"
+    },
+    {
+      "id": "gcp-wipe-tower-volume-role",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "else if (m_extrusion_role==ExtrusionRole::erWipeTower) {\n            m_used_filaments.increase_wipe_tower_caches(volume_extruded_filament);",
+      "new": "else if (m_extrusion_role==ExtrusionRole::erNone) {\n            m_used_filaments.increase_wipe_tower_caches(volume_extruded_filament);",
+      "description": "Stop classifying Prime tower extrusion under its dedicated volume partition.",
+      "test_filter": "GCodeProcessorDeep"
+    },
+    {
+      "id": "gcp-external-purge-volume-accounting",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "m_used_filaments.update_flush_per_filament(filament_id, volume_extruded_filament);",
+      "new": "m_used_filaments.update_flush_per_filament(filament_id, 0.0f);",
+      "description": "Drop an external purge amount from flush filament statistics.",
+      "test_filter": "GCodeProcessorDeep"
+    },
+    {
+      "id": "gcp-flow-override-discarded",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "m_time_processor.machines[i].extrude_factor_override_percentage = value_s;",
+      "new": "m_time_processor.machines[i].extrude_factor_override_percentage = 1.0f;",
+      "description": "Ignore M221's requested flow override in time planning.",
+      "test_filter": "GCodeProcessorDeep"
+    },
+    {
+      "id": "gcp-g29-measure-gate",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if(m_measure_g29_time)\n            simulate_st_synchronize(value_s);",
+      "new": "if(!m_measure_g29_time)\n            simulate_st_synchronize(value_s);",
+      "description": "Invert the BBL M622/M623 measurement gate for G29 timing.",
+      "test_filter": "GCodeProcessorDeep"
+    },
+    {
+      "id": "gcp-chamber-heating-delay",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "simulate_st_synchronize(wait_chamber_temp_time);",
+      "new": "simulate_st_synchronize(0.0f);",
+      "description": "Drop the modeled chamber heating delay for M191 above the threshold.",
+      "test_filter": "GCodeProcessorDeep"
+    },
+    {
+      "id": "gcp-sailfish-m108-gate",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (m_flavor != gcfSailfish)\n        return;",
+      "new": "if (m_flavor == gcfSailfish)\n        return;",
+      "description": "Invert Sailfish M108 handling so its tool alias is ignored while other flavors parse it.",
+      "test_filter": "GCodeProcessorDeep"
+    },
+    {
+      "id": "gcp-makerware-m135-gate",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (m_flavor != gcfMakerWare)\n        return;",
+      "new": "if (m_flavor == gcfMakerWare)\n        return;",
+      "description": "Invert MakerWare M135 handling so its tool alias is ignored while other flavors parse it.",
+      "test_filter": "GCodeProcessorDeep"
+    },
+    {
+      "id": "gcp-m1020-valid-selection",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "// carry the H<nozzle> logical-nozzle id. process_filament_change(int,int) self-gates back\n            // to the single-arg model for the single-nozzle fleet, so this is byte-inert for them.\n            int   nozzle_id = -1;\n            float nozzle_val = 0.f;\n            if (line.has_value('H', nozzle_val))\n                nozzle_id = static_cast<int>(nozzle_val);\n            process_filament_change(eid, nozzle_id);",
+      "new": "// carry the H<nozzle> logical-nozzle id. process_filament_change(int,int) self-gates back\n            // to the single-arg model for the single-nozzle fleet, so this is byte-inert for them.\n            int   nozzle_id = -1;\n            float nozzle_val = 0.f;\n            if (line.has_value('H', nozzle_val))\n                nozzle_id = static_cast<int>(nozzle_val);\n            process_filament_change(0, nozzle_id);",
+      "description": "Ignore the valid M1020 filament selection and keep the prior mapped filament active.",
+      "test_filter": "GCodeProcessorDeep"
+    },
+    {
+      "id": "gcp-m132-x-origin",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (line.has('X'))\n        m_origin[X] = 0.0f;",
+      "new": "if (line.has('X'))\n        m_origin[Y] = 0.0f;",
+      "description": "Reset the wrong axis for MakerBot M132 X, violating the selected-axis origin contract.",
+      "test_filter": "GCodeProcessorDeep"
+    }
+  ]
+}

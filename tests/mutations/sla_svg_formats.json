@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "description": "Bounded source mutations for sla svg formats. Outcomes are reported by the native mutation runner.",
+  "mutants": [
+    {
+      "id": "sl1-archive-png-extension-filter",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "if (boost::filesystem::path(name).extension().string() == \".png\") {",
+      "new": "if (boost::filesystem::path(name).extension().string() != \".png\") {",
+      "description": "Invert archive raster-entry filtering; valid raster layers would no longer be decoded.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "sl1-archive-profile-entry-selection",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "if (name == PROFILE_FNAME) arch.profile = read_ini(entry, zip);",
+      "new": "if (name != PROFILE_FNAME) arch.profile = read_ini(entry, zip);",
+      "description": "Read non-profile archive entries as the profile; profile-backed raster import should reject the resulting configuration.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "sl1-archive-missing-profile-fallback",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "if (profile_in.empty()) { // missing profile... do guess work",
+      "new": "if (!profile_in.empty()) { // missing profile... do guess work",
+      "description": "Disable legacy config.ini layer-height recovery; the missing-profile fixture uses a distinct fallback height to expose this path.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "sl1-archive-raster-decode-check",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "if (!png::decode_png(rb, img)) return;",
+      "new": "if (png::decode_png(rb, img)) return;",
+      "description": "Invert PNG decode handling; valid layers would be discarded and corrupt data would continue into raster processing.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "sl1-archive-cancellation-result",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "if (st.stop) slices = {};",
+      "new": "if (!st.stop) slices = {};",
+      "description": "Invert progress cancellation cleanup; cancellation should not replace the caller's mesh with completed slices.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "svg-empty-attribute-export-guard",
+      "path": "src/libslic3r/SVG.cpp",
+      "old": "if (expolygons_with_attributes.empty())\n        return;",
+      "new": "if (!expolygons_with_attributes.empty())\n        return;",
+      "description": "Invert the empty attribute export guard; the empty collection contract should not create an SVG artifact.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "svg-grid-size-guard",
+      "path": "src/libslic3r/SVG.cpp",
+      "old": "if (bbox_size(0) < step || bbox_size(1) < step)",
+      "new": "if (bbox_size(0) < step && bbox_size(1) < step)",
+      "description": "Require both dimensions to be too small before suppressing a grid; a narrow rectangle would incorrectly receive grid lines.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "svg-arrow-marker-branch",
+      "path": "src/libslic3r/SVG.cpp",
+      "old": "if (this->arrows)",
+      "new": "if (!this->arrows)",
+      "description": "Invert arrow marker emission; the primitive annotation fixture checks the marker on an enabled SVG.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "svg-path-fill-mode",
+      "path": "src/libslic3r/SVG.cpp",
+      "old": "if (! fill)",
+      "new": "if (fill)",
+      "description": "Invert path fill/stroke mode; polygon winding output should distinguish filled paths from outlines.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "svg-polygon-winding-color",
+      "path": "src/libslic3r/SVG.cpp",
+      "old": "if (it->is_counter_clockwise())",
+      "new": "if (!it->is_counter_clockwise())",
+      "description": "Invert polygon winding classification; the fixture expects counter-clockwise input filled red and the reversed input white.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "sl1-image-case-insensitive-order",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "return std::less<std::string>()(r1.fname, r2.fname);",
+      "new": "return std::greater<std::string>()(r1.fname, r2.fname);",
+      "description": "Reverse PNG layer order: the small lower layer becomes the large lower layer, violating independently asserted layer bounds.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "sl1-mirror-y-reflection",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "foreach_vertex(expoly, [height](Point &p) {p.y() = height - p.y(); });",
+      "new": "foreach_vertex(expoly, [height](Point &p) {p.y() = height + p.y(); });",
+      "description": "Break display_mirror_y reflection around the configured display height; independent reflected bounds must fail.",
+      "test_filter": "SLASVGFormatExtended"
+    },
+    {
+      "id": "sl1-mirror-x-reflection",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "foreach_vertex(expoly, [width](Point &p) {p.x() = width - p.x(); });",
+      "new": "foreach_vertex(expoly, [width](Point &p) {p.x() = width + p.x(); });",
+      "description": "Break display_mirror_x reflection around the configured display width; independent reflected bounds must fail.",
+      "test_filter": "SLASVGFormatExtended"
+    }
+  ]
+}
