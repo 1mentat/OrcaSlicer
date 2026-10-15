@@ -451,7 +451,8 @@ TEST_CASE("cut_surface handles two disjoint source meshes in one projection", "[
     for (const Vec3f &vertex : cut.vertices) {
         CHECK(vertex.z() >= 0.f);
         CHECK(vertex.z() <= 10.f);
-        CHECK((vertex.x() <= 10.f || vertex.x() >= 20.f));
+        if (vertex.x() > 10.f)
+            CHECK(vertex.x() >= 20.f);
         left = left || vertex.x() < 10.f;
         right = right || vertex.x() > 20.f;
     }

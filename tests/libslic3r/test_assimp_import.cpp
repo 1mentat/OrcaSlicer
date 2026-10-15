@@ -92,8 +92,10 @@ TEST_CASE("Assimp triangulates a textured quad and keeps UVs", "[AssimpImport]")
     REQUIRE(mesh.indices.size() == 2);
     REQUIRE(mesh.uvs.size() == 4);
     for (const auto &index : mesh.indices)
-        for (int vertex : index)
-            CHECK((vertex >= 0 && static_cast<size_t>(vertex) < mesh.vertices.size()));
+        for (int vertex : index) {
+            CHECK(vertex >= 0);
+            CHECK(static_cast<size_t>(vertex) < mesh.vertices.size());
+        }
     for (size_t index = 0; index < mesh.vertices.size(); ++index) {
         CHECK_THAT(mesh.uvs[index][0], WithinAbs(mesh.vertices[index][0] / 10.f, 1e-6));
         CHECK_THAT(mesh.uvs[index][1], WithinAbs(mesh.vertices[index][1] / 10.f, 1e-6));
