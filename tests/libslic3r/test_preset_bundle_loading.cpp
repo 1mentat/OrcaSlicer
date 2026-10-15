@@ -7602,7 +7602,8 @@ TEST_CASE("G-code config loading activates an external profile from recognized m
     const fs::path gcode = temp.path() / "metadata.gcode";
     write_gcode_config(gcode, 0.27, "#112233");
 
-    PresetBundle bundle;
+    preset_lifecycle_contracts::ScopedPresetBundle scoped_bundle;
+    PresetBundle &bundle = scoped_bundle.bundle;
     REQUIRE_NOTHROW(bundle.load_config_file(gcode.string(), ForwardCompatibilitySubstitutionRule::Disable));
     CHECK(bundle.filament_presets.size() == 1);
     CHECK(bundle.prints.get_selected_preset().is_external);

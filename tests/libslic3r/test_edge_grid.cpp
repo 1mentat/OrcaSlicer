@@ -202,4 +202,3 @@ TEST_CASE("EdgeGrid handles mixed polygons and polylines", "[EdgeGrid]")
     CHECK(grid.contours()[0].num_segments() == 1);
     CHECK(grid.contours()[1].num_segments() == 4);
 }
-

@@ -164,4 +164,3 @@ TEST_CASE("SVG handles polygon winding and primitive annotations", "[SVG][SLASVG
     CHECK(cw_text.find("fill: white") != std::string::npos);
     CHECK(cw_text.find("fill: red") == std::string::npos);
 }
-
