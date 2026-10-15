@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed SLA pipeline mutants for validating layer inclusion and model-volume statistics.",
+  "mutants": [
+    {
+      "id": "sla-pipeline-drop-top-layer",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "for(coord_t h = minZs + ilhs + lhs; h <= maxZs; h += lhs)",
+      "new": "for(coord_t h = minZs + ilhs + lhs; h < maxZs; h += lhs)",
+      "description": "Drop the layer whose top is exactly at the model's maximum Z level.",
+      "test_filter": "SLAPipeline"
+    },
+    {
+      "id": "sla-pipeline-drop-positive-model-volume",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "if (layer_model_area < 0 || layer_model_area > 0) {\n            Lock lck(mutex); models_volume += layer_model_area * l_height;\n        }",
+      "new": "if (layer_model_area < 0) {\n            Lock lck(mutex); models_volume += layer_model_area * l_height;\n        }",
+      "description": "Ignore positive model slice areas when accumulating the printed model volume.",
+      "test_filter": "SLAPipeline"
+    }
+  ]
+}

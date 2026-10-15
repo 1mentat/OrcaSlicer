@@ -55,6 +55,11 @@ class SettingsInventoryTests(unittest.TestCase):
                          options["top_surface_pattern"]["enum_values"])
         self.assertEqual(options["filament_retraction_length"]["type"], "coFloats")
         self.assertEqual(options["gcode_remap_x"]["enum_value_count"], 9)
+        for family in ("speed", "acceleration", "jerk"):
+            for axis in "xyze":
+                option = options[f"machine_max_{family}_{axis}"]
+                self.assertEqual(option["type"], "coFloats")
+                self.assertEqual(option["origin"], "literal_axis_loop")
 
     def test_report_marks_only_declared_dimensions_as_evidence(self):
         report = settings_inventory.build_report(

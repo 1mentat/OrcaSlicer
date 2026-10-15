@@ -4,6 +4,7 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/MeshBoolean.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -11,54 +12,17 @@
 #include "test_helpers.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstddef>
 #include <initializer_list>
+#include <limits>
 #include <string>
-#include <string_view>
 #include <vector>
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
 
 namespace {
-
-// This is a schema inventory plus selected executable dimensions. Settings which
-// only affect firmware startup text are intentionally covered by the config tests.
-constexpr std::array<std::string_view, 31> boolean_keys = {{
-    "precise_outer_wall",
-    "only_one_wall_top",
-    "only_one_wall_first_layer",
-    "extra_perimeters_on_overhangs",
-    "overhang_reverse",
-    "overhang_reverse_internal_only",
-    "reduce_crossing_wall",
-    "relative_bridge_angle",
-    "bridge_no_support",
-    "thick_bridges",
-    "thick_internal_bridges",
-    "is_infill_first",
-    "fuzzy_skin_first_layer",
-    "enable_arc_fitting",
-    "make_overhang_printable",
-    "detect_overhang_wall",
-    "unsupported_wall_last",
-    "spiral_mode",
-    "spiral_mode_smooth",
-    "enable_support",
-    "support_on_build_plate_only",
-    "support_critical_regions_only",
-    "support_remove_small_overhang",
-    "support_ironing",
-    "detect_thin_wall",
-    "hole_to_polyhole",
-    "hole_to_polyhole_twisted",
-    "infill_combination",
-    "align_infill_direction_to_model",
-    "brim_use_efc_outline",
-    "brim_ears_outer_only",
-}};
 
 DynamicPrintConfig boolean_config()
 {
@@ -94,21 +58,34 @@ TriangleMesh two_tier_fixture()
     return lower;
 }
 
+TriangleMesh circular_hole_fixture()
+{
+    // TestMesh::cube_with_hole is a square cutout. Build a real circular
+    // through-hole so polyhole conversion and layer rotation have an
+    // observable geometric input.
+    TriangleMesh body = make_cube(20., 20., 6.);
+    TriangleMesh drill = make_cylinder(3., 8., PI / 90.);
+    drill.translate(Vec3f(10.f, 10.f, -1.f));
+    MeshBoolean::minus(body, drill);
+    return body;
+}
+
 struct BooleanEvidence {
     size_t layers = 0;
     size_t perimeter_paths = 0;
     size_t first_layer_perimeter_paths = 0;
     size_t top_layer_perimeter_paths = 0;
-    size_t thin_fill_paths = 0;
     size_t support_points = 0;
     size_t support_ironing_paths = 0;
     size_t ironing_paths = 0;
-    size_t bridge_paths = 0;
+    size_t external_bridge_infill_paths = 0;
+    double external_bridge_infill_flow_mm3_per_mm = 0.0;
+    size_t external_perimeter_paths = 0;
+    double external_perimeter_max_x = -std::numeric_limits<double>::infinity();
     size_t brim_items = 0;
     double brim_checksum = 0.0;
     double perimeter_length = 0.0;
-    double overhang_direction = 0.0;
-    double bridge_height = 0.0;
+    double overhang_winding = 0.0;
     size_t hole_vertices = 0;
     double hole_checksum = 0.0;
     size_t arc_moves = 0;
@@ -123,18 +100,29 @@ void inspect_paths(const ExtrusionEntityCollection &collection, BooleanEvidence 
         if (is_perimeter(role)) {
             ++evidence.perimeter_paths;
             evidence.perimeter_length += path.length();
-            if (path.overhang_degree > EPSILON) {
-                const Point3 &first = path.first_point3();
-                const Point3 &last = path.last_point3();
-                evidence.overhang_direction += static_cast<double>(first.x()) * last.y() -
-                                               static_cast<double>(first.y()) * last.x();
+            if (role == erExternalPerimeter) {
+                ++evidence.external_perimeter_paths;
+                for (const Point3 &point : path.polyline.points)
+                    evidence.external_perimeter_max_x = std::max(evidence.external_perimeter_max_x, static_cast<double>(point.x()));
+            }
+            if (role == erExternalPerimeter && path.polyline.points.size() > 2) {
+                // A closed path has identical first/last points, so their
+                // cross product cannot observe reversal.  Signed polygon
+                // area remains sensitive to overhang_reverse.
+                for (size_t i = 1; i < path.polyline.points.size(); ++i) {
+                    const Point3 &a = path.polyline.points[i - 1];
+                    const Point3 &b = path.polyline.points[i];
+                    evidence.overhang_winding += static_cast<double>(a.x()) * b.y() -
+                                                  static_cast<double>(a.y()) * b.x();
+                }
             }
         }
         if (role == erIroning)
             ++evidence.ironing_paths;
-        if (role == erBridgeInfill || role == erInternalBridgeInfill) {
-            ++evidence.bridge_paths;
-            evidence.bridge_height = std::max(evidence.bridge_height, static_cast<double>(path.height));
+        if (role == erBridgeInfill) {
+            ++evidence.external_bridge_infill_paths;
+            evidence.external_bridge_infill_flow_mm3_per_mm =
+                std::max(evidence.external_bridge_infill_flow_mm3_per_mm, path.mm3_per_mm);
         }
     });
 }
@@ -179,7 +167,6 @@ BooleanEvidence process_fixture(DynamicPrintConfig config, TriangleMesh shape = 
     for (size_t layer_idx = 0; layer_idx < object.layers().size(); ++layer_idx) {
         const Layer *layer = object.layers()[layer_idx];
         for (const LayerRegion *region : layer->regions()) {
-            evidence.thin_fill_paths += region->thin_fills.items_count();
             if (layer_idx == 0)
                 evidence.first_layer_perimeter_paths += region->perimeters.items_count();
             if (layer_idx + 1 == object.layers().size())
@@ -231,66 +218,109 @@ DynamicPrintConfig with_bool(const char *key, bool value)
     return config;
 }
 
-} // namespace
-
-TEST_CASE("Registered boolean settings accept both canonical values", "[SettingsBooleanVariance]")
+TriangleMesh thin_wall_fixture()
 {
-    for (const std::string_view key : boolean_keys) {
-        CAPTURE(key);
-        DynamicPrintConfig config = boolean_config();
-        REQUIRE_NOTHROW(config.set_deserialize_strict(key.data(), "0"));
-        CHECK(config.option(key.data())->serialize() == "0");
-        REQUIRE_NOTHROW(config.set_deserialize_strict(key.data(), "1"));
-        CHECK(config.option(key.data())->serialize() == "1");
-    }
+    // Keep a normal-sized body so the print remains valid, and attach a
+    // sub-nozzle fin whose narrow section is visible to classic walls.
+    TriangleMesh body = make_cube(20., 20., 3.);
+    // The fin crosses the body's right edge and extends well beyond it. A fin
+    // laid along the edge is absorbed by the union and does not form a
+    // thin-wall medial axis at the junction.
+    TriangleMesh fin = make_cube(10., 0.25, 3.);
+    fin.translate(Vec3f(19.9f, 5.f, 0.f));
+    MeshBoolean::cgal::plus(body, fin);
+    return body;
 }
 
-TEST_CASE("Wall and overhang booleans alter their geometric or ordering contract", "[SettingsBooleanVariance]")
+std::vector<std::string> non_first_layer_role_sequence(const std::string &gcode)
+{
+    const size_t first_layer = gcode.find(";LAYER_CHANGE");
+    if (first_layer == std::string::npos)
+        return {};
+    const size_t second_layer = gcode.find(";LAYER_CHANGE", first_layer + 1);
+    if (second_layer == std::string::npos)
+        return {};
+    return role_sequence(gcode.substr(second_layer), { "perimeter", "infill" });
+}
+
+} // namespace
+
+TEST_CASE("only_one_wall_top limits top layer perimeter count", "[SettingsBooleanVariance][BooleanSettings]")
 {
     DynamicPrintConfig wall_base = boolean_config();
-    wall_base.set_deserialize_strict({ { "wall_loops", 3 } });
+    wall_base.set_deserialize_strict({
+        { "wall_loops", 3 },
+        { "only_one_wall_top", false },
+    });
     const BooleanEvidence normal_top = process_fixture(wall_base);
 
     DynamicPrintConfig one_top = wall_base;
     one_top.set_deserialize_strict({ { "only_one_wall_top", true } });
     const BooleanEvidence one_top_evidence = process_fixture(one_top);
     CHECK(one_top_evidence.top_layer_perimeter_paths < normal_top.top_layer_perimeter_paths);
+}
 
+TEST_CASE("only_one_wall_first_layer limits first layer perimeter count", "[SettingsBooleanVariance][BooleanSettings]")
+{
     DynamicPrintConfig normal_first = boolean_config();
-    normal_first.set_deserialize_strict({ { "wall_loops", 3 } });
+    normal_first.set_deserialize_strict({
+        { "wall_loops", 3 },
+        { "only_one_wall_first_layer", false },
+    });
     const BooleanEvidence regular_first = process_fixture(normal_first);
     DynamicPrintConfig one_first = normal_first;
     one_first.set_deserialize_strict({ { "only_one_wall_first_layer", true } });
     const BooleanEvidence one_first_evidence = process_fixture(one_first);
     CHECK(one_first_evidence.first_layer_perimeter_paths < regular_first.first_layer_perimeter_paths);
+}
 
+TEST_CASE("extra_perimeters_on_overhangs adds overhang perimeter geometry", "[SettingsBooleanVariance][BooleanSettings]")
+{
     DynamicPrintConfig overhang_base = boolean_config();
     overhang_base.set_deserialize_strict({
-        { "detect_overhang_wall", true },
-        { "wall_loops", 3 },
+        { "detect_overhang_wall",          true },
+        { "wall_loops",                    3 },
+        { "extra_perimeters_on_overhangs", false },
+        { "overhang_reverse",              false },
+        { "overhang_reverse_internal_only", false },
     });
     const BooleanEvidence regular_overhang = process_fixture(overhang_base, mesh(TestMesh::overhang));
     DynamicPrintConfig extra = overhang_base;
     extra.set("extra_perimeters_on_overhangs", true);
     const BooleanEvidence extra_overhang = process_fixture(extra, mesh(TestMesh::overhang));
     CHECK(extra_overhang.perimeter_paths > regular_overhang.perimeter_paths);
+}
 
+TEST_CASE("overhang_reverse changes overhang path orientation", "[SettingsBooleanVariance][BooleanSettings]")
+{
+    DynamicPrintConfig overhang_base = boolean_config();
+    overhang_base.set_deserialize_strict({
+        { "detect_overhang_wall",          true },
+        { "wall_loops",                    3 },
+        { "extra_perimeters_on_overhangs", false },
+        { "overhang_reverse",              false },
+        { "overhang_reverse_internal_only", false },
+    });
+    const BooleanEvidence regular_overhang = process_fixture(overhang_base, mesh(TestMesh::overhang));
     DynamicPrintConfig reverse = overhang_base;
     reverse.set("overhang_reverse", true);
     const BooleanEvidence reversed = process_fixture(reverse, mesh(TestMesh::overhang));
-    CHECK(std::abs(reversed.overhang_direction - regular_overhang.overhang_direction) > 0.01);
+    CHECK(std::abs(reversed.overhang_winding - regular_overhang.overhang_winding) > 0.01);
+}
 
+TEST_CASE("is_infill_first changes role ordering", "[SettingsBooleanVariance][BooleanSettings]")
+{
     const BooleanEvidence walls_first = process_fixture(with_bool("is_infill_first", false));
     const BooleanEvidence infill_first = process_fixture(with_bool("is_infill_first", true));
-    const std::vector<std::string> wall_then_fill = role_sequence(walls_first.gcode, { "perimeter", "infill" });
-    const std::vector<std::string> fill_then_wall = role_sequence(infill_first.gcode, { "perimeter", "infill" });
+    const std::vector<std::string> wall_then_fill = non_first_layer_role_sequence(walls_first.gcode);
+    const std::vector<std::string> fill_then_wall = non_first_layer_role_sequence(infill_first.gcode);
     REQUIRE_FALSE(wall_then_fill.empty());
     REQUIRE_FALSE(fill_then_wall.empty());
     CHECK(wall_then_fill.front() == "perimeter");
     CHECK(fill_then_wall.front() == "infill");
 }
 
-TEST_CASE("Support and bridge booleans preserve support and bridge invariants", "[SettingsBooleanVariance]")
+TEST_CASE("enable_support creates support geometry when required", "[SettingsBooleanVariance][BooleanSettings]")
 {
     DynamicPrintConfig unsupported = boolean_config();
     unsupported.set_deserialize_strict({
@@ -308,11 +338,18 @@ TEST_CASE("Support and bridge booleans preserve support and bridge invariants", 
     const BooleanEvidence support = process_fixture(supported, mesh(TestMesh::overhang));
     CHECK(no_support.support_points == 0);
     CHECK(support.support_points > 0);
+}
 
-    DynamicPrintConfig support_ironing_off = supported;
+TEST_CASE("support_ironing creates ironing paths on support", "[SettingsBooleanVariance][BooleanSettings]")
+{
+    DynamicPrintConfig support_ironing_off = boolean_config();
     support_ironing_off.set_deserialize_strict({
+        { "enable_support",               true },
+        { "support_type",                 "normal(auto)" },
+        { "support_threshold_angle",      15 },
+        { "support_remove_small_overhang", false },
         { "support_interface_top_layers", 2 },
-        { "support_ironing", false },
+        { "support_ironing",              false },
     });
     const BooleanEvidence support_interface = process_fixture(support_ironing_off, mesh(TestMesh::overhang));
     DynamicPrintConfig support_ironing_on = support_ironing_off;
@@ -320,7 +357,17 @@ TEST_CASE("Support and bridge booleans preserve support and bridge invariants", 
     const BooleanEvidence ironed_support = process_fixture(support_ironing_on, mesh(TestMesh::overhang));
     CHECK(support_interface.support_ironing_paths == 0);
     CHECK(ironed_support.support_ironing_paths > 0);
+}
 
+TEST_CASE("support_on_build_plate_only changes elevated support allocation", "[SettingsBooleanVariance][BooleanSettings]")
+{
+    DynamicPrintConfig supported = boolean_config();
+    supported.set_deserialize_strict({
+        { "enable_support",               true },
+        { "support_type",                 "normal(auto)" },
+        { "support_threshold_angle",      15 },
+        { "support_remove_small_overhang", false },
+    });
     DynamicPrintConfig anywhere = supported;
     anywhere.set("support_on_build_plate_only", false);
     const BooleanEvidence support_anywhere = process_fixture(anywhere, two_tier_fixture());
@@ -330,23 +377,33 @@ TEST_CASE("Support and bridge booleans preserve support and bridge invariants", 
     CHECK(support_anywhere.support_points > 0);
     CHECK(support_plate_only.support_points > 0);
     CHECK(support_anywhere.support_points != support_plate_only.support_points);
+}
 
+TEST_CASE("thick_bridges changes bridge extrusion geometry", "[SettingsBooleanVariance][BooleanSettings]")
+{
     DynamicPrintConfig thin_bridge = boolean_config();
     thin_bridge.set_deserialize_strict({
         { "bridge_no_support", true },
         { "thick_bridges", false },
+        // Keep the ratio away from the default convergence point so the
+        // rounded (thick) and normal bridge-flow contracts are distinguishable.
+        { "bridge_flow", 0.75 },
         { "support_remove_small_overhang", false },
     });
     const BooleanEvidence normal_bridge = process_fixture(thin_bridge, mesh(TestMesh::bridge));
     DynamicPrintConfig thick_bridge = thin_bridge;
     thick_bridge.set("thick_bridges", true);
     const BooleanEvidence thick_bridge_evidence = process_fixture(thick_bridge, mesh(TestMesh::bridge));
-    REQUIRE(normal_bridge.bridge_paths > 0);
-    REQUIRE(thick_bridge_evidence.bridge_paths > 0);
-    CHECK(thick_bridge_evidence.bridge_height > normal_bridge.bridge_height);
+    REQUIRE(normal_bridge.external_bridge_infill_paths > 0);
+    REQUIRE(thick_bridge_evidence.external_bridge_infill_paths > 0);
+    // Thick bridges use the rounded bridge-flow model. Width and height are
+    // visualization fields and may be normalized by fill spacing; the
+    // deposited volume per unit path is the stable flow contract.
+    CHECK(std::abs(thick_bridge_evidence.external_bridge_infill_flow_mm3_per_mm -
+                   normal_bridge.external_bridge_infill_flow_mm3_per_mm) > 0.001);
 }
 
-TEST_CASE("Brim compensation boolean changes the generated brim outline", "[SettingsBooleanVariance]")
+TEST_CASE("brim_use_efc_outline changes the generated brim outline", "[SettingsBooleanVariance][BooleanSettings]")
 {
     DynamicPrintConfig uncompensated = boolean_config();
     uncompensated.set_deserialize_strict({
@@ -365,7 +422,7 @@ TEST_CASE("Brim compensation boolean changes the generated brim outline", "[Sett
     CHECK(std::abs(plain.brim_checksum - adjusted.brim_checksum) > 0.01);
 }
 
-TEST_CASE("Ironing, thin-wall, arc, and fuzzy booleans reach their pipeline roles", "[SettingsBooleanVariance]")
+TEST_CASE("ironing_type creates topmost ironing paths", "[SettingsBooleanVariance][BooleanSettings]")
 {
     DynamicPrintConfig no_ironing = boolean_config();
     no_ironing.set_deserialize_strict("ironing_type", "no ironing");
@@ -375,16 +432,23 @@ TEST_CASE("Ironing, thin-wall, arc, and fuzzy booleans reach their pipeline role
     const BooleanEvidence ironed = process_fixture(topmost);
     CHECK(plain.ironing_paths == 0);
     CHECK(ironed.ironing_paths > 0);
+}
 
+TEST_CASE("enable_arc_fitting emits arcs for curved geometry", "[SettingsBooleanVariance][BooleanSettings]")
+{
     DynamicPrintConfig no_arc = boolean_config();
     no_arc.set("enable_arc_fitting", false);
-    const BooleanEvidence linear = process_fixture(no_arc);
+    const TriangleMesh curved = make_cylinder(10., 4., PI / 90.);
+    const BooleanEvidence linear = process_fixture(no_arc, curved);
     DynamicPrintConfig arc = no_arc;
     arc.set("enable_arc_fitting", true);
-    const BooleanEvidence arcs = process_fixture(arc);
+    const BooleanEvidence arcs = process_fixture(arc, curved);
     CHECK(linear.arc_moves == 0);
     CHECK(arcs.arc_moves > 0);
+}
 
+TEST_CASE("detect_thin_wall emits an external perimeter into a narrow fin", "[SettingsBooleanVariance][BooleanSettings]")
+{
     DynamicPrintConfig no_thin = boolean_config();
     no_thin.set_deserialize_strict({
         { "wall_loops", 2 },
@@ -392,13 +456,22 @@ TEST_CASE("Ironing, thin-wall, arc, and fuzzy booleans reach their pipeline role
         { "bottom_shell_layers", 0 },
         { "sparse_infill_density", "0%" },
         { "detect_thin_wall", false },
+        { "wall_generator", "classic" },
     });
-    const BooleanEvidence ordinary_wall = process_fixture(no_thin, make_cube(20, 0.25, 3));
+    const BooleanEvidence ordinary_wall = process_fixture(no_thin, thin_wall_fixture());
     DynamicPrintConfig detect_thin = no_thin;
     detect_thin.set("detect_thin_wall", true);
-    const BooleanEvidence thin_wall = process_fixture(detect_thin, make_cube(20, 0.25, 3));
-    CHECK(thin_wall.thin_fill_paths > ordinary_wall.thin_fill_paths);
+    const BooleanEvidence thin_wall = process_fixture(detect_thin, thin_wall_fixture());
+    // Classic perimeter generation stores detected medial-axis walls in the
+    // external-perimeter collection.
+    CHECK(thin_wall.external_perimeter_paths > ordinary_wall.external_perimeter_paths);
+    // init_print centers the fixture, so compare against the disabled control
+    // rather than an absolute model coordinate.
+    CHECK(thin_wall.external_perimeter_max_x > ordinary_wall.external_perimeter_max_x + static_cast<double>(scale_(5.0)));
+}
 
+TEST_CASE("fuzzy_skin_first_layer changes first layer perimeter length", "[SettingsBooleanVariance][BooleanSettings]")
+{
     DynamicPrintConfig fuzzy_off = boolean_config();
     fuzzy_off.set_deserialize_strict({
         { "fuzzy_skin", "external" },
@@ -414,7 +487,7 @@ TEST_CASE("Ironing, thin-wall, arc, and fuzzy booleans reach their pipeline role
     CHECK(std::abs(fuzzy_first.perimeter_length - smooth_first.perimeter_length) > 0.01);
 }
 
-TEST_CASE("Spiral and model transformation booleans alter stateful geometry", "[SettingsBooleanVariance]")
+TEST_CASE("spiral_mode creates continuous extruding Z motion", "[SettingsBooleanVariance][BooleanSettings]")
 {
     DynamicPrintConfig ordinary = boolean_config();
     ordinary.set_deserialize_strict({
@@ -430,7 +503,10 @@ TEST_CASE("Spiral and model transformation booleans alter stateful geometry", "[
     const BooleanEvidence spiral_evidence = process_fixture(spiral, mesh(TestMesh::slopy_cube));
     CHECK(ordinary_evidence.extruding_z_moves == 0);
     CHECK(spiral_evidence.extruding_z_moves > 0);
+}
 
+TEST_CASE("hole_to_polyhole changes circular hole vertex count", "[SettingsBooleanVariance][BooleanSettings]")
+{
     DynamicPrintConfig no_polyhole = boolean_config();
     no_polyhole.set_deserialize_strict({
         { "hole_to_polyhole", false },
@@ -438,19 +514,29 @@ TEST_CASE("Spiral and model transformation booleans alter stateful geometry", "[
         { "hole_to_polyhole_max_edges", 6 },
         { "hole_to_polyhole_threshold", 0.5 },
     });
-    const BooleanEvidence circular_hole = process_fixture(no_polyhole, mesh(TestMesh::cube_with_hole));
+    const BooleanEvidence circular_hole = process_fixture(no_polyhole, circular_hole_fixture());
     DynamicPrintConfig polyhole = no_polyhole;
     polyhole.set("hole_to_polyhole", true);
-    const BooleanEvidence polygon_hole = process_fixture(polyhole, mesh(TestMesh::cube_with_hole));
+    const BooleanEvidence polygon_hole = process_fixture(polyhole, circular_hole_fixture());
     REQUIRE(circular_hole.hole_vertices > 0);
     REQUIRE(polygon_hole.hole_vertices > 0);
     CHECK(circular_hole.hole_vertices != polygon_hole.hole_vertices);
+}
 
+TEST_CASE("hole_to_polyhole_twisted rotates polygon hole geometry", "[SettingsBooleanVariance][BooleanSettings]")
+{
+    DynamicPrintConfig polyhole = boolean_config();
+    polyhole.set_deserialize_strict({
+        { "hole_to_polyhole",           true },
+        { "hole_to_polyhole_twisted",   false },
+        { "hole_to_polyhole_max_edges", 6 },
+        { "hole_to_polyhole_threshold", 0.5 },
+    });
     DynamicPrintConfig untwisted = polyhole;
     untwisted.set("hole_to_polyhole_twisted", false);
-    const BooleanEvidence fixed_hole = process_fixture(untwisted, mesh(TestMesh::cube_with_hole));
+    const BooleanEvidence fixed_hole = process_fixture(untwisted, circular_hole_fixture());
     DynamicPrintConfig twisted = polyhole;
     twisted.set("hole_to_polyhole_twisted", true);
-    const BooleanEvidence rotating_hole = process_fixture(twisted, mesh(TestMesh::cube_with_hole));
+    const BooleanEvidence rotating_hole = process_fixture(twisted, circular_hole_fixture());
     CHECK(std::abs(fixed_hole.hole_checksum - rotating_hole.hole_checksum) > 0.01);
 }

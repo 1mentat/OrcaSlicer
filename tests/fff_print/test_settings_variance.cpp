@@ -67,6 +67,10 @@ struct SliceEvidence {
     size_t perimeter_layers = 0;
     size_t top_layers = 0;
     size_t bottom_layers = 0;
+    size_t top_nominal_shell_layers = 0;
+    size_t bottom_nominal_shell_layers = 0;
+    size_t top_bridge_supported_layers = 0;
+    size_t bottom_bridge_supported_layers = 0;
     double perimeter_length = 0.0;
     double sparse_length = 0.0;
     double solid_length = 0.0;
@@ -74,6 +78,8 @@ struct SliceEvidence {
     double bottom_length = 0.0;
     double top_shell_length = 0.0;
     double bottom_shell_length = 0.0;
+    double top_solid_surface_area = 0.0;
+    double bottom_solid_surface_area = 0.0;
     size_t parsed_motion_moves = 0;
     size_t parsed_extrusion_moves = 0;
     bool gcode_valid = false;
@@ -97,12 +103,35 @@ SliceEvidence slice_fixture(DynamicPrintConfig config, TriangleMesh shape = cube
     evidence.layers = object.layers().size();
     std::vector<double> shell_length_by_layer;
     shell_length_by_layer.reserve(evidence.layers);
+    std::vector<double> solid_surface_area_by_layer;
+    solid_surface_area_by_layer.reserve(evidence.layers);
+    std::vector<double> nominal_shell_area_by_layer;
+    nominal_shell_area_by_layer.reserve(evidence.layers);
+    std::vector<double> bridge_surface_area_by_layer;
+    bridge_surface_area_by_layer.reserve(evidence.layers);
     for (const Layer *layer : object.layers()) {
         double layer_shell_length = 0.0;
+        double layer_solid_surface_area = 0.0;
+        double layer_nominal_shell_area = 0.0;
+        double layer_bridge_surface_area = 0.0;
         size_t layer_perimeter_items = 0;
         for (const LayerRegion *region : layer->regions()) {
             evidence.perimeter_length += collection_length(region->perimeters);
             layer_perimeter_items += region->perimeters.items_count();
+            for (const Surface &surface : region->fill_surfaces.surfaces) {
+                if (surface.is_solid()) {
+                    layer_solid_surface_area += surface.expolygon.area();
+                    // stTop/stBottom plus stInternalSolid are the surfaces
+                    // requested by the shell setting. Bridge surfaces are
+                    // tracked separately because bridge_over_infill() can
+                    // convert one of those solid layers to stInternalBridge.
+                    if (surface.surface_type == stTop || surface.surface_type == stBottom ||
+                        surface.surface_type == stInternalSolid)
+                        layer_nominal_shell_area += surface.expolygon.area();
+                }
+                if (surface.surface_type == stBottomBridge || surface.surface_type == stInternalBridge)
+                    layer_bridge_surface_area += surface.expolygon.area();
+            }
             for_each_extrusion_path(region->fills, [&evidence, &layer_shell_length](const ExtrusionPath &path) {
                 switch (path.role()) {
                 case erInternalInfill:  evidence.sparse_length += path.length(); break;
@@ -118,6 +147,12 @@ SliceEvidence slice_fixture(DynamicPrintConfig config, TriangleMesh shape = cube
                     evidence.bottom_length += path.length();
                     layer_shell_length += path.length();
                     break;
+                case erInternalBridgeInfill:
+                    // Orca can route an additional solid skin over a bridge
+                    // surface through this role.  It is still shell coverage
+                    // for the extremal-layer oracle.
+                    layer_shell_length += path.length();
+                    break;
                 default:
                     break;
                 }
@@ -127,21 +162,40 @@ SliceEvidence slice_fixture(DynamicPrintConfig config, TriangleMesh shape = cube
         if (layer_perimeter_items > 0)
             ++evidence.perimeter_layers;
         shell_length_by_layer.push_back(layer_shell_length);
+        solid_surface_area_by_layer.push_back(layer_solid_surface_area);
+        nominal_shell_area_by_layer.push_back(layer_nominal_shell_area);
+        bridge_surface_area_by_layer.push_back(layer_bridge_surface_area);
     }
 
     // The outermost surface has the top/bottom role, while preceding shell
-    // layers use erSolidInfill. Count contiguous shell coverage from each
-    // extremity so changing shell_layers cannot be hidden by role selection.
+    // layers use erSolidInfill or (for bridge-backed skins) the internal
+    // bridge role. Count contiguous coverage from each extremity and retain
+    // the nominal shell and bridge-supported counts separately. The pipeline
+    // first propagates the configured shell count in discover_horizontal_shells()
+    // and then bridge_over_infill() can reclassify the first propagated solid
+    // layer over sparse infill as stInternalBridge. That layer is physically
+    // solid coverage, but it is not a nominal shell layer.
     evidence.bottom_layers = 0;
-    while (evidence.bottom_layers < shell_length_by_layer.size() &&
-           shell_length_by_layer[evidence.bottom_layers] > 0.0) {
+    while (evidence.bottom_layers < solid_surface_area_by_layer.size() &&
+           solid_surface_area_by_layer[evidence.bottom_layers] > 0.0) {
+        evidence.bottom_solid_surface_area += solid_surface_area_by_layer[evidence.bottom_layers];
         evidence.bottom_shell_length += shell_length_by_layer[evidence.bottom_layers];
+        if (nominal_shell_area_by_layer[evidence.bottom_layers] > 0.0)
+            ++evidence.bottom_nominal_shell_layers;
+        if (bridge_surface_area_by_layer[evidence.bottom_layers] > 0.0)
+            ++evidence.bottom_bridge_supported_layers;
         ++evidence.bottom_layers;
     }
     evidence.top_layers = 0;
-    while (evidence.top_layers < shell_length_by_layer.size() &&
-           shell_length_by_layer[shell_length_by_layer.size() - 1 - evidence.top_layers] > 0.0) {
-        evidence.top_shell_length += shell_length_by_layer[shell_length_by_layer.size() - 1 - evidence.top_layers];
+    while (evidence.top_layers < solid_surface_area_by_layer.size() &&
+           solid_surface_area_by_layer[solid_surface_area_by_layer.size() - 1 - evidence.top_layers] > 0.0) {
+        const size_t index = solid_surface_area_by_layer.size() - 1 - evidence.top_layers;
+        evidence.top_solid_surface_area += solid_surface_area_by_layer[index];
+        evidence.top_shell_length += shell_length_by_layer[index];
+        if (nominal_shell_area_by_layer[index] > 0.0)
+            ++evidence.top_nominal_shell_layers;
+        if (bridge_surface_area_by_layer[index] > 0.0)
+            ++evidence.top_bridge_supported_layers;
         ++evidence.top_layers;
     }
 
@@ -478,13 +532,19 @@ TEST_CASE("Meaningful numeric boundaries retain a valid print contract", "[Setti
             CHECK_THAT(evidence.bottom_shell_length, Catch::Matchers::WithinAbs(0.0, 1e-6));
             CHECK(evidence.top_layers == 0);
             CHECK(evidence.bottom_layers == 0);
+            CHECK(evidence.top_nominal_shell_layers == 0);
+            CHECK(evidence.bottom_nominal_shell_layers == 0);
+            CHECK(evidence.top_bridge_supported_layers == 0);
+            CHECK(evidence.bottom_bridge_supported_layers == 0);
         } else {
             CHECK(evidence.top_length > 0.0);
             CHECK(evidence.bottom_length > 0.0);
             CHECK(evidence.top_shell_length > 0.0);
             CHECK(evidence.bottom_shell_length > 0.0);
-            CHECK(evidence.top_layers == static_cast<size_t>(shell_layers));
-            CHECK(evidence.bottom_layers == static_cast<size_t>(shell_layers));
+            CHECK(evidence.top_nominal_shell_layers == static_cast<size_t>(shell_layers));
+            CHECK(evidence.bottom_nominal_shell_layers == static_cast<size_t>(shell_layers));
+            CHECK(evidence.top_layers == evidence.top_nominal_shell_layers + evidence.top_bridge_supported_layers);
+            CHECK(evidence.bottom_layers == evidence.bottom_nominal_shell_layers + evidence.bottom_bridge_supported_layers);
         }
         if (shell_layers == 1)
             one_shell = evidence;
@@ -493,8 +553,11 @@ TEST_CASE("Meaningful numeric boundaries retain a valid print contract", "[Setti
     }
     CHECK(two_shells.top_layers > one_shell.top_layers);
     CHECK(two_shells.bottom_layers > one_shell.bottom_layers);
-    CHECK(two_shells.top_shell_length > one_shell.top_shell_length);
-    CHECK(two_shells.bottom_shell_length > one_shell.bottom_shell_length);
+    // The emitted path length may remain equal when the fill pattern uses a
+    // shared solid path representation.  The fill-surface areas are the
+    // independent shell-depth oracle and must grow with the configured count.
+    CHECK(two_shells.top_solid_surface_area > one_shell.top_solid_surface_area);
+    CHECK(two_shells.bottom_solid_surface_area > one_shell.bottom_solid_surface_area);
 }
 
 TEST_CASE("Wall generator and sparse infill remain valid across a bounded pairwise matrix", "[SettingsVariance]")

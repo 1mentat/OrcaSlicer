@@ -1,6 +1,7 @@
 get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests ${_TEST_NAME}_tests_main.cpp
     sla_print_tests.cpp
+    test_sla_pipeline_contracts.cpp
     sla_test_utils.hpp sla_test_utils.cpp
     sla_supptgen_tests.cpp
     sla_raycast_tests.cpp)

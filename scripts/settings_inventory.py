@@ -34,6 +34,15 @@ _DIRECT_ADD = re.compile(
 _DYNAMIC_ADD = re.compile(
     r"\b(?:this->)?add(?:_nullable)?\(\s*([A-Za-z_]\w*)\s*,"
 )
+_AXIS_LOOP = re.compile(
+    r"for\s*\(\s*const\s+AxisDefault\s*&\s*axis\s*:\s*axes\s*\)\s*\{"
+    r"(?P<body>.*?)\n\s*\}",
+    re.DOTALL,
+)
+_AXIS_ADD = re.compile(
+    r"\b(?:this->)?add\(\s*\"(?P<prefix>machine_max_(?:speed|acceleration|jerk)_)\""
+    r"\s*\+\s*axis\.name\s*,\s*(?P<type>co[A-Za-z0-9_]+)\s*\)"
+)
 _ENUM_PUSH = re.compile(
     r"enum_values\s*\.\s*(?:push_back|emplace_back)\(\s*\"([^\"]*)\"\s*\)"
 )
@@ -213,6 +222,21 @@ def parse_print_config(source_path: Path) -> dict[str, Any]:
             match.group(1), "coEnum", _line_number(source, segment_offset + match.start()),
             origin="literal_lambda", enum_values=belt_values, default_declared=True,
         ))
+
+    # Machine XYZE limits are registered from one AxisDefault loop. Expand the
+    # literal axis domain so the static inventory agrees with the compiled
+    # PrintConfigDef registry instead of silently dropping these generated keys.
+    for axis_loop in _AXIS_LOOP.finditer(segment):
+        for match in _AXIS_ADD.finditer(axis_loop.group("body")):
+            body_offset = axis_loop.start("body") + match.start()
+            for axis in ("x", "y", "z", "e"):
+                events.append(_registration(
+                    match.group("prefix") + axis,
+                    match.group("type"),
+                    _line_number(source, segment_offset + body_offset),
+                    origin="literal_axis_loop",
+                    body=axis_loop.group("body"),
+                ))
 
     # Filament overrides inherit the base option's type, enum values, and
     # bounds.  Resolve the list from the source rather than silently dropping

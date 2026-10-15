@@ -23,7 +23,7 @@ int main()
             {"key", key},
             {"type_id", static_cast<int>(definition.type)},
             {"nullable", definition.nullable},
-            {"has_default", definition.default_value != nullptr},
+            {"has_default", definition.default_value.get() != nullptr},
             {"enum_values", definition.enum_values},
             {"canonical_enum_values", canonical_values},
         });

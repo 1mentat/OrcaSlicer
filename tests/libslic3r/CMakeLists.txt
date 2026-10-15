@@ -19,6 +19,7 @@ add_executable(${_TEST_NAME}_tests
     test_calib.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
+    test_color_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
     test_locales_utils.cpp
@@ -34,6 +35,7 @@ add_executable(${_TEST_NAME}_tests
     test_elephant_foot_compensation.cpp
     test_expolygon_contracts.cpp
     test_expolygons_index_contracts.cpp
+    test_flush_volume_contracts.cpp
     test_intersection_points_contracts.cpp
     test_fill_corner_smoothing.cpp
     test_filament_mixer.cpp
@@ -55,6 +57,7 @@ add_executable(${_TEST_NAME}_tests
     test_meshboolean.cpp
     test_trianglemesh_slicer.cpp
     test_marchingsquares.cpp
+    test_measure_contracts.cpp
     test_lay_on_face.cpp
     test_model.cpp
     test_utils.cpp
@@ -70,9 +73,14 @@ add_executable(${_TEST_NAME}_tests
     test_indexed_triangle_set.cpp
     test_connected_bodies.cpp
     test_texture_displacement.cpp
+    test_texture_to_color_contracts.cpp
     test_instance_lock.cpp
     ../libnest2d/printer_parts.cpp
     )
+
+# TriMesh.hpp's public includes are relative to the libslic3r include root.
+set_property(SOURCE test_color_utils_contracts.cpp test_texture_to_color_contracts.cpp APPEND PROPERTY
+    INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/src/libslic3r")
 
 if (SLIC3R_CAD)
     target_sources(${_TEST_NAME}_tests PRIVATE

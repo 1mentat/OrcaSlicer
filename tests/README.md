@@ -21,6 +21,7 @@ DEPS_PREFIX=/path/to/OrcaSlicer-deps/usr/local
 UV="$(command -v uv)"
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_COMPILER=clang++ -DSLICER_ENABLE_LLVM_SOURCE_COVERAGE=ON \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -DSLIC3R_GUI=OFF -DBUILD_TESTS=ON -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" \
   -DORCA_BUNDLED_UV_EXECUTABLE="$UV"
 cmake --build build --config Release --target \
@@ -34,6 +35,7 @@ python3 scripts/slicer_coverage.py run \
   --object build/tests/filament_group/filament_group_tests \
   --manifest build/slicer-coverage/libslic3r.sources.txt \
   --manifest build/slicer-coverage/libslic3r_cgal.sources.txt \
+  --compile-commands build/compile_commands.json \
   --test-command 'ctest --test-dir {build}/tests -C Release -LE "NotWorking|RequiresApp" --no-tests=error' \
   --llvm-cov "$LLVM_COV" --llvm-profdata "$LLVM_PROFDATA" \
   --threshold 90 --out build/slicer-coverage
@@ -42,19 +44,39 @@ python3 scripts/slicer_coverage.py run \
 Use the executable paths and source manifests emitted by the selected
 generator when they differ from the Ninja example. The CMake coverage helper
 force-loads the static production libraries, so a source object with zero
-runtime hits remains in the denominator. A source file listed by that target
-manifest but absent from `llvm-cov export` is reported as a missing compiled
-source mapping and fails the integrity gate. Headers are included when LLVM
-provides executable mappings for them; uncompiled headers and conditional
-platform sources are outside the target manifests. The report records the
-source root and manifests used.
+runtime hits remains in the denominator. Every executable mapping within the
+declared source root, including mappings contributed by headers, must be
+present in `llvm-cov export`; a missing mapping fails the integrity gate. An
+object with no executable mapping (for example an include-only translation
+unit) is retained in the report as `mapping_free_translation_unit`. Headers are
+included when LLVM provides executable mappings for them; uncompiled headers
+and conditional platform sources are outside the target manifests. The report
+records the source root and manifests used.
 
-The report's line/function/branch percentages are **source coverage** from
-LLVM's mappings. They are not percentages of registered options. The
+The runner uses `compile_commands.json` as compiler evidence for every
+manifest source. It invokes `llvm-cov export --summary-only -empty-profile` on each
+instrumented object: an object with no coverage map is reported as a
+`mapping_free_translation_unit` (for example an include-only PCH source),
+whereas an object whose mappings come only from an inline or generated header
+is reported as `object_mappings_without_source` and remains subject to the
+link integrity check. An object with mappings that is absent from the linked
+executable fails the integrity gate as a missing compiled-source mapping. This
+keeps mapping-free translation units visible without excusing accidentally
+unlinked executable code. The report's line/function/branch percentages are
+**source coverage** from LLVM's mappings. They are not percentages of registered options. The
 `[SettingsVariance]` tests exercise registered enum/schema values, then slice a real
 `Print` and inspect geometry or G-code; that is **actual settings execution**.
 An option serialization loop alone is schema evidence and does not establish
 pipeline behavior.
+
+The export is summary-only because the report and integrity checks consume
+file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
+line or segment details are needed. A zero-summary header that the successful
+object audit proves has no executable mapping is recorded as
+`mapping_free_headers`. A header with an executable object mapping but no final
+mapping remains an integrity failure. Reports expose `integrity_status`
+separately from test status, so a failed test run cannot hide a coverage
+integrity error.
 
 The mutation run uses a clean checkout and a disposable detached worktree.
 The configure command is run once in that worktree, each mutant is an exact

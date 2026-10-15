@@ -13,7 +13,7 @@ namespace {
 using namespace Slic3r;
 IntersectionsLines compute_intersections(const Lines &lines)
 {
-    if (lines.size() < 3)
+    if (lines.size() < 2)
         return {};    
 
     auto tree = AABBTreeLines::build_aabb_tree_over_indexed_lines(lines);
@@ -22,7 +22,7 @@ IntersectionsLines compute_intersections(const Lines &lines)
         const Line &l = lines[li];
         auto intersections = AABBTreeLines::get_intersections_with_line<false, Point, Line>(lines, tree, l);
         for (const auto &[p, node_index] : intersections) {
-            if (node_index - 1 <= li)
+            if (node_index <= li)
                 continue;            
             if (const Line &l_ = lines[node_index];
                 l_.a == l.a ||

@@ -55,13 +55,13 @@
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SettingsVariance]",
       "dimensions": ["boundary_values", "pipeline_oracle"],
-      "reason": "Zero, one, and two top-shell layers are applied to a real slice; top-role layer counts and lengths are checked."
+      "reason": "Zero, one, and two top-shell layers are applied to a real slice; zero disables top coverage, while extremal solid fill-surface layer counts and areas distinguish one from two."
     },
     "bottom_shell_layers": {
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SettingsVariance]",
       "dimensions": ["boundary_values", "pipeline_oracle"],
-      "reason": "Zero, one, and two bottom-shell layers are applied to a real slice; bottom-role layer counts and lengths are checked."
+      "reason": "Zero, one, and two bottom-shell layers are applied to a real slice; zero disables bottom coverage, while extremal solid fill-surface layer counts and areas distinguish one from two."
     },
     "layer_height": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -223,31 +223,37 @@
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsBooleanVariance]",
       "dimensions": ["boolean_values", "pipeline_oracle"],
-      "reason": "The overhang direction checksum is compared with reversal disabled and enabled, requiring a changed perimeter orientation."
+      "reason": "An overhang fixture is sliced with reversal disabled and enabled; signed external-perimeter winding must change."
     },
     "is_infill_first": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsBooleanVariance]",
       "dimensions": ["boolean_values", "pipeline_oracle"],
-      "reason": "Both ordering states are sliced and the emitted role sequence must begin with perimeter or infill accordingly."
+      "reason": "Both ordering states are sliced and the first non-first-layer extrusion role must begin with perimeter or infill accordingly."
+    },
+    "spiral_mode": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "A sloped fixture is sliced with spiral mode disabled and enabled; parsed G-code must show no extruding Z moves versus continuous extruding Z motion."
     },
     "thick_bridges": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsBooleanVariance]",
       "dimensions": ["boolean_values", "pipeline_oracle"],
-      "reason": "A bridge fixture is sliced with thick bridges disabled and enabled; both emit bridge paths and the enabled path height must be larger."
+      "reason": "A bridge fixture is sliced with thick bridges disabled and enabled; both emit bridge paths and their rounded-versus-normal flow volume per unit path must differ."
     },
     "enable_arc_fitting": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsBooleanVariance]",
       "dimensions": ["boolean_values", "pipeline_oracle"],
-      "reason": "The same fixture is exported with arc fitting disabled and enabled; the G-code must contain zero versus positive G2/G3 moves."
+      "reason": "A curved-cylinder fixture is exported with arc fitting disabled and enabled; the G-code must contain zero versus positive G2/G3 moves."
     },
     "detect_thin_wall": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsBooleanVariance]",
       "dimensions": ["boolean_values", "pipeline_oracle"],
-      "reason": "A narrow wall fixture is sliced with thin-wall detection disabled and enabled; the enabled result must add thin-fill paths."
+      "reason": "A perpendicular sub-nozzle fin is sliced with thin-wall detection disabled and enabled; the enabled result must add external-perimeter medial-axis paths extending beyond the body edge."
     },
     "fuzzy_skin_first_layer": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
@@ -259,7 +265,7 @@
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsBooleanVariance]",
       "dimensions": ["boolean_values", "pipeline_oracle"],
-      "reason": "A cube-with-hole fixture is sliced with conversion disabled and enabled; the resulting hole vertex count must differ."
+      "reason": "A circular through-hole fixture is sliced with conversion disabled and enabled; the resulting hole vertex count must differ."
     },
     "hole_to_polyhole_twisted": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
@@ -290,6 +296,12 @@
       "tag": "[SettingsBooleanVariance]",
       "dimensions": ["boolean_values", "pipeline_oracle"],
       "reason": "Both states are sliced on a two-tier fixture and must produce different positive support-point counts."
+    },
+    "support_ironing": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsBooleanVariance]",
+      "dimensions": ["boolean_values", "pipeline_oracle"],
+      "reason": "Support interface layers are sliced with support ironing disabled and enabled; the enabled result must add support-ironing paths."
     },
     "support_interface_top_layers": {
       "test": "tests/fff_print/test_support_material.cpp",

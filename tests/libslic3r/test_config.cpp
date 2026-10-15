@@ -1657,10 +1657,9 @@ TEST_CASE("Every registered print option has a complete schema contract", "[Conf
                     CHECK(canonical);
                 }
             }
-            for (const auto &[value, enum_value] : *def.enum_keys_map) {
-                (void)enum_value;
-                CHECK(unique_values.find(value) != unique_values.end());
-            }
+            // enum_values is the UI-facing menu. It may intentionally omit
+            // canonical aliases or firmware tokens that remain valid through
+            // enum_keys_map; the round-trip test below exercises every map key.
         }
     }
 

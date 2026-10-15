@@ -17,6 +17,12 @@ include_guard(GLOBAL)
 option(SLICER_ENABLE_LLVM_SOURCE_COVERAGE
        "Instrument selected OrcaSlicer targets with LLVM source coverage" OFF)
 
+if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+    # Object-level compiler evidence distinguishes mapping-free translation
+    # units from executable code that was accidentally omitted from the link.
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
+
 function(slicer_enable_llvm_source_coverage TARGET_NAME)
     if (NOT SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
         return()

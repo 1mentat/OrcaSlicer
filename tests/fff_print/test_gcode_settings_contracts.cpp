@@ -199,8 +199,11 @@ TEST_CASE("Relative and absolute extrusion preserve deposited motion across firm
         REQUIRE(absolute.moves > 0);
         CHECK(relative_gcode.find("M83") != std::string::npos);
         CHECK(absolute_gcode.find("M82") != std::string::npos);
+        // E words are emitted at five decimal places. Relative mode rounds each
+        // segment's extrusion increment, while absolute mode rounds cumulative E;
+        // summing parsed moves therefore has a bounded quantization difference.
         CHECK_THAT(relative.filament_length,
-                   Catch::Matchers::WithinRel(absolute.filament_length, 1e-6));
+                   Catch::Matchers::WithinAbs(absolute.filament_length, 1e-3));
         CHECK_THAT(relative.path_length,
                    Catch::Matchers::WithinRel(absolute.path_length, 1e-6));
 
@@ -217,8 +220,8 @@ TEST_CASE("Disabling G-code comments preserves the normalized motion stream", "[
 {
     DynamicPrintConfig with_comments_config = exporter_config(gcfMarlinFirmware, true, true);
     DynamicPrintConfig without_comments_config = exporter_config(gcfMarlinFirmware, true, false);
-    with_comments_config.set_deserialize_strict("default_acceleration", 1200);
-    without_comments_config.set_deserialize_strict("default_acceleration", 1200);
+    with_comments_config.set_deserialize_strict("default_acceleration", "1200");
+    without_comments_config.set_deserialize_strict("default_acceleration", "1200");
     const std::string with_comments = export_cube(with_comments_config);
     const std::string without_comments = export_cube(without_comments_config);
 

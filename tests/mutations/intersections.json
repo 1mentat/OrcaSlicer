@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed IntersectionPoints mutants killed by the focused geometric contracts.",
+  "mutants": [
+    {
+      "id": "intersections-index-zero-pair-filter",
+      "path": "src/libslic3r/IntersectionPoints.cpp",
+      "old": "if (node_index <= li)",
+      "new": "if (node_index - 1 <= li)",
+      "description": "Reintroduce the unsigned node-index underflow that emits a reversed duplicate when an intersection includes line index zero.",
+      "test_filter": "IntersectionPoints"
+    },
+    {
+      "id": "intersections-two-line-input-guard",
+      "path": "src/libslic3r/IntersectionPoints.cpp",
+      "old": "if (lines.size() < 2)",
+      "new": "if (lines.size() < 3)",
+      "description": "Reject a valid two-line intersection even though the public API collects intersections from arbitrary line sets.",
+      "test_filter": "IntersectionPoints"
+    }
+  ]
+}

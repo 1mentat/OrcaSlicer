@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Bounded Measure mutants for validating analytic feature, distance, transform, assembly, and cube-plane contracts.",
+  "mutants": [
+    {
+      "id": "measure-projection-drops-offset",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "    intersection_pt = pt + length * normal;",
+      "new": "    intersection_pt = pt;",
+      "description": "Drop the signed normal offset when projecting a point onto a plane.",
+      "test_filter": "MeasureContracts"
+    },
+    {
+      "id": "measure-edge-translation-collapses-endpoint",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "    case Measure::SurfaceFeatureType::Edge: {\n        m_pt1 = m_pt1 + displacement;\n        m_pt2 = m_pt2 + displacement;",
+      "new": "    case Measure::SurfaceFeatureType::Edge: {\n        m_pt1 = m_pt1 + displacement;\n        m_pt2 = m_pt1 + displacement;",
+      "description": "Translate an edge's endpoint from the already translated start point, collapsing its length.",
+      "test_filter": "MeasureContracts"
+    },
+    {
+      "id": "measure-plane-transform-loses-normal-origin",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "        m_pt1          = (temp_pt1 - m_pt2).normalized();",
+      "new": "        m_pt1 = temp_pt1.normalized();",
+      "description": "Normalize the transformed plane point in world coordinates instead of preserving the transformed normal direction.",
+      "test_filter": "MeasureContracts"
+    },
+    {
+      "id": "measure-circle-transform-loses-radius",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "            value                = (radius_pt - world_center).norm();",
+      "new": "            value                = 0.0;",
+      "description": "Discard the circle radius while applying a rigid feature transform.",
+      "test_filter": "MeasureContracts"
+    },
+    {
+      "id": "measure-feature-hover-rejects-edge",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "        if (dist < feature_hover_limit && dist < min_dist) {",
+      "new": "        if (dist < 0.0 && dist < min_dist) {",
+      "description": "Prevent a point on a cube edge from selecting its edge feature.",
+      "test_filter": "MeasureContracts"
+    },
+    {
+      "id": "measure-assembly-loses-signed-distance",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "                    action.parallel_distance = -action.parallel_distance;",
+      "new": "                    action.parallel_distance = action.parallel_distance;",
+      "description": "Discard the negative sign for a plane placed below the assembly reference plane.",
+      "test_filter": "MeasureContracts"
+    },
+    {
+      "id": "measure-xyz-point-distance-disabled",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "            return true;\n        }\n    }\n    else if (f1.get_type() == SurfaceFeatureType::Circle)",
+      "new": "            return false;\n        }\n    }\n    else if (f1.get_type() == SurfaceFeatureType::Circle)",
+      "description": "Stop advertising XYZ distance controls for point-to-point measurements.",
+      "test_filter": "MeasureContracts"
+    }
+  ]
+}
