@@ -1,3 +1,4 @@
+
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
 #include <filesystem>
@@ -3428,3 +3429,372 @@ TEST_CASE("G-code archive streams retain the encoded plate thumbnail bytes", "[3
     CHECK(std::string(bytes.begin(), bytes.end()) == std::string("\x89PNG\r\n\x1a\n", 8));
 }
 } // namespace stream_archive_contracts
+
+
+namespace legacy_3mf_contracts {
+
+using namespace Slic3r;
+
+namespace {
+
+std::string transform_string(double tx = 0., double ty = 0., double tz = 0.)
+{
+    return "1 0 0 0 1 0 0 0 1 " + std::to_string(tx) + " " + std::to_string(ty) + " " + std::to_string(tz);
+}
+
+std::string cube_model_xml(const std::string &application = "ThirdParty",
+                           const std::string &build = "  <item objectid=\"1\" printable=\"1\"/>\n",
+                           bool reverse_winding = false,
+                           const std::string &object_name = "Cube")
+{
+    static const int vertices[][3] = {
+        {0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0},
+        {0, 0, 10}, {10, 0, 10}, {10, 10, 10}, {0, 10, 10}
+    };
+    static const int triangles[][3] = {
+        {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+        {0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5},
+        {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}
+    };
+
+    std::string xml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n";
+    if (!application.empty())
+        xml += " <metadata name=\"Application\">" + application + "</metadata>\n";
+    xml += " <resources>\n  <object id=\"1\" type=\"model\" name=\"" + object_name + "\">\n"
+           "   <mesh>\n    <vertices>\n";
+    for (const auto &vertex : vertices)
+        xml += "     <vertex x=\"" + std::to_string(vertex[0]) + "\" y=\"" + std::to_string(vertex[1]) + "\" z=\"" + std::to_string(vertex[2]) + "\"/>\n";
+    xml += "    </vertices>\n    <triangles>\n";
+    for (const auto &triangle : triangles) {
+        const int v1 = triangle[0];
+        const int v2 = reverse_winding ? triangle[2] : triangle[1];
+        const int v3 = reverse_winding ? triangle[1] : triangle[2];
+        xml += "     <triangle v1=\"" + std::to_string(v1) + "\" v2=\"" + std::to_string(v2) + "\" v3=\"" + std::to_string(v3) + "\"/>\n";
+    }
+    xml += "    </triangles>\n   </mesh>\n  </object>\n </resources>\n <build>\n";
+    xml += build;
+    xml += " </build>\n</model>\n";
+    return xml;
+}
+
+bool write_archive(const std::string &path, const std::string &model_xml,
+                   const std::string &model_config = "")
+{
+    try {
+        Zipper archive(path);
+        archive.add_entry("3D/3dmodel.model", model_xml.data(), model_xml.size());
+        if (!model_config.empty())
+            archive.add_entry("Metadata/Slic3r_PE_model.config", model_config.data(), model_config.size());
+        archive.finalize();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool load_generic(const std::string &path, Model &model, DynamicPrintConfig &config,
+                  bool check_version = false)
+{
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_3mf(path.c_str(), config, substitutions, &model, check_version);
+}
+
+Model make_cube_model()
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "round-trip cube";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_instance();
+    return model;
+}
+
+} // namespace
+
+TEST_CASE("Legacy 3MF public entry points reject null and missing paths", "[Legacy3MF][Errors]")
+{
+    Model model;
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    CHECK_FALSE(load_3mf(nullptr, config, substitutions, &model, false));
+    ScopedTemporaryDir directory;
+    const std::string missing = (directory.path() / "missing" / "model.3mf").string();
+    CHECK_FALSE(load_3mf(missing.c_str(), config, substitutions, &model, false));
+    CHECK_FALSE(store_3mf(nullptr, &model, nullptr, false));
+    CHECK_FALSE(store_3mf(missing.c_str(), &model, nullptr, false));
+}
+
+TEST_CASE("Legacy Prusa file parser identifies the generator metadata", "[Legacy3MF][Metadata]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("PrusaSlicer-2.7.0")));
+    PrusaFileParser parser;
+    CHECK(parser.check_3mf_from_prusa(archive.string()));
+
+    ScopedTemporaryFile third_party(".3mf");
+    REQUIRE(write_archive(third_party.string(), cube_model_xml("OtherSlicer-1.0")));
+    PrusaFileParser other_parser;
+    CHECK_FALSE(other_parser.check_3mf_from_prusa(third_party.string()));
+}
+
+TEST_CASE("Legacy Prusa file parser rejects a non-archive and an archive without a model part", "[Legacy3MF][Errors]")
+{
+    ScopedTemporaryFile plain(".3mf");
+    {
+        boost::nowide::ofstream output(plain.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << "not a zip archive";
+        output.flush();
+        REQUIRE(output.good());
+    }
+    PrusaFileParser parser;
+    CHECK_FALSE(parser.check_3mf_from_prusa(plain.string()));
+
+    ScopedTemporaryFile empty_zip(".3mf");
+    {
+        Zipper archive(empty_zip.string());
+        archive.add_entry("README.txt", "no model", 8);
+        archive.finalize();
+    }
+    PrusaFileParser empty_parser;
+    CHECK_FALSE(empty_parser.check_3mf_from_prusa(empty_zip.string()));
+}
+
+TEST_CASE("Legacy importer scales coordinates and defaults absent vertex attributes", "[Legacy3MF][Geometry]")
+{
+    const auto [unit, scale] = GENERATE(
+        std::pair<const char *, double>{"micron", 0.001},
+        std::pair<const char *, double>{"millimeter", 1.},
+        std::pair<const char *, double>{"centimeter", 10.},
+        std::pair<const char *, double>{"inch", 25.4},
+        std::pair<const char *, double>{"foot", 304.8},
+        std::pair<const char *, double>{"meter", 1000.});
+    CAPTURE(unit);
+    const std::string xml =
+        "<model unit=\"" + std::string(unit) + "\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
+        "<resources><object id=\"1\" type=\"model\"><mesh><vertices>"
+        "<vertex x=\"0\" y=\"0\"/><vertex x=\"1\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"1\" z=\"0\"/>"
+        "</vertices><triangles><triangle v1=\"0\" v2=\"1\" v3=\"2\"/></triangles></mesh></object></resources>"
+        "<build><item objectid=\"1\"/></build></model>";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    const BoundingBoxf3 bbox = model.objects.front()->volumes.front()->mesh().bounding_box();
+    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(scale, std::max(1e-7, scale * 1e-6)));
+    CHECK_THAT(double(bbox.max.y() - bbox.min.y()), Catch::Matchers::WithinAbs(scale, std::max(1e-7, scale * 1e-6)));
+    CHECK_THAT(double(bbox.max.z() - bbox.min.z()), Catch::Matchers::WithinAbs(0., 1e-5));
+}
+
+TEST_CASE("Legacy importer expands a component alias with its transform", "[Legacy3MF][Geometry][Components]")
+{
+    const std::string model_xml =
+        "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
+        "<resources><object id=\"1\" type=\"model\" name=\"part\"><mesh><vertices>"
+        "<vertex x=\"0\" y=\"0\" z=\"0\"/><vertex x=\"2\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"2\" z=\"0\"/>"
+        "</vertices><triangles><triangle v1=\"0\" v2=\"1\" v3=\"2\"/></triangles></mesh></object>"
+        "<object id=\"2\" type=\"model\"><components><component objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 10 20 30\"/></components></object></resources>"
+        "<build><item objectid=\"2\" printable=\"1\"/></build></model>";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), model_xml));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    const BoundingBoxf3 bbox = model.mesh().bounding_box();
+    CHECK_THAT(double(bbox.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(bbox.min.y()), Catch::Matchers::WithinAbs(20., 1e-5));
+    CHECK_THAT(double(bbox.min.z()), Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+TEST_CASE("Legacy non-Prusa multi-instance files split independent model objects", "[Legacy3MF][Components]")
+{
+    const std::string items =
+        "  <item objectid=\"1\" transform=\"" + transform_string(0., 0., 0.) + "\"/>\n"
+        "  <item objectid=\"1\" transform=\"" + transform_string(20., 0., 0.) + "\"/>\n";
+    std::string xml = cube_model_xml("", items);
+    const size_t resources = xml.find(" <resources>");
+    REQUIRE(resources != std::string::npos);
+    xml.insert(resources, " <metadata name=\"slic3rpe:Version3mf\">1</metadata>\n");
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 2);
+    CHECK(model.objects[0]->instances.size() == 1);
+    CHECK(model.objects[1]->instances.size() == 1);
+    const BoundingBoxf3 bbox = model.mesh().bounding_box();
+    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+TEST_CASE("Legacy importer preserves non-printable and transformed build items", "[Legacy3MF][Geometry]")
+{
+    const std::string items =
+        "  <item objectid=\"1\" printable=\"0\" transform=\"" + transform_string(7., 8., 9.) + "\"/>\n";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("ThirdParty", items)));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    CHECK_FALSE(model.objects.front()->instances.front()->printable);
+    const BoundingBoxf3 bbox = model.mesh().bounding_box();
+    CHECK_THAT(double(bbox.min.x()), Catch::Matchers::WithinAbs(7., 1e-5));
+    CHECK_THAT(double(bbox.max.z()), Catch::Matchers::WithinAbs(19., 1e-5));
+}
+
+TEST_CASE("Legacy model configuration restores volume identity, type, and source fields", "[Legacy3MF][Metadata]")
+{
+    Model source = make_cube_model();
+    ModelVolume *volume = source.objects.front()->volumes.front();
+    source.objects.front()->name = "Configured object";
+    volume->name = "Configured volume";
+    volume->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    volume->source.input_file = "/tmp/original/source.stl";
+    volume->source.object_idx = 4;
+    volume->source.volume_idx = 2;
+    volume->source.mesh_offset = Vec3d(1.25, -2.5, 3.75);
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), loaded, config));
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.objects.front()->volumes.size() == 1);
+    const ModelObject *object = loaded.objects.front();
+    const ModelVolume *loaded_volume = object->volumes.front();
+    CHECK(object->name == "Configured object");
+    CHECK(loaded_volume->name == "Configured volume");
+    CHECK(loaded_volume->is_modifier());
+    CHECK(loaded_volume->source.input_file == "source.stl");
+    CHECK(loaded_volume->source.object_idx == 4);
+    CHECK(loaded_volume->source.volume_idx == 2);
+    CHECK_THAT(loaded_volume->source.mesh_offset.x(), Catch::Matchers::WithinAbs(1.25, 1e-6));
+    CHECK_THAT(loaded_volume->source.mesh_offset.y(), Catch::Matchers::WithinAbs(-2.5, 1e-6));
+    CHECK_THAT(loaded_volume->source.mesh_offset.z(), Catch::Matchers::WithinAbs(3.75, 1e-6));
+}
+
+TEST_CASE("Legacy generic export and import preserve painted facet annotations", "[Legacy3MF][Painting]")
+{
+    Model source = make_cube_model();
+    ModelVolume *volume = source.objects.front()->volumes.front();
+    TriangleSelector selector(volume->mesh());
+    selector.set_facet(0, EnforcerBlockerType::Extruder2);
+    REQUIRE(volume->mmu_segmentation_facets.set(selector));
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), loaded, config));
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.objects.front()->volumes.size() == 1);
+    const ModelVolume *loaded_volume = loaded.objects.front()->volumes.front();
+    CHECK(loaded_volume->mmu_segmentation_facets.has_facets(*loaded_volume, EnforcerBlockerType::Extruder2));
+    CHECK_FALSE(loaded_volume->mmu_segmentation_facets.has_facets(*loaded_volume, EnforcerBlockerType::Extruder3));
+}
+
+TEST_CASE("Legacy importer repairs a negatively wound volume", "[Legacy3MF][Geometry]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("ThirdParty", "  <item objectid=\"1\"/>\n", true)));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    TriangleMesh repaired = model.objects.front()->volumes.front()->mesh();
+    CHECK_THAT(double(repaired.volume()), Catch::Matchers::WithinAbs(1000., 1e-3));
+}
+
+TEST_CASE("Legacy importer rejects out-of-range triangle vertex references", "[Legacy3MF][Errors]")
+{
+    const int invalid_vertex = GENERATE(-1, 8, 99);
+    CAPTURE(invalid_vertex);
+    std::string xml = cube_model_xml();
+    const size_t attribute = xml.rfind("v3=\"2\"");
+    REQUIRE(attribute != std::string::npos);
+    xml.replace(attribute, 6, "v3=\"" + std::to_string(invalid_vertex) + "\"");
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    CHECK_FALSE(load_generic(archive.string(), model, config));
+}
+
+TEST_CASE("Legacy importer rejects duplicate object identifiers", "[Legacy3MF][Errors]")
+{
+    std::string xml = cube_model_xml();
+    const std::string duplicate =
+        "<object id=\"1\" type=\"model\"><mesh><vertices><vertex x=\"0\" y=\"0\" z=\"0\"/>"
+        "<vertex x=\"1\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"1\" z=\"0\"/></vertices>"
+        "<triangles><triangle v1=\"0\" v2=\"1\" v3=\"2\"/></triangles></mesh></object>";
+    const size_t at = xml.find(" </resources>");
+    REQUIRE(at != std::string::npos);
+    xml.insert(at, duplicate);
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    CHECK_FALSE(load_generic(archive.string(), model, config));
+}
+
+TEST_CASE("Legacy importer rejects an invalid component reference", "[Legacy3MF][Errors]")
+{
+    std::string xml = cube_model_xml();
+    const size_t resources = xml.find(" </resources>");
+    REQUIRE(resources != std::string::npos);
+    xml.insert(resources,
+        " <object id=\"2\" type=\"model\"><components><component objectid=\"999\"/></components></object>\n");
+    xml.replace(xml.find("objectid=\"1\""), 12, "objectid=\"2\"");
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    CHECK_FALSE(load_generic(archive.string(), model, config));
+}
+
+TEST_CASE("Legacy importer ignores a singular build transform", "[Legacy3MF][Geometry][Errors]")
+{
+    const std::string items = "  <item objectid=\"1\" transform=\"0 0 0 0 0 0 0 0 0 0 0 0\"/>\n";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("ThirdParty", items)));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    const BoundingBoxf3 bbox = model.mesh().bounding_box();
+    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(bbox.max.y() - bbox.min.y()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(bbox.max.z() - bbox.min.z()), Catch::Matchers::WithinAbs(10., 1e-5));
+}
+
+TEST_CASE("Legacy importer rejects malformed model configuration XML", "[Legacy3MF][Errors]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml(), "<config><object id=\"1\">") );
+    Model model;
+    DynamicPrintConfig config;
+    CHECK_FALSE(load_generic(archive.string(), model, config));
+}
+
+TEST_CASE("Legacy exporter rejects an object with an empty volume mesh", "[Legacy3MF][Errors]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(TriangleMesh{});
+    object->add_instance();
+    ScopedTemporaryFile archive(".3mf");
+    CHECK_FALSE(store_3mf(archive.string().c_str(), &model, nullptr, false));
+}
+
+} // namespace legacy_3mf_contracts

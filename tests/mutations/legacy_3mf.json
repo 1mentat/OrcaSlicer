@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "description": "Legacy3MF public archive and geometry contracts.",
+  "mutants": [
+    {
+      "id": "legacy-model-config-empty-guard",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "bool _3MF_Importer::_extract_model_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model)\n    {\n        if (stat.m_uncomp_size == 0) {",
+      "new": "bool _3MF_Importer::_extract_model_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model)\n    {\n        if (stat.m_uncomp_size != 0) {",
+      "test_filter": "Legacy3MF"
+    },
+    {
+      "id": "legacy-mmu-facet-restore",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "                if (! geometry.mmu_segmentation[index].empty())\n                    volume->mmu_segmentation_facets.set_triangle_from_string(i, geometry.mmu_segmentation[index]);",
+      "new": "                if (! geometry.mmu_segmentation[index].empty())\n                    volume->mmu_segmentation_facets.set_triangle_from_string(i, std::string());",
+      "test_filter": "Legacy3MF"
+    },
+    {
+      "id": "legacy-singular-transform-guard",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "        if (!transform.matrix().allFinite() || !transform.linear().fullPivLu().isInvertible())\n            return;",
+      "new": "        if (!transform.matrix().allFinite())\n            return;",
+      "test_filter": "Legacy3MF"
+    },
+    {
+      "id": "legacy-bbs-instance-copy-split",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "        //BBS: copy object isteadof instance\n        int object_size = model.objects.size();\n        for (int obj_index = 0; obj_index < object_size; obj_index ++) {\n            ModelObject* object = model.objects[obj_index];\n            while (object->instances.size() > 1) {",
+      "new": "        //BBS: copy object isteadof instance\n        int object_size = model.objects.size();\n        for (int obj_index = 0; obj_index < object_size; obj_index ++) {\n            ModelObject* object = model.objects[obj_index];\n            while (object->instances.size() > 2) {",
+      "test_filter": "Legacy3MF"
+    },
+    {
+      "id": "legacy-duplicate-object-rejection",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "                    add_error(\"Found object with duplicate id\");\n                    return false;",
+      "new": "                    add_error(\"Found object with duplicate id\");\n                    return true;",
+      "test_filter": "Legacy3MF"
+    },
+    {
+      "id": "legacy-volume-winding-repair",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "            if (triangle_mesh.volume() < 0)\n                triangle_mesh.flip_triangles();",
+      "new": "            if (triangle_mesh.volume() > 0)\n                triangle_mesh.flip_triangles();",
+      "test_filter": "Legacy3MF"
+    },
+    {
+      "id": "legacy-config-metadata-type",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "        if (type == OBJECT_TYPE)\n            object->second.metadata.emplace_back(key, value);",
+      "new": "        if (type != OBJECT_TYPE)\n            object->second.metadata.emplace_back(key, value);",
+      "test_filter": "Legacy3MF"
+    },
+    {
+      "id": "legacy-invalid-vertex-rejection",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "                        if (tri_id < 0 || tri_id >= int(geometry.vertices.size())) {\n                            add_error(\"Found invalid vertex id\");\n                            return false;",
+      "new": "                        if (tri_id < 0 || tri_id >= int(geometry.vertices.size())) {\n                            add_error(\"Found invalid vertex id\");\n                            return true;",
+      "test_filter": "Legacy3MF"
+    },
+    {
+      "id": "legacy-inch-unit-scale",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "    else if (::strcmp(text, \"inch\") == 0)\n        return 25.4f;",
+      "new": "    else if (::strcmp(text, \"inch\") == 0)\n        return 1.0f;",
+      "test_filter": "Legacy3MF"
+    }
+  ]
+}
