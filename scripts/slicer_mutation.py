@@ -244,8 +244,16 @@ def _classify_build(result: CommandResult) -> str:
     return "build_error"
 
 
+def _test_timed_out(result: CommandResult) -> bool:
+    # CTest can time out a child and exit normally with status 8 before the
+    # outer command deadline. Such a run is incomplete evidence, not a kill.
+    return result.timed_out or bool(re.search(
+        r"\*{3}Timeout\b|\(Timeout\)\s*$",
+        result.stdout + "\n" + result.stderr, re.IGNORECASE | re.MULTILINE))
+
+
 def _classify_test(result: CommandResult, evidence: int) -> str:
-    if result.timed_out:
+    if _test_timed_out(result):
         return "test_timeout"
     if result.returncode is not None and result.returncode < 0:
         return "test_killed"
@@ -336,9 +344,9 @@ def run_mutation(args: argparse.Namespace) -> int:
                     "test_evidence": evidence,
                     "result": baseline_test.json(),
                 })
-                if baseline_test.timed_out or baseline_test.returncode != 0 or evidence <= 0:
+                if _test_timed_out(baseline_test) or baseline_test.returncode != 0 or evidence <= 0:
                     report["baseline_tests"] = baseline_tests
-                    report["status"] = ("baseline_test_timeout" if baseline_test.timed_out else
+                    report["status"] = ("baseline_test_timeout" if _test_timed_out(baseline_test) else
                                          "baseline_test_failed" if baseline_test.returncode != 0 else
                                          "baseline_no_evidence")
                     _write_report(out / "mutation-report.json", report)

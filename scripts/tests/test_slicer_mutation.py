@@ -83,6 +83,20 @@ class MutationResultTests(unittest.TestCase):
         self.assertEqual(slicer_mutation._classify_build(self.result(1)), "build_error")
         self.assertEqual(slicer_mutation._classify_build(self.result(None, timed_out=True)), "build_timeout")
 
+    def test_ctest_child_timeouts_are_not_mutation_kills(self):
+        outputs = [
+            "1/2 Test #1: traversal ....***Timeout 0.01 sec\n50% tests passed, 1 tests failed out of 2",
+            "The following tests FAILED:\n  1 - traversal (Timeout)\n",
+        ]
+        for output in outputs:
+            with self.subTest(output=output):
+                self.assertEqual(slicer_mutation._classify_test(self.result(8, output=output), 2),
+                                 "test_timeout")
+
+    def test_timeout_in_a_test_name_does_not_hide_an_assertion_failure(self):
+        output = "1/1 Test #1: Timeout settings contract ....***Failed\n0% tests passed, 1 tests failed out of 1"
+        self.assertEqual(slicer_mutation._classify_test(self.result(8, output=output), 1), "killed")
+
     def test_zero_evidence_is_not_a_survivor(self):
         self.assertEqual(slicer_mutation._classify_test(self.result(0, output=""), 0), "test_no_evidence")
 

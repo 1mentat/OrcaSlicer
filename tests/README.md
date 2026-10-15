@@ -114,9 +114,11 @@ match and replacement, build/test commands, and separate statuses for build
 errors, timeouts, killed mutants, and survivors. A mutant is counted only
 after its selected unmutated baseline passes with executed test evidence.
 
-The native harnesses run commands in separate process groups. A timeout stops
-the command and its descendants before restoring or removing the disposable
-worktree, and retains partial output as failure evidence.
+The native harnesses run commands in separate process groups. A timeout or
+interruption stops the command and its descendants before restoring or removing
+the disposable worktree. Partial output is retained as failure evidence. CTest
+child timeouts are reported as incomplete mutation evidence, even when CTest
+itself exits before the outer command deadline.
 
 Repeat `--mutants` to combine subsystem manifests in one configured build;
 `--max-mutants` bounds the total across all selected manifests. For example,
