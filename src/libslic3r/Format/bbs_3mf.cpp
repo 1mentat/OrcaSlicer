@@ -141,21 +141,46 @@ struct ZipUnicodePathExtraField
         }
         return extra;
     }
-    static std::string decode(std::string const& extra, std::string const& path = {}) {
-        char const * p = extra.data();
-        char const * e = p + extra.length();
-        while (p + 4 < e) {
-            boost::uint16_t len = ((boost::uint16_t)p[2]) | ((boost::uint16_t)p[3] << 8);
-            if (p[0] == '\x75' && p[1] == '\x70' && len >= 5 && p + 4 + len < e && p[4] == '\x01') {
-                return std::string(p + 9, p + 4 + len);
+    static std::string decode(std::string const& extra, std::string const& path) {
+        // Info-ZIP Unicode Path extra fields use unsigned little-endian lengths.
+        // Check the remaining size before advancing so truncated fields cannot
+        // create an out-of-range pointer, including when the field is last.
+        size_t offset = 0;
+        while (extra.size() - offset >= 4) {
+            const auto *p = reinterpret_cast<const unsigned char *>(extra.data() + offset);
+            const size_t len = size_t(p[2]) | (size_t(p[3]) << 8);
+            if (len > extra.size() - offset - 4)
+                break;
+            if (p[0] == 0x75 && p[1] == 0x70 && len >= 5 && p[4] == 1) {
+                const mz_ulong crc = mz_ulong(p[5]) | (mz_ulong(p[6]) << 8) |
+                                     (mz_ulong(p[7]) << 16) | (mz_ulong(p[8]) << 24);
+                if (crc == mz_crc32(0, reinterpret_cast<const unsigned char *>(path.data()), path.size()))
+                    return extra.substr(offset + 9, len - 5);
             }
-            else {
-                p += 4 + len;
-            }
+            offset += 4 + len;
         }
         return Slic3r::decode_path(path.c_str());
     }
 };
+
+// miniz's BBS extension returns the copied extra-field byte count plus one and
+// writes a trailing NUL when a destination buffer is supplied.  Query the
+// central-directory size first so fields larger than the old 1024-byte buffer
+// are not silently truncated, then remove exactly that API terminator before
+// parsing ZIP field framing.
+static std::string read_zip_extra(mz_zip_archive &archive, mz_uint file_index)
+{
+    const mz_uint reported_size = mz_zip_reader_get_extra(&archive, file_index, nullptr, 0);
+    if (reported_size == 0)
+        return {};
+
+    std::string extra(reported_size, '\0');
+    const mz_uint returned_size = mz_zip_reader_get_extra(&archive, file_index, extra.data(), reported_size);
+    if (returned_size == 0)
+        return {};
+    extra.resize(std::min<size_t>(extra.size(), static_cast<size_t>(returned_size - 1)));
+    return extra;
+}
 
 // VERSION NUMBERS
 // 0 : .3mf, files saved by older slic3r or other applications. No version definition in them.
@@ -2502,10 +2527,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
         if (index < 0) {
             // try unicode path extra
-            std::string extra(1024, 0);
             for (mz_uint i = 0; i < archive.m_total_files; ++i) {
-                size_t n = mz_zip_reader_get_extra(&archive, i, extra.data(), extra.size());
-                if (n > 0 && path2 == ZipUnicodePathExtraField::decode(extra.substr(0, n))) {
+                const std::string extra = read_zip_extra(archive, i);
+                if (!extra.empty() && mz_zip_reader_file_stat(&archive, i, &stat) &&
+                    path2 == ZipUnicodePathExtraField::decode(extra, stat.m_filename)) {
                     index = i;
                     break;
                 }
@@ -2883,9 +2908,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (stat.m_is_utf8) {
                 dest_file = stat.m_filename;
             } else {
-                std::string extra(1024, 0);
-                size_t n = mz_zip_reader_get_extra(&archive, stat.m_file_index, extra.data(), extra.size());
-                dest_file = ZipUnicodePathExtraField::decode(extra.substr(0, n), stat.m_filename);
+                dest_file = ZipUnicodePathExtraField::decode(read_zip_extra(archive, stat.m_file_index), stat.m_filename);
             }
             std::string temp_path = model.get_auxiliary_file_temp_path();
             //aux directory from model

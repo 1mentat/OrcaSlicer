@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <set>
 
 #include <catch2/catch_test_macros.hpp>
@@ -3070,26 +3071,30 @@ namespace archive_variant_contracts {
 // The central-directory name and Info-ZIP Unicode Path extra field can differ.
 // Keep both explicit so the outer filename filter cannot stand in for the
 // containment check performed after decoding the extra field.
-void append_unicode_auxiliary(const std::string &archive_path, const std::string &decoded_name)
+void append_extra_u16(std::string &extra, uint16_t value)
 {
-    const std::string stored_name = "Auxiliaries/docs/ascii.txt";
-    const std::string payload = "unicode-auxiliary-contract";
+    extra.push_back(static_cast<char>(value & 0xff));
+    extra.push_back(static_cast<char>(value >> 8));
+}
+
+std::string unicode_path_extra(const std::string &stored_name, const std::string &decoded_name,
+                               bool valid_crc = true, unsigned char version = 1)
+{
+    REQUIRE(decoded_name.size() <= std::numeric_limits<uint16_t>::max() - 5);
     std::string extra;
-    auto append_u16 = [&extra](uint16_t value) {
-        extra.push_back(static_cast<char>(value & 0xff));
-        extra.push_back(static_cast<char>(value >> 8));
-    };
-    append_u16(0x7075); // Info-ZIP Unicode Path extra field.
-    append_u16(static_cast<uint16_t>(5 + decoded_name.size()));
-    extra.push_back('\x01');
-    const mz_ulong crc = mz_crc32(0, reinterpret_cast<const unsigned char *>(stored_name.data()), stored_name.size());
+    append_extra_u16(extra, 0x7075); // Info-ZIP Unicode Path extra field.
+    append_extra_u16(extra, static_cast<uint16_t>(5 + decoded_name.size()));
+    extra.push_back(static_cast<char>(version));
+    const mz_ulong crc = mz_crc32(0, reinterpret_cast<const unsigned char *>(stored_name.data()), stored_name.size()) ^ (valid_crc ? 0u : 1u);
     for (unsigned int byte = 0; byte < 4; ++byte)
         extra.push_back(static_cast<char>((crc >> (8 * byte)) & 0xff));
-    extra += decoded_name;
-    // A second, empty private field exercises a Unicode field that is not last.
-    append_u16(0xcafe);
-    append_u16(0);
+    return extra + decoded_name;
+}
 
+void append_entry_with_extra(const std::string &archive_path, const std::string &stored_name,
+                             const std::string &payload, const std::string &extra)
+{
+    REQUIRE(extra.size() <= std::numeric_limits<uint16_t>::max());
     mz_zip_archive zip{};
     REQUIRE(mz_zip_reader_init_file(&zip, archive_path.c_str(), 0));
     ScopeGuard close_zip([&zip] { mz_zip_end(&zip); });
@@ -3098,6 +3103,54 @@ void append_unicode_auxiliary(const std::string &archive_path, const std::string
         nullptr, 0, MZ_DEFAULT_LEVEL | MZ_ZIP_FLAG_ASCII_FILENAME, 0, 0, nullptr,
         extra.data(), static_cast<mz_uint>(extra.size()), extra.data(), static_cast<mz_uint>(extra.size())));
     REQUIRE(mz_zip_writer_finalize_archive(&zip));
+}
+
+void append_unicode_auxiliary(const std::string &archive_path, const std::string &decoded_name,
+                              bool trailing_field = true, bool valid_crc = true, unsigned char version = 1,
+                              size_t prefix_extra_bytes = 0)
+{
+    const std::string stored_name = "Auxiliaries/docs/ascii.txt";
+    std::string extra;
+    REQUIRE(prefix_extra_bytes <= std::numeric_limits<uint16_t>::max());
+    if (prefix_extra_bytes != 0) {
+        // Padding exercises a large extra-field payload with short path components.
+        append_extra_u16(extra, 0xcafe);
+        append_extra_u16(extra, static_cast<uint16_t>(prefix_extra_bytes));
+        extra.append(prefix_extra_bytes, 'x');
+    }
+    extra += unicode_path_extra(stored_name, decoded_name, valid_crc, version);
+    if (trailing_field) {
+        append_extra_u16(extra, 0xcafe); // Empty JAR marker after the Unicode field.
+        append_extra_u16(extra, 0);
+    }
+    append_entry_with_extra(archive_path, stored_name, "unicode-auxiliary-contract", extra);
+}
+
+void append_truncated_unicode_auxiliary(const std::string &archive_path)
+{
+    const std::string stored_name = "Auxiliaries/docs/ascii.txt";
+    std::string extra = unicode_path_extra(stored_name, "short");
+    extra[2] = 32; // Declare more bytes than follow the four-byte field header.
+    append_entry_with_extra(archive_path, stored_name, "truncated-unicode-contract", extra);
+}
+
+void add_unicode_model_alias(const std::string &archive_path)
+{
+    const std::string stored_name = "3D/model-payload.bin";
+    const std::string decoded_name = "3D/3dmodel.model";
+    std::string model_data;
+    REQUIRE(rewrite_3mf_entries(archive_path, [&](std::string &name, std::string &data) {
+        if (name != decoded_name)
+            return false;
+        model_data = data;
+        name = "3D/original-payload.bin";
+        return true;
+    }));
+    REQUIRE_FALSE(model_data.empty());
+    // Filename lookup misses the referenced model path; only the Unicode
+    // metadata on this distinct entry resolves it.
+    append_entry_with_extra(archive_path, stored_name, model_data,
+                            unicode_path_extra(stored_name, decoded_name));
 }
 
 TEST_CASE("BBS 3MF validates auxiliary paths after decoding Unicode metadata",
@@ -3130,4 +3183,111 @@ TEST_CASE("BBS 3MF validates auxiliary paths after decoding Unicode metadata",
     }
 }
 
+} // namespace archive_variant_contracts
+
+namespace archive_variant_contracts {
+TEST_CASE("BBS 3MF decodes final and long Unicode path metadata", "[3MFArchiveVariants][AuxiliaryUnicodeMetadata]")
+{
+    const bool trailing_field = GENERATE(false, true);
+    const bool long_name = GENERATE(false, true);
+    CAPTURE(trailing_field, long_name);
+    const std::string leaf = long_name ? std::string(130, 'a') + "-é.txt" : "unicode-é.txt";
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/" + leaf, trailing_field);
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
+                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const std::filesystem::path root = loaded_model.get_auxiliary_file_temp_path();
+    REQUIRE(std::filesystem::exists(root / "docs" / leaf));
+    CHECK(read_file((root / "docs" / leaf).string()) == "unicode-auxiliary-contract");
+    CHECK_FALSE(std::filesystem::exists(root / "docs/ascii.txt"));
+}
+
+TEST_CASE("BBS 3MF ignores Unicode metadata with an invalid checksum or version", "[3MFArchiveVariants][AuxiliaryUnicodeMetadata]")
+{
+    const bool bad_crc = GENERATE(false, true);
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/untrusted.txt", true,
+                             !bad_crc, bad_crc ? 1 : 2);
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
+                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const std::filesystem::path root = loaded_model.get_auxiliary_file_temp_path();
+    REQUIRE(std::filesystem::exists(root / "docs/ascii.txt"));
+    CHECK(read_file((root / "docs/ascii.txt").string()) == "unicode-auxiliary-contract");
+    CHECK_FALSE(std::filesystem::exists(root / "docs/untrusted.txt"));
+}
+
+TEST_CASE("BBS 3MF reads complete final Unicode metadata beyond 1024 bytes",
+          "[3MFArchiveVariants][AuxiliaryUnicodeMetadata][UnicodeExtraFraming]")
+{
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/unicode-é.txt", false, true, 1, 1020);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
+                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const std::filesystem::path root = loaded_model.get_auxiliary_file_temp_path();
+    const std::filesystem::path extracted = root / "docs/unicode-é.txt";
+    REQUIRE(std::filesystem::exists(extracted));
+    CHECK(read_file(extracted.string()) == "unicode-auxiliary-contract");
+    CHECK_FALSE(std::filesystem::exists(root / "docs/ascii.txt"));
+}
+
+TEST_CASE("BBS 3MF resolves the model part through Unicode metadata",
+          "[3MFArchiveVariants][AuxiliaryUnicodeMetadata][UnicodeExtraFraming]")
+{
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+    add_unicode_model_alias(archive.string());
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    REQUIRE(loaded_model.objects.front()->instances.size() == 1);
+    TriangleMesh mesh = loaded_model.objects.front()->volumes.front()->mesh();
+    CHECK(mesh.facets_count() == 12);
+    CHECK_THAT(mesh.volume(), Catch::Matchers::WithinAbs(1000., 1e-4));
+}
+
+TEST_CASE("BBS 3MF falls back on a truncated Unicode metadata field",
+          "[3MFArchiveVariants][AuxiliaryUnicodeMetadata][UnicodeExtraFraming]")
+{
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+    append_truncated_unicode_auxiliary(archive.string());
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
+                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const std::filesystem::path root = loaded_model.get_auxiliary_file_temp_path();
+    const std::filesystem::path extracted = root / "docs/ascii.txt";
+    REQUIRE(std::filesystem::exists(extracted));
+    CHECK(read_file(extracted.string()) == "truncated-unicode-contract");
+    CHECK_FALSE(std::filesystem::exists(root / "docs/short"));
+}
 } // namespace archive_variant_contracts
