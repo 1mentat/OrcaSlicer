@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed behavioral mutation candidates; native outcomes are reported separately.",
+  "mutants": [
+    {
+      "id": "preset-bundle-metadata-retain-path-prefix",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "arr.push_back(boost::filesystem::path(name).filename().string());",
+      "new": "arr.push_back(name);",
+      "description": "Retain a nested path in bundle metadata instead of serializing its bundle-local filename.",
+      "test_filter": "PresetLifecycle"
+    },
+    {
+      "id": "preset-clone-printer-compatibility-drop",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "compatible_printers->values = std::vector<std::string>{printer};",
+      "new": "compatible_printers->values.clear();",
+      "description": "Drop the target-printer compatibility restriction while cloning a material for a printer.",
+      "test_filter": "PresetLifecycle"
+    },
+    {
+      "id": "preset-clone-filament-overrides-drop",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "preset.config.apply_only(dynamic_config, {\"filament_vendor\", \"compatible_printers\", \"filament_type\"},true);",
+      "new": "preset.config.apply_only(dynamic_config, {\"filament_vendor\"},true);",
+      "description": "Ignore material type and printer compatibility metadata during filament cloning.",
+      "test_filter": "PresetLifecycle"
+    },
+    {
+      "id": "preset-project-embedded-mark-drop",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (save_to_project) {\n            preset.is_project_embedded = true;\n        }",
+      "new": "if (save_to_project) {\n            preset.is_project_embedded = false;\n        }",
+      "description": "Fail to mark a saved project preset as embedded in the project.",
+      "test_filter": "PresetLifecycle"
+    },
+    {
+      "id": "preset-delete-system-force-guard-drop",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (!force && !preset.can_overwrite())\n        return false;",
+      "new": "if (false)\n        return false;",
+      "description": "Allow deletion of protected system presets without the explicit force flag.",
+      "test_filter": "PresetLifecycle"
+    },
+    {
+      "id": "preset-selection-export-process-drop",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "config.set_printer_setting(printer_name, PRESET_PRINT_NAME, prints.get_selected_preset_name());",
+      "new": "config.set_printer_setting(printer_name, PRESET_PRINT_NAME, std::string());",
+      "description": "Omit the selected process preset from the persisted machine selection.",
+      "test_filter": "PresetLifecycle"
+    },
+    {
+      "id": "preset-external-name-format-drop",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "new_name = prefix + \"(\" + name + \")\";",
+      "new": "new_name = prefix + name;",
+      "description": "Drop the source marker from the generated external preset identity.",
+      "test_filter": "PresetLifecycle"
+    },
+    {
+      "id": "preset-bundle-legacy-description-drop",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "else if (j.contains(\"bundle_type\")) this->description = j[\"bundle_type\"].get<std::string>();",
+      "new": "else if (j.contains(\"bundle_type\")) this->description.clear();",
+      "description": "Drop the legacy bundle description fallback while loading metadata.",
+      "test_filter": "PresetLifecycle"
+    }
+  ]
+}

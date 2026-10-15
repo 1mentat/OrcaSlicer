@@ -1,3 +1,9 @@
+#include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
+#include "fff_print/test_helpers.hpp"
+#include <cmath>
+#include <set>
+#include <utility>
 #include <algorithm>
 #include <catch2/catch_all.hpp>
 
@@ -459,3 +465,243 @@ TEST_CASE("A tower printed without a tool change is still validated against the 
     CHECK(print.wipe_tower_data(1).depth > 0.f);
     CHECK_THAT(print.validate().string, Catch::Matchers::ContainsSubstring("printable area"));
 }
+
+namespace wipe_tower_pipeline_contracts {
+
+namespace {
+
+// Two roles deliberately use different filament slots.  A single physical
+// nozzle is enough to exercise ToolOrdering's logical filament transitions and
+// both purge-tower implementations, while keeping every case small and deterministic.
+DynamicPrintConfig tower_config(double prime_volume = 80., bool semm = false, bool top_only = false)
+{
+    const int wall_filament = top_only ? 1 : 2;
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "sparse_infill_filament_id",       1 },
+        { "internal_solid_filament_id",      1 },
+        { "top_surface_filament_id",         top_only ? 2 : 1 },
+        { "bottom_surface_filament_id",      1 },
+        { "outer_wall_filament_id",          wall_filament },
+        { "inner_wall_filament_id",          wall_filament },
+        { "enable_prime_tower",              true },
+        { "wipe_tower_x",                    50 },
+        { "wipe_tower_y",                    50 },
+        { "prime_tower_width",               35 },
+        { "wipe_tower_type",                 "type2" },
+        { "layer_height",                    0.2 },
+        { "skirt_loops",                     0 },
+        { "brim_type",                       "no_brim" },
+        { "single_extruder_multi_material",  semm },
+        { "single_extruder_multi_material_priming", semm },
+        { "use_relative_e_distances",        true },
+        { "layer_change_gcode",             "G92 E0\n" },
+        { "wipe_tower_sparse_layers_combination", false },
+        { "prime_volume",                    prime_volume },
+    });
+    // Keep this explicit: init_print's first apply can normalize a one-filament
+    // plate before the object regions have settled.  The helper below reapplies
+    // the same complete configuration once both slots are known to be used.
+    return config;
+}
+
+struct TowerMetrics {
+    std::size_t planned_layers = 0;
+    std::size_t active_blocks = 0;
+    std::size_t sparse_layers = 0;
+    std::size_t combined_layers = 0;
+    std::size_t transition_events = 0;
+    std::size_t same_tool_blocks = 0;
+    std::size_t invalid_results = 0;
+    std::size_t gcode_tool_commands = 0;
+    std::size_t arc_commands = 0;
+    double extrusion_length = 0.;
+    double elapsed_time = 0.;
+    std::size_t bad_print_z = 0;
+    std::size_t bad_layer_height = 0;
+    std::size_t bad_elapsed = 0;
+    std::size_t bad_purge = 0;
+    std::size_t bad_endpoint = 0;
+    std::size_t bad_extrusion = 0;
+    std::set<std::pair<int, int>> transition_pairs;
+    std::set<int> gcode_tools;
+    FilamentChangeStats stats;
+    std::vector<unsigned int> all_extruders;
+};
+
+void collect_gcode_tools(const std::string &gcode, TowerMetrics &metrics)
+{
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&metrics](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        const std::string command(line.cmd());
+        if (command.size() < 2 || command.front() != 'T' || command[1] < '0' || command[1] > '9')
+            return;
+        metrics.gcode_tool_commands++;
+        metrics.gcode_tools.insert(std::stoi(command.substr(1)));
+    });
+}
+
+TowerMetrics process_tower(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({ cube(10) }, print, model, config);
+    // See test_wipe_tower.cpp: the first apply may normalize the prime tower
+    // away before the second filament is observed by the print regions.
+    print.apply(model, config);
+    const auto validation = print.validate();
+    INFO("validation: " << validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE(print.is_step_done(psWipeTower));
+
+    TowerMetrics metrics;
+    const WipeTowerData &tower = print.wipe_tower_data();
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : tower.tool_changes) {
+        if (layer.empty())
+            continue;
+        ++metrics.planned_layers;
+        if (wipe_tower_layer_is_sparse(layer))
+            ++metrics.sparse_layers;
+        if (wipe_tower_layer_is_combined_away(layer))
+            ++metrics.combined_layers;
+
+        for (const WipeTower::ToolChangeResult &change : layer) {
+            if (change.combined_away)
+                continue;
+            ++metrics.active_blocks;
+            if (change.initial_tool == change.new_tool)
+                ++metrics.same_tool_blocks;
+            else {
+                ++metrics.transition_events;
+                metrics.transition_pairs.emplace(change.initial_tool, change.new_tool);
+            }
+
+            for (std::size_t i = 1; i < change.extrusions.size(); ++i) {
+                const WipeTower::Extrusion &extrusion = change.extrusions[i];
+                if (extrusion.width <= 0.f)
+                    continue;
+                const Vec2f delta = extrusion.pos - change.extrusions[i - 1].pos;
+                metrics.extrusion_length += std::hypot(double(delta.x()), double(delta.y()));
+            }
+
+            GCodeReader change_reader;
+            change_reader.parse_buffer(change.gcode, [&metrics](GCodeReader &, const GCodeReader::GCodeLine &line) {
+                if (line.cmd() == "G2" || line.cmd() == "G3")
+                    ++metrics.arc_commands;
+            });
+
+            const auto finite = [](float value) { return std::isfinite(double(value)); };
+            metrics.elapsed_time += change.elapsed_time;
+            if (!finite(change.print_z)) { ++metrics.invalid_results; ++metrics.bad_print_z; }
+            if (!finite(change.layer_height) || change.layer_height <= 0.f) {
+                ++metrics.invalid_results; ++metrics.bad_layer_height;
+            }
+            if (!finite(change.elapsed_time)) { ++metrics.invalid_results; ++metrics.bad_elapsed; }
+            if (!finite(change.purge_volume)) { ++metrics.invalid_results; ++metrics.bad_purge; }
+            if (!finite(change.start_pos.x()) || !finite(change.start_pos.y()) ||
+                !finite(change.end_pos.x()) || !finite(change.end_pos.y()) ||
+                (change.is_tool_change && (!finite(change.tool_change_start_pos.x()) ||
+                                           !finite(change.tool_change_start_pos.y()))))
+            {
+                ++metrics.invalid_results;
+                ++metrics.bad_endpoint;
+            }
+            for (const WipeTower::Extrusion &extrusion : change.extrusions)
+                if (!finite(extrusion.pos.x()) || !finite(extrusion.pos.y()) || !finite(extrusion.width))
+                {
+                    ++metrics.invalid_results;
+                    ++metrics.bad_extrusion;
+                }
+        }
+    }
+
+    metrics.stats = const_cast<ToolOrdering &>(print.tool_ordering())
+                        .get_filament_change_stats(ToolOrdering::SingleExt);
+    metrics.all_extruders = print.tool_ordering().all_extruders();
+    collect_gcode_tools(gcode(print), metrics);
+    INFO("invalid categories print_z=" << metrics.bad_print_z
+         << " layer_height=" << metrics.bad_layer_height
+         << " elapsed=" << metrics.bad_elapsed
+         << " purge=" << metrics.bad_purge
+         << " endpoint=" << metrics.bad_endpoint
+         << " extrusion=" << metrics.bad_extrusion);
+    CHECK(metrics.invalid_results == 0);
+    return metrics;
+}
+
+} // namespace
+
+TEST_CASE("A real two-filament print emits coherent wipe-tower transitions", "[WipeTower][WipeTowerVariance]")
+{
+    const TowerMetrics metrics = process_tower(tower_config());
+
+    REQUIRE(metrics.planned_layers > 0);
+    REQUIRE(metrics.active_blocks > 0);
+    REQUIRE(metrics.transition_events > 0);
+    CHECK(metrics.transition_pairs.count({ 0, 1 }) + metrics.transition_pairs.count({ 1, 0 }) > 0);
+    CHECK(metrics.extrusion_length > 0.);
+    CHECK(metrics.elapsed_time > 0.);
+    CHECK(metrics.gcode_tool_commands >= metrics.transition_events);
+    CHECK(metrics.gcode_tools.count(0) > 0);
+    CHECK(metrics.gcode_tools.count(1) > 0);
+    CHECK(metrics.stats.filament_change_count > 0);
+    CHECK(metrics.stats.flush_filament_change_count > 0);
+    CHECK_FALSE(metrics.all_extruders.empty());
+    CHECK(metrics.invalid_results == 0);
+}
+
+TEST_CASE("Increasing prime volume increases extrusion without changing tool transitions", "[WipeTower][WipeTowerVariance]")
+{
+    const TowerMetrics low  = process_tower(tower_config(35.));
+    const TowerMetrics high = process_tower(tower_config(120.));
+
+    REQUIRE(low.transition_events > 0);
+    REQUIRE(high.transition_events > 0);
+    CHECK(high.extrusion_length > low.extrusion_length);
+    CHECK(high.transition_events == low.transition_events);
+    CHECK(high.transition_pairs == low.transition_pairs);
+    CHECK(high.gcode_tools == low.gcode_tools);
+}
+
+TEST_CASE("Sparse tower blocks retain same-tool layers beside real changes", "[WipeTower][WipeTowerVariance]")
+{
+    const TowerMetrics metrics = process_tower(tower_config(80., false, true));
+
+    REQUIRE(metrics.planned_layers > 0);
+    CHECK(metrics.sparse_layers > 0);
+    CHECK(metrics.same_tool_blocks > 0);
+    CHECK(metrics.transition_events > 0);
+    CHECK(metrics.invalid_results == 0);
+}
+
+TEST_CASE("SEMM still records material transitions and extrusion geometry", "[WipeTower][WipeTowerVariance]")
+{
+    const TowerMetrics metrics = process_tower(tower_config(80., true));
+
+    REQUIRE(metrics.planned_layers > 0);
+    CHECK(metrics.transition_events > 0);
+    CHECK(metrics.extrusion_length > 0.);
+    CHECK(metrics.elapsed_time > 0.);
+    CHECK(metrics.stats.filament_change_count > 0);
+    INFO("invalid categories print_z=" << metrics.bad_print_z
+         << " layer_height=" << metrics.bad_layer_height
+         << " elapsed=" << metrics.bad_elapsed
+         << " purge=" << metrics.bad_purge
+         << " endpoint=" << metrics.bad_endpoint
+         << " extrusion=" << metrics.bad_extrusion);
+    CHECK(metrics.invalid_results == 0);
+}
+
+TEST_CASE("Type1 wipe towers retain finite positive timing for linear and arc motion", "[WipeTower][WipeTowerVariance][WipeTowerLegacyVariance]")
+{
+    DynamicPrintConfig config = tower_config();
+    config.set_deserialize_strict({{"wipe_tower_type", "type1"}, {"enable_arc_fitting", true}});
+    const TowerMetrics metrics = process_tower(config);
+    REQUIRE(metrics.planned_layers > 0);
+    REQUIRE(metrics.transition_events > 0);
+    CHECK(metrics.elapsed_time > 0.);
+    CHECK(metrics.arc_commands > 0);
+    CHECK(metrics.invalid_results == 0);
+}
+
+} // namespace wipe_tower_pipeline_contracts

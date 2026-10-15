@@ -1,3 +1,4 @@
+#include <set>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -100,6 +101,7 @@ namespace Catch {
 } // end namespace Catch
 
 #include <catch2/catch_all.hpp>
+#include "libslic3r/BoundingBox.hpp"
 
 using namespace Slic3r;
 
@@ -2130,3 +2132,445 @@ TEST_CASE("3MF XML entries declaring more than an int can hold fail to load", "[
         CHECK_FALSE(parser.check_3mf_from_prusa(path));
     }
 }
+
+namespace bbs_archive_contracts {
+
+namespace {
+
+struct LoadedProject
+{
+    DynamicPrintConfig config;
+    PlateDataPtrs       plates;
+    std::vector<Preset*> presets;
+    bool                is_bbl{false};
+    bool                is_orca{false};
+    Semver              version;
+    std::unique_ptr<ScopedTemporaryDir> backup;
+
+    ~LoadedProject();
+};
+
+void release_presets(std::vector<Preset*>& presets)
+{
+    for (Preset *preset : presets)
+        delete preset;
+    presets.clear();
+}
+
+LoadedProject::~LoadedProject()
+{
+    release_PlateData_list(plates);
+    release_presets(presets);
+}
+
+void make_model(Model& model, bool two_objects = false, bool assembly = false)
+{
+    ModelObject *base = model.add_object();
+    base->name = "base-object";
+    base->module_name = "base-module";
+    ModelVolume *base_volume = base->add_volume(make_cube(10., 10., 10.));
+    base_volume->name = "base-volume";
+    base_volume->set_material_id("PLA");
+    base->add_instance();
+    ModelInstance *second = base->add_instance();
+    second->set_offset({30., 5., 0.});
+    second->set_rotation(Z, Geometry::deg2rad(17.));
+    second->set_scaling_factor({1.1, 0.9, 1.0});
+
+    if (assembly) {
+        Transform3d assembled = Transform3d::Identity();
+        assembled.linear() = Eigen::AngleAxisd(Geometry::deg2rad(23.), Vec3d::UnitZ()).toRotationMatrix();
+        assembled.translation() = Vec3d(4., 6., 8.);
+        second->set_assemble_from_transform(assembled);
+        second->set_offset_to_assembly({1.5, -2.5, 0.75});
+    }
+
+    if (two_objects) {
+        ModelObject *other = model.add_object();
+        other->name = "second-object";
+        other->module_name = "second-module";
+        ModelVolume *other_volume = other->add_volume(make_cube(6., 8., 4.));
+        other_volume->name = "second-volume";
+        other_volume->set_material_id("PETG");
+        other->add_instance({60., 10., 0.}, {1., 1., 1.}, {0., 0., Geometry::deg2rad(11.)}, {1., 1., 1.});
+    }
+
+    model.add_material("PLA")->attributes["filament_type"] = "PLA";
+    model.add_material("PETG")->attributes["filament_type"] = "PETG";
+}
+
+void make_multi_volume_model(Model& model)
+{
+    ModelObject *object = model.add_object();
+    object->name = "multi-volume";
+    ModelVolume *part = object->add_volume(make_cube(12., 10., 8.));
+    part->name = "printable-part";
+    part->set_material_id("PLA");
+    ModelVolume *negative = object->add_volume(make_cube(3., 3., 3.), ModelVolumeType::NEGATIVE_VOLUME);
+    negative->name = "negative-cavity";
+    negative->set_material_id("PETG");
+    negative->set_offset({2., 2., 2.});
+    object->add_instance();
+    model.add_material("PLA")->attributes["filament_type"] = "PLA";
+    model.add_material("PETG")->attributes["filament_type"] = "PETG";
+}
+
+void store_model(const std::string& path, Model& model, DynamicPrintConfig& config,
+                 PlateDataPtrs& plates, SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence,
+                 Export3mfProgressFn callback = nullptr)
+{
+    StoreParams params;
+    params.path = path;
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.strategy = strategy;
+    params.proFn = std::move(callback);
+    REQUIRE(store_bbs_3mf(params));
+}
+
+bool load_model(const std::string& path, Model& model, LoadedProject& loaded,
+                Import3mfProgressFn callback = nullptr)
+{
+    loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_ext_load");
+    model.set_backup_path(loaded.backup->string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    const bool result = load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates,
+                                     &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version,
+                                     std::move(callback), LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    return result;
+}
+
+void make_plate(PlateData& plate, int index, const std::vector<std::pair<int, int>>& objects)
+{
+    plate.plate_index = index;
+    plate.plate_name = "plate-" + std::to_string(index + 1);
+    plate.locked = index == 1;
+    plate.objects_and_instances = objects;
+    plate.printer_model_id = "printer-" + std::to_string(index);
+    plate.nozzle_diameters = "0.4;0.6";
+    plate.nozzle_volume_types = "standard;high_flow";
+    plate.gcode_prediction = "{\"time\":42}";
+    plate.gcode_weight = "12.5";
+    plate.toolpath_outside = index == 1;
+    plate.is_support_used = index == 0;
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF preserves multiple objects, instances, and transformed world geometry", "[3MF][Bbs3mfExtended][Geometry]")
+{
+    Model source;
+    make_model(source, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.24));
+    ScopedTemporaryDir backup("orca_bbs_ext_store");
+    source.set_backup_path(backup.string());
+
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}, {0, 1}, {1, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 2);
+    REQUIRE(loaded_model.objects[0]->instances.size() == 2);
+    REQUIRE(loaded_model.objects[1]->instances.size() == 1);
+    CHECK(loaded_model.objects[0]->name == "base-object");
+    CHECK(loaded_model.objects[1]->name == "second-object");
+    const BoundingBoxf3 source_bbox = source.mesh().bounding_box();
+    const BoundingBoxf3 loaded_bbox = loaded_model.mesh().bounding_box();
+    CHECK_THAT(loaded_bbox.min.x(), Catch::Matchers::WithinAbs(source_bbox.min.x(), 1e-5));
+    CHECK_THAT(loaded_bbox.min.z(), Catch::Matchers::WithinAbs(source_bbox.min.z(), 1e-5));
+    CHECK_THAT(loaded_bbox.min.y(), Catch::Matchers::WithinAbs(source_bbox.min.y(), 1e-5));
+    CHECK_THAT(loaded_bbox.max.x(), Catch::Matchers::WithinAbs(source_bbox.max.x(), 1e-5));
+    CHECK_THAT(loaded_bbox.max.y(), Catch::Matchers::WithinAbs(source_bbox.max.y(), 1e-5));
+    CHECK_THAT(loaded_bbox.max.z(), Catch::Matchers::WithinAbs(source_bbox.max.z(), 1e-5));
+    CHECK(loaded_model.mesh().its.indices.size() == source.mesh().its.indices.size());
+    REQUIRE(loaded.config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(loaded.config.option<ConfigOptionFloat>("layer_height")->value, Catch::Matchers::WithinAbs(0.24, 1e-6));
+}
+
+TEST_CASE("BBS 3MF preserves assembly transform and assembly offset", "[3MF][Bbs3mfExtended][Assembly]")
+{
+    Model source;
+    make_model(source, false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_assembly_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}, {0, 1}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->instances.size() == 2);
+    ModelInstance *instance = loaded_model.objects.front()->instances[1];
+    REQUIRE(instance->is_assemble_initialized());
+    CHECK(instance->get_assemble_transformation().get_matrix().isApprox(
+        source.objects.front()->instances[1]->get_assemble_transformation().get_matrix(), 1e-5));
+    CHECK(instance->get_offset_to_assembly().isApprox(Vec3d(1.5, -2.5, 0.75), 1e-5));
+}
+
+TEST_CASE("BBS 3MF preserves model metadata and volume types", "[3MF][Bbs3mfExtended][Metadata]")
+{
+    Model source;
+    make_multi_volume_model(source);
+    source.model_info = std::make_shared<ModelInfo>();
+    source.model_info->model_name = "Archive contract";
+    source.model_info->origin = "designer-origin";
+    source.model_info->description = "metadata survives XML escaping: <&>";
+    source.model_info->metadata_items["custom-key"] = "custom-value";
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_metadata_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.model_info != nullptr);
+    CHECK(loaded_model.model_info->model_name == "Archive contract");
+    CHECK(loaded_model.model_info->origin == "designer-origin");
+    CHECK(loaded_model.model_info->description == "metadata survives XML escaping: <&>");
+    CHECK(loaded_model.model_info->metadata_items.at("custom-key") == "custom-value");
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 2);
+    CHECK(loaded_model.objects.front()->volumes[0]->name == "printable-part");
+    CHECK(loaded_model.objects.front()->volumes[1]->name == "negative-cavity");
+    CHECK(loaded_model.objects.front()->volumes[1]->type() == ModelVolumeType::NEGATIVE_VOLUME);
+}
+
+TEST_CASE("BBS 3MF preserves multiple plate records and plate-scoped metadata", "[3MF][Bbs3mfExtended][Plates]")
+{
+    Model source;
+    make_model(source, false);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_plate_store");
+    source.set_backup_path(backup.string());
+    auto plate0 = std::make_unique<PlateData>();
+    auto plate1 = std::make_unique<PlateData>();
+    make_plate(*plate0, 0, {{0, 0}});
+    make_plate(*plate1, 1, {{0, 1}});
+    PlateDataPtrs plates{plate0.get(), plate1.get()};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 2);
+    CHECK(loaded.plates[0]->plate_name == "plate-1");
+    CHECK(loaded.plates[1]->plate_name == "plate-2");
+    CHECK_FALSE(loaded.plates[0]->locked);
+    CHECK(loaded.plates[1]->locked);
+    CHECK(loaded_model.objects.size() == 1);
+}
+
+TEST_CASE("BBS 3MF gates slice metadata while retaining every plate instance mapping", "[3MF][Bbs3mfExtended][Plates][SliceInfo]")
+{
+    Model source;
+    make_model(source, false);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_slice_info_store");
+    source.set_backup_path(backup.string());
+
+    auto unsliced = std::make_unique<PlateData>();
+    auto sliced = std::make_unique<PlateData>();
+    make_plate(*unsliced, 0, {{0, 0}});
+    make_plate(*sliced, 1, {{0, 1}});
+
+    // These values deliberately exist on both source records.  Only the valid sliced
+    // record is allowed into slice_info.config; the model-settings plate entries still
+    // carry the object/instance mapping for both records.
+    unsliced->printer_model_id = "must-not-be-written";
+    unsliced->gcode_prediction = "999";
+    unsliced->gcode_weight = "888";
+    unsliced->toolpath_outside = true;
+    unsliced->is_support_used = true;
+    unsliced->is_sliced_valid = false;
+
+    sliced->printer_model_id = "sliced-printer";
+    // These attributes are consumed as numeric strings by the GUI and are written
+    // verbatim into XML attributes, so keep the fixture XML-safe as well.
+    sliced->gcode_prediction = "42";
+    sliced->gcode_weight = "12.5";
+    sliced->toolpath_outside = true;
+    sliced->is_support_used = true;
+    sliced->filament_maps = {1};
+    sliced->is_sliced_valid = true;
+
+    PlateDataPtrs plates{unsliced.get(), sliced.get()};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 2);
+
+    const PlateData &loaded_unsliced = *loaded.plates[0];
+    const PlateData &loaded_sliced = *loaded.plates[1];
+
+    // No slice-info plate is emitted for an unsliced record, so all four slice-only
+    // values remain their parser defaults even though they were populated in memory.
+    CHECK(loaded_unsliced.printer_model_id.empty());
+    CHECK(loaded_unsliced.gcode_prediction.empty());
+    CHECK(loaded_unsliced.gcode_weight.empty());
+    CHECK_FALSE(loaded_unsliced.toolpath_outside);
+    CHECK_FALSE(loaded_unsliced.is_support_used);
+
+    // The valid record gets the complete slice-only metadata set.
+    CHECK(loaded_sliced.printer_model_id == "sliced-printer");
+    CHECK(loaded_sliced.gcode_prediction == "42");
+    CHECK(loaded_sliced.gcode_weight == "12.5");
+    CHECK(loaded_sliced.toolpath_outside);
+    CHECK(loaded_sliced.is_support_used);
+
+    // Plate/instance membership is model-settings data, independent of the slice-info
+    // validity gate.  The object id is stable and the selected source instance differs.
+    REQUIRE(loaded_unsliced.obj_inst_map.size() == 1);
+    REQUIRE(loaded_sliced.obj_inst_map.size() == 1);
+    CHECK(loaded_unsliced.obj_inst_map.begin()->first == loaded_sliced.obj_inst_map.begin()->first);
+    CHECK(loaded_unsliced.obj_inst_map.begin()->second.first == 0);
+    CHECK(loaded_sliced.obj_inst_map.begin()->second.first == 1);
+
+}
+
+TEST_CASE("BBS 3MF import cancellation returns false at the public progress seam", "[3MF][Bbs3mfExtended][Cancellation]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_cancel_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    bool called = false;
+    Model loaded_model;
+    LoadedProject loaded;
+    const bool result = load_model(archive.string(), loaded_model, loaded,
+        [&called](int stage, int, int, bool& cancel) {
+            called = true;
+            cancel = stage == IMPORT_STAGE_OPEN;
+        });
+    CHECK(called);
+    CHECK_FALSE(result);
+}
+
+TEST_CASE("BBS 3MF export cancellation stops before writing a project", "[3MF][Bbs3mfExtended][Cancellation]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_export_cancel");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    bool called = false;
+    StoreParams params;
+    params.path = archive.string();
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    params.proFn = [&called](int, int, int, bool& cancel) {
+        called = true;
+        cancel = true;
+    };
+    CHECK_FALSE(store_bbs_3mf(params));
+    CHECK(called);
+}
+
+TEST_CASE("BBS 3MF rejects missing package relationships and malformed model XML", "[3MF][Bbs3mfExtended][Errors]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_error_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+
+    SECTION("missing root relationship")
+    {
+        ScopedTemporaryFile archive(".3mf");
+        store_model(archive.string(), source, config, plates);
+        REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string& name, std::string&) {
+            if (name == "_rels/.rels") {
+                name = "_rels/missing.rels";
+                return true;
+            }
+            return false;
+        }));
+        Model loaded_model;
+        LoadedProject loaded;
+        CHECK_FALSE(load_model(archive.string(), loaded_model, loaded));
+    }
+
+    SECTION("malformed model XML")
+    {
+        ScopedTemporaryFile archive(".3mf");
+        store_model(archive.string(), source, config, plates);
+        REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string& name, std::string& data) {
+            if (name != "3D/3dmodel.model")
+                return false;
+            const size_t end = data.rfind("</model>");
+            if (end == std::string::npos)
+                return false;
+            data.replace(end, 8, "</broken>");
+            return true;
+        }));
+        Model loaded_model;
+        LoadedProject loaded;
+        CHECK_FALSE(load_model(archive.string(), loaded_model, loaded));
+    }
+}
+
+TEST_CASE("Published probe distinguishes published archives from ordinary and missing files", "[3MF][Bbs3mfExtended][Probe]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_probe_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+
+    SECTION("ordinary project")
+    {
+        ScopedTemporaryFile archive(".3mf");
+        store_model(archive.string(), source, config, plates);
+        CHECK_FALSE(bbs_3mf_is_published(archive.string()));
+    }
+    SECTION("published project")
+    {
+        source.model_info = std::make_shared<ModelInfo>();
+        source.model_info->metadata_items[ORCA_PUBLISHED_TAG] = "1";
+        ScopedTemporaryFile archive(".3mf");
+        store_model(archive.string(), source, config, plates);
+        CHECK(bbs_3mf_is_published(archive.string()));
+    }
+    CHECK_FALSE(bbs_3mf_is_published("/definitely/missing/project.3mf"));
+}
+
+} // namespace bbs_archive_contracts

@@ -895,7 +895,11 @@ public:
         m_current_pos.y() = y;
 
 		// Update the elapsed time with a rough estimate.
-        m_elapsed_time += ((len == 0.f) ? std::abs(e) : len) / m_current_feedrate * 60.f;
+        // A feedless first move inherits the printer's prior feedrate, which is
+        // unknown to this standalone writer. Do not turn that unknown duration
+        // into NaN; subsequent moves with an explicit feedrate are timed normally.
+        if (m_current_feedrate > EPSILON)
+            m_elapsed_time += ((len == 0.f) ? std::abs(e) : len) / m_current_feedrate * 60.f;
 		m_gcode += "\n";
 		return *this;
 	}
@@ -973,7 +977,11 @@ public:
         m_current_pos.y() = y;
 
         // Update the elapsed time with a rough estimate.
-        m_elapsed_time += ((len == 0.f) ? std::abs(e) : len) / m_current_feedrate * 60.f;
+        // A feedless first move inherits the printer's prior feedrate, which is
+        // unknown to this standalone writer. Do not turn that unknown duration
+        // into NaN; subsequent moves with an explicit feedrate are timed normally.
+        if (m_current_feedrate > EPSILON)
+            m_elapsed_time += ((len == 0.f) ? std::abs(e) : len) / m_current_feedrate * 60.f;
         m_gcode += "\n";
         return *this;
     }

@@ -1,3 +1,5 @@
+#include <array>
+#include <optional>
 #include <boost/filesystem/operations.hpp>
 #include <catch2/catch_all.hpp>
 
@@ -1484,3 +1486,212 @@ TEST_CASE("Percent accelerations resolve against the option they are a percentag
         REQUIRE(accelerations_by_role[role_name] == std::set<int>{ value });
     }
 }
+
+namespace firmware_flavor_contracts {
+
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+std::vector<GCodeFlavor> registered_flavors()
+{
+    const ConfigOptionDef *definition = print_config_def.get("gcode_flavor");
+    REQUIRE(definition != nullptr);
+    const std::vector<std::string> expected_names = {
+        "marlin", "klipper", "reprapfirmware", "repetier", "marlin2"
+    };
+    REQUIRE(definition->enum_values == expected_names);
+
+    std::vector<GCodeFlavor> flavors;
+    for (const std::string &name : definition->enum_values) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict("gcode_flavor", name);
+        flavors.push_back(config.opt_enum<GCodeFlavor>("gcode_flavor"));
+    }
+    REQUIRE(flavors.size() == definition->enum_values.size());
+    REQUIRE(flavors.size() == expected_names.size());
+    return flavors;
+}
+
+std::string flavor_name(GCodeFlavor flavor)
+{
+    const auto &names = ConfigOptionEnum<GCodeFlavor>::get_enum_names();
+    return names.at(static_cast<size_t>(flavor));
+}
+
+GCodeWriter make_writer(GCodeFlavor flavor, bool relative_e)
+{
+    PrintConfig config;
+    config.gcode_flavor.value = flavor;
+    config.use_relative_e_distances.value = relative_e;
+    config.filament_diameter.values = { 1.75 };
+    config.filament_flow_ratio.values = { 1.0 };
+
+    GCodeWriter writer;
+    writer.apply_print_config(config);
+    writer.set_extruders({ 0 });
+    writer.init_extruder(0);
+    return writer;
+}
+
+struct Deposit {
+    double path = 0.;
+    double filament = 0.;
+    size_t moves = 0;
+};
+
+Deposit deposited(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    Deposit out;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&out](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        out.path += line.dist_XY(self);
+        out.filament += line.dist_E(self);
+        ++out.moves;
+    });
+    return out;
+}
+
+std::string motion(GCodeWriter &writer, const std::string &preamble)
+{
+    // GCodeWriter updates internal E state while emitting each move. The
+    // caller supplies both the preamble and two equal-length deposits.
+    return preamble + writer.set_speed(30.)
+        + writer.extrude_to_xy({ 10., 0. }, 1.)
+        + writer.extrude_to_xy({ 20., 0. }, 1.);
+}
+
+std::string temperature_command(GCodeFlavor flavor)
+{
+    return GCodeWriter::set_temperature(210, flavor, true, 0);
+}
+
+struct FanCommand {
+    std::string command;
+    std::optional<float> pwm;
+};
+
+struct TemperatureCommands {
+    std::string set_command;
+    std::optional<float> setpoint;
+    std::optional<float> t_tool;
+    std::optional<float> p_tool;
+    bool wait_command = false;
+};
+
+FanCommand parse_fan_command(const std::string &gcode)
+{
+    FanCommand result;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&result](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.cmd() != "M106")
+            return;
+        result.command = std::string(line.cmd());
+        float pwm = 0.f;
+        if (line.has_value('S', pwm))
+            result.pwm = pwm;
+    });
+    return result;
+}
+
+TemperatureCommands parse_temperature_commands(const std::string &gcode)
+{
+    TemperatureCommands result;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&result](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        const std::string command(line.cmd());
+        if (command == "M116") {
+            result.wait_command = true;
+            return;
+        }
+        if (command != "G10" && command != "M104" && command != "M109")
+            return;
+        result.set_command = command;
+        float value = 0.f;
+        if (line.has_value('S', value))
+            result.setpoint = value;
+        if (line.has_value('T', value))
+            result.t_tool = value;
+        if (line.has_value('P', value))
+            result.p_tool = value;
+    });
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Registered G-code flavors preserve writer deposition in both E modes", "[GCodeWriter][GCodeFlavorVariance]")
+{
+    const std::vector<GCodeFlavor> flavors = registered_flavors();
+    REQUIRE_FALSE(flavors.empty());
+
+    for (GCodeFlavor flavor : flavors) {
+        INFO("gcode flavor: " << flavor_name(flavor));
+        DynamicPrintConfig relative_config = DynamicPrintConfig::full_print_config();
+        relative_config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(flavor));
+        relative_config.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+        DynamicPrintConfig absolute_config = relative_config;
+        absolute_config.set_key_value("use_relative_e_distances", new ConfigOptionBool(false));
+
+        GCodeWriter relative_writer = make_writer(flavor, true);
+        GCodeWriter absolute_writer = make_writer(flavor, false);
+        const std::string relative = motion(relative_writer, relative_writer.preamble());
+        const std::string absolute = motion(absolute_writer, absolute_writer.preamble());
+        const Deposit relative_deposit = deposited(relative, relative_config);
+        const Deposit absolute_deposit = deposited(absolute, absolute_config);
+
+        REQUIRE(relative_deposit.moves == 2);
+        REQUIRE(absolute_deposit.moves == 2);
+        CHECK_THAT(relative_deposit.path, Catch::Matchers::WithinAbs(20., 1e-6));
+        CHECK_THAT(absolute_deposit.path, Catch::Matchers::WithinAbs(20., 1e-6));
+        CHECK_THAT(relative_deposit.filament, Catch::Matchers::WithinAbs(2., 1e-5));
+        CHECK_THAT(absolute_deposit.filament, Catch::Matchers::WithinAbs(2., 1e-5));
+        CHECK_THAT(relative_deposit.path, Catch::Matchers::WithinAbs(absolute_deposit.path, 1e-6));
+        CHECK_THAT(relative_deposit.filament, Catch::Matchers::WithinAbs(absolute_deposit.filament, 1e-5));
+        CHECK(relative.find("M83") != std::string::npos);
+        CHECK(absolute.find("M82") != std::string::npos);
+    }
+}
+
+TEST_CASE("Registered G-code flavors honor thermal and fan command contracts", "[GCodeWriter][GCodeFlavorVariance]")
+{
+    for (GCodeFlavor flavor : registered_flavors()) {
+        INFO("gcode flavor: " << flavor_name(flavor));
+        const std::string temperature = temperature_command(flavor);
+        const TemperatureCommands thermal = parse_temperature_commands(temperature);
+        const FanCommand fan_off = parse_fan_command(GCodeWriter::set_fan(flavor, 0));
+        const FanCommand fan_mid = parse_fan_command(GCodeWriter::set_fan(flavor, 50));
+        const FanCommand fan_full = parse_fan_command(GCodeWriter::set_fan(flavor, 100));
+
+        REQUIRE(fan_off.command == "M106");
+        REQUIRE(fan_mid.command == "M106");
+        REQUIRE(fan_full.command == "M106");
+        REQUIRE(fan_off.pwm.has_value());
+        REQUIRE(fan_mid.pwm.has_value());
+        REQUIRE(fan_full.pwm.has_value());
+        CHECK_THAT(*fan_off.pwm, Catch::Matchers::WithinAbs(0.f, 0.01f));
+        CHECK_THAT(*fan_mid.pwm, Catch::Matchers::WithinAbs(127.5f, 1.f));
+        CHECK_THAT(*fan_full.pwm, Catch::Matchers::WithinAbs(255.f, 0.01f));
+        if (flavor == gcfRepRapFirmware) {
+            CHECK(thermal.set_command == "G10");
+            REQUIRE(thermal.setpoint.has_value());
+            REQUIRE(thermal.p_tool.has_value());
+            CHECK_FALSE(thermal.t_tool.has_value());
+            CHECK_THAT(*thermal.setpoint, Catch::Matchers::WithinAbs(210.f, 0.01f));
+            CHECK_THAT(*thermal.p_tool, Catch::Matchers::WithinAbs(0.f, 0.01f));
+            CHECK(thermal.wait_command);
+        } else {
+            CHECK(thermal.set_command == "M109");
+            REQUIRE(thermal.setpoint.has_value());
+            REQUIRE(thermal.t_tool.has_value());
+            CHECK_FALSE(thermal.p_tool.has_value());
+            CHECK_THAT(*thermal.setpoint, Catch::Matchers::WithinAbs(210.f, 0.01f));
+            CHECK_THAT(*thermal.t_tool, Catch::Matchers::WithinAbs(0.f, 0.01f));
+        }
+    }
+}
+
+} // namespace firmware_flavor_contracts

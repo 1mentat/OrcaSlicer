@@ -153,12 +153,13 @@
       "reason": "The exporter is run with comments enabled and disabled; the test requires comment text to change while the parsed motion stream remains identical."
     },
     "layer_change_gcode": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
-        "fixture_only"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The fixture supplies a self-contained layer-change command for G-code generation; it does not claim custom-G-code boundary or interaction coverage."
+      "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed."
     },
     "ironing_type": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
@@ -485,13 +486,13 @@
       "reason": "Bottom interface spacing zero and four are compared across support styles and require denser output at zero; numeric boundaries are not claimed."
     },
     "gcode_flavor": {
-      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
-      "tag": "[GCodeSettings]",
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[GCodeFlavorVariance]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "Relative and absolute extrusion are checked for Marlin, Klipper, and RepRapFirmware with parsed deposition and path totals; the remaining registered firmware flavors are not claimed."
+      "reason": "Every registered firmware flavor is deserialized and exercised in relative and absolute E modes with analytic path and deposited-filament totals, parsed temperature/tool commands, and fan PWM endpoints and midpoint."
     },
     "use_relative_e_distances": {
       "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
@@ -566,12 +567,13 @@
       "reason": "The multifilament cooling matrix varies maximum fan speeds by extruder variant and requires the corresponding emitted PWM percentages; numeric boundaries are not claimed."
     },
     "emit_machine_limits_to_gcode": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "Machine-envelope tests enable the option and require M201, M203, M204, and M205 limits in emitted G-code; the disabled branch is not claimed."
+      "reason": "Both boolean values are sliced with Marlin2: enabling emits executable M201/M203/M204/M205 commands and preserves deposited material."
     },
     "machine_max_acceleration_extruding": {
       "test": "tests/fff_print/test_gcodewriter.cpp",
@@ -967,13 +969,13 @@
       "reason": "Tree support generation uses a 5.0 mm branch distance and checks generated support geometry; numeric boundaries are not claimed."
     },
     "z_hop": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Zero and a 1 mm Z-hop are checked directly in emitted G-code; the numeric domain is not claimed."
+      "reason": "Zero and a 1 mm Z-hop are sliced with retraction enabled; hopping adds vertical travel moves while preserving deposited material. The full numeric domain and disabled-retraction interaction are not claimed."
     },
     "line_width": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1323,6 +1325,60 @@
         "representative_values"
       ],
       "reason": "Processor contracts exercise Generic Marlin, case-insensitive Elegoo Carbon and Carbon 2 model aliases through M6211 timing and state. Other printer-model behavior and the complete slicing pipeline are not claimed."
+    },
+    "machine_start_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed."
+    },
+    "machine_end_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed."
+    },
+    "before_layer_change_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed."
+    },
+    "printing_by_object_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The hook is absent in by-layer mode and appears exactly once between two sequential objects, with the object-index placeholder resolved. Broader templates and arrangements remain untested."
+    },
+    "gcode_label_objects": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both boolean values are sliced: start/stop comments appear only when enabled, without changing deposited material."
+    },
+    "exclude_object": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both boolean values are sliced with Marlin2: enabled output has executable M486 object delimiters and processor label state. Other firmware dialects remain outside this case."
     }
   }
 }

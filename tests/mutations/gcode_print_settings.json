@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed GCode/Print settings mutation candidates. Expected kills are proposals only; no native mutation run has been performed.",
+  "mutants": [
+    {
+      "id": "gcode-print-envelope-opt-in",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "print.config().emit_machine_limits_to_gcode.value == true",
+      "new": "false",
+      "description": "Disable the configured machine-envelope emission gate; the matrix's enabled case requires M201/M203/M204/M205 while preserving material motion.",
+      "test_filter": "GCodePrintVariance"
+    },
+    {
+      "id": "gcode-print-sequential-boundary-hook",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (print.config().print_sequence == PrintSequence::ByObject && !has_wipe_tower) {",
+      "new": "if (false) {",
+      "description": "Skip by-object emission, which must leave printing_by_object_gcode absent in by-layer mode and emit it once between two sequential objects.",
+      "test_filter": "GCodePrintVariance"
+    },
+    {
+      "id": "gcode-print-sequential-hook-write",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "file.writeln(printing_by_object_gcode);",
+      "new": "file.writeln(std::string());",
+      "description": "Drop the configured between-object hook after the sequential boundary has been selected.",
+      "test_filter": "GCodePrintVariance"
+    },
+    {
+      "id": "gcode-print-exclude-object-gate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "m_enable_exclude_object = m_config.exclude_object;",
+      "new": "m_enable_exclude_object = false;",
+      "description": "Ignore exclude_object at G-code initialization; the enabled case requires M486 object delimiters and label_object_enabled.",
+      "test_filter": "GCodePrintVariance"
+    },
+    {
+      "id": "gcode-print-object-stop-label",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (this->config().gcode_label_objects) {\n                    gcode += std::string(\"; stop printing object \") +",
+      "new": "if (false) {\n                    gcode += std::string(\"; stop printing object \") +",
+      "description": "Drop the object-stop comments while labels are enabled; the labels case requires both starts and stops without changing deposited material.",
+      "test_filter": "GCodePrintVariance"
+    }
+  ]
+}

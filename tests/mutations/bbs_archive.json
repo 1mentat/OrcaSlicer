@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed behavioral mutation candidates; native outcomes are reported separately.",
+  "mutants": [
+    {
+      "id": "bbs3mf-instance-transform-drop",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "instance.set_transformation(Slic3r::Geometry::Transformation(transform));",
+      "new": "instance.set_transformation(Slic3r::Geometry::Transformation());",
+      "description": "Drop an imported instance transform while keeping its object and mesh.",
+      "test_filter": "Bbs3mfExtended"
+    },
+    {
+      "id": "bbs3mf-assembly-offset-drop",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "set_offset_to_assembly(ofs2ass);",
+      "new": "set_offset_to_assembly(Vec3d::Zero());",
+      "description": "Discard the assembly offset reconstructed from assemble_item metadata.",
+      "test_filter": "Bbs3mfExtended"
+    },
+    {
+      "id": "bbs3mf-plate-lock-state-drop",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "plate_data_list[it->first-1]->locked = it->second->locked;",
+      "new": "plate_data_list[it->first-1]->locked = false;",
+      "description": "Drop the locked state while loading plate metadata.",
+      "test_filter": "Bbs3mfExtended"
+    },
+    {
+      "id": "bbs3mf-model-metadata-drop",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "model_info.metadata_items[m_curr_metadata_name] = xml_unescape(m_curr_characters);",
+      "new": "model_info.metadata_items[m_curr_metadata_name] = std::string();",
+      "description": "Erase arbitrary model metadata values during XML import.",
+      "test_filter": "Bbs3mfExtended"
+    },
+    {
+      "id": "bbs3mf-missing-relationship-accepted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "m_name = boost::filesystem::path(filename).stem().string();\n\n        //BBS progress point\n        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << \":\" << __LINE__ << boost::format(\"import 3mf IMPORT_STAGE_READ_FILES\\n\");\n        if (proFn) {\n            proFn(IMPORT_STAGE_READ_FILES, 0, 3, cb_cancel);\n            if (cb_cancel)\n                return false;\n        }\n        // BBS: load relationships\n        if (!_extract_xml_from_archive(archive, RELATIONSHIPS_FILE, _handle_start_relationships_element, _handle_end_relationships_element))\n            return false;\n        if (m_start_part_path.empty())\n            return false;",
+      "new": "m_name = boost::filesystem::path(filename).stem().string();\n\n        //BBS progress point\n        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << \":\" << __LINE__ << boost::format(\"import 3mf IMPORT_STAGE_READ_FILES\\n\");\n        if (proFn) {\n            proFn(IMPORT_STAGE_READ_FILES, 0, 3, cb_cancel);\n            if (cb_cancel)\n                return false;\n        }\n        // BBS: load relationships\n        if (!_extract_xml_from_archive(archive, RELATIONSHIPS_FILE, _handle_start_relationships_element, _handle_end_relationships_element))\n            return true;\n        if (m_start_part_path.empty())\n            return false;",
+      "description": "Accept an archive with no root relationships instead of rejecting its package structure.",
+      "test_filter": "Bbs3mfExtended"
+    },
+    {
+      "id": "bbs3mf-published-probe-inversion",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "return probe.published;",
+      "new": "return !probe.published;",
+      "description": "Invert the public published-archive probe result.",
+      "test_filter": "Bbs3mfExtended"
+    }
+  ]
+}
