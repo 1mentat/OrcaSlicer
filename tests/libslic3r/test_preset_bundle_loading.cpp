@@ -1,3 +1,5 @@
+#include <string_view>
+#include "libslic3r/Semver.hpp"
 #include <ios>
 
 #include <memory>
@@ -7731,3 +7733,466 @@ TEST_CASE("filament selection canonicalizes the actual dirty preset label", "[Pr
 }
 
 } // namespace preset_bundle_workflow_contracts
+
+namespace preset_workflow_contracts {
+using Catch::Matchers::WithinAbs;
+
+void write_text(const fs::path &path, const std::string &text)
+{
+    fs::create_directories(path.parent_path());
+    std::ofstream out(path.string(), std::ios::binary);
+    REQUIRE(out.good());
+    out << text;
+    REQUIRE(out.good());
+}
+
+DynamicPrintConfig physical_defaults()
+{
+    PhysicalPrinterCollection collection(PhysicalPrinter::printer_options());
+    return collection.default_config();
+}
+
+
+TEST_CASE("Vendor profile INI header and model fields are parsed semantically", "[PresetBundleLoading][PresetDeep][Vendor]")
+{
+    ScopedTemporaryDir dir("preset-deep-vendor");
+    const fs::path file = dir.path() / "Acme.ini";
+    write_text(file,
+        "[vendor]\nname=Acme\nconfig_version=1.2.3\nconfig_update_url=https://example.invalid/update\n"
+        "changelog_url=https://example.invalid/changelog\n"
+        "[printer_model:Alpha]\nname=Alpha Prime\ntechnology=FFF\nfamily=AlphaFamily\n"
+        "variants=0.4;0.6\ndefault_materials=PLA;PETG;PLA\n"
+        "[printer_model:Resin]\nname=Resin\ntechnology=SLA\nvariants=0.05\n"
+        "[default_filaments]\nPLA=1\nPETG=0\n[default_sla_materials]\nResin=1\n");
+
+    const VendorProfile header = VendorProfile::from_ini(file, false);
+    CHECK(header.id == "Acme");
+    CHECK(header.name == "Acme");
+    CHECK(header.config_version == *Semver::parse("1.2.3"));
+    CHECK(header.config_update_url.find("update") != std::string::npos);
+    CHECK(header.models.empty());
+
+    const VendorProfile full = VendorProfile::from_ini(file, true);
+    REQUIRE(full.models.size() == 2);
+    CHECK(full.models[0].id == "Alpha");
+    CHECK(full.models[0].technology == ptFFF);
+    CHECK(full.models[0].variants.size() == 2);
+    CHECK(full.models[0].default_materials == std::vector<std::string>{"PETG", "PLA"});
+    CHECK(full.models[1].technology == ptSLA);
+    CHECK(full.default_filaments == std::set<std::string>{"PLA"});
+    CHECK(full.default_sla_materials == std::set<std::string>{"Resin"});
+}
+
+TEST_CASE("Vendor profile infers BBL families and rejects missing sections", "[PresetBundleLoading][PresetDeep][Vendor]")
+{
+    ScopedTemporaryDir dir("preset-deep-vendor-invalid");
+    const fs::path file = dir.path() / "BBL.ini";
+    write_text(file,
+        "[vendor]\nname=BBL\nconfig_version=2.0.0\n"
+        "[printer_model:MK3]\nvariants=0.4\n"
+        "[printer_model:MK3MMU2]\nvariants=0.4\nfamily=Shared\n"
+        "[printer_model:Other]\nvariants=0.4\nfamily=Other\n");
+    const VendorProfile profile = VendorProfile::from_ini(file, true);
+    REQUIRE(profile.models.size() == 3);
+    CHECK(profile.models[0].family == "MK3");
+    CHECK(profile.models[1].family == "Shared");
+    CHECK(profile.families() == std::vector<std::string>{"MK3", "Shared", "Other"});
+
+    const fs::path malformed = dir.path() / "bad.ini";
+    write_text(malformed, "[vendor]\nname=Bad\n");
+    CHECK_THROWS(VendorProfile::from_ini(malformed, false));
+}
+
+TEST_CASE("Preset type mappings and setting IDs are stable at boundaries", "[PresetBundleLoading][PresetDeep][Identity]")
+{
+    CHECK(Preset::get_type_string(Preset::TYPE_PRINT) == PRESET_PRINT_NAME);
+    CHECK(Preset::get_type_string(Preset::TYPE_FILAMENT) == PRESET_FILAMENT_NAME);
+    CHECK(Preset::get_type_string(Preset::TYPE_PRINTER) == PRESET_PRINTER_NAME);
+    CHECK(Preset::get_type_string(Preset::TYPE_SLA_PRINT) == "invalid");
+    CHECK(Preset::get_iot_type_string(Preset::TYPE_PRINT) == PRESET_IOT_PRINT_TYPE);
+    CHECK(Preset::get_type_from_string("print") == Preset::TYPE_PRINT);
+    CHECK(Preset::get_type_from_string("process") == Preset::TYPE_PRINT);
+    CHECK(Preset::get_type_from_string("filament") == Preset::TYPE_FILAMENT);
+    CHECK(Preset::get_type_from_string("machine") == Preset::TYPE_PRINTER);
+    CHECK(Preset::get_type_from_string("unknown") == Preset::TYPE_INVALID);
+    CHECK(generate_preset_setting_id("Afinia", "filament", "Afinia ABS @Afinia H400") == "TL34qSVkppBvMvgH");
+    CHECK(generate_preset_setting_id("Acme", "process", "Fine") != generate_preset_setting_id("Acme", "filament", "Fine"));
+    CHECK(generate_preset_setting_id("Acme", "process", "Fine") != generate_preset_setting_id("Other", "process", "Fine"));
+    CHECK(generate_preset_setting_id("", "process", "Fine").empty());
+    CHECK(generate_preset_setting_id("Acme", "process", "").empty());
+}
+
+TEST_CASE("Preset modified labels are reversible and aliases remain distinct", "[PresetBundleLoading][PresetDeep][Identity]")
+{
+    const std::string old_suffix = Preset::suffix_modified();
+    const ScopeGuard restore_suffix([&old_suffix] { Preset::update_suffix_modified(old_suffix); });
+    Preset::update_suffix_modified(" [dirty]");
+    Preset preset(Preset::TYPE_PRINT, "Process");
+    preset.alias = "Friendly";
+    preset.set_dirty(true);
+    CHECK(preset.label(false) == " [dirty]Friendly");
+    CHECK(preset.label(true) == " [dirty]Process");
+    CHECK(Preset::remove_suffix_modified(preset.label(true)) == "Process");
+    CHECK(Preset::remove_suffix_modified("Process") == "Process");
+}
+
+TEST_CASE("Preset invalid-key removal reports and removes only unknown options", "[PresetBundleLoading][PresetDeep][Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("preset_deep_unknown", new ConfigOptionString("x"));
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.31));
+    const std::string removed = Preset::remove_invalid_keys(config, DynamicPrintConfig::full_print_config());
+    CHECK(removed == "preset_deep_unknown");
+    CHECK_FALSE(config.has("preset_deep_unknown"));
+    CHECK_THAT(config.opt_float("layer_height"), WithinAbs(0.31, 1e-6));
+}
+
+TEST_CASE("External config preserves project settings but filters print-host credentials", "[PresetBundleLoading][PresetDeep][External]")
+{
+    DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
+    defaults.set_key_value("print_host", new ConfigOptionString("default-host"));
+    defaults.set_key_value("printhost_apikey", new ConfigOptionString("default-secret"));
+    DynamicPrintConfig project = defaults;
+    project.opt<ConfigOptionFloat>("layer_height")->value = 0.31;
+    project.opt<ConfigOptionString>("print_host")->value = "project-host";
+    project.opt<ConfigOptionString>("printhost_apikey")->value = "secret";
+    t_config_option_keys keys;
+    DynamicPrintConfig loaded = Preset::load_external_config(
+        Preset::TYPE_PRINT, defaults, project, {}, [](const std::string &) { return static_cast<DynamicPrintConfig *>(nullptr); }, &keys);
+    CHECK_THAT(loaded.opt_float("layer_height"), WithinAbs(0.31, 1e-6));
+    REQUIRE(loaded.option("print_host") != nullptr);
+    REQUIRE(loaded.option("printhost_apikey") != nullptr);
+    CHECK(loaded.opt_string("print_host") == defaults.opt_string("print_host"));
+    CHECK(loaded.opt_string("printhost_apikey") == defaults.opt_string("printhost_apikey"));
+    CHECK(std::find(keys.begin(), keys.end(), "layer_height") != keys.end());
+}
+
+TEST_CASE("External config refreshes non-different values from its named parent", "[PresetBundleLoading][PresetDeep][External]")
+{
+    DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
+    defaults.set_key_value("inherits", new ConfigOptionString(""));
+    DynamicPrintConfig parent = defaults;
+    parent.opt<ConfigOptionFloat>("layer_height")->value = 0.30;
+    DynamicPrintConfig project = defaults;
+    project.opt_string("inherits", true) = "Base";
+    project.opt<ConfigOptionFloat>("layer_height")->value = 0.20;
+    project.opt<ConfigOptionInt>("wall_loops")->value = 7;
+    std::set<std::string> different{"wall_loops"};
+    DynamicPrintConfig loaded = Preset::load_external_config(
+        Preset::TYPE_PRINT, defaults, project, different,
+        [&](const std::string &name) { return name == "Base" ? &parent : nullptr; }, nullptr);
+    CHECK_THAT(loaded.opt_float("layer_height"), WithinAbs(0.30, 1e-6));
+    CHECK(loaded.opt_int("wall_loops") == 7);
+}
+
+TEST_CASE("Preset info metadata round-trips null normalization and timestamps", "[PresetBundleLoading][PresetDeep][Files]")
+{
+    ScopedTemporaryDir dir("preset-deep-info");
+    ScopedDataDir data(dir.path() / "data");
+    Preset saved(Preset::TYPE_PRINT, "User");
+    saved.file = (dir.path() / "User.json").string();
+    saved.sync_info = "update";
+    saved.user_id = "u-1";
+    saved.setting_id = "s-1";
+    saved.base_id = "b-1";
+    saved.updated_time = 123456;
+    saved.save_info();
+    Preset loaded(Preset::TYPE_PRINT, "User");
+    loaded.load_info((dir.path() / "User.info").string());
+    CHECK(loaded.sync_info == "update");
+    CHECK(loaded.user_id == "u-1");
+    CHECK(loaded.setting_id == "s-1");
+    CHECK(loaded.base_id == "b-1");
+    CHECK(loaded.updated_time == 123456);
+
+    Preset bundled(Preset::TYPE_PRINT, "Bundled");
+    bundled.bundle_id = "bundle-1";
+    bundled.file = (dir.path() / "Bundled.json").string();
+    bundled.save_info();
+    CHECK_FALSE(fs::exists(dir.path() / "Bundled.info"));
+
+    write_text(dir.path() / "Null.info", "setting_id = null\nbase_id = null\nupdated_time = 4\n");
+    Preset nulls(Preset::TYPE_PRINT, "Null");
+    nulls.load_info((dir.path() / "Null.info").string());
+    CHECK(nulls.setting_id.empty());
+    CHECK(nulls.base_id.empty());
+    CHECK(nulls.updated_time == 4);
+}
+
+TEST_CASE("Preset parent save writes a diff that reload restores over the parent", "[PresetBundleLoading][PresetDeep][Files]")
+{
+    ScopedTemporaryDir dir("preset-deep-save");
+    Preset parent(Preset::TYPE_PRINT, "Base", false);
+    parent.config = DynamicPrintConfig::full_print_config();
+    parent.config.opt<ConfigOptionInt>("wall_loops")->value = 7;
+    Preset child(Preset::TYPE_PRINT, "Child", false);
+    child.config = parent.config;
+    child.inherits() = parent.name;
+    child.config.opt<ConfigOptionFloat>("layer_height")->value = 0.31;
+    child.file = (dir.path() / "Child.json").string();
+    REQUIRE(child.save(&parent.config));
+    REQUIRE(fs::exists(child.file));
+    std::string json;
+    load_string_file(child.file, json);
+    CHECK(json.find("layer_height") != std::string::npos);
+    CHECK(json.find("wall_loops") == std::string::npos);
+    parent.config.opt<ConfigOptionInt>("wall_loops")->value = 9;
+    child.config = DynamicPrintConfig::full_print_config();
+    child.reload(parent);
+    CHECK_THAT(child.config.opt_float("layer_height"), WithinAbs(0.31, 1e-6));
+    CHECK(child.config.opt_int("wall_loops") == 9);
+}
+
+TEST_CASE("Preset remove_files deletes local info and marks cloud info for deletion", "[PresetBundleLoading][PresetDeep][Files]")
+{
+    ScopedTemporaryDir dir("preset-deep-remove");
+    ScopedDataDir data(dir.path() / "data");
+    SECTION("local") {
+        Preset preset(Preset::TYPE_PRINT, "Local");
+        preset.file = (dir.path() / "Local.json").string();
+        write_text(preset.file, "{}");
+        preset.save_info();
+        preset.remove_files();
+        CHECK_FALSE(fs::exists(preset.file));
+        CHECK_FALSE(fs::exists(dir.path() / "Local.info"));
+    }
+    SECTION("cloud") {
+        Preset preset(Preset::TYPE_PRINT, "Cloud");
+        preset.file = (dir.path() / "Cloud.json").string();
+        preset.setting_id = "cloud-id";
+        write_text(preset.file, "{}");
+        preset.save_info();
+        preset.remove_files(false);
+        CHECK_FALSE(fs::exists(preset.file));
+        REQUIRE(fs::exists(dir.path() / "Cloud.info"));
+        Preset loaded(Preset::TYPE_PRINT, "Cloud");
+        loaded.load_info((dir.path() / "Cloud.info").string());
+        CHECK(loaded.sync_info == "delete");
+    }
+}
+
+TEST_CASE("Physical printer preserves preset membership and legacy serialized names", "[PresetBundleLoading][PresetDeep][PhysicalPrinter]")
+{
+    DynamicPrintConfig defaults = physical_defaults();
+    PhysicalPrinter printer("Office", defaults);
+    CHECK(printer.add_preset("0.4"));
+    CHECK_FALSE(printer.add_preset("0.4"));
+    CHECK(printer.add_preset("0.6"));
+    printer.update_preset_names_in_config();
+    CHECK(printer.config.opt<ConfigOptionStrings>("preset_names")->values == std::vector<std::string>{"0.4", "0.6"});
+    CHECK(printer.config.opt_string("preset_name") == "0.4;0.6");
+    CHECK(printer.delete_preset("0.4"));
+    CHECK_FALSE(printer.delete_preset("missing"));
+    printer.reset_presets();
+    CHECK(printer.get_preset_names().empty());
+    CHECK(printer.get_full_name("0.4") == "Office * 0.4");
+    CHECK(PhysicalPrinter::get_short_name("Office * 0.4") == "Office");
+    CHECK(PhysicalPrinter::get_preset_name("Office * 0.4") == "0.4");
+}
+
+TEST_CASE("Physical printer save and collection load preserve typed settings", "[PresetBundleLoading][PresetDeep][PhysicalPrinter]")
+{
+    ScopedTemporaryDir dir("preset-deep-printer-files");
+    ScopedDataDir data(dir.path() / "data");
+    PhysicalPrinter printer("Office", physical_defaults());
+    printer.file = (dir.path() / "Office.json").string();
+    printer.add_preset("0.4");
+    printer.config.opt<ConfigOptionString>("print_host")->value = "printer.local";
+    printer.update_preset_names_in_config();
+    printer.save(nullptr);
+    REQUIRE(fs::exists(printer.file));
+
+    PhysicalPrinterCollection loaded(PhysicalPrinter::printer_options());
+    PresetsConfigSubstitutions substitutions;
+    loaded.load_printers(dir.path().string(), "", substitutions, ForwardCompatibilitySubstitutionRule::Disable);
+    REQUIRE(std::distance(loaded.begin(), loaded.end()) == 1);
+    const PhysicalPrinter &roundtrip = loaded.printer(0);
+    CHECK(roundtrip.name == "Office");
+    CHECK(roundtrip.preset_names == std::set<std::string>{"0.4"});
+    CHECK(roundtrip.config.opt_string("print_host") == "printer.local");
+}
+
+TEST_CASE("Physical printer collection selection and preset filters are consistent", "[PresetBundleLoading][PresetDeep][PhysicalPrinter]")
+{
+    ScopedTemporaryDir dir("preset-deep-printer-selection");
+    ScopedDataDir data(dir.path() / "data");
+    PhysicalPrinterCollection collection(PhysicalPrinter::printer_options());
+    auto add = [&](const std::string &name, std::initializer_list<const char*> presets) {
+        DynamicPrintConfig config = collection.default_config();
+        config.opt<ConfigOptionStrings>("preset_names")->values.clear();
+        for (const char *preset : presets)
+            config.opt<ConfigOptionStrings>("preset_names")->values.emplace_back(preset);
+        collection.load_printer((dir.path() / (name + ".json")).string(), name, std::move(config), false);
+    };
+    add("A", {"0.4", "0.6"});
+    add("B", {"0.4"});
+    add("C", {"0.8", "0.4"});
+    CHECK(collection.get_printers_with_preset("0.4") == std::vector<std::string>{"A", "C"});
+    CHECK(collection.get_printers_with_only_preset("0.4") == std::vector<std::string>{"B"});
+    collection.select_printer("A", "0.6");
+    CHECK(collection.has_selection());
+    CHECK(collection.get_selected_full_printer_name() == "A * 0.6");
+    collection.select_printer("missing", "0.4");
+    CHECK_FALSE(collection.has_selection());
+    collection.select_printer("A * 0.4");
+    REQUIRE(collection.has_selection());
+    CHECK(collection.is_selected(collection.begin(), "0.4"));
+    collection.unselect_printer();
+    CHECK_FALSE(collection.delete_selected_printer());
+}
+
+TEST_CASE("Preset collection detached creation stays embedded without writing a user file", "[PresetBundleLoading][PresetDeep][Collection]")
+{
+    ScopedTemporaryDir dir("preset-deep-detached");
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+    const std::string name = collection.add_detached_preset("Detached", DynamicPrintConfig::full_print_config());
+    REQUIRE(collection.find_preset(name) != nullptr);
+    CHECK(collection.find_preset(name)->inherits().empty());
+    CHECK(collection.find_preset(name)->is_project_embedded);
+    CHECK_FALSE(fs::exists(collection.find_preset(name)->file));
+    collection.select_preset_by_name(name, true);
+    REQUIRE(collection.delete_current_preset());
+    CHECK(collection.find_preset(name) == nullptr);
+    CHECK(collection.has_defaults_only());
+}
+
+TEST_CASE("Preset collection aliases and default suppression select visible entries", "[PresetBundleLoading][PresetDeep][Collection]")
+{
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    DynamicPrintConfig config = collection.default_preset().config;
+    Preset &one = collection.load_preset({}, "One", config, false);
+    one.alias.clear();
+    CHECK(collection.get_preset_alias(one, true) == "One");
+    CHECK(collection.get_preset_name_by_alias("One") == "One");
+    CHECK(collection.is_alias_exist("One"));
+    CHECK_FALSE(collection.is_alias_exist("Missing"));
+    collection.set_default_suppressed(true);
+    CHECK(collection.is_default_suppressed());
+    CHECK(collection.first_visible().name == "One");
+}
+
+TEST_CASE("Preset bundle utility keys and legacy filament names are deterministic", "[PresetBundleLoading][PresetDeep][Bundle]")
+{
+    const std::set<std::string> keys = PresetBundle::project_different_keys("layer_height;\"wall_loops\";layer_height");
+    CHECK(keys.count("layer_height") == 1);
+    CHECK(keys.count("wall_loops") == 1);
+    CHECK(keys.count("inherits") == 1);
+    CHECK(keys.count("print_settings_id") == 1);
+    CHECK(keys.count("printer_settings_id") == 1);
+
+    std::string filament = "Bambu PLA Basic @BBL H2D";
+    PresetBundle::convert_filament_preset_name("Bambu Lab H2D 0.6 nozzle", filament);
+    CHECK(filament == "Bambu PLA Basic @BBL H2D 0.6 nozzle");
+    std::string unchanged = "Never Mapped";
+    PresetBundle::convert_filament_preset_name("Unknown Machine", unchanged);
+    CHECK(unchanged == "Never Mapped");
+}
+
+TEST_CASE("Preset bundle vendor model and fallback asset lookup use configured roots", "[PresetBundleLoading][PresetDeep][Bundle]")
+{
+    ScopedTemporaryDir dir("preset-deep-assets");
+    ScopedDataDir data(dir.path() / "data");
+    ScopedResourcesDir resources(dir.path() / "resources");
+    fs::create_directories(dir.path() / "resources" / "profiles" / "Acme");
+    write_text(dir.path() / "resources" / "profiles" / "hotend.stl", "solid fallback\n");
+    write_text(dir.path() / "resources" / "profiles" / "Acme" / "bed.stl", "solid bed\n");
+    write_text(dir.path() / "data" / "vendor" / "Acme" / "bed_local.stl", "solid local\n");
+    VendorProfile profile("Acme");
+    profile.name = "Acme";
+    VendorProfile::PrinterModel model;
+    model.id = "M1";
+    model.name = "Acme One";
+    model.bed_model = "bed.stl";
+    model.bed_texture = "bed.png";
+    model.hotend_model = "hotend.stl";
+    profile.models.push_back(model);
+    PresetBundle bundle;
+    bundle.vendors["Acme"] = profile;
+    CHECK(bundle.get_stl_model_for_printer_model("Acme One") == (dir.path() / "resources" / "profiles" / "Acme" / "bed.stl").string());
+    CHECK(bundle.get_hotend_model_for_printer_model("Acme One") ==
+          (dir.path() / "resources" / "profiles" / "hotend.stl").string());
+    CHECK(bundle.get_stl_model_for_printer_model("missing").empty());
+    CHECK(bundle.get_texture_for_printer_model("missing").empty());
+    CHECK(bundle.get_hotend_model_for_printer_model("missing") ==
+          (dir.path() / "resources" / "profiles" / "hotend.stl").string());
+}
+
+TEST_CASE("Preset bundle filament sizing keeps maps and mixed metadata aligned", "[PresetBundleLoading][PresetDeep][Bundle][Filament]")
+{
+    PresetBundle bundle;
+    bundle.filament_presets = {"A", "B"};
+    bundle.set_num_filaments(3, "#ABCDEF");
+    CHECK(bundle.filament_presets.size() == 3);
+    CHECK(bundle.filament_presets[2] == "B");
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values.size() == 3);
+    CHECK(bundle.project_config.option<ConfigOptionStrings>("filament_colour")->get_at(2) == "#ABCDEF");
+    CHECK(bundle.project_config.opt<ConfigOptionInts>("filament_map")->values.size() == 3);
+    CHECK(bundle.num_physical_filaments() == 3);
+    CHECK(bundle.num_mixed_filaments() == 0);
+
+    bundle.project_config.opt<ConfigOptionBools>("filament_is_mixed")->values = {false, false, true};
+    bundle.project_config.opt<ConfigOptionStrings>("filament_mixed_components")->values = {"", "", "1,2"};
+    CHECK(bundle.is_mixed_filament(2));
+    CHECK(bundle.num_mixed_filaments() == 1);
+    CHECK(bundle.num_physical_filaments() == 2);
+    bundle.update_num_filaments(0);
+    CHECK(bundle.filament_presets.size() == 2);
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values.size() == 2);
+}
+
+TEST_CASE("Preset bundle physical filament indices exclude only live mixed slots", "[PresetBundleLoading][PresetDeep][Bundle][Filament]")
+{
+    PresetBundle bundle;
+    bundle.filament_presets = {"A", "B", "C", "D"};
+    bundle.project_config = DynamicPrintConfig::full_print_config();
+    bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values = {"a", "b", "c", "d"};
+    bundle.project_config.opt<ConfigOptionBools>("filament_is_mixed")->values = {false, true, false, true};
+    const std::vector<size_t> indexes = bundle.physical_filament_config_indices();
+    CHECK(indexes == std::vector<size_t>{0, 2});
+    CHECK(bundle.num_mixed_filaments() == 2);
+    CHECK(bundle.num_physical_filaments() == 2);
+}
+
+TEST_CASE("Preset bundle full config applies current project values over selected presets", "[PresetBundleLoading][PresetDeep][Bundle][Config]")
+{
+    PresetBundle bundle;
+    bundle.project_config = DynamicPrintConfig::full_print_config();
+    bundle.project_config.opt<ConfigOptionFloat>("layer_height")->value = 0.22;
+    bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values = {"#00FF00"};
+    bundle.filament_presets = {bundle.filaments.default_preset().name};
+    DynamicPrintConfig config = bundle.full_config(false);
+    CHECK_THAT(config.opt_float("layer_height"), WithinAbs(0.22, 1e-6));
+    CHECK(config.option<ConfigOptionStrings>("filament_colour")->get_at(0) == "#00FF00");
+    const bool no_inherits = config.option("inherits") == nullptr ||
+                             config.opt_string("inherits").empty();
+    CHECK(no_inherits);
+}
+
+TEST_CASE("Preset bundle resets embedded presets without deleting user presets", "[PresetBundleLoading][PresetDeep][Bundle][Project]")
+{
+    ScopedTemporaryDir dir("preset-deep-project");
+    PresetBundle bundle;
+    bundle.prints.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+    DynamicPrintConfig embedded_config = bundle.prints.default_preset().config;
+    Preset &embedded = bundle.prints.load_preset({}, "Embedded", embedded_config, false,
+                                                 Semver::parse("1.0.0").value_or(Semver()));
+    embedded.is_project_embedded = true;
+    embedded.inherits() = bundle.prints.default_preset().name;
+    embedded.config.opt<ConfigOptionFloat>("layer_height")->value = 0.31;
+    bundle.prints.select_preset_by_name("Embedded", true);
+    const fs::path user_file = dir.path() / PRESET_PRINT_NAME / "User.json";
+    Preset &user = bundle.prints.load_preset(user_file.string(), "User", bundle.prints.default_preset().config, false);
+    user.config.opt<ConfigOptionFloat>("layer_height")->value = 0.27;
+    REQUIRE(user.save(nullptr));
+    REQUIRE(fs::exists(user_file));
+    CHECK(bundle.prints.get_project_embedded_presets().size() == 1);
+    CHECK(bundle.prints.reset_project_embedded_presets());
+    CHECK(bundle.prints.find_preset("Embedded") == nullptr);
+    REQUIRE(bundle.prints.find_preset("User") != nullptr);
+    CHECK(fs::exists(user_file));
+}
+
+} // namespace preset_workflow_contracts
