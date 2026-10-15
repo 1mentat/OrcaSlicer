@@ -2287,3 +2287,246 @@ TEST_CASE("PrintConfig validates mixed filament metadata cardinality", "[PrintCo
 }
 
 } // namespace print_config_behavior_contracts
+
+namespace config_multi_mapping_contracts {
+namespace {
+
+void check_speeds(const DynamicPrintConfig &config, const std::vector<double> &expected)
+{
+    const auto *option = config.option<ConfigOptionFloats>("outer_wall_speed");
+    REQUIRE(option != nullptr);
+    REQUIRE(option->values.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+        CHECK_THAT(option->values[i], Catch::Matchers::WithinAbs(expected[i], 1e-9));
+}
+
+const std::set<std::string> kMappingKeys{
+    "print_extruder_id",
+    "print_extruder_variant",
+    "outer_wall_speed",
+    "small_perimeter_speed",
+    "enable_overhang_speed",
+};
+
+void set_variant_columns(DynamicPrintConfig &config,
+                         std::vector<int> ids,
+                         std::vector<std::string> variants)
+{
+    config.option<ConfigOptionInts>("print_extruder_id", true)->values = std::move(ids);
+    config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = std::move(variants);
+}
+
+void set_single_arrays(DynamicPrintConfig &config, double outer_speed, bool overhang)
+{
+    config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {outer_speed};
+    config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {overhang};
+}
+
+void set_multi_arrays(DynamicPrintConfig &config,
+                      std::vector<double> outer_speed,
+                      std::vector<FloatOrPercent> small_speed,
+                      std::vector<unsigned char> overhang)
+{
+    config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = std::move(outer_speed);
+    config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed", true)->values = std::move(small_speed);
+    config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = std::move(overhang);
+}
+
+} // namespace
+
+TEST_CASE("Single-to-multi copies variant identity and limits numeric columns", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_variant_columns(multi, {1, 1, 2}, {"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"});
+    set_variant_columns(single, {99}, {"old"});
+    set_single_arrays(single, 100., true);
+    single.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed", true)->values = {FloatOrPercent(50., true)};
+    set_multi_arrays(multi, {80., 160., 240.},
+                     {FloatOrPercent(40., false), FloatOrPercent(60., true), FloatOrPercent(30., false)},
+                     {0, 1, 0});
+
+    std::set<std::string> keys = kMappingKeys;
+    REQUIRE(single.update_values_from_single_to_multi(multi, keys,
+                                                       "print_extruder_id", "print_extruder_variant") == 0);
+    CHECK(single.option<ConfigOptionInts>("print_extruder_id")->values == std::vector<int>({1, 1, 2}));
+    CHECK(single.option<ConfigOptionStrings>("print_extruder_variant")->values ==
+          std::vector<std::string>({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"}));
+    // The source defaults cap the user's single value independently in each target column.
+    check_speeds(single, {80., 100., 100.});
+    const auto &small = single.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed")->values;
+    REQUIRE(small.size() == 3);
+    CHECK_THAT(small[0].value, Catch::Matchers::WithinAbs(40., 1e-9));
+    CHECK(small[0].percent == false);
+    CHECK_THAT(small[1].value, Catch::Matchers::WithinAbs(50., 1e-9));
+    CHECK(small[1].percent == true);
+    CHECK_THAT(small[2].value, Catch::Matchers::WithinAbs(30., 1e-9));
+    CHECK(small[2].percent == false);
+    // Bools retain the user's single value for every new variant; the source bool array only supplies width.
+    CHECK(single.option<ConfigOptionBools>("enable_overhang_speed")->values == std::vector<unsigned char>({1, 1, 1}));
+}
+
+TEST_CASE("Single-to-multi leaves unselected and source-missing settings untouched", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_variant_columns(multi, {1, 2}, {"A", "B"});
+    set_single_arrays(single, 42., false);
+    single.option<ConfigOptionInt>("wall_loops", true)->value = 7;
+    // Deliberately omit outer_wall_speed from the source. The variant metadata is valid,
+    // but a missing source option must not erase the caller's current value.
+    std::set<std::string> keys{"outer_wall_speed", "wall_loops"};
+
+    REQUIRE(single.update_values_from_single_to_multi(multi, keys,
+                                                       "print_extruder_id", "print_extruder_variant") == 0);
+    check_speeds(single, {42.});
+    CHECK(single.option<ConfigOptionInt>("wall_loops")->value == 7);
+}
+
+TEST_CASE("Single-to-multi rejects a missing variant option without changing values", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_single_arrays(single, 42., true);
+    const auto before = single.option<ConfigOptionFloats>("outer_wall_speed", true)->values;
+    std::set<std::string> keys{"outer_wall_speed"};
+
+    CHECK(single.update_values_from_single_to_multi(multi, keys, "print_extruder_id", "missing_variant") == -1);
+    check_speeds(single, before);
+}
+
+TEST_CASE("Single-to-multi ignores unknown keys while applying known mappings", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_variant_columns(multi, {1, 2}, {"A", "B"});
+    set_single_arrays(single, 90., false);
+    multi.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {30., 40.};
+    std::set<std::string> keys{"unknown_mapping_key", "outer_wall_speed"};
+
+    REQUIRE(single.update_values_from_single_to_multi(multi, keys, "print_extruder_id", "print_extruder_variant") == 0);
+    check_speeds(single, {30., 40.});
+}
+
+TEST_CASE("Multi-to-multi remaps duplicate variants and preserves numeric minima", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1, 1, 2}, {"A", "B", "A"});
+    set_variant_columns(new_config, {1, 1, 2, 2}, {"A", "B", "A", "B"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {10., 20., 30.};
+    old_config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed", true)->values =
+        {FloatOrPercent(1., false), FloatOrPercent(2., false), FloatOrPercent(3., false)};
+    old_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {0, 1, 0};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {100., 200., 300., 400.};
+    new_config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed", true)->values =
+        {FloatOrPercent(50., true), FloatOrPercent(60., true), FloatOrPercent(70., true), FloatOrPercent(80., true)};
+    new_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {0, 0, 0, 0};
+    std::vector<std::string> new_extruder_variants{"A", "B"};
+
+    std::set<std::string> keys = kMappingKeys;
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant",
+                                                         new_extruder_variants) == 0);
+    CHECK(old_config.option<ConfigOptionInts>("print_extruder_id")->values == std::vector<int>({1, 1, 2, 2}));
+    CHECK(old_config.option<ConfigOptionStrings>("print_extruder_variant")->values ==
+          std::vector<std::string>({"A", "B", "A", "B"}));
+    check_speeds(old_config, {10., 200., 300., 20.});
+    const auto &small = old_config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed")->values;
+    REQUIRE(small.size() == 4);
+    CHECK_THAT(small[0].value, Catch::Matchers::WithinAbs(1., 1e-9));
+    CHECK_THAT(small[1].value, Catch::Matchers::WithinAbs(60., 1e-9));
+    CHECK_THAT(small[2].value, Catch::Matchers::WithinAbs(70., 1e-9));
+    CHECK_THAT(small[3].value, Catch::Matchers::WithinAbs(2., 1e-9));
+    CHECK_FALSE(small[0].percent);
+    CHECK(small[1].percent);
+    CHECK(small[2].percent);
+    CHECK_FALSE(small[3].percent);
+    CHECK(old_config.option<ConfigOptionBools>("enable_overhang_speed")->values == std::vector<unsigned char>({0, 0, 0, 1}));
+}
+
+TEST_CASE("Multi-to-multi keeps destination values when no new extruder target matches", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1, 2}, {"A", "B"});
+    set_variant_columns(new_config, {1, 2}, {"A", "B"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {11., 22.};
+    old_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {1, 0};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101., 202.};
+    new_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {0, 0};
+    std::vector<std::string> new_extruder_variants{"C"};
+    std::set<std::string> keys{"outer_wall_speed", "enable_overhang_speed"};
+
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant",
+                                                         new_extruder_variants) == 0);
+    check_speeds(old_config, {101., 202.});
+    CHECK(old_config.option<ConfigOptionBools>("enable_overhang_speed")->values == std::vector<unsigned char>({0, 0}));
+}
+
+TEST_CASE("Multi-to-multi skips an unmatched target row but still copies identity arrays", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1, 2}, {"A", "B"});
+    set_variant_columns(new_config, {1, 2}, {"A", "B"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {11., 22.};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101., 202.};
+    std::vector<std::string> new_extruder_variants{"B", "A"};
+    std::set<std::string> keys{"outer_wall_speed"};
+
+    // Neither (id=1, B) nor (id=2, A) exists in the destination row.
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant",
+                                                         new_extruder_variants) == 0);
+    check_speeds(old_config, {101., 202.});
+}
+
+TEST_CASE("Multi-to-multi treats unknown keys as no-ops without suppressing known keys", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1}, {"A"});
+    set_variant_columns(new_config, {1}, {"A"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {111.};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101.};
+    std::vector<std::string> variants{"A"};
+    std::set<std::string> keys{"unknown_mapping_key", "outer_wall_speed"};
+
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant", variants) == 0);
+    check_speeds(old_config, {101.});
+}
+
+TEST_CASE("Multi-to-multi rejects absent identity columns without touching the source", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {11.};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101.};
+    std::vector<std::string> variants{"A"};
+    std::set<std::string> keys{"outer_wall_speed"};
+
+    CHECK(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                       "missing_id", "missing_variant", variants) == -1);
+    check_speeds(old_config, {11.});
+}
+
+TEST_CASE("Multi-to-multi with no target extruders still copies destination arrays", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1}, {"A"});
+    set_variant_columns(new_config, {1}, {"A"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {11.};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101.};
+    std::vector<std::string> variants;
+    std::set<std::string> keys{"outer_wall_speed"};
+
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant", variants) == 0);
+    check_speeds(old_config, {101.});
+}
+
+} // namespace config_multi_mapping_contracts

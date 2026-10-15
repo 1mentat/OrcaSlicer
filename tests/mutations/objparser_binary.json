@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "OBJ import and native binary cache contracts.",
+  "mutants": [
+    {
+      "id": "cache-version-value",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "if (serialized_version != 1) {",
+      "new": "if (serialized_version != 2) {",
+      "test_filter": "OBJBinary"
+    },
+    {
+      "id": "cache-version-output",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "data.version = static_cast<int>(serialized_version);",
+      "new": "data.version = 0;",
+      "test_filter": "OBJBinary"
+    },
+    {
+      "id": "cache-string-payload",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "v.push_back(std::move(s));",
+      "new": "v.push_back(std::string());",
+      "test_filter": "OBJBinary"
+    },
+    {
+      "id": "cache-named-record-payload",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "if (::fread(v[i].name.data(), 1, len, pFile) != len)\n\t\t\treturn false;",
+      "new": "if (::fread(v[i].name.data(), 1, len, pFile) != len)\n\t\t\treturn false;\n\t\tv[i].name.clear();",
+      "test_filter": "OBJBinary"
+    },
+    {
+      "id": "cache-empty-string-vector-rejected",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "if (cnt > bytes_remaining(pFile) / sizeof(size_t))\n\t\treturn false;",
+      "new": "if (cnt > bytes_remaining(pFile) / sizeof(size_t) || cnt == 0)\n\t\treturn false;",
+      "test_filter": "OBJBinary"
+    },
+    {
+      "id": "cache-named-record-count-rejected",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "if (cnt > bytes_remaining(pFile) / minimum_record_size)\n\t\treturn false;",
+      "new": "if (cnt > bytes_remaining(pFile) / minimum_record_size || cnt == 0)\n\t\treturn false;",
+      "test_filter": "OBJBinary"
+    },
+    {
+      "id": "cache-load-chain",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "loadvector(pFile, data.coordinates)\t\t\t&&",
+      "new": "false && loadvector(pFile, data.coordinates)\t\t\t&&",
+      "test_filter": "OBJBinary"
+    },
+    {
+      "id": "cache-native-version-upper-bits-ignored",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "if (serialized_version != 1) {",
+      "new": "if (static_cast<uint32_t>(serialized_version) != 1) {",
+      "test_filter": "OBJBinary"
+    }
+  ]
+}

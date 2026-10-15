@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "description": "Configuration column mapping, identity propagation, numeric minima and Boolean state preservation.",
+  "mutants": [
+    {
+      "id": "single-strings-not-copied",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                    ConfigOptionStrings* opt = this->option<ConfigOptionStrings>(key, true);\n\n                    opt->values = src_opt->values;\n                }\n                break;\n",
+      "new": "                    ConfigOptionStrings* opt = this->option<ConfigOptionStrings>(key, true);\n\n                    opt->values.clear();\n                }\n                break;\n",
+      "test_filter": "ConfigMultiMapping"
+    },
+    {
+      "id": "single-ints-not-copied",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                    ConfigOptionInts* opt = this->option<ConfigOptionInts>(key, true);\n\n                    opt->values = src_opt->values;\n                }\n                break;\n",
+      "new": "                    ConfigOptionInts* opt = this->option<ConfigOptionInts>(key, true);\n\n                    opt->values.clear();\n                }\n                break;\n",
+      "test_filter": "ConfigMultiMapping"
+    },
+    {
+      "id": "single-float-clamp-direction",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                        if (opt->values[index] > src_opt->values[index])\n",
+      "new": "                        if (opt->values[index] < src_opt->values[index])\n",
+      "test_filter": "ConfigMultiMapping"
+    },
+    {
+      "id": "single-percent-clamp-direction",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                        if (opt->values[index].value > src_opt->values[index].value)\n",
+      "new": "                        if (opt->values[index].value < src_opt->values[index].value)\n",
+      "test_filter": "ConfigMultiMapping"
+    },
+    {
+      "id": "single-bools-not_resized",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                    assert(variant_count == src_opt->size());\n                    opt->resize(variant_count, opt);\n                }\n",
+      "new": "                    assert(variant_count == src_opt->size());\n                    opt->clear();\n                }\n",
+      "test_filter": "ConfigMultiMapping"
+    },
+    {
+      "id": "multi-strings-not-copied",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                ConfigOptionStrings* opt = this->option<ConfigOptionStrings>(key, true);\n\n                //assert(variant_count == opt->size());\n                opt->values = src_opt->values;\n            }\n            break;\n        }\n",
+      "new": "                ConfigOptionStrings* opt = this->option<ConfigOptionStrings>(key, true);\n\n                //assert(variant_count == opt->size());\n                opt->values.clear();\n            }\n            break;\n        }\n",
+      "test_filter": "ConfigMultiMapping"
+    },
+    {
+      "id": "multi-ints-not-copied",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                ConfigOptionInts* opt = this->option<ConfigOptionInts>(key, true);\n\n                //assert(variant_count == opt->size());\n                opt->values = src_opt->values;\n            }\n            break;\n        }\n",
+      "new": "                ConfigOptionInts* opt = this->option<ConfigOptionInts>(key, true);\n\n                //assert(variant_count == opt->size());\n                opt->values.clear();\n            }\n            break;\n        }\n",
+      "test_filter": "ConfigMultiMapping"
+    },
+    {
+      "id": "multi-float-min-direction",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "\n                    for(auto idx : variant_indices){\n                        assert(idx < old_count);\n                        //the counts come from the variant columns, the arrays from the options;\n                        //they disagree when a config was authored at a different variant width\n                        if (idx >= old_count || new_variant_index >= (int)opt->values.size())\n                            continue;\n                        if (old_values[idx] < opt->values[new_variant_index])\n                            opt->values[new_variant_index] = old_values[idx];\n                    }\n                }\n            }\n            break;\n        }\n        case coFloatsOrPercents:\n",
+      "new": "\n                    for(auto idx : variant_indices){\n                        assert(idx < old_count);\n                        //the counts come from the variant columns, the arrays from the options;\n                        //they disagree when a config was authored at a different variant width\n                        if (idx >= old_count || new_variant_index >= (int)opt->values.size())\n                            continue;\n                        if (old_values[idx] > opt->values[new_variant_index])\n                            opt->values[new_variant_index] = old_values[idx];\n                    }\n                }\n            }\n            break;\n        }\n        case coFloatsOrPercents:\n",
+      "test_filter": "ConfigMultiMapping"
+    },
+    {
+      "id": "multi-bool-enabled-direction",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                        if (old_values[idx]) //enabled\n",
+      "new": "                        if (!old_values[idx]) //enabled\n",
+      "test_filter": "ConfigMultiMapping"
+    },
+    {
+      "id": "multi-target-index-not_recorded",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                new_variant_indices[i] = j;\n",
+      "new": "                new_variant_indices[i] = -1;\n",
+      "test_filter": "ConfigMultiMapping"
+    }
+  ]
+}

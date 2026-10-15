@@ -1,4 +1,6 @@
 #include <cassert>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <cstdio>
 #include <new>
@@ -821,15 +823,33 @@ bool savevectornameidx(FILE *pFile, const std::vector<T> &v)
 	return true;
 }
 
+static size_t bytes_remaining(FILE *pFile)
+{
+	const long current = ::ftell(pFile);
+	if (current < 0 || ::fseek(pFile, 0, SEEK_END) != 0)
+		return 0;
+	const long end = ::ftell(pFile);
+	const bool restored = ::fseek(pFile, current, SEEK_SET) == 0;
+	if (!restored || end < current)
+		return 0;
+	const uintmax_t remaining = static_cast<uintmax_t>(end - current);
+	return remaining > std::numeric_limits<size_t>::max() ? std::numeric_limits<size_t>::max() : static_cast<size_t>(remaining);
+}
+
 template<typename T> 
 bool loadvector(FILE *pFile, std::vector<T> &v)
 {
 	v.clear();
 	size_t cnt = 0;
+	if (bytes_remaining(pFile) < sizeof(cnt))
+		return false;
 	if (::fread(&cnt, sizeof(cnt), 1, pFile) != 1)
 		return false;
 	//FIXME sizeof(T) works for data types leaving no gaps in the allocated vector because of alignment of the T type.
 	if (cnt != 0) {
+		const size_t remaining = bytes_remaining(pFile);
+		if (cnt > remaining / sizeof(T))
+			return false;
 		v.assign(cnt, T());
 		if (::fread(&v.front(), sizeof(T), cnt, pFile) != cnt)
 			return false;
@@ -841,14 +861,22 @@ bool loadvector(FILE *pFile, std::vector<std::string> &v)
 {
 	v.clear();
 	size_t cnt = 0;
+	if (bytes_remaining(pFile) < sizeof(cnt))
+		return false;
 	if (::fread(&cnt, sizeof(cnt), 1, pFile) != 1)
+		return false;
+	if (cnt > bytes_remaining(pFile) / sizeof(size_t))
 		return false;
 	v.reserve(cnt);
 	for (size_t i = 0; i < cnt; ++ i) {
 		size_t len = 0;
+		if (bytes_remaining(pFile) < sizeof(len))
+			return false;
 		if (::fread(&len, sizeof(len), 1, pFile) != 1)
 			return false;
-		std::string s(" ", len);
+		if (len > bytes_remaining(pFile))
+			return false;
+		std::string s(len, '\0');
 		if (::fread(s.data(), 1, len, pFile) != len)
 			return false;
 		v.push_back(std::move(s));
@@ -861,16 +889,25 @@ bool loadvectornameidx(FILE *pFile, std::vector<T> &v)
 {
 	v.clear();
 	size_t cnt = 0;
+	if (bytes_remaining(pFile) < sizeof(cnt))
+		return false;
 	if (::fread(&cnt, sizeof(cnt), 1, pFile) != 1)
+		return false;
+	const size_t minimum_record_size = sizeof(int) + sizeof(size_t);
+	if (cnt > bytes_remaining(pFile) / minimum_record_size)
 		return false;
 	v.assign(cnt, T());
 	for (size_t i = 0; i < cnt; ++ i) {
 		if (::fread(&v[i].vertexIdxFirst, sizeof(int), 1, pFile) != 1)
 			return false;
 		size_t len = 0;
+		if (bytes_remaining(pFile) < sizeof(len))
+			return false;
 		if (::fread(&len, sizeof(len), 1, pFile) != 1)
 			return false;
-		v[i].name.assign(" ", len);
+		if (len > bytes_remaining(pFile))
+			return false;
+		v[i].name.assign(len, ' ');
 		if (::fread(v[i].name.data(), 1, len, pFile) != len)
 			return false;
 	}
@@ -904,15 +941,20 @@ bool objbinsave(const char *path, const ObjData &data)
 
 bool objbinload(const char *path, ObjData &data)
 {
-	FILE *pFile = boost::nowide::fopen(path, "rb");
+	std::unique_ptr<FILE, decltype(&::fclose)> file(boost::nowide::fopen(path, "rb"), &::fclose);
+	FILE *pFile = file.get();
 	if (pFile == 0)
 		return false;
 
 	data.version = 0;
-	if (::fread(&data.version, sizeof(data.version), 1, pFile) != 1)
+	size_t serialized_version = 0;
+	if (::fread(&serialized_version, sizeof(serialized_version), 1, pFile) != 1) {
 		return false;
-	if (data.version != 1)
+	}
+	if (serialized_version != 1) {
 		return false;
+	}
+	data.version = static_cast<int>(serialized_version);
 
 	bool result =
 		loadvector(pFile, data.coordinates)			&&
@@ -926,7 +968,6 @@ bool objbinload(const char *path, ObjData &data)
 		loadvector(pFile, data.smoothingGroups)		&&
 		loadvector(pFile, data.vertices);
 
-	::fclose(pFile);
 	return result;
 }
 

@@ -1656,6 +1656,191 @@
         "pipeline_oracle"
       ],
       "reason": "Configured first-layer hot-plate temperature is observed in executable M140/M190 commands, with custom start temperatures suppressing the configured command. Numeric boundaries remain unclaimed."
+    },
+    "print_sequence": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both registered values (by layer and by object) are sliced; the boundary hook must appear zero times or once between two objects, while deposited material is preserved."
+    },
+    "wait_for_temp_on_wipe_tower": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Both states are sliced with two extruders and a real wipe tower. Parsed toolchange blocks require the selected blocking/nonblocking temperature order and an off-tower wait before purge extrusion; relocation and first-layer temperature regressions are also exercised."
+    },
+    "adaptive_pressure_advance": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Both states run on one- and two-extruder fixtures with Standard/High Flow variants. Emitted Klipper advance values must equal the configured static value and, only when enabled, the independently chosen constant model prediction. Unused variants and a nonadaptive companion are checked separately."
+    },
+    "pressure_advance": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Distinct static values 0.021, 0.037, 0.043 and 0.049 are selected across filament/extruder variants and checked in emitted Klipper commands. Numeric boundaries are not covered."
+    },
+    "adaptive_pressure_advance_model": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Several constant prediction tables produce distinct expected Klipper advance values in the enabled branch; these examples do not cover malformed or nonlinear models."
+    },
+    "extruder_variant_list": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Standard-only, High-Flow-only and combined variant lists select the expected 211/223/239-degree executable nozzle-temperature commands, including fallback when a filament lacks a High Flow variant."
+    },
+    "nozzle_volume_type": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Standard and High Flow nozzle types select independently expected temperature, pressure-advance and fan values. Hybrid, TPU High Flow, E3D High Flow and Extra High Flow are not covered by this pipeline matrix; full enum variance is not claimed."
+    },
+    "filament_map": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Both filaments are mapped to each of two extruders; emitted pressure advance must follow the selected extruder variant. Empty, invalid and larger map boundaries remain unclaimed."
+    },
+    "filament_self_index": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Three-entry and four-entry variant maps select per-filament temperatures and advance values through actual slicing. Numeric/index boundaries are not claimed."
+    },
+    "additional_cooling_fan_speed": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Variant values 10, 20 and 40 percent must appear as the parsed auxiliary fan PWM percentages. Zero and 100-percent boundaries are not covered by this matrix."
+    },
+    "nozzle_temperature_range_high": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The selected variant values 240, 260 and 280 must reach a custom G-code placeholder after real slicing. This covers configuration propagation, not thermal enforcement or numeric boundaries."
+    },
+    "outer_wall_filament_id": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+    },
+    "inner_wall_filament_id": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+    },
+    "sparse_infill_filament_id": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+    },
+    "internal_solid_filament_id": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+    },
+    "top_surface_filament_id": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+    },
+    "bottom_surface_filament_id": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+    },
+    "print_extruder_id": {
+      "test": "tests/libslic3r/test_config.cpp",
+      "tag": "[ConfigMultiMapping]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix"
+      ],
+      "reason": "The config contract maps 1-based identity columns through single-to-multi and multi-to-multi operations, including duplicate IDs and unmatched targets. This asserts resulting DynamicPrintConfig arrays only; numeric boundaries and FFF pipeline behavior are not claimed."
+    },
+    "print_extruder_variant": {
+      "test": "tests/libslic3r/test_config.cpp",
+      "tag": "[ConfigMultiMapping]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix"
+      ],
+      "reason": "The config contract maps variant identity strings across column expansion and destination remapping, including duplicate and unmatched variants. This asserts resulting DynamicPrintConfig arrays only; full variant-domain and FFF pipeline coverage are not claimed."
+    },
+    "small_perimeter_speed": {
+      "test": "tests/libslic3r/test_config.cpp",
+      "tag": "[ConfigMultiMapping]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix"
+      ],
+      "reason": "Representative FloatOrPercent arrays exercise per-column value limiting while checking absolute versus percent mode on the mapped result. Numeric boundaries and generated perimeter behavior are not claimed."
     }
   }
 }

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "description": "OBJ import and native binary cache contracts.",
+  "mutants": [
+    {
+      "id": "vp-w-component",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "data.parameters.push_back((float)w);",
+      "new": "data.parameters.push_back(0.0f);",
+      "test_filter": "OBJParser"
+    },
+    {
+      "id": "vt-v-component",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "data.textureCoordinates.push_back((float)v);",
+      "new": "data.textureCoordinates.push_back(0.0f);",
+      "test_filter": "OBJParser"
+    },
+    {
+      "id": "vn-z-component",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "data.normals.push_back((float)z);",
+      "new": "data.normals.push_back(0.0f);",
+      "test_filter": "OBJParser"
+    },
+    {
+      "id": "negative-position-index",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "vertex.coordIdx += (int) data.coordinates.size() / OBJ_VERTEX_LENGTH;",
+      "new": "vertex.coordIdx += (int) data.coordinates.size() / OBJ_VERTEX_LENGTH - 1;",
+      "test_filter": "OBJParser"
+    },
+    {
+      "id": "quad-diagonal",
+      "path": "src/libslic3r/Format/OBJ.cpp",
+      "old": "its.indices.emplace_back(indices[0], indices[2], indices[3]);",
+      "new": "its.indices.emplace_back(indices[0], indices[1], indices[3]);",
+      "test_filter": "OBJParser"
+    },
+    {
+      "id": "smoothing-record",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "data.smoothingGroups.push_back(group);",
+      "new": "data.smoothingGroups.clear();",
+      "test_filter": "OBJParser"
+    },
+    {
+      "id": "material-texture-name",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "data.new_mtl_unmap[cur_mtl_name]->map_Kd = mtl_parse_texture_name(line);",
+      "new": "data.new_mtl_unmap[cur_mtl_name]->map_Kd.clear();",
+      "test_filter": "OBJParser"
+    },
+    {
+      "id": "binary-version-header",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "size_t version = 1;",
+      "new": "size_t version = 2;",
+      "test_filter": "OBJParser"
+    },
+    {
+      "id": "material-face-range",
+      "path": "src/libslic3r/Format/objparser.cpp",
+      "old": "data.usemtls.back().face_end += face_index_count - 2;",
+      "new": "data.usemtls.back().face_end += face_index_count - 3;",
+      "test_filter": "OBJParser"
+    },
+    {
+      "id": "empty-mesh-rejection",
+      "path": "src/libslic3r/Format/OBJ.cpp",
+      "old": "if (meshptr->empty()) {",
+      "new": "if (false) {",
+      "test_filter": "OBJParser"
+    }
+  ]
+}
