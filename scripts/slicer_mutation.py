@@ -37,6 +37,8 @@ import time
 from typing import Any, Sequence
 
 
+from slicer_process import run_captured
+
 MAX_OUTPUT = 64 * 1024
 DEFAULT_MAX_MUTANTS = 5
 
@@ -114,10 +116,7 @@ class CommandResult:
 def run_command(argv: Sequence[str], *, cwd: Path, timeout: float) -> CommandResult:
     started = time.monotonic()
     try:
-        result = subprocess.run(
-            list(argv), cwd=str(cwd), shell=False, text=True, encoding="utf-8", errors="replace",
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
-        )
+        result = run_captured(argv, cwd=cwd, timeout=timeout)
         return CommandResult(list(argv), result.returncode, time.monotonic() - started,
                              result.stdout or "", result.stderr or "")
     except subprocess.TimeoutExpired as exc:

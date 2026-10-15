@@ -54,15 +54,16 @@ and conditional platform sources are outside the target manifests. The report
 records the source root and manifests used.
 
 The runner uses `compile_commands.json` as compiler evidence for every
-manifest source. It invokes `llvm-cov export --summary-only -empty-profile` on each
-instrumented object: an object with no coverage map is reported as a
+manifest source. It invokes `llvm-cov export --summary-only -instr-profile <merged profile>` on
+each instrumented object (including with LLVM 18): an object with no coverage map is reported as a
 `mapping_free_translation_unit` (for example an include-only PCH source),
 whereas an object whose mappings come only from an inline or generated header
 is reported as `object_mappings_without_source` and remains subject to the
 link integrity check. An object with mappings that is absent from the linked
 executable fails the integrity gate as a missing compiled-source mapping. This
 keeps mapping-free translation units visible without excusing accidentally
-unlinked executable code. The report's line/function/branch percentages are
+unlinked executable code. Object classification uses mapping counts, never runtime
+hit counts, so completely unexecuted functions remain in the denominator. The report's line/function/branch percentages are
 **source coverage** from LLVM's mappings. They are not percentages of registered options. The
 `[SettingsVariance]` tests exercise registered enum/schema values, then slice a real
 `Print` and inspect geometry or G-code; that is **actual settings execution**.
@@ -100,6 +101,10 @@ python3 scripts/slicer_mutation.py run \
 match and replacement, build/test commands, and separate statuses for build
 errors, timeouts, killed mutants, and survivors. A mutant is counted only
 after its selected unmutated baseline passes with executed test evidence.
+
+The native harnesses run commands in separate process groups. A timeout stops
+the command and its descendants before restoring or removing the disposable
+worktree, and retains partial output as failure evidence.
 
 Repeat `--mutants` to combine subsystem manifests in one configured build;
 `--max-mutants` bounds the total across all selected manifests. For example,

@@ -39,6 +39,40 @@ class CoverageEvidenceTests(unittest.TestCase):
 
 
 class CoverageExportTests(unittest.TestCase):
+    def test_profile_based_object_audit_retains_zero_hit_mappings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "never_called.cpp"
+            source.write_text("int never_called() { return 1; }\n")
+            obj = root / "never_called.o"
+            obj.touch()
+            profile = root / "merged.profdata"
+            profile.touch()
+            commands = root / "compile_commands.json"
+            commands.write_text(json.dumps([{
+                "directory": str(root), "file": str(source), "arguments": [
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    str(source), "-o", str(obj),
+                ],
+            }]))
+            fake_cov = root / "llvm18.py"
+            fake_cov.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, pathlib, sys\n"
+                "assert '-empty-profile' not in sys.argv\n"
+                "assert pathlib.Path(sys.argv[sys.argv.index('-instr-profile') + 1]).is_file()\n"
+                f"print(json.dumps({{'data': [{{'files': [{{'filename': {str(source)!r}, "
+                "'summary': {'lines': {'covered': 0, 'count': 1}}}]}]}))\n"
+            )
+            fake_cov.chmod(0o755)
+            evidence = slicer_coverage._compiler_source_evidence(
+                str(fake_cov), [source], commands, timeout=5, profile=profile,
+            )
+            self.assertEqual(evidence["status"], "ok")
+            self.assertEqual(evidence["mapped_sources"], [str(source)])
+            self.assertEqual(evidence["mapping_free_sources"], [])
+            self.assertEqual(evidence["object_executable_mappings"], [slicer_coverage._path_key(source)])
+
     def test_compiler_evidence_separates_mapping_free_translation_units(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

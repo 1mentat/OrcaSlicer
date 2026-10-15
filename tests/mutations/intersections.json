@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Source-reviewed IntersectionPoints mutants killed by the focused geometric contracts.",
+  "description": "Source-reviewed IntersectionPoints mutants for validating the focused geometric contracts.",
   "mutants": [
     {
       "id": "intersections-index-zero-pair-filter",

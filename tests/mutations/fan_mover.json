@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Bounded FanMover mutations for firmware command recognition, delayed insertion, and kickstart threshold contracts.",
+  "mutants": [
+    {
+      "id": "fan-mover-generic-p-parameter",
+      "path": "src/libslic3r/GCode/FanMover.cpp",
+      "old": "            if (!isnan(idx) && idx != 1.0f) {",
+      "new": "            if (!isnan(idx) && idx != 2.0f) {",
+      "description": "Accept the auxiliary P2 fan form while rejecting the generic firmware P1 form.",
+      "test_filter": "FanMover"
+    },
+    {
+      "id": "fan-mover-makerware-command",
+      "path": "src/libslic3r/GCode/FanMover.cpp",
+      "old": "    } else if ((flavor == (gcfMakerWare) || flavor == (gcfSailfish)) && line.compare(0, 4, \"M126\") == 0) {",
+      "new": "    } else if ((flavor == (gcfMakerWare) || flavor == (gcfSailfish)) && line.compare(0, 4, \"M127\") == 0) {",
+      "description": "Stop recognizing M126/T as the fan command for MakerWare and Sailfish firmware.",
+      "test_filter": "FanMover"
+    },
+    {
+      "id": "fan-mover-zero-fan-state",
+      "path": "src/libslic3r/GCode/FanMover.cpp",
+      "old": "            if (fan_speed >= 0) {",
+      "new": "            if (fan_speed > 0) {",
+      "description": "Ignore a recognized zero-speed fan command so the following equal-speed increase bypasses delay handling.",
+      "test_filter": "FanMover"
+    },
+    {
+      "id": "fan-mover-kickstart-threshold",
+      "path": "src/libslic3r/GCode/FanMover.cpp",
+      "old": "                            } else if(m_back_buffer_fan_speed < fan_speed - 10){",
+      "new": "                            } else if(m_back_buffer_fan_speed <= fan_speed - 10){",
+      "description": "Kick-start an exactly ten-percent increase even though the contract requires a strictly larger change.",
+      "test_filter": "FanMover"
+    }
+  ]
+}

@@ -41,6 +41,8 @@ from typing import Any, Iterable, Sequence
 from xml.etree import ElementTree
 
 
+from slicer_process import run_captured
+
 MAX_OUTPUT = 64 * 1024
 DEFAULT_TARGETS = (
     "libslic3r_tests",
@@ -85,13 +87,7 @@ def run_command(argv: Sequence[str], *, cwd: Path, timeout: float = DEFAULT_TIME
     """Run one recorded argv without a shell."""
     started = time.monotonic()
     try:
-        completed = subprocess.run(
-            list(argv), cwd=str(cwd), input=input_data, shell=False,
-            text=not isinstance(input_data, bytes),
-            encoding="utf-8" if not isinstance(input_data, bytes) else None,
-            errors="replace" if not isinstance(input_data, bytes) else None,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
-        )
+        completed = run_captured(argv, cwd=cwd, input_data=input_data, timeout=timeout)
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
         if isinstance(stdout, bytes):

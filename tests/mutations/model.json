@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed Model lifecycle and geometry contracts for instance placement, shared meshes, part accounting, and unit conversion.",
+  "mutants": [
+    {
+      "id": "model-grid-duplication-exclusive-bound",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "for (size_t x_copy = 1; x_copy <= x; ++x_copy) {",
+      "new": "for (size_t x_copy = 1; x_copy < x; ++x_copy) {",
+      "description": "Omit the final column of instances from duplicate_objects_grid.",
+      "test_filter": "ModelContracts"
+    },
+    {
+      "id": "model-grid-spacing-uses-empty-instance-box",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "Vec3d ext_size = object->raw_mesh_bounding_box().size() + dist * Vec3d::Ones();",
+      "new": "Vec3d ext_size = object->bounding_box_exact().size() + dist * Vec3d::Ones();",
+      "description": "Derive grid spacing from the instance bounding box after clearing all instances, collapsing the copies together.",
+      "test_filter": "ModelContracts"
+    },
+    {
+      "id": "model-shared-volume-deep-copy",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "ModelVolume* v = new ModelVolume(this, other.m_mesh);",
+      "new": "ModelVolume* v = new ModelVolume(this, std::make_shared<const TriangleMesh>(other.mesh()));",
+      "description": "Copy the mesh instead of retaining the shared mesh pointer when adding a shared volume.",
+      "test_filter": "ModelContracts"
+    },
+    {
+      "id": "model-instance-bbox-drops-offset",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "const Transform3d inst_matrix = dont_translate ?\n        instance.get_transformation().get_matrix_no_offset() :\n        instance.get_transformation().get_matrix();",
+      "new": "const Transform3d inst_matrix = instance.get_transformation().get_matrix_no_offset();",
+      "description": "Ignore the instance translation even when an exact world-space bounding box is requested.",
+      "test_filter": "ModelContracts"
+    },
+    {
+      "id": "model-parts-count-includes-modifiers",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (v->is_model_part())\n            ++num;",
+      "new": "++num;",
+      "description": "Count negative and modifier volumes as printable model parts.",
+      "test_filter": "ModelContracts"
+    },
+    {
+      "id": "model-imperial-conversion-no-scale",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "obj->scale_mesh_after_creation(in_to_mm);",
+      "new": "obj->scale_mesh_after_creation(1.f);",
+      "description": "Skip the inch-to-millimetre geometry scale while still marking the volume converted.",
+      "test_filter": "ModelContracts"
+    },
+    {
+      "id": "model-meter-conversion-no-scale",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "obj->scale_mesh_after_creation(m_to_mm);",
+      "new": "obj->scale_mesh_after_creation(1.f);",
+      "description": "Skip the metre-to-millimetre geometry scale while still marking the volume converted.",
+      "test_filter": "ModelContracts"
+    }
+  ]
+}

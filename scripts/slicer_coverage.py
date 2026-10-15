@@ -36,6 +36,8 @@ import time
 from typing import Any, Iterable, Sequence
 
 
+from slicer_process import run_captured
+
 DEFAULT_THRESHOLD = 90.0
 _HEADER_SUFFIXES = frozenset({".h", ".hh", ".hpp", ".hxx", ".inc", ".inl", ".ipp", ".tcc", ".txx"})
 _TEST_COUNT_PATTERNS = (
@@ -72,12 +74,7 @@ def _run(argv: Sequence[str], *, cwd: Path | None = None, env: dict[str, str] | 
          timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     """Run a recorded argv without invoking a shell."""
     try:
-        return subprocess.run(
-            list(argv), cwd=str(cwd) if cwd else None, env=env,
-            text=True, encoding="utf-8", errors="replace",
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout, check=False,
-        )
+        return run_captured(argv, cwd=cwd, env=env, timeout=timeout)
     except FileNotFoundError as exc:
         raise CoverageError(f"command not found: {argv[0]}") from exc
     except subprocess.TimeoutExpired as exc:
@@ -561,7 +558,8 @@ def _exported_executable_paths(export: dict[str, Any], *, path_base: Path) -> se
 
 
 def _compiler_source_evidence(llvm_cov: str, manifest: Sequence[Path],
-                              compile_commands: Path, *, timeout: float | None) -> dict[str, Any]:
+                              compile_commands: Path, *, timeout: float | None,
+                              profile: Path | None = None) -> dict[str, Any]:
     """Classify manifest TUs using their compiled object coverage maps.
 
     A source-level export cannot tell an include-only TU from a TU whose
@@ -609,8 +607,13 @@ def _compiler_source_evidence(llvm_cov: str, manifest: Sequence[Path],
             # Object audits only need the file-level summaries.  Full line and
             # segment records make this one-export-per-TU audit needlessly
             # expensive, especially for a large production build.
-            export = _run([llvm_cov, "export", "-format=text", "-summary-only", "-empty-profile",
+            # LLVM 18 requires a profile even when only mapping counts are
+            # inspected. Runtime hit counts never classify an object as mapped.
+            profile_args = ["-instr-profile", str(profile)] if profile else ["-empty-profile"]
+            export = _run([llvm_cov, "export", "-format=text", "-summary-only", *profile_args,
                            "-object", str(object_path)], cwd=candidate["directory"], timeout=timeout)
+            if export.stderr:
+                object_record["diagnostics"] = export.stderr
             if export.returncode != 0:
                 no_mapping = (
                     export.returncode != 124
@@ -830,7 +833,7 @@ def run_coverage(args: argparse.Namespace) -> int:
     if manifest:
         if compile_commands.is_file():
             compiler_evidence = _compiler_source_evidence(
-                llvm_cov, manifest, compile_commands, timeout=args.timeout
+                llvm_cov, manifest, compile_commands, timeout=args.timeout, profile=merged
             )
         else:
             compiler_evidence = {
