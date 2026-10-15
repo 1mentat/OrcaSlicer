@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "BBS project metadata, embedded payloads, thumbnails and compatibility contracts.",
+  "mutants": [
+    {
+      "id": "bbs-followup-published-marker",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "bool is_published_3mf_flag(const std::string &value)\n{\n    return value == \"1\";\n}",
+      "new": "bool is_published_3mf_flag(const std::string &value)\n{\n    return value != \"1\";\n}",
+      "description": "Invert the exact producer published marker accepted by the public probe.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-plate-lock-drop",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "plate_data_list[it->first-1]->locked = it->second->locked;",
+      "new": "plate_data_list[it->first-1]->locked = false;",
+      "description": "Drop the persisted plate lock state during import.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-filament-map-lower-bound",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (filament_map[idx] < 1) {",
+      "new": "if (filament_map[idx] < 0) {",
+      "description": "Stop clamping a zero or negative imported filament slot to the first slot.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-filament-volume-clamp",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (filament_volume_map[idx] > 1) {",
+      "new": "if (filament_volume_map[idx] > 2) {",
+      "description": "Allow a volume-map value that the importer must normalize to Standard.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-duplicate-layer-range-acceptance",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (object_item != m_layer_config_ranges.end()) {",
+      "new": "if (object_item == m_layer_config_ranges.end()) {",
+      "description": "Accept the duplicate layer-range object branch instead of retaining the first definition.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-custom-gcode-single-mode",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "mode == CustomGCode::SingleExtruderMode ? CustomGCode::Mode::SingleExtruder :",
+      "new": "mode == CustomGCode::SingleExtruderMode ? CustomGCode::Mode::MultiAsSingle :",
+      "description": "Map a recognized SingleExtruder custom-G-code mode to the wrong public mode.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-gcode-export-gate",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!m_skip_static && m_save_gcode) {",
+      "new": "if (false) {",
+      "description": "Skip the archive G-code and checksum export path even when WithGcode is requested.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-sidecar-thumbnail-gate",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!thumbnail_status[i] && !plate_data->thumbnail_file.empty() && (boost::filesystem::exists(plate_data->thumbnail_file)))",
+      "new": "if (thumbnail_status[i] && !plate_data->thumbnail_file.empty() && (boost::filesystem::exists(plate_data->thumbnail_file)))",
+      "description": "Prevent a valid sidecar plate thumbnail from being added when no generated thumbnail exists.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-bbox-validity-gate",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (id_bboxes[index]->is_valid()) {",
+      "new": "if (!id_bboxes[index]->is_valid()) {",
+      "description": "Drop a valid persisted calibration bounding-box record.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-filament-preset-identity-guard",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!filament_names) {",
+      "new": "if (filament_names) {",
+      "description": "Reject an embedded filament preset that contains the required canonical identity field.",
+      "test_filter": "Bbs3mfMetadata"
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
+#include <ostream>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -2530,3 +2531,258 @@ TEST_CASE("Multi-to-multi with no target extruders still copies destination arra
 }
 
 } // namespace config_multi_mapping_contracts
+
+namespace config_definition_contracts {
+using namespace Slic3r;
+
+struct HelpDefinition : ConfigDef {
+    using ConfigDef::add;
+};
+
+std::string help_text(const ConfigDef &definition, bool defaults = true)
+{
+    std::ostringstream out;
+    definition.print_cli_help(out, defaults);
+    return out.str();
+}
+
+void check_schema(const ConfigDef &definition,
+                  std::initializer_list<std::pair<const std::string, ConfigOptionType>> expected)
+{
+    const std::map<std::string, ConfigOptionType> types(expected);
+    REQUIRE(definition.options.size() == types.size());
+    REQUIRE(definition.by_serialization_key_ordinal.size() == types.size());
+    for (const auto &[key, type] : types) {
+        INFO(key);
+        const ConfigOptionDef *option = definition.get(key);
+        REQUIRE(option != nullptr);
+        CHECK(option->opt_key == key);
+        CHECK(option->type == type);
+        CHECK_FALSE(option->label.empty());
+        REQUIRE(option->serialization_key_ordinal > 0);
+        const auto entry = definition.by_serialization_key_ordinal.find(option->serialization_key_ordinal);
+        REQUIRE(entry != definition.by_serialization_key_ordinal.end());
+        CHECK(entry->second == option);
+    }
+}
+
+TEST_CASE("CLI help expands aliases and explicit parameter labels", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    auto *option = definition.add("layer_height", coFloat);
+    option->cli = "h|layer-height";
+    option->cli_params = "HEIGHT";
+    option->tooltip = "Set the layer thickness.";
+    const std::string help = help_text(definition);
+    std::istringstream tokens(help);
+    std::string short_alias, short_parameter, long_alias, long_parameter;
+    REQUIRE(static_cast<bool>(tokens >> short_alias >> short_parameter >> long_alias >> long_parameter));
+    CHECK(short_alias == "-h");
+    CHECK(short_parameter == "HEIGHT,");
+    CHECK(long_alias == "--layer-height");
+    CHECK(long_parameter == "HEIGHT");
+    CHECK(help.find("Set the layer thickness.") != std::string::npos);
+}
+
+TEST_CASE("CLI help derives dashed option names when aliases are absent", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    definition.add("machine_start_gcode", coString)->tooltip = "Startup instructions";
+    const std::string help = help_text(definition);
+    CHECK(help.find("--machine-start-gcode") != std::string::npos);
+    CHECK(help.find("machine_start_gcode") == std::string::npos);
+}
+
+TEST_CASE("CLI help filters hidden options and entire excluded categories", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    auto *visible = definition.add("visible", coInt);
+    visible->category = "Visible category";
+    auto *hidden = definition.add("hidden", coInt);
+    hidden->category = visible->category;
+    hidden->cli = ConfigOptionDef::nocli;
+    auto *excluded = definition.add("excluded", coInt);
+    excluded->category = "Excluded category";
+    std::ostringstream out;
+    std::ostream &returned = definition.print_cli_help(out, true, [](const ConfigOptionDef &option) {
+        return option.opt_key != "excluded";
+    });
+    CHECK(&returned == &out);
+    const std::string help = out.str();
+    CHECK(help.find("Visible category:") != std::string::npos);
+    CHECK(help.find("--visible") != std::string::npos);
+    CHECK(help.find("--hidden") == std::string::npos);
+    CHECK(help.find("Excluded category") == std::string::npos);
+    CHECK(help.find("--excluded") == std::string::npos);
+}
+
+TEST_CASE("CLI help labels uncategorized options only among multiple categories", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    definition.add("uncategorized", coInt);
+    CHECK(help_text(definition).find("Misc options:") == std::string::npos);
+    definition.add("categorized", coInt)->category = "Printer";
+    const std::string help = help_text(definition);
+    CHECK(help.find("Misc options:") != std::string::npos);
+    CHECK(help.find("Printer:") != std::string::npos);
+    CHECK(help.find("--uncategorized") != std::string::npos);
+    CHECK(help.find("--categorized") != std::string::npos);
+}
+
+TEST_CASE("CLI help includes numeric defaults and their physical units on request", "[Config][ConfigDefinition][CLIHelp]")
+{
+    const bool defaults = GENERATE(false, true);
+    HelpDefinition definition;
+    auto *option = definition.add("height", coFloat);
+    option->tooltip = "Layer thickness";
+    option->sidetext = "mm";
+    option->set_default_value(new ConfigOptionFloat(.25));
+    const std::string help = help_text(definition, defaults);
+    CHECK((help.find("(mm, default: 0.25)") != std::string::npos) == defaults);
+    CHECK(help.find("Layer thickness") != std::string::npos);
+}
+
+TEST_CASE("CLI help lists enumerated choices before their default", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    auto *option = definition.add("strategy", coString);
+    option->enum_values = {"slow", "fast"};
+    option->set_default_value(new ConfigOptionString("fast"));
+    const std::string help = help_text(definition);
+    CHECK(help.find("(slow, fast; default: fast)") != std::string::npos);
+}
+
+TEST_CASE("CLI help omits boolean and empty string defaults", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    definition.add("enabled", coBool)->set_default_value(new ConfigOptionBool(true));
+    definition.add("empty", coString)->set_default_value(new ConfigOptionString());
+    definition.add("no_default", coInt);
+    const std::string help = help_text(definition);
+    CHECK(help.find("--enabled") != std::string::npos);
+    CHECK(help.find("--empty") != std::string::npos);
+    CHECK(help.find("--no-default") != std::string::npos);
+    CHECK(help.find("default:") == std::string::npos);
+}
+
+TEST_CASE("CLI help always exposes the configuration compatibility default", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    definition.add("config_compatibility", coString)->set_default_value(new ConfigOptionString("enable"));
+    definition.add("ordinary", coString)->set_default_value(new ConfigOptionString("ordinary-default"));
+    const std::string help = help_text(definition, false);
+    CHECK(help.find("default: enable") != std::string::npos);
+    CHECK(help.find("ordinary-default") == std::string::npos);
+}
+
+TEST_CASE("CLI help wraps long descriptions without dropping or reordering words", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    auto *option = definition.add("a_deliberately_long_command_line_option", coString);
+    std::vector<std::string> expected;
+    for (int i = 0; i < 35; ++i) {
+        expected.push_back("parameter" + std::to_string(i));
+        option->tooltip += expected.back() + " ";
+    }
+    std::istringstream lines(help_text(definition));
+    std::string line;
+    REQUIRE(static_cast<bool>(std::getline(lines, line)));
+    CHECK(line.find("--a-deliberately-long-command-line-option") != std::string::npos);
+    CHECK(line.find("parameter0") == std::string::npos);
+    std::vector<std::string> actual;
+    std::size_t wrapped_lines = 0;
+    while (std::getline(lines, line)) {
+        REQUIRE(line.size() >= 21);
+        CHECK(line.substr(0, 21) == std::string(21, ' '));
+        CHECK(line.size() <= 101);
+        std::istringstream words(line.substr(21));
+        std::string word;
+        while (words >> word)
+            actual.push_back(word);
+        ++wrapped_lines;
+    }
+    CHECK(wrapped_lines > 1);
+    CHECK(actual == expected);
+}
+
+TEST_CASE("CLI help leaves an empty or fully filtered definition blank", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    CHECK(help_text(definition).empty());
+    definition.add("excluded", coInt)->category = "Excluded";
+    std::ostringstream out;
+    definition.print_cli_help(out, true, [](const ConfigOptionDef &) { return false; });
+    CHECK(out.str().empty());
+}
+
+TEST_CASE("Read-only slicing placeholders expose the current numeric Z-hop", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(ReadOnlySlicingStatesConfigDef{}, {{"zhop", coFloat}});
+}
+
+TEST_CASE("Writable slicing placeholders retain vectors for per-axis and per-extruder state", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(ReadWriteSlicingStatesConfigDef{}, {
+        {"position", coFloats}, {"e_retracted", coFloats}, {"e_restart_extra", coFloats}, {"e_position", coFloats}});
+}
+
+TEST_CASE("Slicing context placeholders distinguish indexes flags and names", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(OtherSlicingStatesConfigDef{}, {
+        {"current_extruder", coInt}, {"current_object_idx", coInt}, {"has_wipe_tower", coBool},
+        {"initial_extruder", coInt}, {"initial_tool", coInt}, {"is_extruder_used", coBools},
+        {"num_extruders", coInt}, {"has_single_extruder_multi_material_priming", coBool},
+        {"initial_no_support_extruder", coInt}, {"in_head_wrap_detect_zone", coBool}, {"curr_bed_type", coString}});
+}
+
+TEST_CASE("Print statistics placeholders distinguish totals from per-extruder quantities", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(PrintStatisticsConfigDef{}, {
+        {"extruded_volume", coFloats}, {"total_toolchanges", coInt}, {"extruded_volume_total", coFloat},
+        {"extruded_weight", coFloats}, {"extruded_weight_total", coFloat}, {"total_layer_count", coInt},
+        {"normal_print_time", coString}, {"print_time", coString}, {"silent_print_time", coString},
+        {"total_cost", coFloat}, {"total_weight", coFloat}, {"total_wipe_tower_cost", coFloat},
+        {"total_wipe_tower_filament", coFloat}, {"used_filament", coFloat}, {"print_time_total_sec", coString},
+        {"print_time_day", coString}, {"print_time_hour", coString}, {"print_time_minute", coString},
+        {"print_time_sec", coString}, {"used_filament_length", coString}});
+}
+
+TEST_CASE("Object placeholders expose counts filenames and per-object scaling", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(ObjectsInfoConfigDef{}, {
+        {"num_objects", coInt}, {"num_instances", coInt}, {"scale", coStrings},
+        {"input_filename_base", coString}, {"input_filename", coString}, {"plate_name", coString}});
+}
+
+TEST_CASE("Dimension placeholders distinguish planar geometry from scalar height", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(DimensionsConfigDef{}, {
+        {"first_layer_print_convex_hull", coPoints}, {"first_layer_print_min", coFloats},
+        {"first_layer_print_max", coFloats}, {"first_layer_print_size", coFloats},
+        {"print_bed_min", coFloats}, {"print_bed_max", coFloats}, {"print_bed_size", coFloats},
+        {"first_layer_center_no_wipe_tower", coFloats}, {"first_layer_height", coFloat}});
+}
+
+TEST_CASE("Temperature placeholders distinguish per-filament values from aggregate values", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(TemperaturesConfigDef{}, {
+        {"bed_temperature", coInts}, {"bed_temperature_initial_layer", coInts},
+        {"bed_temperature_initial_layer_single", coInt}, {"chamber_temperature", coInts},
+        {"chamber_minimal_temperature", coInts}, {"overall_chamber_temperature", coInt},
+        {"first_layer_bed_temperature", coInts}, {"first_layer_temperature", coInts}});
+}
+
+TEST_CASE("Timestamp placeholders retain textual timestamps and numeric calendar fields", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(TimestampsConfigDef{}, {
+        {"timestamp", coString}, {"year", coInt}, {"month", coInt}, {"day", coInt},
+        {"hour", coInt}, {"minute", coInt}, {"second", coInt}});
+}
+
+TEST_CASE("Preset placeholders retain the public textual name fields", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(OtherPresetsConfigDef{}, {
+        {"print_preset", coString}, {"filament_preset", coString},
+        {"printer_preset", coString}, {"physical_printer_preset", coString}});
+}
+} // namespace config_definition_contracts

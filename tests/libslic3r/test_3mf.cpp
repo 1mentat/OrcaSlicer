@@ -1,3 +1,5 @@
+#include <array>
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -3798,3 +3800,590 @@ TEST_CASE("Legacy exporter rejects an object with an empty volume mesh", "[Legac
 }
 
 } // namespace legacy_3mf_contracts
+
+namespace bbs_3mf_metadata_contracts {
+
+using namespace Slic3r;
+using archive_variant_contracts::BbsLoaded;
+using archive_variant_contracts::make_cube_model;
+using archive_variant_contracts::read_file;
+using archive_variant_contracts::replace_once;
+using namespace Catch::Matchers;
+
+using Setup = std::function<void(Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &)>;
+
+void store_followup(const std::string &path, const Setup &setup,
+                    SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence)
+{
+    ScopedTemporaryDir backup("orca_bbs_followup_store");
+    Model model = make_cube_model();
+    model.set_backup_path(backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    // Plate metadata is intentionally a complete print config.  The exporter
+    // reads plate-local options and does not synthesize missing options.
+    plate.config = config;
+    StoreParams extra;
+    setup(model, config, plate, extra, backup);
+    plate.plate_index = 0;
+    plate.objects_and_instances = {{0, 0}};
+    extra.path = path;
+    extra.model = &model;
+    extra.config = &config;
+    extra.plate_data_list = {&plate};
+    extra.strategy = strategy;
+    REQUIRE(store_bbs_3mf(extra));
+}
+
+bool load_followup(const std::string &path, Model &model, BbsLoaded &loaded,
+                   LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
+{
+    // The importer writes Metadata/* payloads below the caller-owned backup
+    // root.  Seed that directory so the public extraction path is exercised,
+    // rather than silently accepting a declared filename after a failed write.
+    loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_followup_load");
+    std::filesystem::create_directories(std::filesystem::path(loaded.backup->string()) / "Metadata");
+    model.set_backup_path(loaded.backup->string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates,
+                        &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version,
+                        nullptr, strategy);
+}
+
+std::string png_entry(const std::string &path, const std::string &name,
+                      int expected_width, int expected_height)
+{
+    std::string encoded;
+    REQUIRE(read_3mf_entry(path, encoded, name));
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{encoded.data(), encoded.size()}, decoded));
+    REQUIRE(decoded.cols == expected_width);
+    REQUIRE(decoded.rows == expected_height);
+    REQUIRE(decoded.bytes_per_pixel == 4);
+    return std::string(reinterpret_cast<const char *>(decoded.buf.data()), decoded.buf.size());
+}
+
+void check_rgba_pixels(const std::string &actual, const std::array<unsigned char, 16> &expected)
+{
+    REQUIRE(actual.size() == expected.size());
+    CHECK(std::equal(actual.begin(), actual.end(), expected.begin(), [](char value, unsigned char wanted) {
+        return static_cast<unsigned char>(value) == wanted;
+    }));
+}
+
+TEST_CASE("BBS project preserves plate scheduling metadata", "[3mf][Bbs3mfMetadata][PlateMetadata]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.plate_name = "schedule metadata";
+        plate.locked = true;
+        plate.config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(btPEI));
+        plate.config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByObject));
+        plate.config.set_key_value("first_layer_print_sequence", new ConfigOptionInts({2, 1}));
+        plate.config.set_key_value("other_layers_print_sequence", new ConfigOptionInts({1, 2}));
+        plate.config.set_key_value("other_layers_print_sequence_nums", new ConfigOptionInt(3));
+        plate.config.set_key_value("spiral_mode", new ConfigOptionBool(true));
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    CHECK(plate.plate_name == "schedule metadata");
+    CHECK(plate.locked);
+    REQUIRE(plate.config.option<ConfigOptionEnum<BedType>>("curr_bed_type") != nullptr);
+    CHECK(plate.config.opt_enum<BedType>("curr_bed_type") == btPEI);
+    CHECK(plate.config.opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject);
+    REQUIRE(plate.config.option<ConfigOptionInts>("first_layer_print_sequence") != nullptr);
+    REQUIRE(plate.config.option<ConfigOptionInts>("other_layers_print_sequence") != nullptr);
+    CHECK(plate.config.opt<ConfigOptionInts>("first_layer_print_sequence")->values == std::vector<int>{2, 1});
+    CHECK(plate.config.opt<ConfigOptionInts>("other_layers_print_sequence")->values == std::vector<int>{1, 2});
+    CHECK(plate.config.opt_int("other_layers_print_sequence_nums") == 3);
+    CHECK(plate.config.opt_bool("spiral_mode"));
+}
+
+TEST_CASE("BBS project clamps plate map values at import", "[3mf][Bbs3mfMetadata][PlateMetadata][Maps]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+        plate.config.set_key_value("filament_map", new ConfigOptionInts({0, -4, 2}));
+        plate.config.set_key_value("filament_volume_map", new ConfigOptionInts({0, 2, 3}));
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    REQUIRE(plate.config.option<ConfigOptionInts>("filament_map") != nullptr);
+    REQUIRE(plate.config.option<ConfigOptionInts>("filament_volume_map") != nullptr);
+    CHECK(plate.filament_maps == std::vector<int>{1, 1, 2});
+    CHECK(plate.config.opt<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1, 2});
+    CHECK(plate.config.opt<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{0, 0, 0});
+}
+
+TEST_CASE("BBS project retains slice statistics and booleans", "[3mf][Bbs3mfMetadata][SliceInfo]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.is_sliced_valid = true;
+        plate.printer_model_id = "followup-printer";
+        plate.gcode_prediction = "123.4";
+        plate.gcode_weight = "45.6";
+        plate.toolpath_outside = true;
+        plate.is_support_used = true;
+        plate.is_label_object_enabled = true;
+        plate.limit_filament_maps = {1, 4};
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    CHECK(plate.printer_model_id == "followup-printer");
+    CHECK(plate.gcode_prediction == "123.4");
+    CHECK(plate.gcode_weight == "45.6");
+    CHECK(plate.toolpath_outside);
+    CHECK(plate.is_support_used);
+    CHECK(plate.is_label_object_enabled);
+    CHECK(plate.limit_filament_maps.empty()); // limit maps are write-only model metadata today
+}
+
+TEST_CASE("BBS project writes physical and mixed filament records", "[3mf][Bbs3mfMetadata][SliceInfo][Filament]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.is_sliced_valid = true;
+        FilamentInfo physical;
+        physical.id = 1;
+        physical.type = "PLA";
+        physical.color = "#123456";
+        physical.filament_id = "tray-7";
+        physical.used_m = 2.5f;
+        physical.used_g = 6.25f;
+        physical.used_for_object = true;
+        physical.used_for_support = true;
+        physical.group_id = {1, 2};
+        physical.nozzle_diameter = .6;
+        physical.nozzle_volume_type = "High Flow";
+        plate.slice_filaments_info.push_back(physical);
+        plate.mixed_filaments_info.push_back({9, "Mix", "#aabbcc", "2,3"});
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    REQUIRE(plate.slice_filaments_info.size() == 1);
+    const FilamentInfo &physical = plate.slice_filaments_info.front();
+    CHECK(physical.id == 1);
+    CHECK(physical.type == "PLA");
+    CHECK(physical.color == "#123456");
+    CHECK(physical.filament_id == "tray-7");
+    CHECK_THAT(double(physical.used_m), WithinAbs(2.5, 1e-5));
+    CHECK_THAT(double(physical.used_g), WithinAbs(6.25, 1e-5));
+    CHECK(physical.used_for_object);
+    CHECK(physical.used_for_support);
+    CHECK(physical.group_id == std::vector<int>{1, 2});
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
+    CHECK(slice_info.find("<mixed_filament") != std::string::npos);
+    CHECK(slice_info.find("id=\"9\"") != std::string::npos);
+    CHECK(slice_info.find("type=\"Mix\"") != std::string::npos);
+    CHECK(slice_info.find("color=\"#aabbcc\"") != std::string::npos);
+    CHECK(slice_info.find("components=\"2,3\"") != std::string::npos);
+}
+
+TEST_CASE("BBS project restores warning messages without treating them as config", "[3mf][Bbs3mfMetadata][SliceInfo][Warnings]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.is_sliced_valid = true;
+        GCodeProcessorResult::SliceWarning warning;
+        warning.msg = "followup warning";
+        warning.level = 3;
+        plate.warnings.push_back(warning);
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    REQUIRE(loaded.plates.front()->warnings.size() == 1);
+    CHECK(loaded.plates.front()->warnings.front().msg == "followup warning");
+    CHECK(loaded.plates.front()->warnings.front().level == 3);
+}
+
+TEST_CASE("BBS project stores and extracts a sliced G-code payload", "[3mf][Bbs3mfMetadata][Gcode]")
+{
+    ScopedTemporaryFile gcode(".gcode");
+    {
+        std::ofstream output(gcode.string(), std::ios::binary);
+        output << "; follow-up gcode\nG1 X1.25 Y2.5 E0.4\n";
+    }
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.gcode_file = gcode.string();
+        plate.is_sliced_valid = true;
+    }, SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithGcode | SaveStrategy::WithSliceInfo);
+
+    std::string archived;
+    REQUIRE(read_3mf_entry(archive.string(), archived, "Metadata/plate_1.gcode"));
+    CHECK(archived == "; follow-up gcode\nG1 X1.25 Y2.5 E0.4\n");
+    std::string digest;
+    CHECK(read_3mf_entry(archive.string(), digest, "Metadata/plate_1.gcode.md5"));
+    CHECK(digest == "0891BA245E812E8989E6EA1927F84013");
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK(!loaded.plates.front()->gcode_file.empty());
+    const std::filesystem::path extracted = std::filesystem::path(loaded.backup->string()) / "Metadata/plate_1.gcode";
+    REQUIRE(std::filesystem::exists(extracted));
+    CHECK(read_file(extracted.string()) == "; follow-up gcode\nG1 X1.25 Y2.5 E0.4\n");
+}
+
+TEST_CASE("BBS project omits an unavailable G-code source", "[3mf][Bbs3mfMetadata][Gcode][Errors]")
+{
+    ScopedTemporaryDir missing_source("orca_missing_gcode_source");
+    const std::string missing_path = (std::filesystem::path(missing_source.string()) / "absent.gcode").string();
+    REQUIRE_FALSE(std::filesystem::exists(missing_path));
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.gcode_file = missing_path;
+        plate.is_sliced_valid = true;
+    }, SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithGcode | SaveStrategy::WithSliceInfo);
+    std::string payload;
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/plate_1.gcode"));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK_FALSE(std::filesystem::exists(loaded.plates.front()->gcode_file));
+}
+
+TEST_CASE("BBS project SkipStatic omits static payloads while retaining model geometry", "[3mf][Bbs3mfMetadata][Strategy]")
+{
+    ThumbnailData image;
+    image.set(3, 2);
+    std::fill(image.pixels.begin(), image.pixels.end(), 0x22);
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &params, ScopedTemporaryDir &) {
+        plate.plate_thumbnail = image;
+        params.thumbnail_data = {&image};
+    }, SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipStatic);
+    std::string payload;
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/plate_1.png"));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.mesh().facets_count() == 12);
+}
+
+TEST_CASE("BBS project exports and decodes all four plate thumbnail channels", "[3mf][Bbs3mfMetadata][Thumbnail]")
+{
+    ThumbnailData plate_image, no_light, top, pick;
+    plate_image.set(2, 2);
+    no_light.set(2, 2);
+    top.set(2, 2);
+    pick.set(2, 2);
+    const std::array<unsigned char, 16> plate_pixels = {0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0xff,
+                                                        0x70, 0x80, 0x90, 0xff, 0xa0, 0xb0, 0xc0, 0xff};
+    const std::array<unsigned char, 16> no_light_pixels = {0x01, 0x12, 0x23, 0xff, 0x34, 0x45, 0x56, 0xff,
+                                                           0x67, 0x78, 0x89, 0xff, 0x9a, 0xab, 0xbc, 0xff};
+    const std::array<unsigned char, 16> top_pixels = {0xd0, 0xc0, 0xb0, 0xff, 0xa0, 0x90, 0x80, 0xff,
+                                                      0x70, 0x60, 0x50, 0xff, 0x40, 0x30, 0x20, 0xff};
+    const std::array<unsigned char, 16> pick_pixels = {0x0a, 0x1b, 0x2c, 0xff, 0x3d, 0x4e, 0x5f, 0xff,
+                                                       0x6a, 0x7b, 0x8c, 0xff, 0x9d, 0xae, 0xbf, 0xff};
+    std::copy(plate_pixels.begin(), plate_pixels.end(), plate_image.pixels.begin());
+    std::copy(no_light_pixels.begin(), no_light_pixels.end(), no_light.pixels.begin());
+    std::copy(top_pixels.begin(), top_pixels.end(), top.pixels.begin());
+    std::copy(pick_pixels.begin(), pick_pixels.end(), pick.pixels.begin());
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &params, ScopedTemporaryDir &) {
+        plate.plate_thumbnail = plate_image;
+        params.thumbnail_data = {&plate_image};
+        params.no_light_thumbnail_data = {&no_light};
+        params.top_thumbnail_data = {&top};
+        params.pick_thumbnail_data = {&pick};
+        plate.no_light_thumbnail_file = "unused-no-light.png";
+        plate.top_file = "unused-top.png";
+        plate.pick_file = "unused-pick.png";
+    });
+    const std::string p = png_entry(archive.string(), "Metadata/plate_1.png", 2, 2);
+    const std::string n = png_entry(archive.string(), "Metadata/plate_no_light_1.png", 2, 2);
+    const std::string t = png_entry(archive.string(), "Metadata/top_1.png", 2, 2);
+    const std::string k = png_entry(archive.string(), "Metadata/pick_1.png", 2, 2);
+    check_rgba_pixels(p, plate_pixels);
+    check_rgba_pixels(n, no_light_pixels);
+    check_rgba_pixels(t, top_pixels);
+    check_rgba_pixels(k, pick_pixels);
+}
+
+TEST_CASE("BBS project archives sidecar thumbnail files under declared names", "[3mf][Bbs3mfMetadata][Thumbnail][Sidecar]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &backup) {
+        const std::array<std::string, 4> bytes = {"sidecar-plate", "sidecar-no-light", "sidecar-top", "sidecar-pick"};
+        const std::array<std::string, 4> names = {"plate.png", "no-light.png", "top.png", "pick.png"};
+        for (size_t i = 0; i < names.size(); ++i) {
+            std::ofstream output(std::filesystem::path(backup.string()) / names[i], std::ios::binary);
+            output << bytes[i];
+        }
+        plate.thumbnail_file = (std::filesystem::path(backup.string()) / names[0]).string();
+        plate.no_light_thumbnail_file = (std::filesystem::path(backup.string()) / names[1]).string();
+        plate.top_file = (std::filesystem::path(backup.string()) / names[2]).string();
+        plate.pick_file = (std::filesystem::path(backup.string()) / names[3]).string();
+    });
+    std::string payload;
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Metadata/plate_1.png"));
+    CHECK(payload == "sidecar-plate");
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Metadata/plate_no_light_1.png"));
+    CHECK(payload == "sidecar-no-light");
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Metadata/top_1.png"));
+    CHECK(payload == "sidecar-top");
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Metadata/pick_1.png"));
+    CHECK(payload == "sidecar-pick");
+}
+
+TEST_CASE("BBS project persists plate bounding-box JSON", "[3mf][Bbs3mfMetadata][BBox]")
+{
+    PlateBBoxData bbox;
+    bbox.bbox_all = {1, 2, 31, 42};
+    bbox.filament_ids = {0, 2};
+    bbox.filament_colors = {"#111111", "#222222"};
+    bbox.bed_type = "Textured PEI Plate";
+    bbox.first_layer_time = 8.5f;
+    bbox.bbox_objs.push_back({7, {1, 2, 31, 42}, 120.f, .2f, "bbox-cube"});
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &params, ScopedTemporaryDir &) {
+        plate.pattern_bbox_file = "bbox-source.json";
+        params.id_bboxes = {&bbox};
+    });
+    std::string json_text;
+    REQUIRE(read_3mf_entry(archive.string(), json_text, "Metadata/plate_1.json"));
+    const nlohmann::json json = nlohmann::json::parse(json_text);
+    CHECK(json.at("bbox_all").get<std::vector<coordf_t>>() == bbox.bbox_all);
+    CHECK(json.at("filament_ids").get<std::vector<int>>() == bbox.filament_ids);
+    CHECK(json.at("filament_colors").get<std::vector<std::string>>() == bbox.filament_colors);
+    CHECK(json.at("bed_type").get<std::string>() == bbox.bed_type);
+    CHECK_THAT(json.at("first_layer_time").get<float>(), WithinAbs(bbox.first_layer_time, 1e-5));
+    CHECK(json.at("is_seq_print").get<bool>() == bbox.is_seq_print);
+    CHECK(json.at("first_extruder").get<int>() == bbox.first_extruder);
+    CHECK_THAT(json.at("nozzle_diameter").get<float>(), WithinAbs(bbox.nozzle_diameter, 1e-5));
+    CHECK(json.at("version").get<int>() == bbox.version);
+    REQUIRE(json.at("bbox_objects").size() == 1);
+    const nlohmann::json &object = json.at("bbox_objects").at(0);
+    CHECK(object.at("id").get<int>() == 7);
+    CHECK(object.at("bbox").get<std::vector<coordf_t>>() == bbox.bbox_objs.front().bbox);
+    CHECK_THAT(object.at("area").get<float>(), WithinAbs(120.f, 1e-5));
+    CHECK_THAT(object.at("layer_height").get<float>(), WithinAbs(.2f, 1e-5));
+    CHECK(object.at("name").get<std::string>() == "bbox-cube");
+}
+
+TEST_CASE("BBS project loads embedded filament and printer presets", "[3mf][Bbs3mfMetadata][EmbeddedPreset]")
+{
+    ScopedTemporaryFile filament_file(".json");
+    DynamicPrintConfig filament;
+    filament.set_key_value("filament_type", new ConfigOptionStrings({"PETG"}));
+    filament.set_key_value("filament_diameter", new ConfigOptionFloats({1.75}));
+    // The importer uses this field as the embedded preset's canonical name.
+    filament.set_key_value("filament_settings_id", new ConfigOptionStrings({"Embedded filament contract"}));
+    filament.save_to_json(filament_file.string(), "Embedded filament contract", "filament", "0.0.0");
+    ScopedTemporaryFile printer_file(".json");
+    DynamicPrintConfig printer;
+    printer.set_key_value("printer_model", new ConfigOptionString("Contract Printer"));
+    // The importer uses this field as the embedded preset's canonical name.
+    printer.set_key_value("printer_settings_id", new ConfigOptionString("Embedded printer contract"));
+    printer.save_to_json(printer_file.string(), "Embedded printer contract", "printer", "0.0.0");
+
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &config, PlateData &, StoreParams &, ScopedTemporaryDir &) {
+        config.set_key_value("filament_settings_id", new ConfigOptionStrings({"Embedded filament contract"}));
+        config.set_key_value("printer_settings_id", new ConfigOptionString("Embedded printer contract"));
+    });
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {
+        {"Metadata/filament_settings_1.config", read_file(filament_file.string())},
+        {"Metadata/machine_settings_1.config", read_file(printer_file.string())}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    const auto filament_preset = std::find_if(loaded.presets.begin(), loaded.presets.end(), [](const Preset *p) {
+        return p != nullptr && p->type == Preset::TYPE_FILAMENT;
+    });
+    const auto printer_preset = std::find_if(loaded.presets.begin(), loaded.presets.end(), [](const Preset *p) {
+        return p != nullptr && p->type == Preset::TYPE_PRINTER;
+    });
+    REQUIRE(filament_preset != loaded.presets.end());
+    REQUIRE(printer_preset != loaded.presets.end());
+    CHECK((*filament_preset)->name == "Embedded filament contract");
+    CHECK((*printer_preset)->name == "Embedded printer contract");
+    REQUIRE((*filament_preset)->config.option<ConfigOptionStrings>("filament_type") != nullptr);
+    CHECK((*filament_preset)->config.opt<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{"PETG"});
+    REQUIRE((*filament_preset)->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
+    REQUIRE((*filament_preset)->config.opt<ConfigOptionFloats>("filament_diameter")->values.size() == 1);
+    CHECK_THAT((*filament_preset)->config.opt<ConfigOptionFloats>("filament_diameter")->values.front(), WithinAbs(1.75, 1e-6));
+    REQUIRE((*printer_preset)->config.option<ConfigOptionString>("printer_model") != nullptr);
+    CHECK((*printer_preset)->config.opt_string("printer_model") == "Contract Printer");
+}
+
+TEST_CASE("BBS project ignores malformed filament sequence JSON without losing the model", "[3mf][Bbs3mfMetadata][Errors][Sequence]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.filament_change_sequence = {0, 1};
+        plate.nozzle_change_sequence = {1};
+    });
+    REQUIRE(replace_once(archive.string(), "Metadata/filament_sequence.json", "{", "not-json"));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK(loaded.plates.front()->filament_change_sequence.empty());
+    CHECK(loaded.plates.front()->nozzle_change_sequence.empty());
+}
+
+TEST_CASE("BBS project ignores a sequence plate with no nozzle array", "[3mf][Bbs3mfMetadata][Errors][Sequence]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.filament_change_sequence = {0, 1};
+        plate.nozzle_change_sequence = {1};
+    });
+    REQUIRE(replace_once(archive.string(), "Metadata/filament_sequence.json",
+                         "\"nozzle_sequence\":[1]", "\"nozzle_missing\":[1]"));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK(loaded.plates.front()->filament_change_sequence.empty());
+    CHECK(loaded.plates.front()->nozzle_change_sequence.empty());
+}
+
+TEST_CASE("BBS project keeps model geometry when project configuration is absent", "[3mf][Bbs3mfMetadata][Errors][Configuration]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &name, std::string &) {
+        if (name == "Metadata/project_settings.config") {
+            name = "Metadata/project_settings.removed";
+            return true;
+        }
+        return false;
+    }));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    CHECK(loaded_model.mesh().facets_count() == 12);
+    CHECK(loaded.config.empty());
+}
+
+TEST_CASE("BBS project skips an invalid layer range object id", "[3mf][Bbs3mfMetadata][Errors][LayerRanges]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    const std::string invalid = "<?xml version=\"1.0\"?><objects><object id=\"0\"><range min_z=\"0\" max_z=\"1\"><option opt_key=\"layer_height\">0.25</option></range></object></objects>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/layer_config_ranges.xml", invalid}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.objects.front()->layer_config_ranges.empty());
+}
+
+TEST_CASE("BBS project keeps the first duplicate layer range object", "[3mf][Bbs3mfMetadata][Errors][LayerRanges]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    const std::string duplicate = "<?xml version=\"1.0\"?><objects>"
+        "<object id=\"1\"><range min_z=\"0\" max_z=\"1\"><option opt_key=\"layer_height\">0.25</option></range></object>"
+        "<object id=\"1\"><range min_z=\"0\" max_z=\"1\"><option opt_key=\"layer_height\">0.35</option></range></object>"
+        "</objects>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/layer_config_ranges.xml", duplicate}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->layer_config_ranges.size() == 1);
+    CHECK_THAT(loaded_model.objects.front()->layer_config_ranges.begin()->second.get().opt_float("layer_height"), WithinAbs(.25, 1e-6));
+}
+
+TEST_CASE("BBS project ignores malformed brim point records", "[3mf][Bbs3mfMetadata][Errors][Brim]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    const std::string malformed = "version=0\nobject_id=1\nnot-a-coordinate\n";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/brim_ear_points.txt", malformed}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.objects.front()->brim_points.empty());
+}
+
+TEST_CASE("BBS project preserves each custom-gcode mode and typed item", "[3mf][Bbs3mfMetadata][CustomGcode]")
+{
+    const std::string mode = GENERATE("SingleExtruder", "MultiAsSingle", "MultiExtruder");
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {
+    });
+    const std::string xml = "<?xml version=\"1.0\"?><custom_gcodes_per_layer><plate><plate_info id=\"1\"/>"
+        "<layer top_z=\"0.6\" type=\"1\" extruder=\"2\" color=\"#c0ffee\" extra=\"pause-note\" gcode=\"M601\"/>"
+        "<mode value=\"" + mode + "\"/></plate></custom_gcodes_per_layer>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/custom_gcode_per_layer.xml", xml}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    const auto &info = loaded_model.plates_custom_gcodes.at(0);
+    REQUIRE(info.gcodes.size() == 1);
+    CHECK(info.gcodes.front().type == CustomGCode::PausePrint);
+    CHECK(info.gcodes.front().extruder == 2);
+    CHECK(info.gcodes.front().extra == "pause-note");
+    const auto expected = mode == "SingleExtruder" ? CustomGCode::Mode::SingleExtruder :
+        mode == "MultiAsSingle" ? CustomGCode::Mode::MultiAsSingle : CustomGCode::Mode::MultiExtruder;
+    CHECK(info.mode == expected);
+}
+
+TEST_CASE("BBS project uses a safe default for an unknown custom-gcode mode", "[3mf][Bbs3mfMetadata][CustomGcode][Errors]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    const std::string xml = "<custom_gcodes_per_layer><plate><plate_info id=\"1\"/>"
+        "<layer top_z=\"0.6\" type=\"3\" extruder=\"1\" color=\"#000000\" extra=\"tool_change\" gcode=\"tool_change\"/>"
+        "<mode value=\"UnknownMode\"/></plate></custom_gcodes_per_layer>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/custom_gcode_per_layer.xml", xml}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    CHECK(loaded_model.plates_custom_gcodes.at(0).mode == CustomGCode::Mode::MultiExtruder);
+}
+
+TEST_CASE("BBS project clears the plate pointer collection", "[3mf][Bbs3mfMetadata][Ownership]")
+{
+    std::set<std::pair<int, int>> objects{{0, 0}};
+    PlateDataPtrs plates{new PlateData(0, objects, false), new PlateData(1, objects, true)};
+    REQUIRE(plates.front() != nullptr);
+    REQUIRE(plates.back() != nullptr);
+    release_PlateData_list(plates);
+    CHECK(plates.empty());
+}
+
+TEST_CASE("BBS project published flag accepts exactly the producer marker", "[3mf][Bbs3mfMetadata][Published]")
+{
+    CHECK(is_published_3mf_flag("1"));
+    CHECK_FALSE(is_published_3mf_flag("0"));
+    CHECK_FALSE(is_published_3mf_flag("true"));
+    CHECK_FALSE(is_published_3mf_flag(" 1"));
+    CHECK_FALSE(is_published_3mf_flag("1\n"));
+}
+
+} // namespace bbs_3mf_metadata_contracts
