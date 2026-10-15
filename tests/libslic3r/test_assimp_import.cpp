@@ -296,3 +296,19 @@ TEST_CASE("Assimp applies the GLB texture-coordinate convention", "[AssimpImport
         CHECK_THAT(mesh.uvs[index][1], WithinAbs((mesh.vertices[index][1] - 7.f) / 10.f, 1e-6));
     }
 }
+
+TEST_CASE("Assimp rejects an untriangulatable polygon and clears partial geometry", "[AssimpImport][AssimpEmptyTriangles]")
+{
+    ScopedTemporaryFile obj(".obj"), mtl(".mtl");
+    // A five-vertex collinear polygon reaches Assimp's triangulator, which
+    // retains positions but produces no triangles. A face-free OBJ exits
+    // earlier and cannot exercise Orca's final partial-mesh validation.
+    write_obj(obj, mtl, "v 0 0 0\nv 1 0 0\nv 2 0 0\nv 3 0 0\nv 4 0 0\nf 1 2 3 4 5\n");
+    TexturedMesh mesh;
+    std::string error;
+    CHECK_FALSE(load_assimp_textured_model(obj.string(), mesh, &error));
+    CHECK(mesh.vertices.empty());
+    CHECK(mesh.indices.empty());
+    CHECK(mesh.uvs.empty());
+    CHECK(error.find("extracted no valid triangles") != std::string::npos);
+}

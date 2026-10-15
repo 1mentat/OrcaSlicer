@@ -1034,11 +1034,13 @@ double total_extruded_mm(const GCodeProcessorResult& result)
 TEST_CASE("Custom markers create typed events and preserve per-Z metadata", "[GCodeProcessor][GCodeProcessorDeep][Metadata]")
 {
     const auto result = process_buffer(
-        "M83\nG90\nG1 X10 Y0 Z0.2 E1 F600\n"
+        "M83\nG90\nG1 X5 Y0 Z0.2 E0.5 F600\nG1 X10 E0.5\n"
         "; COLOR_CHANGE,T0,#112233\n"
+        "G1 X15 E0.5\nG1 X20 E0.5\n"
         "; PAUSE_PRINTING\n"
+        "G1 X25 E0.5\nG1 X30 E0.5\n"
         "; CUSTOM_GCODE\n"
-        "G1 X20 Y0 E1 F600\n", RunOptions{gcfMarlinFirmware, true});
+        "G1 X35 E0.5\nG1 X40 E0.5\n", RunOptions{gcfMarlinFirmware, true});
 
     const auto color = moves_of(result, EMoveType::Color_change);
     const auto pause = moves_of(result, EMoveType::Pause_Print);
@@ -1055,8 +1057,20 @@ TEST_CASE("Custom markers create typed events and preserve per-Z metadata", "[GC
     CHECK_THAT(result.custom_gcode_per_print_z[0].print_z, WithinAbs(0.2, 1e-4));
     CHECK_THAT(result.custom_gcode_per_print_z[1].print_z, WithinAbs(0.2, 1e-4));
     CHECK_THAT(result.custom_gcode_per_print_z[2].print_z, WithinAbs(0.2, 1e-4));
-    REQUIRE(result.print_statistics.modes[0].custom_gcode_times.size() >= 1);
-    CHECK(result.print_statistics.modes[0].custom_gcode_times.front().first == CustomGCode::ColorChange);
+    // Two planned moves precede each timed marker so the estimator flushes a
+    // nonempty partition. A single move would leave only the synthetic final
+    // ColorChange bucket and could hide a misclassified marker.
+    const auto &times = result.print_statistics.modes[0].custom_gcode_times;
+    REQUIRE(times.size() == 3);
+    CHECK(times[0].first == CustomGCode::ColorChange);
+    CHECK(times[1].first == CustomGCode::PausePrint);
+    CHECK(times[2].first == CustomGCode::ColorChange);
+    CHECK(times[0].second.first >= 1.f); // 10 mm at 600 mm/min, plus acceleration.
+    CHECK(times[1].second.first >= 1.f);
+    CHECK(times[2].second.first >= 2.f);
+    const double partition_sum = times[0].second.first + times[1].second.first + times[2].second.first;
+    CHECK_THAT(partition_sum, WithinAbs(result.print_statistics.modes[0].time, 1e-5));
+    CHECK_THAT(times[1].second.second, WithinAbs(times[1].second.first + times[2].second.first, 1e-5));
     REQUIRE(result.print_statistics.volumes_per_color_change.size() == 2);
     CHECK(result.print_statistics.volumes_per_color_change.front() > 0.0);
     CHECK(result.print_statistics.volumes_per_color_change.back() > 0.0);

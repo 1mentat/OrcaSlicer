@@ -275,6 +275,54 @@ class CoverageExportTests(unittest.TestCase):
         self.assertEqual(unexpected, ["/tmp/Constants.hpp"])
 
 
+class CoverageDiagnosticTests(unittest.TestCase):
+    def test_successful_export_preserves_profile_diagnostics(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "src/libslic3r/fixture.cpp"
+            source.parent.mkdir(parents=True)
+            source.write_text("int fixture() { return 1; }\n")
+            binary = root / "fixture-tests"
+            binary.touch()
+            metric = {"covered": 1, "count": 1, "percent": 100.0}
+            exported = {"data": [{"files": [{"filename": str(source), "summary": {
+                "lines": metric, "functions": metric, "branches": metric,
+            }}]}]}
+
+            def run(argv, **kwargs):
+                stdout, stderr = "", ""
+                if argv[0] == "fixture-tests":
+                    profile = kwargs["env"]["LLVM_PROFILE_FILE"].replace("%4m", "fixture")
+                    Path(profile).write_bytes(b"profile")
+                    stdout = "100% tests passed, 0 tests failed out of 1\n"
+                elif "merge" in argv:
+                    stdout = "profile merge notice\n"
+                    stderr = "profile merge diagnostic\n"
+                elif "export" in argv:
+                    stdout = json.dumps(exported)
+                    stderr = "warning: 1 functions have mismatched data\n"
+                elif "--version" in argv:
+                    stdout = "fixture LLVM\n"
+                else:
+                    self.fail(f"unexpected command {argv}")
+                return subprocess.CompletedProcess(argv, 0, stdout, stderr)
+
+            with mock.patch.object(slicer_coverage, "_coverage_provenance", return_value={}), \
+                 mock.patch.object(slicer_coverage, "_which", side_effect=lambda name, explicit: name), \
+                 mock.patch.object(slicer_coverage, "_run", side_effect=run):
+                status = slicer_coverage.main([
+                    "run", "--root", str(root), "--object", str(binary),
+                    "--test-command", "fixture-tests", "--out", "report",
+                ])
+            self.assertEqual(status, 0)
+            report = json.loads((root / "report/coverage-report.json").read_text())
+            self.assertEqual(report["export"]["stderr"], "warning: 1 functions have mismatched data\n")
+            self.assertEqual(report["merge"]["stdout"], "profile merge notice\n")
+            self.assertEqual(report["merge"]["stderr"], "profile merge diagnostic\n")
+            self.assertNotIn("stdout", report["export"])  # The large JSON export has its own file.
+
+
 class CommandTests(unittest.TestCase):
     def test_command_splitting_does_not_use_a_shell(self):
         self.assertEqual(slicer_coverage.split_command("ctest --test-dir 'build/tests'"),

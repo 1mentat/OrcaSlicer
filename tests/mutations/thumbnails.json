@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Bounded behavioral mutations; native outcomes are recorded separately.",
+  "mutants": [
+    {
+      "id": "thumbnail-zero-size-guard",
+      "path": "src/libslic3r/GCode/ThumbnailData.cpp",
+      "old": "if ((w == 0) || (h == 0))",
+      "new": "if ((w != 0) && (h != 0))",
+      "description": "Accept an invalid zero-sized thumbnail instead of preserving the empty-data invariant.",
+      "test_filter": "ThumbnailsExtended"
+    },
+    {
+      "id": "thumbnail-valid-pixel-cardinality",
+      "path": "src/libslic3r/GCode/ThumbnailData.cpp",
+      "old": "return (width != 0) && (height != 0) && ((unsigned int)pixels.size() == 4 * width * height);",
+      "new": "return (width != 0) && (height != 0);",
+      "description": "Drop the four-channel pixel-count check; the truncated-data contract must reject the mutant.",
+      "test_filter": "ThumbnailsExtended"
+    },
+    {
+      "id": "thumbnail-parser-range-boundary",
+      "path": "src/libslic3r/GCode/Thumbnails.cpp",
+      "old": "if (0 < point(0) && point(0) < 1000 && 0 < point(1) && point(1) < 1000) {",
+      "new": "if (0 <= point(0) && point(0) <= 1000 && 0 <= point(1) && point(1) <= 1000) {",
+      "description": "Admit zero and 1000-pixel dimensions, changing the parser's documented range errors.",
+      "test_filter": "ThumbnailsExtended"
+    },
+    {
+      "id": "thumbnail-parser-invalid-extension-fallback",
+      "path": "src/libslic3r/GCode/Thumbnails.cpp",
+      "old": "if (!ConfigOptionEnum<GCodeThumbnailsFormat>::from_string(ext_str, format)) {",
+      "new": "if (ConfigOptionEnum<GCodeThumbnailsFormat>::from_string(ext_str, format)) {",
+      "description": "Invert invalid-extension handling so a BMP token is treated as a valid format path.",
+      "test_filter": "ThumbnailsExtended"
+    },
+    {
+      "id": "thumbnail-qoi-row-orientation",
+      "path": "src/libslic3r/GCode/Thumbnails.cpp",
+      "old": "for (size_t y = 0; y < data.height; ++ y)\n        memcpy(rgba_pixels.data() + (data.height - y - 1) * row_size, data.pixels.data() + y * row_size, row_size);",
+      "new": "for (size_t y = 0; y < data.height; ++ y)\n        memcpy(rgba_pixels.data() + y * row_size, data.pixels.data() + y * row_size, row_size);",
+      "description": "Stop flipping QOI rows for firmware orientation; the red/blue two-row contract distinguishes the direction.",
+      "test_filter": "ThumbnailsExtended"
+    },
+    {
+      "id": "thumbnail-btt-transparent-alpha",
+      "path": "src/libslic3r/GCode/Thumbnails.cpp",
+      "old": "const uint8_t rv = ((px.a * px.r) / 255);",
+      "new": "const uint8_t rv = px.r;",
+      "description": "Ignore alpha premultiplication in BTT RGB565 conversion; the transparent-red fixture must retain black output.",
+      "test_filter": "ThumbnailsExtended"
+    }
+  ]
+}

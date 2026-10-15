@@ -1,3 +1,9 @@
+#include "libslic3r/Polyline.hpp"
+#include <regex>
+#include "libslic3r/Format/svg.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include <cmath>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include "libslic3r/libslic3r.h"
@@ -164,3 +170,258 @@ TEST_CASE("SVG handles polygon winding and primitive annotations", "[SVG][SLASVG
     CHECK(cw_text.find("fill: white") != std::string::npos);
     CHECK(cw_text.find("fill: red") == std::string::npos);
 }
+
+namespace svg_import_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+constexpr double PX_TO_MM = 25.4 / 96.0;
+
+bool write_svg(const ScopedTemporaryFile &file, const std::string &body)
+{
+    std::ofstream out(file.string(), std::ios::binary);
+    out << body;
+    return out.good();
+}
+
+const TriangleMesh &single_mesh(const Model &model)
+{
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    return model.objects.front()->volumes.front()->mesh();
+}
+
+void check_box(const TriangleMesh &mesh, double x, double y, double z, double expected_volume)
+{
+    TriangleMesh volume_probe(mesh);
+    const Vec3d size = mesh.size();
+    CHECK_THAT(size.x(), WithinAbs(x, 0.15));
+    CHECK_THAT(size.y(), WithinAbs(y, 0.15));
+    CHECK_THAT(size.z(), WithinAbs(z, 0.15));
+    CHECK(std::isfinite(volume_probe.volume()));
+    CHECK(volume_probe.volume() > 0.f);
+    CHECK_THAT(double(volume_probe.volume()),
+               WithinAbs(expected_volume, expected_volume * 0.05 + 0.2));
+}
+
+} // namespace
+
+TEST_CASE("SVG importer reports missing and malformed files", "[SvgFormat]")
+{
+    ScopedTemporaryFile missing(".svg");
+    Model model;
+    std::string message;
+    CHECK_FALSE(load_svg(missing.string().c_str(), &model, message));
+    CHECK(message.find("could not open") != std::string::npos);
+
+    ScopedTemporaryFile malformed(".svg");
+    REQUIRE(write_svg(malformed, "<svg xmlns=\"http://www.w3.org/2000/svg\"><path"));
+    model.clear_objects();
+    message.clear();
+    CHECK_FALSE(load_svg(malformed.string().c_str(), &model, message));
+    CHECK(message.find("could not parse") != std::string::npos);
+}
+
+TEST_CASE("SVG importer creates a physical rectangle", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"20mm\">"
+        "<path fill=\"#112233\" d=\"M0 0 L10 0 L10 20 L0 20 Z\"/></svg>"));
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    const TriangleMesh &mesh = single_mesh(model);
+    check_box(mesh, 10. * PX_TO_MM, 20. * PX_TO_MM, 10., 10. * 20. * PX_TO_MM * PX_TO_MM * 10.);
+    CHECK(model.objects.front()->volumes.front()->name == "part_1");
+}
+
+TEST_CASE("SVG importer preserves separate filled components", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+        "<path fill=\"red\" d=\"M0 0 L4 0 L4 5 L0 5 Z\"/>"
+        "<path fill=\"blue\" d=\"M8 0 L14 0 L14 3 L8 3 Z\"/></svg>"));
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 2);
+    CHECK(model.objects.front()->volumes[0]->name == "part_1");
+    CHECK(model.objects.front()->volumes[1]->name == "part_2");
+    check_box(model.objects.front()->volumes[0]->mesh(), 4. * PX_TO_MM, 5. * PX_TO_MM, 10.,
+              4. * 5. * PX_TO_MM * PX_TO_MM * 10.);
+    check_box(model.objects.front()->volumes[1]->mesh(), 6. * PX_TO_MM, 3. * PX_TO_MM, 10.,
+              6. * 3. * PX_TO_MM * PX_TO_MM * 10.);
+}
+
+TEST_CASE("SVG importer turns an open stroke into a solid", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+        "<path fill=\"none\" stroke=\"#000000\" stroke-width=\"2\" "
+        "d=\"M0 0 L10 0\"/></svg>"));
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    const TriangleMesh &mesh = single_mesh(model);
+    const Vec3d size = mesh.size();
+    CHECK_THAT(size.x(), WithinAbs(11. * PX_TO_MM, 0.15));
+    CHECK_THAT(size.y(), WithinAbs(1. * PX_TO_MM, 0.15));
+    CHECK_THAT(size.z(), WithinAbs(10., 0.15));
+}
+
+TEST_CASE("SVG importer evaluates cubic path geometry", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+        "<path fill=\"#40a0ff\" d=\"M0 0 C0 10 10 10 10 0 Z\"/></svg>"));
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    const TriangleMesh &mesh = single_mesh(model);
+    const Vec3d size = mesh.size();
+    CHECK_THAT(size.x(), WithinAbs(10. * PX_TO_MM, 0.15));
+    CHECK_THAT(size.y(), WithinAbs(7.5 * PX_TO_MM, 0.15));
+    CHECK_THAT(size.z(), WithinAbs(10., 0.15));
+    TriangleMesh volume_probe(mesh);
+    CHECK_THAT(double(volume_probe.volume()), WithinAbs(60. * PX_TO_MM * PX_TO_MM * 10., 2.0));
+}
+
+TEST_CASE("SVG importer keeps an inner contour as a hole", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+        "<path fill=\"#bbbbbb\" d=\"M0 0 L20 0 L20 20 L0 20 Z "
+        "M5 5 L5 15 L15 15 L15 5 Z\"/></svg>"));
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    const TriangleMesh &mesh = single_mesh(model);
+    check_box(mesh, 20. * PX_TO_MM, 20. * PX_TO_MM, 10.,
+              (20. * 20. - 10. * 10.) * PX_TO_MM * PX_TO_MM * 10.);
+    TriangleMesh volume_probe(mesh);
+    const double bounding_volume = mesh.size().x() * mesh.size().y() * mesh.size().z();
+    CHECK(volume_probe.volume() < 0.85 * bounding_volume);
+    CHECK(volume_probe.volume() > 0.65 * bounding_volume);
+}
+
+TEST_CASE("SVG importer accepts gradient-backed shapes", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs>"
+        "<linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/>"
+        "<stop offset=\"1\" stop-color=\"blue\"/></linearGradient></defs>"
+        "<path fill=\"url(#g)\" d=\"M0 0 L6 0 L6 7 L0 7\"/></svg>"));
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    check_box(single_mesh(model), 6. * PX_TO_MM, 7. * PX_TO_MM, 10.,
+              6. * 7. * PX_TO_MM * PX_TO_MM * 10.);
+}
+
+TEST_CASE("SVG importer handles a self-intersecting contour", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+        "<path fill=\"#ffffff\" d=\"M0 0 L10 10 L0 10 L10 0 Z\"/></svg>"));
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    REQUIRE(model.objects.size() == 1);
+    CHECK(model.objects.front()->volumes.size() == 1);
+    const TriangleMesh &mesh = model.objects.front()->volumes.front()->mesh();
+    CHECK(mesh.facets_count() > 0);
+    TriangleMesh volume_probe(mesh);
+    CHECK(std::isfinite(volume_probe.volume()));
+}
+
+TEST_CASE("SVG importer rejects an SVG with no drawable shapes", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file, "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"));
+    Model model;
+    std::string message;
+    CHECK_FALSE(load_svg(file.string().c_str(), &model, message));
+    CHECK(message.find("could not parse") != std::string::npos);
+}
+
+TEST_CASE("SVG importer accepts a path with a relative command mix", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+        "<path fill=\"#00cc88\" d=\"m2 3 h8 v4 h-8 z\"/></svg>"));
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    check_box(single_mesh(model), 8. * PX_TO_MM, 4. * PX_TO_MM, 10.,
+              8. * 4. * PX_TO_MM * PX_TO_MM * 10.);
+}
+
+TEST_CASE("SVG importer keeps distinct element names for styled paths", "[SvgFormat]")
+{
+    ScopedTemporaryFile file(".svg");
+    REQUIRE(write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+        "<g><path fill=\"red\" d=\"M0 0 L2 0 L2 2 L0 2 Z\"/></g>"
+        "<g><path fill=\"blue\" d=\"M4 0 L7 0 L7 1 L4 1 Z\"/></g></svg>"));
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 2);
+    CHECK(model.objects.front()->volumes[0]->name != model.objects.front()->volumes[1]->name);
+    CHECK(model.objects.front()->volumes[0]->mesh().facets_count() > 0);
+    CHECK(model.objects.front()->volumes[1]->mesh().facets_count() > 0);
+}
+
+} // namespace svg_import_contracts
+
+namespace svg_stroke_contracts {
+using namespace Slic3r;
+
+TEST_CASE("SVG filled paths suppress outlines while open paths retain visible stroke widths", "[SVG][SVGStrokeWidth]")
+{
+    ScopedTemporaryFile output(".svg");
+    const Polygon polygon({Point(scaled(1.), scaled(1.)), Point(scaled(5.), scaled(1.)),
+                           Point(scaled(5.), scaled(5.)), Point(scaled(1.), scaled(5.))});
+    {
+        const BoundingBox bounds(Point(0, 0), Point(scaled(10.), scaled(10.)));
+        SVG svg(output.string(), bounds, scaled(1.), false);
+        svg.draw(Polygons{polygon}, "red");
+        svg.draw_outline(polygon, "blue", scaled(.3));
+        svg.draw(Polyline({Point(scaled(2.), scaled(2.)), Point(scaled(6.), scaled(2.))}), "green");
+        svg.Close();
+    }
+    std::ifstream input(output.string());
+    REQUIRE(input.good());
+    const std::string text{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    const std::regex path_style(R"svg(<path\b[^>]*style="([^"]*)")svg");
+    const std::regex stroke_width(R"svg((?:^|;)\s*stroke-width:\s*([0-9.]+))svg");
+    std::vector<std::string> styles;
+    for (std::sregex_iterator it(text.begin(), text.end(), path_style), end; it != end; ++it)
+        styles.push_back((*it)[1].str());
+    REQUIRE(styles.size() == 3);
+    const std::vector<double> expected_widths{0., 3., 2.}; // SVG coordinates use 10 units per mm.
+    for (size_t i = 0; i < styles.size(); ++i) {
+        std::smatch match;
+        REQUIRE(std::regex_search(styles[i], match, stroke_width));
+        CHECK_THAT(std::stod(match[1].str()), Catch::Matchers::WithinAbs(expected_widths[i], 1e-6));
+    }
+    CHECK(styles[0].find("fill: red") != std::string::npos);
+    CHECK(styles[1].find("fill: none") != std::string::npos);
+    CHECK(styles[1].find("stroke: blue") != std::string::npos);
+    CHECK(styles[2].find("fill: none") != std::string::npos);
+    CHECK(styles[2].find("stroke: green") != std::string::npos);
+}
+
+} // namespace svg_stroke_contracts

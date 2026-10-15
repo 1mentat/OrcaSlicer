@@ -826,7 +826,8 @@ def run_coverage(args: argparse.Namespace) -> int:
     except CoverageError as exc:
         _write_report(out / "coverage-report.json", {
             "status": "invalid_export", "error": str(exc), "run": run_record,
-            "export": {"argv": export_argv, "returncode": export.returncode},
+            "export": {"argv": export_argv, "returncode": export.returncode,
+                       "stderr": export.stderr},
         }, provenance)
         raise
     compiler_evidence: dict[str, Any] | None = None
@@ -913,8 +914,10 @@ def run_coverage(args: argparse.Namespace) -> int:
         "integrity_failures": integrity_failures,
         "compiler_evidence": compiler_evidence,
         "run": run_record,
-        "merge": {"argv": merge_argv, "returncode": merge.returncode},
-        "export": {"argv": export_argv, "returncode": export.returncode},
+        "merge": {"argv": merge_argv, "returncode": merge.returncode,
+                  "stdout": merge.stdout, "stderr": merge.stderr},
+        "export": {"argv": export_argv, "returncode": export.returncode,
+                   "stderr": export.stderr},
         "tool_versions": {
             "llvm-cov": _run([llvm_cov, "--version"]).stdout.strip(),
             "llvm-profdata": _run([llvm_profdata, "--version"]).stdout.strip(),

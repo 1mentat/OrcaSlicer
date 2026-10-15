@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "Bounded behavioral mutations; native outcomes are recorded separately.",
+  "mutants": [
+    {
+      "id": "generic-3mf-unknown-unit-factor",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "return 1.0f;",
+      "new": "return 0.001f;",
+      "description": "Treat an unknown generic 3MF unit as micron instead of the specification's millimeter default.",
+      "test_filter": "3MFArchiveVariants"
+    },
+    {
+      "id": "generic-3mf-printable-attribute-ignored",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "int printable = get_attribute_value_bool(attributes, num_attributes, PRINTABLE_ATTR);",
+      "new": "int printable = 1;",
+      "description": "Ignore a generic 3MF build item's printable attribute.",
+      "test_filter": "3MFArchiveVariants"
+    },
+    {
+      "id": "generic-3mf-future-version-accepted",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "if (m_check_version && (m_version > VERSION_3MF_COMPATIBLE)) {",
+      "new": "if (false) {",
+      "description": "Stop rejecting a generic 3MF file version newer than the supported compatibility version.",
+      "test_filter": "3MFArchiveVariants"
+    },
+    {
+      "id": "generic-3mf-future-painting-version-accepted",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "check_painting_version(m_fdm_supports_painting_version, FDM_SUPPORTS_PAINTING_VERSION,",
+      "new": "check_painting_version(m_fdm_supports_painting_version, 99,",
+      "description": "Accept a future FDM-support painting metadata version instead of enforcing the compatibility limit.",
+      "test_filter": "3MFArchiveVariants"
+    },
+    {
+      "id": "bbs-3mf-auxiliary-strategy-ignored",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (m_load_aux && !m_load_restore)",
+      "new": "if (!m_load_restore)",
+      "description": "Extract auxiliary files even when the caller did not request the LoadAuxiliary strategy.",
+      "test_filter": "3MFArchiveVariants"
+    },
+    {
+      "id": "bbs-3mf-auxiliary-traversal-accepted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!is_path_within_root(dest_file, dir)) {",
+      "new": "if (false) {",
+      "description": "Allow an auxiliary ZIP path to escape the model-owned extraction root.",
+      "test_filter": "3MFArchiveVariants"
+    },
+    {
+      "id": "bbs-3mf-legacy-m600-reclassified",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "type = gcode == \"M600\" ? CustomGCode::ColorChange :",
+      "new": "type = gcode == \"M600\" ? CustomGCode::PausePrint :",
+      "description": "Map the legacy M600 record to PausePrint instead of the documented ColorChange type.",
+      "test_filter": "3MFArchiveVariants"
+    },
+    {
+      "id": "bbs-3mf-filament-sequence-index-not-normalized",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "filament_sequence.push_back(filament_id > 0 ? filament_id - 1 : 0);",
+      "new": "filament_sequence.push_back(filament_id);",
+      "description": "Fail to convert the one-based serialized filament sequence to the zero-based PlateData representation.",
+      "test_filter": "3MFArchiveVariants"
+    },
+    {
+      "id": "bbs-3mf-project-config-not-loaded",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!dont_load_config && boost::algorithm::iequals(name, BBS_PROJECT_CONFIG_FILE)) {",
+      "new": "if (false) {",
+      "description": "Skip the project_settings.config entry even for the normal LoadConfig strategy.",
+      "test_filter": "3MFArchiveVariants"
+    },
+    {
+      "id": "generic-3mf-thumbnail-not-added",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "res = mz_zip_writer_add_mem(&archive, THUMBNAIL_FILE.c_str(), (const void*)png_data, png_size, MZ_DEFAULT_COMPRESSION);",
+      "new": "res = false;",
+      "description": "Drop the successfully encoded generic thumbnail instead of adding it to the archive.",
+      "test_filter": "3MFArchiveVariants"
+    }
+  ]
+}

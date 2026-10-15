@@ -38,7 +38,7 @@
       "id": "preset-import-overwrite-decision",
       "path": "src/libslic3r/PresetBundle.cpp",
       "old": "if (overwrite == 0 || overwrite == 2) {\n            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << \" Preset already present, not loading: \" << preset_name;\n            return false;\n        }",
-      "new": "if (overwrite == 0 && overwrite == 2) {\n            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << \" Preset already present, not loading: \" << preset_name;\n            return false;\n        }",
+      "new": "if (overwrite == 1 || overwrite == 3) {\n            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << \" Preset already present, not loading: \" << preset_name;\n            return false;\n        }",
       "description": "Break the no/skip overwrite decision; re-importing with a rejecting callback should preserve the existing file.",
       "test_filter": "PresetBundleWorkflowsExtended"
     },

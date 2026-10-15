@@ -71,8 +71,8 @@
       "path": "src/libslic3r/SVG.cpp",
       "old": "if (! fill)",
       "new": "if (fill)",
-      "description": "Invert path fill/stroke mode; polygon winding output should distinguish filled paths from outlines.",
-      "test_filter": "SLASVGFormatExtended"
+      "description": "Invert outline-width handling; filled paths must suppress strokes while explicit and default outlines remain visible.",
+      "test_filter": "SVGStrokeWidth"
     },
     {
       "id": "svg-polygon-winding-color",

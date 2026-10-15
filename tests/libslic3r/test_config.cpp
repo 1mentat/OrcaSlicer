@@ -1,3 +1,4 @@
+#include <string>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -1967,3 +1968,322 @@ TEST_CASE("Core FFF numeric validation rejects values below their semantic floor
         }
     }
 }
+
+namespace print_config_behavior_contracts {
+using namespace Slic3r;
+
+namespace {
+
+bool has_error(const std::map<std::string, std::string> &errors, const char *key)
+{
+    return errors.find(key) != errors.end();
+}
+
+void require_all_false(const ConfigOptionBools *option)
+{
+    REQUIRE(option != nullptr);
+    REQUIRE(option->values.size() == 2);
+    CHECK(std::all_of(option->values.begin(), option->values.end(), [](unsigned char value) { return value == 0; }));
+}
+
+DynamicPrintConfig complete_config()
+{
+    DynamicPrintConfig config;
+    config.apply(FullPrintConfig::defaults(), false);
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contract", "[PrintConfigBehavior][Config]")
+{
+    struct Migration {
+        const char *old_key;
+        const char *old_value;
+        const char *new_key;
+        const char *new_value;
+    };
+    const Migration migrations[] = {
+        {"enable_wipe_tower", "1", "enable_prime_tower", "1"},
+        {"wipe_tower_width", "42", "prime_tower_width", "42"},
+        {"bridge_fan_speed", "77", "overhang_fan_speed", "77"},
+        {"support_material_angle", "55", "support_angle", "55"},
+        {"support_material_enforce_layers", "3", "enforce_support_layers", "3"},
+        {"top_one_wall_type", "outer", "only_one_wall_top", "1"},
+        {"sparse_infill_anchor", "35", "infill_anchor", "35"},
+        {"chamber_temperatures", "60,65", "chamber_temperature", "60,65"},
+        {"thumbnail_size", "96x96", "thumbnails", "96x96"},
+        {"counterbole_hole_bridging", "bridges", "counterbore_hole_bridging", "bridges"},
+    };
+
+    for (const Migration &migration : migrations) {
+        DYNAMIC_SECTION(migration.old_key << " -> " << migration.new_key) {
+            t_config_option_key key = migration.old_key;
+            std::string value       = migration.old_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == migration.new_key);
+            CHECK(value == migration.new_value);
+        }
+    }
+}
+
+TEST_CASE("PrintConfig legacy enum spellings become current canonical values", "[PrintConfigBehavior][Config]")
+{
+    struct Conversion {
+        const char *key;
+        const char *old_value;
+        const char *new_value;
+    };
+    const Conversion conversions[] = {
+        {"support_type", "normal", "normal(manual)"},
+        {"support_type", "tree", "tree(manual)"},
+        {"support_type", "hybrid(auto)", "tree(auto)"},
+        {"support_base_pattern", "none", "hollow"},
+        {"sparse_infill_pattern", "zig-zag", "rectilinear"},
+        {"top_surface_pattern", "zig-zag", "rectilinear"},
+        {"filament_map_mode", "Auto", "Auto For Flush"},
+        {"extruder_type", "DirectDrive", "Direct Drive"},
+        {"enable_power_loss_recovery", "true", "enable"},
+        {"ensure_vertical_shell_thickness", "0", "ensure_moderate"},
+        {"wall_direction", "auto", "ccw"},
+    };
+
+    for (const Conversion &conversion : conversions) {
+        DYNAMIC_SECTION(conversion.key << " = " << conversion.old_value) {
+            t_config_option_key key = conversion.key;
+            std::string value       = conversion.old_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == conversion.key);
+            CHECK(value == conversion.new_value);
+        }
+    }
+
+    t_config_option_key key = "rotate_solid_infill_direction";
+    std::string value       = "1";
+    PrintConfigDef::handle_legacy(key, value);
+    CHECK(key == "solid_infill_rotate_template");
+    CHECK(value == "0,90");
+}
+
+TEST_CASE("PrintConfig legacy values that cannot be represented are discarded", "[PrintConfigBehavior][Config]")
+{
+    const std::pair<const char *, const char *> obsolete[] = {
+        {"initial_layer_speed", "50%"},
+        {"outer_wall_speed", "80%"},
+        {"support_object_xy_distance", "25%"},
+        {"scale", "1.2"},
+        {"bed_size", "220,220"},
+        {"key_from_a_future_release", "1"},
+    };
+    for (const auto &[old_key, old_value] : obsolete) {
+        DYNAMIC_SECTION(old_key) {
+            t_config_option_key key = old_key;
+            std::string value       = old_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key.empty());
+        }
+    }
+}
+
+TEST_CASE("Legacy SLA vector corrections are expanded into axis options", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig config;
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.1, 1.2}));
+    config.set_key_value("material_correction", new ConfigOptionFloats({0.9, 0.8}));
+    handle_legacy_sla(config);
+
+    CHECK_THAT(config.opt_float("relative_correction_x"), Catch::Matchers::WithinAbs(1.1, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_y"), Catch::Matchers::WithinAbs(1.1, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_z"), Catch::Matchers::WithinAbs(1.2, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_x"), Catch::Matchers::WithinAbs(0.9, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_y"), Catch::Matchers::WithinAbs(0.9, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_z"), Catch::Matchers::WithinAbs(0.8, 1e-9));
+}
+
+TEST_CASE("Legacy composite thumbnail values become canonical definitions", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig config = complete_config();
+    config.set("thumbnails", "16x16,32x32/JPG");
+    config.handle_legacy_composite();
+    CHECK(config.opt_string("thumbnails") == "16x16/PNG, 32x32/JPG");
+}
+
+TEST_CASE("Legacy composite wiping matrix detects whether custom entries exist", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig defaults;
+    defaults.set_key_value("wiping_volumes_matrix", new ConfigOptionFloats({0., 140., 140., 0.}));
+    defaults.handle_legacy_composite();
+    CHECK_FALSE(defaults.opt_bool("wiping_volumes_use_custom_matrix"));
+
+    DynamicPrintConfig custom;
+    custom.set_key_value("wiping_volumes_matrix", new ConfigOptionFloats({0., 141., 140., 0.}));
+    custom.handle_legacy_composite();
+    CHECK(custom.opt_bool("wiping_volumes_use_custom_matrix"));
+}
+
+TEST_CASE("Firmware retraction validation checks flavor and wipe independently", "[PrintConfigBehavior][Config]")
+{
+    const bool firmware = GENERATE(false, true);
+    const bool wipe = GENERATE(false, true);
+    const std::string flavor = GENERATE("teacup", "klipper");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set("use_firmware_retraction", firmware);
+    config.set_deserialize_strict("gcode_flavor", flavor);
+    config.set_deserialize_strict("wipe", wipe ? "1" : "0");
+    const bool incompatible = firmware && (wipe || flavor == "teacup");
+    CHECK(has_error(config.validate(true), "use_firmware_retraction") == incompatible);
+}
+
+TEST_CASE("PrintConfig validation reports spiral mode's incompatible process settings", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set("spiral_mode", true);
+    config.set("wall_loops", 2);
+    config.set_deserialize_strict("sparse_infill_density", "15");
+    config.set("top_shell_layers", 1);
+    config.set("enable_support", true);
+    config.set("enforce_support_layers", 1);
+    const auto errors = config.validate(true);
+    CHECK(has_error(errors, "wall_loops"));
+    CHECK(has_error(errors, "sparse_infill_density"));
+    CHECK(has_error(errors, "top_shell_layers"));
+    CHECK(has_error(errors, "enable_support"));
+    CHECK(has_error(errors, "enforce_support_layers"));
+
+    config.set("wall_loops", 1);
+    config.set_deserialize_strict("sparse_infill_density", "0");
+    config.set("top_shell_layers", 0);
+    config.set("enable_support", false);
+    config.set("enforce_support_layers", 0);
+    CHECK_FALSE(has_error(config.validate(true), "wall_loops"));
+    CHECK_FALSE(has_error(config.validate(true), "sparse_infill_density"));
+    CHECK_FALSE(has_error(config.validate(true), "top_shell_layers"));
+    CHECK_FALSE(has_error(config.validate(true), "enable_support"));
+    CHECK_FALSE(has_error(config.validate(true), "enforce_support_layers"));
+}
+
+TEST_CASE("PrintConfig validation applies nozzle-relative bridge width limits", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig too_wide = DynamicPrintConfig::full_print_config();
+    too_wide.set_deserialize_strict("nozzle_diameter", "0.4");
+    too_wide.set_deserialize_strict("bridge_line_width", "0.41");
+    CHECK(has_error(too_wide.validate(), "bridge_line_width"));
+
+    DynamicPrintConfig at_limit = DynamicPrintConfig::full_print_config();
+    at_limit.set_deserialize_strict("nozzle_diameter", "0.4");
+    at_limit.set_deserialize_strict("bridge_line_width", "0.4");
+    CHECK_FALSE(has_error(at_limit.validate(), "bridge_line_width"));
+}
+
+TEST_CASE("normalize_fdm migrates a legacy extruder without overwriting explicit roles", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig config = complete_config();
+    config.option<ConfigOptionInt>("extruder", true)->value = 2;
+    config.set("outer_wall_filament_id", 3);
+    config.set("inner_wall_filament_id", 0);
+    config.set("sparse_infill_filament_id", 0);
+    config.set("internal_solid_filament_id", 0);
+    config.set("top_surface_filament_id", 0);
+    config.set("bottom_surface_filament_id", 0);
+    config.normalize_fdm();
+
+    CHECK_FALSE(config.has("extruder"));
+    CHECK(config.opt_int("sparse_infill_filament_id") == 2);
+    CHECK(config.opt_int("outer_wall_filament_id") == 3);
+    CHECK(config.opt_int("inner_wall_filament_id") == 2);
+    CHECK(config.opt_int("internal_solid_filament_id") == 2);
+    CHECK(config.opt_int("top_surface_filament_id") == 2);
+    CHECK(config.opt_int("bottom_surface_filament_id") == 2);
+}
+
+TEST_CASE("normalize_fdm clamps spiral process values and the resolution floor", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig config = complete_config();
+    config.set("spiral_mode", true);
+    config.set("wall_loops", 4);
+    config.set("top_shell_layers", 3);
+    config.set_deserialize_strict("sparse_infill_density", "20");
+    config.set_deserialize_strict("resolution", "0.0001");
+    config.set_deserialize_strict("retract_when_changing_layer", "1,1");
+    config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true)->values = {false, false};
+    config.normalize_fdm();
+
+    CHECK(config.opt_int("wall_loops") == 1);
+    CHECK(config.opt_int("top_shell_layers") == 0);
+    CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(config.opt_float("resolution"), Catch::Matchers::WithinAbs(0.001, 1e-9));
+    require_all_false(config.opt<ConfigOptionBools>("retract_when_changing_layer"));
+}
+
+TEST_CASE("normalize_fdm_2 records prime tower changes for one filament and keeps two-filament tower rules", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig one = DynamicPrintConfig::full_print_config();
+    one.set("enable_prime_tower", true);
+    one.set("independent_support_layer_height", true);
+    const auto one_changed = one.normalize_fdm_2(1, 1);
+    CHECK_FALSE(one.opt_bool("enable_prime_tower"));
+    CHECK(std::find(one_changed.begin(), one_changed.end(), "enable_prime_tower") != one_changed.end());
+
+    DynamicPrintConfig two = DynamicPrintConfig::full_print_config();
+    two.set("enable_prime_tower", true);
+    two.set("independent_support_layer_height", true);
+    const auto two_changed = two.normalize_fdm_2(1, 2);
+    CHECK(two.opt_bool("enable_prime_tower"));
+    CHECK_FALSE(two.opt_bool("independent_support_layer_height"));
+    CHECK(std::find(two_changed.begin(), two_changed.end(), "independent_support_layer_height") != two_changed.end());
+}
+
+TEST_CASE("get_parameter_size uses variant cardinality and stride-specific machine dimensions", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig config;
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow"}));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"}));
+    config.set_key_value("print_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard", "Bowden High Flow"}));
+
+    CHECK(config.get_parameter_size("machine_max_speed_x", 9) == 4);
+    CHECK(config.get_parameter_size("machine_max_acceleration_x", 9) == 4);
+    CHECK(config.get_parameter_size("filament_flow_ratio", 9) == 3);
+    CHECK(config.get_parameter_size("outer_wall_speed", 9) == 4);
+    CHECK(config.get_parameter_size("unknown_option", 9) == 9);
+}
+
+TEST_CASE("AMS count serialization is sorted and preserves empty extruder slots", "[PrintConfigBehavior][Config]")
+{
+    const std::vector<std::map<int, int>> source = {
+        {{2, 5}, {1, 3}},
+        {},
+        {{4, 1}},
+    };
+    const auto serialized = save_extruder_ams_count_to_string(source);
+    CHECK(serialized == std::vector<std::string>{"1#3|2#5", "", "4#1"});
+    CHECK(get_extruder_ams_count(serialized) == source);
+}
+
+TEST_CASE("Nozzle statistics skip malformed tokens while retaining valid inventory", "[PrintConfigBehavior][Config]")
+{
+    const auto parsed = get_extruder_nozzle_stats({"Standard#2|Broken|High Flow#1", "Unknown#9|E3D High Flow#3"});
+    REQUIRE(parsed.size() == 2);
+    CHECK(parsed[0].at(nvtStandard) == 2);
+    CHECK(parsed[0].at(nvtHighFlow) == 1);
+    CHECK(parsed[1].at(nvtE3DHighFlow) == 3);
+    CHECK(parsed[1].count(nvtStandard) == 0);
+    CHECK(save_extruder_nozzle_stats_to_string(parsed) == std::vector<std::string>{"Standard#2|High Flow#1", "E3D High Flow#3"});
+}
+
+TEST_CASE("PrintConfig validates mixed filament metadata cardinality", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, false, true}));
+    config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "1,2"}));
+    config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "0.5,0.5"}));
+    config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, true}));
+    config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "0.2,0.8"}));
+    config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "0,0;1,1"}));
+    CHECK_FALSE(config.validate().count("filament_mixed_components"));
+    CHECK_FALSE(config.validate().count("filament_mixed_sublayer_ratios"));
+
+    config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "0.4"}));
+    CHECK(config.validate().count("filament_mixed_sublayer_ratios"));
+}
+
+} // namespace print_config_behavior_contracts

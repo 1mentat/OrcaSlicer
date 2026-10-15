@@ -84,7 +84,10 @@ that evidence is declared separately from sliced-output coverage.
 
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
-line or segment details are needed. A zero-summary header that the successful
+line or segment details are needed. Profile-merge and export diagnostics are retained
+in the report even when the LLVM commands succeed. Investigate mismatch warnings
+with `llvm-cov export --dump` against the same binaries and profile; an integrity
+pass checks mapping presence and does not certify that LLVM emitted no warnings. A zero-summary header that the successful
 object audit proves has no executable mapping is recorded as
 `mapping_free_headers`. A header with an executable object mapping but no final
 mapping remains an integrity failure. Reports expose `integrity_status`
