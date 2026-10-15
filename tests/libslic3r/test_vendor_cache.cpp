@@ -1278,7 +1278,7 @@ TEST_CASE("a vendor installed as its cache alone still loads after a library upd
     CHECK_THAT(cost->values.front(), WithinAbs(30., 1e-9));
 }
 
-TEST_CASE("a cache install stopped by a canceled task group throws instead of rejecting the cache", "[VendorCache]")
+TEST_CASE("a cache install stopped by a canceled task group throws instead of rejecting the cache", "[VendorCache][Parallel]")
 {
     TempDir tmp;
     const std::string cache = (tmp.path / "Acme.opc").string();

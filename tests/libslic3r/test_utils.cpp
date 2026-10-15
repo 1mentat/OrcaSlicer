@@ -158,7 +158,7 @@ TEST_CASE("write_file_atomically writes through a symlink and keeps the target's
 }
 #endif
 
-TEST_CASE("write_file_atomically survives two threads writing one target", "[utils]") {
+TEST_CASE("write_file_atomically survives two threads writing one target", "[utils][Parallel]") {
     ScopedTemporaryDir dir;
     const boost::filesystem::path target = dir.path() / "shared.json";
     const std::string a(20000, 'a'), b(20000, 'b');

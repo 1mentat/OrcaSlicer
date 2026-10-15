@@ -1841,6 +1841,114 @@
         "interaction_matrix"
       ],
       "reason": "Representative FloatOrPercent arrays exercise per-column value limiting while checking absolute versus percent mode on the mapped result. Numeric boundaries and generated perimeter behavior are not claimed."
+    },
+    "wipe_inward": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][Regression]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Inward wipe changes the exported trajectory when outer wall width is Auto. Slices inward=false and true, requires nonempty parsed wipe trajectories, and requires destination vectors to differ for both classic and Arachne wall generators. Does not claim calibration-mode or every wall-generator interaction."
+    },
+    "wipe_inward_distance": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][Regression]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Literal inward wipe distance is clamped to the outer wall width. Compares inward100% and literal2mm trajectories; oversized literal output must match the full-width clamped geometry point by point. 100% and literal2mm representatives only; disabled inward wipe is the control."
+    },
+    "wipe_on_loops": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][Regression]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Wipe on loops preserves the corner move with inward wipe disabled / remains valid after wipe on loops moves the nozzle. Runs true and false loop-wipe paths over a square, checks five layers and analytic corner displacement, then parses loop and inward-wipe trajectories after toggling the option. Comments 0/1 are also varied; no numeric wipe-on-loop domain claim."
+    },
+    "wipe_distance": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][Regression]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Wipe retraction preserves fractional speed with inward wipe disabled. With wipe_distance=2 and wipe_speed=100, parses the Wipe_Start/Wipe_End interval and checks during-wipe and before-wipe retraction totals against the configured duration split. Only 2 mm/100 mm/s representatives; no range claim."
+    },
+    "retraction_length": {
+      "test": "tests/fff_print/test_pipeline_invariants.cpp",
+      "tag": "[Pipeline][GCode][Regression]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Configured retraction is emitted around long object travels. Slices separated cubes with 1.25 mm retraction, parses G-code motions, requires retraction moves, and checks total retraction equals 1.25 mm per move with matching unretraction. One positive length; firmware-retraction path is disabled in this fixture."
+    },
+    "retraction_speed": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][Regression]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Wipe retraction preserves fractional speed with inward wipe disabled. GENERATE values 25.25,25.5,25.75 and relative/absolute-E modes; parsed retraction during wipe equals speed*distance/time and the remainder is emitted before wipe. Three fractional representatives, not the full speed domain."
+    },
+    "fan_cooling_layer_time": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Each filament cools with the fan speeds of its extruder variant. Fast/slow layer branches set fan_cooling_layer_time to 1000/0 per filament variant; parsed M106 S equals the expected maximum/minimum PWM while the rest of the slice remains valid. Thresholds 0 and 1000 only; slow_down_layer_time is also configured to keep the branch deterministic."
+    },
+    "auxiliary_fan": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Each filament cools with the fan speeds of its extruder variant. Enables auxiliary fan and requires parsed M106 P2 S values to equal per-variant additional fan speeds 10/20/40 percent. Enabled path only; disabled behavior is not claimed."
+    },
+    "bridge_acceleration": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[GCodeWriter]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets bridge acceleration to 50%, resolves analytically to 1500, and requires every parsed bridge extrusion role to carry exactly that M204 S value. One percent representative; no boundary claim."
+    },
+    "internal_solid_infill_acceleration": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[GCodeWriter]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets internal solid acceleration to 60%, resolves analytically to 2400, and requires parsed role accelerations to match. One percent representative; no boundary claim."
+    },
+    "default_acceleration": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[GCodeWriter]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets default acceleration to 4000 as the ratio base for sparse/internal solid percent settings; analytical get_abs_value_at results and parsed role M204 values must agree. One absolute base value; this is dependency evidence, not a full default-acceleration sweep."
+    },
+    "wipe_speed": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][Regression]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Wipe retraction preserves fractional speed with inward wipe disabled. Sets wipe speed to 100 mm/s and uses the parsed two millimeter wipe interval to derive the expected retraction amount. One speed representative; no numeric range claim."
     }
   }
 }

@@ -18,7 +18,7 @@ using namespace Slic3r;
 // the order has to be canonical or the same mesh projects to different polygons run to run.
 // The single-threaded projection is the reference; every multi-threaded run must reproduce it
 // exactly, vertex order included.
-TEST_CASE("Slab slicing projects the same polygons whatever the thread schedule", "[TriangleMeshSlicer]")
+TEST_CASE("Slab slicing projects the same polygons whatever the thread schedule", "[TriangleMeshSlicer][Parallel]")
 {
     // A dense sphere, tilted so no facet is axis aligned: thousands of upward and downward
     // facing facets spread over every slab.

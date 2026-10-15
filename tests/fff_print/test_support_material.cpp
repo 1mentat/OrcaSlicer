@@ -172,7 +172,7 @@ static std::vector<PrintBase::SlicingStatus> support_needed_statuses(bool no_che
     return statuses;
 }
 
-TEST_CASE("An overhang sliced with support off reports that support is needed", "[SupportMaterial]")
+TEST_CASE("An overhang sliced with support off reports that support is needed", "[SupportMaterial][Parallel]")
 {
     // The 40mm cap reaches ~22mm past its 8mm stem, beyond the 6mm cantilever limit of
     // PrintObject::is_support_necessary().
@@ -185,7 +185,7 @@ TEST_CASE("An overhang sliced with support off reports that support is needed", 
     }
 }
 
-TEST_CASE("The no-check flag skips the support-needed check", "[SupportMaterial]")
+TEST_CASE("The no-check flag skips the support-needed check", "[SupportMaterial][Parallel]")
 {
     CHECK(support_needed_statuses(true).empty());
 }

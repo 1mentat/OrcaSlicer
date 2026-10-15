@@ -307,7 +307,7 @@ SCENARIO("Cut behavior", "[TriangleMesh]") {
     }
 }
 #ifdef TEST_PERFORMANCE
-TEST_CASE("Large mesh slices within the time budget (#4486)", "[TriangleMesh][Regression]") {
+TEST_CASE("Large mesh slices within the time budget (#4486)", "[TriangleMesh][Regression][Parallel]") {
     TriangleMesh mesh;
     DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
     mesh.ReadSTLFile(std::string(testfile_dir) + "test_trianglemesh/4486/100_000.stl");
@@ -334,7 +334,7 @@ TEST_CASE("Large mesh slices within the time budget (#4486)", "[TriangleMesh][Re
 #endif // TEST_PERFORMANCE
 
 #ifdef BUILD_PROFILE
-TEST_CASE("Large mesh slicing profile (#4486)", "[TriangleMesh][Profile]") {
+TEST_CASE("Large mesh slicing profile (#4486)", "[TriangleMesh][Profile][Parallel]") {
     TriangleMesh mesh;
     DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
     mesh.ReadSTLFile(std::string(testfile_dir) + "test_trianglemesh/4486/10_000.stl");

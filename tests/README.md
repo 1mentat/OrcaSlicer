@@ -11,6 +11,20 @@ Catch2 uses file-descriptor output capture so parallel slicer diagnostics can
 be collected safely by the JUnit reporter. Worker threads must finish before
 test assertions run, and tests must not depend on diagnostic line ordering.
 
+For CPU-heavy Linux runs, configure with `-DSLICER_TEST_PROCESSORS=1` to give
+each test a CPU affinity mask and one CTest scheduling slot. Tests tagged
+`[Parallel]` retain two CPUs because their assertions depend on concurrency.
+Use `ctest --parallel 8` to allow eight slots in total; build parallelism is a
+separate limit. A larger positive setting gives every test that many CPUs;
+the default `0` leaves scheduling and affinity unrestricted. CTest applies
+affinity on supported operating systems. Hidden Catch tests remain hidden in
+every mode.
+
+Tag tests that explicitly verify concurrent execution or thread scheduling
+with `[Parallel]`. When adding the first such test to another suite, add its
+target to `SLICER_TEST_TARGETS_WITH_PARALLEL` in `tests/CMakeLists.txt` so the
+one-CPU mode registers its concurrent tests separately.
+
 ## Confidence runs
 
 The checked-in harnesses keep coverage and mutation evidence tied to the real

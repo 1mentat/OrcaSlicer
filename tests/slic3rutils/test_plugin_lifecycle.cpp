@@ -219,7 +219,7 @@ PluginDescriptor descriptor_of(PluginManager& manager, const std::string& plugin
 
 } // namespace
 
-TEST_CASE("Lifecycle hook shutdown drains concurrent dispatch", "[PluginLifecycle][LifecycleEvents]")
+TEST_CASE("Lifecycle hook shutdown drains concurrent dispatch", "[PluginLifecycle][LifecycleEvents][Parallel]")
 {
     std::mutex              mutex;
     std::condition_variable cv;
