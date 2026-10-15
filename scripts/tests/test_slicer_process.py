@@ -2,9 +2,11 @@
 
 from pathlib import Path
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -56,6 +58,24 @@ class CapturedProcessTests(unittest.TestCase):
             lines = result.stdout.splitlines()
             self.assertEqual(Path(lines[0]).resolve(), Path(directory).resolve())
             self.assertEqual(lines[1], "scoped")
+
+    def test_keyboard_interrupt_stops_grandchild_before_worktree_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "late-write"
+            child = ("from pathlib import Path; import sys,time; "
+                     "time.sleep(0.9); Path(sys.argv[1]).write_text('still running')")
+            parent = ("import subprocess,sys,time; "
+                      "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]]); "
+                      "time.sleep(10)")
+            timer = threading.Timer(0.2, os.kill, args=(os.getpid(), signal.SIGINT))
+            timer.start()
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    run_captured([sys.executable, "-c", parent, child, str(marker)], timeout=5)
+            finally:
+                timer.cancel()
+            time.sleep(1.1)
+            self.assertFalse(marker.exists(), "an interrupted descendant survived process cleanup")
 
 
 if __name__ == "__main__":

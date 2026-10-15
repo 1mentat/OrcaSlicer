@@ -1307,6 +1307,22 @@
         "pipeline_oracle"
       ],
       "reason": "The matrix varies 5% and 35% infill/wall overlap with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+    },
+    "small_area_infill_flow_compensation_model": {
+      "test": "tests/fff_print/test_small_area_infill_flow_compensator.cpp",
+      "tag": "[SmallAreaInfillFlowCompensator]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Direct compensation contracts check model knots, zero and upper-bound bypass, extrusion-role gates, and malformed or non-monotonic models. Full exporter enable/disable wiring is not claimed."
+    },
+    "printer_model": {
+      "test": "tests/fff_print/test_gcodeprocessor.cpp",
+      "tag": "[Elegoo]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Processor contracts exercise Generic Marlin, case-insensitive Elegoo Carbon and Carbon 2 model aliases through M6211 timing and state. Other printer-model behavior and the complete slicing pipeline are not claimed."
     }
   }
 }

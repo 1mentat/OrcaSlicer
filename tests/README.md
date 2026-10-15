@@ -160,12 +160,23 @@ the static inventory and fails on omitted or spurious settings. Omitting
 ## Exact-head PR validation
 
 `scripts/slicer_pr_validation.py` validates the exact head OIDs in the
-externally provided `build/evidence/open-prs.json` snapshot. It first runs the
-same test harness at `--harness-ref` as a baseline, then applies the binary
-testing diff from `--harness-base..--harness-ref` with `git apply --3way
---index` to each selected PR head in one disposable worktree. The original
-checkout is never changed, and a patch conflict is recorded as a failure for
-that head rather than resolved or hidden.
+externally provided `build/evidence/open-prs.json` snapshot. It first verifies
+that the complete harness at `--harness-ref` passes. It then applies the
+selected diff from `--harness-base..--harness-ref` to the unmodified production
+reference at `--harness-base` and to each PR head in a disposable worktree.
+The default `--patch-scope test-only` includes tests, scripts, `cmake/`, the
+root `CMakeLists.txt` and `.gitignore`. It excludes production bug fixes from
+the testing branch, and verifies the `src/` index hash is unchanged by the
+overlay. The report records every applied and excluded path.
+
+Use `--patch-scope integration` to also include the two source CMake files,
+or `--patch-scope full` for the full branch diff. Repeated `--patch-include`
+values add literal paths or directories explicitly. Results from these broader
+scopes describe the combined changes, rather than an unchanged PR source tree.
+A patch conflict is recorded as a failure for that head and is never resolved
+automatically. The runner does not write the original checkout; if its observed
+state changes during a run, the report records that fact without attributing
+who changed it and exits nonzero.
 
 Run all snapshot heads, or select reproducible PR numbers with repeated or
 comma-separated `--numbers` values:
@@ -197,8 +208,13 @@ The native defaults configure Release/Ninja with `SLIC3R_GUI=OFF`,
 `BUILD_TESTS=ON`, `SLIC3R_CAD=ON`, build the five slicer test targets, and run
 CTest while excluding `NotWorking|RequiresApp`. Use repeated `--cmake-arg`
 or `--target` options for a deliberate override. The JSON report records the
-baseline and every exact head, tested tree SHA, configure/build/test commands,
-elapsed time, logs, JUnit output, and cleanup result. A head is not marked
+harness guard, production reference and every exact head, tested tree SHA,
+source-index hashes, configure/build/test commands, elapsed time, logs,
+JUnit output, and cleanup result. The reference baseline runs by default;
+its failures do not prevent PR tests from running after a green harness guard.
+JUnit comparison records failures seen on both reference and PR, newly failing
+cases, resolved cases, and cases that cannot be compared. Shared failing test
+identities do not establish a shared root cause; raw failures remain visible. A head is not marked
 passing if the baseline fails, configuration/build/test fails, no tests run,
 tests are skipped, or the harness patch conflicts; the process exits nonzero
 when any selected head or the baseline is not a verified pass.

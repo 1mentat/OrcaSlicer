@@ -1,4 +1,4 @@
-"""Captured native commands whose timeout also stops their child processes."""
+"""Captured native commands whose timeouts and interruptions stop their child processes."""
 
 from __future__ import annotations
 
@@ -46,4 +46,31 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
                         process.kill()
             stdout, stderr = process.communicate()
             raise subprocess.TimeoutExpired(list(argv), timeout, output=stdout, stderr=stderr) from None
+        except BaseException:
+            # A caller can be interrupted while waiting for a compiler or test
+            # process (KeyboardInterrupt, cancellation, or a test-framework
+            # exception).  The worktree may be reset/removed immediately after
+            # this function returns, so clean the same process group used for
+            # timeout handling before re-raising the original exception.
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                try:
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=10, check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                if process.poll() is None:
+                    process.kill()
+            try:
+                process.communicate()
+            except BaseException:
+                # Preserve the caller's interruption rather than replacing it
+                # with a cleanup error.
+                pass
+            raise
         return subprocess.CompletedProcess(list(argv), process.returncode, stdout, stderr)

@@ -1,3 +1,7 @@
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <map>
+#include "libslic3r/calib.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -317,3 +321,184 @@ TEST_CASE("AppConfig Editor load migrates legacy physical printer", "[AppConfig]
     REQUIRE_FALSE(config.has_section("extras"));
     REQUIRE_FALSE(config.get_bool("app", "installed_networking"));
 }
+
+namespace appconfig_extended_contracts {
+
+namespace {
+
+void require_close(float actual, float expected)
+{
+    CHECK_THAT(actual, Catch::Matchers::WithinAbs(expected, 1e-5));
+}
+
+void require_calibration(const PrinterCaliInfo &actual, const PrinterCaliInfo &expected)
+{
+    REQUIRE(actual.dev_id == expected.dev_id);
+    REQUIRE(actual.cali_finished == expected.cali_finished);
+    require_close(actual.cache_flow_ratio, expected.cache_flow_ratio);
+    REQUIRE(actual.cache_flow_rate_calibration_type == expected.cache_flow_rate_calibration_type);
+    REQUIRE(actual.selected_presets.size() == expected.selected_presets.size());
+    REQUIRE(actual.selected_presets.size() == 1);
+
+    const CaliPresetInfo &actual_preset = actual.selected_presets.front();
+    const CaliPresetInfo &expected_preset = expected.selected_presets.front();
+    REQUIRE(actual_preset.tray_id == expected_preset.tray_id);
+    REQUIRE(actual_preset.extruder_id == expected_preset.extruder_id);
+    REQUIRE(actual_preset.nozzle_volume_type == expected_preset.nozzle_volume_type);
+    REQUIRE(actual_preset.bed_type == expected_preset.bed_type);
+    require_close(actual_preset.nozzle_diameter, expected_preset.nozzle_diameter);
+    REQUIRE(actual_preset.nozzle_pos_id == expected_preset.nozzle_pos_id);
+    REQUIRE(actual_preset.nozzle_sn == expected_preset.nozzle_sn);
+    REQUIRE(actual_preset.filament_id == expected_preset.filament_id);
+    REQUIRE(actual_preset.setting_id == expected_preset.setting_id);
+    REQUIRE(actual_preset.name == expected_preset.name);
+}
+
+} // namespace
+
+TEST_CASE("calibration records survive save and load", "[AppConfig][AppConfigExtended]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig source;
+
+    PrinterCaliInfo initial;
+    initial.dev_id = "calibration-device";
+    initial.cali_finished = false;
+    initial.cache_flow_ratio = 0.987f;
+    initial.cache_flow_rate_calibration_type = FINE_CALIBRATION;
+
+    CaliPresetInfo preset;
+    preset.tray_id = 7;
+    preset.extruder_id = 1;
+    preset.nozzle_volume_type = nvtHighFlow;
+    preset.bed_type = btPEI;
+    preset.nozzle_diameter = 0.6f;
+    preset.nozzle_pos_id = 2;
+    preset.nozzle_sn = "nozzle\\SN-7";
+    preset.filament_id = "filament\\id";
+    preset.setting_id = "setting-7";
+    preset.name = "Calibration preset 7";
+    initial.selected_presets.push_back(preset);
+
+    source.save_printer_cali_infos(initial);
+    REQUIRE(source.get_printer_cali_infos().size() == 1);
+
+    PrinterCaliInfo update = initial;
+    update.cali_finished = true;
+    update.cache_flow_ratio = 1.023f;
+    update.selected_presets.front().name = "Calibration preset 7 updated";
+    source.save_printer_cali_infos(update, false);
+    REQUIRE(source.get_printer_cali_infos().front().cali_finished == false);
+    source.save_printer_cali_infos(update, true);
+    REQUIRE(source.get_printer_cali_infos().front().cali_finished);
+
+    source.save();
+    AppConfig loaded;
+    REQUIRE(loaded.load().empty());
+    REQUIRE(loaded.get_printer_cali_infos().size() == 1);
+    require_calibration(loaded.get_printer_cali_infos().front(), update);
+}
+
+TEST_CASE("printer snapshots remain separated by machine", "[AppConfig][AppConfigExtended]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig source;
+    source.set_printer_setting("Printer A", PRESET_PRINTER_NAME, "Printer A");
+    source.set_printer_setting("Printer A", PRESET_PRINT_NAME, "Quality A");
+    source.set_printer_setting("Printer A", "curr_bed_type", "Engineering Plate");
+    source.set_printer_setting("Printer B", PRESET_PRINTER_NAME, "Printer B");
+    source.set_printer_setting("Printer B", PRESET_PRINT_NAME, "Quality B");
+    source.set_printer_setting("Printer B", "curr_bed_type", "Textured PEI");
+
+    source.save();
+    AppConfig loaded;
+    REQUIRE(loaded.load().empty());
+    REQUIRE(loaded.has_printer_settings("Printer A"));
+    REQUIRE(loaded.has_printer_settings("Printer B"));
+    REQUIRE(loaded.get_printer_setting("Printer A", PRESET_PRINT_NAME) == "Quality A");
+    REQUIRE(loaded.get_printer_setting("Printer A", "curr_bed_type") == "Engineering Plate");
+    REQUIRE(loaded.get_printer_setting("Printer B", PRESET_PRINT_NAME) == "Quality B");
+    REQUIRE(loaded.get_printer_setting("Printer B", "curr_bed_type") == "Textured PEI");
+}
+
+TEST_CASE("vendor records filter empty models and preserve escaped variants", "[AppConfig][AppConfigExtended]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig source;
+
+    AppConfig::VendorMap vendors;
+    vendors["Skipped Vendor"]["Skipped Model"] = {};
+    vendors["Mixed Vendor"]["Empty Model"] = {};
+    vendors["Mixed Vendor"]["Model\\with\\slashes"] = {"0.4\\draft", "0.6,quoted"};
+    source.set_vendors(vendors);
+    source.save();
+
+    AppConfig loaded;
+    REQUIRE(loaded.load().empty());
+    REQUIRE(loaded.get_variant("Mixed Vendor", "Model\\with\\slashes", "0.4\\draft"));
+    REQUIRE(loaded.get_variant("Mixed Vendor", "Model\\with\\slashes", "0.6,quoted"));
+    REQUIRE_FALSE(loaded.get_variant("Mixed Vendor", "Empty Model", "0.4"));
+    REQUIRE_FALSE(loaded.get_variant("Skipped Vendor", "Skipped Model", "0.4"));
+}
+
+TEST_CASE("cloud and skipped-version collections persist their public invariants", "[AppConfig][AppConfigExtended]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig source;
+    source.set_cloud_providers({"bambu", "custom"});
+    source.add_cloud_provider("custom");
+    source.add_cloud_provider("new-provider");
+    source.remove_cloud_provider("bambu");
+    source.remove_cloud_provider("orca");
+    source.add_skipped_network_version("02.01.01.52");
+    source.add_skipped_network_version("02.03.00.62");
+    source.add_skipped_network_version("02.01.01.52");
+
+    source.save();
+    AppConfig loaded;
+    REQUIRE(loaded.load().empty());
+    REQUIRE(loaded.get_cloud_providers() == std::vector<std::string>{"orca", "custom", "new-provider"});
+    REQUIRE(loaded.has_cloud_provider("orca"));
+    REQUIRE(loaded.has_cloud_provider("custom"));
+    REQUIRE_FALSE(loaded.has_cloud_provider("bambu"));
+    REQUIRE(loaded.get_skipped_network_versions() == std::vector<std::string>{"02.01.01.52", "02.03.00.62"});
+
+    loaded.clear_skipped_network_versions();
+    loaded.remove_cloud_provider("custom");
+    loaded.save();
+    AppConfig cleared;
+    REQUIRE(cleared.load().empty());
+    REQUIRE(cleared.get_skipped_network_versions().empty());
+    REQUIRE(cleared.get_cloud_providers() == std::vector<std::string>{"orca", "new-provider"});
+}
+
+TEST_CASE("reset_selections removes persisted selection keys only", "[AppConfig][AppConfigExtended]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig source;
+    source.set("presets", PRESET_PRINT_NAME, "Quality");
+    source.set("presets", PRESET_FILAMENT_NAME, "PLA");
+    source.set("presets", PRESET_PRINTER_NAME, "Printer A");
+    source.set("presets", "sla_print", "SLA Quality");
+    source.set("presets", "sla_material", "SLA Resin");
+    source.set("presets", "physical_printer", "Printer A / LAN");
+    source.set("presets", "keep_this", "retained");
+
+    source.reset_selections();
+    REQUIRE(source.get("presets", PRESET_PRINT_NAME).empty());
+    REQUIRE(source.get("presets", PRESET_FILAMENT_NAME).empty());
+    REQUIRE(source.get("presets", PRESET_PRINTER_NAME).empty());
+    REQUIRE(source.get("presets", "sla_print").empty());
+    REQUIRE(source.get("presets", "sla_material").empty());
+    REQUIRE(source.get("presets", "physical_printer").empty());
+    REQUIRE(source.get("presets", "keep_this") == "retained");
+
+    source.save();
+    AppConfig loaded;
+    REQUIRE(loaded.load().empty());
+    REQUIRE(loaded.get("presets", "keep_this") == "retained");
+    REQUIRE(loaded.get("presets", PRESET_PRINTER_NAME).empty());
+}
+
+
+} // namespace appconfig_extended_contracts

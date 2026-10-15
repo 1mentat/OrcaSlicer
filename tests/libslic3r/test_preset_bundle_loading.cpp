@@ -1,3 +1,4 @@
+#include <optional>
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/directory.hpp>
@@ -6773,3 +6774,206 @@ TEST_CASE("File loading rejects an inheritance cycle without installing either n
     CHECK(collection.find_preset("Cycle B") == nullptr);
     CHECK(collection.error_count() == 2);
 }
+
+namespace preset_full_config_contracts {
+
+namespace {
+
+struct ConstructInputs {
+    PresetBundle bundle;
+    Preset printer{Preset::TYPE_PRINTER, "Test Printer"};
+    Preset print{Preset::TYPE_PRINT, "Test Process"};
+    std::vector<Preset> filaments;
+
+    ConstructInputs()
+    {
+        printer.config = bundle.printers.default_preset().config;
+        print.config   = bundle.prints.default_preset().config;
+
+        Preset filament{Preset::TYPE_FILAMENT, "Test PLA"};
+        filament.config = bundle.filaments.default_preset().config;
+        filament.filament_id = "test-pla-id";
+        filaments.emplace_back(std::move(filament));
+    }
+
+    void add_filament(const std::string &name, const std::string &id)
+    {
+        Preset filament{Preset::TYPE_FILAMENT, name};
+        filament.config = bundle.filaments.default_preset().config;
+        filament.filament_id = id;
+        filaments.emplace_back(std::move(filament));
+    }
+
+    DynamicPrintConfig project() const { return bundle.project_config; }
+
+    DynamicPrintConfig construct(
+        bool apply_extruder = false,
+        std::optional<std::vector<int>> filament_maps = std::nullopt,
+        std::optional<std::vector<int>> filament_volume_maps = std::nullopt)
+    {
+        DynamicPrintConfig project_config = project();
+        return PresetBundle::construct_full_config(
+            printer, print, project_config, filaments, apply_extruder,
+            std::move(filament_maps), std::move(filament_volume_maps));
+    }
+};
+
+void set_dual_printer_layout(ConstructInputs &in)
+{
+    in.printer.config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.4};
+    in.printer.config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values = {
+        etDirectDrive, etDirectDrive};
+    in.printer.config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {
+        nvtStandard, nvtStandard};
+    in.printer.config.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {
+        "Direct Drive Standard", "Direct Drive Standard"};
+    in.printer.config.option<ConfigOptionInts>("printer_extruder_id", true)->values = {1, 2};
+    in.printer.config.option<ConfigOptionStrings>("printer_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive Standard"};
+}
+
+} // namespace
+
+TEST_CASE("The complete preset configuration merges one filament and preserves preset metadata", "[Preset][Bundle][ConstructFullConfig]")
+{
+    ConstructInputs in;
+    in.print.config.option<ConfigOptionFloat>("layer_height", true)->value = 0.21;
+    in.print.config.option<ConfigOptionInt>("support_filament", true)->value = 7;
+    in.print.config.option<ConfigOptionInt>("support_interface_filament", true)->value = -2;
+    in.print.inherits() = "Test Base Process";
+    in.print.compatible_printers_condition() = "printer_model == 'Test Printer'";
+    in.filaments[0].inherits() = "Test Base Filament";
+    in.filaments[0].compatible_printers_condition() = "printer_model == 'Test Printer'";
+    in.filaments[0].compatible_prints_condition() = "process == 'Test Process'";
+    in.filaments[0].config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75};
+
+    DynamicPrintConfig out = in.construct();
+
+    CHECK_THAT(out.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.21, 1e-9));
+    CHECK(out.opt_int("support_filament") == 1);
+    CHECK(out.opt_int("support_interface_filament") == 0);
+    CHECK(out.opt_string("print_settings_id") == "Test Process");
+    CHECK(out.opt_string("printer_settings_id") == "Test Printer");
+    CHECK(out.option<ConfigOptionStrings>("filament_settings_id")->values == std::vector<std::string>{"Test PLA"});
+    CHECK(out.option<ConfigOptionStrings>("filament_ids")->values == std::vector<std::string>{"test-pla-id"});
+    CHECK(out.option<ConfigOptionInts>("filament_self_index")->values == std::vector<int>{1});
+    CHECK(out.opt_enum<PrinterTechnology>("printer_technology") == ptFFF);
+    CHECK(out.option<ConfigOptionStrings>("compatible_machine_expression_group")->values ==
+          std::vector<std::string>{"printer_model == 'Test Printer'", "printer_model == 'Test Printer'"});
+    CHECK(out.option<ConfigOptionStrings>("compatible_process_expression_group")->values ==
+          std::vector<std::string>{"process == 'Test Process'"});
+    CHECK(out.option<ConfigOptionStrings>("inherits_group")->values ==
+          std::vector<std::string>{"Test Base Process", "Test Base Filament"});
+}
+
+TEST_CASE("The complete preset configuration accepts explicit filament and volume maps", "[Preset][Bundle][ConstructFullConfig]")
+{
+    ConstructInputs in;
+    DynamicPrintConfig out = in.construct(false, std::vector<int>{4}, std::vector<int>{2});
+
+    CHECK(out.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{4});
+    CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{2});
+    CHECK(out.option<ConfigOptionInts>("filament_self_index")->values == std::vector<int>{1});
+}
+
+TEST_CASE("The complete preset configuration concatenates multiple filament vectors and tracks source slots", "[Preset][Bundle][ConstructFullConfig]")
+{
+    ConstructInputs in;
+    in.add_filament("Test PETG", "test-petg-id");
+    in.filaments[0].config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75};
+    in.filaments[0].config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA"};
+    in.filaments[0].config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {"Direct Drive Standard"};
+    in.filaments[1].config.option<ConfigOptionFloats>("filament_diameter", true)->values = {2.85, 2.85};
+    in.filaments[1].config.option<ConfigOptionStrings>("filament_type", true)->values = {"PETG", "PETG-HF"};
+    in.filaments[1].config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"};
+
+    DynamicPrintConfig out = in.construct();
+
+    check_double_vector(out.option<ConfigOptionFloats>("filament_diameter")->values, {1.75, 2.85, 2.85});
+    CHECK(out.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{"PLA", "PETG", "PETG-HF"});
+    CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{"Direct Drive Standard", "Direct Drive Standard", "Direct Drive High Flow"});
+    CHECK(out.option<ConfigOptionInts>("filament_self_index")->values == std::vector<int>{1, 2, 2});
+    CHECK(out.option<ConfigOptionStrings>("filament_settings_id")->values ==
+          std::vector<std::string>{"Test PLA", "Test PETG"});
+    CHECK(out.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1});
+}
+
+TEST_CASE("The complete preset configuration resizes transient maps to the filament count", "[Preset][Bundle][ConstructFullConfig]")
+{
+    ConstructInputs in;
+    in.add_filament("Test PETG", "test-petg-id");
+    DynamicPrintConfig project = in.project();
+    project.option<ConfigOptionInts>("filament_map", true)->values = {2};
+    project.option<ConfigOptionInts>("filament_volume_map", true)->values = {1};
+
+    DynamicPrintConfig out = PresetBundle::construct_full_config(
+        in.printer, in.print, project, in.filaments, false, std::nullopt, std::nullopt);
+
+    // The public contract is one map entry per selected filament. A stale project array is
+    // repaired to the current count and padded with the normal first-slot mapping.
+    CHECK(out.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{2, 1});
+    CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{0, 0});
+}
+
+TEST_CASE("The complete preset configuration resolves a single filament through a dual-extruder printer", "[Preset][Bundle][ConstructFullConfig]")
+{
+    ConstructInputs in;
+    set_dual_printer_layout(in);
+    in.filaments[0].config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"};
+    in.filaments[0].config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75, 1.75};
+
+    DynamicPrintConfig out = in.construct(true, std::vector<int>{2}, std::vector<int>{nvtStandard});
+
+    CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{"Direct Drive Standard"});
+    // A single selected filament is resolved against both physical printer
+    // extruders before its selected variant is retained.
+    check_double_vector(out.option<ConfigOptionFloats>("filament_diameter")->values, {1.75, 1.75});
+    CHECK(out.option<ConfigOptionInts>("filament_self_index")->values == std::vector<int>{1});
+}
+
+TEST_CASE("The complete preset configuration resolves multiple filaments while retaining source order", "[Preset][Bundle][ConstructFullConfig]")
+{
+    ConstructInputs in;
+    in.add_filament("Test PETG", "test-petg-id");
+    set_dual_printer_layout(in);
+    for (Preset &filament : in.filaments) {
+        filament.config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+            "Direct Drive Standard", "Direct Drive High Flow"};
+        filament.config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75, 1.75};
+    }
+
+    DynamicPrintConfig out = in.construct(true, std::vector<int>{1, 2}, std::vector<int>{nvtStandard, nvtStandard});
+
+    CHECK(out.option<ConfigOptionStrings>("filament_settings_id")->values ==
+          std::vector<std::string>{"Test PLA", "Test PETG"});
+    CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{"Direct Drive Standard", "Direct Drive Standard"});
+    check_double_vector(out.option<ConfigOptionFloats>("filament_diameter")->values, {1.75, 1.75});
+}
+
+TEST_CASE("The complete preset configuration removes preset-only bookkeeping from the merged config", "[Preset][Bundle][ConstructFullConfig]")
+{
+    ConstructInputs in;
+    in.print.inherits() = "Base Process";
+    in.filaments[0].inherits() = "Base Filament";
+    in.print.compatible_printers_condition() = "machine";
+    in.filaments[0].compatible_printers_condition() = "machine";
+    in.print.config.option<ConfigOptionStrings>("compatible_printers", true)->values = {"Test Printer"};
+
+    DynamicPrintConfig out = in.construct();
+
+    CHECK_FALSE(out.has("compatible_prints"));
+    CHECK_FALSE(out.has("compatible_printers"));
+    CHECK_FALSE(out.has("compatible_printers_condition"));
+    CHECK_FALSE(out.has("compatible_prints_condition"));
+    CHECK_FALSE(out.has("inherits"));
+    CHECK_FALSE(out.has("different_settings_to_system"));
+    CHECK(out.option<ConfigOptionStrings>("print_compatible_printers")->values ==
+          std::vector<std::string>{"Test Printer"});
+}
+
+} // namespace preset_full_config_contracts

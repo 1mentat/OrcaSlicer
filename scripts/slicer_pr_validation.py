@@ -3,10 +3,13 @@
 
 The runner reads ``build/evidence/open-prs.json``, creates one disposable
 detached worktree, and reuses that worktree and its native CMake build for the
-baseline and every selected PR head.  The testing harness is the binary diff
-between ``--harness-base`` and ``--harness-ref``; it is applied to each PR head
-with ``git apply --3way --index``.  A conflicted overlay is recorded as a
-conflict and is never guessed at or auto-resolved.
+harness guard, unmodified production reference, and every selected PR head.
+By default the binary diff between ``--harness-base`` and ``--harness-ref``
+is restricted to tests, scripts and build configuration. Production source
+index hashes must remain unchanged when applying this test-only overlay.
+``--patch-scope integration`` and ``full`` deliberately broaden that scope.
+The selected patch is applied with ``git apply --3way --index``; conflicts
+are recorded and never guessed at or auto-resolved.
 
 The caller's checkout is read only.  The temporary worktree is reset between
 heads and removed in a ``finally`` block.  Every command, tested commit/tree,
@@ -54,6 +57,8 @@ DEFAULT_TARGETS = (
 DEFAULT_EXCLUDED_LABELS = "NotWorking|RequiresApp"
 DEFAULT_TIMEOUT = 3600.0
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
+TEST_ONLY_PATHS = ("tests/", "scripts/", "cmake/", ":(top)CMakeLists.txt", ":(top).gitignore")
+INTEGRATION_PATHS = TEST_ONLY_PATHS + ("src/CMakeLists.txt", "src/libslic3r/CMakeLists.txt")
 
 
 class ValidationError(RuntimeError):
@@ -191,6 +196,40 @@ def skipped_test_evidence(output: str, junit: Path | None = None) -> int:
             # A partial JUnit file should not hide command output or a failure.
             pass
     return count
+
+
+def junit_case_statuses(junit: Path) -> dict[str, str]:
+    """Return testcase-name -> pass/fail/skip without trusting suite totals."""
+    if not junit.is_file():
+        return {}
+    try:
+        root = ElementTree.parse(junit).getroot()
+    except (ElementTree.ParseError, OSError):
+        return {}
+    statuses: dict[str, str] = {}
+    for case in root.iter():
+        if case.tag.rsplit("}", 1)[-1] != "testcase":
+            continue
+        name = case.attrib.get("name", "")
+        if not name:
+            continue
+        classname = case.attrib.get("classname", "")
+        key = f"{classname}::{name}" if classname else name
+        if key in statuses:
+            # A repeated display name must not let a later passing case hide an
+            # earlier failure.  Keep both observations independently keyed.
+            suffix = 2
+            while f"{key}#{suffix}" in statuses:
+                suffix += 1
+            key = f"{key}#{suffix}"
+        if any(child.tag.rsplit("}", 1)[-1] in {"failure", "error"}
+               for child in case):
+            statuses[key] = "failed"
+        elif any(child.tag.rsplit("}", 1)[-1] == "skipped" for child in case):
+            statuses[key] = "skipped"
+        else:
+            statuses[key] = "passed"
+    return statuses
 
 
 def classify_command(result: CommandResult, phase: str) -> str:
@@ -336,28 +375,92 @@ def _resolve_build_path(worktree: Path, build_dir: str) -> Path:
     return build
 
 
-def _git_diff(repo: Path, base: str, ref: str) -> tuple[bytes | None, CommandResult]:
+def _git_diff_paths(repo: Path, base: str, ref: str) -> tuple[list[str], CommandResult]:
+    command = ["git", "diff", "--name-only", "--no-renames", "-z", base, ref, "--"]
+    started = time.monotonic()
+    try:
+        result = subprocess.run(command, cwd=str(repo), shell=False,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=120, check=False)
+        stdout = (result.stdout or b"").decode("utf-8", "replace")
+        stderr = (result.stderr or b"").decode("utf-8", "replace")
+        command_result = CommandResult(command, result.returncode,
+                                       time.monotonic() - started, stdout, stderr)
+        # ``--name-only`` is NUL-delimited so names containing newlines remain
+        # one path in the scope report.  Empty trailing records are expected.
+        return [path for path in stdout.split("\0") if path] if result.returncode == 0 else [], command_result
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        command_result = CommandResult(command, None if isinstance(exc, subprocess.TimeoutExpired) else 127,
+                                       time.monotonic() - started, "", str(exc),
+                                       isinstance(exc, subprocess.TimeoutExpired))
+        return [], command_result
+
+
+def _scope_pathspecs(scope: str, includes: Sequence[str]) -> list[str] | None:
+    if scope == "full":
+        return None
+    paths = list(TEST_ONLY_PATHS if scope == "test-only" else INTEGRATION_PATHS)
+    for include in includes:
+        include = include.removeprefix("./")
+        if include not in paths:
+            paths.append(include)
+    return paths
+
+
+def _path_is_in_scope(path: str, scope: str, includes: Sequence[str]) -> bool:
+    path = path.removeprefix("./")
+    pathspecs = _scope_pathspecs(scope, includes)
+    if pathspecs is None:
+        return True
+    for spec in pathspecs:
+        spec = spec.removeprefix(":(top)")
+        if spec.endswith("/") and path.startswith(spec):
+            return True
+        if path == spec:
+            return True
+    return False
+
+
+def _git_diff(repo: Path, base: str, ref: str,
+              pathspecs: Sequence[str] | None = None) -> tuple[bytes | None, CommandResult]:
+    command = ["git", "diff", "--binary", "--full-index", base, ref]
+    command += ["--"] + [_git_pathspec(path) for path in (pathspecs or [])]
     started = time.monotonic()
     try:
         result = subprocess.run(
-            ["git", "diff", "--binary", "--full-index", base, ref], cwd=str(repo),
+            command, cwd=str(repo),
             shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=120, check=False,
         )
         stdout = result.stdout or b""
         stderr = (result.stderr or b"").decode("utf-8", "replace")
-        command = CommandResult(["git", "diff", "--binary", "--full-index", base, ref],
+        command = CommandResult(command,
                                 result.returncode, time.monotonic() - started,
                                 stdout.decode("utf-8", "replace"), stderr)
         return stdout if result.returncode == 0 else None, command
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         if isinstance(exc, subprocess.TimeoutExpired):
-            result = CommandResult(["git", "diff", "--binary", "--full-index", base, ref],
+            result = CommandResult(command,
                                    None, time.monotonic() - started, "", str(exc), True)
         else:
-            result = CommandResult(["git", "diff", "--binary", "--full-index", base, ref],
+            result = CommandResult(command,
                                    127, time.monotonic() - started, "", str(exc))
         return None, result
+
+
+def _git_pathspec(path: str) -> str:
+    """Use literal top-level matching for caller-supplied include paths."""
+    if path.startswith(":(") or path.startswith(":/"):
+        return path
+    return f":(top,literal){path.removeprefix('./')}"
+
+
+def _tracked_source_index_hash(repo: Path) -> tuple[str | None, CommandResult]:
+    """Hash the tracked ``src/`` index so test-only overlays cannot alter production."""
+    result = _git(repo, "ls-files", "-s", "--", "src/")
+    if result.returncode != 0:
+        return None, result
+    return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest(), result
 
 
 def _reset_worktree(worktree: Path, commit: str) -> list[dict[str, Any]]:
@@ -423,13 +526,68 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
     entry["no_test_evidence"] = no_test_evidence(test_output)
     entry["skipped_test_evidence"] = skipped_test_evidence(test_output, junit)
     entry["junit_exists"] = junit.is_file()
-    return finish(classify_test_result(test, entry["test_evidence"],
-                                       skipped=entry["skipped_test_evidence"],
-                                       no_tests=entry["no_test_evidence"]))
+    case_statuses = junit_case_statuses(junit)
+    entry["junit_case_statuses"] = case_statuses
+    entry["failed_test_names"] = sorted(name for name, status in case_statuses.items()
+                                         if status == "failed")
+    entry["skipped_test_names"] = sorted(name for name, status in case_statuses.items()
+                                          if status == "skipped")
+    status = classify_test_result(test, entry["test_evidence"],
+                                  skipped=entry["skipped_test_evidence"],
+                                  no_tests=entry["no_test_evidence"])
+    entry["junit_reference_usable"] = bool(
+        case_statuses and entry["junit_exists"] and entry["skipped_test_evidence"] == 0 and
+        status in {"pass", "test_failed"})
+    return finish(status)
 
 
 def _selected_statuses(report: dict[str, Any]) -> list[str]:
     return [str(item.get("status", "infrastructure_error")) for item in report.get("heads", [])]
+
+
+def classify_failure_names(reference: dict[str, Any] | None,
+                          head: dict[str, Any]) -> dict[str, Any]:
+    """Compare failed JUnit testcase names without treating missing evidence as pass."""
+    reference_statuses = dict(reference.get("junit_case_statuses", {})) if reference else {}
+    head_statuses = dict(head.get("junit_case_statuses", {}))
+    head_names = set(head.get("failed_test_names", []))
+    reference_names = {name for name, status in reference_statuses.items()
+                       if status == "failed"}
+    if not reference or not reference.get("junit_reference_usable", False):
+        return {
+            "reference_available": False,
+            "inherited": [], "new": [], "resolved": [],
+            "raw_observed_head_failures": sorted(head_names),
+            "uncompared_head_failures": sorted(head_names),
+            "not_executed_reference_failures": sorted(reference_names),
+            "classification_basis": (
+                "No comparable reference testcase execution was available; matching names "
+                "cannot establish a shared root cause."
+            ),
+            "reason": "reference JUnit evidence unavailable",
+        }
+    inherited = sorted(name for name in head_names if reference_statuses.get(name) == "failed")
+    new = sorted(name for name in head_names if reference_statuses.get(name) == "passed")
+    uncompared = sorted(name for name in head_names
+                        if reference_statuses.get(name) not in {"failed", "passed"})
+    resolved = sorted(name for name in reference_names if head_statuses.get(name) == "passed")
+    not_executed = sorted(name for name in reference_names
+                          if head_statuses.get(name) not in {"passed", "failed"})
+    return {
+        "reference_available": True,
+        "inherited": inherited,
+        "new": new,
+        "resolved": resolved,
+        "raw_observed_head_failures": sorted(head_names),
+        "uncompared_head_failures": uncompared,
+        "not_executed_reference_failures": not_executed,
+        "reference_failed": sorted(reference_names),
+        "head_failed": sorted(head_names),
+        "classification_basis": (
+            "Testcase names compare execution statuses only; matching failure names do not "
+            "establish the same root cause."
+        ),
+    }
 
 
 def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
@@ -444,6 +602,9 @@ def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
         return "pass", 0
     if any(status in {"patch_conflict", "invalid_ref", "reset_failed",
                       "tree_resolution_failed", "infrastructure_error", "cleanup_failed"}
+           for status in statuses):
+        return "infrastructure_error", 2
+    if any(status in {"tracked_source_index_changed", "tracked_source_index_resolution_failed"}
            for status in statuses):
         return "infrastructure_error", 2
     return "heads_failed", 1
@@ -468,7 +629,16 @@ def run_validation(args: argparse.Namespace) -> int:
     if harness_ref is None:
         raise ValidationError(f"invalid --harness-ref {args.harness_ref}: {harness_ref_result.stderr.strip()}")
 
-    patch, patch_result = _git_diff(repo, harness_base, harness_ref)
+    full_diff_paths, paths_result = _git_diff_paths(repo, harness_base, harness_ref)
+    if paths_result.returncode != 0:
+        raise ValidationError(f"cannot enumerate testing diff paths: {paths_result.stderr.strip()}")
+    pathspecs = _scope_pathspecs(args.patch_scope, args.patch_include)
+    applied_paths = [path for path in full_diff_paths
+                     if _path_is_in_scope(path, args.patch_scope, args.patch_include)]
+    excluded_paths = [path for path in full_diff_paths if path not in applied_paths]
+    excluded_production_paths = [path for path in excluded_paths
+                                 if path.startswith("src/")]
+    patch, patch_result = _git_diff(repo, harness_base, harness_ref, pathspecs)
     if patch is None:
         raise ValidationError(f"cannot compute testing diff: {patch_result.stderr.strip()}")
     patch_path = output / "testing-harness.patch"
@@ -485,7 +655,11 @@ def run_validation(args: argparse.Namespace) -> int:
             "base_ref": args.harness_base, "base_sha": harness_base,
             "ref": args.harness_ref, "ref_sha": harness_ref,
             "patch": str(patch_path), "patch_sha256": patch_sha,
-            "patch_bytes": len(patch),
+            "patch_bytes": len(patch), "patch_scope": args.patch_scope,
+            "patch_include": list(args.patch_include), "full_diff_paths": full_diff_paths,
+            "applied_paths": applied_paths, "excluded_paths": excluded_paths,
+            "excluded_production_diff_paths": excluded_production_paths,
+            "path_enumeration": paths_result.json(),
             "diff_command": patch_result.json(),
         },
         "original_checkout": {
@@ -497,9 +671,12 @@ def run_validation(args: argparse.Namespace) -> int:
             "deps_prefix": args.deps_prefix, "uv": uv, "jobs": args.jobs,
             "build_dir": args.build_dir, "exclude_labels": args.exclude_labels,
             "targets": list(args.targets), "timeout_seconds": args.timeout,
-            "cmake_args": list(args.cmake_arg),
+            "cmake_args": list(args.cmake_arg), "patch_scope": args.patch_scope,
+            "patch_include": list(args.patch_include),
+            "reference_baseline": args.reference_baseline,
         },
         "baseline": {},
+        "reference": {},
         "heads": [],
     }
     worktree: Path | None = None
@@ -524,11 +701,20 @@ def run_validation(args: argparse.Namespace) -> int:
         baseline = _run_tree(worktree, output, "baseline", args, configure_args, build_args,
                              commit_sha=harness_ref, tree_sha=baseline_tree)
         baseline["tree_resolution"] = baseline_tree_result.json()
+        baseline_prod_hash, baseline_prod_result = _tracked_source_index_hash(worktree)
+        baseline["tracked_source_index_hash_before_overlay"] = baseline_prod_hash
+        baseline["tracked_source_index_hash_after_overlay"] = baseline_prod_hash
+        baseline["tracked_source_index_unchanged"] = True
+        baseline["tracked_source_index_resolution"] = baseline_prod_result.json()
         baseline["harness_patch_applied"] = False
         report["baseline"] = baseline
         _write_json(output / "report.json", report)
 
         if baseline["status"] != "pass":
+            report["reference"] = {
+                "status": "not_run",
+                "reason": "harness_ref baseline guard did not pass",
+            }
             for record in records:
                 report["heads"].append({
                     "number": int(record["number"]),
@@ -539,6 +725,56 @@ def run_validation(args: argparse.Namespace) -> int:
                 })
             return_code = 2
         else:
+            return_code = 0
+            if args.reference_baseline:
+                reference: dict[str, Any] = {
+                    "name": "reference",
+                    "commit_sha": harness_base,
+                    "status": "infrastructure_error",
+                    "harness_patch_applied": False,
+                }
+                reference_reset = _reset_worktree(worktree, harness_base)
+                reference["reset"] = reference_reset
+                if any(item.get("returncode") != 0 for item in reference_reset):
+                    reference["status"] = "reset_failed"
+                else:
+                    reference_before, reference_before_result = _tracked_source_index_hash(worktree)
+                    reference["tracked_source_index_hash_before_overlay"] = reference_before
+                    reference["tracked_source_index_resolution_before"] = reference_before_result.json()
+                    if patch:
+                        reference_apply = _git(worktree, "apply", "--3way", "--index",
+                                                str(patch_path), timeout=300)
+                        reference["patch_apply"] = reference_apply.json()
+                        if reference_apply.returncode != 0:
+                            reference["status"] = "patch_conflict"
+                            reference["conflict_status"] = _status(worktree)
+                            reference["unresolved_paths"] = _git(
+                                worktree, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
+                    if reference.get("status") != "patch_conflict":
+                        reference_after, reference_after_result = _tracked_source_index_hash(worktree)
+                        reference["tracked_source_index_hash_after_overlay"] = reference_after
+                        reference["tracked_source_index_resolution_after"] = reference_after_result.json()
+                        reference["tracked_source_index_unchanged"] = reference_before == reference_after
+                        if (args.patch_scope == "test-only" and
+                                (reference_after is None or not reference["tracked_source_index_unchanged"])):
+                            reference["status"] = "tracked_source_index_changed"
+                        else:
+                            reference_tree, reference_tree_result = _tree_sha(worktree)
+                            reference["tree_resolution"] = reference_tree_result.json()
+                            if reference_tree is None:
+                                reference["status"] = "tree_resolution_failed"
+                            else:
+                                reference_run = _run_tree(
+                                    worktree, output, "reference", args, configure_args, build_args,
+                                    commit_sha=harness_base, tree_sha=reference_tree)
+                                reference.update(reference_run)
+                                reference["harness_patch_applied"] = bool(patch)
+                report["reference"] = reference
+                _write_json(output / "report.json", report)
+            else:
+                report["reference"] = {
+                    "status": "not_run", "reason": "--no-reference-baseline",
+                }
             return_code = 0
             for record in records:
                 number = int(record["number"])
@@ -564,6 +800,14 @@ def run_validation(args: argparse.Namespace) -> int:
                     report["heads"].append(entry)
                     return_code = 2
                     continue
+                production_before, production_before_result = _tracked_source_index_hash(worktree)
+                entry["tracked_source_index_hash_before_overlay"] = production_before
+                entry["tracked_source_index_resolution_before"] = production_before_result.json()
+                if production_before is None:
+                    entry["status"] = "tracked_source_index_resolution_failed"
+                    report["heads"].append(entry)
+                    return_code = 2
+                    continue
                 if patch:
                     apply = _git(worktree, "apply", "--3way", "--index", str(patch_path), timeout=300)
                     entry["patch_apply"] = apply.json()
@@ -575,6 +819,16 @@ def run_validation(args: argparse.Namespace) -> int:
                         report["heads"].append(entry)
                         return_code = 2
                         continue
+                production_after, production_after_result = _tracked_source_index_hash(worktree)
+                entry["tracked_source_index_hash_after_overlay"] = production_after
+                entry["tracked_source_index_resolution_after"] = production_after_result.json()
+                entry["tracked_source_index_unchanged"] = production_before == production_after
+                if (args.patch_scope == "test-only" and
+                        (production_after is None or not entry["tracked_source_index_unchanged"])):
+                    entry["status"] = "tracked_source_index_changed"
+                    report["heads"].append(entry)
+                    return_code = 2
+                    continue
                 tree, tree_result = _tree_sha(worktree)
                 entry["tree_resolution"] = tree_result.json()
                 entry["tested_tree_sha"] = tree
@@ -587,6 +841,8 @@ def run_validation(args: argparse.Namespace) -> int:
                                 commit_sha=resolved, tree_sha=tree)
                 entry.update(run)
                 entry["harness_patch_applied"] = bool(patch)
+                entry["failure_classification"] = classify_failure_names(
+                    report.get("reference"), entry)
                 report["heads"].append(entry)
                 if entry["status"] != "pass":
                     return_code = 1 if entry["status"] in {"configure_failed", "build_failed",
@@ -621,12 +877,26 @@ def run_validation(args: argparse.Namespace) -> int:
             "head_sha": resolve_commit(repo, "HEAD")[0],
             "status": _status(repo),
         }
-        if report.get("original_checkout_after", {}).get("head_sha") != original_head:
-            report["status"] = "original_checkout_mutated"
-        elif report.get("original_checkout_after", {}).get("status") != original_status:
-            report["status"] = "original_checkout_status_changed"
+        checkout_after = report["original_checkout_after"]
+        if (checkout_after.get("head_sha") != original_head or
+                checkout_after.get("status") != original_status):
+            # This is deliberately fail-closed, but the runner cannot infer
+            # causality when another process edits the shared checkout during
+            # an independent worktree run.  Keep both snapshots and report the
+            # observation without claiming the runner caused it.
+            report["original_checkout_change"] = {
+                "observed": True,
+                "cause": "unknown; concurrent shared-checkout activity is possible",
+                "head_before": original_head,
+                "head_after": checkout_after.get("head_sha"),
+                "status_before": original_status,
+                "status_after": checkout_after.get("status"),
+            }
+            report["status"] = "original_checkout_changed_during_run"
+            return_code = 2
         elif cleanup and not cleanup.get("removed", False):
             report["status"] = "cleanup_failed"
+            return_code = 2
         else:
             report["status"], return_code = _overall_status(report)
         _write_json(output / "report.json", report)
@@ -655,6 +925,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", dest="targets", action="append", default=None,
                         help="native test target (repeat to override defaults)")
     parser.add_argument("--exclude-labels", default=DEFAULT_EXCLUDED_LABELS)
+    parser.add_argument("--patch-scope", choices=("test-only", "integration", "full"),
+                        default="test-only",
+                        help="overlay scope; test-only protects src/, integration allows build CMake, full applies the legacy complete diff")
+    parser.add_argument("--patch-include", action="append", default=[],
+                        help="additional exact path or directory allowed in test-only/integration overlay")
+    parser.add_argument("--reference-baseline", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="run harness-base plus the selected overlay as a failure reference (default: enabled)")
     return parser
 
 

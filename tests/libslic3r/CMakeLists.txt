@@ -15,6 +15,7 @@ add_executable(${_TEST_NAME}_tests
     test_assemble_list.cpp
     test_bambu_networking.cpp
     test_belt_brim.cpp
+    test_bridge_detector.cpp
     test_buildvolume.cpp
     test_calib.cpp
     test_clipper_offset.cpp
@@ -71,6 +72,7 @@ add_executable(${_TEST_NAME}_tests
     test_miniz_extension.cpp
     test_timeutils.cpp
     test_voronoi.cpp
+    test_voxel_utils.cpp
     test_wipe_tower_estimate.cpp
     test_wipe_tower.cpp
     test_wipe_path.cpp

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed command and flow mutation candidates. Native outcomes are recorded separately.",
+  "mutants": [
+    {
+      "id": "gcode-modal-relative-xyz",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "m_global_positioning_type = EPositioningType::Relative;",
+      "new": "m_global_positioning_type = EPositioningType::Absolute;",
+      "description": "Make G91 leave the processor in absolute positioning.",
+      "test_filter": "GCodeProcessorExtended"
+    },
+    {
+      "id": "gcode-inch-scale-process-g1",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "const double lengthsScaleFactor = (m_units == EUnits::Inches) ? double(INCHES_TO_MM) : 1.0;\n            double       ret                = *value * lengthsScaleFactor;",
+      "new": "const double lengthsScaleFactor = 1.0;\n            double       ret                = *value * lengthsScaleFactor;",
+      "description": "Ignore G20 inch scaling in the process_G1 absolute-position lambda; the G20/G21 endpoint contract should detect the unit loss.",
+      "test_filter": "GCodeProcessorExtended"
+    },
+    {
+      "id": "gcode-m900-pressure-axis",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "line.has_value('K', pa_value);",
+      "new": "line.has_value('S', pa_value);",
+      "description": "Read the wrong axis for Marlin pressure advance.",
+      "test_filter": "GCodeProcessorExtended"
+    },
+    {
+      "id": "gcode-klipper-pressure-assignment",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (std::regex_search(line.raw(), matches, regex) && matches.size() > 1) {\n        float pa_value = 0;\n        try {\n            pa_value = std::stof(matches[1].str());\n        } catch (...) {}\n        m_pressure_advance = std::max(0.0f, pa_value);",
+      "new": "if (std::regex_search(line.raw(), matches, regex) && matches.size() > 1) {\n        float pa_value = 0;\n        try {\n            pa_value = std::stof(matches[1].str());\n        } catch (...) {}\n        m_pressure_advance = 0.0f;",
+      "description": "Discard the parsed Klipper ADVANCE value before stamping the next move.",
+      "test_filter": "GCodeProcessorExtended"
+    },
+    {
+      "id": "gcode-forced-width-assignment",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (m_forced_width > 0.0f)\n            m_width = m_forced_width;",
+      "new": "if (m_forced_width > 0.0f)\n            m_width = m_forced_height;",
+      "description": "Use the height tag as width, which violates the WIDTH tag geometry contract.",
+      "test_filter": "GCodeProcessorExtended"
+    },
+    {
+      "id": "gcode-arc-fitting-gate",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (fitting == EFitting::None)\n        return;",
+      "new": "if (fitting != EFitting::None)\n        return;",
+      "description": "Reject valid IJ/R arc commands at the fitting gate, so the analytic arc endpoint contract cannot be satisfied.",
+      "test_filter": "GCodeProcessorExtended"
+    },
+    {
+      "id": "gcode-firmware-retract-sign",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "g10.set(Axis::E, -this->m_parser.config().retraction_length.get_at(m_extruder_id));",
+      "new": "g10.set(Axis::E, this->m_parser.config().retraction_length.get_at(m_extruder_id));",
+      "description": "Make firmware retract add extrusion instead of retracting.",
+      "test_filter": "GCodeProcessorExtended"
+    },
+    {
+      "id": "gcode-g22-marker",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "store_move_vertex(EMoveType::Retract);",
+      "new": "store_move_vertex(EMoveType::Unretract);",
+      "description": "Classify explicit G22 firmware retract as unretract.",
+      "test_filter": "GCodeProcessorExtended"
+    }
+  ]
+}

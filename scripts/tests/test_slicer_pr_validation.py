@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -87,6 +88,123 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(slicer_pr_validation._overall_status(report),
                          ("infrastructure_error", 2))
 
+    def test_reference_failures_are_classified_without_suppressing_head(self):
+        reference = {
+            "junit_exists": True,
+            "junit_reference_usable": True,
+            "status": "test_failed",
+            "junit_case_statuses": {
+                "suite::known base regression": "failed",
+                "suite::resolved on PR": "failed",
+            },
+            "failed_test_names": ["suite::known base regression", "suite::resolved on PR"],
+        }
+        head = {
+            "status": "pass",
+            "junit_case_statuses": {
+                "suite::known base regression": "passed",
+                "suite::resolved on PR": "passed",
+            },
+            "failed_test_names": [],
+        }
+        classification = slicer_pr_validation.classify_failure_names(reference, head)
+        self.assertEqual(classification["inherited"], [])
+        self.assertEqual(classification["new"], [])
+        self.assertEqual(classification["resolved"], [
+            "suite::known base regression", "suite::resolved on PR",
+        ])
+        report = {"baseline": {"status": "pass"}, "reference": reference,
+                  "heads": [head]}
+        self.assertEqual(slicer_pr_validation._overall_status(report), ("pass", 0))
+
+    def test_missing_reference_evidence_is_not_reported_as_inherited(self):
+        classification = slicer_pr_validation.classify_failure_names(
+            {"status": "test_timeout", "junit_exists": False},
+            {"status": "test_failed", "failed_test_names": ["head failure"]})
+        self.assertFalse(classification["reference_available"])
+        self.assertEqual(classification["new"], [])
+        self.assertEqual(classification["uncompared_head_failures"], ["head failure"])
+        self.assertIn("cannot establish a shared root cause", classification["classification_basis"])
+        self.assertIn("unavailable", classification["reason"])
+
+    def test_malformed_reference_junit_cannot_claim_new_failure(self):
+        classification = slicer_pr_validation.classify_failure_names(
+            {"status": "test_failed", "junit_exists": True,
+             "junit_reference_usable": False, "junit_case_statuses": {}},
+            {"status": "test_failed", "failed_test_names": ["suite::new"]})
+        self.assertFalse(classification["reference_available"])
+        self.assertEqual(classification["new"], [])
+        self.assertEqual(classification["raw_observed_head_failures"], ["suite::new"])
+        self.assertEqual(classification["uncompared_head_failures"], ["suite::new"])
+
+    def test_differential_classification_requires_case_execution(self):
+        reference = {
+            "junit_reference_usable": True,
+            "junit_case_statuses": {
+                "suite::inherited": "failed",
+                "suite::resolved": "failed",
+                "suite::new": "passed",
+                "suite::reference_only": "failed",
+                "suite::skipped_reference": "failed",
+                "suite::reference_skipped": "skipped",
+                "suite::reference_unknown": "unknown",
+            },
+            "failed_test_names": [
+                "suite::inherited", "suite::resolved", "suite::reference_only",
+            ],
+        }
+        head = {
+            "status": "test_failed",
+            "junit_case_statuses": {
+                "suite::inherited": "failed",
+                "suite::resolved": "passed",
+                "suite::new": "failed",
+                "suite::skipped": "skipped",
+                "suite::skipped_reference": "skipped",
+            },
+            "failed_test_names": [
+                "suite::inherited", "suite::new",
+                "suite::reference_skipped", "suite::reference_unknown",
+            ],
+        }
+        classification = slicer_pr_validation.classify_failure_names(reference, head)
+        self.assertEqual(classification["inherited"], ["suite::inherited"])
+        self.assertEqual(classification["new"], ["suite::new"])
+        self.assertEqual(classification["resolved"], ["suite::resolved"])
+        self.assertEqual(classification["uncompared_head_failures"], [
+            "suite::reference_skipped", "suite::reference_unknown",
+        ])
+        self.assertEqual(classification["not_executed_reference_failures"],
+                         ["suite::reference_only", "suite::skipped_reference"])
+        self.assertIn("matching failure names do not", classification["classification_basis"])
+
+    def test_build_failure_cannot_claim_reference_failure_resolved(self):
+        reference = {
+            "junit_reference_usable": True,
+            "junit_case_statuses": {"suite::known": "failed"},
+            "failed_test_names": ["suite::known"],
+        }
+        head = {
+            "status": "build_failed",
+            "junit_exists": False,
+            "junit_case_statuses": {},
+            "failed_test_names": [],
+        }
+        classification = slicer_pr_validation.classify_failure_names(reference, head)
+        self.assertEqual(classification["resolved"], [])
+        self.assertEqual(classification["not_executed_reference_failures"], ["suite::known"])
+
+    def test_duplicate_junit_names_are_qualified_and_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as temp:
+            junit = Path(temp) / "duplicate.xml"
+            junit.write_text(
+                "<testsuites><testsuite><testcase classname='a' name='same'>"
+                "<failure/></testcase><testcase classname='a' name='same'/>"
+                "</testsuite></testsuites>", encoding="utf-8")
+            self.assertEqual(slicer_pr_validation.junit_case_statuses(junit), {
+                "a::same": "failed", "a::same#2": "passed",
+            })
+
 
 class CleanupTests(unittest.TestCase):
     def test_reset_operations_are_recorded_and_do_not_touch_original_checkout(self):
@@ -141,6 +259,255 @@ class CommandTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "payload")
+
+
+class PatchScopeTests(unittest.TestCase):
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+
+    def _fixture(self, root):
+        repo = root / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "test@example.invalid")
+        self._git(repo, "config", "user.name", "Test")
+        (repo / "tests").mkdir()
+        (repo / "scripts").mkdir()
+        (repo / "src").mkdir()
+        (repo / "cmake").mkdir()
+        (repo / "tests/harness.txt").write_text("base\n", encoding="utf-8")
+        (repo / "tests/blob.bin").write_bytes(b"base\x00\xff")
+        (repo / "src/production.cpp").write_text("base\n", encoding="utf-8")
+        (repo / "src/CMakeLists.txt").write_text("base\n", encoding="utf-8")
+        (repo / "CMakeLists.txt").write_text("base\n", encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "base")
+        base = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        (repo / "tests/harness.txt").write_text("harness\n", encoding="utf-8")
+        (repo / "tests/blob.bin").write_bytes(b"harness\x00\x01\xfe")
+        (repo / "src/production.cpp").write_text("production change\n", encoding="utf-8")
+        (repo / "src/CMakeLists.txt").write_text("integration change\n", encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "harness and production")
+        ref = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        return repo, base, ref
+
+    def test_test_only_scope_preserves_production_and_binary_patch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, ref = self._fixture(Path(temp))
+            test_paths = slicer_pr_validation._scope_pathspecs("test-only", [])
+            patch, result = slicer_pr_validation._git_diff(repo, base, ref, test_paths)
+            self.assertEqual(result.returncode, 0)
+            self.assertIsNotNone(patch)
+            self.assertIn(b"tests/harness.txt", patch)
+            self.assertIn(b"GIT binary patch", patch)
+            self.assertNotIn(b"src/production.cpp", patch)
+            self.assertNotIn(b"src/CMakeLists.txt", patch)
+
+            worktree = Path(temp) / "worktree"
+            self._git(repo, "worktree", "add", "--detach", str(worktree), base)
+            patch_path = Path(temp) / "test-only.patch"
+            patch_path.write_bytes(patch)
+            before, _ = slicer_pr_validation._tracked_source_index_hash(worktree)
+            apply = slicer_pr_validation._git(worktree, "apply", "--3way", "--index", str(patch_path))
+            self.assertEqual(apply.returncode, 0, apply.stderr)
+            self.assertEqual((worktree / "tests/harness.txt").read_text(encoding="utf-8"), "harness\n")
+            self.assertEqual((worktree / "tests/blob.bin").read_bytes(), b"harness\x00\x01\xfe")
+            after, _ = slicer_pr_validation._tracked_source_index_hash(worktree)
+            self.assertEqual(before, after)
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+    def test_integration_and_full_scopes_are_explicit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, ref = self._fixture(Path(temp))
+            integration, result = slicer_pr_validation._git_diff(
+                repo, base, ref, slicer_pr_validation._scope_pathspecs("integration", []))
+            self.assertEqual(result.returncode, 0)
+            self.assertIn(b"src/CMakeLists.txt", integration)
+            self.assertNotIn(b"src/production.cpp", integration)
+            full, result = slicer_pr_validation._git_diff(repo, base, ref, None)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn(b"src/production.cpp", full)
+            explicit, result = slicer_pr_validation._git_diff(
+                repo, base, ref, slicer_pr_validation._scope_pathspecs("test-only", ["src/CMakeLists.txt"]))
+            self.assertEqual(result.returncode, 0)
+            self.assertIn(b"src/CMakeLists.txt", explicit)
+
+    def test_diff_paths_and_literal_include_preserve_special_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _, ref = self._fixture(Path(temp))
+            (repo / "docs").mkdir()
+            selected = "docs/special [x]*☃.txt"
+            sibling = "docs/special ax☃.txt"
+            (repo / selected).write_text("selected\n", encoding="utf-8")
+            (repo / sibling).write_text("sibling\n", encoding="utf-8")
+            self._git(repo, "add", ".")
+            self._git(repo, "commit", "-qm", "special names")
+            special_ref = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+
+            paths, result = slicer_pr_validation._git_diff_paths(repo, ref, special_ref)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(paths, [selected, sibling])
+            patch, result = slicer_pr_validation._git_diff(
+                repo, ref, special_ref,
+                slicer_pr_validation._scope_pathspecs("test-only", [selected]))
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(any(":(top,literal)" in arg for arg in result.argv))
+            self.assertIn(b"+selected\n", patch)
+            self.assertNotIn(b"+sibling\n", patch)
+
+
+class RunValidationOrchestrationTests(unittest.TestCase):
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+
+    def _fixture(self, root):
+        repo = root / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "test@example.invalid")
+        self._git(repo, "config", "user.name", "Test")
+        (repo / "tests").mkdir()
+        (repo / "src").mkdir()
+        (repo / "tests/harness.txt").write_text("base\n", encoding="utf-8")
+        (repo / "src/production.cpp").write_text("production\n", encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "base")
+        base = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        (repo / "tests/harness.txt").write_text("harness\n", encoding="utf-8")
+        self._git(repo, "add", "tests/harness.txt")
+        self._git(repo, "commit", "-qm", "harness")
+        harness_ref = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        self._git(repo, "checkout", "-q", "-b", "head", base)
+        (repo / "README.txt").write_text("head-only context\n", encoding="utf-8")
+        self._git(repo, "add", "README.txt")
+        self._git(repo, "commit", "-qm", "head")
+        head = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        return repo, base, harness_ref, head
+
+    def _args(self, repo, snapshot, output):
+        args = slicer_pr_validation._parser().parse_args([
+            "--root", str(repo),
+            "--snapshot", str(snapshot),
+            "--harness-base", "HEAD~1~1",
+            "--harness-ref", "HEAD~1",
+            "--deps-prefix", str(repo / "deps"),
+            "--output-dir", str(output),
+            "--build-dir", "build",
+            "--jobs", "1",
+            "--timeout", "1",
+        ])
+        args.targets = slicer_pr_validation.DEFAULT_TARGETS
+        args.uv = "uv"
+        return args
+
+    def _write_snapshot(self, root, head):
+        snapshot = root / "snapshot.json"
+        snapshot.write_text(json.dumps([{
+            "number": 1, "headRefName": "head", "headRefOid": head,
+        }]), encoding="utf-8")
+        return snapshot
+
+    @staticmethod
+    def _fake_run_tree(worktree, root_output, name, args, configure_args, build_args, **kwargs):
+        if name == "baseline":
+            return {"name": name, "status": "pass"}
+        if name == "reference":
+            return {
+                "name": name,
+                "status": "test_failed",
+                "junit_reference_usable": True,
+                "junit_case_statuses": {"suite::base regression": "failed"},
+                "failed_test_names": ["suite::base regression"],
+            }
+        return {
+            "name": name,
+            "status": "pass",
+            "junit_case_statuses": {"suite::base regression": "passed"},
+            "failed_test_names": [],
+        }
+
+    def test_reference_failure_does_not_suppress_head_and_src_stays_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree) as run_tree:
+                result = slicer_pr_validation.run_validation(args)
+            self.assertEqual(result, 0)
+            self.assertEqual([call.args[2] for call in run_tree.call_args_list],
+                             ["baseline", "reference", "pr-1"])
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["reference"]["status"], "test_failed")
+            self.assertEqual(report["heads"][0]["status"], "pass")
+            self.assertEqual(report["heads"][0]["failure_classification"]["resolved"],
+                             ["suite::base regression"])
+            self.assertTrue(report["heads"][0]["tracked_source_index_unchanged"])
+
+    def test_original_checkout_change_is_fail_closed_with_nonzero_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+
+            def mutate_original(*run_args, **run_kwargs):
+                (repo / "concurrent-change.txt").write_text("changed\n", encoding="utf-8")
+                return self._fake_run_tree(*run_args, **run_kwargs)
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=mutate_original):
+                result = slicer_pr_validation.run_validation(args)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(result, 2)
+            self.assertEqual(report["status"], "original_checkout_changed_during_run")
+
+    def test_cleanup_failure_is_fail_closed_with_nonzero_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            real_git = slicer_pr_validation._git
+
+            def fail_remove(git_repo, *git_args, **git_kwargs):
+                if git_args[:3] == ("worktree", "remove", "--force"):
+                    return slicer_pr_validation.CommandResult(
+                        ["git", *git_args], 1, 0.01, "", "forced cleanup failure")
+                return real_git(git_repo, *git_args, **git_kwargs)
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree), \
+                 mock.patch.object(slicer_pr_validation, "_git",
+                                   side_effect=fail_remove):
+                result = slicer_pr_validation.run_validation(args)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(result, 2)
+            self.assertEqual(report["status"], "cleanup_failed")
+            self.assertFalse(report["cleanup"]["removed"])
+            # The mocked cleanup failure intentionally leaves the disposable
+            # worktree registered; remove it after the fail-closed assertion.
+            worktree = Path(report["worktree"]["path"])
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
 
 
 if __name__ == "__main__":
