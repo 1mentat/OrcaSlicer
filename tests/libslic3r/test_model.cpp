@@ -1,3 +1,7 @@
+#include "libslic3r/CustomGCode.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Arrange.hpp"
+#include <set>
 #include <cstddef>
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Config.hpp"
@@ -663,6 +667,387 @@ TEST_CASE("Volume type names round-trip every persisted model category", "[Model
         CHECK(ModelVolume::type_from_string(name) == type);
     }
     CHECK(ModelVolume::type_from_string("unrecognized") == ModelVolumeType::MODEL_PART);
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+TEST_CASE("Model copy and move assignment preserve parent links and ownership", "[Model][ModelExtendedVariance]")
+{
+    Model source;
+    ModelObject *object = cube_object(source);
+    object->name = "source";
+    source.add_material("PLA")->attributes["type"] = "PLA";
+    object->volumes.front()->set_material_id("PLA");
+    const ObjectID model_id = source.id();
+
+    Model copied;
+    copied = source;
+    REQUIRE(copied.id() == model_id);
+    REQUIRE(copied.objects.size() == 1);
+    CHECK(copied.objects.front()->get_model() == &copied);
+    CHECK(copied.objects.front()->volumes.front()->get_object() == copied.objects.front());
+    CHECK(copied.get_material("PLA")->get_model() == &copied);
+
+    Model moved;
+    moved = std::move(copied);
+    CHECK(moved.id() == model_id);
+    REQUIRE(moved.objects.size() == 1);
+    CHECK(moved.objects.front()->get_model() == &moved);
+    CHECK(copied.objects.empty());
+    CHECK(copied.materials.empty());
+}
+
+TEST_CASE("Named object overload records source metadata and export filename", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = model.add_object("part", "/tmp/input/source.stl", make_cube(4, 4, 4));
+    REQUIRE(object->volumes.size() == 1);
+    CHECK(object->name == "part");
+    CHECK(object->input_file == "/tmp/input/source.stl");
+    CHECK(object->volumes.front()->source.input_file == "/tmp/input/source.stl");
+    CHECK(object->volumes.front()->source.object_idx == 0);
+    CHECK(object->volumes.front()->source.volume_idx == 0);
+    CHECK(object->config.extruder() == 1);
+    CHECK(object->get_export_filename() == "/tmp/input/part");
+    CHECK(model.propose_export_file_name_and_path().empty());
+    object->add_instance();
+    CHECK(model.propose_export_file_name_and_path() == "/tmp/input/part");
+    CHECK(model.propose_export_file_name_and_path("3mf") == "/tmp/input/part.3mf");
+}
+
+TEST_CASE("Backup IDs remain stable and advance independently of object IDs", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *first = cube_object(model);
+    ModelObject *second = cube_object(model);
+    model.set_object_backup_id(*first, 1);
+    CHECK(first->get_backup_id() == 1);
+    CHECK(first->get_backup_id() == 1);
+    model.set_object_backup_id(*second, 42);
+    CHECK(second->get_backup_id() == 42);
+    ModelObject *third = cube_object(model);
+    CHECK(model.get_object_backup_id(*third) == 43);
+    CHECK(model.get_object_backup_id(*third) == 43);
+}
+
+TEST_CASE("Model metadata and plate custom code have explicit current-plate selection", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    model.SetDesigner("Ada", "user-7");
+    REQUIRE(model.design_info != nullptr);
+    CHECK(model.design_info->Designer == "Ada");
+    CHECK(model.design_info->DesignerUserId == "user-7");
+    model.plates_custom_gcodes[2].gcodes.push_back(CustomGCode::Item{1., CustomGCode::Custom, 1, "", "plate2"});
+    model.curr_plate_index = 2;
+    REQUIRE(model.get_curr_plate_custom_gcodes().gcodes.size() == 1);
+    CHECK(model.get_curr_plate_custom_gcodes().gcodes.front().extra == "plate2");
+    model.curr_plate_index = 9;
+    CHECK(model.get_curr_plate_custom_gcodes().gcodes.empty());
+}
+
+TEST_CASE("Multipart detection distinguishes equal and different minimum Z", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    cube_object(model, 10.);
+    ModelObject *second = cube_object(model, 5.);
+    second->instances.front()->set_offset(Vec3d(30, 0, 0));
+    CHECK_FALSE(model.looks_like_multipart_object());
+    second->instances.front()->set_offset(Vec3d(30, 0, 2));
+    second->invalidate_bounding_box();
+    CHECK(model.looks_like_multipart_object());
+}
+
+TEST_CASE("Centering can include modifiers while printable-only centering excludes them", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 10., false);
+    object->add_volume(make_cube(4, 4, 4), ModelVolumeType::PARAMETER_MODIFIER, false)->set_offset(Vec3d(100, 0, 0));
+    object->add_instance();
+    object->center_around_origin(false);
+    object->invalidate_bounding_box();
+    CHECK_THAT(object->raw_mesh_bounding_box().center().x(), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(object->full_raw_mesh_bounding_box().center().x(), Catch::Matchers::WithinAbs(47., 1e-5));
+    object->center_around_origin(true);
+    CHECK_THAT(object->full_raw_mesh_bounding_box().center().x(), Catch::Matchers::WithinAbs(0., 1e-5));
+}
+
+TEST_CASE("Ensure-on-bed respects auto-drop and the negative-Z allowance", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    object->instances.front()->set_offset(Vec3d(0, 0, -5));
+    object->invalidate_bounding_box();
+    object->ensure_on_bed();
+    CHECK_THAT(object->min_z(), Catch::Matchers::WithinAbs(0., 1e-6));
+    object->instances.front()->set_offset(Vec3d(0, 0, -5));
+    object->invalidate_bounding_box();
+    object->instances.front()->auto_drop = false;
+    object->ensure_on_bed();
+    CHECK_THAT(object->min_z(), Catch::Matchers::WithinAbs(-5., 1e-6));
+    object->instances.front()->auto_drop = true;
+    object->invalidate_bounding_box();
+    object->ensure_on_bed(true);
+    CHECK_THAT(object->min_z(), Catch::Matchers::WithinAbs(-5., 1e-6));
+}
+
+TEST_CASE("Deleting the last instance and clearing instances invalidate world geometry", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    object->add_instance(Vec3d(30, 0, 0), Vec3d::Ones(), Vec3d::Zero(), Vec3d::Ones());
+    REQUIRE(object->instances.size() == 2);
+    CHECK(object->bounding_box_exact().size().x() > 30.);
+    object->delete_last_instance();
+    REQUIRE(object->instances.size() == 1);
+    CHECK_THAT(object->bounding_box_exact().size().x(), Catch::Matchers::WithinAbs(10., 1e-5));
+    object->clear_instances();
+    CHECK(object->instances.empty());
+    CHECK_THROWS(object->raw_bounding_box());
+}
+
+TEST_CASE("Volume sorting orders precise seam strength and semantic volume types", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(1, 1, 1), ModelVolumeType::SUPPORT_ENFORCER, false);
+    object->add_volume(make_cube(1, 1, 1), ModelVolumeType::MODEL_PART, false);
+    object->add_volume(make_cube(1, 1, 1), ModelVolumeType::PRECISE_SEAM_NEUTRAL, false);
+    object->add_volume(make_cube(1, 1, 1), ModelVolumeType::PRECISE_SEAM_CENTER, false);
+    object->add_volume(make_cube(1, 1, 1), ModelVolumeType::PARAMETER_MODIFIER, false);
+    object->sort_volumes(true);
+    CHECK(object->volumes[0]->is_model_part());
+    CHECK(object->volumes[1]->is_modifier());
+    CHECK(object->volumes[2]->is_support_enforcer());
+    CHECK(object->volumes[3]->is_precise_seam_strong());
+    CHECK(object->volumes[4]->is_precise_seam_weak());
+    object->sort_volumes(false);
+    CHECK(object->volumes.front()->is_model_part());
+}
+
+TEST_CASE("Deleting one of two volumes folds its transform into the remaining instance", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false)->set_offset(Vec3d(20, 0, 0));
+    object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false)->set_offset(Vec3d(5, 0, 0));
+    ModelInstance *instance = object->add_instance(Vec3d(7, 0, 0), Vec3d::Ones(), Vec3d::Zero(), Vec3d::Ones());
+    const BoundingBoxf3 before_remaining = object->volumes[1]->mesh().transformed_bounding_box(instance->get_matrix() * object->volumes[1]->get_matrix());
+    object->delete_volume(0);
+    REQUIRE(object->volumes.size() == 1);
+    check_vec3d(object->volumes.front()->get_offset(), Vec3d::Zero());
+    check_box(object->instance_bounding_box(*instance), before_remaining.min.cast<double>(), before_remaining.max.cast<double>());
+}
+
+TEST_CASE("Raw printable mesh excludes modifiers and reverses mirrored winding", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *part = object->add_volume(make_cube(2, 2, 2), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *modifier = object->add_volume(make_cube(20, 20, 20), ModelVolumeType::PARAMETER_MODIFIER, false);
+    modifier->set_offset(Vec3d(100, 0, 0));
+    const indexed_triangle_set before = object->raw_indexed_triangle_set();
+    REQUIRE(before.indices.size() == part->mesh().its.indices.size());
+    CHECK(before.indices.front() == part->mesh().its.indices.front());
+    part->set_mirror(X, -1.);
+    REQUIRE(part->is_left_handed());
+    const indexed_triangle_set mirrored = object->raw_indexed_triangle_set();
+    REQUIRE(mirrored.indices.size() == before.indices.size());
+    CHECK(mirrored.indices.front() != before.indices.front());
+    CHECK(mirrored.indices.front()[0] == before.indices.front()[1]);
+    CHECK(mirrored.indices.front()[1] == before.indices.front()[0]);
+    CHECK(mirrored.indices.front()[2] == before.indices.front()[2]);
+}
+
+TEST_CASE("Partial unit conversion clones only selected volumes and preserves metadata", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *inch = object->add_volume(make_cube(1, 1, 1), ModelVolumeType::MODEL_PART, false);
+    inch->name = "inch";
+    inch->source.input_file = "inch.stl";
+    ModelVolume *untouched = object->add_volume(make_cube(2, 2, 2), ModelVolumeType::MODEL_PART, false);
+    untouched->name = "millimeter";
+    // convert_units returns detached objects; Model owns their cleanup.
+    Model converted_model;
+    ModelObjectPtrs &converted = converted_model.objects;
+    object->convert_units(converted, ConversionType::CONV_FROM_INCH, {0});
+    REQUIRE(converted.size() == 1);
+    REQUIRE(converted.front()->volumes.size() == 2);
+    check_vec3d(converted.front()->volumes[0]->mesh().bounding_box().size().cast<double>(), Vec3d(25.4, 25.4, 25.4), 1e-3);
+    check_vec3d(converted.front()->volumes[1]->mesh().bounding_box().size().cast<double>(), Vec3d(2, 2, 2), 1e-5);
+    CHECK(converted.front()->volumes[0]->source.is_converted_from_inches);
+    CHECK_FALSE(converted.front()->volumes[1]->source.is_converted_from_inches);
+    CHECK(converted.front()->volumes[0]->name == "inch");
+    CHECK(converted.front()->volumes[0]->source.input_file == "inch.stl");
+}
+
+TEST_CASE("Volume conversion resets offset and records the source unit", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 1., false);
+    ModelVolume *volume = object->volumes.front();
+    volume->set_offset(Vec3d(5, 6, 7));
+    volume->convert_from_imperial_units();
+    check_vec3d(volume->mesh().bounding_box().size().cast<double>(), Vec3d(25.4, 25.4, 25.4), 1e-3);
+    check_vec3d(volume->get_offset(), Vec3d::Zero());
+    CHECK(volume->source.is_converted_from_inches);
+}
+
+TEST_CASE("Filament deletion remaps or removes stale explicit volume assignments", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 2.);
+    ModelVolume *volume = object->volumes.front();
+    volume->config.set("extruder", 6);
+    volume->update_extruder_count_when_delete_filament(4, 1, 4, {0, 0, 0, 0, 0, 0});
+    CHECK_FALSE(volume->config.has("extruder"));
+    volume->config.set("extruder", 6);
+    volume->update_extruder_count_when_delete_filament(4, 1, 4, {0, 0, 0, 0, 0, 1});
+    CHECK(volume->config.extruder() == 6);
+    volume->config.set("extruder", 2);
+    volume->update_extruder_count(1);
+    CHECK_FALSE(volume->config.has("extruder"));
+}
+
+TEST_CASE("Convex hull cache separates translation from shape changes", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 10., false);
+    ModelVolume *volume = object->volumes.front();
+    const Polygon &base = volume->get_convex_hull_2d(Transform3d::Identity());
+    const auto base_box = base.bounding_box();
+    Transform3d translated = Transform3d::Identity();
+    translated.translation() = Vec3d(20, 30, 0);
+    const Polygon &moved = volume->get_convex_hull_2d(translated);
+    CHECK(moved.bounding_box().min.x() == base_box.min.x() + scaled(20.));
+    CHECK(moved.bounding_box().min.y() == base_box.min.y() + scaled(30.));
+    volume->set_scaling_factor(Vec3d(2, 1, 1));
+    const Polygon &scaled_hull = volume->get_convex_hull_2d(Transform3d::Identity());
+    CHECK(scaled_hull.bounding_box().size().x() == scaled(20.));
+    CHECK(scaled_hull.bounding_box().size().y() == scaled(10.));
+}
+
+TEST_CASE("Only-one-part and connector cleanup distinguish model and auxiliary volumes", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 2., false);
+    ModelVolume *part = object->volumes.front();
+    CHECK(part->is_the_only_one_part());
+    ModelVolume *modifier = object->add_volume(make_cube(1, 1, 1), ModelVolumeType::PARAMETER_MODIFIER, false);
+    CHECK(part->is_the_only_one_part());
+    ModelVolume *other = object->add_volume(make_cube(1, 1, 1), ModelVolumeType::MODEL_PART, false);
+    CHECK_FALSE(part->is_the_only_one_part());
+    other->cut_info.is_connector = true;
+    other->cut_info.is_processed = true;
+    object->delete_connectors();
+    CHECK(object->volumes.size() == 2);
+    object->invalidate_cut();
+    CHECK_FALSE(modifier->cut_info.is_connector);
+}
+
+TEST_CASE("Material painting round-trips serialized triangle state and resets", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 2., false);
+    ModelVolume *volume = object->volumes.front();
+    volume->mmu_segmentation_facets.set_triangle_from_string(0, "8");
+    CHECK(volume->mmu_segmentation_facets.get_triangle_as_string(0) == "8");
+    CHECK_FALSE(volume->mmu_segmentation_facets.get_data().bitstream.empty());
+    CHECK(volume->is_mm_painted());
+    const auto saved = volume->save_painting();
+    REQUIRE(saved.has_value());
+    volume->reset_extra_facets();
+    CHECK_FALSE(volume->is_any_painted());
+    volume->restore_painting(saved);
+    CHECK(volume->is_mm_painted());
+    volume->reset_extra_facets();
+    CHECK_FALSE(volume->save_painting().has_value());
+}
+
+TEST_CASE("OBJ face and vertex filament imports reject malformed cardinality and record painted slots", "[Model][ModelExtendedVariance]")
+{
+    Model face_model;
+    ModelObject *face_object = cube_object(face_model, 2., false);
+    const size_t faces = face_object->volumes.front()->mesh().its.indices.size();
+    CHECK_FALSE(Model::obj_import_face_color_deal({}, 1, &face_model));
+    CHECK_FALSE(Model::obj_import_face_color_deal(std::vector<unsigned char>(faces - 1, 2), 1, &face_model));
+    CHECK(Model::obj_import_face_color_deal(std::vector<unsigned char>(faces, 2), 1, &face_model));
+    CHECK(face_object->is_mm_painted());
+    CHECK(face_object->volumes.front()->get_extruders_from_multi_material_painting() == std::vector<size_t>{1});
+
+    Model vertex_model;
+    ModelObject *vertex_object = cube_object(vertex_model, 2., false);
+    const size_t vertices = vertex_object->volumes.front()->mesh().its.vertices.size();
+    CHECK_FALSE(Model::obj_import_vertex_color_deal(std::vector<unsigned char>(vertices - 1, 2), 1, &vertex_model));
+    CHECK(Model::obj_import_vertex_color_deal(std::vector<unsigned char>(vertices, 2), 1, &vertex_model));
+    CHECK(vertex_object->is_mm_painted());
+}
+
+TEST_CASE("Print-volume classification distinguishes inside, outside, and mixed model parts", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false)->set_offset(Vec3d(200, 0, 0));
+    ModelInstance *instance = object->add_instance();
+    CHECK(instance->calc_print_volume_state(rectangular_bed()) == ModelInstancePVS_Partly_Outside);
+    object->volumes.back()->set_offset(Vec3d(200, 0, 0));
+    instance->set_offset(Vec3d(200, 0, 0));
+    CHECK(instance->calc_print_volume_state(rectangular_bed()) == ModelInstancePVS_Fully_Outside);
+    instance->set_offset(Vec3d(10, 10, 0));
+    object->volumes.back()->set_offset(Vec3d(0, 0, 0));
+    CHECK(instance->calc_print_volume_state(rectangular_bed()) == ModelInstancePVS_Inside);
+}
+
+TEST_CASE("Instance Z queries follow scaling and translation of printable volumes", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 10.);
+    ModelInstance *instance = object->instances.front();
+    instance->set_scaling_factor(Vec3d(1, 1, 2));
+    instance->set_offset(Vec3d(0, 0, 3));
+    CHECK_THAT(object->get_instance_min_z(0), Catch::Matchers::WithinAbs(3., 1e-5));
+    CHECK_THAT(object->get_instance_max_z(0), Catch::Matchers::WithinAbs(23., 1e-5));
+}
+
+TEST_CASE("Arrange polygon reports transformed footprint and material support assignments", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 10.);
+    object->volumes.front()->config.set("extruder", 2);
+    DynamicPrintConfig global;
+    global.set_key_value("enable_support", new ConfigOptionBool(true));
+    global.set_key_value("support_filament", new ConfigOptionInt(3));
+    global.set_key_value("support_interface_filament", new ConfigOptionInt(2));
+    arrangement::ArrangePolygon arranged;
+    object->instances.front()->set_offset(Vec3d(12, 15, 4));
+    object->instances.front()->set_rotation(Z, 0.25);
+    object->instances.front()->get_arrange_polygon(&arranged, global);
+    CHECK(arranged.poly.contour.size() == 4);
+    CHECK(arranged.translation == Vec2crd(scaled(12.), scaled(15.)));
+    CHECK_THAT(arranged.rotation, Catch::Matchers::WithinAbs(0.25, 1e-9));
+    const std::set<int> extruders(arranged.extrude_ids.begin(), arranged.extrude_ids.end());
+    CHECK(extruders == std::set<int>{2, 3});
+}
+
+TEST_CASE("Object export statistics use printable volume determinants and names", "[Model][ModelExtendedVariance]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "named";
+    object->input_file = "/tmp/source.stl";
+    ModelVolume *part = object->add_volume(make_cube(2, 2, 2), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *modifier = object->add_volume(make_cube(4, 4, 4), ModelVolumeType::PARAMETER_MODIFIER, false);
+    modifier->set_offset(Vec3d(100, 0, 0));
+    object->add_instance();
+    CHECK(object->get_export_filename() == "/tmp/named");
+    CHECK_THAT(object->get_object_stl_stats().volume, Catch::Matchers::WithinAbs(8., 1e-4));
+    part->set_scaling_factor(Vec3d(2, 3, 4));
+    CHECK_THAT(object->get_object_stl_stats().volume, Catch::Matchers::WithinAbs(192., 1e-3));
+    CHECK(object->get_object_stl_stats().number_of_parts == 1);
+    CHECK(object->has_solid_mesh());
+    CHECK(object->facets_count() == 12);
 }
 
 } // namespace model_extended_contracts

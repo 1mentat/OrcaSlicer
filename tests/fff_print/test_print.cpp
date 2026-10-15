@@ -1,3 +1,12 @@
+#include <nlohmann/json.hpp>
+#include "libslic3r/BoundingBox.hpp"
+#include <boost/filesystem/directory.hpp>
+#include <ios>
+#include "libslic3r/Slicing.hpp"
+#include "libslic3r/Utils.hpp"
+#include <initializer_list>
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/operations.hpp>
 #ifdef WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -1775,3 +1784,615 @@ TEST_CASE("Print validation gates junction-deviation warnings on firmware suppor
     CAPTURE(flavor, deviation);
     CHECK(count == (flavor == "marlin2" && deviation > 0.02 ? 1 : 0));
 }
+
+namespace print_workflow_contracts {
+namespace {
+
+DynamicPrintConfig pipeline_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"top_shell_layers", 2},
+        {"bottom_shell_layers", 2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"sparse_infill_density", "15%"},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"before_layer_change_gcode", ""},
+        {"gcode_comments", true},
+    });
+    return config;
+}
+
+void require_valid(const Print &print)
+{
+    const StringObjectException error = print.validate();
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+}
+
+void init_valid(std::initializer_list<TriangleMesh> meshes, Print &print, Model &model,
+                const DynamicPrintConfig &config, bool arrange = true, size_t instances = 1)
+{
+    if (instances == 1 && arrange) {
+        init_print(meshes, print, model, config);
+    } else {
+        init_print(std::vector<TriangleMesh>(meshes), print, model, config, nullptr, arrange, instances);
+    }
+    require_valid(print);
+}
+
+double layer_slice_area(const PrintObject &object, size_t index)
+{
+    double area = 0.0;
+    for (const ExPolygon &slice : object.get_layer(static_cast<int>(index))->lslices)
+        // ExPolygon::area() is in scaled-coordinate squared units.
+        area += slice.area() * SCALING_FACTOR * SCALING_FACTOR;
+    return area;
+}
+
+double polygon_area_mm2(const Polygons &polygons)
+{
+    return area(polygons) * SCALING_FACTOR * SCALING_FACTOR;
+}
+
+size_t perimeter_items(const PrintObject &object, size_t layer)
+{
+    size_t items = 0;
+    for (const LayerRegion *region : object.get_layer(static_cast<int>(layer))->regions())
+        items += region->perimeters.items_count();
+    return items;
+}
+
+size_t support_polygon_count(const PrintObject &object)
+{
+    size_t count = 0;
+    for (const SupportLayer *layer : object.support_layers())
+        count += layer->support_islands.size();
+    return count;
+}
+
+class ScopedResourcesDir
+{
+public:
+    explicit ScopedResourcesDir(const boost::filesystem::path &path) : previous(resources_dir())
+    {
+        set_resources_dir(path.string());
+    }
+    ~ScopedResourcesDir() { set_resources_dir(previous); }
+private:
+    std::string previous;
+};
+
+} // namespace
+
+TEST_CASE("An empty Print has no completed workflow and clear removes applied objects", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    CHECK(print.empty());
+    CHECK_FALSE(print.finished());
+    CHECK_FALSE(print.is_step_done(posSlice));
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+    REQUIRE_THAT(print.max_allowed_layer_height(), Catch::Matchers::WithinAbs(0.0, 1e-9));
+
+    Model model;
+    init_valid({cube(20.0)}, print, model, pipeline_config());
+    CHECK_FALSE(print.empty());
+    print.clear();
+    CHECK(print.empty());
+    CHECK(print.print_object_ids().empty());
+    CHECK_FALSE(print.finished());
+}
+
+TEST_CASE("Processing and exporting advance the Print lifecycle in order", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(20.0)}, print, model, pipeline_config());
+    CHECK_FALSE(print.is_step_done(posInfill));
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+
+    print.process();
+    REQUIRE(print.is_step_done(posSlice));
+    REQUIRE(print.is_step_done(posInfill));
+    REQUIRE(print.is_step_done(psSkirtBrim));
+    CHECK_FALSE(print.finished());
+
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    CHECK(print.is_step_done(psGCodeExport));
+    CHECK(print.finished());
+}
+
+TEST_CASE("A G-code-only config change preserves sliced object steps and invalidates export", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Print print;
+    Model model;
+    init_valid({cube(20.0)}, print, model, config);
+    print.process();
+    const size_t layers_before = print.objects().front()->layer_count();
+    gcode(print);
+    REQUIRE(print.finished());
+
+    config.set_deserialize_strict({{"gcode_comments", false}, {"default_acceleration", "1200"}});
+    print.apply(model, config);
+    CHECK(print.objects().front()->layer_count() == layers_before);
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+    print.process();
+    CHECK(print.is_step_done(posInfill));
+    CHECK_FALSE(gcode(print).empty());
+}
+
+TEST_CASE("A wall config change invalidates and recomputes perimeters", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Print print;
+    Model model;
+    init_valid({cube(20.0)}, print, model, config);
+    print.process();
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object->layer_count() > 3);
+    const size_t layers_before = object->layer_count();
+    const size_t before = perimeter_items(*object, 2);
+
+    config.set_deserialize_strict({{"wall_loops", 4}});
+    print.apply(model, config);
+    CHECK_FALSE(print.is_step_done(posPerimeters));
+    CHECK_FALSE(print.is_step_done(posInfill));
+    print.process();
+    const size_t after = perimeter_items(*print.objects().front(), 2);
+    CHECK(after > before);
+    CHECK(print.objects().front()->layer_count() == layers_before);
+}
+
+TEST_CASE("Multiple overhang objects sort layers by their distinct bounding footprints", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    TriangleMesh large = mesh(TestMesh::overhang);
+    TriangleMesh small = mesh(TestMesh::overhang);
+    small.scale(0.7f);
+    // Distinct overhang footprints make the descending-area order observable.
+    init_valid({std::move(large), std::move(small)}, print, model, pipeline_config());
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.num_object_instances() == 2);
+    const std::vector<ObjectID> ids = print.print_object_ids();
+    REQUIRE(ids.size() == 2);
+    CHECK(ids[0] != ids[1]);
+
+    print.process();
+    std::vector<LayerPtrs> layers;
+    std::vector<BoundingBox> boxes;
+    VecOfPoints shifts;
+    const std::vector<size_t> order = print.layers_sorted_for_object(0.f, 100.f, layers, boxes, shifts);
+    REQUIRE(order.size() == 2);
+    REQUIRE(layers.size() == 2);
+    REQUIRE(boxes.size() == 2);
+    REQUIRE(shifts.size() == 2);
+    CHECK(layers[0].size() > 0);
+    CHECK(layers[1].size() > 0);
+    REQUIRE(boxes[0].area() != boxes[1].area());
+    const size_t larger = boxes[0].area() > boxes[1].area() ? 0 : 1;
+    CHECK(order.front() == larger);
+    CHECK(boxes[order.front()].area() > boxes[order.back()].area());
+}
+
+TEST_CASE("Multiple instances contribute to object counts and first-layer geometry", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(15.0)}, print, model, pipeline_config(), false, 2);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->instances().size() == 2);
+    CHECK(print.num_object_instances() == 2);
+    print.process();
+    REQUIRE(print.objects().front()->layer_count() > 1);
+    CHECK(print.first_layer_convex_hull().size() >= 4);
+}
+
+TEST_CASE("Object and support filament collections report the configured extruders", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        {"enable_support", true},
+        {"support_filament", 2},
+        {"support_interface_filament", 2},
+        {"nozzle_diameter", "0.4,0.8"},
+    });
+    config.set_deserialize_strict({{"layer_change_gcode", "G92 E0\n"}, {"machine_start_gcode", ""}, {"machine_end_gcode", ""}});
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(2));
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+
+    const std::vector<unsigned int> objects = print.object_extruders();
+    const std::vector<unsigned int> supports = print.support_material_extruders();
+    REQUIRE(objects.size() == 1);
+    CHECK(objects.front() == 1);
+    REQUIRE(supports.size() == 1);
+    CHECK(supports.front() == 1);
+    const std::vector<unsigned int> all = print.extruders();
+    REQUIRE(all.size() == 1);
+    CHECK(all.front() == 1);
+    REQUIRE_THAT(print.max_allowed_layer_height(), Catch::Matchers::WithinAbs(0.8, 1e-6));
+}
+
+TEST_CASE("PrintObject layer lookup distinguishes exact, epsilon, below, and bottom queries", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(8.0)}, print, model, pipeline_config());
+    print.process();
+    PrintObject &object = *print.get_object(0);
+    REQUIRE(object.layer_count() > 3);
+    const Layer *middle = object.get_layer(2);
+    REQUIRE(middle != nullptr);
+    CHECK(object.get_layer_at_printz(middle->print_z) == middle);
+    CHECK(object.get_layer_at_printz(middle->print_z + 0.01, 0.02) == middle);
+    CHECK(object.get_layer_at_printz(middle->print_z + 0.05, 0.01) == nullptr);
+    CHECK(object.get_layer_idx_get_printz(middle->print_z, 0.001) == 3);
+    CHECK(object.get_first_layer_bellow_printz(middle->print_z + 0.05, 0.01) == middle);
+    CHECK(object.get_layer_at_bottomz(middle->bottom_z(), 0.001) == middle);
+    CHECK(object.get_layer_at_bottomz(middle->bottom_z() + 0.05, 0.001) == nullptr);
+}
+
+TEST_CASE("Layer range and instance shift queries preserve selected geometry", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(12.0)}, print, model, pipeline_config(), false, 2);
+    print.process();
+    PrintObject &object = *print.get_object(0);
+    REQUIRE(object.layer_count() > 4);
+    std::vector<LayerPtrs> selected;
+    std::vector<BoundingBox> boxes;
+    const float start_z = object.get_layer(1)->print_z;
+    const float end_z = object.get_layer(3)->print_z + 0.005;
+    INFO("start=" << start_z << " end=" << end_z << " z1=" << object.get_layer(1)->print_z << " z2=" << object.get_layer(2)->print_z << " z3=" << object.get_layer(3)->print_z);
+    object.get_certain_layers(start_z, end_z, selected, boxes);
+    REQUIRE(selected.size() == 1);
+    REQUIRE(selected.front().size() >= 2);
+    INFO("selected_count=" << selected.front().size() << " first=" << selected.front().front()->print_z << " last=" << selected.front().back()->print_z);
+    for (const Layer *layer : selected.front()) {
+        CHECK(layer->print_z >= start_z - EPSILON);
+        CHECK(layer->print_z <= end_z + EPSILON);
+    }
+    REQUIRE(boxes.size() == 1);
+    const Points first_shifts = object.get_instances_shift_without_plate_offset();
+    REQUIRE(first_shifts.size() == 2);
+
+    print.set_plate_origin(Vec3d(3.0, 4.0, 0.0));
+    const Points shifted = object.get_instances_shift_without_plate_offset();
+    REQUIRE(shifted.size() == first_shifts.size());
+    for (size_t i = 0; i < shifted.size(); ++i) {
+        CHECK(shifted[i].x() == first_shifts[i].x() - scaled(3.0));
+        CHECK(shifted[i].y() == first_shifts[i].y() - scaled(4.0));
+    }
+}
+
+TEST_CASE("The first-layer bbox reports a 20 mm cube's area, height, and identity", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "bbox-cube";
+    object->add_volume(cube(20.0));
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, pipeline_config());
+    require_valid(print);
+    print.process();
+    float area = 0.f;
+    float height = 0.f;
+    std::string name;
+    const BoundingBox bbox = print.get_object(0)->get_first_layer_bbox(area, height, name);
+    REQUIRE(bbox.defined);
+    CHECK_THAT(static_cast<double>(area) * SCALING_FACTOR * SCALING_FACTOR,
+               Catch::Matchers::WithinAbs(400.0, 1e-3));
+    CHECK_THAT(height, Catch::Matchers::WithinAbs(0.2f, 1e-5f));
+    CHECK(name == "bbox-cube");
+    CHECK_THAT(unscaled<double>(bbox.size().x()), Catch::Matchers::WithinAbs(20.0, 1e-5));
+    CHECK_THAT(unscaled<double>(bbox.size().y()), Catch::Matchers::WithinAbs(20.0, 1e-5));
+}
+
+TEST_CASE("Support blocker and enforcer volumes slice into their own polygons", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({{"enable_support", true}, {"support_type", "normal"}});
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->add_volume(make_cube(5.0, 5.0, 5.0), ModelVolumeType::SUPPORT_BLOCKER);
+    object->add_volume(make_cube(4.0, 4.0, 4.0), ModelVolumeType::SUPPORT_ENFORCER);
+    object->volumes[1]->set_offset(Vec3d(7.0, 7.0, 0.0));
+    object->volumes[2]->set_offset(Vec3d(-7.0, -7.0, 0.0));
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+    print.process();
+    const PrintObject &po = *print.objects().front();
+    const std::vector<Polygons> blockers = po.slice_support_blockers();
+    const std::vector<Polygons> enforcers = po.slice_support_enforcers();
+    REQUIRE(blockers.size() == po.layer_count());
+    REQUIRE(enforcers.size() == po.layer_count());
+    std::vector<size_t> blocker_layers;
+    std::vector<size_t> enforcer_layers;
+    for (size_t i = 0; i < blockers.size(); ++i) {
+        if (!blockers[i].empty())
+            blocker_layers.push_back(i);
+        if (!enforcers[i].empty())
+            enforcer_layers.push_back(i);
+    }
+    REQUIRE_FALSE(blocker_layers.empty());
+    REQUIRE_FALSE(enforcer_layers.empty());
+    const BoundingBoxf3 blocker_bbox = object->volumes[1]->mesh().transformed_bounding_box(po.trafo_sliced() * object->volumes[1]->get_matrix());
+    const BoundingBoxf3 enforcer_bbox = object->volumes[2]->mesh().transformed_bounding_box(po.trafo_sliced() * object->volumes[2]->get_matrix());
+    INFO("blocker bbox z=" << blocker_bbox.min.z() << ".." << blocker_bbox.max.z()
+         << " enforcer bbox z=" << enforcer_bbox.min.z() << ".." << enforcer_bbox.max.z()
+         << " blocker last index=" << blocker_layers.back() << " enforcer last index=" << enforcer_layers.back());
+    CHECK(blocker_layers.front() == 0);
+    CHECK(enforcer_layers.front() == 0);
+    CHECK_THAT(po.get_layer(static_cast<int>(blocker_layers.front()))->print_z,
+               Catch::Matchers::WithinAbs(0.2, 1e-5));
+    const double blocker_top_z = std::max(0.0, blocker_bbox.max.z());
+    const double enforcer_top_z = std::max(0.0, enforcer_bbox.max.z());
+    CHECK(po.get_layer(static_cast<int>(blocker_layers.back()))->print_z <= blocker_top_z + 0.2f + EPSILON);
+    CHECK(po.get_layer(static_cast<int>(enforcer_layers.back()))->print_z <= enforcer_top_z + 0.2f + EPSILON);
+    REQUIRE(blocker_layers.back() + 1 < po.layer_count());
+    CHECK(po.get_layer(static_cast<int>(blocker_layers.back() + 1))->print_z > blocker_top_z - EPSILON);
+    REQUIRE(enforcer_layers.back() + 1 < po.layer_count());
+    CHECK(po.get_layer(static_cast<int>(enforcer_layers.back() + 1))->print_z > enforcer_top_z - EPSILON);
+    for (size_t i : blocker_layers)
+        CHECK_THAT(polygon_area_mm2(blockers[i]), Catch::Matchers::WithinAbs(25.0, 1e-3));
+    for (size_t i : enforcer_layers)
+        CHECK_THAT(polygon_area_mm2(enforcers[i]), Catch::Matchers::WithinAbs(16.0, 1e-3));
+}
+
+TEST_CASE("Single-volume slicing preserves a hole in every occupied layer", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({mesh(TestMesh::cube_with_hole)}, print, model, pipeline_config());
+    print.process();
+    const PrintObject &object = *print.objects().front();
+    REQUIRE_FALSE(object.model_object()->volumes.empty());
+    const std::vector<ExPolygons> slices = object.slice_single_volume_regions(object.model_object()->volumes.front());
+    REQUIRE(slices.size() == object.layer_count());
+    size_t occupied = 0;
+    for (const ExPolygons &layer : slices) {
+        for (const ExPolygon &region : layer)
+            CHECK_FALSE(region.holes.empty());
+        occupied += !layer.empty();
+    }
+    CHECK(occupied > 0);
+}
+
+TEST_CASE("Support preview generates support layers without requiring full G-code export", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"support_type", "normal(auto)"},
+        {"support_style", "default"},
+        {"support_threshold_angle", 30.0},
+        {"support_on_build_plate_only", false},
+    });
+    Print print;
+    Model model;
+    init_valid({mesh(TestMesh::overhang)}, print, model, config);
+    PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    object->generate_support_preview();
+    REQUIRE(object->layer_count() > 0);
+    CHECK(object->support_layer_count() > 0);
+    CHECK(support_polygon_count(*object) > 0);
+}
+
+TEST_CASE("Slicing parameters reflect layer height, object height, and shrinkage", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->add_instance();
+    const SlicingParameters normal = PrintObject::slicing_parameters(config, *object, 20.f, Vec3d(1., 1., 1.));
+    REQUIRE(normal.valid);
+    CHECK_THAT(normal.layer_height, Catch::Matchers::WithinAbs(0.2, 1e-5));
+    CHECK_THAT(normal.object_print_z_height(), Catch::Matchers::WithinAbs(20.0, 1e-4));
+
+    config.set_deserialize_strict({{"layer_height", 0.4}, {"initial_layer_print_height", 0.3}});
+    const SlicingParameters changed = PrintObject::slicing_parameters(config, *object, 20.f, Vec3d(1., 1., 1.1));
+    REQUIRE(changed.valid);
+    CHECK_THAT(changed.layer_height, Catch::Matchers::WithinAbs(0.4, 1e-5));
+    CHECK_THAT(changed.first_print_layer_height, Catch::Matchers::WithinAbs(0.3, 1e-5));
+    CHECK_THAT(changed.object_print_z_height(), Catch::Matchers::WithinAbs(22.0, 1e-4));
+}
+
+TEST_CASE("A negative volume removes only its footprint from the first layer", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Print positive;
+    Model positive_model;
+    init_valid({cube(20.0)}, positive, positive_model, config);
+    positive.process();
+    const double positive_area = layer_slice_area(*positive.objects().front(), 0);
+
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->add_volume(make_cube(6.0, 6.0, 20.0), ModelVolumeType::NEGATIVE_VOLUME);
+    // Place the 6 x 6 negative volume in the interior of the 20 x 20 base.
+    object->volumes[1]->set_offset(Vec3d(7., 7., 0.));
+    object->add_instance();
+    object->ensure_on_bed();
+    Print cut;
+    cut.auto_assign_extruders(object);
+    cut.apply(model, config);
+    require_valid(cut);
+    cut.process();
+    const double cut_area = layer_slice_area(*cut.objects().front(), 0);
+    CHECK_THAT(positive_area, Catch::Matchers::WithinAbs(400.0, 1e-3));
+    CHECK_THAT(cut_area, Catch::Matchers::WithinAbs(364.0, 1e-3));
+    CHECK_THAT(positive_area - cut_area, Catch::Matchers::WithinAbs(36.0, 1e-3));
+}
+
+TEST_CASE("A layer-range override creates an additional print region and changes wall planning", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->add_instance();
+    ModelConfig range;
+    range.set_key_value("wall_loops", new ConfigOptionInt(4));
+    range.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    object->layer_config_ranges[{1.0, 3.0}] = range;
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+    print.process();
+    const PrintObject &po = *print.objects().front();
+    REQUIRE(po.layer_count() > 10);
+    CHECK(po.num_printing_regions() >= 2);
+    auto first_layer_matching = [&po](auto predicate) -> size_t {
+        for (size_t i = 0; i < po.layer_count(); ++i)
+            if (predicate(po.get_layer(static_cast<int>(i))->print_z))
+                return i;
+        return po.layer_count();
+    };
+    const size_t below = first_layer_matching([](float z) { return z < 1.0f - EPSILON; });
+    const size_t inside = first_layer_matching([](float z) { return z > 1.0f + EPSILON && z < 3.0f - EPSILON; });
+    const size_t above = first_layer_matching([](float z) { return z > 3.0f + EPSILON; });
+    REQUIRE(below < po.layer_count());
+    REQUIRE(inside < po.layer_count());
+    REQUIRE(above < po.layer_count());
+    CHECK(perimeter_items(po, below) == 2);
+    CHECK(perimeter_items(po, inside) == 4);
+    CHECK(perimeter_items(po, above) == 2);
+}
+
+TEST_CASE("Cache export persists layer geometry and rejects a missing directory", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(16.0)}, print, model, pipeline_config());
+    print.process();
+    const PrintObject &before_object = *print.objects().front();
+    REQUIRE(before_object.layer_count() > 2);
+    const size_t layer_count = before_object.layer_count();
+    const size_t first_perimeters = perimeter_items(before_object, 0);
+
+    ScopedTemporaryDir cache("orca-print-cache");
+    REQUIRE(print.export_cached_data(cache.string(), true) == 0);
+    std::ifstream cache_file;
+    for (const auto &entry : boost::filesystem::directory_iterator(cache.string())) {
+        cache_file.open(entry.path().string(), std::ios::binary);
+        if (cache_file.good())
+            break;
+        cache_file.clear();
+    }
+    REQUIRE(cache_file.good());
+    const nlohmann::json payload = nlohmann::json::parse(cache_file);
+    CHECK(payload.at("name").get<std::string>() == before_object.model_object()->name);
+    const auto &layers = payload.at("layers");
+    REQUIRE(layers.size() == layer_count);
+    for (size_t i = 0; i < layers.size(); ++i) {
+        CHECK_THAT(layers.at(i).at("height").get<double>(), Catch::Matchers::WithinAbs(0.2, 1e-6));
+        CHECK_THAT(layers.at(i).at("print_z").get<double>(), Catch::Matchers::WithinAbs(0.2 * (i + 1), 1e-5));
+    }
+    CHECK(print.load_cached_data(cache.string() + "/missing") == CLI_IMPORT_CACHE_NOT_FOUND);
+    CHECK(before_object.layer_count() == layer_count);
+    CHECK(layer_slice_area(before_object, 0) > 0.0);
+    CHECK(first_perimeters > 0);
+}
+
+TEST_CASE("Filament temperature classification and mixed compatibility are symmetric", "[Print][PrintPipelineWorkflows]")
+{
+    CHECK(Print::get_filament_temp_type("PLA") == FilamentTempType::LowTemp);
+    CHECK(Print::get_filament_temp_type("ABS") == FilamentTempType::HighTemp);
+    CHECK(Print::get_filament_temp_type("not-a-material") == FilamentTempType::Undefine);
+    CHECK(Print::is_filaments_compatible({FilamentTempType::LowTemp, FilamentTempType::LowTemp}));
+    CHECK_FALSE(Print::is_filaments_compatible({FilamentTempType::LowTemp, FilamentTempType::HighTemp}));
+    CHECK_FALSE(Print::is_filaments_compatible({FilamentTempType::HighTemp, FilamentTempType::LowTemp}));
+    CHECK(Print::get_compatible_filament_type({FilamentTempType::HighTemp}) == FilamentTempType::HighTemp);
+    CHECK(Print::get_compatible_filament_type({FilamentTempType::LowTemp, FilamentTempType::HighTemp}) == FilamentTempType::HighLowCompatible);
+    ScopedResourcesDir resources(boost::filesystem::path(PROFILES_DIR).parent_path());
+    const std::vector<std::string> incompatible = Print::get_incompatible_filaments_by_nozzle(0.4f);
+    CHECK_FALSE(incompatible.empty());
+    const std::vector<std::string> high_flow_incompatible =
+        Print::get_incompatible_filaments_by_nozzle(0.4f, NozzleVolumeType::nvtHighFlow);
+    REQUIRE_FALSE(high_flow_incompatible.empty());
+}
+
+TEST_CASE("Print-space translation follows the configured plate origin", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    print.set_plate_origin(Vec3d(12.5, -7.25, 0.0));
+    const Vec2d point(15.0, -3.25);
+    const Vec2d translated = print.translate_to_print_space(point);
+    CHECK_THAT(translated.x(), Catch::Matchers::WithinAbs(2.5, 1e-9));
+    CHECK_THAT(translated.y(), Catch::Matchers::WithinAbs(4.0, 1e-9));
+    const Point scaled_point = Point::new_scale(15.0, -3.25);
+    const Vec2d translated_scaled = print.translate_to_print_space(scaled_point);
+    CHECK_THAT(translated_scaled.x(), Catch::Matchers::WithinAbs(2.5, 1e-9));
+    CHECK_THAT(translated_scaled.y(), Catch::Matchers::WithinAbs(4.0, 1e-9));
+}
+
+TEST_CASE("Print validates sequential collisions and reports the colliding footprint", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({{"print_sequence", "by object"}, {"extruder_clearance_radius", 10.0}});
+    Print print;
+    Model model;
+    TriangleMesh left = cube(20.0);
+    TriangleMesh right = cube(20.0);
+    right.translate(18.0, 0.0, 0.0);
+    init_print(std::vector<TriangleMesh>{std::move(left), std::move(right)}, print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE_FALSE(validation.string.empty());
+    CHECK(validation.type == STRING_EXCEPT_OBJECT_COLLISION_IN_SEQ_PRINT);
+    Polygons collision;
+    const StringObjectException error = Print::sequential_print_clearance_valid(print, &collision);
+    REQUIRE_FALSE(error.string.empty());
+    CHECK_FALSE(collision.empty());
+}
+
+TEST_CASE("Print g-code export leaves a readable file result and can reload moves", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(10.0)}, print, model, pipeline_config());
+    print.process();
+    ScopedTemporaryFile file(".gcode");
+    GCodeProcessorResult result;
+    const std::string path = print.export_gcode(file.string(), &result, nullptr);
+    REQUIRE(path == file.string());
+    std::ifstream stream(path, std::ios::binary);
+    const std::string data((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(data.empty());
+    CHECK(result.moves.size() > 0);
+    const size_t old_moves = result.moves.size();
+    print.reload_gcode_moves(&result);
+    CHECK(result.moves.size() == old_moves);
+}
+
+} // namespace print_workflow_contracts
