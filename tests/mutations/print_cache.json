@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Cached planar and contoured extrusion geometry, legacy compatibility, and repeated-load ownership.",
+  "mutants": [
+    {
+      "id": "cache-legacy-contoured-default-enabled",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "j.value(\"z_contoured\", false)",
+      "new": "j.value(\"z_contoured\", true)",
+      "description": "legacy planar caches must default to planar emission when the contoured flag is absent",
+      "test_filter": "PrintCacheRoundtrip"
+    },
+    {
+      "id": "cache-polyline3-z-dropped",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "j[\"z\"] = std::move(z);",
+      "new": "j[\"z\"] = json::array();",
+      "description": "drops non-planar per-point Z values while retaining the legacy XY representation",
+      "test_filter": "PrintCacheRoundtrip"
+    },
+    {
+      "id": "cache-polyline3-z-sign-inverted",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "polyline.points[i].z() = z.at(i).get<coord_t>();",
+      "new": "polyline.points[i].z() = -z.at(i).get<coord_t>();",
+      "description": "restores Z with the wrong sign",
+      "test_filter": "PrintCacheRoundtrip"
+    },
+    {
+      "id": "cache-polyline3-arc-fitting-dropped",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "polyline.fitting_result = std::move(planar.fitting_result);",
+      "new": "polyline.fitting_result.clear();",
+      "description": "loses arc fitting metadata during Polyline3 conversion",
+      "test_filter": "PrintCacheRoundtrip"
+    },
+    {
+      "id": "cache-polyline3-z-cardinality-ignored",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (!z.is_array() || z.size() != polyline.points.size())",
+      "new": "if (!z.is_array() || z.size() == polyline.points.size())",
+      "description": "inverts the cardinality predicate and rejects valid matching Z arrays",
+      "test_filter": "PrintCacheRoundtrip"
+    },
+    {
+      "id": "cache-extrusion-z-contoured-dropped",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "extrusion_path.z_contoured             =    j.value(\"z_contoured\", false);",
+      "new": "extrusion_path.z_contoured             =    false;",
+      "description": "reloads a contoured path as planar even when its cache records the required Z-aware emission flag",
+      "test_filter": "PrintCacheRoundtrip"
+    },
+    {
+      "id": "cache-first-layer-groups-appended-on-reload",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "firstlayer_objgroups.clear();",
+      "new": "/* first-layer groups intentionally left uncleared */",
+      "description": "appends cached first-layer grouping metadata each time the same object reloads a cache",
+      "test_filter": "PrintCacheRoundtrip"
+    }
+  ]
+}

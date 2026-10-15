@@ -5671,11 +5671,26 @@ static void to_json(json& j, const Polyline& poly_line) {
     j[JSON_ARC_FITTING] = fittings_json;
 }
 
+static void to_json(json& j, const Polyline3& polyline) {
+    // Keep the existing XY/arc representation readable by legacy caches and
+    // store per-point Z separately for non-planar extrusion paths.
+    Polyline planar = polyline.to_polyline();
+    planar.fitting_result = polyline.fitting_result;
+    to_json(j, planar);
+    json z = json::array();
+    for (const Point3& point : polyline.points)
+        z.push_back(point.z());
+    j["z"] = std::move(z);
+}
+
 static void to_json(json& j, const ExtrusionPath& extrusion_path) {
     j[JSON_EXTRUSION_POLYLINE] = extrusion_path.polyline;
     j[JSON_EXTRUSION_MM3_PER_MM] = extrusion_path.mm3_per_mm;
     j[JSON_EXTRUSION_WIDTH] = extrusion_path.width;
     j[JSON_EXTRUSION_HEIGHT] = extrusion_path.height;
+    // A contoured path uses its per-point Z values when G-code is emitted;
+    // retaining only the coordinates would reload it as a planar path.
+    j["z_contoured"] = extrusion_path.z_contoured;
     j[JSON_EXTRUSION_ROLE] = extrusion_path.role();
     j[JSON_EXTRUSION_NO_EXTRUSION] = extrusion_path.is_force_no_extrusion();
 }
@@ -5947,12 +5962,26 @@ static void from_json(const json& j, Polyline& poly_line) {
     return;
 }
 
+static void from_json(const json& j, Polyline3& polyline) {
+    Polyline planar = j;
+    polyline = Polyline3(planar);
+    polyline.fitting_result = std::move(planar.fitting_result);
+    if (j.contains("z")) {
+        const json& z = j.at("z");
+        if (!z.is_array() || z.size() != polyline.points.size())
+            throw Slic3r::FileIOError("Invalid cached extrusion Z coordinates");
+        for (size_t i = 0; i < polyline.points.size(); ++i)
+            polyline.points[i].z() = z.at(i).get<coord_t>();
+    }
+}
+
 static void from_json(const json& j, ExtrusionPath& extrusion_path) {
-    Polyline temp_polyline = j[JSON_EXTRUSION_POLYLINE];
-    extrusion_path.polyline = Polyline3(temp_polyline);
+    extrusion_path.polyline = j[JSON_EXTRUSION_POLYLINE].get<Polyline3>();
     extrusion_path.mm3_per_mm             =    j[JSON_EXTRUSION_MM3_PER_MM];
     extrusion_path.width                  =    j[JSON_EXTRUSION_WIDTH];
     extrusion_path.height                 =    j[JSON_EXTRUSION_HEIGHT];
+    // Keep old cache files backward compatible: absent means planar.
+    extrusion_path.z_contoured             =    j.value("z_contoured", false);
     extrusion_path.set_extrusion_role(j[JSON_EXTRUSION_ROLE]);
     extrusion_path.set_force_no_extrusion(j[JSON_EXTRUSION_NO_EXTRUSION]);
 }
@@ -5962,20 +5991,12 @@ static bool convert_extrusion_from_json(const json& entity_json, ExtrusionEntity
     bool ret = false;
 
     if (path_type == JSON_EXTRUSION_TYPE_PATH) {
-        ExtrusionPath* path = new ExtrusionPath();
-        if (!path) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": oom when new ExtrusionPath");
-            return false;
-        }
+        auto path = std::make_unique<ExtrusionPath>();
         *path = entity_json[JSON_EXTRUSION_PATHS][0];
-        entity_collection.entities.push_back(path);
+        entity_collection.entities.push_back(path.release());
     }
     else if (path_type == JSON_EXTRUSION_TYPE_MULTIPATH) {
-        ExtrusionMultiPath* multipath = new ExtrusionMultiPath();
-        if (!multipath) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": oom when new ExtrusionMultiPath");
-            return false;
-        }
+        auto multipath = std::make_unique<ExtrusionMultiPath>();
         int paths_count = entity_json[JSON_EXTRUSION_PATHS].size();
         for (int path_index = 0; path_index < paths_count; path_index++)
         {
@@ -5983,14 +6004,10 @@ static bool convert_extrusion_from_json(const json& entity_json, ExtrusionEntity
             path = entity_json[JSON_EXTRUSION_PATHS][path_index];
             multipath->paths.push_back(std::move(path));
         }
-        entity_collection.entities.push_back(multipath);
+        entity_collection.entities.push_back(multipath.release());
     }
     else if (path_type == JSON_EXTRUSION_TYPE_LOOP) {
-        ExtrusionLoop* loop = new ExtrusionLoop();
-        if (!loop) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": oom when new ExtrusionLoop");
-            return false;
-        }
+        auto loop = std::make_unique<ExtrusionLoop>();
         loop->set_loop_role(entity_json[JSON_EXTRUSION_LOOP_ROLE]);
         int paths_count = entity_json[JSON_EXTRUSION_PATHS].size();
         for (int path_index = 0; path_index < paths_count; path_index++)
@@ -5999,14 +6016,10 @@ static bool convert_extrusion_from_json(const json& entity_json, ExtrusionEntity
             path = entity_json[JSON_EXTRUSION_PATHS][path_index];
             loop->paths.push_back(std::move(path));
         }
-        entity_collection.entities.push_back(loop);
+        entity_collection.entities.push_back(loop.release());
     }
     else if (path_type == JSON_EXTRUSION_TYPE_COLLECTION) {
-        ExtrusionEntityCollection* collection = new ExtrusionEntityCollection();
-        if (!collection) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": oom when new ExtrusionEntityCollection");
-            return false;
-        }
+        auto collection = std::make_unique<ExtrusionEntityCollection>();
         collection->no_sort = entity_json[JSON_EXTRUSION_NO_SORT];
         int entities_count = entity_json[JSON_EXTRUSION_ENTITIES].size();
         for (int entity_index = 0; entity_index < entities_count; entity_index++)
@@ -6018,7 +6031,7 @@ static bool convert_extrusion_from_json(const json& entity_json, ExtrusionEntity
                 return false;
             }
         }
-        entity_collection.entities.push_back(collection);
+        entity_collection.entities.push_back(collection.release());
     }
     else {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": unknown path type %1%")%path_type;
@@ -6683,6 +6696,9 @@ int Print::load_cached_data(const std::string& directory)
 
             //load first group volumes
             std::vector<groupedVolumeSlices>& firstlayer_objgroups = obj->firstLayerObjGroupsMod();
+            // Loading the same cache again must replace, rather than append to,
+            // the previously loaded first-layer grouping metadata.
+            firstlayer_objgroups.clear();
             for (int index = 0; index < firstlayer_group_count; index++)
             {
                 json& firstlayer_group_json = root_json[JSON_FIRSTLAYER_GROUPS][index];

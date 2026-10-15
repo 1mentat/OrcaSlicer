@@ -1,3 +1,7 @@
+#include <functional>
+#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Circle.hpp"
+#include "libslic3r/ArcFitter.hpp"
 #include <nlohmann/json.hpp>
 #include "libslic3r/BoundingBox.hpp"
 #include <boost/filesystem/directory.hpp>
@@ -2393,6 +2397,189 @@ TEST_CASE("Print g-code export leaves a readable file result and can reload move
     const size_t old_moves = result.moves.size();
     print.reload_gcode_moves(&result);
     CHECK(result.moves.size() == old_moves);
+}
+
+namespace {
+using Json = nlohmann::json;
+
+std::vector<ExtrusionPath> cached_paths(const PrintObject &object)
+{
+    std::vector<ExtrusionPath> result;
+    for (const Layer *layer : object.layers())
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->perimeters, [&](const ExtrusionPath &p) { result.push_back(p); });
+            for_each_extrusion_path(region->fills, [&](const ExtrusionPath &p) { result.push_back(p); });
+        }
+    return result;
+}
+
+void rewrite_cache(const std::string &directory, const std::function<void(Json &)> &edit)
+{
+    size_t edited = 0;
+    for (const auto &entry : boost::filesystem::directory_iterator(directory)) {
+        std::ifstream input(entry.path().string());
+        Json document = Json::parse(input);
+        input.close();
+        edit(document);
+        std::ofstream output(entry.path().string());
+        output << document.dump();
+        REQUIRE(output.good());
+        ++edited;
+    }
+    REQUIRE(edited == 1);
+}
+
+void visit_cached_extrusions(Json &node, const std::function<void(Json &)> &edit)
+{
+    if (node.is_object() && node.contains("polyline"))
+        edit(node);
+    if (node.is_structured())
+        for (auto &child : node)
+            visit_cached_extrusions(child, edit);
+}
+
+void inject_arc(Print &print)
+{
+    ExtrusionPath path(erPerimeter, 0.08, 0.4, 0.2);
+    path.polyline.points = {Point3::new_scale(1., 0., 0.1),
+                            Point3::new_scale(0.6, 0.8, 0.2),
+                            Point3::new_scale(0., 1., 0.3)};
+    path.z_contoured = true;
+    ArcSegment arc(Point(0, 0), scaled(1.), Point(scaled(1.), 0), Point(0, scaled(1.)), ArcDirection::Arc_Dir_CCW);
+    REQUIRE(arc.is_arc);
+    path.polyline.fitting_result.push_back({0, 2, EMovePathType::Arc_move_ccw, arc});
+    LayerRegion *region = print.get_object(0)->get_layer(0)->get_region(0);
+    region->perimeters.clear();
+    region->perimeters.entities.push_back(new ExtrusionPath(path));
+}
+}
+
+TEST_CASE("Cached planar layers preserve extrusion coordinates and material flow", "[Print][PrintCacheRoundtrip]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    const auto before = cached_paths(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    ScopedTemporaryDir cache("orca-cache-planar");
+    REQUIRE(print.export_cached_data(cache.string(), true) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    REQUIRE(print.objects().front()->layer_count() == 20);
+    const auto after = cached_paths(*print.objects().front());
+    REQUIRE(after.size() == before.size());
+    for (size_t i = 0; i < before.size(); ++i) {
+        CHECK(after[i].polyline.points == before[i].polyline.points);
+        CHECK(after[i].role() == before[i].role());
+        CHECK_THAT(after[i].mm3_per_mm, Catch::Matchers::WithinAbs(before[i].mm3_per_mm, 1e-12));
+        CHECK_THAT(after[i].width, Catch::Matchers::WithinAbs(before[i].width, 1e-6));
+        CHECK_THAT(after[i].height, Catch::Matchers::WithinAbs(0.2, 1e-6));
+    }
+}
+
+TEST_CASE("Cached non-planar arcs preserve Z and fitting data", "[Print][PrintCacheRoundtrip]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    inject_arc(print);
+    const auto before_paths = cached_paths(*print.objects().front());
+    REQUIRE_FALSE(before_paths.empty());
+    const ExtrusionPath before = before_paths.front();
+    ScopedTemporaryDir cache("orca-cache-arc");
+    REQUIRE(print.export_cached_data(cache.string(), true) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto after = cached_paths(*print.objects().front());
+    REQUIRE_FALSE(after.empty());
+    CHECK(after.front().polyline.points == before.polyline.points);
+    CHECK(after.front().z_contoured);
+    const auto &fits = after.front().polyline.fitting_result;
+    REQUIRE(fits.size() == 1);
+    CHECK(fits.front().start_point_index == 0);
+    CHECK(fits.front().end_point_index == 2);
+    CHECK(fits.front().path_type == EMovePathType::Arc_move_ccw);
+    CHECK(fits.front().arc_data.is_arc);
+    CHECK(fits.front().arc_data.center == Point(0, 0));
+    CHECK_THAT(fits.front().arc_data.radius, Catch::Matchers::WithinAbs(scaled(1.), 1e-6));
+    CHECK_THAT(fits.front().arc_data.angle_radians, Catch::Matchers::WithinAbs(PI / 2., 1e-9));
+}
+
+TEST_CASE("Legacy cached polylines without Z restore planar coordinates and arcs", "[Print][PrintCacheRoundtrip]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    inject_arc(print);
+    ScopedTemporaryDir cache("orca-cache-legacy");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        visit_cached_extrusions(document, [](Json &extrusion) {
+            REQUIRE(extrusion.at("polyline").is_object());
+            extrusion.at("polyline").erase("z");
+            extrusion.erase("z_contoured");
+        });
+    });
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto paths = cached_paths(*print.objects().front());
+    REQUIRE_FALSE(paths.empty());
+    for (const auto &path : paths) {
+        CHECK_FALSE(path.z_contoured);
+        for (const auto &point : path.polyline.points)
+            CHECK(point.z() == 0);
+    }
+    REQUIRE(paths.front().polyline.fitting_result.size() == 1);
+    CHECK(paths.front().polyline.fitting_result.front().path_type == EMovePathType::Arc_move_ccw);
+    CHECK(paths.front().polyline.points.front().x() == scaled(1.));
+    CHECK(paths.front().polyline.points.back().y() == scaled(1.));
+}
+
+TEST_CASE("Cached Z vectors must match the number of polyline points", "[Print][PrintCacheRoundtrip]")
+{
+    const bool array = GENERATE(false, true);
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    ScopedTemporaryDir cache("orca-cache-invalid-z");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [array](Json &document) {
+        visit_cached_extrusions(document, [array](Json &extrusion) {
+            REQUIRE(extrusion.at("polyline").is_object());
+            extrusion.at("polyline")["z"] = array ? Json::array() : Json("invalid");
+        });
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+}
+
+TEST_CASE("Reloading cached first-layer groups replaces prior metadata", "[Print][PrintCacheRoundtrip]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    ScopedTemporaryDir cache("orca-cache-first-layer-groups");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    const size_t expected_groups = print.get_object(0)->firstLayerObjGroups().size() + 1;
+    print.get_object(0)->firstLayerObjGroupsMod().clear();
+    rewrite_cache(cache.string(), [](Json &document) {
+        REQUIRE(document.contains("first_layer_groups"));
+        REQUIRE(document.at("first_layer_groups").is_array());
+        Json group = Json::object();
+        group["group_id"] = 991;
+        group["volume_ids"] = Json::array({0});
+        group["slices"] = Json::array();
+        document["first_layer_groups"].push_back(std::move(group));
+    });
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    REQUIRE(print.get_object(0)->firstLayerObjGroups().size() == expected_groups);
+    const auto &last_group = print.get_object(0)->firstLayerObjGroups().back();
+    CHECK(last_group.groupId == 991);
+    REQUIRE(last_group.volume_ids.size() == 1);
+    CHECK(last_group.volume_ids.front() == model.objects.front()->volumes.front()->id());
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    CHECK(print.get_object(0)->firstLayerObjGroups().size() == expected_groups);
 }
 
 } // namespace print_workflow_contracts
