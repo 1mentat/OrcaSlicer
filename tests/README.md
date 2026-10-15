@@ -20,6 +20,12 @@ the default `0` leaves scheduling and affinity unrestricted. CTest applies
 affinity on supported operating systems. Hidden Catch tests remain hidden in
 every mode.
 
+The CTest build must support affinity. Some Linux distribution packages link
+an unpatched system libuv and silently ignore `PROCESSOR_AFFINITY`; the
+[official CMake binaries](https://cmake.org/download/) include the required
+support. Check a running test's CPU mask when enabling this option on a new
+runner; seeing the property in CTest's JSON inventory alone is insufficient.
+
 Tag tests that explicitly verify concurrent execution or thread scheduling
 with `[Parallel]`. When adding the first such test to another suite, add its
 target to `SLICER_TEST_TARGETS_WITH_PARALLEL` in `tests/CMakeLists.txt` so the
