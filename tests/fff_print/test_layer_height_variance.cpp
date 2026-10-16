@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <limits>
 #include <libslic3r/libslic3r.h>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -224,6 +225,8 @@ struct LayerGeometryEvidence {
     std::size_t motion_moves = 0;
     std::size_t extrusion_moves = 0;
     bool finite = true;
+    std::size_t layer_changes = 0;
+    std::vector<double> emitted_heights;
 };
 
 DynamicPrintConfig layer_geometry_config()
@@ -285,6 +288,33 @@ LayerGeometryEvidence export_evidence(const DynamicPrintConfig &config)
     REQUIRE(output.size() <= 4u * 1024u * 1024u);
 
     LayerGeometryEvidence evidence;
+    std::istringstream raw_lines(output);
+    std::string raw;
+    bool awaiting_layer_height = false;
+    while (std::getline(raw_lines, raw)) {
+        if (raw == ";LAYER_CHANGE") {
+            ++evidence.layer_changes;
+            awaiting_layer_height = true;
+            continue;
+        }
+        constexpr std::string_view height_prefix = ";HEIGHT:";
+        if (!awaiting_layer_height || raw.rfind(height_prefix.data(), 0) != 0)
+            continue;
+        // The first HEIGHT after a layer marker describes the layer. Later
+        // HEIGHT tags may describe a bridge or another extrusion role.
+        awaiting_layer_height = false;
+        try {
+            std::size_t parsed = 0;
+            const double height = std::stod(raw.substr(height_prefix.size()), &parsed);
+            if (!std::isfinite(height) || parsed != raw.size() - height_prefix.size())
+                evidence.finite = false;
+            else
+                evidence.emitted_heights.push_back(height);
+        } catch (...) {
+            evidence.finite = false;
+        }
+    }
+
     enum class Role { Other, Top, Bottom, Solid, Sparse };
     Role active_role = Role::Other;
     GCodeReader reader;
@@ -429,6 +459,61 @@ TEST_CASE("Top and bottom surface densities change their generated surface mater
             CHECK(full.bottom_length > sparse.bottom_length);
             CHECK_THAT(sparse.top_length, Catch::Matchers::WithinRel(full.top_length, 1e-6));
         }
+    }
+}
+
+double layer_height_output_tolerance(double expected)
+{
+    // XYZF_EXPORT_DIGITS is three; layer comments are derived from the same float Z state.
+    constexpr double gcode_quantization_mm = 0.001;
+    return 0.5 * gcode_quantization_mm +
+           8.0 * std::numeric_limits<float>::epsilon() * std::max(1.0, std::abs(expected));
+}
+
+TEST_CASE("Configured layer heights reach exact full-print layers and HEIGHT tags",
+          "[LayerHeightPrintPipeline][LayerHeightVariance][LayerGeometrySettings][SettingsVariance]")
+{
+    constexpr double fixture_height = 1.2;
+    constexpr double nozzle_diameter = 0.4;
+    constexpr double minimum_layer_height = 0.1;
+    constexpr double nominal_layer_height = 0.2;
+    constexpr double maximum_layer_height = 0.3;
+
+    for (const double layer_height : {minimum_layer_height, nominal_layer_height, maximum_layer_height}) {
+        INFO("layer height: " << layer_height);
+        DynamicPrintConfig config = layer_geometry_config();
+        config.set_deserialize_strict({
+            {"layer_height", layer_height},
+            {"initial_layer_print_height", layer_height},
+            {"nozzle_diameter", nozzle_diameter},
+            {"min_layer_height", "0.1"},
+            {"max_layer_height", "0.3"},
+        });
+
+        const LayerGeometryEvidence evidence = export_evidence(config);
+        require_valid_evidence(evidence);
+        const std::size_t expected_layers = static_cast<std::size_t>(std::llround(fixture_height / layer_height));
+        const double height_tolerance = layer_height_output_tolerance(layer_height);
+        const double top_z_tolerance = layer_height_output_tolerance(fixture_height);
+
+        REQUIRE_THAT(expected_layers * layer_height,
+                     Catch::Matchers::WithinAbs(fixture_height,
+                         4.0 * std::numeric_limits<double>::epsilon() * fixture_height));
+        REQUIRE(evidence.layer_changes == expected_layers);
+        REQUIRE(evidence.emitted_heights.size() == expected_layers);
+        REQUIRE(evidence.extrusion_layers.size() == expected_layers);
+        REQUIRE(evidence.top_length > 0.0);
+        REQUIRE(evidence.bottom_length > 0.0);
+        REQUIRE(evidence.sparse_length > 0.0);
+        CHECK_THAT(evidence.first_extrusion_z, Catch::Matchers::WithinAbs(layer_height, height_tolerance));
+        CHECK_THAT(evidence.max_extrusion_z, Catch::Matchers::WithinAbs(fixture_height, top_z_tolerance));
+        for (std::size_t layer = 0; layer < expected_layers; ++layer) {
+            const double expected_z = (layer + 1) * layer_height;
+            CHECK_THAT(evidence.extrusion_layers[layer],
+                       Catch::Matchers::WithinAbs(expected_z, layer_height_output_tolerance(expected_z)));
+        }
+        for (const double emitted_height : evidence.emitted_heights)
+            CHECK_THAT(emitted_height, Catch::Matchers::WithinAbs(layer_height, height_tolerance));
     }
 }
 

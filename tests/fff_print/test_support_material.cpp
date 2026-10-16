@@ -1364,6 +1364,7 @@ struct SupportIroningStats {
     std::set<double> layers;
     double xy_length = 0.0;
     double e_length = 0.0;
+    std::set<int> feedrates;
     double orientation_alignment = 0.0;
     double orientation_error_bound = 0.0;
     double xy_error_bound = 0.0;
@@ -1444,6 +1445,10 @@ SupportIroningStats inspect_support_ironing(const std::string &gcode)
         const double max_e = std::max(std::abs(old_e), std::abs(new_e));
         out.max_pair_abs_e = std::max(out.max_pair_abs_e, max_e);
         out.e_error_bound += 1e-5 + 4.0 * std::numeric_limits<float>::epsilon() * max_e;
+        const double feedrate = static_cast<double>(line.new_F(self));
+        REQUIRE(std::isfinite(feedrate));
+        REQUIRE(feedrate > 0.0);
+        out.feedrates.insert(static_cast<int>(std::lround(feedrate)));
 
         // support_angle=45 fixes the ironing angle at support_angle+90=135 degrees.
         // Compare length-weighted axial alignment to that actual fill direction. The
@@ -1490,9 +1495,21 @@ struct SupportIroningExport {
     double interface_height = 0.0;
 };
 
-SupportIroningExport slice_support_ironing(const char *pattern, double flow, double spacing)
+SupportIroningExport slice_support_ironing(const char *pattern, double flow, double spacing, double ironing_speed = -1.0)
 {
-    const DynamicPrintConfig config = support_ironing_config(pattern, flow, spacing);
+    DynamicPrintConfig config = support_ironing_config(pattern, flow, spacing);
+    if (ironing_speed > 0.0) {
+        // Keep the speed oracle independent of CoolingBuffer slowdown and the
+        // filament volumetric cap. The production erIroning branch then uses
+        // only the registered ironing_speed value for its F word.
+        config.set_deserialize_strict({
+            {"ironing_speed", ironing_speed},
+            {"filament_ironing_speed", "nil"},
+            {"slow_down_for_layer_cooling", false},
+            {"filament_max_volumetric_speed", "200"},
+            {"filament_adaptive_volumetric_speed", false}
+        });
+    }
     Print print;
     Model model;
     init_print({capital_fixture()}, print, model, config);
@@ -1587,6 +1604,27 @@ TEST_CASE("Support ironing flow scales ironing material at fixed geometry",
             std::max({1.0, std::abs(expected), std::abs(high.stats.e_length)});
     REQUIRE(tolerance < std::abs(expected - low.stats.e_length));
     CHECK_THAT(high.stats.e_length, Catch::Matchers::WithinAbs(expected, tolerance));
+}
+
+TEST_CASE("Support ironing speed controls ironing feedrate without changing support material",
+          "[SupportIroningSpeedSettings][SupportIroningSettings][SupportSettingsVariance][SupportMaterial]")
+{
+    require_ironing_registry();
+    const SupportIroningExport slow = slice_support_ironing("rectilinear", 10.0, 0.10, 20.0);
+    const SupportIroningExport fast = slice_support_ironing("rectilinear", 10.0, 0.10, 40.0);
+    require_positive_support_ironing(slow);
+    require_positive_support_ironing(fast);
+    require_same_support_geometry(slow, fast);
+    REQUIRE(slow.stats.layers == fast.stats.layers);
+    REQUIRE(slow.stats.moves == fast.stats.moves);
+    REQUIRE(slow.stats.feedrates == std::set<int>{1200});
+    REQUIRE(fast.stats.feedrates == std::set<int>{2400});
+    CHECK_THAT(fast.stats.xy_length, Catch::Matchers::WithinAbs(
+        slow.stats.xy_length, slow.stats.xy_error_bound + fast.stats.xy_error_bound));
+    CHECK_THAT(fast.stats.e_length, Catch::Matchers::WithinAbs(
+        slow.stats.e_length, slow.stats.e_error_bound + fast.stats.e_error_bound));
+    CHECK_THAT(fast.interface_width, Catch::Matchers::WithinAbs(slow.interface_width, 0.0));
+    CHECK_THAT(fast.interface_height, Catch::Matchers::WithinAbs(slow.interface_height, 0.0));
 }
 
 TEST_CASE("Support ironing spacing changes ironing density",
