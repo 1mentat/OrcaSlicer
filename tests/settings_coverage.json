@@ -1067,12 +1067,13 @@
     },
     "support_base_pattern": {
       "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "tag": "[SupportBasePattern]",
       "dimensions": [
+        "enum_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Default, rectilinear, rectilinear-grid, honeycomb, lightning, and hollow are each deserialized on the tree-hybrid capital fixture; each produces finite bounded support, and the family has at least two distinct aggregate base-length signatures. Per-value semantic separation and hollow-infill suppression remain unclaimed."
+      "reason": "All six registered values are sliced independently with normal support. Default and rectilinear retain the same base geometry; rectilinear-grid changes interior layer orientation; honeycomb selects its fill pattern and a distinct direction signature; lightning and hollow emit structured fallback warnings and match rectilinear base geometry. The separate tree-hybrid fixture also checks finite bounded support for every value. Hollow suppression and broad setting interactions remain unclaimed."
     },
     "printable_height": {
       "test": "tests/fff_print/test_print.cpp",

@@ -163,6 +163,10 @@ malformed payload rejection. `[WipeTowerContact]` checks parsed feedrates,
 interface temperature commands, pre-extrusion lengths, and bed clipping through
 the tower generator; these settings claims remain separate from full Print wiring.
 
+`[SupportBasePattern]` checks all six registered normal-support base patterns,
+including structured fallback warnings, honeycomb geometry, and alternating
+rectilinear-grid layer orientation on a bounded overhang fixture.
+
 `[FilamentPlanContracts]` checks physical nozzle identity with repeated loaded
 filament values, filtered extruder groups, multiple assignment epochs, and
 independently enumerated flow costs. Empty-nozzle inputs have an explicit error

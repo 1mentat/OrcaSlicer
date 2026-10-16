@@ -568,6 +568,8 @@ struct SupportStats {
     double base_max_z = -std::numeric_limits<double>::infinity();
     double interface_min_z = std::numeric_limits<double>::infinity();
     double interface_max_z = -std::numeric_limits<double>::infinity();
+    std::set<int> base_direction_bins;
+    std::map<double, double> base_direction_by_layer;
     bool finite = true;
 };
 
@@ -596,9 +598,10 @@ SupportStats inspect_support(const std::string &gcode)
     REQUIRE(count_occurrences(gcode, "support material") < kMaxSupportSegments);
 
     SupportStats out;
+    std::map<double, std::pair<double, double>> base_direction_accumulator;
     GCodeReader parser;
     int active_tool = -1;
-    parser.parse_buffer(gcode, [&out, &active_tool](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+    parser.parse_buffer(gcode, [&out, &active_tool, &base_direction_accumulator](GCodeReader &self, const GCodeReader::GCodeLine &line) {
         const std::string_view command = line.cmd();
         if (command.size() >= 2 && command.front() == 'T' && command[1] >= '0' && command[1] <= '9')
             active_tool = command[1] - '0';
@@ -609,11 +612,24 @@ SupportStats inspect_support(const std::string &gcode)
         const bool base_line = !interface_line && comment.find("support material") != std::string_view::npos;
         if (!interface_line && !base_line)
             return;
-        const double length = std::hypot(line.dist_X(self), line.dist_Y(self));
+        const double dx = line.dist_X(self);
+        const double dy = line.dist_Y(self);
+        const double length = std::hypot(dx, dy);
         const double z = self.z();
         out.finite = out.finite && std::isfinite(length) && std::isfinite(z);
         if (!std::isfinite(length) || !std::isfinite(z))
             return;
+        if (base_line && length > 1e-6) {
+            double angle = std::fmod(std::atan2(dy, dx), M_PI);
+            if (angle < 0.0)
+                angle += M_PI;
+            const int direction_bin = std::min(11, static_cast<int>(angle / M_PI * 12.0));
+            out.base_direction_bins.insert(direction_bin);
+            const double axial_angle = 2.0 * std::atan2(dy, dx);
+            auto &accumulator = base_direction_accumulator[z];
+            accumulator.first += length * std::cos(axial_angle);
+            accumulator.second += length * std::sin(axial_angle);
+        }
         if (active_tool >= 0)
             out.support_tools.insert(active_tool);
         if (interface_line) {
@@ -630,6 +646,12 @@ SupportStats inspect_support(const std::string &gcode)
             out.base_max_z = std::max(out.base_max_z, z);
         }
     });
+    for (const auto &entry : base_direction_accumulator) {
+        double angle = 0.5 * std::atan2(entry.second.second, entry.second.first);
+        if (angle < 0.0)
+            angle += M_PI;
+        out.base_direction_by_layer.emplace(entry.first, angle);
+    }
     return out;
 }
 
@@ -878,6 +900,125 @@ TEST_CASE("Support and interface filament selections reach distinct tools", "[Su
     REQUIRE(split_stats.interface_segments > 0);
     CHECK(same_stats.support_tools.size() == 1);
     CHECK(split_stats.support_tools.size() >= 2);
+}
+
+
+struct BasePatternObservation {
+    SupportStats stats;
+    StringObjectException validation;
+    std::vector<StringObjectException> warnings;
+    InfillPattern base_fill_pattern = ipSupportBase;
+};
+
+BasePatternObservation slice_normal_base_pattern(const char *pattern)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"support_type", "normal(auto)"},
+        {"support_style", "default"},
+        {"support_interface_top_layers", 0},
+        {"support_interface_bottom_layers", 0},
+        {"support_base_pattern", pattern}
+    });
+
+    Print print;
+    Model model;
+    init_print({capital_fixture()}, print, model, config);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    INFO("Support validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    REQUIRE_FALSE(print.objects().empty());
+    BasePatternObservation out;
+    out.validation = validation;
+    out.warnings = std::move(warnings);
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    out.stats = inspect_support(output);
+    out.base_fill_pattern = SupportParameters(*print.objects().front()).base_fill_pattern;
+    return out;
+}
+
+void require_same_base_signature(const SupportStats &expected, const SupportStats &observed)
+{
+    REQUIRE(expected.finite);
+    REQUIRE(observed.finite);
+    REQUIRE(expected.base_segments > 0);
+    REQUIRE(observed.base_segments > 0);
+    CHECK(observed.base_segments == expected.base_segments);
+    CHECK(observed.base_layers.size() == expected.base_layers.size());
+    CHECK_THAT(observed.base_length, Catch::Matchers::WithinAbs(expected.base_length, 1e-5));
+}
+
+std::size_t interior_orientation_changes(const SupportStats &expected, const SupportStats &observed)
+{
+    REQUIRE_FALSE(expected.base_direction_by_layer.empty());
+    REQUIRE_FALSE(observed.base_direction_by_layer.empty());
+    const double first_z = expected.base_direction_by_layer.begin()->first;
+    const double last_z = expected.base_direction_by_layer.rbegin()->first;
+    std::size_t common_interior_layers = 0;
+    std::size_t changed_layers = 0;
+    for (const auto &entry : observed.base_direction_by_layer) {
+        const auto expected_it = expected.base_direction_by_layer.find(entry.first);
+        if (expected_it == expected.base_direction_by_layer.end())
+            continue;
+        if (entry.first <= first_z + 1e-6 || entry.first >= last_z - 1e-6)
+            continue;
+        ++common_interior_layers;
+        double delta = std::fabs(entry.second - expected_it->second);
+        delta = std::min(delta, M_PI - delta);
+        if (delta > 0.2)
+            ++changed_layers;
+    }
+    REQUIRE(common_interior_layers >= 3);
+    return changed_layers;
+}
+
+TEST_CASE("Normal support base patterns honor supported and fallback partitions",
+          "[SupportSettingsVariance][SupportMaterial][SupportBasePattern]")
+{
+    const BasePatternObservation rectilinear = slice_normal_base_pattern("rectilinear");
+    REQUIRE(rectilinear.validation.string.empty());
+    REQUIRE(rectilinear.stats.finite);
+    REQUIRE(rectilinear.stats.base_segments > 0);
+
+    for (const char *pattern : {"default", "rectilinear", "rectilinear-grid", "honeycomb", "lightning", "hollow"}) {
+        CAPTURE(pattern);
+        const BasePatternObservation observed = slice_normal_base_pattern(pattern);
+        REQUIRE(observed.validation.string.empty());
+        REQUIRE(observed.stats.finite);
+        REQUIRE(observed.stats.base_segments > 0);
+
+        const bool documented_fallback = std::string(pattern) == "lightning" || std::string(pattern) == "hollow";
+        const bool documented_noop = std::string(pattern) == "default" ||
+                                     std::string(pattern) == "rectilinear";
+        if (documented_noop) {
+            CHECK(observed.base_fill_pattern == rectilinear.base_fill_pattern);
+            require_same_base_signature(rectilinear.stats, observed.stats);
+        } else if (std::string(pattern) == "rectilinear-grid") {
+            // The grid alternates base and interface angles. Weighted per-layer
+            // orientation distinguishes this from the rectilinear control.
+            CHECK(observed.base_fill_pattern == rectilinear.base_fill_pattern);
+            const std::size_t changed_layers = interior_orientation_changes(rectilinear.stats, observed.stats);
+            CHECK(changed_layers > 0);
+        } else if (documented_fallback) {
+            bool has_base_pattern_warning = false;
+            for (const StringObjectException &warning : observed.warnings) {
+                const bool is_base_pattern_warning = warning.opt_key == "support_base_pattern";
+                const bool is_warning = warning.is_warning;
+                const bool names_rectilinear_fallback = warning.string.find("Rectilinear") != std::string::npos;
+                if (is_base_pattern_warning && is_warning && names_rectilinear_fallback)
+                    has_base_pattern_warning = true;
+            }
+            CHECK(has_base_pattern_warning);
+            CHECK(observed.base_fill_pattern == rectilinear.base_fill_pattern);
+            require_same_base_signature(rectilinear.stats, observed.stats);
+        } else {
+            REQUIRE(std::string(pattern) == "honeycomb");
+            CHECK(observed.base_fill_pattern == ipHoneycomb);
+            CHECK(observed.stats.base_direction_bins != rectilinear.stats.base_direction_bins);
+        }
+    }
 }
 
 } // namespace support_settings_variance_contracts
