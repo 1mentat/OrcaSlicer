@@ -549,7 +549,6 @@ TEST_CASE("Custom start temperature is respected without a duplicate initial noz
     config.set_deserialize_strict({
         {"machine_start_gcode", "M104 S177\nM140 S41\n"},
         {"nozzle_temperature_initial_layer", 211},
-        {"bed_temperature_initial_layer", 61},
         {"hot_plate_temp_initial_layer", 61},
     });
     const auto out = fresh_export(config);
@@ -582,9 +581,7 @@ TEST_CASE("Bed temperature formula emits the configured first-layer command", "[
         {"nozzle_temperature_initial_layer", 208},
         {"nozzle_temperature", 202},
         {"curr_bed_type", "High Temp Plate"},
-        {"bed_temperature_initial_layer", 57},
-                {"hot_plate_temp_initial_layer", 57},
-        {"bed_temperature", 47},
+        {"hot_plate_temp_initial_layer", 57},
         {"hot_plate_temp", 47},
     });
     const auto out = fresh_export(config);
@@ -731,7 +728,7 @@ TEST_CASE("Arc fitting converts eligible perimeter motion to arcs", "[GCode][GCo
     auto off = base_config();
     off.set_deserialize_strict({{"enable_arc_fitting", false}});
     auto on = off;
-    on.set_deserialize_strict({{"enable_arc_fitting", true}, {"arc_fitting_tolerance", 0.01}});
+    on.set_deserialize_strict({{"enable_arc_fitting", true}});
     const auto a = fresh_custom_mesh_export(off, make_cylinder(10., 4., PI / 90.));
     const auto b = fresh_custom_mesh_export(on, make_cylinder(10., 4., PI / 90.));
     REQUIRE(motion_evidence(a.text, off).extrusion_moves > 0);
