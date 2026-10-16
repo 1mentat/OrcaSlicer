@@ -25,6 +25,7 @@
 #include <sstream>
 #include "libslic3r/Print.hpp"
 #include "libslic3r/CustomGCode.hpp"
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
