@@ -24,7 +24,7 @@ file(TO_NATIVE_PATH "${PROFILES_DIR}" PROFILES_DIR)
 include(CTest)
 include(Catch)
 
-set(CATCH_EXTRA_ARGS "" CACHE STRING "Extra arguments for catch2 test suites.") # Unknown if this still works and/or should be replaced with something else.
+set(CATCH_EXTRA_ARGS "" CACHE STRING "Semicolon-separated extra arguments for Catch2 test executions")
 
 # Optional Linux/CTest CPU allocation for suites whose tests are TBB-heavy.
 # Keep zero as the default so existing scheduling and labels are unchanged.
@@ -113,19 +113,22 @@ function(orcaslicer_discover_tests TARGET)
             # distinct CTest test names/files for the two partitions.
             catch_discover_tests(${TARGET}
                 TEST_SPEC "~[Parallel]"
+                EXTRA_ARGS ${CATCH_EXTRA_ARGS}
                 ADD_TAGS_AS_LABELS
                 PROPERTIES PROCESSOR_AFFINITY TRUE PROCESSORS 1)
             catch_discover_tests(${TARGET}
                 TEST_SPEC "[Parallel]~[.]"
+                EXTRA_ARGS ${CATCH_EXTRA_ARGS}
                 ADD_TAGS_AS_LABELS
                 PROPERTIES PROCESSOR_AFFINITY TRUE PROCESSORS 2)
         else()
             catch_discover_tests(${TARGET}
+                EXTRA_ARGS ${CATCH_EXTRA_ARGS}
                 ADD_TAGS_AS_LABELS
                 PROPERTIES PROCESSOR_AFFINITY TRUE PROCESSORS ${SLICER_TEST_PROCESSORS})
         endif()
     else()
-        catch_discover_tests(${TARGET} ADD_TAGS_AS_LABELS)
+        catch_discover_tests(${TARGET} EXTRA_ARGS ${CATCH_EXTRA_ARGS} ADD_TAGS_AS_LABELS)
     endif()
 endfunction()
 

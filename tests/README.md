@@ -31,6 +31,12 @@ with `[Parallel]`. When adding the first such test to another suite, add its
 target to `SLICER_TEST_TARGETS_WITH_PARALLEL` in `tests/CMakeLists.txt` so the
 one-CPU mode registers its concurrent tests separately.
 
+`CATCH_EXTRA_ARGS` passes a semicolon-separated argument list to every Catch2
+test registered with CTest. For reproducible generator inputs, configure with
+`-DCATCH_EXTRA_ARGS="--rng-seed;21907"` and rebuild to refresh discovery. Record
+the seed with the results and vary it in additional runs to explore other
+inputs. The default empty value keeps Catch2's automatic seed selection.
+
 ## Confidence runs
 
 The checked-in harnesses keep coverage and mutation evidence tied to the real
@@ -46,6 +52,7 @@ UV="$(command -v uv)"
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_COMPILER=clang++ -DSLICER_ENABLE_LLVM_SOURCE_COVERAGE=ON \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DCATCH_EXTRA_ARGS="--rng-seed;21907" \
   -DSLIC3R_GUI=OFF -DBUILD_TESTS=ON -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" \
   -DORCA_BUNDLED_UV_EXECUTABLE="$UV"
 cmake --build build --config Release --target \
