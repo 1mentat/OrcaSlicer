@@ -43,7 +43,7 @@
       "test_filter": "GCodeProcessorExtended"
     },
     {
-      "id": "gcode-arc-fitting-gate",
+      "id": "gcode-processor-arc-fitting-gate",
       "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
       "old": "if (fitting == EFitting::None)\n        return;",
       "new": "if (fitting != EFitting::None)\n        return;",

@@ -139,7 +139,7 @@
       "description": "A vertex-colored OBJ must publish its constructed TexturedMesh to the returned Model."
     },
     {
-      "id": "archive-source-identity",
+      "id": "model-import-archive-source-identity",
       "old": "//        else\n            o->input_file = input_file;\n    }\n\n    bool cb_cancel;",
       "new": "//        else\n            o->input_file.clear();\n    }\n\n    bool cb_cancel;",
       "path": "src/libslic3r/Model.cpp",
