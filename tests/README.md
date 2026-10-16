@@ -109,6 +109,18 @@ cooling or volumetric limits cannot silently mask the tested effect.
 `[ValidationContracts]` exercises rejected configurations and warning gates;
 that evidence is declared separately from sliced-output coverage.
 
+`[SettingsSpeedAccelVariance]` checks first-layer and role-specific feedrates,
+acceleration, and jerk against every eligible parsed move. Layer markers keep
+first-layer travel separate from later motion. Its direct firmware-writer
+checks are identified as writer evidence in the settings map; they do not
+establish a complete print-pipeline sweep or full numeric-domain coverage.
+
+`[ModelImport]` uses actual STL, OBJ, AMF, and 3MF inputs and checks geometry,
+source metadata, colors, decoded texture pixels, cancellation, and error types.
+`[EmbossLayout]`, `[TriangleCursor]`, and `[PolylineOperations]` use analytic
+geometry and transformation invariants, including integer-grid partitioning
+and translation far from the coordinate origin.
+
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
 line or segment details are needed. Profile-merge and export diagnostics are retained

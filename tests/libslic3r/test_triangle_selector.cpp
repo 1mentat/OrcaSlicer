@@ -1,3 +1,4 @@
+#include <utility>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Geometry.hpp"
 #include <array>
@@ -470,3 +471,382 @@ TEST_CASE("Remapping empty painting does not invent target facets", "[TriangleSe
 }
 
 } // namespace triangle_selector_extended_contracts
+
+namespace triangle_cursor_contracts {
+
+using namespace Slic3r;
+
+namespace {
+using Selector = TriangleSelector;
+using Cursor = Selector::Cursor;
+using Plane = Selector::ClippingPlane;
+
+std::unique_ptr<Cursor> single(Selector::CursorType kind, float radius = 2.f,
+                              const Transform3d &transform = Transform3d::Identity(),
+                              const Plane &plane = Plane())
+{
+    return Selector::SinglePointCursor::cursor_factory(
+        Vec3f::Zero(), Vec3f(0, 0, 10), radius, kind, transform, plane);
+}
+
+std::unique_ptr<Cursor> swept(Selector::CursorType kind,
+                             const Transform3d &transform = Transform3d::Identity(),
+                             const Plane &plane = Plane())
+{
+    return Selector::DoublePointCursor::cursor_factory(
+        Vec3f(0, 0, 0), Vec3f(6, 0, 0), Vec3f(0, 0, 10), 2.f, kind, transform, plane);
+}
+
+// Cursor methods accept protected record types. Expose only construction of
+// valid three-vertex inputs, without changing any selector implementation state.
+struct CursorInput : Selector {
+    static bool edge(const Cursor &cursor, const std::array<Vec3f, 3> &points)
+    {
+        const Triangle triangle(0, 1, 2, 0, EnforcerBlockerType::NONE);
+        const std::vector<Vertex> vertices{Vertex(points[0]), Vertex(points[1]), Vertex(points[2])};
+        return cursor.is_edge_inside_cursor(triangle, vertices);
+    }
+    static int count(const Cursor &cursor, const std::array<Vec3f, 3> &points)
+    {
+        const Triangle triangle(0, 1, 2, 0, EnforcerBlockerType::NONE);
+        const std::vector<Vertex> vertices{Vertex(points[0]), Vertex(points[1]), Vertex(points[2])};
+        return cursor.vertices_inside(triangle, vertices);
+    }
+};
+
+Transform3d stretch()
+{
+    Transform3d transform = Transform3d::Identity();
+    transform.scale(Vec3d(2, 3, 4));
+    transform.translate(Vec3d(7, -2, 5));
+    return transform;
+}
+}
+
+TEST_CASE("A circular brush selects a projected disk at either depth", "[TriangleSelector][TriangleCursor]")
+{
+    const auto brush = single(Selector::CIRCLE);
+    for (float depth : {-5.f, 0.f, 8.f}) {
+        CHECK(brush->is_mesh_point_inside(Vec3f(1, 1, depth)));
+        CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(2.1f, 0, depth)));
+        CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(0, -2.1f, depth)));
+    }
+}
+
+TEST_CASE("A spherical brush limits selection in depth as well as in the plane", "[TriangleSelector][TriangleCursor]")
+{
+    const auto brush = single(Selector::SPHERE);
+    CHECK(brush->is_mesh_point_inside(Vec3f(1, 1, 1)));
+    CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(1, 1, 2)));
+    CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(0, 0, -3)));
+}
+
+TEST_CASE("Single-point brushes apply clipping in mesh coordinates", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = single(kind, 2.f, stretch(), Plane({1, 0, 0, 0}));
+    CHECK(brush->is_mesh_point_inside(Vec3f(-0.2f, 0, 0)));
+    CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(0.2f, 0, 0)));
+    CHECK(brush->is_mesh_point_inside(Vec3f(0, 0, 0)));
+}
+
+TEST_CASE("Nonuniform scaling keeps the brush radius in world units", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = single(kind, 2.f, stretch());
+    CHECK(brush->is_mesh_point_inside(Vec3f(0.9f, 0, 0)));
+    CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(1.1f, 0, 0)));
+    CHECK(brush->is_mesh_point_inside(Vec3f(0, 0.6f, 0)));
+    CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(0, 0.7f, 0)));
+}
+
+TEST_CASE("Uniform scaling converts a world brush radius to mesh units", "[TriangleSelector][TriangleCursor]")
+{
+    Transform3d transform = Transform3d::Identity();
+    transform.scale(2.);
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = single(kind, 2.f, transform);
+    CHECK(brush->is_mesh_point_inside(Vec3f(0.9f, 0, 0)));
+    CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(1.1f, 0, 0)));
+}
+
+TEST_CASE("Projected brushes reject back-facing and tangent facets", "[TriangleSelector][TriangleCursor]")
+{
+    const bool use_stretch = GENERATE(false, true);
+    const auto brush = single(Selector::CIRCLE, 2.f, use_stretch ? stretch() : Transform3d::Identity());
+    const std::vector<Vec3f> normals{Vec3f::UnitZ(), -Vec3f::UnitZ(), Vec3f::UnitX()};
+    CHECK(brush->is_facet_visible(0, normals));
+    CHECK_FALSE(brush->is_facet_visible(1, normals));
+    CHECK_FALSE(brush->is_facet_visible(2, normals));
+}
+
+TEST_CASE("Volume brushes can paint either side of a facet", "[TriangleSelector][TriangleCursor]")
+{
+    const auto brush = swept(Selector::SPHERE);
+    const std::vector<Vec3f> normals{Vec3f::UnitZ(), -Vec3f::UnitZ()};
+    CHECK(brush->is_facet_visible(0, normals));
+    CHECK(brush->is_facet_visible(1, normals));
+}
+
+TEST_CASE("A swept sphere selects both caps and the intervening cylinder", "[TriangleSelector][TriangleCursor]")
+{
+    const auto brush = swept(Selector::SPHERE);
+    for (const Vec3f &point : {Vec3f(-1, 0, 0), Vec3f(7, 0, 0), Vec3f(3, 1, 1)})
+        CHECK(brush->is_mesh_point_inside(point));
+    for (const Vec3f &point : {Vec3f(-3, 0, 0), Vec3f(9, 0, 0), Vec3f(3, 2, 2)})
+        CHECK_FALSE(brush->is_mesh_point_inside(point));
+}
+
+TEST_CASE("A swept circle selects a projected capsule at either depth", "[TriangleSelector][TriangleCursor]")
+{
+    const auto brush = swept(Selector::CIRCLE);
+    for (float depth : {-10.f, 0.f, 10.f}) {
+        for (float x : {-1.f, 3.f, 7.f})
+            CHECK(brush->is_mesh_point_inside(Vec3f(x, 0.5f, depth)));
+        CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(3, 3, depth)));
+        CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(-3, 0, depth)));
+        CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(9, 0, depth)));
+    }
+}
+
+TEST_CASE("Swept brushes clip their endcaps and middle independently", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = swept(kind, Transform3d::Identity(), Plane({0, 1, 0, 0}));
+    for (float x : {-1.f, 3.f, 7.f}) {
+        CHECK(brush->is_mesh_point_inside(Vec3f(x, -0.5f, 0)));
+        CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(x, 0.5f, 0)));
+    }
+}
+
+TEST_CASE("Nonuniformly scaled swept brushes retain their world thickness", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = swept(kind, stretch());
+    for (float x : {0.f, 3.f, 6.f}) {
+        CHECK(brush->is_mesh_point_inside(Vec3f(x, 0.6f, 0)));
+        CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(x, 0.8f, 0)));
+    }
+}
+
+TEST_CASE("A swept pointer hits a facet under either endpoint", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = swept(kind);
+    for (float x : {0.f, 6.f})
+        CHECK(brush->is_pointer_in_triangle(Vec3f(x-1, -1, 0), Vec3f(x+1, -1, 0), Vec3f(x, 1, 0)));
+    CHECK_FALSE(brush->is_pointer_in_triangle(Vec3f(2, -1, 0), Vec3f(4, -1, 0), Vec3f(3, 1, 0)));
+}
+
+TEST_CASE("Brush vertex counts distinguish zero through three selected vertices", "[TriangleSelector][TriangleCursor]")
+{
+    const auto brush = single(Selector::CIRCLE);
+    std::array<Vec3f, 3> points{Vec3f(5, 0, 0), Vec3f(0, 5, 0), Vec3f(-5, 0, 0)};
+    CHECK(CursorInput::count(*brush, points) == 0);
+    for (size_t i = 0; i < points.size(); ++i) {
+        points[i] = Vec3f(float(i) * 0.5f, 0, 0);
+        CHECK(CursorInput::count(*brush, points) == int(i + 1));
+    }
+}
+
+TEST_CASE("Circular brushes detect crossing edges whose endpoints are outside", "[TriangleSelector][TriangleCursor]")
+{
+    const auto brush = single(Selector::CIRCLE);
+    CHECK(CursorInput::edge(*brush, {Vec3f(-4, 0, 5), Vec3f(4, 0, 5), Vec3f(4, 5, 5)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(4, 3, 5), Vec3f(7, 3, 5), Vec3f(7, 5, 5)}));
+}
+
+TEST_CASE("Swept brushes detect edges across the middle of the stroke", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = swept(kind);
+    CHECK(CursorInput::edge(*brush, {Vec3f(3, -4, 0), Vec3f(3, 4, 0), Vec3f(10, 4, 0)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(3, 4, 0), Vec3f(3, 8, 0), Vec3f(10, 8, 0)}));
+}
+
+TEST_CASE("Swept brushes detect edges across either round endcap", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = swept(kind);
+    for (float x : {-1.f, 7.f})
+        CHECK(CursorInput::edge(*brush, {Vec3f(x, -4, 0), Vec3f(x, 4, 0), Vec3f(x+0.2f, 4, 0)}));
+}
+
+TEST_CASE("Transformed brush edge tests agree with their world-space radius", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = swept(kind, stretch());
+    CHECK(CursorInput::edge(*brush, {Vec3f(3, -2, 0), Vec3f(3, 2, 0), Vec3f(7, 2, 0)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(3, 1, 0), Vec3f(3, 2, 0), Vec3f(7, 2, 0)}));
+}
+
+TEST_CASE("Height brushes select a world-space band with a small boundary tolerance", "[TriangleSelector][TriangleCursor]")
+{
+    const auto brush = Selector::SinglePointCursor::cursor_factory(2.f, Vec3f(0, 0, 10), 3.f, Transform3d::Identity(), Plane());
+    for (float z : {1.99f, 2.f, 3.f, 5.f, 5.01f})
+        CHECK(brush->is_mesh_point_inside(Vec3f(100, -100, z)));
+    for (float z : {1.9f, 5.1f})
+        CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(0, 0, z)));
+    CHECK_FALSE(brush->is_pointer_in_triangle(Vec3f(-1, -1, 3), Vec3f(1, -1, 3), Vec3f(0, 1, 3)));
+}
+
+TEST_CASE("Height brushes apply the complete object transform", "[TriangleSelector][TriangleCursor]")
+{
+    Transform3d transform = Transform3d::Identity();
+    transform.translate(Vec3d(0, 0, 10));
+    transform.scale(Vec3d(2, 3, 4));
+    const auto brush = Selector::SinglePointCursor::cursor_factory(14.f, Vec3f(0, 0, 30), 4.f, transform, Plane());
+    CHECK(brush->is_mesh_point_inside(Vec3f(0, 0, 1.5f)));
+    CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(0, 0, 0.5f)));
+    CHECK_FALSE(brush->is_mesh_point_inside(Vec3f(0, 0, 2.5f)));
+}
+
+TEST_CASE("Height brushes detect triangles spanning the band without an interior vertex", "[TriangleSelector][TriangleCursor]")
+{
+    const auto brush = Selector::SinglePointCursor::cursor_factory(2.f, Vec3f(0, 0, 10), 3.f, Transform3d::Identity(), Plane());
+    CHECK(CursorInput::edge(*brush, {Vec3f(0, 0, 0), Vec3f(1, 0, 8), Vec3f(0, 1, 8)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, 0), Vec3f(1, 0, 1), Vec3f(0, 1, 1)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, 6), Vec3f(1, 0, 8), Vec3f(0, 1, 8)}));
+    CHECK(CursorInput::edge(*brush, {Vec3f(0, 0, 5.00005f), Vec3f(1, 0, 5.00005f), Vec3f(0, 1, 5.00005f)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, 5.0002f), Vec3f(1, 0, 5.0002f), Vec3f(0, 1, 5.0002f)}));
+}
+
+TEST_CASE("Used paint states are extracted in state order without duplicates", "[TriangleSelector][TriangleCursor]")
+{
+    Selector::TriangleSplittingData data;
+    data.used_states.assign(size_t(EnforcerBlockerType::ExtruderMax) + 1, false);
+    CHECK(Selector::extract_used_facet_states(data).empty());
+    data.used_states[32] = true;
+    data.used_states[1] = true;
+    data.used_states[17] = true;
+    const std::vector<EnforcerBlockerType> expected{
+        EnforcerBlockerType::Extruder1, EnforcerBlockerType::Extruder17, EnforcerBlockerType::Extruder32};
+    CHECK(Selector::extract_used_facet_states(data) == expected);
+}
+
+namespace triangle_cursor_end_to_end_contracts {
+namespace {
+
+stl_vertex vertex(float x, float y, float z)
+{
+    stl_vertex result;
+    result << x, y, z;
+    return result;
+}
+
+stl_triangle_vertex_indices face(int a, int b, int c)
+{
+    stl_triangle_vertex_indices result;
+    result << a, b, c;
+    return result;
+}
+
+TriangleMesh square_mesh()
+{
+    indexed_triangle_set its;
+    its.vertices = {vertex(0, 0, 0), vertex(10, 0, 0), vertex(10, 10, 0), vertex(0, 10, 0)};
+    its.indices = {face(0, 1, 2), face(0, 2, 3)};
+    return TriangleMesh(std::move(its));
+}
+
+double area(const indexed_triangle_set &mesh)
+{
+    double total = 0.;
+    for (const auto &triangle : mesh.indices) {
+        const auto &a = mesh.vertices[triangle(0)];
+        const auto &b = mesh.vertices[triangle(1)];
+        const auto &c = mesh.vertices[triangle(2)];
+        total += .5 * double((b - a).cross(c - a).norm());
+    }
+    return total;
+}
+
+std::unique_ptr<Cursor> sphere_at_origin(float radius)
+{
+    return Selector::SinglePointCursor::cursor_factory(
+        Vec3f::Zero(), Vec3f(0, 0, 20), radius, Selector::SPHERE,
+        Transform3d::Identity(), Plane());
+}
+}
+
+TEST_CASE("Partial cursor painting conserves area through garbage collection", "[TriangleSelector][TriangleCursor]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    selector.select_patch(0, sphere_at_origin(2.f), EnforcerBlockerType::ENFORCER,
+                          Transform3d::Identity(), true, 0.f, Vec3f::UnitZ(), true);
+    const auto split_state = selector.serialize();
+    REQUIRE_FALSE(split_state.bitstream.empty());
+    REQUIRE_FALSE(split_state.triangles_to_split.empty());
+    const double before = area(selector.get_facets_strict(EnforcerBlockerType::ENFORCER)) +
+                          area(selector.get_facets_strict(EnforcerBlockerType::NONE));
+    REQUIRE(selector.num_facets(EnforcerBlockerType::ENFORCER) > 0);
+    CHECK_THAT(before, Catch::Matchers::WithinAbs(100., 1e-3));
+
+    // Painting each complete facet with a new state collapses all split
+    // children.  The serialized state still contains one record per painted
+    // root facet; it must not contain child split records.
+    selector.set_facet(0, EnforcerBlockerType::BLOCKER);
+    selector.set_facet(1, EnforcerBlockerType::BLOCKER);
+    const auto collapsed = selector.serialize();
+    TriangleSelector collapsed_expected(mesh);
+    collapsed_expected.set_facet(0, EnforcerBlockerType::BLOCKER);
+    collapsed_expected.set_facet(1, EnforcerBlockerType::BLOCKER);
+    CHECK(collapsed == collapsed_expected.serialize());
+    const double collapsed_area = area(selector.get_facets_strict(EnforcerBlockerType::BLOCKER)) +
+                                  area(selector.get_facets_strict(EnforcerBlockerType::NONE));
+    CHECK_THAT(collapsed_area, Catch::Matchers::WithinAbs(100., 1e-3));
+
+    selector.garbage_collect();
+    const auto compacted = selector.serialize();
+    CHECK(compacted.bitstream == collapsed.bitstream);
+    CHECK(compacted.triangles_to_split == collapsed.triangles_to_split);
+    const double after = area(selector.get_facets_strict(EnforcerBlockerType::BLOCKER)) +
+                         area(selector.get_facets_strict(EnforcerBlockerType::NONE));
+    CHECK_THAT(after, Catch::Matchers::WithinAbs(collapsed_area, 1e-3));
+    CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 2);
+    CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 0);
+}
+
+TEST_CASE("Serialized states are stable across garbage collection", "[TriangleSelector][TriangleCursor]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    selector.set_facet(0, EnforcerBlockerType::ENFORCER);
+    selector.set_facet(1, EnforcerBlockerType::BLOCKER);
+    const auto serialized = selector.serialize();
+    selector.garbage_collect();
+    CHECK(selector.serialize() == serialized);
+    CHECK(selector.num_facets(EnforcerBlockerType::ENFORCER) == 1);
+    CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 1);
+}
+
+TEST_CASE("Coplanar paint selection reaches an adjacent facet through the shared edge", "[TriangleSelector][TriangleCursor]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    selector.seed_fill_select_triangles(Vec3f(2, 2, 0), 0, Transform3d::Identity(), Plane(), 180.f);
+    selector.seed_fill_apply_on_triangles(EnforcerBlockerType::Extruder3);
+    CHECK(selector.num_facets(EnforcerBlockerType::Extruder3) == 2);
+    CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 0);
+}
+}
+
+TEST_CASE("Cursor round ends exclude exact radius while capsule middle includes its boundary", "[TriangleSelector][TriangleCursor]")
+{
+    const auto single_kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto single_brush = single(single_kind);
+    CHECK(single_brush->is_mesh_point_inside(Vec3f(1.999f, 0, 0)));
+    CHECK_FALSE(single_brush->is_mesh_point_inside(Vec3f(2.f, 0, 0)));
+
+    const auto swept_kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto swept_brush = swept(swept_kind);
+    CHECK(swept_brush->is_mesh_point_inside(Vec3f(-1.999f, 0, 0)));
+    CHECK_FALSE(swept_brush->is_mesh_point_inside(Vec3f(-2.f, 0, 0)));
+    CHECK(swept_brush->is_mesh_point_inside(Vec3f(7.999f, 0, 0)));
+    CHECK_FALSE(swept_brush->is_mesh_point_inside(Vec3f(8.f, 0, 0)));
+    CHECK(swept_brush->is_mesh_point_inside(Vec3f(3.f, 2.f, 0)));
+    CHECK_FALSE(swept_brush->is_mesh_point_inside(Vec3f(3.f, 2.001f, 0)));
+}
+
+} // namespace triangle_cursor_contracts

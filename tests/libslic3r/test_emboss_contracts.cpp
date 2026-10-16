@@ -1,3 +1,9 @@
+#include <cstdint>
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/TextConfiguration.hpp"
+#include "libslic3r/libslic3r.h"
 #include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -248,3 +254,205 @@ TEST_CASE("Emboss font contracts cover real glyph caching and style variance", "
     const double bold_area = glyph_area(Emboss::text2vshapes(bold_cache, L"A", bold));
     CHECK(bold_area > plain_area);
 }
+
+namespace emboss_layout_contracts {
+
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+Point xy(double x, double y) { return Point(scaled(x), scaled(y)); }
+Polygon square() { return Polygon{Points{xy(-10, -10), xy(10, -10), xy(10, 10), xy(-10, 10)}}; }
+Emboss::TextLine baseline() { return Emboss::TextLine{square(), PolygonPoint{0, xy(0, -10)}, 0.f}; }
+BoundingBox glyph_box(int center) { return BoundingBox(Point(center - 1, -1), Point(center + 1, 1)); }
+void same_vector(const Vec3d& actual, const Vec3d& expected)
+{
+    for (int axis = 0; axis < 3; ++axis)
+        CHECK_THAT(actual[axis], WithinAbs(expected[axis], 1e-6));
+}
+auto font()
+{
+    const auto path = repo_font_path();
+    auto result     = Emboss::create_font_file(path.string().c_str());
+    REQUIRE(result != nullptr);
+    return result;
+}
+} // namespace
+
+TEST_CASE("An absent emboss transform preserves the existing placement", "[Emboss][EmbossLayout]")
+{
+    Transform3d transform = Transform3d::Identity();
+    transform.translate(Vec3d(3, 4, 5));
+    transform.rotate(Eigen::AngleAxisd(0.7, Vec3d::UnitX()));
+    const Transform3d before = transform;
+    Emboss::apply_transformation(std::nullopt, std::nullopt, transform);
+    CHECK_THAT((transform.matrix() - before.matrix()).norm(), WithinAbs(0., 1e-12));
+}
+
+TEST_CASE("Emboss rotation acts around the local text normal", "[Emboss][EmbossLayout]")
+{
+    Transform3d transform = Transform3d::Identity();
+    transform.translate(Vec3d(3, 4, 5));
+    Emboss::apply_transformation(float(PI / 2), std::nullopt, transform);
+    same_vector(transform * Vec3d::UnitX(), Vec3d(3, 5, 5));
+    same_vector(transform * Vec3d::UnitY(), Vec3d(2, 4, 5));
+    same_vector(transform * Vec3d::Zero(), Vec3d(3, 4, 5));
+}
+
+TEST_CASE("Emboss distance follows the transformed normal", "[Emboss][EmbossLayout]")
+{
+    Transform3d transform = Transform3d::Identity();
+    transform.translate(Vec3d(3, 4, 5));
+    transform.rotate(Eigen::AngleAxisd(PI / 2, Vec3d::UnitY()));
+    Emboss::apply_transformation(std::nullopt, -2.f, transform);
+    same_vector(transform * Vec3d::Zero(), Vec3d(1, 4, 5));
+    same_vector(transform.linear() * Vec3d::UnitZ(), Vec3d::UnitX());
+}
+
+TEST_CASE("Combined emboss rotation and distance retain both placement effects", "[Emboss][EmbossLayout]")
+{
+    Transform3d transform = Transform3d::Identity();
+    Emboss::apply_transformation(float(PI / 2), 3.f, transform);
+    same_vector(transform * Vec3d::UnitX(), Vec3d(0, 1, 3));
+    same_vector(transform * Vec3d::UnitY(), Vec3d(-1, 0, 3));
+}
+
+TEST_CASE("Emboss normals point outward along each side of a rectangle", "[Emboss][EmbossLayout]")
+{
+    const Polygon polygon = square();
+    const PolygonPoints locations{{0, xy(0, -10)}, {1, xy(10, 0)}, {2, xy(0, 10)}, {3, xy(-10, 0)}};
+    const auto angles = Emboss::calculate_angles(int32_t(scaled(1.)), locations, polygon);
+    REQUIRE(angles.size() == 4);
+    const std::vector<Vec2d> expected{{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
+    for (size_t i = 0; i < angles.size(); ++i) {
+        CHECK_THAT(std::cos(angles[i]), WithinAbs(expected[i].x(), 1e-8));
+        CHECK_THAT(std::sin(angles[i]), WithinAbs(expected[i].y(), 1e-8));
+    }
+}
+
+TEST_CASE("Emboss normals bisect a right-angle corner", "[Emboss][EmbossLayout]")
+{
+    const Polygon polygon = square();
+    const double angle    = Emboss::calculate_angle(int32_t(scaled(2.)), PolygonPoint{1, xy(10, -10)}, polygon);
+    CHECK_THAT(std::cos(angle), WithinAbs(std::sqrt(0.5), 1e-8));
+    CHECK_THAT(std::sin(angle), WithinAbs(-std::sqrt(0.5), 1e-8));
+}
+
+TEST_CASE("Emboss normal calculation handles crossing into both adjacent edges", "[Emboss][EmbossLayout]")
+{
+    const Polygon polygon = square();
+    const double angle    = Emboss::calculate_angle(int32_t(scaled(12.)), PolygonPoint{0, xy(0, -10)}, polygon);
+    CHECK_THAT(std::cos(angle), WithinAbs(0., 1e-8));
+    CHECK_THAT(std::sin(angle), WithinAbs(-1., 1e-8));
+}
+
+TEST_CASE("An empty list of emboss samples produces no normal angles", "[Emboss][EmbossLayout]")
+{
+    CHECK(Emboss::calculate_angles(int32_t(scaled(1.)), PolygonPoints{}, square()).empty());
+    CHECK(Emboss::sample_slice(baseline(), BoundingBoxes{}, 1.).empty());
+}
+
+TEST_CASE("Emboss glyph centers sample both sides of the baseline origin", "[Emboss][EmbossLayout]")
+{
+    const BoundingBoxes boxes{glyph_box(-4), glyph_box(0), glyph_box(4)};
+    const auto samples = Emboss::sample_slice(baseline(), boxes, 1.);
+    REQUIRE(samples.size() == 3);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        CHECK(samples[i].index == 0);
+        CHECK(samples[i].point == xy(double(i) * 4. - 4., -10));
+    }
+}
+
+TEST_CASE("Emboss glyph samples scale font coordinates into millimeters", "[Emboss][EmbossLayout]")
+{
+    const BoundingBoxes boxes{glyph_box(2), glyph_box(4), glyph_box(6)};
+    const auto samples = Emboss::sample_slice(baseline(), boxes, 0.5);
+    REQUIRE(samples.size() == 3);
+    for (size_t i = 0; i < samples.size(); ++i)
+        CHECK(samples[i].point == xy(double(i) + 1., -10));
+}
+
+TEST_CASE("Emboss sampling supports a line containing only left-aligned glyphs", "[Emboss][EmbossLayout]")
+{
+    const BoundingBoxes boxes{glyph_box(-6), glyph_box(-4), glyph_box(-2)};
+    const auto samples = Emboss::sample_slice(baseline(), boxes, 1.);
+    REQUIRE(samples.size() == 3);
+    for (size_t i = 0; i < samples.size(); ++i)
+        CHECK(samples[i].point == xy(double(i) * 2. - 6., -10));
+}
+
+TEST_CASE("Whitespace glyphs retain an existing baseline cursor", "[Emboss][EmbossLayout]")
+{
+    const BoundingBoxes boxes{glyph_box(2), BoundingBox(), glyph_box(6)};
+    const auto samples = Emboss::sample_slice(baseline(), boxes, 1.);
+    REQUIRE(samples.size() == 3);
+    CHECK(samples[0].point == xy(2, -10));
+    CHECK(samples[1].point == samples[0].point);
+    CHECK(samples[2].point == xy(6, -10));
+}
+
+TEST_CASE("Emboss glyph sampling crosses a corner at the requested chord distance", "[Emboss][EmbossLayout]")
+{
+    const auto samples = Emboss::sample_slice(baseline(), BoundingBoxes{glyph_box(13)}, 1.);
+    REQUIRE(samples.size() == 1);
+    CHECK(samples[0].index == 1);
+    CHECK(samples[0].point.x() == scaled(10.));
+    // A 13 mm chord from (0,-10) reaches the x=10 edge at sqrt(69) above its base.
+    CHECK_THAT(unscale<double>(samples[0].point.y()), WithinAbs(-10. + std::sqrt(69.), 2e-6));
+}
+
+TEST_CASE("Emboss vertical alignment offsets respond independently to text height and line count", "[Emboss][EmbossLayout]")
+{
+    auto face = font();
+    FontProp prop(10.f);
+    const auto offset = [&](FontProp::VerticalAlign alignment, unsigned count) {
+        return Emboss::get_align_y_offset_in_mm(alignment, count, *face, prop);
+    };
+    const double bottom_one = offset(FontProp::VerticalAlign::bottom, 1);
+    const double bottom_two = offset(FontProp::VerticalAlign::bottom, 2);
+    CHECK_THAT(bottom_one, WithinAbs(0., 1e-8));
+    REQUIRE(bottom_two > 0.);
+    CHECK_THAT(offset(FontProp::VerticalAlign::bottom, 3), WithinAbs(2. * bottom_two, 1e-5));
+    const double top_one = offset(FontProp::VerticalAlign::top, 1);
+    REQUIRE(top_one < 0.);
+    CHECK_THAT(offset(FontProp::VerticalAlign::top, 3), WithinAbs(top_one, 1e-5));
+    const double center_one = offset(FontProp::VerticalAlign::center, 1);
+    CHECK_THAT(offset(FontProp::VerticalAlign::center, 3) - center_one, WithinAbs(bottom_two, 1e-5));
+    FontProp doubled(20.f);
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::bottom, 2, *face, doubled), WithinAbs(2. * bottom_two, 1e-5));
+}
+
+TEST_CASE("Emboss vertical offsets convert supplied font metrics into exact millimeters", "[Emboss][EmbossLayout]")
+{
+    auto face = font();
+    // Layout consumes cached metrics. Keep a real owned font buffer and supply
+    // simple independent metrics: 1000 units/em, 800 ascent, 1200 line advance.
+    face->infos = {{800, -200, 200, 1000}};
+    FontProp prop(10.f);
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::top, 3, *face, prop), WithinAbs(-8., 1e-5));
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::bottom, 3, *face, prop), WithinAbs(24., 1e-5));
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::center, 3, *face, prop), WithinAbs(12. - 8. / 3., 1e-5));
+}
+
+TEST_CASE("Extra emboss line gap changes only multi-line baseline spacing", "[Emboss][EmbossLayout]")
+{
+    auto face   = font();
+    face->infos = {{800, -200, 200, 1000}};
+    FontProp prop(10.f);
+    prop.line_gap = 300;
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::bottom, 1, *face, prop), WithinAbs(0., 1e-5));
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::bottom, 3, *face, prop), WithinAbs(30., 1e-5));
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::top, 3, *face, prop), WithinAbs(-8., 1e-5));
+}
+
+TEST_CASE("Emboss layout selects metrics from the requested font collection entry", "[Emboss][EmbossLayout]")
+{
+    auto face   = font();
+    face->infos = {{800, -200, 200, 1000}, {1200, -400, 100, 2000}};
+    FontProp prop(20.f);
+    prop.collection_number = 1;
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::top, 1, *face, prop), WithinAbs(-12., 1e-5));
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::bottom, 2, *face, prop), WithinAbs(17., 1e-5));
+}
+
+} // namespace emboss_layout_contracts

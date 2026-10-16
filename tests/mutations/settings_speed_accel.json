@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "description": "Role and first-layer speed, acceleration, jerk, and firmware command contracts.",
+  "mutants": [
+    {
+      "id": "gw-klipper-print",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "        if (this->config.accel_to_decel_enable) {\n            gcode += \" ACCEL_TO_DECEL=\";\n            gcode += float_to_string_decimal_point(acceleration * this->config.accel_to_decel_factor / 100);\n            if (GCodeWriter::full_gcode_comment)\n                gcode += \" ; adjust ACCEL_TO_DECEL\";\n        }\n    } else {",
+      "new": "        if (false) {\n            gcode += \" ACCEL_TO_DECEL=\";\n            gcode += float_to_string_decimal_point(acceleration * this->config.accel_to_decel_factor / 100);\n            if (GCodeWriter::full_gcode_comment)\n                gcode += \" ; adjust ACCEL_TO_DECEL\";\n        }\n    } else {",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Klipper set_print_acceleration emits configured ACCEL_TO_DECEL only when enabled"
+    },
+    {
+      "id": "gw-klipper-combined",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "        gcode += std::to_string(acceleration);\n        if (this->config.accel_to_decel_enable) {\n            gcode += \" ACCEL_TO_DECEL=\";\n            gcode += float_to_string_decimal_point(acceleration * this->config.accel_to_decel_factor / 100);\n        }\n        m_last_acceleration = acceleration;",
+      "new": "        gcode += std::to_string(acceleration);\n        if (false) {\n            gcode += \" ACCEL_TO_DECEL=\";\n            gcode += float_to_string_decimal_point(acceleration * this->config.accel_to_decel_factor / 100);\n        }\n        m_last_acceleration = acceleration;",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Klipper set_accel_and_jerk preserves the accel-to-decel contract"
+    },
+    {
+      "id": "gw-marlin-separate",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "    return (flavor == gcfRepetier || flavor == gcfMarlinFirmware ||  flavor == gcfRepRapFirmware);",
+      "new": "    return (flavor == gcfRepetier || flavor == gcfRepRapFirmware);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Marlin travel acceleration uses M204 T, independently checked by the direct writer oracle"
+    },
+    {
+      "id": "gw-jerk-y-word",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "        gcode << \"M205 X\" << jerk_x << \" Y\" << jerk_y;",
+      "new": "        gcode << \"M205 X\" << jerk_x;",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Marlin jerk output contains both configured X and Y words"
+    },
+    {
+      "id": "gw-first-layer-travel-speed",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "    auto speed = this->point_on_first_layer(Vec3d(point_on_plate.x(), point_on_plate.y(), m_pos.z()))\n        ? this->config.get_abs_value_at(\"initial_layer_travel_speed\", m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);",
+      "new": "    auto speed = this->point_on_first_layer(Vec3d(point_on_plate.x(), point_on_plate.y(), m_pos.z()))\n        ? this->config.travel_speed.get_at(m_cached_extruder_idx) : this->config.travel_speed.get_at(m_cached_extruder_idx);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "First-layer XY travel uses the configured initial-layer percentage speed"
+    },
+    {
+      "id": "gw-z-travel-speed",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "    double speed = this->config.travel_speed_z.get_at(m_cached_extruder_idx);\n    if (speed == 0.) {\n        speed = this->point_on_first_layer(Vec3d(m_pos.x() - m_x_offset, m_pos.y() - m_y_offset, z))",
+      "new": "    double speed = this->config.travel_speed.get_at(m_cached_extruder_idx);\n    if (speed == 0.) {\n        speed = this->point_on_first_layer(Vec3d(m_pos.x() - m_x_offset, m_pos.y() - m_y_offset, z))",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Vertical z-hop uses travel_speed_z rather than the XY travel speed"
+    },
+    {
+      "id": "gc-first-layer-infill-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else if (path.role() == erBottomSurface) {\n            speed = NOZZLE_CONFIG(initial_layer_infill_speed);\n        } else if (path.role() == erGapFill) {",
+      "new": "        } else if (path.role() == erBottomSurface) {\n            speed = NOZZLE_CONFIG(initial_layer_speed);\n        } else if (path.role() == erGapFill) {",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Bottom-surface extrusion on the first layer uses initial_layer_infill_speed"
+    },
+    {
+      "id": "gc-first-layer-role-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            const bool use_first_layer_speed = is_perimeter(path.role()) || path.role() == erBrim;\n            speed = use_first_layer_speed ? NOZZLE_CONFIG(initial_layer_speed) :\n                                            NOZZLE_CONFIG(initial_layer_infill_speed);",
+      "new": "            const bool use_first_layer_speed = is_perimeter(path.role()) || path.role() == erBrim;\n            speed = NOZZLE_CONFIG(initial_layer_speed);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "First-layer perimeter and infill roles retain their distinct speed partition"
+    },
+    {
+      "id": "gc-internal-bridge-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else if(path.role() == erInternalBridgeInfill) {\n            speed = m_config.internal_bridge_speed.get_at(nozzle).get_abs_value(m_config.bridge_speed.get_at(nozzle));",
+      "new": "        } else if(path.role() == erInternalBridgeInfill) {\n            speed = m_config.bridge_speed.get_at(nozzle);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Internal bridge speed resolves its percentage against bridge_speed"
+    },
+    {
+      "id": "gc-bridge-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else if (path.role() == erOverhangPerimeter || path.role() == erSupportTransition || path.role() == erBridgeInfill) {\n            speed = NOZZLE_CONFIG(bridge_speed);",
+      "new": "        } else if (path.role() == erOverhangPerimeter || path.role() == erSupportTransition || path.role() == erBridgeInfill) {\n            speed = NOZZLE_CONFIG(initial_layer_speed);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "External bridge extrusion uses bridge_speed"
+    },
+    {
+      "id": "gc-initial-layer-acceleration",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        if (path_on_first_layer && m_config.initial_layer_acceleration.get_at(nozzle) > 0) {\n            acceleration = m_config.initial_layer_acceleration.get_at(nozzle);",
+      "new": "        if (false && path_on_first_layer && m_config.initial_layer_acceleration.get_at(nozzle) > 0) {\n            acceleration = m_config.initial_layer_acceleration.get_at(nozzle);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "First-layer role extrusion uses initial_layer_acceleration"
+    },
+    {
+      "id": "gc-inner-wall-acceleration",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else if (m_config.inner_wall_acceleration.get_at(nozzle) > 0 && is_internal_perimeter(role)) {\n            acceleration = m_config.inner_wall_acceleration.get_at(nozzle);",
+      "new": "        } else if (false && m_config.inner_wall_acceleration.get_at(nozzle) > 0 && is_internal_perimeter(role)) {\n            acceleration = m_config.inner_wall_acceleration.get_at(nozzle);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Internal perimeter extrusion uses inner_wall_acceleration"
+    },
+    {
+      "id": "gc-top-surface-acceleration",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else if (m_config.top_surface_acceleration.get_at(nozzle) > 0 && is_top_surface(role)) {\n            acceleration = m_config.top_surface_acceleration.get_at(nozzle);",
+      "new": "        } else if (false && m_config.top_surface_acceleration.get_at(nozzle) > 0 && is_top_surface(role)) {\n            acceleration = m_config.top_surface_acceleration.get_at(nozzle);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Top surface extrusion uses top_surface_acceleration"
+    },
+    {
+      "id": "gc-initial-layer-travel-acceleration",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        if (NOZZLE_CONFIG(default_acceleration) > 0 && initial_layer_travel_acceleration > 0) {\n            acceleration_to_set = (unsigned int) floor(initial_layer_travel_acceleration + 0.5);\n        }",
+      "new": "        if (NOZZLE_CONFIG(default_acceleration) > 0 && initial_layer_travel_acceleration > 0) {\n            acceleration_to_set = (unsigned int) floor(NOZZLE_CONFIG(travel_acceleration) + 0.5);\n        }",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "First-layer percentage travel acceleration must emit its resolved value, not the regular travel acceleration."
+    },
+    {
+      "id": "gc-initial-layer-travel-jerk",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        if (NOZZLE_CONFIG(default_jerk)> 0 && initial_layer_travel_jerk > 0) {\n            jerk_to_set = initial_layer_travel_jerk;\n        }",
+      "new": "        if (NOZZLE_CONFIG(default_jerk)> 0 && initial_layer_travel_jerk > 0) {\n            jerk_to_set = NOZZLE_CONFIG(travel_jerk);\n        }",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "First-layer percentage travel jerk must emit its resolved value, not the regular travel jerk."
+    },
+    {
+      "id": "gc-outer-wall-acceleration",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else if (m_config.outer_wall_acceleration.get_at(nozzle) > 0 && is_external_perimeter(role)) {\n            acceleration = m_config.outer_wall_acceleration.get_at(nozzle);",
+      "new": "        } else if (m_config.outer_wall_acceleration.get_at(nozzle) > 0 && is_external_perimeter(role)) {\n            acceleration = m_config.default_acceleration.get_at(nozzle);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Outer-wall acceleration must remain independent from default acceleration."
+    },
+    {
+      "id": "gc-sparse-infill-acceleration",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        const double sparse_infill_acceleration = role == erInternalInfill ?\n            m_config.sparse_infill_acceleration.get_at(nozzle).get_abs_value(m_config.default_acceleration.get_at(nozzle)) : 0.;",
+      "new": "        const double sparse_infill_acceleration = role == erInternalInfill ?\n            m_config.default_acceleration.get_at(nozzle) : 0.;",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Sparse-infill acceleration must honor the independently configured role value."
+    },
+    {
+      "id": "gc-outer-wall-jerk",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else if (NOZZLE_CONFIG(outer_wall_jerk) > 0 && is_external_perimeter(path.role())) {\n             jerk = NOZZLE_CONFIG(outer_wall_jerk);",
+      "new": "        } else if (NOZZLE_CONFIG(outer_wall_jerk) > 0 && is_external_perimeter(path.role())) {\n             jerk = NOZZLE_CONFIG(default_jerk);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Outer-wall jerk must remain independent from default jerk."
+    },
+    {
+      "id": "gc-infill-jerk",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else if (NOZZLE_CONFIG(infill_jerk) > 0 && is_infill(path.role())) {\n            jerk = NOZZLE_CONFIG(infill_jerk);",
+      "new": "        } else if (NOZZLE_CONFIG(infill_jerk) > 0 && is_infill(path.role())) {\n            jerk = NOZZLE_CONFIG(default_jerk);",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "Sparse and internal solid infill jerk must honor the configured infill jerk."
+    }
+  ]
+}

@@ -1,3 +1,20 @@
+#include <ios>
+#include "libslic3r/Semver.hpp"
+#include <array>
+#include <cstdint>
+#include <fstream>
+#include <functional>
+#include <iterator>
+#include <tuple>
+#include <boost/nowide/fstream.hpp>
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/Format/STL.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/PNGReadWrite.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/TexturePainting.hpp"
+#include "libslic3r/Utils.hpp"
+#include "test_utils.hpp"
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Arrange.hpp"
@@ -1051,3 +1068,606 @@ TEST_CASE("Object export statistics use printable volume determinants and names"
 }
 
 } // namespace model_extended_contracts
+
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
+
+namespace model_import_contracts {
+namespace {
+
+void write_text(const std::string& path, const std::string& contents)
+{
+    boost::nowide::ofstream out(path);
+    REQUIRE(out.good());
+    out << contents;
+    REQUIRE(out.good());
+}
+
+void write_binary(const std::string& path, const std::vector<unsigned char>& bytes)
+{
+    boost::nowide::ofstream out(path, std::ios::binary);
+    REQUIRE(out.good());
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(out.good());
+}
+
+std::string plain_obj()
+{
+    return "o triangle\n"
+           "v 0 0 0\n"
+           "v 12 0 0\n"
+           "v 0 8 0\n"
+           "v 0 0 5\n"
+           "f 1 2 3\n"
+           "f 1 4 2\n"
+           "f 1 3 4\n"
+           "f 2 4 3\n";
+}
+
+std::string colored_obj()
+{
+    return "o colored\n"
+           "v 0 0 0 1 0 0\n"
+           "v 10 0 0 0.5 0.5 0\n"
+           "v 0 10 0 0 0 0.25\n"
+           "v 0 0 10 0.25 1 0.75\n"
+           "f 1 2 3\n"
+           "f 1 4 2\n"
+           "f 1 3 4\n"
+           "f 2 4 3\n";
+}
+
+std::string material_obj_with_uv_without_texture(const std::string& mtl_name)
+{
+    return "mtllib " + mtl_name +
+           "\n"
+           "usemtl painted\n"
+           "v 0 0 0\n"
+           "v 10 0 0\n"
+           "v 0 10 0\n"
+           "vt 0.1 0.2\n"
+           "vt 0.4 0.5\n"
+           "vt 0.8 0.9\n"
+           "f 1/1 2/2 3/3\n";
+}
+
+std::string textured_obj_without_uv(const std::string& mtl_name)
+{
+    return "mtllib " + mtl_name +
+           "\n"
+           "usemtl painted\n"
+           "v 0 0 0\n"
+           "v 10 0 0\n"
+           "v 0 10 0\n"
+           "f 1 2 3\n";
+}
+
+std::string material_obj(const std::string& mtl_name)
+{
+    return "mtllib " + mtl_name +
+           "\n"
+           "usemtl red\n"
+           "v 0 0 0\n"
+           "v 10 0 0\n"
+           "v 0 10 0\n"
+           "v 0 0 10\n"
+           "f 1 2 3\n"
+           "usemtl blue\n"
+           "f 1 4 2\n"
+           "f 1 3 4\n"
+           "f 2 4 3\n";
+}
+
+std::string textured_obj(const std::string& mtl_name)
+{
+    return "mtllib " + mtl_name +
+           "\n"
+           "usemtl painted\n"
+           "v 0 0 0\n"
+           "v 10 0 0\n"
+           "v 0 10 0\n"
+           "vt 0.1 0.2\n"
+           "vt 0.4 0.5\n"
+           "vt 0.8 0.9\n"
+           "f 1/1 2/2 3/3\n";
+}
+
+void write_cube_binary_stl(const std::string& path, size_t header_size = 80)
+{
+    const indexed_triangle_set cube = its_make_cube(10., 20., 30.);
+    std::vector<unsigned char> bytes(header_size, 0);
+    const auto append = [&bytes](const auto& value) {
+        const auto* begin = reinterpret_cast<const unsigned char*>(&value);
+        bytes.insert(bytes.end(), begin, begin + sizeof(value));
+    };
+    append(static_cast<uint32_t>(cube.indices.size()));
+    const stl_normal normal = stl_normal::Zero();
+    for (const Vec3i32& face : cube.indices) {
+        append(normal);
+        for (int i = 0; i < 3; ++i)
+            append(cube.vertices[face[i]]);
+        append(static_cast<uint16_t>(0));
+    }
+    write_binary(path, bytes);
+}
+
+void check_box(const ModelObject& object, const Vec3d& expected_size)
+{
+    const Vec3d size = object.raw_mesh_bounding_box().size();
+    CHECK_THAT(size.x(), WithinAbs(expected_size.x(), 1e-5));
+    CHECK_THAT(size.y(), WithinAbs(expected_size.y(), 1e-5));
+    CHECK_THAT(size.z(), WithinAbs(expected_size.z(), 1e-5));
+}
+
+void write_valid_texture(const std::string& path)
+{
+    const std::vector<uint8_t> pixels = {
+        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0,
+    };
+    REQUIRE(png::write_rgb_to_file(path, 2, 2, pixels));
+}
+
+DynamicPrintConfig archive_config() { return DynamicPrintConfig::full_print_config(); }
+
+void store_archive(const std::string& path)
+{
+    Model model;
+    ModelObject* object = model.add_object();
+    object->name        = "archive-cube";
+    object->add_volume(make_cube(10., 20., 30.));
+    object->add_instance();
+
+    ScopedTemporaryDir backup("orca_model_import_store");
+    model.set_backup_path(backup.string());
+    DynamicPrintConfig config = archive_config();
+    PlateData plate;
+    plate.plate_index = 0;
+    plate.plate_name  = "Import fixture";
+
+    StoreParams params;
+    params.path   = path;
+    params.model  = &model;
+    params.config = &config;
+    params.plate_data_list.push_back(&plate);
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+}
+
+Model read_archive(const std::string& path, En3mfType& type, LoadStrategy options = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
+{
+    DynamicPrintConfig config = archive_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    Semver version;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    });
+    return Model::read_from_archive(path, &config, &substitutions, type, options, &plates, &presets, &version);
+}
+
+} // namespace
+
+TEST_CASE("Model import reads binary STL geometry and records its source", "[Model][ModelImport][STL]")
+{
+    ScopedTemporaryFile stl(".stl");
+    write_cube_binary_stl(stl.string());
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(stl.string()));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    check_box(*model.objects.front(), Vec3d(10., 20., 30.));
+    CHECK(model.objects.front()->input_file == stl.string());
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    CHECK_THAT(model.objects.front()->raw_mesh().volume(), WithinRel(6000., 1e-5));
+}
+
+TEST_CASE("Model import can suppress STL default instances", "[Model][ModelImport][STL]")
+{
+    ScopedTemporaryFile stl(".stl");
+    write_cube_binary_stl(stl.string());
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(stl.string(), nullptr, nullptr, LoadStrategy::Default));
+    REQUIRE(model.objects.size() == 1);
+    CHECK(model.objects.front()->instances.empty());
+    check_box(*model.objects.front(), Vec3d(10., 20., 30.));
+}
+
+TEST_CASE("OLTP import uses the STL path while preserving geometry", "[Model][ModelImport][OLTP]")
+{
+    ScopedTemporaryFile oltp(".oltp");
+    write_cube_binary_stl(oltp.string(), 256);
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(oltp.string(), nullptr, nullptr, LoadStrategy::AddDefaultInstances));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    check_box(*model.objects.front(), Vec3d(10., 20., 30.));
+}
+
+TEST_CASE("STL progress reports bounded progress and allows completion", "[Model][ModelImport][STL]")
+{
+    ScopedTemporaryFile stl(".stl");
+    write_cube_binary_stl(stl.string());
+    int callbacks                = 0;
+    int last_current             = -1;
+    int last_total               = -1;
+    bool invalid_progress        = false;
+    ImportstlProgressFn progress = [&](int current, int total, bool& cancel, std::string& id, std::string& stage) {
+        cancel = false;
+        ++callbacks;
+        last_current = current;
+        last_total   = total;
+        if (current < 0 || total <= 0 || current > total || !id.empty() || !stage.empty())
+            invalid_progress = true;
+    };
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(stl.string(), nullptr, nullptr, LoadStrategy::Default, nullptr, nullptr, nullptr, nullptr,
+                                                  nullptr, progress));
+    REQUIRE(model.objects.size() == 1);
+    CHECK(callbacks > 0);
+    CHECK(last_total > 0);
+    CHECK(last_current >= 0);
+    CHECK_FALSE(invalid_progress);
+}
+
+TEST_CASE("STL cancellation is surfaced as an import failure", "[Model][ModelImport][STL]")
+{
+    ScopedTemporaryFile stl(".stl");
+    write_cube_binary_stl(stl.string());
+    bool callback_called         = false;
+    ImportstlProgressFn progress = [&](int, int, bool& cancel, std::string&, std::string&) {
+        callback_called = true;
+        cancel          = true;
+    };
+    CHECK_THROWS_AS(Model::read_from_file(stl.string(), nullptr, nullptr, LoadStrategy::Default, nullptr, nullptr, nullptr, nullptr,
+                                          nullptr, progress),
+                    Slic3r::RuntimeError);
+    CHECK(callback_called);
+}
+
+TEST_CASE("Model import accepts the repository ASCII STL fixture variants", "[Model][ModelImport][STL]")
+{
+    const std::array<const char*, 3> names = {"ASCII/20mmbox-LF.stl", "ASCII/20mmbox-CRLF.stl", "ASCII/20mmbox-nonstandard.stl"};
+    for (const char* name : names) {
+        Model model;
+        REQUIRE_NOTHROW(model = Model::read_from_file(std::string(TEST_DATA_DIR) + "/test_stl/" + name));
+        REQUIRE(model.objects.size() == 1);
+        check_box(*model.objects.front(), Vec3d(20., 20., 20.));
+    }
+}
+
+TEST_CASE("Model import rejects malformed STL and unknown extensions", "[Model][ModelImport][Errors]")
+{
+    ScopedTemporaryFile malformed(".stl");
+    write_text(malformed.string(), "solid incomplete\n facet normal 0 0 1\n");
+    CHECK_THROWS_AS(Model::read_from_file(malformed.string()), Slic3r::RuntimeError);
+
+    ScopedTemporaryFile unknown(".model");
+    write_text(unknown.string(), "geometry");
+    CHECK_THROWS_AS(Model::read_from_file(unknown.string()), Slic3r::RuntimeError);
+}
+
+TEST_CASE("Model import preserves plain OBJ bounds and topology", "[Model][ModelImport][OBJ]")
+{
+    ScopedTemporaryFile obj(".obj");
+    write_text(obj.string(), plain_obj());
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string(), nullptr, nullptr, LoadStrategy::Default));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    CHECK(model.objects.front()->raw_mesh().facets_count() == 4);
+    check_box(*model.objects.front(), Vec3d(12., 8., 5.));
+    CHECK(model.objects.front()->instances.empty());
+}
+
+TEST_CASE("Model import turns OBJ vertex colors into per-face colors", "[Model][ModelImport][OBJ][Colors]")
+{
+    ScopedTemporaryFile obj(".obj");
+    write_text(obj.string(), colored_obj());
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.texture_mesh != nullptr);
+    REQUIRE(model.texture_mesh->precomputed_face_colors.size() == 4);
+    REQUIRE(model.texture_mesh->precomputed_vertex_colors.size() == 4);
+    CHECK(model.texture_mesh->precomputed_face_colors[0] == std::array<std::size_t, 3>{127, 42, 21});
+    CHECK(model.texture_mesh->precomputed_face_colors[1] == std::array<std::size_t, 3>{148, 127, 63});
+    CHECK(model.texture_mesh->precomputed_face_colors[2] == std::array<std::size_t, 3>{106, 85, 85});
+    CHECK(model.texture_mesh->precomputed_face_colors[3] == std::array<std::size_t, 3>{63, 127, 85});
+    const std::array<std::array<float, 4>, 4> expected_colors = {
+        {{1.f, 0.f, 0.f, 1.f}, {.5f, .5f, 0.f, 1.f}, {0.f, 0.f, .25f, 1.f}, {.25f, 1.f, .75f, 1.f}}};
+    for (size_t vertex = 0; vertex < expected_colors.size(); ++vertex)
+        for (size_t channel = 0; channel < expected_colors[vertex].size(); ++channel)
+            CHECK_THAT(model.texture_mesh->precomputed_vertex_colors[vertex][channel], WithinAbs(expected_colors[vertex][channel], 1e-6));
+    const std::array<std::array<float, 3>, 4> expected_vertices = {{{0.f, 0.f, 0.f}, {10.f, 0.f, 0.f}, {0.f, 10.f, 0.f}, {0.f, 0.f, 10.f}}};
+    REQUIRE(model.texture_mesh->vertices.size() == expected_vertices.size());
+    for (size_t vertex = 0; vertex < expected_vertices.size(); ++vertex)
+        for (size_t axis = 0; axis < expected_vertices[vertex].size(); ++axis)
+            CHECK_THAT(model.texture_mesh->vertices[vertex][axis], WithinAbs(expected_vertices[vertex][axis] - 5.f, 1e-6));
+    // Model volumes center their mesh; OBJ import repairs inward winding.
+    CHECK(model.texture_mesh->indices == std::vector<std::array<int, 3>>{{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
+    REQUIRE(model.objects.size() == 1);
+    check_box(*model.objects.front(), Vec3d(10., 10., 10.));
+    CHECK_THAT(model.objects.front()->raw_mesh().volume(), WithinRel(1000. / 6., 1e-5));
+}
+
+TEST_CASE("Model import maps OBJ material colors to face colors", "[Model][ModelImport][OBJ][Colors]")
+{
+    ScopedTemporaryFile obj(".obj");
+    ScopedTemporaryFile mtl(".mtl");
+    write_text(mtl.string(), "newmtl red\nKd 1 0 0\nnewmtl blue\nKd 0 0 1\n");
+    write_text(obj.string(), material_obj(mtl.path().filename().string()));
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.texture_mesh != nullptr);
+    REQUIRE(model.texture_mesh->precomputed_face_colors.size() == 4);
+    CHECK(model.texture_mesh->precomputed_face_colors[0] == std::array<std::size_t, 3>{255, 0, 0});
+    CHECK(model.texture_mesh->precomputed_face_colors[1] == std::array<std::size_t, 3>{0, 0, 255});
+    CHECK(model.texture_mesh->precomputed_face_colors[2] == std::array<std::size_t, 3>{0, 0, 255});
+    CHECK(model.texture_mesh->precomputed_face_colors[3] == std::array<std::size_t, 3>{0, 0, 255});
+}
+
+TEST_CASE("Model import retains OBJ texture bytes and flipped UVs", "[Model][ModelImport][OBJ][Texture]")
+{
+    ScopedTemporaryFile obj(".obj");
+    ScopedTemporaryFile mtl(".mtl");
+    ScopedTemporaryFile texture(".png");
+    write_valid_texture(texture.string());
+    write_text(mtl.string(), "newmtl painted\nKd .2 .4 .6\nmap_Kd " + texture.path().filename().string() + "\n");
+    write_text(obj.string(), textured_obj(mtl.path().filename().string()));
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.texture_mesh != nullptr);
+    REQUIRE(model.texture_mesh->textures.size() == 1);
+    const auto& encoded = model.texture_mesh->textures[0].data;
+    REQUIRE(png::is_png(png::ReadBuf{encoded.data(), encoded.size()}));
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{encoded.data(), encoded.size()}, decoded));
+    CHECK(decoded.cols == 2);
+    CHECK(decoded.rows == 2);
+    CHECK(decoded.bytes_per_pixel == 3);
+    // The colored PNG decoder returns rows bottom-up.
+    CHECK(decoded.buf == std::vector<uint8_t>{0, 0, 255, 255, 255, 0, 255, 0, 0, 0, 255, 0});
+    REQUIRE(model.objects.size() == 1);
+    CHECK(model.objects.front()->input_file == obj.string());
+    CHECK(model.objects.front()->raw_mesh().facets_count() == 1);
+    check_box(*model.objects.front(), Vec3d(10., 10., 0.));
+    REQUIRE(model.texture_mesh->uv_coords.size() == 3);
+    CHECK_THAT(model.texture_mesh->uv_coords[0][0], WithinAbs(.1, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[0][1], WithinAbs(.8, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[1][0], WithinAbs(.4, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[1][1], WithinAbs(.5, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[2][0], WithinAbs(.8, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[2][1], WithinAbs(.1, 1e-6));
+}
+
+TEST_CASE("OBJ UVs without a texture retain material face colors", "[Model][ModelImport][OBJ][Texture]")
+{
+    ScopedTemporaryFile obj(".obj");
+    ScopedTemporaryFile mtl(".mtl");
+    write_text(mtl.string(), "newmtl painted\nKd .2 .4 .6\n");
+    write_text(obj.string(), material_obj_with_uv_without_texture(mtl.path().filename().string()));
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.texture_mesh != nullptr);
+    REQUIRE(model.texture_mesh->precomputed_face_colors.size() == 1);
+    CHECK(model.texture_mesh->precomputed_face_colors[0] == std::array<std::size_t, 3>{51, 102, 153});
+    CHECK(model.texture_mesh->textures.empty());
+    REQUIRE(model.objects.size() == 1);
+    CHECK(model.objects.front()->raw_mesh().facets_count() == 1);
+}
+
+TEST_CASE("OBJ texture material without UVs does not publish a textured mesh", "[Model][ModelImport][OBJ][Texture]")
+{
+    ScopedTemporaryFile obj(".obj");
+    ScopedTemporaryFile mtl(".mtl");
+    ScopedTemporaryFile texture(".png");
+    write_valid_texture(texture.string());
+    write_text(mtl.string(), "newmtl painted\nKd .2 .4 .6\nmap_Kd " + texture.path().filename().string() + "\n");
+    write_text(obj.string(), textured_obj_without_uv(mtl.path().filename().string()));
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.objects.size() == 1);
+    CHECK(model.texture_mesh == nullptr);
+    CHECK(model.objects.front()->raw_mesh().facets_count() == 1);
+}
+
+TEST_CASE("Model import reports malformed OBJ files", "[Model][ModelImport][OBJ][Errors]")
+{
+    ScopedTemporaryFile obj(".obj");
+    write_text(obj.string(), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 99\n");
+    CHECK_THROWS_AS(Model::read_from_file(obj.string()), Slic3r::RuntimeError);
+}
+
+TEST_CASE("Model import reads the supported AMF extension and rejects malformed XML", "[Model][ModelImport][AMF]")
+{
+    ScopedTemporaryFile amf(".amf");
+    write_text(amf.string(), "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                             "<amf unit=\"millimeter\"><object id=\"0\"><mesh><vertices>"
+                             "<vertex><coordinates><x>0</x><y>0</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>10</x><y>0</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>0</x><y>10</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>0</x><y>0</y><z>10</z></coordinates></vertex>"
+                             "</vertices><volume><triangle><v1>0</v1><v2>2</v2><v3>1</v3></triangle>"
+                             "<triangle><v1>0</v1><v2>1</v2><v3>3</v3></triangle>"
+                             "<triangle><v1>0</v1><v2>3</v2><v3>2</v3></triangle>"
+                             "<triangle><v1>1</v1><v2>2</v2><v3>3</v3></triangle></volume></mesh></object></amf>");
+    bool is_inches = true;
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(amf.string(), nullptr, nullptr, LoadStrategy::Default, nullptr, nullptr, &is_inches));
+    REQUIRE(model.objects.size() == 1);
+    CHECK_FALSE(is_inches);
+    CHECK_THAT(model.objects.front()->raw_mesh().volume(), WithinRel(1000. / 6., 1e-5));
+
+    ScopedTemporaryFile bad(".amf");
+    write_text(bad.string(), "<amf><object>");
+    CHECK_THROWS_AS(Model::read_from_file(bad.string()), Slic3r::RuntimeError);
+}
+
+TEST_CASE("AMF inch units are reported while preserving source coordinates", "[Model][ModelImport][AMF]")
+{
+    ScopedTemporaryFile amf(".amf");
+    write_text(amf.string(), "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                             "<amf unit=\"inch\"><object id=\"0\"><mesh><vertices>"
+                             "<vertex><coordinates><x>0</x><y>0</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>1</x><y>0</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>0</x><y>1</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>0</x><y>0</y><z>1</z></coordinates></vertex>"
+                             "</vertices><volume>"
+                             "<triangle><v1>0</v1><v2>2</v2><v3>1</v3></triangle>"
+                             "<triangle><v1>0</v1><v2>1</v2><v3>3</v3></triangle>"
+                             "<triangle><v1>0</v1><v2>3</v2><v3>2</v3></triangle>"
+                             "<triangle><v1>1</v1><v2>2</v2><v3>3</v3></triangle>"
+                             "</volume></mesh></object></amf>");
+    bool is_inches = false;
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(amf.string(), nullptr, nullptr, LoadStrategy::Default, nullptr, nullptr, &is_inches));
+    REQUIRE(model.objects.size() == 1);
+    CHECK(is_inches);
+    const Vec3d size = model.objects.front()->raw_mesh_bounding_box().size();
+    CHECK_THAT(size.x(), WithinAbs(1., 1e-5));
+    CHECK_THAT(size.y(), WithinAbs(1., 1e-5));
+    CHECK_THAT(size.z(), WithinAbs(1., 1e-5));
+}
+
+TEST_CASE("Model read_from_file imports a generated BBS archive with model options", "[Model][ModelImport][Archive]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_read");
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string());
+    DynamicPrintConfig config = archive_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    bool is_bbl = false;
+    Semver version;
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(archive.string(), &config, &substitutions,
+                                                  LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances,
+                                                  nullptr, nullptr, &is_bbl, &version));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    check_box(*model.objects.front(), Vec3d(10., 20., 30.));
+    CHECK(model.objects.front()->input_file == archive.string());
+}
+
+TEST_CASE("Model read_from_file preserves an archive's explicit instance without adding another", "[Model][ModelImport][Archive]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_no_instances");
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string());
+    DynamicPrintConfig config = archive_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    Model model;
+    REQUIRE_NOTHROW(
+        model = Model::read_from_file(archive.string(), &config, &substitutions, LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    REQUIRE(model.objects.size() == 1);
+    CHECK(model.objects.front()->instances.size() == 1);
+    check_box(*model.objects.front(), Vec3d(10., 20., 30.));
+}
+
+TEST_CASE("Model read_from_archive identifies the generated archive origin and restores geometry", "[Model][ModelImport][Archive]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_archive");
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string());
+    En3mfType type = En3mfType::From_Other;
+    Model model;
+    REQUIRE_NOTHROW(model = read_archive(archive.string(), type,
+                                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    check_box(*model.objects.front(), Vec3d(10., 20., 30.));
+    CHECK(type == En3mfType::From_Orca);
+    CHECK(model.objects.front()->input_file == archive.string());
+}
+
+TEST_CASE("Model read_from_archive reports progress stages after loading", "[Model][ModelImport][Archive]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_progress");
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string());
+    DynamicPrintConfig config = archive_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    En3mfType type = En3mfType::From_Other;
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    Semver version;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    });
+    std::vector<std::tuple<int, int, int>> progress_records;
+    Import3mfProgressFn progress = [&](int stage, int current, int total, bool& cancel) {
+        progress_records.emplace_back(stage, current, total);
+        cancel = false;
+    };
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_archive(archive.string(), &config, &substitutions, type,
+                                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig, &plates, &presets, &version,
+                                                     progress));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE_FALSE(progress_records.empty());
+    CHECK(std::any_of(progress_records.begin(), progress_records.end(),
+                      [](const auto& record) { return std::get<0>(record) == IMPORT_STAGE_UPDATE_GCODE; }));
+    CHECK(std::any_of(progress_records.begin(), progress_records.end(),
+                      [](const auto& record) { return std::get<0>(record) == IMPORT_STAGE_CHECK_MODE_GCODE; }));
+    for (const auto& [stage, current, total] : progress_records) {
+        CHECK(stage >= 0);
+        CHECK(current >= 0);
+        CHECK(total >= 0);
+        CHECK(current <= total);
+    }
+}
+
+TEST_CASE("Model read_from_archive cancellation is surfaced after archive load", "[Model][ModelImport][Archive]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_read");
+    const std::string archive = std::string(TEST_DATA_DIR) + "/test_3mf/Geräte/Büchse.3mf";
+    DynamicPrintConfig config = archive_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    En3mfType type = En3mfType::From_Other;
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    Semver version;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    });
+    bool callback_called         = false;
+    Import3mfProgressFn progress = [&](int stage, int, int, bool& cancel) {
+        cancel = false;
+        if (stage == IMPORT_STAGE_ADD_INSTANCE) {
+            callback_called = true;
+            cancel          = true;
+        }
+    };
+    CHECK_THROWS_AS(Model::read_from_archive(archive, &config, &substitutions, type,
+                                             LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances,
+                                             &plates, &presets, &version, progress),
+                    Slic3r::RuntimeError);
+    CHECK(callback_called);
+}
+
+TEST_CASE("Model read_from_archive rejects malformed archives and unsupported suffixes", "[Model][ModelImport][Archive][Errors]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_errors");
+    ScopedTemporaryFile malformed(".3mf");
+    write_text(malformed.string(), "not a zip archive");
+    DynamicPrintConfig config = archive_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    En3mfType type = En3mfType::From_Other;
+    CHECK_THROWS_AS(Model::read_from_archive(malformed.string(), &config, &substitutions, type), Slic3r::RuntimeError);
+
+    ScopedTemporaryFile unknown(".obj");
+    write_text(unknown.string(), plain_obj());
+    CHECK_THROWS_AS(Model::read_from_archive(unknown.string(), &config, &substitutions, type), Slic3r::RuntimeError);
+
+    ScopedTemporaryFile amf(".zip.amf");
+    write_text(amf.string(), "not an amf archive");
+    CHECK_THROWS_AS(Model::read_from_archive(amf.string(), &config, &substitutions, type), Slic3r::RuntimeError);
+}
+
+} // namespace model_import_contracts

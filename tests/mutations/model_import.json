@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "description": "Real model import geometry, metadata, colors, textures, cancellation, and error contracts.",
+  "mutants": [
+    {
+      "id": "stl-extension-dispatch",
+      "old": "if (boost::algorithm::iends_with(input_file, \".stl\"))",
+      "new": "if (boost::algorithm::iends_with(input_file, \".obj\"))",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The public dispatcher must send .stl files through the STL loader."
+    },
+    {
+      "id": "oltp-custom-header",
+      "old": "result = load_stl(input_file.c_str(), &model, nullptr, stlFn,256);",
+      "new": "result = load_stl(input_file.c_str(), &model, nullptr, stlFn,80);",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "OLTP uses its 256-byte header layout; the dedicated fixture would fail with the ordinary STL header size."
+    },
+    {
+      "id": "file-default-instance-gate",
+      "old": "    if (options & LoadStrategy::AddDefaultInstances)\n        model.add_default_instances();\n\n    //BBS\n    //CustomGCode::update_custom_gcode_per_print_z_from_config(model.custom_gcode_per_print_z, config);",
+      "new": "    if (false)\n        model.add_default_instances();\n\n    //BBS\n    //CustomGCode::update_custom_gcode_per_print_z_from_config(model.custom_gcode_per_print_z, config);",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The STL and archive option partitions assert that AddDefaultInstances changes the returned model."
+    },
+    {
+      "id": "obj-texture-branch-gate",
+      "old": "if (result && obj_info.has_uv_png && !obj_info.uvs.empty() && !model.objects.empty())",
+      "new": "if ((result && obj_info.has_uv_png) || (!obj_info.uvs.empty() && !model.objects.empty()))",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The textured OBJ path requires the complete texture prerequisites; UV-only and texture-without-UV controls distinguish the AND gate from an OR gate."
+    },
+    {
+      "id": "obj-vertex-color-gate",
+      "old": "if (obj_info.vertex_colors.size() > 0)",
+      "new": "if (obj_info.vertex_colors.size() > 4)",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "A four-vertex colored OBJ must take the vertex-color path without dereferencing an empty color vector; the explicit color/geometry oracle must fail if the gate rejects the actual input."
+    },
+    {
+      "id": "obj-face-color-red-channel",
+      "old": "avg(0)",
+      "new": "avg(1)",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The independent vertex-color oracle checks the red channel of the precomputed face colors."
+    },
+    {
+      "id": "obj-material-face-color-gate",
+      "old": "obj_info.face_colors.size() > 0 && obj_info.has_uv_png == false",
+      "new": "obj_info.face_colors.size() > 0 && obj_info.has_uv_png == true",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "MTL face colors are used when the OBJ has no UV texture map."
+    },
+    {
+      "id": "amf-extension-dispatch",
+      "old": "else if (boost::algorithm::iends_with(input_file, \".amf\"))\n        //BBS: is_xxx is used for is_inches when load amf",
+      "new": "else if (boost::algorithm::iends_with(input_file, \".obj\"))\n        //BBS: is_xxx is used for is_inches when load amf",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The AMF fixture exercises the supported extension branch and inch-unit conversion."
+    },
+    {
+      "id": "archive-origin-dispatch",
+      "old": "out_file_type = En3mfType::From_Orca;",
+      "new": "out_file_type = En3mfType::From_Other;",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The generated archive reaches the explicit Orca-origin branch; changing that assignment must alter the externally reported origin."
+    },
+    {
+      "id": "archive-default-instance-gate",
+      "old": "    if (options & LoadStrategy::AddDefaultInstances) {\n        model.add_default_instances();\n        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << \":\" <<__LINE__ << boost::format(\"import 3mf IMPORT_STAGE_ADD_INSTANCE\\n\");",
+      "new": "    if (false) {\n        model.add_default_instances();\n        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << \":\" <<__LINE__ << boost::format(\"import 3mf IMPORT_STAGE_ADD_INSTANCE\\n\");",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The archive stores one explicit instance; AddDefaultInstances must preserve the model instance contract and progress behavior."
+    },
+    {
+      "id": "archive-add-cancel-guard",
+      "old": "        if (proFn) {\n            proFn(IMPORT_STAGE_ADD_INSTANCE, 0, 1, cb_cancel);\n            if (cb_cancel)\n                throw Slic3r::RuntimeError(_L(\"Canceled\"));\n        }",
+      "new": "        if (proFn) {\n            proFn(IMPORT_STAGE_ADD_INSTANCE, 0, 1, cb_cancel);\n            if (!cb_cancel)\n                throw Slic3r::RuntimeError(_L(\"Canceled\"));\n        }",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The callback's false cancel state must allow archive progress to complete; true must cancel."
+    },
+    {
+      "id": "archive-update-cancel-guard",
+      "old": "    if (proFn) {\n        proFn(IMPORT_STAGE_UPDATE_GCODE, 0, 1, cb_cancel);\n        if (cb_cancel)\n            throw Slic3r::RuntimeError(_L(\"Canceled\"));\n    }",
+      "new": "    if (proFn) {\n        proFn(IMPORT_STAGE_UPDATE_GCODE, 0, 1, cb_cancel);\n        if (!cb_cancel)\n            throw Slic3r::RuntimeError(_L(\"Canceled\"));\n    }",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The update stage has the same explicit cancellation contract as archive instance creation."
+    },
+    {
+      "id": "archive-mode-cancel-guard",
+      "old": "    if (proFn) {\n        proFn(IMPORT_STAGE_CHECK_MODE_GCODE, 0, 1, cb_cancel);\n        if (cb_cancel)\n            throw Slic3r::RuntimeError(_L(\"Canceled\"));\n    }",
+      "new": "    if (proFn) {\n        proFn(IMPORT_STAGE_CHECK_MODE_GCODE, 0, 1, cb_cancel);\n        if (!cb_cancel)\n            throw Slic3r::RuntimeError(_L(\"Canceled\"));\n    }",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The final archive progress stage must not reject a callback that leaves cancellation false."
+    },
+    {
+      "id": "file-source-identity",
+      "old": "    if (is_cb_cancel) {\n        Model empty_model;\n        return empty_model;\n    }\n\n    if (!result) {\n        if (message.empty())\n            throw Slic3r::RuntimeError(_L(\"Loading of a model file failed.\"));\n        else\n            throw Slic3r::RuntimeError(message);\n    }\n\n    if (model.objects.empty())\n        throw Slic3r::RuntimeError(_L(\"The supplied file couldn\\'t be read because it\\'s empty.\"));\n\n    for (ModelObject *o : model.objects)\n        o->input_file = input_file;\n\n    if (options & LoadStrategy::AddDefaultInstances)",
+      "new": "    if (is_cb_cancel) {\n        Model empty_model;\n        return empty_model;\n    }\n\n    if (!result) {\n        if (message.empty())\n            throw Slic3r::RuntimeError(_L(\"Loading of a model file failed.\"));\n        else\n            throw Slic3r::RuntimeError(message);\n    }\n\n    if (model.objects.empty())\n        throw Slic3r::RuntimeError(_L(\"The supplied file couldn\\'t be read because it\\'s empty.\"));\n\n    for (ModelObject *o : model.objects)\n        o->input_file.clear();\n\n    if (options & LoadStrategy::AddDefaultInstances)",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "read_from_file assigns the caller-visible source path to every imported object."
+    },
+    {
+      "id": "vertex-precomputed-face-count",
+      "old": "                tex_mesh->precomputed_face_colors.resize(its.indices.size());",
+      "new": "                tex_mesh->precomputed_face_colors.resize(its.indices.size() + 1);",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "Vertex-colored OBJ imports expose exactly one precomputed face color per emitted triangle."
+    },
+    {
+      "id": "vertex-precomputed-colors",
+      "old": "                tex_mesh->precomputed_vertex_colors = obj_info.vertex_colors;",
+      "new": "                tex_mesh->precomputed_vertex_colors.clear();",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "The imported vertex color records are part of the public TexturedMesh result."
+    },
+    {
+      "id": "vertex-texture-result",
+      "old": "                tex_mesh->precomputed_vertex_colors = obj_info.vertex_colors;\n                model.texture_mesh = tex_mesh;",
+      "new": "                tex_mesh->precomputed_vertex_colors = obj_info.vertex_colors;\n                model.texture_mesh.reset();",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "A vertex-colored OBJ must publish its constructed TexturedMesh to the returned Model."
+    },
+    {
+      "id": "archive-source-identity",
+      "old": "//        else\n            o->input_file = input_file;\n    }\n\n    bool cb_cancel;",
+      "new": "//        else\n            o->input_file.clear();\n    }\n\n    bool cb_cancel;",
+      "path": "src/libslic3r/Model.cpp",
+      "test_filter": "ModelImport",
+      "description": "read_from_archive preserves the archive path as the imported object source identity."
+    }
+  ]
+}

@@ -1,0 +1,134 @@
+{
+  "scope": "TriangleSelector cursor and height behavior; expected assertion kills are hypotheses until native validation",
+  "mutants": [
+    {
+      "id": "sphere-includes-boundary",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if ((center - transformed_point).squaredNorm() < radius_sqr)",
+      "new": "if ((center - transformed_point).squaredNorm() <= radius_sqr)",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "circle-includes-boundary",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if ((diff - diff.dot(dir) * dir).squaredNorm() < radius_sqr)",
+      "new": "if ((diff - diff.dot(dir) * dir).squaredNorm() <= radius_sqr)",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "capsule3d-includes-endcap-boundary",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if (first_center_diff.squaredNorm() < this->radius_sqr || second_center_diff.squaredNorm() < this->radius_sqr)",
+      "new": "if (first_center_diff.squaredNorm() <= this->radius_sqr || second_center_diff.squaredNorm() < this->radius_sqr)",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "capsule2d-includes-first-endcap-boundary",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if (first_center_diff_projected.squaredNorm() < this->radius_sqr)",
+      "new": "if (first_center_diff_projected.squaredNorm() <= this->radius_sqr)",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "capsule2d-includes-second-endcap-boundary",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if (second_center_diff_projected.squaredNorm() < this->radius_sqr)",
+      "new": "if (second_center_diff_projected.squaredNorm() <= this->radius_sqr)",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "sphere-ignores-nonuniform-transform",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "bool TriangleSelector::Sphere::is_mesh_point_inside(const Vec3f &point) const\n{\n    const Vec3f transformed_point = uniform_scaling ? point : Vec3f(trafo * point);",
+      "new": "bool TriangleSelector::Sphere::is_mesh_point_inside(const Vec3f &point) const\n{\n    const Vec3f transformed_point = point;",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "circle-ignores-nonuniform-transform",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "bool TriangleSelector::Circle::is_mesh_point_inside(const Vec3f &point) const\n{\n    const Vec3f transformed_point = uniform_scaling ? point : Vec3f(trafo * point);",
+      "new": "bool TriangleSelector::Circle::is_mesh_point_inside(const Vec3f &point) const\n{\n    const Vec3f transformed_point = point;",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "sphere-bypasses-clipping",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if ((center - transformed_point).squaredNorm() < radius_sqr)\n        return is_mesh_point_not_clipped(point, clipping_plane);",
+      "new": "if ((center - transformed_point).squaredNorm() < radius_sqr)\n        return true;",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "circle-bypasses-clipping",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if ((diff - diff.dot(dir) * dir).squaredNorm() < radius_sqr)\n        return is_mesh_point_not_clipped(point, clipping_plane);",
+      "new": "if ((diff - diff.dot(dir) * dir).squaredNorm() < radius_sqr)\n        return true;",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "capsule-cylinder-excludes-boundary",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "(first_center_diff.cross(centers_diff).norm() / centers_diff.norm()) <= this->radius",
+      "new": "(first_center_diff.cross(centers_diff).norm() / centers_diff.norm()) < this->radius",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "facet-visibility-reverses-facing",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "return n.dot(cursor.dir) < 0.f;",
+      "new": "return n.dot(cursor.dir) > 0.f;",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "vertex-count-double-increment",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "            ++inside;",
+      "new": "            inside += 2;",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "height-band-shrinks-top",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "float top_z = m_z_world + m_height + tolerance;",
+      "new": "float top_z = m_z_world + m_height - tolerance;",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "height-edge-shrinks-top",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "float top_z = m_z_world + m_height + EPSILON;",
+      "new": "float top_z = m_z_world + m_height - EPSILON;",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "height-edge-requires-all-sides-outside",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "return !((pts[0].z() < bot_z && pts[1].z() < bot_z && pts[2].z() < bot_z) ||\n             (pts[0].z() > top_z && pts[1].z() > top_z && pts[2].z() > top_z));",
+      "new": "return !((pts[0].z() < bot_z && pts[1].z() < bot_z && pts[2].z() < bot_z) &&\n             (pts[0].z() > top_z && pts[1].z() > top_z && pts[2].z() > top_z));",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    },
+    {
+      "id": "pointer-plane-test-inverted",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if (signed_volume_sign(q1,p1,p2,p3) == signed_volume_sign(q2,p1,p2,p3))",
+      "new": "if (signed_volume_sign(q1,p1,p2,p3) != signed_volume_sign(q2,p1,p2,p3))",
+      "test_filter": "TriangleCursor",
+      "description": "Cursor membership and selection preserve the analytic shape and boundary contracts."
+    }
+  ],
+  "schema_version": 1
+}

@@ -611,13 +611,12 @@
       "reason": "Machine-envelope tests set junction deviation values and require their selected maximum in M205 J output; numeric boundaries are not claimed."
     },
     "accel_to_decel_factor": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle"
+        "representative_values"
       ],
-      "reason": "A 50 percent acceleration-to-deceleration factor is reflected in generated command output; percentage boundaries are not claimed."
+      "reason": "Direct Klipper output resolves factor 50 from acceleration 1600 to ACCEL_TO_DECEL=800. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "brim_type": {
       "test": "tests/fff_print/test_gcodeprocessor.cpp",
@@ -1170,7 +1169,7 @@
       "dimensions": [
         "representative_values"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Direct Marlin2 GCodeWriter output contains the exact M205 X10 Y10 command. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "outer_wall_jerk": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1178,7 +1177,7 @@
       "dimensions": [
         "representative_values"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed outer-wall extrusion on every observed layer carries jerk 23 while default jerk is 19. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "inner_wall_jerk": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1186,7 +1185,7 @@
       "dimensions": [
         "representative_values"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed inner-wall extrusion on every observed layer carries jerk 29. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "infill_jerk": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1194,7 +1193,7 @@
       "dimensions": [
         "representative_values"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed sparse-infill and internal-solid-infill extrusion on every observed layer carries jerk 37, independent of default jerk 19. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "top_surface_jerk": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1202,7 +1201,7 @@
       "dimensions": [
         "representative_values"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed top-surface extrusion on every observed layer carries jerk 31. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "initial_layer_jerk": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1218,7 +1217,7 @@
       "dimensions": [
         "representative_values"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Direct Marlin2 GCodeWriter output contains exact M205 X6 Y6. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "default_junction_deviation": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1272,7 +1271,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The matrix varies 70 and 180 mm/s travel feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+      "reason": "The matrix varies 70 and 180 mm/s travel feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: The zero travel_speed_z fallback uses the configured 80 mm/s travel speed and emits Z-hop feedrate F4800. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "outer_wall_acceleration": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -1281,7 +1280,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The matrix varies 250 and 1000 mm/s\u00b2 outer-wall acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+      "reason": "The matrix varies 250 and 1000 mm/s\u00b2 outer-wall acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed outer-wall extrusion on every observed layer carries acceleration 611 while the default is 1200. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "sparse_infill_acceleration": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -1290,7 +1289,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The matrix varies 500 and 12000 mm/s\u00b2 sparse-infill acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+      "reason": "The matrix varies 500 and 12000 mm/s\u00b2 sparse-infill acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed sparse-infill extrusion on every observed layer carries acceleration 555, independent of default acceleration 1200. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "print_flow_ratio": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -1921,7 +1920,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets bridge acceleration to 50%, resolves analytically to 1500, and requires every parsed bridge extrusion role to carry exactly that M204 S value. One percent representative; no boundary claim."
+      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets bridge acceleration to 50%, resolves analytically to 1500, and requires every parsed bridge extrusion role to carry exactly that M204 S value. One percent representative; no boundary claim. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: External bridge extrusion commands carry acceleration 432. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "internal_solid_infill_acceleration": {
       "test": "tests/fff_print/test_gcodewriter.cpp",
@@ -1930,7 +1929,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets internal solid acceleration to 60%, resolves analytically to 2400, and requires parsed role accelerations to match. One percent representative; no boundary claim."
+      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets internal solid acceleration to 60%, resolves analytically to 2400, and requires parsed role accelerations to match. One percent representative; no boundary claim. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed internal-solid-infill extrusion on every observed layer carries acceleration 666. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "default_acceleration": {
       "test": "tests/fff_print/test_gcodewriter.cpp",
@@ -1939,7 +1938,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets default acceleration to 4000 as the ratio base for sparse/internal solid percent settings; analytical get_abs_value_at results and parsed role M204 values must agree. One absolute base value; this is dependency evidence, not a full default-acceleration sweep."
+      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets default acceleration to 4000 as the ratio base for sparse/internal solid percent settings; analytical get_abs_value_at results and parsed role M204 values must agree. One absolute base value; this is dependency evidence, not a full default-acceleration sweep. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Direct Marlin2 GCodeWriter output contains the exact M204 P1200 command. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "wipe_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -2021,6 +2020,122 @@
         "pipeline_oracle"
       ],
       "reason": "All four policies are sliced on a five-layer fixture with a 0.4 mm hop. After first extrusion, every top-only lift is 1.4 mm and every bottom-only lift is 0.6 mm; both sets are nonempty. All-surface includes both and has additional intermediate lifts; top-and-bottom equals their set union. Startup positioning is excluded."
+    },
+    "initial_layer_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "First-layer outer walls emit F1620 for 27 mm/s, while the no-bottom-shell fixture emits sparse infill at F2580 for the independently configured 43 mm/s infill speed. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "initial_layer_infill_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Bottom-surface and first-layer sparse-infill feedrates equal the configured 43 mm/s value; a first-layer-role mutation is killed by the sparse-infill distinction. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "initial_layer_travel_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "All eligible first-layer XY travel moves emit F2400 for 50% of the configured 80 mm/s travel speed. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "initial_layer_travel_acceleration": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "All eligible first-layer XY travel moves emit acceleration 1000, the exact 25% resolution of travel acceleration 4000; the config value is also checked. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "initial_layer_travel_jerk": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "All eligible first-layer XY travel moves emit jerk 6, the exact 50% resolution of travel jerk 12; the config value is also checked. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "initial_layer_acceleration": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "First-layer outer-wall and bottom-surface commands all carry acceleration 333. Later-layer independence is not claimed."
+    },
+    "inner_wall_acceleration": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Every parsed inner-wall extrusion on every observed layer carries acceleration 777. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "top_surface_acceleration": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Every parsed top-surface extrusion on every observed layer carries acceleration 888. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "travel_acceleration": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The 4000 base resolves 25 percent first-layer XY travel acceleration to an emitted 1000; direct Marlin2 writer output also checks M204 T1234. Full travel acceleration ranges are not claimed."
+    },
+    "travel_speed_z": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Only first-layer pure-Z moves that rise above the configured layer height are considered hops: explicit 9 mm/s emits F540; zero falls back to 80 mm/s with first-layer travel speed explicitly set to 100%, emitting F4800. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "bridge_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "External bridge moves emit exact F1260 and F2220 for independent 21 and 37 mm/s cases. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "internal_bridge_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The merged-tower fixture contains internal-bridge paths and emits F1890 for 150% of bridge speed 21 mm/s. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "accel_to_decel_enable": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
+      "dimensions": [
+        "boolean_values"
+      ],
+      "reason": "Direct Klipper GCodeWriter output emits ACCEL_TO_DECEL=800 when enabled at factor 50 and omits the field when disabled. Representative values only; full numeric ranges and interactions are not claimed."
     }
   }
 }

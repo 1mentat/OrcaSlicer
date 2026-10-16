@@ -1,0 +1,150 @@
+{
+  "scope": "Relative segment interpolation for equally_spaced_lines plus existing reviewed Polyline contracts; timeout is separately classified for absolute-coordinate no-progress evidence.",
+  "mutants": [
+    {
+      "id": "reject-only-nan-to-accept-nan",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "!std::isfinite(distance)",
+      "new": "false",
+      "test_filter": "PolylineOperations",
+      "description": "Non-finite distances are rejected before partitioning."
+    },
+    {
+      "id": "allow-zero-distance",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "distance <= 0.",
+      "new": "distance < 0.",
+      "test_filter": "PolylineOperations",
+      "description": "Zero spacing is rejected rather than treated as one coordinate unit."
+    },
+    {
+      "id": "drop-two-point-path",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "this->points.size() < 2",
+      "new": "this->points.size() <= 2",
+      "test_filter": "PolylineOperations",
+      "description": "A two-point source still produces its complete partition."
+    },
+    {
+      "id": "wrong-reset-distance",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "            remaining = distance;\n        }\n        // Keep original vertices",
+      "new": "            remaining = distance + 1.;\n        }\n        // Keep original vertices",
+      "test_filter": "PolylineOperations",
+      "description": "Successive one-unit cuts remain evenly spaced without accumulated drift."
+    },
+    {
+      "id": "wrong-remainder-update",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "remaining -= length;",
+      "new": "remaining += length;",
+      "test_filter": "PolylineOperations",
+      "description": "Distance remaining to the next cut decreases when crossing a source segment."
+    },
+    {
+      "id": "drop-post-split-length",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "            length = segment_length - position;\n            remaining = distance;",
+      "new": "            length = 0.;\n            remaining = distance;",
+      "test_filter": "PolylineOperations",
+      "description": "Long source segments produce every intermediate cut."
+    },
+    {
+      "id": "skip-source-bend",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "source path instead of replacing the bend with a chord.\n        line.append(target_point);",
+      "new": "source path instead of replacing the bend with a chord.\n        line.append(start_point);",
+      "test_filter": "PolylineOperations",
+      "description": "Each piece retains original vertices when it crosses a bend."
+    },
+    {
+      "id": "use-requested-distance-for-split",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "            position += remaining;",
+      "new": "            position += distance;",
+      "test_filter": "PolylineOperations",
+      "description": "A piece crossing a bend consumes only its remaining distance."
+    },
+    {
+      "id": "split-at-target",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "const Point split = start_point + (delta * (position / segment_length)).cast<coord_t>();",
+      "new": "const Point split = target_point;",
+      "test_filter": "PolylineOperations",
+      "description": "Intermediate cuts interpolate inside the source segment."
+    },
+    {
+      "id": "emit-invalid-piece",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "line.append(split);\n            if (line.is_valid())\n                lines.emplace_back(std::move(line));",
+      "new": "line.append(split);\n            if (false)\n                lines.emplace_back(std::move(line));",
+      "test_filter": "PolylineOperations",
+      "description": "Completed nondegenerate pieces are included in the result."
+    },
+    {
+      "id": "drop-remainder-piece",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "    if (line.is_valid())\n        lines.emplace_back(std::move(line));",
+      "new": "    if (false)\n        lines.emplace_back(std::move(line));",
+      "test_filter": "PolylineOperations",
+      "description": "The final shorter piece retains the source endpoint."
+    },
+    {
+      "id": "start-at-last-vertex",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "line.append(this->first_point());",
+      "new": "line.append(this->last_point());",
+      "test_filter": "PolylineOperations",
+      "description": "The partition begins at the original first point."
+    },
+    {
+      "id": "target-is-previous-vertex",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "const Point &target_point = this->points[i];",
+      "new": "const Point &target_point = this->points[i - 1];",
+      "test_filter": "PolylineOperations",
+      "description": "Partitioning advances toward the next source vertex."
+    },
+    {
+      "id": "reset-without-split",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "line = Polyline();\n            line.append(split);",
+      "new": "line = Polyline();\n            line.append(this->points[i]);",
+      "test_filter": "PolylineOperations",
+      "description": "Adjacent pieces share the interpolated cut point."
+    },
+    {
+      "id": "lose-arc-on-compaction",
+      "old": "std::swap(polylines[i], polylines[j]);",
+      "new": "std::swap(polylines[i].points, polylines[j].points);",
+      "path": "src/libslic3r/Polyline.cpp",
+      "test_filter": "PolylineOperations",
+      "description": "Removing degenerate entries retains each surviving path\u2019s arc metadata."
+    },
+    {
+      "id": "raise-coordinate-resolution",
+      "old": "distance = std::max(distance, 1.);",
+      "new": "distance = std::max(distance, 2.);",
+      "path": "src/libslic3r/Polyline.cpp",
+      "test_filter": "PolylineOperations",
+      "description": "Sub-unit requests use one coordinate unit, preserving the finest supported spacing."
+    },
+    {
+      "id": "discard-appended-arc-metadata",
+      "old": "void Polyline::append(const Polyline &src)\n{\n    if (!src.is_valid()) return;\n\n    if (this->points.empty()) {\n        this->points = src.points;\n        this->fitting_result = src.fitting_result;\n    } else {\n        //BBS: append the first point to create connection first, update the fitting date as well\n        this->append(src.points[0]);\n        //BBS: append a polyline which has fitting data to a polyline without fitting data.\n        //Then create a fake fitting data first, so that we can keep the fitting data in last polyline\n        if (this->fitting_result.empty() &&\n            !src.fitting_result.empty()) {\n            this->fitting_result.emplace_back(PathFittingData{ 0, this->points.size() - 1, EMovePathType::Linear_move, ArcSegment() });\n        }\n        //BBS: then append the remain points\n        MultiPoint::append(src.points.begin() + 1, src.points.end());\n        //BBS: finally append the fitting data\n        append_fitting_result_after_append_polyline(src);\n    }\n}\n\n",
+      "new": "void Polyline::append(const Polyline &src)\n{\n    if (!src.is_valid()) return;\n\n    if (this->points.empty()) {\n        this->points = src.points;\n        this->fitting_result.clear();\n    } else {\n        //BBS: append the first point to create connection first, update the fitting date as well\n        this->append(src.points[0]);\n        //BBS: append a polyline which has fitting data to a polyline without fitting data.\n        //Then create a fake fitting data first, so that we can keep the fitting data in last polyline\n        if (this->fitting_result.empty() &&\n            !src.fitting_result.empty()) {\n            this->fitting_result.emplace_back(PathFittingData{ 0, this->points.size() - 1, EMovePathType::Linear_move, ArcSegment() });\n        }\n        //BBS: then append the remain points\n        MultiPoint::append(src.points.begin() + 1, src.points.end());\n        //BBS: finally append the fitting data\n        append_fitting_result_after_append_polyline(src);\n    }\n}\n\n",
+      "path": "src/libslic3r/Polyline.cpp",
+      "test_filter": "PolylineOperations",
+      "description": "Appending a curved source to an empty destination preserves its fitting data."
+    },
+    {
+      "id": "drop-shared-split-vertex",
+      "old": "bool Polyline::split_at_index(const size_t index, Polyline* p1, Polyline* p2) const\n{\n    if (index > this->size() - 1)\n        return false;\n\n    if (index == 0) {\n        p1->clear();\n        p1->append(this->first_point());\n        *p2 = *this;\n    } else if (index == this->size() - 1) {\n        p2->clear();\n        p2->append(this->last_point());\n        *p1 = *this;\n    } else {\n        //BBS: spilit first part\n        p1->clear();\n        p1->points.reserve(index + 1);\n        p1->points.insert(p1->begin(), this->begin(), this->begin() + index + 1);\n        Point new_endpoint;\n        if (this->split_fitting_result_before_index(index, new_endpoint, p1->fitting_result))\n            p1->points.back() = new_endpoint;\n\n        p2->clear();\n        p2->points.reserve(this->size() - index);\n        p2->points.insert(p2->begin(), this->begin() + index, this->end());\n        Point new_startpoint;\n        if (this->split_fitting_result_after_index(index, new_startpoint, p2->fitting_result))\n            p2->points.front() = new_startpoint;\n    }\n    return true;\n}\n\n",
+      "new": "bool Polyline::split_at_index(const size_t index, Polyline* p1, Polyline* p2) const\n{\n    if (index > this->size() - 1)\n        return false;\n\n    if (index == 0) {\n        p1->clear();\n        p1->append(this->first_point());\n        *p2 = *this;\n    } else if (index == this->size() - 1) {\n        p2->clear();\n        p2->append(this->last_point());\n        *p1 = *this;\n    } else {\n        //BBS: spilit first part\n        p1->clear();\n        p1->points.reserve(index + 1);\n        p1->points.insert(p1->begin(), this->begin(), this->begin() + index + 1);\n        Point new_endpoint;\n        if (this->split_fitting_result_before_index(index, new_endpoint, p1->fitting_result))\n            p1->points.back() = new_endpoint;\n\n        p2->clear();\n        p2->points.reserve(this->size() - index);\n        p2->points.insert(p2->begin(), this->begin() + index + 1, this->end());\n        Point new_startpoint;\n        if (this->split_fitting_result_after_index(index, new_startpoint, p2->fitting_result))\n            p2->points.front() = new_startpoint;\n    }\n    return true;\n}\n\n",
+      "path": "src/libslic3r/Polyline.cpp",
+      "test_filter": "PolylineOperations",
+      "description": "Index splitting retains the shared vertex at the start of the second piece."
+    }
+  ],
+  "schema_version": 1
+}

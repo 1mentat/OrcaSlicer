@@ -136,7 +136,9 @@ public:
     //BBS: simplify points by arc fitting
     void simplify_by_fitting_arc(double tolerance);
     void reset_to_linear_move();
-    //BBS:
+    // Partition by arc length while retaining original bends. Distances must be
+    // finite and positive; values below one integer coordinate unit use one unit.
+    // Split coordinates are rounded to the integer grid; empty pieces are omitted.
     Polylines equally_spaced_lines(double distance) const;
 
 private:
