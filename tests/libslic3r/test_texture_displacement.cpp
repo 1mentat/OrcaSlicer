@@ -42,30 +42,33 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
+#include "test_utils.hpp"
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 
-// Encodes a flat (uniform-value) grayscale image through Slic3r's own PNG writer/reader round
-// trip, so decode_height_texture() (which only accepts true 8-bit grayscale PNG) is guaranteed a
-// compatible file, exactly like the GUI's "Add texture" import path does.
-static std::shared_ptr<std::vector<unsigned char>> make_flat_gray_png(uint8_t value, size_t w = 4, size_t h = 4)
+// Encode literal texels through the PNG format accepted by the displacement layer.
+static std::shared_ptr<std::vector<unsigned char>> make_gray_png(size_t w, size_t h,
+                                                               const std::vector<uint8_t> &pixels)
 {
-    std::vector<uint8_t> pixels(w * h, value);
-    const boost::filesystem::path tmp_path = boost::filesystem::temp_directory_path()
-        / boost::filesystem::unique_path("texdisp_test_%%%%%%%%.png");
-    REQUIRE(Slic3r::png::write_gray_to_file(tmp_path.string(), w, h, pixels));
+    REQUIRE(pixels.size() == w * h);
+    ScopedTemporaryFile file(".png");
+    REQUIRE(Slic3r::png::write_gray_to_file(file.string(), w, h, pixels));
 
     std::vector<unsigned char> bytes;
     {
-        std::ifstream ifs(tmp_path.string(), std::ios::binary);
+        std::ifstream ifs(file.string(), std::ios::binary);
+        REQUIRE(ifs.good());
         bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
     }
-    boost::system::error_code ec;
-    boost::filesystem::remove(tmp_path, ec);
-
     REQUIRE_FALSE(bytes.empty());
     return std::make_shared<std::vector<unsigned char>>(std::move(bytes));
+}
+
+// A flat map gives every painted vertex the same height sample.
+static std::shared_ptr<std::vector<unsigned char>> make_flat_gray_png(uint8_t value, size_t w = 4, size_t h = 4)
+{
+    return make_gray_png(w, h, std::vector<uint8_t>(w * h, value));
 }
 
 // A hard-edged black/white checkerboard, the worst case for a height map: every texel boundary is a
@@ -76,20 +79,7 @@ static std::shared_ptr<std::vector<unsigned char>> make_checkerboard_png(size_t 
     for (size_t y = 0; y < h; ++y)
         for (size_t x = 0; x < w; ++x)
             pixels[y * w + x] = ((x / 2 + y / 2) % 2) ? 255 : 0;
-    const boost::filesystem::path tmp_path = boost::filesystem::temp_directory_path()
-        / boost::filesystem::unique_path("texdisp_test_%%%%%%%%.png");
-    REQUIRE(Slic3r::png::write_gray_to_file(tmp_path.string(), w, h, pixels));
-
-    std::vector<unsigned char> bytes;
-    {
-        std::ifstream ifs(tmp_path.string(), std::ios::binary);
-        bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
-    }
-    boost::system::error_code ec;
-    boost::filesystem::remove(tmp_path, ec);
-
-    REQUIRE_FALSE(bytes.empty());
-    return std::make_shared<std::vector<unsigned char>>(std::move(bytes));
+    return make_gray_png(w, h, pixels);
 }
 
 // The bake never drives relief below the model's own resting plane (see build_texture_displacement()),
@@ -181,6 +171,14 @@ static TriangleSelector::TriangleSplittingData paint_whole_mesh(const indexed_tr
     return selector.serialize();
 }
 
+static indexed_triangle_set make_texture_sheet(float x0, float x1, float y0, float y1)
+{
+    indexed_triangle_set sheet;
+    sheet.vertices = { { x0, y0, 0.f }, { x1, y0, 0.f }, { x1, y1, 0.f }, { x0, y1, 0.f } };
+    sheet.indices  = { { 0, 1, 2 }, { 0, 2, 3 } };
+    return sheet;
+}
+
 // Paints a disc of the top face of `mesh` (the plane z = `top`) the way the gizmo's brush does: the
 // selector splits the triangles under it, so the stroke need not follow the mesh.
 static TriangleSelector::TriangleSplittingData paint_top_disc(const indexed_triangle_set &mesh, float top,
@@ -198,6 +196,111 @@ static TriangleSelector::TriangleSplittingData paint_top_disc(const indexed_tria
                               Transform3d::Identity(), TriangleSelector::ClippingPlane()),
                           EnforcerBlockerType::ENFORCER, Transform3d::Identity(), /* triangle_splitting */ true);
     return selector.serialize();
+}
+
+TEST_CASE("A projective view texture leaves vertices behind its projector flat", "[TextureDisplacement][TextureDisplacementView]")
+{
+    const indexed_triangle_set sheet = make_texture_sheet(-1.f, 1.f, -1.f, 1.f);
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_whole_mesh(sheet);
+
+    TextureDisplacementLayer layer;
+    layer.slot                    = 0;
+    layer.image_data              = make_flat_gray_png(255);
+    layer.depth_mm                = 0.5f;
+    layer.tile_enabled            = false;
+    layer.projection_method       = TextureProjectionMethod::ViewProjected;
+    layer.view_project_projective = true;
+    // u/v cover [0.25, 0.75] on the sheet; w is the signed distance from the projector plane.
+    layer.view_project_matrix = { 0.25f, 0.f, 0.f, 0.5f,
+                                  0.f, 0.25f, 0.f, 0.5f,
+                                  1.f, 0.f, 0.f, 0.f };
+
+    const indexed_triangle_set out = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(out.vertices.size() == sheet.vertices.size());
+    REQUIRE(out.indices == sheet.indices);
+
+    for (size_t i = 0; i < sheet.vertices.size(); ++i) {
+        const float expected_z = sheet.vertices[i].x() > 0.f ? 0.5f : 0.f;
+        CHECK_THAT(out.vertices[i].z(), WithinAbs(expected_z, 1e-4f));
+        CHECK_THAT(out.vertices[i].x(), WithinAbs(sheet.vertices[i].x(), 1e-6f));
+        CHECK_THAT(out.vertices[i].y(), WithinAbs(sheet.vertices[i].y(), 1e-6f));
+    }
+
+    // The rejected branch must leave a caller's UV untouched, rather than returning a mirrored
+    // coordinate for a point behind the projector.
+    Vec2f rejected_uv(7.f, -3.f);
+    CHECK_FALSE(project_uv_projective(layer.view_project_matrix, Vec3f(-1.f, 0.f, 0.f), rejected_uv));
+    CHECK_THAT(rejected_uv.x(), WithinAbs(7.f, 1e-6f));
+    CHECK_THAT(rejected_uv.y(), WithinAbs(-3.f, 1e-6f));
+}
+
+TEST_CASE("A non-tiled projective view uses its UV window for displacement", "[TextureDisplacement][TextureDisplacementView]")
+{
+    const indexed_triangle_set sheet = make_texture_sheet(-1.f, 1.f, -1.f, 1.f);
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_whole_mesh(sheet);
+
+    TextureDisplacementLayer layer;
+    layer.slot                    = 0;
+    layer.image_data              = make_gray_png(2, 2, { 0, 255, 255, 0 });
+    layer.depth_mm                = 0.4f;
+    layer.tile_enabled            = false;
+    layer.projection_method       = TextureProjectionMethod::ViewProjected;
+    layer.view_project_projective = true;
+    // The four sheet corners land at (u,v) = (.125/.375, .125/.375). Projective placement already is
+    // normalized UV, so these non-default transform values must not affect the sample.
+    layer.tiling_scale = 0.125f;
+    layer.rotation_deg = 37.f;
+    layer.offset       = Vec2f(0.31f, -0.27f);
+    layer.view_project_matrix = { 0.125f, 0.f, 0.f, 0.25f,
+                                  0.f, 0.125f, 0.f, 0.25f,
+                                  0.f, 0.f, 0.f, 1.f };
+
+    const indexed_triangle_set inside = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(inside.vertices.size() == sheet.vertices.size());
+    const std::array<float, 4> expected_z = { 0.15f, 0.25f, 0.15f, 0.25f };
+    for (size_t i = 0; i < expected_z.size(); ++i)
+        CHECK_THAT(inside.vertices[i].z(), WithinAbs(expected_z[i], 2e-3f));
+
+    // Shifting the projector window completely outside [0,1) is the negative control: with tiling
+    // disabled, no border texel may be smeared across the rest of the mesh.
+    layer.view_project_matrix[3] = 1.25f;
+    const indexed_triangle_set outside = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(outside.vertices.size() == sheet.vertices.size());
+    for (const Vec3f &v : outside.vertices)
+        CHECK_THAT(v.z(), WithinAbs(0.f, 1e-6f));
+}
+
+TEST_CASE("Mirrored texture tiling reflects the second tile before displacement", "[TextureDisplacement][TextureDisplacementView]")
+{
+    const indexed_triangle_set sheet = make_texture_sheet(7.5f, 12.5f, 0.f, 2.f);
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_whole_mesh(sheet);
+
+    TextureDisplacementLayer layer;
+    layer.slot         = 0;
+    layer.image_data   = make_gray_png(3, 1, { 0, 255, 64 });
+    layer.depth_mm     = 1.f;
+    layer.tiling_scale = 10.f;
+    layer.tile_enabled = true;
+    layer.projection_method = TextureProjectionMethod::Triplanar;
+
+    layer.tile_method = TextureTileMethod::MirroredRepeat;
+    const indexed_triangle_set mirrored = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(mirrored.vertices.size() == sheet.vertices.size());
+    const float mirrored_height = 48.f / 255.f; // u=.75 and mirrored u=1.25 -> .75, from texels {0,255,64}
+    CHECK_THAT(mirrored.vertices[0].z(), WithinAbs(mirrored_height, 1e-4f));
+    CHECK_THAT(mirrored.vertices[1].z(), WithinAbs(mirrored_height, 1e-4f));
+
+    // Repeat is the control: the second point wraps to u=.25 and therefore samples the rising edge
+    // of the asymmetric map instead of the reflected falling edge.
+    layer.tile_method = TextureTileMethod::Repeat;
+    const indexed_triangle_set repeated = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(repeated.vertices.size() == sheet.vertices.size());
+    CHECK_THAT(repeated.vertices[0].z(), WithinAbs(48.f / 255.f, 1e-4f));
+    CHECK_THAT(repeated.vertices[1].z(), WithinAbs(191.25f / 255.f, 1e-4f));
+    CHECK(std::abs(repeated.vertices[1].z() - repeated.vertices[0].z()) > 0.5f);
 }
 
 // Regression test for the bug this feature shipped with: with two layers painted over the same
@@ -2134,4 +2237,3 @@ TEST_CASE("A second bake beside a first comes out as fine as a single bake", "[T
     REQUIRE(single > 0);
     CHECK(second <= single * 5 / 4);
 }
-

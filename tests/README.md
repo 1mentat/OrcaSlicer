@@ -202,7 +202,11 @@ geometry and transformation invariants, including integer-grid partitioning
 and translation far from the coordinate origin.
 
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
-placement, mesh ownership, metadata, and malformed inputs. `[GcpPost]` checks
+placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`
+checks non-sequential backup IDs, geometry preservation, and missing-part
+rejection. `[Bbs3mfAssemblyErrors]` checks missing object references in assembly
+metadata. `[TextureDisplacementView]` checks projective placement, excluded UV
+windows, and mirrored tiling against literal height-map samples. `[GcpPost]` checks
 rewritten G-code against independently calculated time, filament volume,
 mass, and cost. `[PyramidWinding]` checks oriented topology and analytic
 volume under translation; `[SLADrainTransforms]` checks normals against

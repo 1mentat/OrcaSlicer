@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Split-model Restore ID remapping, missing-part failures, and invalid assembly references.",
+  "mutants": [
+    {
+      "id": "bbs-restore-component-remap-disabled",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                        if (current_object != m_current_objects.end()\n                                && (new_id.first.empty() || new_id.first == current_object->first.first)) {",
+      "new": "                        if (false) {",
+      "description": "Restore must remap each root production component to its explicit non-sequential backup ID while retaining geometry.",
+      "test_filter": "SplitModelRestore"
+    },
+    {
+      "id": "bbs-restore-missing-part-return-forced-success",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        if (m_load_restore && !result) // not clear failed backup data for later analyze\n            model.set_backup_path(\"detach\");\n        return result;",
+      "new": "        if (m_load_restore && !result) // not clear failed backup data for later analyze\n            model.set_backup_path(\"detach\");\n        return true;",
+      "description": "A missing split part must propagate the Restore import failure instead of reporting success.",
+      "test_filter": "SplitModelRestore"
+    },
+    {
+      "id": "bbs-assembly-item-dispatch-bypassed",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        else if (::strcmp(ASSEMBLE_ITEM_TAG, name) == 0)\n            res = _handle_start_assemble_item(attributes, num_attributes);",
+      "new": "        else if (::strcmp(ASSEMBLE_ITEM_TAG, name) == 0)\n            res = true;",
+      "description": "An assembly item naming an absent object must invoke the importer validation and return false.",
+      "test_filter": "Bbs3mfAssemblyErrors"
+    }
+  ]
+}

@@ -2332,6 +2332,35 @@ TEST_CASE("BBS 3MF preserves assembly transform and assembly offset", "[3MF][Bbs
     CHECK(instance->get_offset_to_assembly().isApprox(Vec3d(1.5, -2.5, 0.75), 1e-5));
 }
 
+TEST_CASE("BBS 3MF rejects an assembly item that names a missing object",
+          "[3MF][Bbs3mfExtended][Assembly][Bbs3mfAssemblyErrors]")
+{
+    Model source;
+    make_model(source, false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_bad_assembly_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}, {0, 1}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    std::string settings;
+    REQUIRE(read_3mf_entry(archive.string(), settings, "Metadata/model_settings.config"));
+    const std::string item_prefix = "<assemble_item object_id=\"";
+    const size_t item_start = settings.find(item_prefix);
+    REQUIRE(item_start != std::string::npos);
+    const size_t id_end = settings.find('"', item_start + item_prefix.size());
+    REQUIRE(id_end != std::string::npos);
+    REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+        settings.substr(item_start, id_end - item_start + 1), item_prefix + "999999\""));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    CHECK_FALSE(load_model(archive.string(), loaded_model, loaded));
+}
+
 TEST_CASE("BBS 3MF preserves model metadata and volume types", "[3MF][Bbs3mfExtended][Metadata]")
 {
     Model source;
@@ -4763,7 +4792,10 @@ struct Fixture
 {
     ScopedTemporaryDir backup{"orca_split_source"};
     ScopedTemporaryDir loaded_backup{"orca_split_loaded"};
-    ScopedTemporaryFile archive{".3mf"};
+    // Restore creates a sibling directory by removing the archive's extension.
+    // Its error path deliberately preserves that directory, so own both paths.
+    ScopedTemporaryDir archive_root{"orca_split_archive"};
+    boost::filesystem::path archive = archive_root.path() / "project.3mf";
     Model source;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     Fixture()
@@ -4843,6 +4875,46 @@ TEST_CASE("Split model archives store each object in a distinct referenced part"
         CHECK_THAT(actual.raw_mesh().volume(), WithinAbs(expected->raw_mesh().volume(), 1e-5));
         check_box(actual.bounding_box_exact(), expected->bounding_box_exact());
     }
+}
+
+TEST_CASE("Split model Restore remaps production object ids and preserves geometry",
+          "[3MF][SplitModelRestore]")
+{
+    Fixture f;
+    // Non-sequential IDs make accidental sequential reconstruction observable.
+    f.source.set_object_backup_id(*f.source.objects[0], 17);
+    f.source.set_object_backup_id(*f.source.objects[1], 42);
+    f.store();
+
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded, LoadStrategy::Restore));
+    REQUIRE(loaded.model.objects.size() == f.source.objects.size());
+
+    for (const ModelObject *expected : f.source.objects) {
+        const ModelObject &actual = named(loaded.model, expected->name);
+        CHECK(actual.instances.size() == expected->instances.size());
+        CHECK_THAT(actual.raw_mesh().volume(), WithinAbs(expected->raw_mesh().volume(), 1e-5));
+        check_box(actual.bounding_box_exact(), expected->bounding_box_exact());
+        CHECK(loaded.model.get_object_backup_id(actual) ==
+              f.source.get_object_backup_id(*expected));
+    }
+}
+
+TEST_CASE("Split model Restore rejects a missing referenced object part",
+          "[3MF][SplitModelRestore]")
+{
+    Fixture f;
+    f.store();
+    rewrite(f.archive.string(), [](std::vector<Entry> &all) {
+        const auto found = std::find_if(all.begin(), all.end(),
+            [](const Entry &entry) { return is_part(entry.first); });
+        REQUIRE(found != all.end());
+        all.erase(found);
+    });
+
+    LoadedSplit loaded;
+    CHECK_FALSE(f.load(loaded, LoadStrategy::Restore));
+    CHECK(loaded.model.objects.empty());
 }
 
 TEST_CASE("Split model archives preserve object and volume settings independently", "[3MF][SplitModel]")
