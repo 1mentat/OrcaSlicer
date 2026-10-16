@@ -115,6 +115,17 @@ first-layer travel separate from later motion. Its direct firmware-writer
 checks are identified as writer evidence in the settings map; they do not
 establish a complete print-pipeline sweep or full numeric-domain coverage.
 
+`[SupportCache]` checks support-layer cache round trips through `Print`, including
+island coordinates, extrusion geometry, interface metadata, layer links, and
+malformed payload rejection. `[WipeTowerContact]` checks parsed feedrates,
+interface temperature commands, pre-extrusion lengths, and bed clipping through
+the tower generator; these settings claims remain separate from full Print wiring.
+
+`[FilamentPlanContracts]` checks physical nozzle identity with repeated loaded
+filament values, filtered extruder groups, multiple assignment epochs, and
+independently enumerated flow costs. Empty-nozzle inputs have an explicit error
+contract, while the legacy solver continues to return filament values.
+
 `[ModelImport]` uses actual STL, OBJ, AMF, and 3MF inputs and checks geometry,
 source metadata, colors, decoded texture pixels, cancellation, and error types.
 `[EmbossLayout]`, `[TriangleCursor]`, and `[PolylineOperations]` use analytic

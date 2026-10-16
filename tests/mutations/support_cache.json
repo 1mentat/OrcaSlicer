@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "description": "Support-layer cache serialization, geometry, metadata and linkage contracts.",
+  "mutants": [
+    {
+      "id": "support-import-type-default",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "    support_layer.support_type = support_layer_json[JSON_SUPPORT_LAYER_TYPE];",
+      "new": "    support_layer.support_type = stInnerNormal;",
+      "description": "Tree support cache loading must restore the stored support type.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-import-no-sort-default",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "    support_layer.support_fills.no_sort = support_layer_json[JSON_SUPPORT_LAYER_FILLS][JSON_EXTRUSION_NO_SORT];",
+      "new": "    support_layer.support_fills.no_sort = false;",
+      "description": "A support fill collection's no-sort metadata must survive loading.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-import-island-drop",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "        polygon = support_layer_json[JSON_SUPPORT_LAYER_ISLANDS][islands_index];\n        support_layer.support_islands.push_back(std::move(polygon));",
+      "new": "        polygon = support_layer_json[JSON_SUPPORT_LAYER_ISLANDS][islands_index];\n        static_cast<void>(polygon);",
+      "description": "Support island polygons are part of the cached geometry and cannot be silently discarded.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-import-fill-count-zero",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "    int support_fills_entities_count = support_layer_json[JSON_SUPPORT_LAYER_FILLS][JSON_EXTRUSION_ENTITIES].size();",
+      "new": "    int support_fills_entities_count = 0;",
+      "description": "Loading must restore every cached support extrusion collection entity.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-export-type-default",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                        support_layer_json[JSON_SUPPORT_LAYER_TYPE] = support_layer->support_type;",
+      "new": "                        support_layer_json[JSON_SUPPORT_LAYER_TYPE] = stInnerNormal;",
+      "description": "Exporting tree layers must retain their tree support type.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-export-interface-id-zero",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                        convert_layer_to_json(support_layer_json, support_layer);\n\n                        support_layer_json[JSON_SUPPORT_LAYER_INTERFACE_ID] = support_layer->interface_id();",
+      "new": "                        convert_layer_to_json(support_layer_json, support_layer);\n\n                        support_layer_json[JSON_SUPPORT_LAYER_INTERFACE_ID] = 0;",
+      "description": "The support interface layer identifier links interface metadata and must be serialized.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-export-island-drop",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                            json support_island_json = support_island;\n                            support_islands_json.push_back(std::move(support_island_json));",
+      "new": "                            json support_island_json = support_island;\n                            static_cast<void>(support_island_json);",
+      "description": "Exporting must retain support island polygons rather than emitting an empty island array.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-export-no-sort-default",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                        //support_fills\n                        support_fills_json[JSON_EXTRUSION_NO_SORT] = support_layer->support_fills.no_sort;",
+      "new": "                        //support_fills\n                        support_fills_json[JSON_EXTRUSION_NO_SORT] = false;",
+      "description": "Exporting must preserve a support fill collection's no-sort flag.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-link-upper-drop",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                    previous_support_layer->upper_layer = new_support_layer;",
+      "new": "                    previous_support_layer->upper_layer = nullptr;",
+      "description": "Loaded support layers must be linked in both directions.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-link-lower-drop",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                    new_support_layer->lower_layer = previous_support_layer;",
+      "new": "                    new_support_layer->lower_layer = nullptr;",
+      "description": "Loaded support layers must retain their lower-layer links.",
+      "test_filter": "SupportCache"
+    },
+    {
+      "id": "support-import-interface-id-zero",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                SupportLayer* new_support_layer = obj->add_support_layer(layer_json[JSON_LAYER_ID], layer_json[JSON_SUPPORT_LAYER_INTERFACE_ID], layer_json[JSON_LAYER_HEIGHT], layer_json[JSON_LAYER_PRINT_Z]);",
+      "new": "                SupportLayer* new_support_layer = obj->add_support_layer(layer_json[JSON_LAYER_ID], 0, layer_json[JSON_LAYER_HEIGHT], layer_json[JSON_LAYER_PRINT_Z]);",
+      "description": "Loading must pass the cached support interface identifier into the new layer.",
+      "test_filter": "SupportCache"
+    }
+  ]
+}

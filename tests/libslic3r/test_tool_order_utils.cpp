@@ -1,3 +1,4 @@
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -392,4 +393,64 @@ TEST_CASE("Filament reordering charges the initial loaded filament", "[ToolOrder
 
     REQUIRE(output == std::vector<std::vector<unsigned int>>{{0}});
     CHECK(cost == 3);
+}
+
+TEST_CASE("Group matching chooses the independently enumerated minimum cost assignment", "[ToolOrderUtils][FilamentPlanContracts]")
+{
+    std::vector<FlushMatrix> matrix(2, FlushMatrix(4, std::vector<float>(4, 100.f)));
+    matrix[0][0][2] = 7.f;
+    matrix[0][1][2] = 41.f;
+    matrix[1][0][3] = 53.f;
+    matrix[1][1][3] = 11.f;
+    const std::array<int, 2> left_nodes{0, 1};
+    const std::array<int, 2> right_nodes{2, 3};
+    const std::array<int, 2> right_groups{0, 1};
+    const std::array<std::array<int, 2>, 4> legal_assignments{{{{0, 0}}, {{0, 1}}, {{1, 0}}, {{1, 1}}}};
+    const auto score = [&](const std::array<int, 2> &assignment) {
+        const std::set<int> groups = {right_groups[assignment[0]], right_groups[assignment[1]]};
+        const std::set<int> nozzles = {assignment[0], assignment[1]};
+        const int cost = static_cast<int>(matrix[right_groups[assignment[0]]][left_nodes[0]][right_nodes[assignment[0]]]) +
+                         static_cast<int>(matrix[right_groups[assignment[1]]][left_nodes[1]][right_nodes[assignment[1]]]);
+        return std::array<int, 3>{static_cast<int>(groups.size()), static_cast<int>(nozzles.size()), -cost};
+    };
+    auto better = [](const std::array<int, 3> &a, const std::array<int, 3> &b) {
+        return a[0] != b[0] ? a[0] > b[0] : (a[1] != b[1] ? a[1] > b[1] : a[2] > b[2]);
+    };
+    std::array<int, 3> optimum = score(legal_assignments.front());
+    for (const auto &assignment : legal_assignments)
+        if (better(score(assignment), optimum)) optimum = score(assignment);
+
+    GroupMinCostFlowSolver solver(matrix, {0, 1}, {2, 3}, {0, 1});
+    const auto indices = solver.solve_indices();
+    REQUIRE(indices.size() == 2);
+    REQUIRE(indices.at(0) >= 0);
+    REQUIRE(indices.at(0) < 2);
+    REQUIRE(indices.at(1) >= 0);
+    REQUIRE(indices.at(1) < 2);
+    const std::array<int, 2> selected{indices.at(0), indices.at(1)};
+    const auto selected_score = score(selected);
+    CHECK(selected_score == optimum);
+    CHECK(selected_score[0] == 2); // both group IDs are covered
+    CHECK(selected_score[1] == 2); // both physical right nodes are used
+    CHECK(-selected_score[2] == 18); // the independently enumerated minimum cost
+}
+
+
+TEST_CASE("Group matching exposes repeated values without changing the legacy value result", "[ToolOrderUtils][FilamentPlanContracts]")
+{
+    std::vector<FlushMatrix> matrix(2, FlushMatrix(3, std::vector<float>(3, 100.f)));
+    matrix[0][0][2] = 1.f;
+    matrix[0][1][2] = 100.f;
+    matrix[1][0][2] = 100.f;
+    matrix[1][1][2] = 1.f;
+    GroupMinCostFlowSolver by_index(matrix, {0, 1}, {2, 2}, {0, 1});
+    const auto indices = by_index.solve_indices();
+    REQUIRE(indices.size() == 2);
+    CHECK(indices.at(0) == 0);
+    CHECK(indices.at(1) == 1);
+    GroupMinCostFlowSolver by_value(matrix, {0, 1}, {2, 2}, {0, 1});
+    const auto values = by_value.solve();
+    REQUIRE(values.size() == 2);
+    CHECK(values.at(0) == 2);
+    CHECK(values.at(1) == 2);
 }

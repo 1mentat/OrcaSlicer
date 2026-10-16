@@ -2866,6 +2866,51 @@
         "fixture_only"
       ],
       "reason": "Direct ripple consumer checks 0.25, 0.5, 1, and 2 mm sampling with exact counts on an analytic perimeter and disabled/subresolution controls. Other noise types and Print pipeline interactions remain unclaimed."
+    },
+    "enable_tower_interface_features": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerContact]",
+      "dimensions": [
+        "boolean_values",
+        "fixture_only"
+      ],
+      "reason": "Direct wipe-tower generation exercises disabled and enabled interface features. Disabled output omits interface waits, temperature restores and pre-extrusion; enabled output contains the configured commands. Full Print wiring remains unclaimed."
+    },
+    "filament_tower_interface_print_temp": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerContact]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct wipe-tower output parses configured 215/220 degree interface waits and 200 degree restoration; other temperatures and full Print wiring remain unclaimed."
+    },
+    "filament_tower_interface_pre_extrusion_dist": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerContact]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct wipe-tower generation tests nominal 2 mm and extreme 1000 mm interface distances, requiring both translated bed limits to clamp output motion; full range and full Print wiring remain unclaimed."
+    },
+    "filament_tower_interface_pre_extrusion_length": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerContact]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct wipe-tower generation checks configured 1, 3 and 5 mm pre-extrusion as parsed E3, E5 and E7 moves after the 2 mm recovery. Other lengths and full Print wiring remain unclaimed."
+    },
+    "filament_adhesiveness_category": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerContact]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct two-filament wipe-tower generation uses category 0/1 transitions to require contact layers and their 20 mm/s feedrates; other category combinations and full Print wiring remain unclaimed."
     }
   }
 }

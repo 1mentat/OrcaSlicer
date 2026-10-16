@@ -1,3 +1,5 @@
+#include <array>
+#include <sstream>
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -2254,3 +2256,480 @@ TEST_CASE("Legacy direct tower preserves changing tool and purge records", "[Wip
     CHECK_FALSE(change.gcode.empty());
 }
 } // namespace legacy_wipe_toolordering_contracts
+
+namespace tower_contact_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+using legacy_tower_direct_contracts::DirectRun;
+using legacy_tower_direct_contracts::extruded_length;
+using legacy_tower_direct_contracts::nonempty_layers;
+using legacy_tower_direct_contracts::require_finite_run;
+using legacy_tower_direct_contracts::group_for_two_filaments;
+
+DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, unsigned int, float>> &plan,
+                     bool semm = false,
+                     WipeTowerWallType wall = WipeTowerWallType::wtwRectangle,
+                     bool sparse = false,
+                     bool arc_fitting = false,
+                     bool same_extruder = false,
+                     bool interface_features = false,
+                     float interface_dist = 2.f,
+                     float interface_length = 3.f)
+{
+    FullPrintConfig config = legacy_tower_direct_contracts::legacy_config(semm, wall, sparse, arc_fitting);
+    config.set_deserialize_strict({
+        {"enable_tower_interface_features", interface_features},
+        {"filament_tower_interface_print_temp", "215,220"},
+        {"filament_tower_interface_pre_extrusion_dist", interface_dist},
+        {"filament_tower_interface_pre_extrusion_length", interface_length},
+        {"nozzle_temperature", "200,200"},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+    });
+    auto group = group_for_two_filaments(same_extruder);
+    REQUIRE(group.has_value());
+    WipeTower tower(config, 0, Vec3d::Zero(), 0, 8.f,
+                    std::vector<unsigned int>{0, 1});
+    Polygon bed;
+    for (const Vec2d &point : config.printable_area.values)
+        bed.points.emplace_back(scaled(point.x()), scaled(point.y()));
+    tower.set_shared_print_bed({bed});
+    tower.set_nozzle_group_result(*group);
+    tower.set_used_filament_ids({0, 1});
+    tower.set_filament_categories({0, 1});
+    tower.set_extruder(0, config);
+    tower.set_extruder(1, config);
+    for (const auto &[z, h, old_tool, new_tool, purge] : plan)
+        tower.plan_toolchange(z, h, old_tool, new_tool, purge, purge, purge);
+
+    DirectRun run;
+    tower.generate_new(run.layers);
+    run.depth = tower.get_depth();
+    run.width = tower.width();
+    run.height = tower.get_height();
+    run.brim = tower.get_brim_width();
+    run.toolchanges = tower.get_number_of_toolchanges();
+    return run;
+}
+
+float total_extrusion(const DirectRun &run)
+{
+    float total = 0.f;
+    for (const auto &layer : run.layers)
+        for (const auto &tcr : layer)
+            total += extruded_length(tcr);
+    return total;
+}
+
+struct GridStats {
+    int grid_starts = 0;
+    int grid_ends = 0;
+    int positive_extrusions = 0;
+    int contact_speed_moves = 0;
+    int other_speed_moves = 0;
+    int m109_count = 0;
+    int m104_count = 0;
+    std::vector<float> feedrates;
+    std::vector<int> m109_temps;
+    std::vector<int> m104_temps;
+    Vec2f first_extrusion = Vec2f::Zero();
+    Vec2f last_extrusion = Vec2f::Zero();
+    float extrusion_length = 0.f;
+};
+
+bool parse_float_token(const std::string &token, char prefix, float &value)
+{
+    if (token.size() < 2 || token.front() != prefix)
+        return false;
+    try {
+        std::size_t used = 0;
+        value = std::stof(token.substr(1), &used);
+        return used == token.size() - 1 && std::isfinite(double(value));
+    } catch (...) {
+        return false;
+    }
+}
+
+GridStats grid_stats(const WipeTower::ToolChangeResult &tcr)
+{
+    GridStats result;
+    bool in_grid = false;
+    for (const std::string &raw : [&]() {
+        std::vector<std::string> lines;
+        std::istringstream stream(tcr.gcode);
+        for (std::string line; std::getline(stream, line);)
+            lines.push_back(std::move(line));
+        return lines;
+    }()) {
+        const std::string line = raw.substr(0, raw.find(';'));
+        if (raw.find("CP EMPTY GRID START") != std::string::npos) {
+            ++result.grid_starts;
+            in_grid = true;
+        }
+        if (raw.find("CP EMPTY GRID END") != std::string::npos) {
+            ++result.grid_ends;
+            in_grid = false;
+        }
+        if (!in_grid)
+            continue;
+        std::istringstream words(line);
+        std::string word;
+        while (words >> word) {
+            float value = 0.f;
+            if (parse_float_token(word, 'F', value))
+                result.feedrates.push_back(value);
+        }
+    }
+    for (const std::string &raw : [&]() {
+        std::vector<std::string> lines;
+        std::istringstream stream(tcr.gcode);
+        for (std::string line; std::getline(stream, line);)
+            lines.push_back(std::move(line));
+        return lines;
+    }()) {
+        const std::size_t m109 = raw.find("M109 S");
+        const std::size_t m104 = raw.find("M104 S");
+        auto parse_temp = [&](std::size_t offset, std::vector<int> &temps) {
+            try {
+                const int temp = std::stoi(raw.substr(offset));
+                temps.push_back(temp);
+            } catch (...) {
+            }
+        };
+        if (m109 != std::string::npos) {
+            ++result.m109_count;
+            parse_temp(m109 + 6, result.m109_temps);
+        }
+        if (m104 != std::string::npos) {
+            ++result.m104_count;
+            parse_temp(m104 + 6, result.m104_temps);
+        }
+    }
+    bool have_first = false;
+    for (std::size_t i = 0; i < tcr.extrusions.size(); ++i) {
+        const auto &extrusion = tcr.extrusions[i];
+        if (extrusion.width <= 0.f)
+            continue;
+        ++result.positive_extrusions;
+        if (!have_first) {
+            result.first_extrusion = extrusion.pos;
+            have_first = true;
+        }
+        result.last_extrusion = extrusion.pos;
+        if (i > 0)
+            result.extrusion_length += (extrusion.pos - tcr.extrusions[i - 1].pos).norm();
+    }
+    for (float feedrate : result.feedrates) {
+        if (std::abs(feedrate - 1200.f) < 1e-3f)
+            ++result.contact_speed_moves;
+        else if (feedrate > 0.f)
+            ++result.other_speed_moves;
+    }
+    return result;
+}
+
+std::pair<float, float> gcode_x_bounds(const DirectRun &run)
+{
+    float min_x = std::numeric_limits<float>::infinity();
+    float max_x = -std::numeric_limits<float>::infinity();
+    for (const auto &layer : run.layers)
+        for (const auto &tcr : layer) {
+            std::istringstream stream(tcr.gcode);
+            for (std::string raw; std::getline(stream, raw);) {
+                const std::size_t comment = raw.find(';');
+                const std::string line = raw.substr(0, comment);
+                if (line.find("G1") == std::string::npos && line.find("G0") == std::string::npos)
+                    continue;
+                std::istringstream words(line);
+                for (std::string word; words >> word;) {
+                    float value = 0.f;
+                    if (parse_float_token(word, 'X', value)) {
+                        min_x = std::min(min_x, value);
+                        max_x = std::max(max_x, value);
+                    }
+                }
+            }
+        }
+    return {min_x, max_x};
+}
+
+bool has_interface_pre_extrusion_move(const std::string &gcode, float amount = 5.f)
+{
+    std::istringstream stream(gcode);
+    for (std::string raw; std::getline(stream, raw);) {
+        const std::size_t comment = raw.find(';');
+        const std::string line = raw.substr(0, comment);
+        std::istringstream words(line);
+        std::string command;
+        words >> command;
+        if (command != "G1")
+            continue;
+        bool has_e = false;
+        bool has_f = false;
+        float e = 0.f;
+        float f = 0.f;
+        for (std::string word; words >> word;) {
+            if (parse_float_token(word, 'E', e))
+                has_e = true;
+            if (parse_float_token(word, 'F', f))
+                has_f = true;
+        }
+        if (has_e && has_f && std::abs(e - amount) < 1e-4f && std::abs(f - 100.f) < 1e-4f)
+            return true;
+    }
+    return false;
+}
+
+std::vector<GridStats> layer_grid_stats(const DirectRun &run)
+{
+    std::vector<GridStats> result;
+    result.reserve(run.layers.size());
+    for (const auto &layer : run.layers) {
+        GridStats combined;
+        for (const auto &tcr : layer) {
+            const GridStats current = grid_stats(tcr);
+            combined.grid_starts += current.grid_starts;
+            combined.grid_ends += current.grid_ends;
+            combined.positive_extrusions += current.positive_extrusions;
+            combined.contact_speed_moves += current.contact_speed_moves;
+            combined.other_speed_moves += current.other_speed_moves;
+            combined.m109_count += current.m109_count;
+            combined.m104_count += current.m104_count;
+            combined.feedrates.insert(combined.feedrates.end(), current.feedrates.begin(), current.feedrates.end());
+            combined.m109_temps.insert(combined.m109_temps.end(), current.m109_temps.begin(), current.m109_temps.end());
+            combined.m104_temps.insert(combined.m104_temps.end(), current.m104_temps.begin(), current.m104_temps.end());
+            combined.extrusion_length += current.extrusion_length;
+            if (combined.positive_extrusions == current.positive_extrusions) {
+                combined.first_extrusion = current.first_extrusion;
+                combined.last_extrusion = current.last_extrusion;
+            } else {
+                combined.last_extrusion = current.last_extrusion;
+            }
+        }
+        result.push_back(std::move(combined));
+    }
+    return result;
+}
+
+} // namespace
+
+
+TEST_CASE("Wipe tower category changes create complete intermediate contact layers", "[WipeTower][WipeTowerContact]")
+{
+    const DirectRun run = run_direct({
+        {0.2f, 0.2f, 0, 1, 80.f},
+        {0.4f, 0.2f, 1, 1, 80.f},
+        {0.6f, 0.2f, 1, 1, 80.f},
+        {0.8f, 0.2f, 1, 0, 80.f},
+        {1.0f, 0.2f, 0, 0, 80.f},
+        {1.2f, 0.2f, 0, 0, 80.f},
+        {1.4f, 0.2f, 0, 1, 80.f},
+    }, false, WipeTowerWallType::wtwRectangle, true);
+    require_finite_run(run);
+    REQUIRE(run.layers.size() == 7);
+    CHECK(nonempty_layers(run) == 7);
+    std::string emitted;
+    for (const auto &layer : run.layers)
+        for (const auto &change : layer)
+            emitted += change.gcode;
+    CHECK(emitted.find("CP EMPTY GRID START") != std::string::npos);
+}
+
+TEST_CASE("Wipe tower category transitions expose grid roles and contact feedrate", "[WipeTower][WipeTowerContact]")
+{
+    const DirectRun run = run_direct({
+        {0.2f, 0.2f, 0, 1, 80.f},
+        {0.4f, 0.2f, 1, 1, 80.f},
+        {0.6f, 0.2f, 1, 1, 80.f},
+        {0.8f, 0.2f, 1, 0, 80.f},
+        {1.0f, 0.2f, 0, 0, 80.f},
+        {1.2f, 0.2f, 0, 0, 80.f},
+        {1.4f, 0.2f, 0, 1, 80.f},
+    }, false, WipeTowerWallType::wtwRectangle, true);
+    require_finite_run(run);
+    const auto stats = layer_grid_stats(run);
+    REQUIRE(stats.size() == run.layers.size());
+    for (std::size_t i = 0; i < stats.size(); ++i) {
+        CAPTURE(i, stats[i].grid_starts, stats[i].grid_ends, stats[i].positive_extrusions,
+                stats[i].contact_speed_moves, stats[i].other_speed_moves,
+                stats[i].m109_count, stats[i].m104_count,
+                stats[i].extrusion_length,
+                stats[i].first_extrusion.x(), stats[i].first_extrusion.y(),
+                stats[i].last_extrusion.x(), stats[i].last_extrusion.y());
+        CHECK(stats[i].grid_starts == stats[i].grid_ends);
+        CHECK(stats[i].positive_extrusions > 0);
+        CHECK(stats[i].extrusion_length > 0.f);
+    }
+    CHECK(stats[0].contact_speed_moves == 0);
+    CHECK(stats[1].contact_speed_moves > 0);
+    CHECK(stats[2].contact_speed_moves > 0);
+    CHECK(stats[3].contact_speed_moves == 0);
+    CHECK(stats[4].contact_speed_moves > 0);
+    CHECK(stats[5].contact_speed_moves > 0);
+    CHECK(stats[6].contact_speed_moves == 0);
+}
+
+TEST_CASE("Wipe tower contact interfaces emit wait, pre-extrusion and temperature restore", "[WipeTower][WipeTowerContact]")
+{
+    const DirectRun run = run_direct({
+        {0.2f, 0.2f, 0, 1, 80.f},
+        {0.4f, 0.2f, 1, 1, 80.f},
+        {0.6f, 0.2f, 1, 1, 80.f},
+        {0.8f, 0.2f, 1, 0, 80.f},
+        {1.0f, 0.2f, 0, 0, 80.f},
+        {1.2f, 0.2f, 0, 0, 80.f},
+        {1.4f, 0.2f, 0, 1, 80.f},
+    }, false, WipeTowerWallType::wtwRectangle, true, false, false, true, 2.f, 3.f);
+    require_finite_run(run);
+    int m109_count = 0;
+    int m104_count = 0;
+    int configured_waits = 0;
+    int configured_restores = 0;
+    int pre_extrusion_moves = 0;
+    for (const auto &layer : run.layers)
+        for (const auto &tcr : layer) {
+            const GridStats stats = grid_stats(tcr);
+            m109_count += stats.m109_count;
+            m104_count += stats.m104_count;
+            configured_waits += int(std::count(stats.m109_temps.begin(), stats.m109_temps.end(), 215) +
+                                    std::count(stats.m109_temps.begin(), stats.m109_temps.end(), 220));
+            configured_restores += int(std::count(stats.m104_temps.begin(), stats.m104_temps.end(), 200));
+            if (has_interface_pre_extrusion_move(tcr.gcode))
+                ++pre_extrusion_moves;
+        }
+    CHECK(m109_count > 0);
+    CHECK(m104_count > 0);
+    CHECK(configured_waits == m109_count);
+    CHECK(configured_restores == m104_count);
+    CHECK(pre_extrusion_moves > 0);
+}
+
+TEST_CASE("Wipe tower contact pre-extrusion is clipped to the configured rectangular bed", "[WipeTower][WipeTowerContact]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f},
+        {0.4f, 0.2f, 1, 1, 80.f},
+        {0.6f, 0.2f, 1, 1, 80.f},
+        {0.8f, 0.2f, 1, 0, 80.f},
+        {1.0f, 0.2f, 0, 0, 80.f},
+        {1.2f, 0.2f, 0, 0, 80.f},
+        {1.4f, 0.2f, 0, 1, 80.f},
+    };
+    const DirectRun run = run_direct(plan, false, WipeTowerWallType::wtwRectangle,
+                                     true, false, false, true, 1000.f, 3.f);
+    require_finite_run(run);
+    const auto [min_x, max_x] = gcode_x_bounds(run);
+    CAPTURE(min_x, max_x);
+    // The configured 200 mm bed is translated by the 20 mm tower origin before
+    // the extreme interface stop positions are clamped: x is therefore in
+    // [-20, 180], while both ends remain inside that translated bed.
+    CHECK(min_x >= -20.001f);
+    CHECK(max_x <= 180.001f);
+    CHECK(min_x < -19.9f);
+    CHECK(max_x > 179.9f);
+}
+
+TEST_CASE("Wipe tower generate_new accepts an empty planned layer set", "[WipeTower][WipeTowerContact]")
+{
+    const DirectRun run = run_direct({});
+    CHECK(run.layers.empty());
+    CHECK(run.toolchanges == 0);
+}
+
+TEST_CASE("Wipe tower solid geometry remains finite for rectangular and rib walls", "[WipeTower][WipeTowerContact]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f},
+        {0.4f, 0.2f, 1, 1, 80.f},
+        {0.6f, 0.2f, 1, 0, 80.f},
+        {0.8f, 0.2f, 0, 0, 80.f},
+    };
+    const DirectRun rectangle = run_direct(plan, false, WipeTowerWallType::wtwRectangle, true);
+    const DirectRun rib = run_direct(plan, false, WipeTowerWallType::wtwRib, true);
+    require_finite_run(rectangle);
+    require_finite_run(rib);
+    CHECK(total_extrusion(rectangle) > 0.f);
+    CHECK(total_extrusion(rib) > 0.f);
+    const bool geometry_diff = std::abs(rectangle.width - rib.width) > 1e-3f ||
+                               std::abs(rectangle.depth - rib.depth) > 1e-3f ||
+                               std::abs(total_extrusion(rectangle) - total_extrusion(rib)) > 1e-3f;
+    CHECK(geometry_diff);
+}
+
+TEST_CASE("Wipe tower preserves nonuniform planned layer heights in solid results", "[WipeTower][WipeTowerContact]")
+{
+    const DirectRun run = run_direct({
+        {0.2f, 0.1f, 0, 1, 80.f},
+        {0.3f, 0.3f, 1, 0, 80.f},
+        {0.6f, 0.15f, 0, 1, 80.f},
+        {0.75f, 0.25f, 1, 0, 80.f},
+    }, false, WipeTowerWallType::wtwRectangle, true);
+    require_finite_run(run);
+    REQUIRE(run.layers.size() == 4);
+    for (std::size_t i = 0; i < run.layers.size(); ++i) {
+        REQUIRE_FALSE(run.layers[i].empty());
+        CHECK_THAT(run.layers[i].front().print_z, WithinAbs(std::array<float, 4>{0.2f, 0.3f, 0.6f, 0.75f}[i], 1e-4f));
+        CHECK_THAT(run.layers[i].front().layer_height, WithinAbs(std::array<float, 4>{0.1f, 0.3f, 0.15f, 0.25f}[i], 1e-4f));
+    }
+}
+
+TEST_CASE("Wipe tower reserves more solid geometry for a larger purge request", "[WipeTower][WipeTowerContact]")
+{
+    const DirectRun small = run_direct({{0.2f, 0.2f, 0, 1, 20.f}});
+    const DirectRun large = run_direct({{0.2f, 0.2f, 0, 1, 160.f}});
+    require_finite_run(small);
+    require_finite_run(large);
+    CHECK(large.depth > small.depth);
+    CHECK(total_extrusion(large) > total_extrusion(small));
+    CHECK(large.toolchanges == small.toolchanges);
+}
+
+TEST_CASE("Wipe tower logical filament transitions remain valid on one physical extruder", "[WipeTower][WipeTowerContact]")
+{
+    const DirectRun run = run_direct({
+        {0.2f, 0.2f, 0, 1, 80.f},
+        {0.4f, 0.2f, 1, 0, 80.f},
+        {0.6f, 0.2f, 0, 1, 80.f},
+    }, true, WipeTowerWallType::wtwRectangle, true, false, true);
+    require_finite_run(run);
+    CHECK(run.toolchanges == 3);
+    CHECK(nonempty_layers(run) == 3);
+    CHECK(total_extrusion(run) > 0.f);
+}
+
+TEST_CASE("Disabled tower interfaces omit temperature waits and pre-extrusion", "[WipeTower][WipeTowerContact]")
+{
+    const DirectRun run = run_direct({
+        {0.2f, 0.2f, 0, 1, 80.f}, {0.4f, 0.2f, 1, 1, 80.f},
+        {0.6f, 0.2f, 1, 1, 80.f}, {0.8f, 0.2f, 1, 0, 80.f},
+    }, false, WipeTowerWallType::wtwRectangle, true, false, false, false);
+    require_finite_run(run);
+    for (const auto &layer : run.layers)
+        for (const auto &change : layer) {
+            const GridStats stats = grid_stats(change);
+            CHECK(stats.m109_count == 0);
+            CHECK(stats.m104_count == 0);
+            CHECK_FALSE(has_interface_pre_extrusion_move(change.gcode));
+        }
+}
+
+TEST_CASE("Tower interface pre-extrusion follows the configured length", "[WipeTower][WipeTowerContact]")
+{
+    const float length = GENERATE(1.f, 5.f);
+    const DirectRun run = run_direct({
+        {0.2f, 0.2f, 0, 1, 80.f}, {0.4f, 0.2f, 1, 1, 80.f},
+        {0.6f, 0.2f, 1, 1, 80.f}, {0.8f, 0.2f, 1, 0, 80.f},
+    }, false, WipeTowerWallType::wtwRectangle, true, false, false, true, 2.f, length);
+    require_finite_run(run);
+    bool configured_move = false;
+    for (const auto &layer : run.layers)
+        for (const auto &change : layer) {
+            configured_move |= has_interface_pre_extrusion_move(change.gcode, length + 2.f);
+            CHECK_FALSE(has_interface_pre_extrusion_move(change.gcode, 5.f));
+        }
+    CHECK(configured_move);
+}
+
+}

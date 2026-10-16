@@ -1,3 +1,4 @@
+#include "libslic3r/ExPolygon.hpp"
 #include <functional>
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Circle.hpp"
@@ -2583,3 +2584,293 @@ TEST_CASE("Reloading cached first-layer groups replaces prior metadata", "[Print
 }
 
 } // namespace print_workflow_contracts
+
+namespace support_cache_contracts {
+using Json = nlohmann::json;
+
+namespace {
+struct SupportState {
+    size_t id = 0;
+    size_t interface_id = 0;
+    double z = 0.;
+    double height = 0.;
+    double island_area = 0.;
+    ExPolygons islands;
+    int type = 0;
+    bool no_sort = false;
+    std::vector<ExtrusionPath> paths;
+};
+
+std::vector<SupportState> capture_support(const PrintObject &object)
+{
+    std::vector<SupportState> result;
+    for (const SupportLayer *layer : object.support_layers()) {
+        SupportState state;
+        state.id = layer->id();
+        state.interface_id = layer->interface_id();
+        state.z = layer->print_z;
+        state.height = layer->height;
+        state.type = int(layer->support_type);
+        state.islands = layer->support_islands;
+        state.no_sort = layer->support_fills.no_sort;
+        for (const ExPolygon &island : layer->support_islands)
+            state.island_area += island.area() * SCALING_FACTOR * SCALING_FACTOR;
+        for_each_extrusion_path(layer->support_fills,
+                                [&state](const ExtrusionPath &path) { state.paths.push_back(path); });
+        result.push_back(std::move(state));
+    }
+    return result;
+}
+
+DynamicPrintConfig support_config(const char *support_type, const char *support_style = "default", int raft_layers = 0)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height", 0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops", 2 },
+        { "top_shell_layers", 2 },
+        { "bottom_shell_layers", 2 },
+        { "skirt_loops", 0 },
+        { "brim_type", "no_brim" },
+        { "raft_layers", raft_layers },
+        { "sparse_infill_density", "15%" },
+        { "machine_start_gcode", "" },
+        { "machine_end_gcode", "" },
+        { "layer_change_gcode", "G92 E0\n" },
+        { "before_layer_change_gcode", "" },
+        { "enable_support", true },
+        { "support_type", support_type },
+        { "support_style", support_style },
+        { "support_on_build_plate_only", false },
+        { "support_interface_layers", 2 },
+    });
+    return config;
+}
+
+void process_support(Print &print, Model &model, const TriangleMesh &mesh, const DynamicPrintConfig &config)
+{
+    init_print({ mesh }, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+}
+
+void compare_support(const std::vector<SupportState> &before, const std::vector<SupportState> &after)
+{
+    REQUIRE(after.size() == before.size());
+    for (size_t i = 0; i < before.size(); ++i) {
+        INFO("support layer=" << i);
+        CHECK(after[i].id == before[i].id);
+        CHECK(after[i].interface_id == before[i].interface_id);
+        CHECK(after[i].type == before[i].type);
+        CHECK(after[i].no_sort == before[i].no_sort);
+        CHECK_THAT(after[i].z, Catch::Matchers::WithinAbs(before[i].z, 1e-6));
+        CHECK_THAT(after[i].height, Catch::Matchers::WithinAbs(before[i].height, 1e-6));
+        CHECK_THAT(after[i].island_area, Catch::Matchers::WithinAbs(before[i].island_area, 1e-6));
+        REQUIRE(after[i].islands.size() == before[i].islands.size());
+        for (size_t island = 0; island < before[i].islands.size(); ++island) {
+            CHECK(after[i].islands[island].contour.points == before[i].islands[island].contour.points);
+            REQUIRE(after[i].islands[island].holes.size() == before[i].islands[island].holes.size());
+            for (size_t hole = 0; hole < before[i].islands[island].holes.size(); ++hole)
+                CHECK(after[i].islands[island].holes[hole].points == before[i].islands[island].holes[hole].points);
+        }
+        REQUIRE(after[i].paths.size() == before[i].paths.size());
+        for (size_t j = 0; j < before[i].paths.size(); ++j) {
+            const ExtrusionPath &old_path = before[i].paths[j];
+            const ExtrusionPath &new_path = after[i].paths[j];
+            CHECK(new_path.role() == old_path.role());
+            CHECK(new_path.polyline.points == old_path.polyline.points);
+            CHECK_THAT(new_path.mm3_per_mm, Catch::Matchers::WithinAbs(old_path.mm3_per_mm, 1e-12));
+            CHECK_THAT(new_path.width, Catch::Matchers::WithinAbs(old_path.width, 1e-6));
+            CHECK_THAT(new_path.height, Catch::Matchers::WithinAbs(old_path.height, 1e-6));
+            CHECK(new_path.z_contoured == old_path.z_contoured);
+        }
+    }
+}
+
+void compare_links(const PrintObject &object, size_t count)
+{
+    REQUIRE(object.support_layers().size() == count);
+    for (size_t i = 0; i < count; ++i) {
+        const SupportLayer *layer = object.support_layers()[i];
+        const SupportLayer *lower = i == 0 ? nullptr : object.support_layers()[i - 1];
+        const SupportLayer *upper = i + 1 == count ? nullptr : object.support_layers()[i + 1];
+        CHECK(layer->lower_layer == lower);
+        CHECK(layer->upper_layer == upper);
+    }
+}
+
+void rewrite_cache(const std::string &directory, const std::function<void(Json &)> &edit)
+{
+    size_t edited = 0;
+    for (const auto &entry : boost::filesystem::directory_iterator(directory)) {
+        if (!boost::filesystem::is_regular_file(entry.path()))
+            continue;
+        std::ifstream input(entry.path().string());
+        Json document = Json::parse(input);
+        input.close();
+        edit(document);
+        std::ofstream output(entry.path().string());
+        output << document.dump();
+        REQUIRE(output.good());
+        ++edited;
+    }
+    REQUIRE(edited == 1);
+}
+
+size_t support_path_count(const std::vector<SupportState> &states)
+{
+    size_t count = 0;
+    for (const SupportState &state : states)
+        count += state.paths.size();
+    return count;
+}
+
+void expect_roundtrip(const TriangleMesh &mesh, const DynamicPrintConfig &config, bool pretty)
+{
+    Print print;
+    Model model;
+    process_support(print, model, mesh, config);
+    const auto before = capture_support(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    REQUIRE(support_path_count(before) > 0);
+    const size_t before_count = before.size();
+    ScopedTemporaryDir cache("orca-support-cache-contract");
+    REQUIRE(print.export_cached_data(cache.string(), pretty) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto after = capture_support(*print.objects().front());
+    compare_support(before, after);
+    compare_links(*print.objects().front(), before_count);
+}
+}
+
+TEST_CASE("Raft support cache preserves linked layers and compact JSON", "[Print][SupportCache]")
+{
+    expect_roundtrip(cube(6.), support_config("normal(auto)", "default", 3), false);
+}
+
+TEST_CASE("Pretty raft support cache preserves the same geometry", "[Print][SupportCache]")
+{
+    expect_roundtrip(cube(6.), support_config("normal(auto)", "default", 3), true);
+}
+
+TEST_CASE("Normal support cache preserves islands and interface paths", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"), false);
+}
+
+TEST_CASE("Normal snug support cache preserves nested fill paths", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)", "snug"), false);
+}
+
+TEST_CASE("Organic tree support cache preserves tree layer metadata", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("tree(auto)", "organic"), false);
+}
+
+TEST_CASE("Slim tree support cache preserves tree geometry", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("tree(auto)", "tree_slim"), false);
+}
+
+TEST_CASE("Strong tree support cache preserves branch extrusion paths", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("tree(auto)", "tree_strong"), false);
+}
+
+TEST_CASE("Support no-sort metadata survives cache loading", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    auto before = capture_support(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    for (SupportLayer *layer : print.objects().front()->support_layers())
+        layer->support_fills.no_sort = true;
+    before = capture_support(*print.objects().front());
+    ScopedTemporaryDir cache("orca-support-cache-nosort");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto after = capture_support(*print.objects().front());
+    compare_support(before, after);
+    for (const SupportState &state : after)
+        CHECK(state.no_sort);
+}
+
+TEST_CASE("Repeated support cache loads replace support layers and links", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    const auto before = capture_support(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    ScopedTemporaryDir cache("orca-support-cache-repeat");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto after = capture_support(*print.objects().front());
+    compare_support(before, after);
+    compare_links(*print.objects().front(), before.size());
+}
+
+TEST_CASE("Missing support cache directory leaves the processed support state intact", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    const auto before = capture_support(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    ScopedTemporaryDir cache("orca-support-cache-missing");
+    CHECK(print.load_cached_data(cache.string() + "/missing") == CLI_IMPORT_CACHE_NOT_FOUND);
+    const auto after = capture_support(*print.objects().front());
+    compare_support(before, after);
+}
+
+TEST_CASE("Corrupt support type metadata is rejected", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    ScopedTemporaryDir cache("orca-support-cache-bad-type");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        REQUIRE_FALSE(document.at("support_layers").empty());
+        document.at("support_layers").at(0)["support_type"] = "invalid-support-type";
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+}
+
+TEST_CASE("Corrupt support extrusion payload is rejected", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    ScopedTemporaryDir cache("orca-support-cache-bad-fill");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        REQUIRE_FALSE(document.at("support_layers").empty());
+        auto &entities = document.at("support_layers").at(0).at("support_fills").at("entities");
+        REQUIRE_FALSE(entities.empty());
+        entities.at(0)["entity_type"] = "not-an-extrusion-entity";
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+}
+
+TEST_CASE("Corrupt support island payload is rejected", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    ScopedTemporaryDir cache("orca-support-cache-bad-island");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        REQUIRE_FALSE(document.at("support_layers").empty());
+        document.at("support_layers").at(0).at("support_islands") = 17;
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+}
+
+} // namespace support_cache_contracts

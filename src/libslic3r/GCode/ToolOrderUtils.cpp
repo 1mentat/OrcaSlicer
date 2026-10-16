@@ -116,6 +116,7 @@ namespace Slic3r
     struct MinCostMaxFlow {
     public:
         std::vector<int> solve();
+        std::vector<int> solve_indices();
         void add_edge(int from, int to, int capacity, int cost);
         bool spfa(int source, int sink);
         int get_distance(int idx_in_left, int idx_in_right);
@@ -131,21 +132,28 @@ namespace Slic3r
         int sink_id{ -1 };
     };
 
-    std::vector<int> MinCostMaxFlow::solve()
+    std::vector<int> MinCostMaxFlow::solve_indices()
     {
         while (spfa(source_id, sink_id));
 
-        std::vector<int>matching(l_nodes.size(), MaxFlowGraph::INVALID_ID);
-        // to get the match info, just traverse the left nodes and
-        // check the edges with flow > 0 and linked to right nodes
+        std::vector<int> matching(l_nodes.size(), MaxFlowGraph::INVALID_ID);
         for (int u = 0; u < l_nodes.size(); ++u) {
             for (int eid : adj[u]) {
                 Edge& e = edges[eid];
-                if (e.flow > 0 && e.to >= l_nodes.size() && e.to < l_nodes.size() + r_nodes.size())
-                    matching[e.from] = r_nodes[e.to - l_nodes.size()];
+                if (e.flow > 0 && e.to >= static_cast<int>(l_nodes.size()) &&
+                    e.to < static_cast<int>(l_nodes.size() + r_nodes.size()))
+                    matching[e.from] = e.to - static_cast<int>(l_nodes.size());
             }
         }
+        return matching;
+    }
 
+    std::vector<int> MinCostMaxFlow::solve()
+    {
+        auto matching = solve_indices();
+        for (int &index : matching)
+            if (index >= 0 && index < static_cast<int>(r_nodes.size()))
+                index = r_nodes[index];
         return matching;
     }
 
@@ -670,6 +678,11 @@ namespace Slic3r
     std::vector<int> GroupMinCostFlowSolver::solve()
     {
         return m_solver->solve();
+    }
+
+    std::vector<int> GroupMinCostFlowSolver::solve_indices()
+    {
+        return m_solver->solve_indices();
     }
 
 // ==================== MinFlushFlowSolver ====================
