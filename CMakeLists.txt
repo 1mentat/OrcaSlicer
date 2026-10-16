@@ -707,8 +707,16 @@ set(LIBDIR_BIN ${CMAKE_CURRENT_BINARY_DIR}/src)
 message(STATUS "LIBDIR: ${LIBDIR}")
 message(STATUS "LIBDIR_BIN: ${LIBDIR_BIN}")
 
-# For the bundled boost libraries (boost::nowide)
-include_directories(SYSTEM ${LIBDIR})
+include(cmake/SlicerCoverage.cmake)
+# Clang omits system-header coverage mappings even when profile counters are
+# emitted. Our own inline definitions must have consistent mappings in the
+# library and tests, so keep the source root non-system in coverage builds.
+if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+    include_directories(${LIBDIR})
+else()
+    # For the bundled boost libraries (boost::nowide)
+    include_directories(SYSTEM ${LIBDIR})
+endif()
 # For generated header files
 include_directories(SYSTEM ${LIBDIR_BIN}/dev-utils/platform)
 # For ligigl
@@ -1278,7 +1286,6 @@ elseif (MSVC AND NOT IS_CLANG_CL)
     add_compile_options(/W3 /we4715)
 endif ()
 
-include(cmake/SlicerCoverage.cmake)
 add_subdirectory(src)
 slicer_enable_llvm_source_coverage(libslic3r)
 slicer_enable_llvm_source_coverage(libslic3r_cgal)

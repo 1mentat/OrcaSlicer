@@ -118,6 +118,11 @@ included when LLVM provides executable mappings for them; uncompiled headers
 and conditional platform sources are outside the target manifests. The report
 records the source root and manifests used.
 
+Coverage builds include Orca's source headers as ordinary project headers.
+Clang suppresses system-header mappings even when it emits profile counters;
+mixing those counters with unused inline mappings can silently remove executed
+functions from an export. Dependency headers keep their existing classification.
+
 The runner uses `compile_commands.json` as compiler evidence for every
 manifest source. It invokes `llvm-cov export --summary-only -instr-profile <merged profile>` on
 each instrumented object (including with LLVM 18): an object with no coverage map is reported as a
