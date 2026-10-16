@@ -2045,16 +2045,15 @@ TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior densi
 {
     // The modes following the distance print more lines than their target where its levels meet: along the shells, or
     // where the patterns blend.
-    const auto row = GENERATE(table<std::string, std::string, double>({{"tpmsd", "lobes", 0.5},
-                                                                        {"tpmsfk", "lobes", 0.5},
-                                                                        {"gyroid", "lobes", 0.5},
-                                                                        {"gyroid", "stepped_shells", 0.6},
-                                                                        {"tpmsfk", "smooth_blend", 0.6},
-                                                                        {"tpmsd", "distance_warp", 0.5}}));
-    const std::string pattern  = std::get<0>(row);
-    const std::string mode     = std::get<1>(row);
-    const double      max_core = std::get<2>(row);
-    CAPTURE(pattern, mode);
+    // Each pattern compares two adaptive modes against one uniform baseline.
+    const std::string pattern = GENERATE("tpmsd", "tpmsfk", "gyroid");
+    const auto modes = [&pattern] {
+        if (pattern == "tpmsd")
+            return std::vector<std::pair<std::string, double>>{{"lobes", 0.5}, {"distance_warp", 0.5}};
+        if (pattern == "tpmsfk")
+            return std::vector<std::pair<std::string, double>>{{"lobes", 0.5}, {"smooth_blend", 0.6}};
+        return std::vector<std::pair<std::string, double>>{{"lobes", 0.5}, {"stepped_shells", 0.6}};
+    }();
     // A 60 mm cube in 0.4 mm layers, centered on the origin in XY. Its center is 30 mm from every face.
     auto slice = [&pattern](const std::string &adaptive, Print &print) {
         Slic3r::Test::init_and_process_print({Slic3r::Test::cube(60)}, print,
@@ -2066,20 +2065,24 @@ TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior densi
                                              {"layer_height", 0.4},
                                              {"initial_layer_print_height", 0.4}});
     };
-    Print uniform, adaptive;
+    Print uniform;
     slice("disabled", uniform);
-    slice(mode, adaptive);
+    for (const auto &[mode, max_core] : modes) {
+        CAPTURE(pattern, mode);
+        Print adaptive;
+        slice(mode, adaptive);
 
-    // The middle of the cube, at most 10 mm from the center: at most 5% + 20% * 10 / 30 = 11.7% dense.
-    const Polygons core = centered_square(10.);
-    // Along the sides at mid height, 24 to 28 mm from the center: at least 5% + 20% * 24 / 30 = 21% dense.
-    const Polygons shell = diff(centered_square(28.), centered_square(24.));
-    const double core_uniform = sparse_infill_length(uniform, 25., 35., core);
-    const double shell_uniform = sparse_infill_length(uniform, 25., 35., shell);
-    REQUIRE(core_uniform > 0.);
-    REQUIRE(shell_uniform > 0.);
-    CHECK(sparse_infill_length(adaptive, 25., 35., core) < max_core * core_uniform);
-    CHECK(sparse_infill_length(adaptive, 25., 35., shell) > 0.75 * shell_uniform);
+        // The middle of the cube, at most 10 mm from the center: at most 5% + 20% * 10 / 30 = 11.7% dense.
+        const Polygons core = centered_square(10.);
+        // Along the sides at mid height, 24 to 28 mm from the center: at least 5% + 20% * 24 / 30 = 21% dense.
+        const Polygons shell = diff(centered_square(28.), centered_square(24.));
+        const double core_uniform = sparse_infill_length(uniform, 25., 35., core);
+        const double shell_uniform = sparse_infill_length(uniform, 25., 35., shell);
+        REQUIRE(core_uniform > 0.);
+        REQUIRE(shell_uniform > 0.);
+        CHECK(sparse_infill_length(adaptive, 25., 35., core) < max_core * core_uniform);
+        CHECK(sparse_infill_length(adaptive, 25., 35., shell) > 0.75 * shell_uniform);
+    }
 }
 
 TEST_CASE("Adaptive TPMS infill of a tall object is sparsest at its middle height", "[Fill]")
