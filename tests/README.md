@@ -324,7 +324,12 @@ python3 scripts/slicer_mutation.py run \
 `mutation-report.json` records the commit, worktree commands, exact source
 match and replacement, build/test commands, and separate statuses for build
 errors, timeouts, killed mutants, and survivors. A mutant is counted only
-after its selected unmutated baseline passes with executed test evidence.
+after its selected unmutated baseline passes, the same number of tests executes,
+and Catch2 reports a positive assertion-failure count. CTest receives
+`--output-on-failure` so that this assertion evidence is retained. Child crashes,
+fatal signals, unexpected exceptions, and nonzero exits without an assertion
+summary are infrastructure or unverified failures, not mutation kills. Custom
+test commands must retain Catch2's console summary for kill classification.
 
 The native harnesses run commands in separate process groups. A timeout or
 interruption stops the command and its descendants before restoring or removing

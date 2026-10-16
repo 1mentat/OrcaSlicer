@@ -77,7 +77,8 @@ class MutationResultTests(unittest.TestCase):
         return slicer_mutation.CommandResult(["runner"], returncode, 0.01, output, "", timed_out)
 
     def test_distinguishes_killed_survived_timeout_and_build_error(self):
-        self.assertEqual(slicer_mutation._classify_test(self.result(1), 1), "killed")
+        failure = self.result(1, output="test cases: 1 | 1 failed\nassertions: 3 | 2 passed | 1 failed")
+        self.assertEqual(slicer_mutation._classify_test(failure, 1), "killed")
         self.assertEqual(slicer_mutation._classify_test(self.result(0), 1), "survived")
         self.assertEqual(slicer_mutation._classify_test(self.result(None, timed_out=True), 1), "test_timeout")
         self.assertEqual(slicer_mutation._classify_build(self.result(1)), "build_error")
@@ -94,8 +95,76 @@ class MutationResultTests(unittest.TestCase):
                                  "test_timeout")
 
     def test_timeout_in_a_test_name_does_not_hide_an_assertion_failure(self):
-        output = "1/1 Test #1: Timeout settings contract ....***Failed\n0% tests passed, 1 tests failed out of 1"
+        output = ("1/1 Test #1: Timeout settings contract ....***Failed\n"
+                  "assertions: 1 | 1 failed\n0% tests passed, 1 tests failed out of 1")
         self.assertEqual(slicer_mutation._classify_test(self.result(8, output=output), 1), "killed")
+
+    def test_ctest_crashes_are_not_kills_even_with_another_assertion_failure(self):
+        for crash in ("***Exception: SegFault", "***Exception: Other",
+                      "2 - crash (Subprocess aborted)", "2 - crash (SEGFAULT)",
+                      "fatal error condition: SIGSEGV", "unexpected exception with message:",
+                      "Subprocess killed",
+                      "FAILED due to a fatal error condition:",
+                      "FAILED due to unexpected exception with message:"):
+            with self.subTest(crash=crash):
+                output = f"{crash}\nassertions: 2 | 1 passed | 1 failed\n2 tests failed out of 2"
+                self.assertEqual(slicer_mutation._classify_test(self.result(8, output=output), 2),
+                                 "test_infrastructure_failure")
+
+    def test_nonzero_exit_requires_positive_assertion_failure_evidence(self):
+        for output in ("1 tests passed", "1 tests failed out of 1",
+                       "assertions: 3 | 3 passed | 0 failed", "assertions: -1 | -1 failed",
+                       "assertions: 1 | -1 failed", "assertions: 1 | 1 failed as expected"):
+            with self.subTest(output=output):
+                self.assertEqual(slicer_mutation._classify_test(self.result(8, output=output), 1),
+                                 "test_failure_unverified")
+
+    def test_mutant_must_execute_the_baseline_test_count(self):
+        output = "test cases: 1 | 1 failed\nassertions: 1 | 1 failed"
+        self.assertEqual(slicer_mutation._classify_test(self.result(1, output=output), 1, 2),
+                         "test_count_mismatch")
+        self.assertEqual(slicer_mutation._classify_test(self.result(0), 1, 2),
+                         "test_count_mismatch")
+
+    def test_catch_success_counts_cases_instead_of_assertions(self):
+        self.assertEqual(slicer_mutation.test_evidence(
+            "All tests passed (43 assertions in 2 test cases)"), 2)
+        self.assertEqual(slicer_mutation.test_evidence(
+            "All tests passed (1 assertion in 1 test case)"), 1)
+
+    def test_grouped_ctest_counts_are_stable_when_catch_failure_output_is_added(self):
+        baseline = "100% tests passed, 0 tests failed out of 1"
+        failed = ("test cases: 3 | 2 passed | 1 failed\nassertions: 7 | 6 passed | 1 failed\n"
+                  "0% tests passed, 1 tests failed out of 1")
+        expected = slicer_mutation.test_evidence(baseline)
+        observed = slicer_mutation.test_evidence(failed)
+        self.assertEqual((expected, observed), (1, 1))
+        self.assertEqual(slicer_mutation._classify_test(self.result(8, output=failed), observed, expected),
+                         "killed")
+
+    def test_zero_exit_cannot_hide_reported_assertion_failures(self):
+        for output in ("assertions: 1 | 1 failed", "0% tests passed, 1 tests failed out of 1"):
+            with self.subTest(output=output):
+                self.assertEqual(slicer_mutation._classify_test(self.result(0, output=output), 1),
+                                 "test_infrastructure_failure")
+
+    def test_ctest_requests_failure_output_once_and_preserves_filter(self):
+        mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "", "Flow")
+        for executable in ("/usr/bin/ctest", "C:/tools/ctest.exe", r"C:\tools\ctest.exe"):
+            with self.subTest(executable=executable):
+                command = slicer_mutation._test_command([executable, "--output-on-failure"], mutant)
+                self.assertEqual(command.count("--output-on-failure"), 1)
+                self.assertEqual(command[-2:], ["-L", "Flow"])
+                command = slicer_mutation._test_command([executable], mutant)
+                self.assertIn("--output-on-failure", command)
+
+    def test_ctest_preserves_existing_label_options(self):
+        mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "", "Flow")
+        for options in (["-L", "Other"], ["-LOther"], ["--label-regex", "Other"],
+                        ["--label-regex=Other"]):
+            with self.subTest(options=options):
+                command = slicer_mutation._test_command(["ctest", *options], mutant)
+                self.assertEqual(command, ["ctest", *options, "--output-on-failure"])
 
     def test_zero_evidence_is_not_a_survivor(self):
         self.assertEqual(slicer_mutation._classify_test(self.result(0, output=""), 0), "test_no_evidence")

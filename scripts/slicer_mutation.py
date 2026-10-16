@@ -136,7 +136,7 @@ _TEST_COUNT_PATTERNS = (
     re.compile(r"\bof\s+(\d+)\s+tests?\b", re.IGNORECASE),
     re.compile(r"\b(\d+)\s+tests?\s+(?:passed|failed|skipped)\b", re.IGNORECASE),
     re.compile(r"test cases?:\s*(\d+)\b", re.IGNORECASE),
-    re.compile(r"all tests passed\s*\((\d+)\s+assertions?", re.IGNORECASE),
+    re.compile(r"all tests passed\s*\(\d+\s+assertions?\s+in\s+(\d+)\s+test cases?", re.IGNORECASE),
 )
 _NO_EXECUTION_PATTERNS = (
     re.compile(r"no tests? (?:were )?found", re.IGNORECASE),
@@ -151,6 +151,13 @@ def test_evidence(output: str) -> int:
     if any(pattern.search(output) for pattern in _NO_EXECUTION_PATTERNS):
         return sum(int(match.group(1)) for match in re.finditer(
             r"\b([1-9]\d*)\s+tests?\s+(?:passed|failed)\b", output, re.IGNORECASE))
+    # CTest counts registered invocations; a grouped invocation may run several
+    # Catch2 cases. Failure output includes both reporters, unlike a quiet
+    # passing baseline, so their counts must not be mixed.
+    ctest_totals = re.findall(r"\d+% tests passed,\s*\d+ tests failed out of\s+(\d+)\b",
+                              output, re.IGNORECASE)
+    if ctest_totals:
+        return int(ctest_totals[-1])
     values = [int(match.group(1)) for pattern in _TEST_COUNT_PATTERNS
               for match in pattern.finditer(output)]
     return max(values, default=0)
@@ -228,10 +235,21 @@ def _apply(mutant: Mutant, root: Path) -> tuple[Path, bytes]:
     return path, original
 
 
+def _is_ctest(executable: str) -> bool:
+    return executable.replace("\\", "/").rsplit("/", 1)[-1].lower() in {"ctest", "ctest.exe"}
+
+
 def _test_command(argv: Sequence[str], mutant: Mutant) -> list[str]:
     result = [value.replace("{filter}", mutant.test_filter) for value in argv]
+    if _is_ctest(result[0]):
+        # Catch2's assertion summary is needed to distinguish a test failure
+        # from a CTest child crash or another infrastructure failure.
+        if "--output-on-failure" not in result:
+            result.append("--output-on-failure")
     if mutant.test_filter and "{filter}" not in " ".join(argv):
-        if Path(result[0]).name == "ctest" and "-L" not in result:
+        has_label = any(value == "--label-regex" or value.startswith("--label-regex=")
+                        or value.startswith("-L") for value in result[1:])
+        if _is_ctest(result[0]) and not has_label:
             result.extend(["-L", mutant.test_filter])
     return result
 
@@ -252,15 +270,35 @@ def _test_timed_out(result: CommandResult) -> bool:
         result.stdout + "\n" + result.stderr, re.IGNORECASE | re.MULTILINE))
 
 
-def _classify_test(result: CommandResult, evidence: int) -> str:
+def _classify_test(result: CommandResult, evidence: int,
+                   expected_tests: int | None = None) -> str:
     if _test_timed_out(result):
         return "test_timeout"
     if result.returncode is not None and result.returncode < 0:
         return "test_killed"
+    output = result.stdout + "\n" + result.stderr
+    # CTest itself often returns 8 after a child dies. Catch2 can also report
+    # a fatal signal or unexpected exception as a failed assertion. Neither
+    # establishes that an ordinary behavioral assertion detected the mutant.
+    if re.search(r"\*{3}Exception:|fatal error condition:|unexpected exception with message:|"
+                 r"\bSubprocess killed\b|"
+                 r"\((?:SEGFAULT|Subprocess aborted|OTHER_FAULT|ILLEGAL|INTERRUPT|Bus error)\)\s*$",
+                 output, re.IGNORECASE | re.MULTILINE):
+        return "test_infrastructure_failure"
     if evidence <= 0:
         return "test_no_evidence"
+    if expected_tests is not None and evidence != expected_tests:
+        return "test_count_mismatch"
+    assertion_failure = any(
+        re.search(r"(?:^|\|)\s*[1-9]\d*\s+failed\s*(?:\||$)", summary, re.IGNORECASE)
+        for summary in re.findall(r"^\s*assertions?\s*:\s*\d+\s*\|([^\n]*)", output,
+                                  re.IGNORECASE | re.MULTILINE))
     if result.returncode != 0:
-        return "killed"
+        if assertion_failure:
+            return "killed"
+        return "test_failure_unverified"
+    if assertion_failure or re.search(r"\d+% tests passed,\s*[1-9]\d* tests failed out of", output):
+        return "test_infrastructure_failure"
     return "survived"
 
 
@@ -332,6 +370,7 @@ def run_mutation(args: argparse.Namespace) -> int:
             # hiding whether the selected test actually ran.
             filters = sorted(set(mutant.test_filter for mutant in mutants))
             baseline_tests: list[dict[str, Any]] = []
+            baseline_counts: dict[str, int] = {}
             for test_filter in filters:
                 baseline_mutant = Mutant("baseline", "", "x", "y", "", test_filter)
                 selected = _test_command(test_argv, baseline_mutant)
@@ -339,15 +378,18 @@ def run_mutation(args: argparse.Namespace) -> int:
                                                      build=(worktree / args.build_dir).resolve()),
                                             cwd=worktree, timeout=args.timeout)
                 evidence = test_evidence(baseline_test.stdout + baseline_test.stderr)
+                baseline_counts[test_filter] = evidence
+                classification = _classify_test(baseline_test, evidence)
                 baseline_tests.append({
                     "filter": test_filter,
                     "test_evidence": evidence,
+                    "classification": classification,
                     "result": baseline_test.json(),
                 })
-                if _test_timed_out(baseline_test) or baseline_test.returncode != 0 or evidence <= 0:
+                if classification != "survived":
                     report["baseline_tests"] = baseline_tests
                     report["status"] = ("baseline_test_timeout" if _test_timed_out(baseline_test) else
-                                         "baseline_test_failed" if baseline_test.returncode != 0 else
+                                         "baseline_test_failed" if evidence > 0 else
                                          "baseline_no_evidence")
                     _write_report(out / "mutation-report.json", report)
                     return 2
@@ -379,7 +421,9 @@ def run_mutation(args: argparse.Namespace) -> int:
                     mutant_evidence = test_evidence(mutant_test.stdout + mutant_test.stderr)
                     entry["test"] = mutant_test.json()
                     entry["test_evidence"] = mutant_evidence
-                    entry["status"] = _classify_test(mutant_test, mutant_evidence)
+                    entry["expected_test_count"] = baseline_counts[mutant.test_filter]
+                    entry["status"] = _classify_test(
+                        mutant_test, mutant_evidence, baseline_counts[mutant.test_filter])
                     report["mutants"].append(entry)
                 except MutationError as exc:
                     entry["status"] = "mutation_error"
