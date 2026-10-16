@@ -481,7 +481,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Emitted-fill contracts distinguish rectilinear from rectilinear_interlaced by layer orientation and rectilinear from spiralinset by finite interface extrusion, at least three interface layers, and aggregate interface length. Auto, concentric, and grid have direct SupportParameters angle checks, but lack a dedicated emitted-path oracle here; complete enum pipeline coverage remains unclaimed. Numeric spacing and other interaction domains remain unclaimed."
+      "reason": "Emitted-fill contracts distinguish rectilinear from rectilinear_interlaced by layer orientation and rectilinear from spiralinset by finite interface extrusion, at least three interface layers, and aggregate interface length. The six-mode SupportInterfacePattern test adds public extrusion-path geometry oracles, but its native baseline and routing mutations are pending; complete enum pipeline coverage remains unclaimed until that validation passes. Numeric spacing and other interaction domains remain unclaimed."
     },
     "support_bottom_interface_spacing": {
       "test": "tests/fff_print/test_support_material.cpp",

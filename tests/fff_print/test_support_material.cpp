@@ -12,6 +12,9 @@
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Polyline.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -122,6 +125,7 @@ static TriangleMesh support_capital()
     model.merge(cap);
     return model;
 }
+
 
 TEST_CASE("Three raft layers are created", "[SupportMaterial]")
 {
@@ -987,6 +991,119 @@ std::size_t distinct_lengths(const std::vector<double> &values)
     return sorted.size();
 }
 
+// A single wall-supported cantilever keeps the unsupported contact footprint simply connected:
+// the cap overhangs one 6 mm x 24 mm wall, leaving one 18 mm x 24 mm support rectangle. This is
+// the fixture for the pattern topology test.
+static TriangleMesh support_pattern_wall_capital()
+{
+    TriangleMesh result = make_cube(24.0, 24.0, 1.0);
+    TriangleMesh wall = make_cube(6.0, 24.0, 6.0);
+    wall.translate(0.0, 0.0, 1.0);
+    TriangleMesh cap = make_cube(24.0, 24.0, 1.0);
+    cap.translate(0.0, 0.0, 6.0);
+    result.merge(wall);
+    result.merge(cap);
+    return result;
+}
+
+// Observe generated paths and use interface_id for the alternating-direction contract.
+struct PublicInterfaceLayerObservation {
+    size_t path_count = 0;
+    double length = 0.0;
+    double volume = 0.0;
+    double long_horizontal_length = 0.0;
+    double long_vertical_length = 0.0;
+    std::pair<double, double> angle_accumulator{0.0, 0.0};
+};
+
+struct PublicInterfaceObservation {
+    std::map<size_t, PublicInterfaceLayerObservation> by_interface_id;
+    size_t interface_paths = 0;
+    size_t open_paths = 0;
+    size_t closed_paths = 0;
+    double max_open_signed_turn = 0.0;
+    bool finite = true;
+};
+
+static PublicInterfaceObservation inspect_public_support(const PrintObject &object)
+{
+    PublicInterfaceObservation out;
+    for (const SupportLayer *layer : object.support_layers()) {
+        PublicInterfaceLayerObservation &layer_out = out.by_interface_id[layer->interface_id()];
+        for_each_extrusion_path(layer->support_fills, [&out, &layer_out](const ExtrusionPath &path) {
+            if (path.role() != erSupportMaterialInterface)
+                return;
+            ++out.interface_paths;
+            ++layer_out.path_count;
+            const bool closed = path.is_closed();
+            if (closed)
+                ++out.closed_paths;
+            else
+                ++out.open_paths;
+
+            double path_length = 0.0;
+            double signed_turn = 0.0;
+            double previous_angle = 0.0;
+            bool have_previous_angle = false;
+            for (size_t i = 1; i < path.polyline.points.size(); ++i) {
+                const Point3 &a = path.polyline.points[i - 1];
+                const Point3 &b = path.polyline.points[i];
+                const double dx = unscale<double>(static_cast<double>(b.x()) - static_cast<double>(a.x()));
+                const double dy = unscale<double>(static_cast<double>(b.y()) - static_cast<double>(a.y()));
+                const double length = std::hypot(dx, dy);
+                if (!std::isfinite(length) || !std::isfinite(dx) || !std::isfinite(dy)) {
+                    out.finite = false;
+                    continue;
+                }
+                path_length += length;
+                if (!closed && length >= 1.0) {
+                    double angle = std::fmod(std::atan2(dy, dx), M_PI);
+                    if (angle < 0.0)
+                        angle += M_PI;
+                    if (axial_angle_diff_deg(angle, 0.0) < 10.0)
+                        layer_out.long_horizontal_length += length;
+                    if (axial_angle_diff_deg(angle, 0.5 * M_PI) < 10.0)
+                        layer_out.long_vertical_length += length;
+                    layer_out.angle_accumulator.first += length * std::cos(2.0 * angle);
+                    layer_out.angle_accumulator.second += length * std::sin(2.0 * angle);
+                }
+                if (!closed && length > 1e-6) {
+                    const double directed_angle = std::atan2(dy, dx);
+                    if (have_previous_angle)
+                        signed_turn += std::atan2(std::sin(directed_angle - previous_angle),
+                                                  std::cos(directed_angle - previous_angle));
+                    previous_angle = directed_angle;
+                    have_previous_angle = true;
+                }
+            }
+            layer_out.length += path_length;
+            layer_out.volume += path_length * path.mm3_per_mm;
+            if (!std::isfinite(path.mm3_per_mm) || path.mm3_per_mm <= 0.0)
+                out.finite = false;
+            out.max_open_signed_turn = std::max(out.max_open_signed_turn, std::abs(signed_turn));
+            out.finite = out.finite && std::isfinite(path_length);
+        });
+    }
+    return out;
+}
+
+static PublicInterfaceObservation process_pattern_fixture(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({support_pattern_wall_capital()}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE_FALSE(print.objects().empty());
+
+    PublicInterfaceObservation out = inspect_public_support(*print.objects().front());
+    REQUIRE(out.finite);
+    REQUIRE(out.interface_paths > 0);
+    return out;
+}
+
 } // namespace
 
 TEST_CASE("Manual support modes respond only to an enforcer", "[SupportSettingsVariance][SupportMaterial]")
@@ -1023,6 +1140,142 @@ TEST_CASE("Support base patterns emit finite material with distinct geometry", "
         base_lengths.push_back(stats.base_length);
     }
     CHECK(distinct_lengths(base_lengths) >= 2);
+}
+
+TEST_CASE("Every support interface pattern emits its defining geometry", "[SupportInterfacePattern][SupportMaterial]")
+{
+    const std::vector<const char *> patterns = {
+        "auto", "rectilinear", "concentric", "spiralinset", "rectilinear_interlaced", "grid"
+    };
+    std::map<std::string, PublicInterfaceObservation> observations;
+
+    auto public_angles = [](const PublicInterfaceObservation &observation) {
+        std::map<size_t, double> result;
+        for (const auto &[interface_id, layer] : observation.by_interface_id) {
+            const double magnitude = std::hypot(layer.angle_accumulator.first, layer.angle_accumulator.second);
+            if (layer.path_count == 0 || magnitude <= 1e-9)
+                continue;
+            double angle = 0.5 * std::atan2(layer.angle_accumulator.second, layer.angle_accumulator.first);
+            if (angle < 0.0)
+                angle += M_PI;
+            result.emplace(interface_id, angle);
+        }
+        return result;
+    };
+
+    // Only open, long paths participate in the direction-family witness.  Closed paths are the
+    // nested-loop evidence for concentric and must not manufacture a second grid family.
+    const auto has_orthogonal_open_families = [](const PublicInterfaceObservation &observation) {
+        return std::any_of(observation.by_interface_id.begin(), observation.by_interface_id.end(),
+            [](const auto &entry) {
+                return entry.second.long_horizontal_length >= 2.0 && entry.second.long_vertical_length >= 2.0;
+            });
+    };
+
+    for (const char *pattern : patterns) {
+        CAPTURE(pattern);
+        DynamicPrintConfig config = support_config();
+        config.set_deserialize_strict({
+            {"support_type",                 "normal(auto)"},
+            {"support_style",                "default"},
+            {"support_angle",                0.0},
+            // Keep interface placement and contact-loop generation fixed while only the pattern
+            // value changes.  These are registered production keys.
+            {"support_top_z_distance",       0.2},
+            {"support_interface_loop_pattern", 0},
+            {"support_object_xy_distance",   0.0},
+            {"support_interface_top_layers", 4},
+            {"support_interface_spacing",    0.0},
+            {"support_interface_pattern",    pattern}
+        });
+        PublicInterfaceObservation observation = process_pattern_fixture(config);
+        size_t interface_ids_with_paths = 0;
+        double deposited_length = 0.0;
+        double deposited_volume = 0.0;
+        for (const auto &[interface_id, layer] : observation.by_interface_id) {
+            (void)interface_id;
+            if (layer.path_count > 0)
+                ++interface_ids_with_paths;
+            deposited_length += layer.length;
+            deposited_volume += layer.volume;
+            REQUIRE(std::isfinite(layer.length));
+        }
+        REQUIRE(observation.finite);
+        REQUIRE(observation.interface_paths > 0);
+        REQUIRE(interface_ids_with_paths >= 3);
+        REQUIRE(std::isfinite(deposited_length));
+        REQUIRE(deposited_length > 0.0);
+        REQUIRE(std::isfinite(deposited_volume));
+        REQUIRE(deposited_volume > 0.0);
+        observations.emplace(pattern, std::move(observation));
+    }
+
+    const auto auto_angles = public_angles(observations.at("auto"));
+    const auto rect_angles = public_angles(observations.at("rectilinear"));
+    REQUIRE(auto_angles.size() >= 3);
+    REQUIRE(rect_angles.size() >= 3);
+    std::size_t common_auto_ids = 0;
+    for (const auto &[interface_id, angle] : auto_angles) {
+        const auto rect_it = rect_angles.find(interface_id);
+        if (rect_it == rect_angles.end())
+            continue;
+        ++common_auto_ids;
+        CHECK(axial_angle_diff_deg(angle, rect_it->second) < 15.0);
+    }
+    REQUIRE(common_auto_ids >= 3);
+
+    // Concentric is observed from the public extrusion topology rather than from every tiny
+    // connector: its interface fill contains nested closed paths. The loop-pattern pin
+    // keeps contact loops from becoming a second source of closed paths.
+    REQUIRE(observations.at("concentric").closed_paths >= 2);
+    CHECK(observations.at("concentric").open_paths == 0);
+
+    // Rectilinear has one open long family; grid has two.  Restricting this witness to public
+    // interface entities and open segments avoids counting the surrounding support boundary.
+    CHECK_FALSE(has_orthogonal_open_families(observations.at("rectilinear")));
+    REQUIRE(has_orthogonal_open_families(observations.at("grid")));
+    CHECK(observations.at("rectilinear").max_open_signed_turn <= 3.0 * M_PI);
+
+    // FillSpiralInset deliberately chains nested loops into an open extrusion path. Its signed
+    // XY turning accumulates as the path winds through successive loops, while a rectilinear
+    // serpentine's opposing turns cancel. The rectangular contact region keeps successive
+    // spiral loops nested and reachable without crossing a hole.
+    REQUIRE(observations.at("spiralinset").open_paths > 0);
+    CHECK(observations.at("spiralinset").closed_paths == 0);
+    REQUIRE(observations.at("spiralinset").max_open_signed_turn > 3.0 * M_PI);
+
+    // The production contract alternates by SupportLayer::interface_id(), not by adjacent Z
+    // values.  Compare the two actual id parities and require both to be present.
+    const auto interlaced_angles = public_angles(observations.at("rectilinear_interlaced"));
+    REQUIRE(interlaced_angles.size() >= 3);
+    std::vector<double> even_angles;
+    std::vector<double> odd_angles;
+    for (const auto &[interface_id, angle] : interlaced_angles) {
+        if ((interface_id & 1u) == 0)
+            even_angles.push_back(angle);
+        else
+            odd_angles.push_back(angle);
+    }
+    REQUIRE(even_angles.size() > 0);
+    REQUIRE(odd_angles.size() > 0);
+    double even_x = 0.0, even_y = 0.0, odd_x = 0.0, odd_y = 0.0;
+    for (double angle : even_angles) {
+        even_x += std::cos(2.0 * angle);
+        even_y += std::sin(2.0 * angle);
+    }
+    for (double angle : odd_angles) {
+        odd_x += std::cos(2.0 * angle);
+        odd_y += std::sin(2.0 * angle);
+    }
+    REQUIRE(std::hypot(even_x, even_y) > 0.8 * even_angles.size());
+    REQUIRE(std::hypot(odd_x, odd_y) > 0.8 * odd_angles.size());
+    const double even_angle = 0.5 * std::atan2(even_y, even_x);
+    const double odd_angle = 0.5 * std::atan2(odd_y, odd_x);
+    CHECK(axial_angle_diff_deg(even_angle, odd_angle) > 60.0);
+    for (double angle : even_angles)
+        CHECK(axial_angle_diff_deg(angle, even_angle) < 15.0);
+    for (double angle : odd_angles)
+        CHECK(axial_angle_diff_deg(angle, odd_angle) < 15.0);
 }
 
 TEST_CASE("Spiral inset reaches support interface extrusion", "[SupportSettingsVariance][SupportMaterial]")
