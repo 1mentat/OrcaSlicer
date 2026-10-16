@@ -1,3 +1,7 @@
+#include "libslic3r/Geometry.hpp"
+#include "libslic3r/Point.hpp"
+#include <initializer_list>
+#include <limits>
 #include <algorithm>
 #include <catch2/catch_all.hpp>
 
@@ -527,3 +531,353 @@ TEST_CASE("Bottom-only support interface keeps the dense interface density", "[S
     REQUIRE(sp.bottom_interface_density > sp.support_density);
 }
 
+namespace support_settings_variance_contracts {
+
+namespace {
+
+TriangleMesh capital_fixture()
+{
+    // The 24 mm cap leaves a 9 mm overhang around the 6 mm stem. At 0.2 mm
+    // layer height, the 7 mm fixture supplies 35 layers and a distinct contact region.
+    TriangleMesh result = make_cube(24.0, 24.0, 1.0);
+    TriangleMesh stem = make_cube(6.0, 6.0, 6.0);
+    stem.translate(9.0, 9.0, 1.0);
+    TriangleMesh cap = make_cube(24.0, 24.0, 1.0);
+    cap.translate(0.0, 0.0, 6.0);
+    result.merge(stem);
+    result.merge(cap);
+    return result;
+}
+
+TriangleMesh tunnel_fixture()
+{
+    TriangleMesh tunnel = mesh(TestMesh::cube_with_hole);
+    tunnel.rotate_x(float(Geometry::deg2rad(90.0)));
+    return tunnel;
+}
+
+struct SupportStats {
+    std::size_t base_segments = 0;
+    std::size_t interface_segments = 0;
+    std::set<double> base_layers;
+    std::set<double> interface_layers;
+    std::set<int> support_tools;
+    double base_length = 0.0;
+    double interface_length = 0.0;
+    double base_min_z = std::numeric_limits<double>::infinity();
+    double base_max_z = -std::numeric_limits<double>::infinity();
+    double interface_min_z = std::numeric_limits<double>::infinity();
+    double interface_max_z = -std::numeric_limits<double>::infinity();
+    bool finite = true;
+};
+
+constexpr std::size_t kMaxGCodeBytes = 16u * 1024u * 1024u;
+constexpr std::size_t kMaxGCodeLines = 250000u;
+constexpr std::size_t kMaxSupportSegments = 250000u;
+
+std::size_t count_occurrences(const std::string &text, const std::string_view needle)
+{
+    std::size_t count = 0;
+    std::size_t pos = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        ++count;
+        pos += needle.size();
+    }
+    return count;
+}
+
+SupportStats inspect_support(const std::string &gcode)
+{
+    // Guard the parser before it sees any caller-produced text. These limits are deliberately
+    // generous for the small capital/tunnel fixtures, while bounding both parser input and the
+    // support-role work performed below.
+    REQUIRE(gcode.size() <= kMaxGCodeBytes);
+    REQUIRE(std::count(gcode.begin(), gcode.end(), '\n') < kMaxGCodeLines);
+    REQUIRE(count_occurrences(gcode, "support material") < kMaxSupportSegments);
+
+    SupportStats out;
+    GCodeReader parser;
+    int active_tool = -1;
+    parser.parse_buffer(gcode, [&out, &active_tool](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view command = line.cmd();
+        if (command.size() >= 2 && command.front() == 'T' && command[1] >= '0' && command[1] <= '9')
+            active_tool = command[1] - '0';
+        if (!line.extruding(self))
+            return;
+        const std::string_view comment = line.comment();
+        const bool interface_line = comment.find("support material interface") != std::string_view::npos;
+        const bool base_line = !interface_line && comment.find("support material") != std::string_view::npos;
+        if (!interface_line && !base_line)
+            return;
+        const double length = std::hypot(line.dist_X(self), line.dist_Y(self));
+        const double z = self.z();
+        out.finite = out.finite && std::isfinite(length) && std::isfinite(z);
+        if (!std::isfinite(length) || !std::isfinite(z))
+            return;
+        if (active_tool >= 0)
+            out.support_tools.insert(active_tool);
+        if (interface_line) {
+            ++out.interface_segments;
+            out.interface_length += length;
+            out.interface_layers.insert(z);
+            out.interface_min_z = std::min(out.interface_min_z, z);
+            out.interface_max_z = std::max(out.interface_max_z, z);
+        } else {
+            ++out.base_segments;
+            out.base_length += length;
+            out.base_layers.insert(z);
+            out.base_min_z = std::min(out.base_min_z, z);
+            out.base_max_z = std::max(out.base_max_z, z);
+        }
+    });
+    return out;
+}
+
+DynamicPrintConfig support_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", 1},
+        {"layer_height", 0.2},
+        {"support_on_build_plate_only", 0},
+        {"support_interface_top_layers", 3},
+        {"support_interface_bottom_layers", 0},
+        {"support_base_pattern_spacing", 2.5},
+        // "back" is the registered token for SeamPosition::spRear; it bypasses global
+        // visibility raycasting while retaining the rear-seam path in SeamPlacer.
+        {"seam_position", "back"},
+        // init_print currently applies this too, but keep it explicit for the manual path.
+        {"gcode_comments", 1},
+        {"use_relative_e_distances", 1},
+        // The validation message calls this layer_gcode; the registered config key is
+        // layer_change_gcode and requires this exact uppercase command in relative-E mode.
+        {"layer_change_gcode", "G92 E0\n"},
+        {"skirt_loops", 0},
+        {"brim_width", 0.0},
+        {"raft_layers", 0}
+    });
+    return config;
+}
+
+std::string slice_checked(const TriangleMesh &mesh, const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({mesh}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    return gcode(print);
+}
+
+std::string slice_capital(std::initializer_list<ConfigBase::SetDeserializeItem> items)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict(items);
+    return slice_checked(capital_fixture(), config);
+}
+
+std::string slice_tunnel(std::initializer_list<ConfigBase::SetDeserializeItem> items)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict(items);
+    return slice_checked(tunnel_fixture(), config);
+}
+
+std::string slice_manual(const char *support_type, bool with_enforcer)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"support_type", support_type},
+        {"support_style", "default"},
+        {"support_interface_top_layers", 2}
+    });
+
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(capital_fixture());
+    // Keep the volume types explicit while scaling their dimensions with the smaller capital.
+    auto *blocker = object->add_volume(make_cube(3.0, 3.0, 3.0), ModelVolumeType::SUPPORT_BLOCKER);
+    blocker->set_offset(Vec3d(4.0, 4.0, 0.0));
+    if (with_enforcer) {
+        auto *enforcer = object->add_volume(make_cube(4.0, 4.0, 2.0), ModelVolumeType::SUPPORT_ENFORCER);
+        // The cap spans z=6..7; overlap it so enforcer polygons meet a sampled cap layer.
+        enforcer->set_offset(Vec3d(0.0, 0.0, 5.5));
+    }
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    return gcode(print);
+}
+
+std::size_t distinct_lengths(const std::vector<double> &values)
+{
+    std::vector<double> sorted = values;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end(), [](double a, double b) {
+        return std::fabs(a - b) < 1e-3;
+    }), sorted.end());
+    return sorted.size();
+}
+
+} // namespace
+
+TEST_CASE("Manual support modes respond only to an enforcer", "[SupportSettingsVariance][SupportMaterial]")
+{
+    for (const char *type : {"normal(manual)", "tree(manual)"}) {
+        const SupportStats baseline = inspect_support(slice_manual(type, false));
+        const SupportStats enforced = inspect_support(slice_manual(type, true));
+        CAPTURE(type);
+        REQUIRE(baseline.finite);
+        REQUIRE(enforced.finite);
+        CHECK(baseline.base_segments + baseline.interface_segments == 0);
+        CHECK(enforced.base_segments + enforced.interface_segments > 0);
+    }
+}
+
+TEST_CASE("Support base patterns emit finite material with distinct geometry", "[SupportSettingsVariance][SupportMaterial][TreeSupport]")
+{
+    const std::vector<const char *> patterns = {
+        "default", "rectilinear", "rectilinear-grid", "honeycomb", "lightning", "hollow"
+    };
+    std::vector<double> base_lengths;
+    for (const char *pattern : patterns) {
+        const SupportStats stats = inspect_support(slice_capital({
+            {"support_type", "tree(auto)"},
+            {"support_style", "tree_hybrid"},
+            {"support_interface_top_layers", 0},
+            {"support_base_pattern", pattern}
+        }));
+        CAPTURE(pattern);
+        REQUIRE(stats.finite);
+        // `hollow` disables tree infill, but production still emits bounded perimeter/wall
+        // support in this fixture; require support output while comparing signatures instead.
+        CHECK(stats.base_segments + stats.interface_segments > 0);
+        base_lengths.push_back(stats.base_length);
+    }
+    CHECK(distinct_lengths(base_lengths) >= 2);
+}
+
+TEST_CASE("Spiral inset reaches support interface extrusion", "[SupportSettingsVariance][SupportMaterial]")
+{
+    std::vector<double> lengths;
+    for (const char *pattern : {"rectilinear", "spiralinset"}) {
+        const SupportStats stats = inspect_support(slice_capital({
+            {"support_type", "normal(auto)"},
+            {"support_style", "default"},
+            {"support_interface_top_layers", 4},
+            {"support_interface_pattern", pattern}
+        }));
+        CAPTURE(pattern);
+        REQUIRE(stats.finite);
+        REQUIRE(stats.interface_segments > 0);
+        // Pattern-specific perimeter/base-interface handling may add a contact layer; require
+        // the configured interface depth to be reached without pinning incidental extra layers.
+        CHECK(stats.interface_layers.size() >= 3);
+        lengths.push_back(stats.interface_length);
+    }
+    CHECK(distinct_lengths(lengths) == 2);
+}
+
+TEST_CASE("Top interface spacing changes emitted density", "[SupportSettingsVariance][SupportMaterial]")
+{
+    const SupportStats solid = inspect_support(slice_capital({
+        {"support_type", "normal(auto)"}, {"support_interface_top_layers", 4},
+        {"support_interface_spacing", 0.0}
+    }));
+    const SupportStats sparse = inspect_support(slice_capital({
+        {"support_type", "normal(auto)"}, {"support_interface_top_layers", 4},
+        {"support_interface_spacing", 4.0}
+    }));
+    REQUIRE(solid.finite);
+    REQUIRE(sparse.finite);
+    REQUIRE(solid.interface_segments > 0);
+    REQUIRE(sparse.interface_segments > 0);
+    CHECK(solid.interface_length > sparse.interface_length * 1.5);
+}
+
+TEST_CASE("Support XY gap changes clipped support geometry", "[SupportSettingsVariance][SupportMaterial]")
+{
+    const SupportStats tight = inspect_support(slice_capital({
+        {"support_type", "normal(auto)"}, {"support_interface_top_layers", 3},
+        {"support_object_xy_distance", 0.0}
+    }));
+    const SupportStats open = inspect_support(slice_capital({
+        {"support_type", "normal(auto)"}, {"support_interface_top_layers", 3},
+        {"support_object_xy_distance", 3.0}
+    }));
+    REQUIRE(tight.finite);
+    REQUIRE(open.finite);
+    REQUIRE(tight.base_segments + tight.interface_segments > 0);
+    REQUIRE(open.base_segments + open.interface_segments > 0);
+    const bool changed = std::fabs(tight.base_length - open.base_length) > 1e-3 ||
+                         std::fabs(tight.interface_length - open.interface_length) > 1e-3;
+    CHECK(changed);
+}
+
+TEST_CASE("Support top and bottom Z gaps move their interface contact", "[SupportSettingsVariance][SupportMaterial]")
+{
+    const SupportStats top_zero = inspect_support(slice_capital({
+        {"support_type", "normal(auto)"}, {"support_interface_top_layers", 4},
+        {"support_top_z_distance", 0.0}
+    }));
+    const SupportStats top_gap = inspect_support(slice_capital({
+        {"support_type", "normal(auto)"}, {"support_interface_top_layers", 4},
+        {"support_top_z_distance", 0.4}
+    }));
+    REQUIRE(top_zero.finite);
+    REQUIRE(top_gap.finite);
+    REQUIRE(top_zero.interface_segments > 0);
+    REQUIRE(top_gap.interface_segments > 0);
+    CHECK(std::fabs(top_zero.interface_max_z - top_gap.interface_max_z) > 0.1);
+
+    const SupportStats bottom_zero = inspect_support(slice_tunnel({
+        {"support_type", "normal(auto)"}, {"support_interface_top_layers", 0},
+        {"support_interface_bottom_layers", 4}, {"support_bottom_z_distance", 0.0}
+    }));
+    const SupportStats bottom_gap = inspect_support(slice_tunnel({
+        {"support_type", "normal(auto)"}, {"support_interface_top_layers", 0},
+        {"support_interface_bottom_layers", 4}, {"support_bottom_z_distance", 0.4}
+    }));
+    REQUIRE(bottom_zero.finite);
+    REQUIRE(bottom_gap.finite);
+    REQUIRE(bottom_zero.interface_segments > 0);
+    REQUIRE(bottom_gap.interface_segments > 0);
+    CHECK(std::fabs(bottom_zero.interface_min_z - bottom_gap.interface_min_z) > 0.1);
+}
+
+TEST_CASE("Support and interface filament selections reach distinct tools", "[SupportSettingsVariance][SupportMaterial][GCode]")
+{
+    DynamicPrintConfig same = multifilament_config(2, {
+        {"enable_support", 1}, {"layer_height", 0.2}, {"support_on_build_plate_only", 0},
+        {"support_interface_top_layers", 3}, {"support_interface_bottom_layers", 0},
+        {"support_base_pattern_spacing", 2.5}, {"seam_position", "back"}, {"gcode_comments", 1},
+        {"use_relative_e_distances", 1}, {"layer_change_gcode", "G92 E0\n"},
+        {"skirt_loops", 0}, {"brim_width", 0.0}, {"raft_layers", 0},
+        {"support_filament", 0}, {"support_interface_filament", 0}
+    });
+    DynamicPrintConfig split = multifilament_config(2, {
+        {"enable_support", 1}, {"layer_height", 0.2}, {"support_on_build_plate_only", 0},
+        {"support_interface_top_layers", 3}, {"support_interface_bottom_layers", 0},
+        {"support_base_pattern_spacing", 2.5}, {"seam_position", "back"}, {"gcode_comments", 1},
+        {"use_relative_e_distances", 1}, {"layer_change_gcode", "G92 E0\n"},
+        {"skirt_loops", 0}, {"brim_width", 0.0}, {"raft_layers", 0},
+        {"support_filament", 1}, {"support_interface_filament", 2}
+    });
+    const SupportStats same_stats = inspect_support(slice_checked(capital_fixture(), same));
+    const SupportStats split_stats = inspect_support(slice_checked(capital_fixture(), split));
+    REQUIRE(same_stats.finite);
+    REQUIRE(split_stats.finite);
+    REQUIRE(same_stats.interface_segments > 0);
+    REQUIRE(split_stats.interface_segments > 0);
+    CHECK(same_stats.support_tools.size() == 1);
+    CHECK(split_stats.support_tools.size() >= 2);
+}
+
+} // namespace support_settings_variance_contracts

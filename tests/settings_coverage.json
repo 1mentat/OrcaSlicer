@@ -471,10 +471,10 @@
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "Support interface tests exercise auto, rectilinear, rectilinear interlaced, concentric, and grid mappings through direct and emitted-angle oracles; spiralinset is not claimed."
+      "reason": "The existing angle and emitted-fill contracts cover auto, rectilinear, concentric, rectilinear_interlaced, and grid; the spiral-inset contract adds an end-to-end rectilinear versus spiralinset comparison requiring finite interface extrusion, at least three interface layers, and distinct aggregate interface lengths. Numeric spacing and other interaction domains remain unclaimed."
     },
     "support_bottom_interface_spacing": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -926,10 +926,10 @@
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "Normal and tree support are compared through emitted interface direction on the same fixture; manual and other support-type variants remain unclaimed."
+      "reason": "The normal(auto) and tree(auto) retain the existing emitted-interface contracts, while the manual-support contract exercises normal(manual) and tree(manual) with and without an overlapping support enforcer, requiring zero support without the enforcer and positive support with it. Broader manual-volume geometry remains unclaimed."
     },
     "supports_enable": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
@@ -1066,12 +1066,13 @@
       "reason": "Organic support dimensions are varied below the extrusion width, below twice that width, below the tip, and at a legal nominal pair; errors identify the responsible option. These tests call Print::validate; a complete sliced-output matrix is not claimed."
     },
     "support_base_pattern": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
       "dimensions": [
-        "representative_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Normal support with Hollow and Lightning patterns emits a typed fallback warning without a blocking error. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Default, rectilinear, rectilinear-grid, honeycomb, lightning, and hollow are each deserialized on the tree-hybrid capital fixture; each produces finite bounded support, and the family has at least two distinct aggregate base-length signatures. Per-value semantic separation and hollow-infill suppression remain unclaimed."
     },
     "printable_height": {
       "test": "tests/fff_print/test_print.cpp",
@@ -2911,6 +2912,60 @@
         "fixture_only"
       ],
       "reason": "Direct two-filament wipe-tower generation uses category 0/1 transitions to require contact layers and their 20 mm/s feedrates; other category combinations and full Print wiring remain unclaimed."
+    },
+    "support_interface_spacing": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Top interface spacing values 0.0 and 4.0 are compared on the same capital fixture; both emit finite interface support and the solid case has more than 1.5 times the sparse case's interface length. The numeric boundary and broader interactions remain unclaimed."
+    },
+    "support_object_xy_distance": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Support/object XY distances 0.0 and 3.0 are sliced on the same capital fixture; both emit finite support and their base or interface aggregate lengths differ. The declared 0..10 range and contact geometry beyond this pair remain unclaimed."
+    },
+    "support_top_z_distance": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Top Z gaps 0.0 and 0.4 are compared with four top interface layers; both emit finite interface support and their maximum interface Z positions differ by more than 0.1. The numeric domain and independent-layer-height interactions remain unclaimed."
+    },
+    "support_bottom_z_distance": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Bottom Z gaps 0.0 and 0.4 are compared on the tunnel fixture with four bottom interface layers; both emit finite interface support and their minimum interface Z positions differ by more than 0.1. The numeric domain and top-gap interaction matrix remain unclaimed."
+    },
+    "support_filament": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Support base filament selections 0 (current/default) and 1 are exercised in the same two-filament slice; the same-selection case reaches one support tool while the split-selection comparison reaches at least two support tools. The open integer selector domain and isolated base-only oracle remain unclaimed."
+    },
+    "support_interface_filament": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Support-interface filament selections 0 (current/default) and 2 are exercised in the same two-filament slice; the same-selection case reaches one support tool while the split-selection comparison reaches at least two support tools. The open integer selector domain and isolated interface-only oracle remain unclaimed."
     }
   }
 }
