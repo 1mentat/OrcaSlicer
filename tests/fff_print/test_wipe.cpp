@@ -1265,7 +1265,7 @@ DepositionStats deposition_stats(const std::string &output, const DynamicPrintCo
         stats.xy_error_bound += 2. * std::sqrt(2.) *
             (0.5e-3 + float_epsilon * max_coordinate);
         // E_EXPORT_DIGITS is 5: a delta has two endpoint quantization errors.
-        const double max_e = std::max(std::abs(old_e), std::abs(line.e()));
+        const double max_e = std::max(std::abs(old_e), std::abs(static_cast<double>(line.e())));
         stats.filament_error_bound += 1e-5 + 4. * float_epsilon * max_e;
     });
     REQUIRE(stats.finite);
