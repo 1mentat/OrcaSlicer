@@ -188,6 +188,23 @@ motion, displacement limits, gradient gates, locked vertices, welded copies,
 and positive face orientation. Constant and stationary height fields exercise
 no-op and finite-output behavior; auxiliary weights must survive unchanged.
 
+`[Visvalingam]` checks polyline simplification against an independent linear
+search for each least-area point, including endpoints, exact area thresholds,
+translation, scaling, and salient turns. A default-comparator `pop_heap` mutation
+remains an unclaimed survivor; later heap rebuilding masks it in these cases.
+The production fix sizes the area array and uses the same area comparator for
+heap construction and removal.
+
+`[AmsValidation]` checks AMS tray temperature reconciliation, per-nozzle
+filament variants, and duplicate system material IDs through the public bundle
+validator. Negative controls cover ignored tags, user/system scope, library
+exclusions, distinct IDs, and printer compatibility.
+
+`[SettingsReslice]` compares fresh, incremental, and restored slicing across
+solid patterns, fill ordering, gap fill, bridge layers, and activated geometry
+settings. The settings inventory distinguishes observable variants from negative
+controls; combined expansion direction and close-holes behavior remain partial.
+
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
 line or segment details are needed. Profile-merge and export diagnostics are retained

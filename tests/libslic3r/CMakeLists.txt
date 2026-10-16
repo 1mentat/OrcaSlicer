@@ -62,6 +62,7 @@ add_executable(${_TEST_NAME}_tests
     test_png_read_write.cpp
     test_polygon.cpp
     test_polyline.cpp
+    test_multipoint.cpp
     test_mutable_polygon.cpp
     test_mutable_priority_queue.cpp
     test_minimum_spanning_tree.cpp

@@ -2686,6 +2686,132 @@
         "pipeline_oracle"
       ],
       "reason": "An enabled high-current fixture emits the M907 E550 command during direct SEMM loading. The disabled command behavior is not independently asserted."
+    },
+    "internal_solid_infill_pattern": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "All nine registered patterns run on a stepped solid; each non-default pattern changes the role/path snapshot and incremental slicing matches a fresh slice before restoration."
+    },
+    "top_surface_fill_order": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Default, inward, and outward top concentric fill orders produce observable path-order variants, with fresh/incremental/restored equivalence."
+    },
+    "bottom_surface_fill_order": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Default, inward, and outward bottom concentric fill orders run in both reslice directions; an explicit inward/outward comparison exposes ordering while the default/outward no-effect row remains a negative control."
+    },
+    "gap_fill_target": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Everywhere, top/bottom, and nowhere produce distinct path evidence; top/bottom must reduce gap-fill path count relative to everywhere and match fresh/restored slicing."
+    },
+    "wall_direction": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both wall directions are checked against absolute contour winding on every generated perimeter loop; clockwise reverses every counter-clockwise loop."
+    },
+    "dont_filter_internal_bridges": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Disabled, limited, and no-filter internal bridge modes have observable role/path differences on a stepped solid, checked through fresh, incremental, and restored slices."
+    },
+    "enable_extra_bridge_layer": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "All four modes are exercised; an external-overhang fixture activates external-only behavior while the stepped fixture exposes internal-only and apply-to-all changes."
+    },
+    "detect_narrow_internal_solid_infill": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both values run in fresh/incremental/restored slices; enabling detection must increase solid-infill path count on the selected narrow fixture."
+    },
+    "precise_outer_wall": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both values run in fresh/incremental/restored slices; enabling precise outer walls must reduce aggregate path length for the chosen wall configuration."
+    },
+    "infill_complete_top": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A 3D honeycomb fixture activates both values and requires increased path count when completion is enabled, with fresh/incremental/restored equivalence."
+    },
+    "make_overhang_printable": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "An overhang fixture with an explicit 20-degree threshold activates both values and requires changed geometry plus fresh/incremental/restored equivalence."
+    },
+    "precise_z_height": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A nonuniform-height mesh activates both values, permits their different layer counts, and requires changed path evidence plus fresh/incremental/restored equivalence."
+    },
+    "top_surface_expansion_direction": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "An activated ledge fixture distinguishes inward from outward expansion and checks fresh/incremental/restored equality; the combined direction is exercised only as a negative control, so complete enum behavior is not claimed."
+    },
+    "slicing_mode": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsReslice]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "An overlapping-volume fixture distinguishes regular from even-odd parity and checks fresh/incremental/restored equality; close-holes is currently only a negative control on a mesh without the needed hole geometry."
     }
   }
 }

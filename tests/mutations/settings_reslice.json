@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "description": "Fresh, incremental and restored slicing across activated setting families.",
+  "mutants": [
+    {
+      "id": "reslice-top-fill-order-source",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "params.fill_order = region_config.top_surface_fill_order.value;",
+      "new": "params.fill_order = region_config.bottom_surface_fill_order.value;",
+      "description": "Uses the bottom ordering for top concentric fills; the top fill-order matrix must distinguish both supported directions.",
+      "test_filter": "SettingsReslice"
+    },
+    {
+      "id": "reslice-bottom-fill-order-source",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "params.fill_order = region_config.bottom_surface_fill_order.value;",
+      "new": "params.fill_order = region_config.top_surface_fill_order.value;",
+      "description": "Uses the top ordering for bottom concentric fills; the activation contract checks the resulting ordering.",
+      "test_filter": "SettingsReslice"
+    },
+    {
+      "id": "reslice-gap-fill-internal-solid-gate",
+      "path": "src/libslic3r/Fill/FillBase.cpp",
+      "old": "if ((this->print_object_config->gap_fill_target.value == gftNowhere) ||\n        (surface->surface_type == stInternalSolid && this->print_object_config->gap_fill_target.value != gftEverywhere))",
+      "new": "if ((this->print_object_config->gap_fill_target.value == gftNowhere) ||\n        (surface->surface_type == stInternalSolid && this->print_object_config->gap_fill_target.value == gftEverywhere))",
+      "description": "Inverts the internal-solid gap-fill target guard; the everywhere/top-bottom/nowhere partitions must no longer agree.",
+      "test_filter": "SettingsReslice"
+    },
+    {
+      "id": "reslice-external-bridge-layer-gate",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if( (this->config().enable_extra_bridge_layer.value == eblApplyToAll) || (this->config().enable_extra_bridge_layer.value == eblExternalBridgeOnly)){",
+      "new": "if( (this->config().enable_extra_bridge_layer.value == eblApplyToAll) && (this->config().enable_extra_bridge_layer.value == eblExternalBridgeOnly)){",
+      "description": "Makes the external extra-bridge mode impossible; the activated overhang fixture must detect the missing generated layer.",
+      "test_filter": "SettingsReslice"
+    },
+    {
+      "id": "reslice-narrow-solid-detection-gate",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "if (layer.object()->config().detect_narrow_internal_solid_infill) {",
+      "new": "if (!layer.object()->config().detect_narrow_internal_solid_infill) {",
+      "description": "Reverses narrow internal solid detection; the boolean geometry variant must cease matching the fresh changed slice.",
+      "test_filter": "SettingsReslice"
+    },
+    {
+      "id": "reslice-precise-outer-wall-gate",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "if(config->precise_outer_wall && config->wall_sequence == WallSequence::InnerOuter)",
+      "new": "if(!config->precise_outer_wall && config->wall_sequence == WallSequence::InnerOuter)",
+      "description": "Reverses the precise outer-wall spacing branch; the precise-wall geometry contract must fail.",
+      "test_filter": "SettingsReslice"
+    },
+    {
+      "id": "reslice-top-expansion-direction-gate",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (direction != TopSurfaceExpansionDirection::InwardAndOutward) {",
+      "new": "if (direction == TopSurfaceExpansionDirection::InwardAndOutward) {",
+      "description": "Reverses directional expansion filtering; the step-with-ledge activation fixture must distinguish inward from outward growth.",
+      "test_filter": "SettingsReslice"
+    },
+    {
+      "id": "reslice-even-odd-slicing-mode",
+      "path": "src/libslic3r/PrintObjectSlice.cpp",
+      "old": "case SlicingMode::EvenOdd:    params_base.mode = MeshSlicingParams::SlicingMode::EvenOdd; break;",
+      "new": "case SlicingMode::EvenOdd:    params_base.mode = MeshSlicingParams::SlicingMode::Regular; break;",
+      "description": "Maps even-odd back to regular slicing; overlapping-volume parity must change.",
+      "test_filter": "SettingsReslice"
+    },
+    {
+      "id": "reslice-honeycomb-complete-top",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "params.infill_complete_top = region_config.infill_complete_top;",
+      "new": "params.infill_complete_top = !region_config.infill_complete_top;",
+      "description": "Inverts the 3D honeycomb complete-top setting; the solid sparse-fill activation fixture must fail.",
+      "test_filter": "SettingsReslice"
+    },
+    {
+      "id": "reslice-wall-direction-orientation",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "if ((perimeter_generator.config->wall_direction == WallDirection::CounterClockwise) == (loop.is_contour || loop.is_thin_wall_hole))",
+      "new": "if ((perimeter_generator.config->wall_direction == WallDirection::CounterClockwise) != (loop.is_contour || loop.is_thin_wall_hole))",
+      "description": "Reverses the absolute contour/hole orientation rule; the wall-direction contract checks both configured orientation and pairwise reversal.",
+      "test_filter": "SettingsReslice"
+    }
+  ],
+  "known_survivors": [
+    {
+      "id": "reslice-top-one-wall-gate",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "if (loop_number > 0 && only_one_wall_top && this->upper_slices == nullptr)",
+      "new": "if (loop_number > 0 && !only_one_wall_top && this->upper_slices == nullptr)",
+      "description": "Reverses the top one-wall reduction; the stepped geometry variant requires the configured reduction.",
+      "test_filter": "SettingsReslice",
+      "status": "survived",
+      "scope": "Selected fixture observes only-one-wall behavior, but this particular guard is masked by its perimeter path; not counted as a kill or proven equivalent."
+    }
+  ]
+}

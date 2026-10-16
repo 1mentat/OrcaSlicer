@@ -9910,3 +9910,130 @@ TEST_CASE("AMS combo info clears stale output before resolving an empty tray lis
 }
 
 } // namespace preset_bundle_contracts
+
+namespace {
+Preset &ams_add(PresetCollection &collection, const std::string &name)
+{
+    auto config = collection.default_preset().config;
+    config.option<ConfigOptionString>("inherits", true)->value.clear();
+    return collection.load_preset({}, name, config, false);
+}
+struct AmsValidationFixture {
+    PresetBundle bundle;
+    AmsValidationFixture()
+    {
+        auto &vendor = bundle.vendors["Contract Vendor"];
+        vendor.id = vendor.name = "Contract Vendor";
+        auto &printer = ams_add(bundle.printers, "Contract Printer 0.4 nozzle");
+        printer.is_system = true;
+        printer.vendor = &vendor;
+        printer.config.option<ConfigOptionString>("printer_model", true)->value = "Contract Printer";
+        printer.config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+        printer.config.option<ConfigOptionStrings>("default_filament_profile", true)->values.clear();
+    }
+    Preset &filament(const std::string &name)
+    {
+        auto &preset = ams_add(bundle.filaments, name);
+        preset.filament_id = "contract-material";
+        preset.setting_id = "setting-" + name;
+        preset.vendor = &bundle.vendors.at("Contract Vendor");
+        preset.config.option<ConfigOptionStrings>("compatible_printers", true)->values = {"Contract Printer 0.4 nozzle"};
+        preset.config.option<ConfigOptionInts>("nozzle_temperature_range_low", true)->values = {195};
+        preset.config.option<ConfigOptionInts>("nozzle_temperature_range_high", true)->values = {245};
+        return preset;
+    }
+};
+}
+TEST_CASE("AMS tray temperatures reconcile only the identified compatible user material", "[PresetBundle][AmsValidation]")
+{
+    const int scenario = GENERATE(0, 1, 2, 3, 4, 5, 6, 7, 8);
+    CAPTURE(scenario);
+    AmsValidationFixture fixture;
+    auto &preset = fixture.filament("User material");
+    std::string nozzle = "0.4", material = "contract-material", tag = "1234567890129999";
+    std::string low = "180", high = "260", setting = "unchanged";
+    bool expected_equal = false;
+    std::string expected_low = "195", expected_high = "245";
+    switch (scenario) {
+    case 1: low = expected_low; high = expected_high; expected_equal = true; break;
+    case 2: low = expected_low; break;
+    case 3: high = expected_high; break;
+    case 4: tag = "0"; expected_equal = true; break;
+    case 5: tag = "1234567890120199"; expected_equal = true; break;
+    case 6: material = "absent"; expected_equal = true; break;
+    case 7: preset.is_system = true; expected_equal = true; break;
+    case 8: preset.config.option<ConfigOptionStrings>("compatible_printers")->values = {"Other Printer"}; expected_equal = true; break;
+    default: break;
+    }
+    if (expected_equal) { expected_low = low; expected_high = high; }
+    const bool equal = fixture.bundle.check_filament_temp_equation_by_printer_type_and_nozzle_for_mas_tray(
+        "Contract Printer", nozzle, material, tag, low, high, setting, 0, nvtStandard);
+    CHECK(equal == expected_equal);
+    CHECK(low == expected_low);
+    CHECK(high == expected_high);
+    CHECK(setting == (expected_equal ? "unchanged" : "setting-User material"));
+}
+TEST_CASE("AMS duplicate validation scopes material identifiers by compatible system printer", "[PresetBundle][AmsValidation]")
+{
+    const int scenario = GENERATE(0, 1, 2, 3, 4, 5, 6);
+    CAPTURE(scenario);
+    AmsValidationFixture fixture;
+    fixture.filament("First").is_system = true;
+    auto &model = fixture.bundle.vendors.at("Contract Vendor").models.emplace_back();
+    model.id = model.name = "Contract Printer";
+    model.variants.emplace_back("0.4");
+    model.default_materials = {"First"};
+    auto &second = fixture.filament("Second");
+    second.is_system = true;
+    bool duplicate = true;
+    if (scenario == 1) { second.filament_id = "distinct"; duplicate = false; }
+    if (scenario == 2) { second.filament_id.clear(); duplicate = false; }
+    if (scenario == 3) { second.is_system = false; duplicate = false; }
+    if (scenario == 4) {
+        auto &library = fixture.bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
+        library.id = library.name = PresetBundle::ORCA_FILAMENT_LIBRARY;
+        second.vendor = &library;
+        second.config.option<ConfigOptionStrings>("compatible_printers")->values.clear();
+    }
+    if (scenario == 5) {
+        auto &library = fixture.bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
+        library.id = library.name = PresetBundle::ORCA_FILAMENT_LIBRARY;
+        second.vendor = &library;
+        second.config.option<ConfigOptionStrings>("compatible_printers")->values.clear();
+        second.m_excluded_from.insert("Contract Printer 0.4 nozzle");
+        duplicate = false;
+    }
+    if (scenario == 6) {
+        fixture.bundle.printers.find_preset("Contract Printer 0.4 nozzle")->is_system = false;
+        duplicate = false;
+    }
+    // The optional check is the only reason this otherwise valid bundle fails.
+    REQUIRE_FALSE(fixture.bundle.has_errors(false));
+    CHECK(fixture.bundle.has_errors(true) == duplicate);
+}
+
+TEST_CASE("AMS tray temperatures select the extruder and nozzle variant", "[PresetBundle][AmsValidation]")
+{
+    const int variant = GENERATE(0, 1, 2, 3);
+    CAPTURE(variant);
+    AmsValidationFixture fixture;
+    auto &preset = fixture.filament("Variant material");
+    preset.config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"};
+    preset.config.option<ConfigOptionInts>("nozzle_temperature_range_low")->values = {195, 205, 215};
+    preset.config.option<ConfigOptionInts>("nozzle_temperature_range_high")->values = {245, 255, 265};
+    fixture.bundle.printers.find_preset("Contract Printer 0.4 nozzle")
+        ->config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values = {etDirectDrive, etBowden};
+    std::string nozzle = "0.4", material = "contract-material", tag = "1234567890129999";
+    std::string low = "170", high = "300", setting = "unchanged";
+    const bool equal = fixture.bundle.check_filament_temp_equation_by_printer_type_and_nozzle_for_mas_tray(
+        "Contract Printer", nozzle, material, tag, low, high, setting, variant / 2,
+        variant % 2 == 0 ? nvtStandard : nvtHighFlow);
+    CHECK_FALSE(equal);
+    // No Bowden High Flow entry exists, so that nozzle uses the first variant.
+    const std::vector<std::string> expected_low{"195", "205", "215", "195"};
+    const std::vector<std::string> expected_high{"245", "255", "265", "245"};
+    CHECK(low == expected_low[variant]);
+    CHECK(high == expected_high[variant]);
+    CHECK(setting == "setting-Variant material");
+}

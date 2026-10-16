@@ -1,3 +1,6 @@
+#include <array>
+#include <tuple>
+#include <catch2/generators/catch_generators_range.hpp>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polyline.hpp"
 #include <functional>
@@ -1857,3 +1860,375 @@ TEST_CASE("Infill anchor maximum enables connected sparse geometry", "[SettingsF
 }
 
 } // namespace settings_family_contracts
+
+namespace reslice_settings_contracts {
+using Catch::Matchers::WithinAbs;
+
+namespace {
+struct Totals {
+    size_t paths = 0;
+    double length = 0.;
+    double volume = 0.;
+};
+struct LayerSnapshot {
+    std::map<ExtrusionRole, Totals> totals;
+    std::vector<std::array<long long, 5>> path_order;
+};
+using Snapshot = std::vector<LayerSnapshot>;
+
+DynamicPrintConfig config()
+{
+    DynamicPrintConfig c = DynamicPrintConfig::full_print_config();
+    c.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", 0.4}, {"wall_loops", 2}, {"wall_generator", "classic"},
+        {"top_shell_layers", 3}, {"bottom_shell_layers", 3},
+        {"top_shell_thickness", 0}, {"bottom_shell_thickness", 0},
+        {"sparse_infill_density", "20%"}, {"elefant_foot_compensation", 0},
+        // Center-based top and bottom patterns make fill-order variants
+        // observable while retaining a small, deterministic stepped fixture.
+        {"top_surface_pattern", "concentric"}, {"bottom_surface_pattern", "concentric"},
+        {"internal_solid_infill_pattern", "monotonic"},
+        {"layer_change_gcode", "G92 E0"},
+        {"bridge_no_support", false}, {"make_overhang_printable", false},
+    });
+    return c;
+}
+
+TriangleMesh fixture()
+{
+    // A stepped solid includes exposed shelves, top/bottom shells, and internal
+    // sparse regions in only twenty layers.
+    TriangleMesh a = make_cube(12., 12., 2.);
+    TriangleMesh b = make_cube(6., 8., 2.);
+    b.translate(3., 2., 2.);
+    a.merge(b);
+    return a;
+}
+
+Snapshot snapshot(Print &print, const std::optional<size_t> expected_layer_count = size_t(20))
+{
+    const auto error = print.validate();
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+    print.set_status_silent();
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    if (expected_layer_count)
+        REQUIRE(print.objects().front()->layer_count() == *expected_layer_count);
+    Snapshot result;
+    for (const Layer *layer : print.objects().front()->layers()) {
+        LayerSnapshot layer_snapshot;
+        auto &totals = layer_snapshot.totals;
+        for (const LayerRegion *region : layer->regions()) {
+            const auto collect = [&](const ExtrusionPath &path) {
+                const double length = unscale<double>(path.length());
+                CHECK(std::isfinite(length));
+                CHECK(length >= 0.);
+                CHECK(std::isfinite(path.mm3_per_mm));
+                CHECK(path.mm3_per_mm > 0.);
+                auto &sum = totals[path.role()];
+                ++sum.paths;
+                sum.length += length;
+                sum.volume += length * path.mm3_per_mm;
+                const Point first = path.first_point();
+                const Point last = path.last_point();
+                layer_snapshot.path_order.push_back({
+                    static_cast<long long>(path.role()), first.x(), first.y(), last.x(), last.y()});
+            };
+            for_each_extrusion_path(region->perimeters, collect);
+            for_each_extrusion_path(region->fills, collect);
+        }
+        REQUIRE_FALSE(totals.empty());
+        result.push_back(std::move(layer_snapshot));
+    }
+    return result;
+}
+
+void same(const Snapshot &a, const Snapshot &b)
+{
+    REQUIRE(a.size() == b.size());
+    for (size_t layer = 0; layer < a.size(); ++layer) {
+        CAPTURE(layer);
+        REQUIRE(a[layer].totals.size() == b[layer].totals.size());
+        for (const auto &[role, expected] : a[layer].totals) {
+            CAPTURE(role);
+            REQUIRE(b[layer].totals.count(role) == 1);
+            const auto &actual = b[layer].totals.at(role);
+            CHECK(actual.paths == expected.paths);
+            CHECK_THAT(actual.length, WithinAbs(expected.length, 1e-5));
+            CHECK_THAT(actual.volume, WithinAbs(expected.volume, 1e-5));
+        }
+        CHECK(a[layer].path_order == b[layer].path_order);
+    }
+}
+
+bool different(const Snapshot &a, const Snapshot &b)
+{
+    if (a.size() != b.size()) return true;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].totals.size() != b[i].totals.size()) return true;
+        for (const auto &[role, p] : a[i].totals) {
+            const auto it = b[i].totals.find(role);
+            if (it == b[i].totals.end()) return true;
+            const auto &q = it->second;
+            if (p.paths != q.paths || std::abs(p.length - q.length) > 1e-5 ||
+                std::abs(p.volume - q.volume) > 1e-5) return true;
+        }
+        if (a[i].path_order != b[i].path_order) return true;
+    }
+    return false;
+}
+
+std::pair<size_t, double> path_totals(const Snapshot &snapshot, const bool solid_only = false)
+{
+    size_t paths = 0;
+    double length = 0.;
+    for (const LayerSnapshot &layer : snapshot)
+        for (const auto &[role, totals] : layer.totals)
+            if (!solid_only || role == erSolidInfill) {
+                paths += totals.paths;
+                length += totals.length;
+            }
+    return {paths, length};
+}
+
+size_t role_path_count(const Snapshot &snapshot, const ExtrusionRole role)
+{
+    size_t paths = 0;
+    for (const LayerSnapshot &layer : snapshot)
+        if (const auto it = layer.totals.find(role); it != layer.totals.end())
+            paths += it->second.paths;
+    return paths;
+}
+
+void check_variant_on(const TriangleMesh &mesh, std::initializer_list<ConfigBase::SetDeserializeItem> fixture_options,
+                      const std::string &key, const std::string &before, const std::string &after,
+                      bool expect_effect = true,
+                      const std::optional<size_t> expected_layer_count = size_t(20))
+{
+    CAPTURE(key, before, after);
+    DynamicPrintConfig base = config();
+    base.set_deserialize_strict(fixture_options);
+    REQUIRE(base.option(key) != nullptr);
+    base.set_deserialize_strict(key, before);
+    DynamicPrintConfig changed = base;
+    changed.set_deserialize_strict(key, after);
+    REQUIRE_FALSE(*base.option(key) == *changed.option(key));
+
+    Print reused;
+    Model model;
+    init_print({mesh}, reused, model, base, nullptr, false);
+    const Snapshot original = snapshot(reused, expected_layer_count);
+    reused.apply(model, changed);
+    const Snapshot incremental = snapshot(reused, expected_layer_count);
+    Print fresh;
+    Model fresh_model;
+    init_print({mesh}, fresh, fresh_model, changed, nullptr, false);
+    const Snapshot expected = snapshot(fresh, expected_layer_count);
+    if (expect_effect)
+        REQUIRE(different(original, expected));
+    else
+        CHECK_FALSE(different(original, expected));
+    if (key == "detect_narrow_internal_solid_infill")
+        REQUIRE(path_totals(expected, true).first > path_totals(original, true).first);
+    if (key == "only_one_wall_top")
+        REQUIRE(path_totals(expected).first < path_totals(original).first);
+    if (key == "precise_outer_wall")
+        REQUIRE(path_totals(expected).second < path_totals(original).second);
+    if (key == "infill_complete_top" && expected_layer_count && *expected_layer_count == 50)
+        REQUIRE(path_totals(expected).first > path_totals(original).first);
+    if (key == "gap_fill_target" && after == "topbottom")
+        REQUIRE(role_path_count(expected, erGapFill) < role_path_count(original, erGapFill));
+    same(expected, incremental);
+    reused.apply(model, base);
+    same(original, snapshot(reused, expected_layer_count));
+
+}
+
+void check_variant(const std::string &key, const std::string &before, const std::string &after,
+                   bool expect_effect = true)
+{
+    check_variant_on(fixture(), {}, key, before, after, expect_effect);
+}
+
+TriangleMesh overlap_fixture()
+{
+    TriangleMesh base = make_cube(12., 12., 4.);
+    TriangleMesh overlap = make_cube(6., 8., 2.);
+    overlap.translate(3., 2., 1.);
+    base.merge(overlap);
+    return base;
+}
+
+TriangleMesh overhang_fixture()
+{
+    TriangleMesh base = make_cube(12., 12., 2.);
+    TriangleMesh overhang = make_cube(5., 5., 2.);
+    overhang.translate(9., 3., 2.);
+    base.merge(overhang);
+    return base;
+}
+
+TriangleMesh step_expansion_fixture()
+{
+    TriangleMesh base = make_cube(60., 60., 5.);
+    TriangleMesh upper = make_cube(54., 54., 5.);
+    upper.translate(3.f, 3.f, 5.f);
+    base.merge(upper);
+    return base;
+}
+
+TriangleMesh nonuniform_height_fixture()
+{
+    TriangleMesh mesh = make_cube(12., 12., 4.);
+    mesh.scale(Vec3f(1.f, 1.f, 1.005f));
+    return mesh;
+}
+
+std::vector<bool> contour_winding(Print &print)
+{
+    std::vector<bool> winding;
+    REQUIRE(print.objects().size() == 1);
+    for (const Layer *layer : print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions())
+            for (const ExtrusionEntity *entity : region->perimeters.flatten().entities)
+                if (entity->is_loop()) {
+                    const auto *loop = static_cast<const ExtrusionLoop *>(entity);
+                    winding.push_back(loop->polygon().is_counter_clockwise());
+                }
+    return winding;
+}
+}
+
+TEST_CASE("Solid infill pattern changes match fresh slicing in both directions", "[SettingsVariance][SettingsReslice]")
+{
+    const auto pattern = GENERATE("monotonicline", "rectilinear", "alignedrectilinear", "concentric",
+                                  "spiralinset", "hilbertcurve", "archimedeanchords", "octagramspiral");
+    check_variant("internal_solid_infill_pattern", "monotonic", pattern);
+}
+
+TEST_CASE("Shell and perimeter enum changes match fresh slicing in both directions", "[SettingsVariance][SettingsReslice]")
+{
+    struct Row { const char *key; const char *before; const char *after; bool expect_effect; };
+    const std::vector<Row> rows {
+        {"top_surface_fill_order", "default", "outward", true},
+        {"top_surface_fill_order", "default", "inward", true},
+        // The stepped solid has no bottom internal interface and therefore
+        // exercises the setting without making the result change.
+        {"bottom_surface_fill_order", "default", "outward", false},
+        {"bottom_surface_fill_order", "default", "inward", true},
+        // Expansion is only observable when only-one-wall top frees an area;
+        // this fixture deliberately records that activation precondition.
+        {"top_surface_expansion_direction", "inward_and_outward", "inward", false},
+        {"top_surface_expansion_direction", "inward_and_outward", "outward", false},
+        {"gap_fill_target", "everywhere", "topbottom", true},
+        {"gap_fill_target", "everywhere", "nowhere", true},
+        {"wall_direction", "ccw", "cw", false},
+        {"slicing_mode", "regular", "even_odd", false},
+        {"slicing_mode", "regular", "close_holes", false},
+        {"dont_filter_internal_bridges", "disabled", "limited", true},
+        {"dont_filter_internal_bridges", "disabled", "nofilter", true},
+        // No bridge surface is present in this non-support fixture.
+        {"enable_extra_bridge_layer", "disabled", "external_bridge_only", false},
+        {"enable_extra_bridge_layer", "disabled", "internal_bridge_only", true},
+        {"enable_extra_bridge_layer", "disabled", "apply_to_all", true},
+    };
+    const size_t index = GENERATE_COPY(Catch::Generators::range(size_t(0), rows.size()));
+    check_variant(rows[index].key, rows[index].before, rows[index].after, rows[index].expect_effect);
+}
+
+TEST_CASE("Geometry boolean changes match fresh slicing in both directions", "[SettingsVariance][SettingsReslice]")
+{
+    struct Row { const char *key; bool expect_effect; };
+    const std::vector<Row> rows {
+        {"bridge_no_support", false},
+        {"detect_narrow_internal_solid_infill", true},
+        {"infill_complete_top", false},
+        {"interface_shells", false},
+        {"make_overhang_printable", false},
+        {"precise_outer_wall", true},
+        {"precise_z_height", false},
+        {"staggered_inner_seams", false},
+        {"only_one_wall_top", true},
+        {"only_one_wall_first_layer", true},
+    };
+    const size_t index = GENERATE_COPY(Catch::Generators::range(size_t(0), rows.size()));
+    // The false rows are explicit negative controls: their activation
+    // preconditions are absent from this fixture, while fresh/incremental
+    // equivalence and restoration remain required.
+    check_variant(rows[index].key, "0", "1", rows[index].expect_effect);
+}
+
+TEST_CASE("Bottom fill order reverses the bottom surface ordering", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
+{
+    check_variant("bottom_surface_fill_order", "inward", "outward");
+}
+
+TEST_CASE("Top expansion direction changes a configured top expansion", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
+{
+    check_variant_on(step_expansion_fixture(),
+                     {{"wall_generator", "arachne"}, {"wall_loops", 3}, {"top_shell_layers", 3},
+                      {"bottom_shell_layers", 3}, {"top_surface_density", "100%"},
+                     {"min_width_top_surface", 0.0}, {"only_one_wall_top", true},
+                      {"top_surface_expansion", 2.0}},
+                     "top_surface_expansion_direction", "inward", "outward", true, 50);
+}
+
+TEST_CASE("Honeycomb complete-top setting changes the internal solid fill", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
+{
+    check_variant_on(make_cube(20., 20., 10.),
+                     {{"sparse_infill_pattern", "3dhoneycomb"}, {"sparse_infill_density", "20%"},
+                      {"top_shell_layers", 0}, {"bottom_shell_layers", 0}},
+                     "infill_complete_top", "0", "1", true, 50);
+}
+
+TEST_CASE("Overlapping volumes select a slicing mode with different parity", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
+{
+    check_variant_on(overlap_fixture(), {}, "slicing_mode", "regular", "even_odd");
+}
+
+TEST_CASE("External overhang setting changes printable overhang treatment", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
+{
+    check_variant_on(overhang_fixture(), {{"make_overhang_printable_angle", 20.0}},
+                     "make_overhang_printable", "0", "1");
+}
+
+TEST_CASE("Extra bridge layer mode changes overhang processing", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
+{
+    check_variant_on(overhang_fixture(), {{"bridge_no_support", true}},
+                     "enable_extra_bridge_layer", "disabled", "external_bridge_only");
+}
+
+TEST_CASE("Precise Z height changes a nonuniform-height mesh", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
+{
+    check_variant_on(nonuniform_height_fixture(), {}, "precise_z_height", "0", "1", true, std::nullopt);
+}
+
+TEST_CASE("Wall direction reverses every generated perimeter winding", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
+{
+    DynamicPrintConfig ccw = config();
+    ccw.set_deserialize_strict({{"wall_direction", "ccw"}, {"wall_loops", 2}});
+    DynamicPrintConfig cw = ccw;
+    cw.set_deserialize_strict("wall_direction", "cw");
+    Print first;
+    Model first_model;
+    init_print({fixture()}, first, first_model, ccw, nullptr, false);
+    first.process();
+    const auto first_winding = contour_winding(first);
+    Print second;
+    Model second_model;
+    init_print({fixture()}, second, second_model, cw, nullptr, false);
+    second.process();
+    const auto second_winding = contour_winding(second);
+    REQUIRE_FALSE(first_winding.empty());
+    REQUIRE(first_winding.size() == second_winding.size());
+    CHECK(std::all_of(first_winding.begin(), first_winding.end(), [](bool value) { return value; }));
+    CHECK(std::all_of(second_winding.begin(), second_winding.end(), [](bool value) { return !value; }));
+    bool all_reversed = true;
+    for (size_t index = 0; index < first_winding.size(); ++index)
+        all_reversed = all_reversed && first_winding[index] != second_winding[index];
+    CHECK(all_reversed);
+}
+
+} // namespace reslice_settings_contracts

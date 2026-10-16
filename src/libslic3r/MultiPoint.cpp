@@ -282,13 +282,20 @@ Points MultiPoint::visivalingam(const Points& pts, const double tolerance)
     };
      // We store the effective areas for each node
     std::vector<coordf_t> areas;
-    areas.reserve(pts.size());
+    areas.resize(pts.size());
      // Construct the initial set of nodes. We will make a heap out of the "heap" vector using 
     // std::make_heap. node_list is used later.
     std::vector<vis_node*> node_list;
     node_list.resize(pts.size());
     std::vector<vis_node*> heap;
     heap.reserve(pts.size());
+    // The heap stores pointers, so the default comparator orders addresses. Compare
+    // the pointed-to effective areas explicitly and break ties by source index.
+    const auto heap_less = [](const vis_node *lhs, const vis_node *rhs) {
+        if (lhs->area != rhs->area)
+            return lhs->area > rhs->area;
+        return lhs->pt_idx > rhs->pt_idx;
+    };
     for (size_t i = 1; i < pts.size() - 1; ++ i) {
         // Get effective area of current node.
         coordf_t area = effective_area(i, i - 1, i + 1);
@@ -296,9 +303,8 @@ Points MultiPoint::visivalingam(const Points& pts, const double tolerance)
         node_list[i] = new vis_node(i, i - 1, i + 1, area);
         heap.push_back(node_list[i]);
     }
-     // Call std::make_heap, which uses the < operator by default to make "heap" into 
-    // a binheap, sorted by the < operator we defind in the vis_node struct
-    std::make_heap(heap.begin(), heap.end());
+     // Build the min-heap using the pointed-node comparator above.
+    std::make_heap(heap.begin(), heap.end(), heap_less);
      // Start comparing areas. Set min_area to an outrageous value initially.
     double min_area = -std::numeric_limits<double>::max();
     while (!heap.empty()) {
@@ -306,7 +312,7 @@ Points MultiPoint::visivalingam(const Points& pts, const double tolerance)
         vis_node* curr = heap.front();
          // Pop node we just retrieved off the heap. pop_heap moves front element in vector
         // to the back, so we can call pop_back()
-        std::pop_heap(heap.begin(), heap.end());
+        std::pop_heap(heap.begin(), heap.end(), heap_less);
         heap.pop_back();
          // Sanity assert check
         assert(curr == node_list[curr->pt_idx]);
@@ -320,14 +326,14 @@ Points MultiPoint::visivalingam(const Points& pts, const double tolerance)
             prev->next_idx = curr->next_idx;
             prev->area = effective_area(prev->pt_idx, prev->prev_idx, prev->next_idx);
             // For some reason, std::make_heap() is the fastest way to resort the heap. Probably needs testing.
-            std::make_heap(heap.begin(), heap.end());
+            std::make_heap(heap.begin(), heap.end(), heap_less);
         }
          // Update next
         vis_node* next = node_list[curr->next_idx];
         if(next != nullptr){
             next->prev_idx = curr->prev_idx;
             next->area = effective_area(next->pt_idx, next->prev_idx, next->next_idx);
-            std::make_heap(heap.begin(), heap.end());
+            std::make_heap(heap.begin(), heap.end(), heap_less);
         }
          areas[curr->pt_idx] = min_area;
         node_list[curr->pt_idx] = nullptr;
