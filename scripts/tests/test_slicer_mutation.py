@@ -169,6 +169,21 @@ class MutationResultTests(unittest.TestCase):
                 command = slicer_mutation._test_command(["ctest", *options], mutant)
                 self.assertEqual(command, ["ctest", *options, "--output-on-failure"])
 
+    def test_ctest_exclusions_do_not_suppress_mutant_selection(self):
+        mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "", "Flow")
+        for options in (["-LE", "NotWorking|RequiresApp"], ["-LENotWorking"],
+                        ["--label-exclude", "NotWorking"], ["--label-exclude=NotWorking"]):
+            with self.subTest(options=options):
+                command = slicer_mutation._test_command(["ctest", *options], mutant)
+                self.assertEqual(command, ["ctest", *options, "--output-on-failure", "-L", "Flow"])
+
+    def test_ctest_explicit_filter_and_exclusions_are_preserved(self):
+        mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "", "Flow")
+        command = slicer_mutation._test_command(
+            ["ctest", "--label-regex", "{filter}", "-LE", "NotWorking"], mutant)
+        self.assertEqual(command, ["ctest", "--label-regex", "Flow", "-LE", "NotWorking",
+                                   "--output-on-failure"])
+
     def test_zero_evidence_is_not_a_survivor(self):
         self.assertEqual(slicer_mutation._classify_test(self.result(0, output=""), 0), "test_no_evidence")
 

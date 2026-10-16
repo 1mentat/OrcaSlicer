@@ -382,7 +382,8 @@ def _test_command(argv: Sequence[str], mutant: Mutant) -> list[str]:
             result.append("--output-on-failure")
     if mutant.test_filter and "{filter}" not in " ".join(argv):
         has_label = any(value == "--label-regex" or value.startswith("--label-regex=")
-                        or value.startswith("-L") for value in result[1:])
+                        or (value.startswith("-L") and not value.startswith("-LE"))
+                        for value in result[1:])
         if _is_ctest(result[0]) and not has_label:
             result.extend(["-L", mutant.test_filter])
     return result
