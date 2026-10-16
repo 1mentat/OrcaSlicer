@@ -1076,7 +1076,11 @@ TEST_CASE("Role flow gate leaves top and bottom ratios active while disabling ot
         REQUIRE(baseline.roles[i].filament_length > 0.0);
     }
     REQUIRE(baseline.roles[bottom].first_layer_moves > 0);
-    REQUIRE(baseline.roles[bottom].later_layer_moves > 0);
+    // Later shell layers on this uniform solid have the internal-solid role.
+    REQUIRE(baseline.roles[internal_solid].later_layer_moves > 0);
+    REQUIRE(baseline.roles[top].later_layer_moves > 0);
+    REQUIRE(baseline.roles[outer].first_layer_moves > 0);
+    REQUIRE(baseline.roles[outer].later_layer_moves > 0);
 
     DynamicPrintConfig changed_config = baseline_config;
     changed_config.set_deserialize_strict({
@@ -1108,7 +1112,11 @@ TEST_CASE("Role flow gate compounds first-layer and role ratios",
         REQUIRE(baseline.roles[i].filament_length > 0.0);
     }
     REQUIRE(baseline.roles[bottom].first_layer_moves > 0);
-    REQUIRE(baseline.roles[bottom].later_layer_moves > 0);
+    // Later shell layers on this uniform solid have the internal-solid role.
+    REQUIRE(baseline.roles[internal_solid].later_layer_moves > 0);
+    REQUIRE(baseline.roles[top].later_layer_moves > 0);
+    REQUIRE(baseline.roles[outer].first_layer_moves > 0);
+    REQUIRE(baseline.roles[outer].later_layer_moves > 0);
 
     DynamicPrintConfig changed_config = baseline_config;
     changed_config.set_deserialize_strict({

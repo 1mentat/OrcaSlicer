@@ -1286,26 +1286,57 @@ void require_same_deposition(const DepositionStats &baseline, const DepositionSt
 std::set<double> lift_height_deltas(const std::string &output, const DynamicPrintConfig &config)
 {
     std::set<double> heights;
+    std::vector<double> pending_lift_zs;
     GCodeReader reader;
     reader.apply_config(config);
+    const double initial_layer_height = config.opt_float("initial_layer_print_height");
+    const double layer_height = config.opt_float("layer_height");
+    REQUIRE(std::isfinite(initial_layer_height));
+    REQUIRE(std::isfinite(layer_height));
+    REQUIRE(initial_layer_height > EPSILON);
+    REQUIRE(layer_height > EPSILON);
     bool has_printed = false;
-    bool awaiting_restore = false;
-    double lifted_z = 0.;
-    reader.parse_buffer(output, [&heights, &has_printed, &awaiting_restore, &lifted_z](GCodeReader &self,
-                                                                                 const GCodeReader::GCodeLine &line) {
-        if (line.extruding(self) && line.dist_XY(self) > EPSILON)
+    size_t layer_markers = 0;
+    bool awaiting_layer_plane = false;
+    reader.parse_buffer(output, [&heights, &pending_lift_zs, &has_printed, &layer_markers,
+                                 &awaiting_layer_plane, initial_layer_height, layer_height](GCodeReader &self,
+                                                                                             const GCodeReader::GCodeLine &line) {
+        if (line.comment().find("LAYER_CHANGE") != std::string_view::npos) {
+            ++layer_markers;
+            awaiting_layer_plane = true;
+        }
+        const bool positive_extrusion = line.extruding(self) && line.dist_XY(self) > EPSILON;
+        if (positive_extrusion) {
+            const double destination_plane = line.new_Z(self);
+            REQUIRE(std::isfinite(destination_plane));
+            if (awaiting_layer_plane) {
+                const double expected_plane = initial_layer_height +
+                    static_cast<double>(layer_markers - 1) * layer_height;
+                CHECK_THAT(destination_plane, Catch::Matchers::WithinAbs(expected_plane, 0.001));
+                awaiting_layer_plane = false;
+            }
+            if (has_printed && !pending_lift_zs.empty()) {
+                // A lift may include a layer advance, and its descent can be
+                // folded into another travel. Measure above the next print plane.
+                for (const double lifted_z : pending_lift_zs) {
+                    CAPTURE(lifted_z, destination_plane, layer_markers);
+                    REQUIRE(std::isfinite(lifted_z));
+                    const double height = lifted_z - destination_plane;
+                    REQUIRE(std::isfinite(height));
+                    REQUIRE(height > EPSILON);
+                    heights.insert(height);
+                }
+                pending_lift_zs.clear();
+            }
             has_printed = true;
+        }
+
+        const double lift_delta = line.dist_Z(self);
         if (has_printed && line.comment().find("lift Z") != std::string_view::npos &&
-            line.dist_Z(self) > EPSILON && std::isfinite(line.dist_Z(self))) {
-            lifted_z = line.new_Z(self);
-            awaiting_restore = true;
-        } else if (awaiting_restore && line.comment().find("restore layer Z") != std::string_view::npos) {
-            // A lift move may also advance to the next layer. Measure the hop
-            // above its destination print plane, excluding that layer advance.
-            REQUIRE(std::isfinite(line.new_Z(self)));
-            REQUIRE(line.dist_Z(self) < -EPSILON);
-            heights.insert(lifted_z - line.new_Z(self));
-            awaiting_restore = false;
+            std::isfinite(lift_delta) && lift_delta > EPSILON) {
+            const double lifted_z = line.new_Z(self);
+            REQUIRE(std::isfinite(lifted_z));
+            pending_lift_zs.push_back(lifted_z);
         }
     });
     return heights;
@@ -1445,6 +1476,7 @@ TEST_CASE("Nullable filament z hop inherits and overrides the normal lift height
              {"nil", 0.4}, {"0", 0.}, {"0.8", 0.8}}) {
         CAPTURE(value, expected_lift);
         DynamicPrintConfig config = filament_retraction_config("filament_z_hop", value, "z_hop", "0.4");
+        config.set_deserialize_strict("z_offset", "0");
         const std::string output = bounded_retraction_export(short_cube(), config);
         require_layer_marker_count(output, config, 5);
         const DepositionStats deposition = deposition_stats(output, config);
