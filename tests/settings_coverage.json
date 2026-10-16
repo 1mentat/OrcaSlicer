@@ -478,10 +478,10 @@
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
       "dimensions": [
-        "enum_values",
+        "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The existing angle and emitted-fill contracts cover auto, rectilinear, concentric, rectilinear_interlaced, and grid; the spiral-inset contract adds an end-to-end rectilinear versus spiralinset comparison requiring finite interface extrusion, at least three interface layers, and distinct aggregate interface lengths. Numeric spacing and other interaction domains remain unclaimed."
+      "reason": "Emitted-fill contracts distinguish rectilinear from rectilinear_interlaced by layer orientation and rectilinear from spiralinset by finite interface extrusion, at least three interface layers, and aggregate interface length. Auto, concentric, and grid have direct SupportParameters angle checks, but lack a dedicated emitted-path oracle here; complete enum pipeline coverage remains unclaimed. Numeric spacing and other interaction domains remain unclaimed."
     },
     "support_bottom_interface_spacing": {
       "test": "tests/fff_print/test_support_material.cpp",
