@@ -46,6 +46,12 @@ function(slicer_enable_llvm_source_coverage TARGET_NAME)
     # below.  Keep the flags target-local so dependencies are not instrumented.
     target_compile_options(${TARGET_NAME} PRIVATE
         -fprofile-instr-generate -fcoverage-mapping)
+    # Coverage includes Orca headers as project headers to retain their inline
+    # mappings. This exposes existing unused private fields that normal SYSTEM
+    # includes hide. Keep these diagnostics visible without blocking test-only
+    # overlays on older production trees; other warnings remain errors.
+    target_compile_options(${TARGET_NAME} PRIVATE
+        "$<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-Wno-error=unused-private-field>")
     get_target_property(_target_type ${TARGET_NAME} TYPE)
     if (NOT _target_type STREQUAL "STATIC_LIBRARY")
         target_link_options(${TARGET_NAME} PRIVATE -fprofile-instr-generate)

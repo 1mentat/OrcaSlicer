@@ -1,6 +1,7 @@
 """Unit tests for PR-head validation status and cleanup semantics."""
 
 from pathlib import Path
+from argparse import Namespace
 import hashlib
 import json
 import subprocess
@@ -145,6 +146,46 @@ class StatusTests(unittest.TestCase):
                     ("infrastructure_error", 2),
                 )
 
+    def test_requested_reference_accepts_only_comparable_statuses(self):
+        for status in ("pass", "test_failed"):
+            with self.subTest(status=status):
+                report = {
+                    "configuration": {"reference_baseline": True},
+                    "baseline": {"status": "pass"},
+                    "reference": {"status": status},
+                    "heads": [{"status": "pass"}],
+                }
+                self.assertEqual(slicer_pr_validation._overall_status(report), ("pass", 0))
+
+    def test_requested_reference_missing_or_error_status_is_infrastructure_failure(self):
+        statuses = (None, "not_run", "tracked_source_index_changed",
+                    "tracked_source_index_resolution_failed", "infrastructure_error",
+                    "test_evidence_incomplete")
+        for status in statuses:
+            with self.subTest(status=status):
+                report = {
+                    "configuration": {"reference_baseline": True},
+                    "baseline": {"status": "pass"},
+                    "heads": [{"status": "pass"}],
+                }
+                if status is not None:
+                    report["reference"] = {"status": status}
+                self.assertEqual(slicer_pr_validation._overall_status(report),
+                                 ("infrastructure_error", 2))
+
+    def test_disabled_reference_does_not_require_reference_evidence(self):
+        report = {
+            "configuration": {"reference_baseline": False},
+            "baseline": {"status": "pass"},
+            "reference": {"status": "not_run"},
+            "heads": [{"status": "pass"}],
+        }
+        self.assertEqual(slicer_pr_validation._overall_status(report), ("pass", 0))
+
+    def test_legacy_report_without_reference_request_keeps_existing_behavior(self):
+        report = {"baseline": {"status": "pass"}, "heads": [{"status": "pass"}]}
+        self.assertEqual(slicer_pr_validation._overall_status(report), ("pass", 0))
+
     def test_reference_failures_are_classified_without_suppressing_head(self):
         reference = {
             "junit_exists": True,
@@ -281,6 +322,130 @@ class StatusTests(unittest.TestCase):
         self.assertFalse(classification["reference_available"])
         self.assertEqual(classification["new"], [])
         self.assertEqual(classification["uncompared_head_failures"], ["suite::new"])
+
+
+def _minimum_junit(names):
+    cases = "".join(
+        f'<testcase classname="Harness" name="{name}" />' for name in names)
+    return (f'<testsuite tests="{len(names)}" failures="0" errors="0" skipped="0">'
+            f"{cases}</testsuite>")
+
+
+class MinimumTestIntegrationTests(unittest.TestCase):
+    """Exercise the count and identity gates through the real _run_tree path."""
+
+    @staticmethod
+    def _args(minimum_tests=1):
+        return Namespace(
+            test_timeout=180.0,
+            timeout=30.0,
+            minimum_tests=minimum_tests,
+            build_dir="build",
+            jobs=1,
+            test_jobs=1,
+            exclude_labels="",
+            deps_prefix="deps",
+            uv="uv",
+        )
+
+    def _run_tree(self, *, minimum_tests, names, build_result=None):
+        with tempfile.TemporaryDirectory() as temp:
+            root_output = Path(temp) / "output"
+            worktree = Path(temp) / "worktree"
+            worktree.mkdir()
+
+            def fake_default_test(build, jobs, junit, excluded, timeout):
+                junit.write_text(_minimum_junit(names), encoding="utf-8")
+                return ["ctest", "--output-junit", str(junit)]
+
+            def fake_phase(argv, *, cwd, timeout, log):
+                log.parent.mkdir(parents=True, exist_ok=True)
+                is_test = argv and argv[0] == "ctest"
+                if build_result is not None and not is_test \
+                        and not hasattr(fake_phase, "configured"):
+                    fake_phase.configured = True
+                    result = slicer_pr_validation.CommandResult(
+                        list(argv), 0, 0.01, "", "")
+                elif build_result is not None and not is_test:
+                    result = build_result
+                else:
+                    result = slicer_pr_validation.CommandResult(
+                        list(argv), 0, 0.01,
+                        "100% tests passed, 0 tests failed out of 3" if is_test else "",
+                        "")
+                log.write_text(result.stdout + result.stderr, encoding="utf-8")
+                return result
+
+            with mock.patch.object(slicer_pr_validation, "_default_test",
+                                   side_effect=fake_default_test), \
+                 mock.patch.object(slicer_pr_validation, "_run_phase",
+                                   side_effect=fake_phase):
+                return slicer_pr_validation._run_tree(
+                    worktree, root_output, "baseline", self._args(minimum_tests),
+                    ["cmake", "configure"], ["cmake", "build"],
+                    commit_sha="a" * 40, tree_sha="b" * 40,
+                )
+
+    def test_count_floor_is_applied_after_junit_parsing(self):
+        entry = self._run_tree(minimum_tests=4, names=["one", "two", "three"])
+        self.assertEqual(entry["status"], "test_evidence_incomplete")
+        self.assertEqual(entry["minimum_tests_required"], 4)
+        self.assertEqual(entry["minimum_tests_observed"], 3)
+        self.assertFalse(entry["minimum_tests_ok"])
+        self.assertFalse(entry["junit_reference_usable"])
+
+    def test_equal_count_replacement_fails_identity_gate(self):
+        entry = self._run_tree(minimum_tests=3, names=["one", "replacement", "three"])
+        self.assertEqual(entry["status"], "pass")
+        slicer_pr_validation._apply_minimum_test_gate(
+            entry, minimum_tests=3,
+            baseline_cases={
+                "Harness::one": "passed", "Harness::two": "passed",
+                "Harness::three": "passed",
+            })
+        self.assertEqual(entry["status"], "test_evidence_incomplete")
+        self.assertEqual(entry["missing_baseline_testcases"], ["Harness::two"])
+        self.assertFalse(entry["junit_reference_usable"])
+
+    def test_complete_identity_set_preserves_comparable_failure(self):
+        entry = self._run_tree(minimum_tests=3, names=["one", "two", "three"])
+        entry["status"] = "test_failed"
+        slicer_pr_validation._apply_minimum_test_gate(
+            entry, minimum_tests=3,
+            baseline_cases={
+                "Harness::one": "passed", "Harness::two": "passed",
+                "Harness::three": "passed",
+            })
+        self.assertEqual(entry["status"], "test_failed")
+        self.assertTrue(entry["junit_reference_usable"])
+        self.assertEqual(entry["missing_baseline_testcases"], [])
+
+    def test_build_timeout_is_preserved_and_floor_is_recorded(self):
+        timed_out = slicer_pr_validation.CommandResult(
+            ["cmake"], None, 0.01, "partial", "", True)
+        entry = self._run_tree(minimum_tests=3212, names=[], build_result=timed_out)
+        self.assertEqual(entry["status"], "build_timeout")
+        self.assertEqual(entry["minimum_tests_required"], 3212)
+        self.assertNotIn("minimum_tests_ok", entry)
+
+    def test_existing_test_timeout_is_not_hidden_by_identity_gate(self):
+        entry = {
+            "status": "test_timeout",
+            "junit_evidence": {"counts": {"tests": 0}},
+            "junit_case_statuses": {},
+        }
+        slicer_pr_validation._apply_minimum_test_gate(
+            entry, minimum_tests=3212, baseline_cases={"Harness::one": "passed"})
+        self.assertEqual(entry["status"], "test_timeout")
+
+    def test_parser_default_explicit_value_and_rejection(self):
+        parser = slicer_pr_validation._parser()
+        common = ["--harness-base", "a" * 40, "--harness-ref", "b" * 40,
+                  "--deps-prefix", "deps"]
+        self.assertEqual(parser.parse_args(common).minimum_tests, 1)
+        self.assertEqual(
+            parser.parse_args(common + ["--minimum-tests", "3212"]).minimum_tests, 3212)
+        self.assertEqual(slicer_pr_validation.main(common + ["--minimum-tests", "0"]), 2)
 
 
 class JUnitEvidenceTests(unittest.TestCase):
@@ -913,10 +1078,26 @@ class RunValidationOrchestrationTests(unittest.TestCase):
 
     @staticmethod
     def _fake_run_tree(worktree, root_output, name, args, configure_args, build_args, **kwargs):
+        evidence = {"counts": {"tests": 1}}
+        common = {
+            "junit_evidence": evidence,
+            "minimum_tests_required": getattr(args, "minimum_tests", 1),
+            "minimum_tests_observed": 1,
+            "minimum_tests_ok": True,
+            "missing_baseline_testcases": [],
+        }
         if name == "baseline":
-            return {"name": name, "status": "pass"}
+            return {
+                **common,
+                "name": name,
+                "status": "pass",
+                "junit_reference_usable": True,
+                "junit_case_statuses": {"suite::base regression": "passed"},
+                "failed_test_names": [],
+            }
         if name == "reference":
             return {
+                **common,
                 "name": name,
                 "status": "test_failed",
                 "junit_reference_usable": True,
@@ -924,6 +1105,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                 "failed_test_names": ["suite::base regression"],
             }
         return {
+            **common,
             "name": name,
             "status": "pass",
             "junit_reference_usable": True,
@@ -952,6 +1134,70 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             self.assertEqual(report["heads"][0]["failure_classification"]["resolved"],
                              ["suite::base regression"])
             self.assertTrue(report["heads"][0]["tracked_source_index_unchanged"])
+
+    def test_identity_gate_runs_before_head_failure_classification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+
+            def mismatched_head(*run_args, **run_kwargs):
+                entry = self._fake_run_tree(*run_args, **run_kwargs)
+                if run_args[2] == "pr-1":
+                    entry["status"] = "test_failed"
+                    entry["junit_case_statuses"] = {"suite::replacement": "failed"}
+                    entry["failed_test_names"] = ["suite::replacement"]
+                return entry
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=mismatched_head):
+                result = slicer_pr_validation.run_validation(args)
+            self.assertEqual(result, 2)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            head_entry = report["heads"][0]
+            self.assertEqual(head_entry["status"], "test_evidence_incomplete")
+            self.assertEqual(head_entry["missing_baseline_testcases"],
+                             ["suite::base regression"])
+            classification = head_entry["failure_classification"]
+            self.assertFalse(classification["reference_available"])
+            self.assertEqual(classification["new"], [])
+            self.assertEqual(classification["inherited"], [])
+            self.assertEqual(classification["resolved"], [])
+            self.assertEqual(classification["uncompared_head_failures"],
+                             ["suite::replacement"])
+
+    def test_reference_identity_gap_is_incomplete_and_blocks_matrix_pass(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+
+            def mismatched_reference(*run_args, **run_kwargs):
+                entry = self._fake_run_tree(*run_args, **run_kwargs)
+                if run_args[2] == "reference":
+                    entry["junit_case_statuses"] = {"suite::replacement": "failed"}
+                    entry["failed_test_names"] = ["suite::replacement"]
+                return entry
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=mismatched_reference):
+                result = slicer_pr_validation.run_validation(args)
+            self.assertEqual(result, 2)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["reference"]["status"], "test_evidence_incomplete")
+            self.assertEqual(report["reference"]["missing_baseline_testcases"],
+                             ["suite::base regression"])
+            classification = report["heads"][0]["failure_classification"]
+            self.assertFalse(classification["reference_available"])
+            self.assertEqual(classification["new"], [])
 
     def test_original_checkout_change_is_fail_closed_with_nonzero_result(self):
         with tempfile.TemporaryDirectory() as temp:

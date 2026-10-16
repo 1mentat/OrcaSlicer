@@ -26,6 +26,7 @@ import argparse
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -105,20 +106,56 @@ class CommandResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    log_path: str | None = None
+    log_sha256: str | None = None
+    log_size_bytes: int | None = None
 
     def json(self) -> dict[str, Any]:
         result = asdict(self)
         result["stdout"] = _truncate(result["stdout"])
         result["stderr"] = _truncate(result["stderr"])
+        if self.log_path is not None:
+            result["log"] = {
+                "path": self.log_path,
+                "sha256": self.log_sha256,
+                "size_bytes": self.log_size_bytes,
+            }
         return result
 
 
-def run_command(argv: Sequence[str], *, cwd: Path, timeout: float) -> CommandResult:
+def _log_metadata(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        while chunk := stream.read(64 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def run_command(argv: Sequence[str], *, cwd: Path, timeout: float,
+                output_file: Path | None = None) -> CommandResult:
     started = time.monotonic()
+    stream = None
     try:
-        result = run_captured(argv, cwd=cwd, timeout=timeout)
-        return CommandResult(list(argv), result.returncode, time.monotonic() - started,
-                             result.stdout or "", result.stderr or "")
+        if output_file is not None:
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            stream = output_file.open("wb")
+        if stream is None:
+            # Keep the legacy call shape for callers and mocks that do not
+            # request file-backed output.
+            result = run_captured(argv, cwd=cwd, timeout=timeout)
+        else:
+            result = run_captured(argv, cwd=cwd, timeout=timeout,
+                                  output_file=stream)
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", "replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        command = CommandResult(list(argv), result.returncode,
+                                time.monotonic() - started, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or ""
         stderr = exc.stderr or ""
@@ -126,9 +163,17 @@ def run_command(argv: Sequence[str], *, cwd: Path, timeout: float) -> CommandRes
             stdout = stdout.decode("utf-8", "replace")
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", "replace")
-        return CommandResult(list(argv), None, time.monotonic() - started, stdout, stderr, True)
+        command = CommandResult(list(argv), None, time.monotonic() - started,
+                                stdout, stderr, True)
     except FileNotFoundError as exc:
-        return CommandResult(list(argv), 127, time.monotonic() - started, "", str(exc))
+        command = CommandResult(list(argv), 127, time.monotonic() - started, "", str(exc))
+    finally:
+        if stream is not None:
+            stream.close()
+    if output_file is not None and output_file.is_file():
+        command.log_path = str(output_file.resolve())
+        command.log_sha256, command.log_size_bytes = _log_metadata(output_file)
+    return command
 
 
 _TEST_COUNT_PATTERNS = (
@@ -144,6 +189,95 @@ _NO_EXECUTION_PATTERNS = (
     re.compile(r"\b[1-9]\d*\s+(?:tests?|test cases?)\s+skipped\b", re.IGNORECASE),
     re.compile(r"\b[1-9]\d*\s+skipped\b", re.IGNORECASE),
 )
+
+
+@dataclass(frozen=True)
+class LogEvidence:
+    """Bounded summary collected from the complete command log."""
+
+    test_count: int = 0
+    no_execution: bool = False
+    assertion_failure: bool = False
+    failed_summary: bool = False
+    infrastructure_failure: bool = False
+    timed_out: bool = False
+    complete: bool = True
+    bytes_read: int = 0
+    error: str = ""
+
+
+_MAX_EVIDENCE_LINE = 1024 * 1024
+_INFRASTRUCTURE_PATTERN = re.compile(
+    r"\*{3}Exception:|fatal error condition:|unexpected exception with message:|"
+    r"\bSubprocess killed\b|"
+    r"\((?:SEGFAULT|Subprocess aborted|OTHER_FAULT|ILLEGAL|INTERRUPT|Bus error)\)\s*$",
+    re.IGNORECASE,
+)
+_TIMEOUT_PATTERN = re.compile(r"\*{3}Timeout\b|\(Timeout\)\s*$", re.IGNORECASE)
+_FAILED_SUMMARY_PATTERN = re.compile(
+    r"\d+% tests passed,\s*[1-9]\d* tests failed out of", re.IGNORECASE)
+
+
+def scan_log_evidence(path: Path) -> LogEvidence:
+    """Scan a complete log with bounded line memory; never trust a truncated scan."""
+    max_count = 0
+    passed_failed = 0
+    ctest_total: int | None = None
+    no_execution = False
+    assertion_failure = False
+    failed_summary = False
+    infrastructure_failure = False
+    timed_out = False
+    bytes_read = 0
+    try:
+        with path.open("rb") as stream:
+            while True:
+                raw = stream.readline(_MAX_EVIDENCE_LINE + 1)
+                if not raw:
+                    break
+                bytes_read += len(raw)
+                if len(raw) > _MAX_EVIDENCE_LINE:
+                    return LogEvidence(complete=False, bytes_read=bytes_read,
+                                       error="evidence line exceeds bounded scanner limit")
+                text = raw.decode("utf-8", "replace")
+                if any(pattern.search(text) for pattern in _NO_EXECUTION_PATTERNS):
+                    no_execution = True
+                if _INFRASTRUCTURE_PATTERN.search(text):
+                    infrastructure_failure = True
+                if _TIMEOUT_PATTERN.search(text):
+                    timed_out = True
+                if _FAILED_SUMMARY_PATTERN.search(text):
+                    failed_summary = True
+                assertion_summaries = re.findall(
+                    r"^\s*assertions?\s*:\s*\d+\s*\|([^\n]*)",
+                    text, re.IGNORECASE)
+                if any(re.search(r"(?:^|\|)\s*[1-9]\d*\s+failed\s*(?:\||$)", summary,
+                                 re.IGNORECASE) for summary in assertion_summaries):
+                    assertion_failure = True
+                ctest_matches = re.findall(
+                    r"\d+% tests passed,\s*\d+ tests failed out of\s+(\d+)\b",
+                    text, re.IGNORECASE)
+                if ctest_matches:
+                    ctest_total = int(ctest_matches[-1])
+                passed_failed += sum(int(match.group(1)) for match in re.finditer(
+                    r"\b([1-9]\d*)\s+tests?\s+(?:passed|failed)\b",
+                    text, re.IGNORECASE))
+                for pattern in _TEST_COUNT_PATTERNS:
+                    for match in pattern.finditer(text):
+                        max_count = max(max_count, int(match.group(1)))
+    except OSError as exc:
+        return LogEvidence(complete=False, bytes_read=bytes_read, error=str(exc))
+    if no_execution:
+        test_count = passed_failed
+    elif ctest_total is not None:
+        test_count = ctest_total
+    else:
+        test_count = max_count
+    return LogEvidence(test_count=test_count, no_execution=no_execution,
+                       assertion_failure=assertion_failure,
+                       failed_summary=failed_summary,
+                       infrastructure_failure=infrastructure_failure,
+                       timed_out=timed_out, bytes_read=bytes_read)
 
 
 def test_evidence(output: str) -> int:
@@ -271,7 +405,13 @@ def _test_timed_out(result: CommandResult) -> bool:
 
 
 def _classify_test(result: CommandResult, evidence: int,
-                   expected_tests: int | None = None) -> str:
+                   expected_tests: int | None = None,
+                   *, log_evidence: LogEvidence | None = None) -> str:
+    if log_evidence is not None:
+        if not log_evidence.complete:
+            return "test_evidence_incomplete"
+        if log_evidence.timed_out:
+            return "test_timeout"
     if _test_timed_out(result):
         return "test_timeout"
     if result.returncode is not None and result.returncode < 0:
@@ -280,37 +420,108 @@ def _classify_test(result: CommandResult, evidence: int,
     # CTest itself often returns 8 after a child dies. Catch2 can also report
     # a fatal signal or unexpected exception as a failed assertion. Neither
     # establishes that an ordinary behavioral assertion detected the mutant.
-    if re.search(r"\*{3}Exception:|fatal error condition:|unexpected exception with message:|"
-                 r"\bSubprocess killed\b|"
-                 r"\((?:SEGFAULT|Subprocess aborted|OTHER_FAULT|ILLEGAL|INTERRUPT|Bus error)\)\s*$",
-                 output, re.IGNORECASE | re.MULTILINE):
+    infrastructure_failure = (log_evidence.infrastructure_failure
+                               if log_evidence is not None else
+                               bool(re.search(
+                                   r"\*{3}Exception:|fatal error condition:|unexpected exception with message:|"
+                                   r"\bSubprocess killed\b|"
+                                   r"\((?:SEGFAULT|Subprocess aborted|OTHER_FAULT|ILLEGAL|INTERRUPT|Bus error)\)\s*$",
+                                   output, re.IGNORECASE | re.MULTILINE)))
+    if infrastructure_failure:
         return "test_infrastructure_failure"
     if evidence <= 0:
         return "test_no_evidence"
     if expected_tests is not None and evidence != expected_tests:
         return "test_count_mismatch"
-    assertion_failure = any(
-        re.search(r"(?:^|\|)\s*[1-9]\d*\s+failed\s*(?:\||$)", summary, re.IGNORECASE)
-        for summary in re.findall(r"^\s*assertions?\s*:\s*\d+\s*\|([^\n]*)", output,
-                                  re.IGNORECASE | re.MULTILINE))
+    assertion_failure = (log_evidence.assertion_failure
+                         if log_evidence is not None else any(
+                             re.search(r"(?:^|\|)\s*[1-9]\d*\s+failed\s*(?:\||$)", summary,
+                                       re.IGNORECASE)
+                             for summary in re.findall(
+                                 r"^\s*assertions?\s*:\s*\d+\s*\|([^\n]*)", output,
+                                 re.IGNORECASE | re.MULTILINE)))
     if result.returncode != 0:
         if assertion_failure:
             return "killed"
         return "test_failure_unverified"
-    if assertion_failure or re.search(r"\d+% tests passed,\s*[1-9]\d* tests failed out of", output):
+    failed_summary = (log_evidence.failed_summary if log_evidence is not None else
+                      bool(re.search(r"\d+% tests passed,\s*[1-9]\d* tests failed out of",
+                                     output)))
+    if assertion_failure or failed_summary:
         return "test_infrastructure_failure"
     return "survived"
 
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                                     dir=str(path.parent), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _output_available(out: Path) -> None:
+    """Reject prior evidence before any worktree or report can be created."""
+    if out.is_symlink():
+        raise MutationError(f"output evidence path must not be a symlink: {out}")
+    if not out.exists():
+        return
+    if not out.is_dir():
+        raise MutationError(f"output evidence path is not a directory: {out}")
+    try:
+        next(out.iterdir())
+    except StopIteration:
+        return
+    raise MutationError(f"output evidence directory is not empty; refusing to clobber: {out}")
+
+
+def _lexical_output_path(root: Path, argument: str | os.PathLike[str]) -> Path:
+    """Make an absolute path without resolving a final symlink."""
+    candidate = Path(argument)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return Path(os.path.abspath(candidate))
+
+
+def _checkpoint(report_path: Path, report: dict[str, Any], phase: str) -> None:
+    report["checkpoint"] = {"state": "in_progress", "phase": phase}
+    _write_report(report_path, report)
+
+
+def _result_log_evidence(result: CommandResult) -> LogEvidence | None:
+    if result.log_path is None:
+        return None
+    return scan_log_evidence(Path(result.log_path))
+
+
+def _command_log(log_root: Path, serial: int, phase: str, label: str = "") -> Path:
+    safe_phase = re.sub(r"[^A-Za-z0-9_.-]+", "-", phase).strip("-") or "command"
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-")
+    suffix = f"-{safe_label}" if safe_label else ""
+    return log_root / f"{serial:04d}-{safe_phase}{suffix}.log"
 
 
 def run_mutation(args: argparse.Namespace) -> int:
     repo = Path(args.root).resolve()
     if not repo.is_dir():
         raise MutationError(f"repository root does not exist: {repo}")
+    if args.max_mutants <= 0:
+        raise MutationError("--max-mutants must be positive")
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        raise MutationError("--timeout must be finite and positive")
+    out_lexical = _lexical_output_path(repo, args.out)
+    _output_available(out_lexical)
+    out = out_lexical.resolve()
     commit = validate_clean_repo(repo)
     mutants = _load_mutants(args.mutants, repo)
     if not mutants:
@@ -323,8 +534,6 @@ def run_mutation(args: argparse.Namespace) -> int:
     build_argv = split_command(args.build_command)
     test_argv = split_command(args.test_command)
     configure_argv = split_command(args.configure_command) if args.configure_command else None
-    out_arg = Path(args.out)
-    out = ((repo / out_arg) if not out_arg.is_absolute() else out_arg).resolve()
     work_parent_arg = Path(args.work_root) if args.work_root else None
     work_parent = ((repo / work_parent_arg) if work_parent_arg is not None and not work_parent_arg.is_absolute()
                    else work_parent_arg)
@@ -341,29 +550,46 @@ def run_mutation(args: argparse.Namespace) -> int:
         "commands": {"configure": configure_argv, "build": build_argv, "test": test_argv},
         "mutants": [],
     }
+    report_path = out / "mutation-report.json"
+    out.mkdir(parents=True, exist_ok=True)
+    log_root = out / "command-logs"
+    log_root.mkdir(parents=True, exist_ok=True)
+    _checkpoint(report_path, report, "preflight")
+    command_serial = 0
+
+    def next_log(phase: str, label: str = "") -> Path:
+        nonlocal command_serial
+        command_serial += 1
+        return _command_log(log_root, command_serial, phase, label)
 
     with tempfile.TemporaryDirectory(prefix="slicer-mutation-", dir=str(work_parent) if work_parent else None) as parent:
         worktree = Path(parent) / "repo"
-        add = _git(repo, "worktree", "add", "--detach", str(worktree), commit)
-        report["worktree"] = {"path": str(worktree), "add": add.json()}
-        if add.returncode != 0:
-            raise MutationError(f"cannot create disposable worktree: {_truncate(add.stderr)}")
+        report["worktree"] = {"path": str(worktree)}
         try:
+            add = _git(repo, "worktree", "add", "--detach", str(worktree), commit)
+            report["worktree"]["add"] = add.json()
+            _checkpoint(report_path, report, "worktree_add")
+            if add.returncode != 0:
+                raise MutationError(f"cannot create disposable worktree: {_truncate(add.stderr)}")
             build_dir = (worktree / args.build_dir).resolve()
             if configure_argv:
                 configure = run_command(_expand(configure_argv, root=worktree, build=build_dir),
-                                        cwd=worktree, timeout=args.timeout)
+                                        cwd=worktree, timeout=args.timeout,
+                                        output_file=next_log("configure"))
                 report["configure"] = configure.json()
+                _checkpoint(report_path, report, "configure")
                 if configure.timed_out or configure.returncode != 0:
                     report["status"] = "configure_timeout" if configure.timed_out else "configure_error"
-                    _write_report(out / "mutation-report.json", report)
+                    _checkpoint(report_path, report, "configure_failed")
                     return 2
             build = _expand(build_argv, root=worktree, build=(worktree / args.build_dir).resolve())
-            baseline_build = run_command(build, cwd=worktree, timeout=args.timeout)
+            baseline_build = run_command(build, cwd=worktree, timeout=args.timeout,
+                                         output_file=next_log("baseline-build"))
             report["baseline_build"] = baseline_build.json()
+            _checkpoint(report_path, report, "baseline_build")
             if baseline_build.timed_out or baseline_build.returncode != 0:
                 report["status"] = _classify_build(baseline_build)
-                _write_report(out / "mutation-report.json", report)
+                _checkpoint(report_path, report, "baseline_build_failed")
                 return 2
             # Validate each manifest filter against the unmutated build.  A
             # broad suite baseline can fail for unrelated reasons while still
@@ -376,24 +602,34 @@ def run_mutation(args: argparse.Namespace) -> int:
                 selected = _test_command(test_argv, baseline_mutant)
                 baseline_test = run_command(_expand(selected, root=worktree,
                                                      build=(worktree / args.build_dir).resolve()),
-                                            cwd=worktree, timeout=args.timeout)
-                evidence = test_evidence(baseline_test.stdout + baseline_test.stderr)
+                                            cwd=worktree, timeout=args.timeout,
+                                            output_file=next_log("baseline-test", test_filter))
+                log_evidence = _result_log_evidence(baseline_test)
+                evidence = (log_evidence.test_count if log_evidence is not None
+                            else test_evidence(baseline_test.stdout + baseline_test.stderr))
                 baseline_counts[test_filter] = evidence
-                classification = _classify_test(baseline_test, evidence)
+                classification = _classify_test(baseline_test, evidence,
+                                                log_evidence=log_evidence)
                 baseline_tests.append({
                     "filter": test_filter,
                     "test_evidence": evidence,
                     "classification": classification,
                     "result": baseline_test.json(),
                 })
+                if log_evidence is not None:
+                    baseline_tests[-1]["log_evidence"] = asdict(log_evidence)
+                report["baseline_tests"] = baseline_tests
+                _checkpoint(report_path, report, f"baseline_test:{test_filter or 'all'}")
                 if classification != "survived":
-                    report["baseline_tests"] = baseline_tests
-                    report["status"] = ("baseline_test_timeout" if _test_timed_out(baseline_test) else
+                    report["status"] = ("baseline_test_timeout" if
+                                         (log_evidence is not None and log_evidence.timed_out) or
+                                         _test_timed_out(baseline_test) else
                                          "baseline_test_failed" if evidence > 0 else
                                          "baseline_no_evidence")
-                    _write_report(out / "mutation-report.json", report)
+                    _checkpoint(report_path, report, "baseline_test_failed")
                     return 2
             report["baseline_tests"] = baseline_tests
+            _checkpoint(report_path, report, "baseline_complete")
 
             for mutant in mutants:
                 entry: dict[str, Any] = {
@@ -408,27 +644,37 @@ def run_mutation(args: argparse.Namespace) -> int:
                 try:
                     path, original = _apply(mutant, worktree)
                     entry["source_match"] = "exactly_one"
-                    mutant_build = run_command(build, cwd=worktree, timeout=args.timeout)
+                    mutant_build = run_command(build, cwd=worktree, timeout=args.timeout,
+                                               output_file=next_log("mutant-build", mutant.id))
                     entry["build"] = mutant_build.json()
                     if mutant_build.timed_out or mutant_build.returncode != 0:
                         entry["status"] = _classify_build(mutant_build)
                         report["mutants"].append(entry)
+                        _checkpoint(report_path, report, f"mutant:{mutant.id}:build")
                         continue
                     selected_test = _test_command(test_argv, mutant)
                     mutant_test = run_command(_expand(selected_test, root=worktree,
                                                        build=(worktree / args.build_dir).resolve()),
-                                              cwd=worktree, timeout=args.timeout)
-                    mutant_evidence = test_evidence(mutant_test.stdout + mutant_test.stderr)
+                                              cwd=worktree, timeout=args.timeout,
+                                              output_file=next_log("mutant-test", mutant.id))
+                    log_evidence = _result_log_evidence(mutant_test)
+                    mutant_evidence = (log_evidence.test_count if log_evidence is not None
+                                       else test_evidence(mutant_test.stdout + mutant_test.stderr))
                     entry["test"] = mutant_test.json()
                     entry["test_evidence"] = mutant_evidence
+                    if log_evidence is not None:
+                        entry["log_evidence"] = asdict(log_evidence)
                     entry["expected_test_count"] = baseline_counts[mutant.test_filter]
                     entry["status"] = _classify_test(
-                        mutant_test, mutant_evidence, baseline_counts[mutant.test_filter])
+                        mutant_test, mutant_evidence, baseline_counts[mutant.test_filter],
+                        log_evidence=log_evidence)
                     report["mutants"].append(entry)
+                    _checkpoint(report_path, report, f"mutant:{mutant.id}:test")
                 except MutationError as exc:
                     entry["status"] = "mutation_error"
                     entry["error"] = str(exc)
                     report["mutants"].append(entry)
+                    _checkpoint(report_path, report, f"mutant:{mutant.id}:error")
                 finally:
                     if path is not None and original is not None:
                         path.write_bytes(original)
@@ -437,21 +683,28 @@ def run_mutation(args: argparse.Namespace) -> int:
         finally:
             remove = _git(repo, "worktree", "remove", "--force", str(worktree))
             report["worktree"]["remove"] = remove.json()
+            if remove.timed_out or remove.returncode != 0:
+                report["cleanup_failed"] = True
+                report["status"] = "cleanup_failed"
             # Also persist early baseline failures after the worktree cleanup,
             # so the report contains the exact remove command and outcome.
-            _write_report(out / "mutation-report.json", report)
+            _checkpoint(report_path, report, "worktree_removed")
     statuses = [entry.get("status") for entry in report["mutants"]]
     report["counts"] = {status: statuses.count(status) for status in sorted(set(statuses))}
-    if any(status == "survived" for status in statuses):
-        report["status"] = "survivors"
-        exit_code = 1
-    elif any(status != "killed" for status in statuses):
+    if report.get("cleanup_failed"):
+        report["status"] = "cleanup_failed"
+        exit_code = 2
+    elif any(status not in {"killed", "survived"} for status in statuses):
         report["status"] = "infrastructure_error"
         exit_code = 2
+    elif any(status == "survived" for status in statuses):
+        report["status"] = "survivors"
+        exit_code = 1
     else:
         report["status"] = "pass"
         exit_code = 0
-    _write_report(out / "mutation-report.json", report)
+    report["checkpoint"] = {"state": "complete", "phase": "complete"}
+    _write_report(report_path, report)
     return exit_code
 
 
@@ -487,11 +740,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         # fails before the disposable worktree can be created (for example,
         # a dirty checkout or an empty/ambiguous source match).
         try:
-            out_arg = Path(args.out)
             root = Path(args.root).resolve()
-            out = (root / out_arg if not out_arg.is_absolute() else out_arg).resolve()
-            report_path = out / "mutation-report.json"
-            if not report_path.exists():
+            out_lexical = _lexical_output_path(root, args.out)
+            report_path = out_lexical / "mutation-report.json"
+            output_is_absent_or_empty = not out_lexical.exists() and not out_lexical.is_symlink()
+            if not out_lexical.is_symlink() and out_lexical.exists() and out_lexical.is_dir():
+                try:
+                    next(out_lexical.iterdir())
+                except StopIteration:
+                    output_is_absent_or_empty = True
+            if not report_path.exists() and output_is_absent_or_empty:
                 _write_report(report_path, {
                     "schema_version": 1,
                     "status": "infrastructure_error",

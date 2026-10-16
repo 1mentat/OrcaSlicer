@@ -58,6 +58,7 @@ DEFAULT_TARGETS = (
 DEFAULT_EXCLUDED_LABELS = "NotWorking|RequiresApp"
 DEFAULT_TIMEOUT = 3600.0
 DEFAULT_TEST_TIMEOUT = 180.0
+DEFAULT_MINIMUM_TESTS = 1
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 TEST_ONLY_PATHS = ("tests/", "scripts/", "cmake/", ":(top)CMakeLists.txt", ":(top).gitignore")
 INTEGRATION_PATHS = TEST_ONLY_PATHS + ("src/CMakeLists.txt", "src/libslic3r/CMakeLists.txt")
@@ -336,6 +337,35 @@ def classify_junit_result(result: CommandResult, evidence: dict[str, Any],
     if counts["failures"]:
         return "test_failed" if result.returncode else "test_evidence_incomplete"
     return "pass" if result.returncode == 0 else "test_error"
+
+
+def _missing_baseline_testcases(baseline_cases: dict[str, str],
+                                current_cases: dict[str, str]) -> list[str]:
+    """Return exact passing baseline identities absent from a run."""
+    return sorted(name for name, status in baseline_cases.items()
+                  if status == "passed" and name not in current_cases)
+
+
+def _apply_minimum_test_gate(entry: dict[str, Any], *, minimum_tests: int,
+                             baseline_cases: dict[str, str] | None = None) -> dict[str, Any]:
+    """Apply count and optional baseline-identity gates to comparable test runs."""
+    counts = (entry.get("junit_evidence") or {}).get("counts") or {}
+    observed = counts.get("tests")
+    current_cases = entry.get("junit_case_statuses") or {}
+    missing = (_missing_baseline_testcases(baseline_cases, current_cases)
+               if baseline_cases is not None else [])
+    entry["minimum_tests_required"] = minimum_tests
+    entry["minimum_tests_observed"] = observed
+    entry["minimum_tests_ok"] = isinstance(observed, int) and observed >= minimum_tests
+    entry["missing_baseline_testcases"] = missing
+    # Preserve stronger configure/build/timeout/error statuses.  The gate only
+    # changes an otherwise comparable test result, so it cannot hide an
+    # existing infrastructure failure.
+    if (entry.get("status") in {"pass", "test_failed"}
+            and (not entry["minimum_tests_ok"] or missing)):
+        entry["status"] = "test_evidence_incomplete"
+    entry["junit_reference_usable"] = entry.get("status") in {"pass", "test_failed"}
+    return entry
 
 
 def classify_command(result: CommandResult, phase: str) -> str:
@@ -620,6 +650,8 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
     }
     test_timeout = getattr(args, "test_timeout", DEFAULT_TEST_TIMEOUT)
     entry["test_timeout_seconds"] = test_timeout
+    minimum_tests = getattr(args, "minimum_tests", DEFAULT_MINIMUM_TESTS)
+    entry["minimum_tests_required"] = minimum_tests
 
     def finish(status: str) -> dict[str, Any]:
         entry["status"] = status
@@ -670,8 +702,9 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
                               if case_status == wanted)
     status = classify_junit_result(test, junit_evidence, entry["test_evidence"],
                                    no_tests=entry["no_test_evidence"])
-    entry["junit_reference_usable"] = status in {"pass", "test_failed"}
-    return finish(status)
+    entry["status"] = status
+    _apply_minimum_test_gate(entry, minimum_tests=minimum_tests)
+    return finish(str(entry["status"]))
 
 
 def _selected_statuses(report: dict[str, Any]) -> list[str]:
@@ -738,6 +771,17 @@ def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
     baseline_status = baseline.get("status")
     if baseline_status != "pass":
         return str(baseline_status or "baseline_failed"), 2
+    # A requested reference is part of the comparison contract.  Accept only
+    # the two statuses that contain usable testcase evidence; a denylist would
+    # silently turn newly introduced preflight/error statuses into a matrix
+    # result.  Legacy hand-authored reports without this configuration field
+    # retain their previous behavior, while --no-reference-baseline is explicit.
+    configuration = report.get("configuration") or {}
+    if configuration.get("reference_baseline") is True:
+        reference = report.get("reference")
+        if (not isinstance(reference, dict)
+                or reference.get("status") not in {"pass", "test_failed"}):
+            return "infrastructure_error", 2
     statuses = _selected_statuses(report)
     if not statuses:
         return "no_heads", 2
@@ -824,6 +868,7 @@ def run_validation(args: argparse.Namespace) -> int:
             "build_dir": args.build_dir, "exclude_labels": args.exclude_labels,
             "targets": list(args.targets), "timeout_seconds": args.timeout,
             "test_timeout_seconds": getattr(args, "test_timeout", DEFAULT_TEST_TIMEOUT),
+            "minimum_tests": args.minimum_tests,
             "timeout_provenance": {
                 "phase_timeout_seconds": args.timeout,
                 "ctest_per_case_timeout_seconds": getattr(
@@ -871,6 +916,12 @@ def run_validation(args: argparse.Namespace) -> int:
         baseline = _run_tree(worktree, output, "baseline", args, configure_args, build_args,
                              commit_sha=harness_ref, tree_sha=baseline_tree)
         baseline["tree_resolution"] = baseline_tree_result.json()
+        baseline_passed_cases = {
+            name: status for name, status in baseline.get("junit_case_statuses", {}).items()
+            if status == "passed"
+        }
+        baseline["baseline_passed_testcase_count"] = len(baseline_passed_cases)
+        baseline["baseline_passed_testcase_ids"] = sorted(baseline_passed_cases)
         baseline_prod_hash, baseline_prod_result = _tracked_source_index_hash(worktree)
         baseline["tracked_source_index_hash_before_overlay"] = baseline_prod_hash
         baseline["tracked_source_index_hash_after_overlay"] = baseline_prod_hash
@@ -938,6 +989,9 @@ def run_validation(args: argparse.Namespace) -> int:
                                     worktree, output, "reference", args, configure_args, build_args,
                                     commit_sha=harness_base, tree_sha=reference_tree)
                                 reference.update(reference_run)
+                                _apply_minimum_test_gate(
+                                    reference, minimum_tests=args.minimum_tests,
+                                    baseline_cases=baseline_passed_cases)
                                 reference["harness_patch_applied"] = bool(patch)
                 report["reference"] = reference
                 _write_json(output / "report.json", report)
@@ -1010,6 +1064,9 @@ def run_validation(args: argparse.Namespace) -> int:
                 run = _run_tree(worktree, output, f"pr-{number}", args, configure_args, build_args,
                                 commit_sha=resolved, tree_sha=tree)
                 entry.update(run)
+                _apply_minimum_test_gate(
+                    entry, minimum_tests=args.minimum_tests,
+                    baseline_cases=baseline_passed_cases)
                 entry["harness_patch_applied"] = bool(patch)
                 entry["failure_classification"] = classify_failure_names(
                     report.get("reference"), entry)
@@ -1094,6 +1151,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--test-timeout", type=float, default=DEFAULT_TEST_TIMEOUT,
                         help="per-CTest-case timeout in seconds (default: 180)")
+    parser.add_argument("--minimum-tests", type=int, default=DEFAULT_MINIMUM_TESTS,
+                        help="minimum testcase identities required for comparable evidence (default: 1)")
     parser.add_argument("--uv-executable", help="local uv executable for ORCA_BUNDLED_UV_EXECUTABLE")
     parser.add_argument("--cmake-arg", action="append", default=[],
                         help="extra CMake cache argument; may use {root}, {build}, {deps_prefix}, {uv}, {jobs}")
@@ -1125,6 +1184,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not math.isfinite(args.test_timeout) or args.test_timeout <= 0:
         print("slicer_pr_validation: error: --test-timeout must be positive and finite",
               file=sys.stderr)
+        return 2
+    if args.minimum_tests < 1:
+        print("slicer_pr_validation: error: --minimum-tests must be positive", file=sys.stderr)
         return 2
     args.targets = tuple(args.targets or DEFAULT_TARGETS)
     args.uv = _resolve_uv(args.uv_executable)

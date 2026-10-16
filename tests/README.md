@@ -125,6 +125,9 @@ Coverage builds include Orca's source headers as ordinary project headers.
 Clang suppresses system-header mappings even when it emits profile counters;
 mixing those counters with unused inline mappings can silently remove executed
 functions from an export. Dependency headers keep their existing classification.
+Coverage targets retain Clang's unused-private-field diagnostics as warnings:
+project-header classification exposes existing fields that normal system-header
+classification hides. Other warning categories retain their existing policy.
 
 The runner uses `compile_commands.json` as compiler evidence for every
 manifest source. It invokes `llvm-cov export --summary-only -instr-profile <merged profile>` on
@@ -361,6 +364,13 @@ fatal signals, unexpected exceptions, and nonzero exits without an assertion
 summary are infrastructure or unverified failures, not mutation kills. Custom
 test commands must retain Catch2's console summary for kill classification.
 
+Use a new or empty output directory. Configure, build, and test output is written
+to separate files, with their hashes and sizes recorded in the report. Test
+classification scans the complete log with bounded memory; an overlong line
+makes the evidence incomplete. Atomic checkpoints retain completed baselines
+and mutants while marking an unfinished run `in_progress`. Cleanup failures
+and execution errors take precedence over survivors in the final status.
+
 The native harnesses run commands in separate process groups. A timeout or
 interruption stops the command and its descendants before restoring or removing
 the disposable worktree. Partial output is retained as failure evidence. CTest
@@ -438,6 +448,12 @@ with CTest. Missing or contradictory reports and duplicate testcase identities
 are incomplete evidence. Crashes, timeouts, and JUnit errors are execution
 failures; they do not enter the new/inherited/resolved test-failure comparison.
 Both the reference and the head must have comparable execution evidence.
+`--minimum-tests` adds an independent positive testcase floor (default `1`);
+set it to the expected suite size for a validation campaign. Every passing
+testcase identity from the harness baseline must also appear in the reference
+and each head. Equal totals cannot hide a missing test replaced by another name.
+A requested reference with incomplete execution evidence makes the overall
+matrix incomplete, even if individual heads pass.
 
 Run all snapshot heads, or select reproducible PR numbers with repeated or
 comma-separated `--numbers` values:
