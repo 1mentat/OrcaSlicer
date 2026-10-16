@@ -45,7 +45,7 @@ _TEST_COUNT_PATTERNS = (
     re.compile(r"\bof\s+(\d+)\s+tests?\b", re.IGNORECASE),
     re.compile(r"\b(\d+)\s+tests?\s+(?:passed|failed|skipped)\b", re.IGNORECASE),
     re.compile(r"test cases?:\s*(\d+)\b", re.IGNORECASE),
-    re.compile(r"all tests passed\s*\((\d+)\s+assertions?", re.IGNORECASE),
+    re.compile(r"all tests passed\s*\(\s*\d+\s+assertions?\s+in\s+(\d+)\s+test cases?\s*\)", re.IGNORECASE),
 )
 _NO_EXECUTION_PATTERNS = (
     re.compile(r"no tests? (?:were )?found", re.IGNORECASE),

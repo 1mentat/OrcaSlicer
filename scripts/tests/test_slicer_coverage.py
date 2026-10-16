@@ -22,6 +22,11 @@ class CoverageEvidenceTests(unittest.TestCase):
         self.assertEqual(slicer_coverage.test_evidence("100% tests passed, 0 tests failed out of 17"), 17)
         self.assertEqual(slicer_coverage.test_evidence("test cases: 4 | 4 passed"), 4)
 
+    def test_catch_summary_counts_cases_instead_of_assertions(self):
+        self.assertEqual(slicer_coverage.test_evidence("All tests passed (43 assertions in 2 test cases)"), 2)
+        self.assertEqual(slicer_coverage.test_evidence("All tests passed (1 assertion in 1 test case)"), 1)
+        self.assertEqual(slicer_coverage.test_evidence("All tests passed (43 assertions)"), 0)
+
     def test_all_skipped_or_not_run_is_not_evidence(self):
         self.assertEqual(
             slicer_coverage.test_evidence(
