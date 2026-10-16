@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "description": "Single-anchor semantic mutations for EmbossExtra; expected kills require independent shape, cache, cancellation, font, transform, and projection assertions.",
+  "mutants": [
+    {
+      "id": "divide-empty-guard",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "if (expolygons.empty()) return false;",
+      "new": "if (!expolygons.empty()) return false;",
+      "test_filter": "EmbossExtra"
+    },
+    {
+      "id": "divide-distance-guard",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "if (distance < 0.) return false;",
+      "new": "if (distance >= 0.) return false;",
+      "test_filter": "EmbossExtra"
+    },
+    {
+      "id": "heal-empty-branch",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "if (polygons.empty())\n        return {{}, false};",
+      "new": "if (!polygons.empty())\n        return {{}, false};",
+      "test_filter": "EmbossExtra"
+    },
+    {
+      "id": "union-cache-guard",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "if (!shape.final_shape.expolygons.empty())",
+      "new": "if (shape.final_shape.expolygons.empty())",
+      "test_filter": "EmbossExtra"
+    },
+    {
+      "id": "text-cancel-branch",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "if (was_canceled())\n                return {};",
+      "new": "if (!was_canceled())\n                return {};",
+      "test_filter": "EmbossExtra"
+    },
+    {
+      "id": "glyph-validity-branch",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "if (!is_valid(font, font_index)) return {};\n    auto font_info_opt = load_font_info(font.data->data(), font_index);",
+      "new": "if (is_valid(font, font_index)) return {};\n    auto font_info_opt = load_font_info(font.data->data(), font_index);",
+      "test_filter": "EmbossExtra"
+    },
+    {
+      "id": "calc-up-zero-branch",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "if (is_approx(res, 0.))\n        return {};",
+      "new": "if (!is_approx(res, 0.))\n        return {};",
+      "test_filter": "EmbossExtra"
+    },
+    {
+      "id": "center-direction",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "translate(e, -bb.center());",
+      "new": "translate(e, bb.center());",
+      "test_filter": "EmbossExtra"
+    },
+    {
+      "id": "suggest-up-branch",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "(std::fabs(normal.z()) > up_limit)",
+      "new": "(std::fabs(normal.z()) < up_limit)",
+      "test_filter": "EmbossExtra"
+    },
+    {
+      "id": "euclidean-radius-squared-query",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "AABBTreeLines::all_lines_in_radius(lines, tree, p_d, distance * distance)",
+      "new": "AABBTreeLines::all_lines_in_radius(lines, tree, p_d, distance)",
+      "test_filter": "EmbossExtra",
+      "description": "The public Euclidean radius must be squared for the AABB query."
+    }
+  ]
+}

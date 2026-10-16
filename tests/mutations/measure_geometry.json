@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "description": "Independent measurement geometry and regression checks.",
+  "mutants": [
+    {
+      "id": "projection-double-length",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "intersection_pt = pt + length * normal;",
+      "new": "intersection_pt = pt + 2.0 * length * normal;",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "projection distance"
+    },
+    {
+      "id": "basis-epsilon-zero",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "float eps = 1e-3;",
+      "new": "float eps = 0.0;",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "alternate basis threshold"
+    },
+    {
+      "id": "affine-circle-radius-one",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "value                = (radius_pt - world_center).norm();",
+      "new": "value                = (radius_pt - world_center).norm() + 1.0;",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "affine circle radius"
+    },
+    {
+      "id": "point-plane-distance-zero",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "plane.absDistance(f1.get_point()), f1.get_point(), plane.projection(f1.get_point())",
+      "new": "0.0, f1.get_point(), plane.projection(f1.get_point())",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "point-plane distance"
+    },
+    {
+      "id": "edge-plane-angle-removed",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "result.angle = angle_edge_plane(f1.get_edge(), f2.get_plane());",
+      "new": "result.angle.reset();",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "edge-plane angle result"
+    },
+    {
+      "id": "parallel-circle-outer-witnesses-removed",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "                    info.circle0Closest = c0 + r0 * U;\n                    info.circle1Closest = c1 - r1 * U;",
+      "new": "                    info.circle0Closest = c0;\n                    info.circle1Closest = c1;",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "external parallel-circle closest witnesses"
+    },
+    {
+      "id": "parallel-circle-inner-witnesses-removed",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "                        if (d > 0.0) {\n                            info.circle0Closest = c0 + r0 * U;\n                            info.circle1Closest = c1 + r1 * U;",
+      "new": "                        if (d > 0.0) {\n                            info.circle0Closest = c0;\n                            info.circle1Closest = c1;",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "circle-inside-circle closest witnesses"
+    },
+    {
+      "id": "parallel-circle-reverse-inner-witnesses-removed",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "                        if (d > 0.0) {\n                            info.circle0Closest = c0 - r0 * U;\n                            info.circle1Closest = c1 - r1 * U;",
+      "new": "                        if (d > 0.0) {\n                            info.circle0Closest = c0;\n                            info.circle1Closest = c1;",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "reverse nested closest witnesses"
+    },
+    {
+      "id": "coplanar-circle-plane-one",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "std::make_optional(DistAndPoints{0, center, origin2})",
+      "new": "std::make_optional(DistAndPoints{1.0, center, origin2})",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "coplanar circle-plane distance"
+    },
+    {
+      "id": "feature-selection-condition-invert",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "if (!only_select_plane) {",
+      "new": "if (only_select_plane) {",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "feature hover selection"
+    },
+    {
+      "id": "cylinder-circle-type-edge",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "                        plane.surface_features.emplace_back(SurfaceFeature(SurfaceFeatureType::Circle, center, plane.normal, std::nullopt, radius));",
+      "new": "                        plane.surface_features.emplace_back(SurfaceFeature(SurfaceFeatureType::Edge, center, plane.normal, std::nullopt, radius));",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "circular end-face feature type"
+    },
+    {
+      "id": "translate-plane-affine-offset",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "m_pt2 = tran * m_pt2;",
+      "new": "m_pt2 = tran * m_pt2 + Vec3d::Ones();",
+      "test_filter": "MeasureGeometryExtended",
+      "description": "affine plane translation"
+    },
+    {
+      "id": "point-circle-axis-reversion",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "                // The radial projection is the circle center for points on its\n                // axis. Pick a deterministic point on the circle and measure\n                // the actual point-to-circle distance, including axial offset.\n                const Vec3d p_on_circle = c + radius * get_orthogonal(n, true);\n                if (deal_circle_result == false) {\n                    result.distance_strict = std::make_optional(\n                        DistAndPoints{(f1.get_point() - p_on_circle).norm(), f1.get_point(), p_on_circle});\n                }\n                else {\n                    const double dist = (f1.get_point() - c).norm();\n                    result.distance_strict = std::make_optional(DistAndPoints{dist, f1.get_point(), c});\n                }\n",
+      "new": "                const Vec3d p_on_circle = c + radius * get_orthogonal(n, true);\n                result.distance_strict = std::make_optional(DistAndPoints{ radius, c, p_on_circle });\n",
+      "test_filter": "MeasureGeometryExtended"
+    },
+    {
+      "id": "parallel-circle-axial-reversion",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "                // Calculate from the witnesses rather than a planar-only\n                // branch distance. This includes axial separation and keeps\n                // the reported distance consistent with its witness points.\n                info.sqrDistance = (info.circle1Closest - info.circle0Closest).squaredNorm();\n",
+      "new": "                Vec3d witness_delta = info.circle1Closest - info.circle0Closest;\n                witness_delta.z() = 0.0;\n                info.sqrDistance = witness_delta.squaredNorm();\n",
+      "test_filter": "MeasureGeometryExtended"
+    },
+    {
+      "id": "parallel-circle-overlap-reversion",
+      "path": "src/libslic3r/Measure.cpp",
+      "old": "                        // The projected circles intersect. Their closest points\n                        // share the projected intersection point; using the two\n                        // centers here is not a valid circle witness. The earlier\n                        // nested/concentric branches handle every d == 0 case,\n                        // so this intersection branch has a well-defined projected direction.\n                        assert(d > 0.0);\n                        const double x = (r0 * r0 - r1 * r1 + d * d) / (2.0 * d);\n                        const double h_sq = std::max(r0 * r0 - x * x, 0.0);\n                        const Vec3d V = n0.cross(U).normalized();\n                        const Vec3d offset = x * U + std::sqrt(h_sq) * V;\n                        info.circle0Closest = c0 + offset;\n                        info.circle1Closest = c1 - (d - x) * U + std::sqrt(h_sq) * V;\n",
+      "new": "                        info.circle0Closest = c0;\n                        info.circle1Closest = c1;\n",
+      "test_filter": "MeasureGeometryExtended"
+    }
+  ]
+}

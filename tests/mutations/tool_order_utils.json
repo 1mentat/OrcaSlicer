@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "description": "Bounded ToolOrderUtils flow and ordering mutants. Each source anchor is required to occur once and is validated against a fresh native replacement object.",
+  "mutants": [
+    {
+      "id": "maxflow-link-target-selection",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "                    add_edge(from_idx, l_nodes.size() + r_id, 1);",
+      "new": "                    add_edge(from_idx, l_nodes.size() + ((r_id + 1) % static_cast<int>(r_nodes.size())), 1);",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "maxflow-unlink-limit-branch",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "            if (unlink_limits.has_value() && std::find(unlink_limits->begin(), unlink_limits->end(), j) != unlink_limits->end())\n                    continue;\n                add_edge(from_idx, l_nodes.size() + j, 1);",
+      "new": "            if (unlink_limits.has_value() && std::find(unlink_limits->begin(), unlink_limits->end(), j) == unlink_limits->end())\n                    continue;\n                add_edge(from_idx, l_nodes.size() + j, 1);",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "maxflow-group-routing",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "v_node_to[vid] = l_nodes.size() + r_nodes.size() + gid;",
+      "new": "v_node_to[vid] = sink_id;",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "mincost-single-augmentation",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "while (spfa(source_id, sink_id));",
+      "new": "for (int pass = 0; pass < 1 && spfa(source_id, sink_id); ++pass) {}",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "lower-bound-cost-propagation",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "if (r_nodes[idx_in_right] == -1) continue;",
+      "new": "if (r_nodes[idx_in_right] != -1) continue;",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "group-coverage-bonus",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "int bonus = max_flush * L + 1;",
+      "new": "int bonus = 0;",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "minflush-default-source-capacity",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "int capacity = u_capacity.empty() ? 1 : u_capacity[i];",
+      "new": "int capacity = u_capacity.empty() ? 0 : u_capacity[i];",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "forecast-cost-direction",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "if (total_cost < best_cost || (total_cost == best_cost && total_change < best_change)) {",
+      "new": "if (total_cost > best_cost || (total_cost == best_cost && total_change < best_change)) {",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "hamilton-dp-direction",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "if (cache[state][target] > tmp) {",
+      "new": "if (cache[state][target] < tmp) {",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "reorder-group-zero-membership",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "if (filament_maps[i] == 0)",
+      "new": "if (filament_maps[i] != 0)",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "reorder-group-one-membership",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "if (filament_maps[i] == 1)",
+      "new": "if (filament_maps[i] != 1)",
+      "test_filter": "ToolOrderUtils"
+    },
+    {
+      "id": "reorder-initial-filament-bound",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "if (initial_fil < flush_matrix[idx].size())",
+      "new": "if (initial_fil >= flush_matrix[idx].size())",
+      "test_filter": "ToolOrderUtils"
+    }
+  ]
+}

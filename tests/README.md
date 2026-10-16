@@ -165,6 +165,29 @@ identical, empty, and unequal-length integer groups. Header mutations require
 recompiling consumers; an isolated header check must avoid archived weak inline
 definitions masking the changed implementation.
 
+`[ToolOrderUtils]` checks constrained flow capacities, group requirements,
+minimum flush costs, and filament ordering. Small path instances use exhaustive
+permutation oracles, including transitions into the next layer; large instances
+check membership and the independently summed path cost. Mutation cases cover
+edge restrictions, capacity defaults, group bonuses, and ordering decisions.
+
+`[MeasureGeometryExtended]` and `[MeasureSkew]` check distances and closest
+points against analytic circle geometry and independent angular minimization.
+The cases include axial offsets, intersecting projected circles, nearly
+concentric circles, reversed inputs, and common rigid transforms. Every closest
+point must lie on the requested feature and agree with the reported distance.
+
+`[MeshBooleanContracts]` checks analytic solid volumes, valid mesh indices,
+remeshing, UV conformality, and conversion ownership. `[EmbossExtra]` checks
+Euclidean radius boundaries, healed areas, font loading and cancellation,
+shape transforms, and projection round trips. The radius regression distinguishes
+a public distance from the squared distance required by the AABB query.
+
+`[TextureBakeRelocate]` checks movement toward known linear contours, tangent
+motion, displacement limits, gradient gates, locked vertices, welded copies,
+and positive face orientation. Constant and stationary height fields exercise
+no-op and finite-output behavior; auxiliary weights must survive unchanged.
+
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
 line or segment details are needed. Profile-merge and export diagnostics are retained

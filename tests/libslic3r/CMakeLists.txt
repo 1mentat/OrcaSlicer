@@ -31,12 +31,14 @@ add_executable(${_TEST_NAME}_tests
     test_cut_utils.cpp
     test_texture_painting.cpp
     test_texture_bake_regularize.cpp
+    test_texture_bake_relocate.cpp
     test_orient.cpp
     test_locales_utils.cpp
     test_drc.cpp
     test_edge_grid.cpp
     test_gcodereader.cpp
     test_toolordering_nozzle_group.cpp
+    test_tool_order_utils.cpp
     test_parallel_resolve.cpp
     test_preset_bundle_loading.cpp
     test_preset_setting_id.cpp

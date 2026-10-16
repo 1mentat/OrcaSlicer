@@ -1,3 +1,9 @@
+#include <ios>
+#include <initializer_list>
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/EmbossShape.hpp"
+#include <iterator>
+#include <fstream>
 #include <cstdint>
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Point.hpp"
@@ -456,3 +462,233 @@ TEST_CASE("Emboss layout selects metrics from the requested font collection entr
 }
 
 } // namespace emboss_layout_contracts
+
+namespace emboss_extra {
+
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
+
+namespace {
+
+std::filesystem::path repo_font_path()
+{
+    return std::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() /
+           "resources/fonts/Sarabun-Medium.ttf";
+}
+
+Polygon scaled_polygon(std::initializer_list<std::pair<double, double>> points)
+{
+    Polygon result;
+    for (const auto &[x, y] : points)
+        result.points.push_back(Point::new_scale(x, y));
+    return result;
+}
+
+ExPolygon square(double x, double y, double side)
+{
+    return ExPolygon(scaled_polygon({{x, y}, {x + side, y}, {x + side, y + side}, {x, y + side}}));
+}
+
+double area_of(const ExPolygons &shape)
+{
+    double area = 0.;
+    for (const ExPolygon &expolygon : shape)
+        area += expolygon.area();
+    return area;
+}
+
+} // namespace
+
+TEST_CASE("Healing removes self intersections while retaining filled area", "[Emboss][EmbossExtra]")
+{
+    const Polygons bowtie{scaled_polygon({{0., 0.}, {20., 20.}, {0., 20.}, {20., 0.}})};
+    const HealedExPolygons healed = Emboss::heal_polygons(bowtie, true, 10);
+    REQUIRE_FALSE(healed.expolygons.empty());
+    CHECK(healed.is_healed);
+    CHECK_THAT(area_of(healed.expolygons), WithinRel(200. / (SCALING_FACTOR * SCALING_FACTOR), 1e-2));
+
+    ExPolygons duplicate{ExPolygon(scaled_polygon({{0., 0.}, {20., 0.}, {20., 20.}, {20., 20.}, {0., 20.}}))};
+    CHECK(Emboss::heal_expolygons(duplicate, 10));
+    REQUIRE_FALSE(duplicate.empty());
+    CHECK_THAT(area_of(duplicate), WithinRel(400. / (SCALING_FACTOR * SCALING_FACTOR), 1e-2));
+}
+
+static ExPolygons close_point_shape()
+{
+    return {
+        ExPolygon(scaled_polygon({{0., 0.}, {100., 0.}, {100., 100.}, {0., 100.}})),
+        ExPolygon(scaled_polygon({{50., 2.}, {55., 10.}, {45., 10.}})),
+    };
+}
+
+TEST_CASE("Close-point division honors a Euclidean radius boundary", "[Emboss][EmbossExtra]")
+{
+    const double unit = 1. / SCALING_FACTOR;
+    const size_t original_points = close_point_shape().front().contour.size();
+
+    ExPolygons below = close_point_shape();
+    CHECK_FALSE(Emboss::divide_segments_for_close_point(below, 1.9 * unit));
+    CHECK(below.front().contour.size() == original_points);
+
+    // AABBTreeLines uses a strict squared-distance comparison, so the exact
+    // boundary is intentionally excluded; a radius above the boundary includes the nearby point.
+    ExPolygons exact = close_point_shape();
+    CHECK_FALSE(Emboss::divide_segments_for_close_point(exact, 2.0 * unit));
+    CHECK(exact.front().contour.size() == original_points);
+
+    ExPolygons above = close_point_shape();
+    REQUIRE(Emboss::divide_segments_for_close_point(above, 2.1 * unit));
+    CHECK(above.front().contour.size() == original_points + 1);
+    CHECK(std::count(above.front().contour.points.begin(), above.front().contour.points.end(),
+                     Point::new_scale(50., 2.)) == 1);
+
+    ExPolygons zero = close_point_shape();
+    CHECK_FALSE(Emboss::divide_segments_for_close_point(zero, 0.));
+    CHECK(zero.front().contour.size() == original_points);
+
+    ExPolygons negative = close_point_shape();
+    CHECK_FALSE(Emboss::divide_segments_for_close_point(negative, -unit));
+    CHECK(negative.front().contour.size() == original_points);
+
+    ExPolygons empty;
+    CHECK_FALSE(Emboss::divide_segments_for_close_point(empty, 2.0 * unit));
+    for (const Point &point : above.front().contour.points) {
+        CHECK(std::isfinite(static_cast<double>(point.x())));
+        CHECK(std::isfinite(static_cast<double>(point.y())));
+    }
+}
+
+TEST_CASE("Font loading supports raw data, glyph extraction, and invalid collection selection", "[Emboss][EmbossExtra]")
+{
+    const std::filesystem::path path = repo_font_path();
+    REQUIRE(std::filesystem::exists(path));
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    std::vector<unsigned char> data((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(data.empty());
+    auto font = Emboss::create_font_file(std::make_unique<std::vector<unsigned char>>(data));
+    REQUIRE(font != nullptr);
+    REQUIRE_FALSE(font->infos.empty());
+
+    const auto glyph = Emboss::letter2glyph(*font, 0, 'A', 0.1f);
+    REQUIRE(glyph.has_value());
+    REQUIRE_FALSE(glyph->shape.empty());
+    CHECK(glyph->advance_width > 0);
+    CHECK_FALSE(Emboss::letter2glyph(*font, static_cast<unsigned>(font->infos.size()), 'A', 0.1f).has_value());
+    CHECK_FALSE(Emboss::is_italic(*font, static_cast<unsigned>(font->infos.size())));
+}
+
+TEST_CASE("Glyph cancellation stops a long text conversion at its cancellation checkpoint", "[Emboss][EmbossExtra]")
+{
+    auto font = Emboss::create_font_file(repo_font_path().string().c_str());
+    REQUIRE(font != nullptr);
+    Emboss::FontFileWithCache cached(std::move(font));
+    FontProp prop(10.f);
+    size_t checks = 0;
+    const std::wstring text(20, L'A');
+    const ExPolygonsWithIds cancelled = Emboss::text2vshapes(cached, text, prop, [&checks]() {
+        ++checks;
+        return true;
+    });
+    CHECK(checks > 0);
+    CHECK(cancelled.empty());
+}
+
+TEST_CASE("Union-with-delta merges overlapping glyph shapes and caches the healed result", "[Emboss][EmbossExtra]")
+{
+    EmbossShape shape;
+    shape.shapes_with_ids = {
+        {10u, {square(0., 0., 20.)}, true},
+        {11u, {square(10., 0., 20.)}, true},
+    };
+    const ExPolygons first = Slic3r::union_with_delta(shape, 1.f, 10);
+    REQUIRE_FALSE(first.empty());
+    // Two 20 x 20 squares overlap by a 10 x 20 rectangle.
+    CHECK_THAT(area_of(first), WithinRel(600. / (SCALING_FACTOR * SCALING_FACTOR), 1e-3));
+    CHECK(shape.final_shape.is_healed);
+    const ExPolygons cached = Slic3r::union_with_delta(shape, 100.f, 0);
+    CHECK(cached.size() == first.size());
+    CHECK_THAT(area_of(cached), WithinAbs(area_of(first), 1e-6));
+}
+
+TEST_CASE("Shape translation, centering, and extents are mutually consistent", "[Emboss][EmbossExtra]")
+{
+    ExPolygonsWithIds shapes{
+        {1u, {square(0., 0., 10.)}, true},
+        {2u, {square(20., 10., 5.)}, true},
+    };
+    const BoundingBox before = Slic3r::get_extents(shapes);
+    REQUIRE(before.defined);
+    CHECK_THAT(before.min.x(), WithinAbs(0., 1e-6));
+    CHECK_THAT(before.max.y(), WithinAbs(15. / SCALING_FACTOR, 1e-6));
+    Slic3r::translate(shapes, Point::new_scale(5., -3.));
+    const BoundingBox moved = Slic3r::get_extents(shapes);
+    CHECK_THAT(moved.min.x(), WithinAbs(5. / SCALING_FACTOR, 1e-6));
+    Slic3r::center(shapes);
+    const BoundingBox centered = Slic3r::get_extents(shapes);
+    CHECK_THAT(centered.center().x(), WithinAbs(0., 1e-6));
+    CHECK_THAT(centered.center().y(), WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("Suggested-up and calculated-up distinguish identity and rotated frames", "[Emboss][EmbossExtra]")
+{
+    const Vec3d normal = Vec3d(0.6, 0.0, 0.8).normalized();
+    const Vec3d suggested = Emboss::suggest_up(normal);
+    CHECK_THAT(suggested.norm(), WithinAbs(1., 1e-9));
+    CHECK_THAT(suggested.dot(normal), WithinAbs(0., 1e-9));
+
+    const Transform3d identity = Transform3d::Identity();
+    CHECK_FALSE(Emboss::calc_up(identity).has_value());
+    Transform3d rotated = Transform3d::Identity();
+    rotated.rotate(Eigen::AngleAxisd(PI / 2., Vec3d::UnitZ()));
+    const auto calculated = Emboss::calc_up(rotated);
+    REQUIRE(calculated.has_value());
+    CHECK(std::isfinite(*calculated));
+    CHECK_THAT(std::abs(*calculated), WithinAbs(PI / 2., 1e-6));
+}
+
+TEST_CASE("Projection wrappers preserve round-trip coordinates and depth", "[Emboss][EmbossExtra]")
+{
+    auto scale_core = std::make_unique<Emboss::OrthoProject>(Transform3d::Identity(), Vec3d(0., 0., 4.));
+    Emboss::ProjectScale scaled(std::move(scale_core), 2.);
+    const Point p = Point::new_scale(3., 5.);
+    const auto front_back = scaled.create_front_back(p);
+    CHECK_THAT(front_back.second.z(), WithinAbs(8., 1e-9));
+    double depth = 0.;
+    const auto back = scaled.unproject(front_back.second, &depth);
+    REQUIRE(back.has_value());
+    CHECK_THAT((*back - p.cast<double>()).norm(), WithinAbs(0., 1e-9));
+    CHECK_THAT(depth, WithinAbs(8., 1e-9));
+
+    Transform3d transform = Transform3d::Identity();
+    transform.translate(Vec3d(10., -4., 3.));
+    auto transform_core = std::make_unique<Emboss::ProjectZ>(2.);
+    Emboss::ProjectTransform transformed(std::move(transform_core), transform);
+    const auto transformed_fb = transformed.create_front_back(p);
+    double transformed_depth = 0.;
+    const auto transformed_back = transformed.unproject(transformed_fb.second, &transformed_depth);
+    REQUIRE(transformed_back.has_value());
+    CHECK_THAT((*transformed_back - p.cast<double>()).norm(), WithinAbs(0., 1e-9));
+    CHECK_THAT(transformed_depth, WithinAbs(0., 1e-9));
+}
+
+TEST_CASE("Orthogonal direction projection is reversible through the 3d adapter", "[Emboss][EmbossExtra]")
+{
+    const Emboss::OrthoProject3d projection(Vec3d(1., 2., 3.));
+    const Vec3d point(4., -1., 8.);
+    const Vec3d projected = projection.project(point);
+    CHECK_THAT((projected - point).norm(), WithinAbs(std::sqrt(14.), 1e-9));
+
+    Transform3d matrix = Transform3d::Identity();
+    matrix.translate(Vec3d(2., 3., 4.));
+    Emboss::OrthoProject ortho(matrix, Vec3d(0., 0., 5.));
+    double depth = 0.;
+    const auto front_back = ortho.create_front_back(Point::new_scale(2., 3.));
+    const auto original = ortho.unproject(front_back.first, &depth);
+    REQUIRE(original.has_value());
+    CHECK_THAT((*original - Point::new_scale(2., 3.).cast<double>()).norm(), WithinAbs(0., 1e-9));
+    CHECK_THAT(depth, WithinAbs(0., 1e-9));
+}
+
+} // namespace emboss_extra

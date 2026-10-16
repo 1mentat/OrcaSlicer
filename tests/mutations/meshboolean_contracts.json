@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Single-anchor semantic mutations for MeshBooleanContracts; expected kills require independent geometry/topology assertions.",
+  "mutants": [
+    {
+      "id": "remesh-result-preservation",
+      "path": "src/libslic3r/MeshBoolean.cpp",
+      "old": "return cgal_to_indexed_triangle_set(cgal_mesh);",
+      "new": "return mesh;",
+      "test_filter": "MeshBooleanContracts"
+    },
+    {
+      "id": "lscm-empty-guard",
+      "path": "src/libslic3r/MeshBoolean.cpp",
+      "old": "if (mesh.indices.empty())\n        return std::nullopt;",
+      "new": "if (!mesh.indices.empty())\n        return std::nullopt;",
+      "test_filter": "MeshBooleanContracts"
+    },
+    {
+      "id": "cgal-empty-result",
+      "path": "src/libslic3r/MeshBoolean.cpp",
+      "old": "return mesh.m.is_empty();",
+      "new": "return false;",
+      "test_filter": "MeshBooleanContracts"
+    },
+    {
+      "id": "cgal-volume-bound",
+      "path": "src/libslic3r/MeshBoolean.cpp",
+      "old": "return CGAL::is_closed(mesh.m) && CGALProc::does_bound_a_volume(mesh.m);",
+      "new": "return false;",
+      "test_filter": "MeshBooleanContracts"
+    },
+    {
+      "id": "repair-empty-guard",
+      "path": "src/libslic3r/MeshBoolean.cpp",
+      "old": "if (mesh.empty())\n        return true;",
+      "new": "if (!mesh.empty())\n        return true;",
+      "test_filter": "MeshBooleanContracts"
+    },
+    {
+      "id": "mcut-empty-result",
+      "path": "src/libslic3r/MeshBoolean.cpp",
+      "old": "bool empty(const McutMesh &mesh) { return mesh.vertexCoordsArray.empty() || mesh.faceIndicesArray.empty(); }",
+      "new": "bool empty(const McutMesh &mesh) { return false; }",
+      "test_filter": "MeshBooleanContracts"
+    },
+    {
+      "id": "mcut-empty-union",
+      "path": "src/libslic3r/MeshBoolean.cpp",
+      "old": "if (src_parts.empty() && boolean_opts == \"UNION\")",
+      "new": "if (!src_parts.empty() && boolean_opts == \"UNION\")",
+      "test_filter": "MeshBooleanContracts"
+    },
+    {
+      "id": "lscm-component-gate",
+      "path": "src/libslic3r/MeshBoolean.cpp",
+      "old": "if (num_components != 1)",
+      "new": "if (num_components == 1)",
+      "test_filter": "MeshBooleanContracts"
+    }
+  ]
+}

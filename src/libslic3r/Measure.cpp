@@ -896,8 +896,18 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             const Eigen::Hyperplane<double, 3> circle_plane(n, c);
             const Vec3d proj = circle_plane.projection(f1.get_point());
             if (proj.isApprox(c)) {
+                // The radial projection is the circle center for points on its
+                // axis. Pick a deterministic point on the circle and measure
+                // the actual point-to-circle distance, including axial offset.
                 const Vec3d p_on_circle = c + radius * get_orthogonal(n, true);
-                result.distance_strict = std::make_optional(DistAndPoints{ radius, c, p_on_circle });
+                if (deal_circle_result == false) {
+                    result.distance_strict = std::make_optional(
+                        DistAndPoints{(f1.get_point() - p_on_circle).norm(), f1.get_point(), p_on_circle});
+                }
+                else {
+                    const double dist = (f1.get_point() - c).norm();
+                    result.distance_strict = std::make_optional(DistAndPoints{dist, f1.get_point(), c});
+                }
             }
             else {
                 if (deal_circle_result == false) {
@@ -1177,24 +1187,32 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             else {
                 ClosestInfo& info = candidates[0];
 
-                const double N0dD = n0.dot(D);
-                const Vec3d normProj = N0dD * n0;
-                const Vec3d compProj = D - normProj;
-                Vec3d U = compProj;
-                const double d = U.norm();
-                U.normalize();
+                // Project through cross products instead of subtracting two nearly equal axial
+                // vectors. This keeps a rigidly transformed axial offset from becoming an arbitrary
+                // tangent direction through cancellation. Only values at floating-point roundoff are
+                // canonicalized to zero relative to the center/radius scale; real small projected
+                // separations remain positive geometry even for small models.
+                Vec3d U = n0.cross(D.cross(n0));
+                double d = U.norm();
+                const double roundoff_scale = std::max({ D.norm(), std::abs(r0), std::abs(r1),
+                                                            std::numeric_limits<double>::min() });
+                const double roundoff = 64.0 * std::numeric_limits<double>::epsilon() * roundoff_scale;
+                if (d <= roundoff) {
+                    d = 0.0;
+                    U = Vec3d::Zero();
+                } else {
+                    U /= d;
+                }
 
                 // The configuration is determined by the relative location of the
                 // intervals of projection of the circles on to the D-line.
                 // Circle0 projects to [-r0,r0] and circle1 projects to
                 // [d-r1,d+r1].
                 const double dmr1 = d - r1;
-                double distance;
                 if (dmr1 >= r0) {
                     // d >= r0 + r1
                     // The circles are separated (d > r0 + r1) or tangent with one
                     // outside the other (d = r0 + r1).
-                    distance = dmr1 - r0;
                     info.circle0Closest = c0 + r0 * U;
                     info.circle1Closest = c1 - r1 * U;
                 }
@@ -1204,7 +1222,6 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                     const double dpr1 = d + r1;
                     if (dpr1 <= r0) {
                         // Circle1 is inside circle0.
-                        distance = r0 - dpr1;
                         if (d > 0.0) {
                             info.circle0Closest = c0 + r0 * U;
                             info.circle1Closest = c1 + r1 * U;
@@ -1220,7 +1237,6 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                     }
                     else if (dmr1 <= -r0) {
                         // Circle0 is inside circle1.
-                        distance = -r0 - dmr1;
                         if (d > 0.0) {
                             info.circle0Closest = c0 - r0 * U;
                             info.circle1Closest = c1 - r1 * U;
@@ -1235,13 +1251,25 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                         }
                     }
                     else {
-                        distance = (c1 - c0).norm();
-                        info.circle0Closest = c0;
-                        info.circle1Closest = c1;
+                        // The projected circles intersect. Their closest points
+                        // share the projected intersection point; using the two
+                        // centers here is not a valid circle witness. The earlier
+                        // nested/concentric branches handle every d == 0 case,
+                        // so this intersection branch has a well-defined projected direction.
+                        assert(d > 0.0);
+                        const double x = (r0 * r0 - r1 * r1 + d * d) / (2.0 * d);
+                        const double h_sq = std::max(r0 * r0 - x * x, 0.0);
+                        const Vec3d V = n0.cross(U).normalized();
+                        const Vec3d offset = x * U + std::sqrt(h_sq) * V;
+                        info.circle0Closest = c0 + offset;
+                        info.circle1Closest = c1 - (d - x) * U + std::sqrt(h_sq) * V;
                     }
                 }
 
-                info.sqrDistance = distance * distance;
+                // Calculate from the witnesses rather than a planar-only
+                // branch distance. This includes axial separation and keeps
+                // the reported distance consistent with its witness points.
+                info.sqrDistance = (info.circle1Closest - info.circle0Closest).squaredNorm();
             }
             if (deal_circle_result == false) {
                 result.distance_infinite = std::make_optional(

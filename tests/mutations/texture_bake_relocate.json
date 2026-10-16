@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "description": "Contour relocation geometry, movement limits, gradient and topology contracts.",
+  "mutants": [
+    {
+      "id": "disabled-iterations-removed",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "for (int iter = 0; iter < settings.iterations; ++iter)",
+      "new": "for (int iter = 0; iter <= settings.iterations; ++iter)",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "constant-field-guard-inverted",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "if (!(h_range > 0.0))",
+      "new": "if (!(h_range < 0.0))",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "gradient-zero-guard-removed",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "if (g2 <= 0.0)",
+      "new": "if (g2 < 0.0)",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "gradient-threshold-ignored",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "if (std::sqrt(g2) * double(edge_len[v]) < min_grad)",
+      "new": "if (std::sqrt(g2) * double(edge_len[v]) > min_grad)",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "newton-direction-reversed",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "const double s   = -(h - target) / g2;",
+      "new": "const double s   = (h - target) / g2;",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "move-cap-removed",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "if (len > cap)\n                    d *= cap / len;",
+      "new": "if (false)\n                    d *= cap / len;",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "locked-vertices-ignored",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "if (frozen[v] || edge_len[v] <= 0.f)",
+      "new": "if (edge_len[v] <= 0.f)",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "welding-removed",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "vid[i] = weld.get_or_set(geometry.pos[i], int(pos.size()));\n        if (weld.inserted())\n            pos.push_back(geometry.pos[i]);",
+      "new": "vid[i] = int(pos.size());\n        pos.push_back(geometry.pos[i]);",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "proposal-suppressed",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "want[v]     = 1;",
+      "new": "want[v]     = 0;",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "inversion-guard-removed",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "if (n2.squaredNorm() <= 0.f || n2.normalized().dot(nrm[v]) < 0.f)",
+      "new": "if (n2.squaredNorm() <= 0.f)",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "contour-level-ignored",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "const double target   = h_lo + h_range * settings.contour_level;",
+      "new": "const double target   = h_lo + h_range * 0.5;",
+      "test_filter": "TextureBakeRelocate"
+    },
+    {
+      "id": "positions-not-written-back",
+      "path": "src/libslic3r/TextureBake/TextureBakeRelocate.cpp",
+      "old": "result.geometry.pos[i] = pos[size_t(vid[i])];",
+      "new": "result.geometry.pos[i] = geometry.pos[i];",
+      "test_filter": "TextureBakeRelocate"
+    }
+  ]
+}
