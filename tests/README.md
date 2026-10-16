@@ -436,7 +436,8 @@ python3 scripts/slicer_pr_validation.py \
   --deps-prefix "$DEPS_PREFIX" \
   --uv-executable "$UV" \
   --output-dir build/evidence/pr-validation \
-  --jobs 12
+  --jobs 4 --test-jobs 8 \
+  --cmake-arg=-DSLICER_TEST_PROCESSORS=1
 # Example focused rerun:
 python3 scripts/slicer_pr_validation.py \
   --snapshot build/evidence/open-prs.json \
@@ -446,8 +447,14 @@ python3 scripts/slicer_pr_validation.py \
   --uv-executable "$UV" \
   --numbers 10,12 48 \
   --output-dir build/evidence/pr-validation-selected \
-  --jobs 12
+  --jobs 4 --test-jobs 8 \
+  --cmake-arg=-DSLICER_TEST_PROCESSORS=1
 ```
+
+`--jobs` limits compiler parallelism; `--test-jobs` independently sets CTest
+scheduling slots and defaults to `--jobs` when omitted. The examples keep four
+compiler jobs while allowing eight test slots within the resource boundary
+described above. Test affinity reserves two slots for `[Parallel]` cases.
 
 The native defaults configure Release/Ninja with `SLIC3R_GUI=OFF`,
 `BUILD_TESTS=ON`, `SLIC3R_CAD=ON`, build the five slicer test targets, and run

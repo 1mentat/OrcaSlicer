@@ -15,6 +15,18 @@ import slicer_pr_validation  # noqa: E402
 
 
 class ParsingTests(unittest.TestCase):
+    def test_nonpositive_test_jobs_fail_before_validation(self):
+        for jobs in ("0", "-1"):
+            with self.subTest(jobs=jobs), \
+                 mock.patch.object(slicer_pr_validation, "run_validation") as run, \
+                 mock.patch("sys.stderr"):
+                result = slicer_pr_validation.main([
+                    "--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused", "--test-jobs", jobs,
+                ])
+            self.assertEqual(result, 2)
+            run.assert_not_called()
+
     def test_numbers_accept_repeated_and_comma_separated_values(self):
         self.assertEqual(slicer_pr_validation.parse_numbers(["1, 3", "8"]), [1, 3, 8])
         self.assertEqual(slicer_pr_validation.parse_numbers([["1", "3"], ["8"]]), [1, 3, 8])
@@ -664,11 +676,14 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             args = self._args(repo, snapshot, output)
             args.harness_base = base
             args.harness_ref = harness_ref
+            args.test_jobs = 8
             with mock.patch.object(slicer_pr_validation, "_run_tree",
                                    side_effect=self._fake_run_tree):
                 result = slicer_pr_validation.run_validation(args)
             self.assertEqual(result, 0)
             report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["configuration"]["jobs"], 1)
+            self.assertEqual(report["configuration"]["test_jobs"], 8)
             self.assertEqual(
                 report["snapshot_sha256"], hashlib.sha256(snapshot.read_bytes()).hexdigest())
             self.assertEqual(len(report["preflight_heads"]), 1)
@@ -712,6 +727,37 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             recorded = report["snapshot_sha256"]
             self.assertEqual(recorded, hashlib.sha256(original_bytes).hexdigest())
             self.assertNotEqual(recorded, hashlib.sha256(changed_bytes).hexdigest())
+
+    def test_test_slots_do_not_raise_compiler_parallelism(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            worktree = root / "repo"
+            worktree.mkdir()
+            args = self._args(worktree, root / "snapshot.json", root / "evidence")
+            args.jobs = 4
+            build_path = worktree / args.build_dir
+            for test_jobs in (None, 8):
+                with self.subTest(test_jobs=test_jobs):
+                    args.test_jobs = test_jobs
+                    calls = []
+
+                    def fake_phase(argv, *, cwd, timeout, log):
+                        calls.append(list(argv))
+                        if argv[0] == "ctest":
+                            junit = Path(argv[argv.index("--output-junit") + 1])
+                            junit.write_text('<testsuite tests="1"><testcase name="contract" /></testsuite>')
+                            return slicer_pr_validation.CommandResult(
+                                list(argv), 0, 0.01, "100% tests passed, 0 tests failed out of 1", "")
+                        return slicer_pr_validation.CommandResult(list(argv), 0, 0.01, "", "")
+
+                    build = slicer_pr_validation._default_build(worktree, build_path, args.jobs, args.targets)
+                    with mock.patch.object(slicer_pr_validation, "_run_phase", side_effect=fake_phase):
+                        result = slicer_pr_validation._run_tree(
+                            worktree, root, f"run-{test_jobs}", args, ["cmake-configure"], build,
+                            commit_sha="a" * 40, tree_sha="b" * 40)
+                    self.assertEqual(result["status"], "pass")
+                    self.assertEqual(calls[1][calls[1].index("--parallel") + 1], "4")
+                    self.assertEqual(calls[2][calls[2].index("--parallel") + 1], str(test_jobs or 4))
 
     def test_run_tree_requires_junit_when_ctest_console_reports_success(self):
         with tempfile.TemporaryDirectory() as temp:

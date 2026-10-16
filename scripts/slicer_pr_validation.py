@@ -23,7 +23,7 @@ Example::
       --harness-ref codex/slicer-confidence-tests \
       --deps-prefix /path/to/deps/install \
       --output-dir build/evidence/pr-validation \
-      --jobs 8
+      --jobs 4 --test-jobs 8
 """
 
 from __future__ import annotations
@@ -614,7 +614,8 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
 
     junit = run_dir / "tests.junit.xml"
     build_path = _resolve_build_path(worktree, args.build_dir)
-    test_args = _default_test(build_path, args.jobs, junit, args.exclude_labels)
+    test_jobs = args.test_jobs if args.test_jobs is not None else args.jobs
+    test_args = _default_test(build_path, test_jobs, junit, args.exclude_labels)
     test_args = _format_args(test_args, root=worktree, build=build_path,
                              deps_prefix=args.deps_prefix, uv=args.uv, jobs=args.jobs)
     entry["commands"]["test"] = {"argv": test_args, "junit": str(junit),
@@ -778,6 +779,7 @@ def run_validation(args: argparse.Namespace) -> int:
         },
         "configuration": {
             "deps_prefix": args.deps_prefix, "uv": uv, "jobs": args.jobs,
+            "test_jobs": args.test_jobs if args.test_jobs is not None else args.jobs,
             "build_dir": args.build_dir, "exclude_labels": args.exclude_labels,
             "targets": list(args.targets), "timeout_seconds": args.timeout,
             "cmake_args": list(args.cmake_arg), "patch_scope": args.patch_scope,
@@ -1032,7 +1034,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--deps-prefix", required=True,
                         help="native dependency install prefix for CMake")
     parser.add_argument("--output-dir", default="build/evidence/pr-validation")
-    parser.add_argument("--jobs", type=int, default=max(1, os.cpu_count() or 1))
+    parser.add_argument("--jobs", type=int, default=max(1, os.cpu_count() or 1),
+                        help="parallel compiler jobs; also the default test slots")
+    parser.add_argument("--test-jobs", type=int,
+                        help="CTest scheduling slots (defaults to --jobs)")
     parser.add_argument("--numbers", action="append", nargs="+",
                         help="PR numbers, space/comma-separated; may be repeated")
     parser.add_argument("--build-dir", default="build")
@@ -1058,6 +1063,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.jobs < 1:
         print("slicer_pr_validation: error: --jobs must be positive", file=sys.stderr)
+        return 2
+    if args.test_jobs is not None and args.test_jobs < 1:
+        print("slicer_pr_validation: error: --test-jobs must be positive", file=sys.stderr)
         return 2
     if args.timeout <= 0:
         print("slicer_pr_validation: error: --timeout must be positive", file=sys.stderr)
