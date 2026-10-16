@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed mesh-repair mutants for independent boundary limits and cancellation ownership. Repair.hpp is inline: rebuild every affected consumer before testing; frozen archives can mask changed definitions. Execution results are recorded separately.",
+  "mutants": [
+    {
+      "id": "texture-repair-boundary-limit-exclusive",
+      "path": "src/libslic3r/TextureToColor/Repair.hpp",
+      "old": "stats.total_boundary_edges <= setting.max_boundary_edges",
+      "new": "stats.total_boundary_edges < setting.max_boundary_edges",
+      "description": "Reject a hole whose total boundary count exactly equals the configured limit.",
+      "test_filter": "TextureToColorRepair"
+    },
+    {
+      "id": "texture-repair-hole-limit-exclusive",
+      "path": "src/libslic3r/TextureToColor/Repair.hpp",
+      "old": "stats.max_cycle_edges      <= setting.max_hole_edges",
+      "new": "stats.max_cycle_edges      < setting.max_hole_edges",
+      "description": "Reject a boundary cycle whose edge count exactly equals the configured hole limit.",
+      "test_filter": "TextureToColorRepair"
+    },
+    {
+      "id": "texture-repair-all-limits-required",
+      "path": "src/libslic3r/TextureToColor/Repair.hpp",
+      "old": "stats.total_boundary_edges <= setting.max_boundary_edges &&",
+      "new": "stats.total_boundary_edges <= setting.max_boundary_edges ||",
+      "description": "Close a hole when only one of the two independent limits allows repair.",
+      "test_filter": "TextureToColorRepair"
+    },
+    {
+      "id": "texture-repair-hole-closing-disabled",
+      "path": "src/libslic3r/TextureToColor/Repair.hpp",
+      "old": "if (can_repair_holes) {",
+      "new": "if (false && can_repair_holes) {",
+      "description": "Leave a permitted tetrahedron boundary open.",
+      "test_filter": "TextureToColorRepair"
+    },
+    {
+      "id": "texture-repair-final-cancellation-ignored",
+      "path": "src/libslic3r/TextureToColor/Repair.hpp",
+      "old": "if (cancel_callback && cancel_callback()) {\n        return false;\n    }\n\n    std::shared_ptr<TriMesh> out;",
+      "new": "if (false && cancel_callback && cancel_callback()) {\n        return false;\n    }\n\n    std::shared_ptr<TriMesh> out;",
+      "description": "Ignore cancellation at the final published stage and replace the caller-owned output.",
+      "test_filter": "TextureToColorRepair"
+    }
+  ]
+}

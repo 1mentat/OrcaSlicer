@@ -267,6 +267,12 @@ encoded PNG and raw RGB/RGBA conversion, material mapping, patterned tiled UVs,
 color swatches, cancellation, and truncated raw buffers. PNG decoding is exercised
 through the encoded-image route used by model importers.
 
+`[TextureToColorPublic]` checks textured tetrahedron conversion and cancellation
+output clearing. `[TextureToColorRepair]` checks independent boundary limits,
+face orientation, degenerate-face removal, topology, volume, and cancellation
+at each published stage. Its inline-header mutants require rebuilding every
+affected consumer before testing.
+
 `[CalibrationContracts]` checks PA command sequences, feedrates, bed extents,
 annotation geometry, layer heights, and coordinate offsets. `[PresetAmsSync]`
 checks physical tray mappings, placeholders, deduplication, mixed-filament
