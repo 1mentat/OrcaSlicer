@@ -51,7 +51,7 @@ mkdir -p build/tmp
 systemd-run --user --wait --pipe --slice=orca-validation.slice \
   --working-directory="$PWD" --setenv="TMPDIR=$PWD/build/tmp" \
   -p MemoryMax=12G -p MemorySwapMax=0 -p CPUQuota=800% -p TasksMax=128 \
-  -p RuntimeMaxSec=1800 -p LimitFSIZE=4G -p TimeoutStopSec=2 \
+  -p RuntimeMaxSec=1800 -p LimitFSIZE=4G -p LimitCORE=0 -p TimeoutStopSec=2 \
   -p KillMode=control-group -p OOMPolicy=kill \
   cmake --build build --config Release --parallel 8 --target libslic3r_tests
 ```
@@ -61,7 +61,10 @@ descendants share the limits and are stopped when it exits. Use smaller limits
 for focused tests, such as 4 GiB, two CPUs, and a five-minute service deadline.
 `LimitFSIZE` limits each output file, including libraries and coverage exports;
 leave enough room for the expected artifacts and check free storage before a
-run. Verify parent-death, memory-limit, and timeout cleanup with small synthetic
+run. Disable core dumps so an assertion failure cannot fill the worker's disk.
+Keep build trees, temporary files, profiles, and compiler caches on disk-backed
+storage; tmpfs retains these artifacts in RAM even after their processes exit.
+Verify parent-death, memory-limit, and timeout cleanup with small synthetic
 processes when adopting a new worker. Preserve failed logs and binaries before
 rebuilding; an interrupted run is incomplete evidence.
 
@@ -179,6 +182,12 @@ volume under translation; `[SLADrainTransforms]` checks normals against
 transformed surface tangents under rotation, unequal scaling, and printer
 correction. `[ColorUtilsExtended]` checks clustering, palette preservation,
 UV correspondence, mesh closure, and remeshing invariants.
+
+`[GCodeProcessorReachable]` checks reserved-tag selection and preheating through
+the public post-processing path. A completed extruder's final idle window must
+emit cooling without scheduling a later heating command or heating block.
+The preheating mutation manifest challenges the usage-block gates, temperature
+branches, extruder selectors, and generated command markers.
 
 `[SettingsFamilyVariance]` connects support speeds, bridge flow, overhang
 speed bands, ironing overrides, and infill connection limits to emitted

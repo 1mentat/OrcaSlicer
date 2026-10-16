@@ -1144,4 +1144,24 @@ TEST_CASE("Nozzle-change contact metadata still permits a measured preheat trans
 }
 
 
+TEST_CASE("A completed extruder with a later idle window emits cooling only", "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat]")
+{
+    // T0 finishes before the long T1 moves, leaving an idle window with no
+    // future T0 filament. The processor must cool T0 without scheduling heat.
+    const std::string gcode =
+        "; MACHINE_START_GCODE_END\nM83\nT0\nG1 X1 Y0 Z0.2 E1 F600\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "; CP_TOOLCHANGE_WIPE CT1 FL0\nT1\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "G1 X150 Y0 E0.5 F60\nG1 X200 Y0 E0.5 F60\n"
+        "; MACHINE_END_GCODE_START\n";
+    const auto processed = process_post(gcode, preheat_config(), true);
+    INFO("cooling-only output: " << processed.output);
+    REQUIRE(processed.result.moves.size() > 2);
+    CHECK(processed.output.find("M104 T0 S25 N0 ;Multi extruder pre cooling") != std::string::npos);
+    CHECK(processed.output.find("Multi extruder pre heating") == std::string::npos);
+    CHECK(processed.output.find("M632") == std::string::npos);
+    CHECK(processed.output.find("M633") == std::string::npos);
+}
+
 } // namespace gcode_processor_reachable_contracts

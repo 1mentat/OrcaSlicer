@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "Bounded source mutations for reachable G-code preheating contracts. Each entry requires an exact single source match and the GCodeProcessorReachable test filter.",
+  "mutants": [
+    {
+      "id": "preheat-cooling-delta-guard-reversed",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (real_delta_temp == 0)",
+      "new": "if (real_delta_temp != 0)",
+      "description": "Invert the zero-delta guard so a nonzero cooling delta returns without emitting the required cooling command.",
+      "test_filter": "GCodeProcessorReachable"
+    },
+    {
+      "id": "preheat-usage-block-build-gated-off",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (m_enable_pre_heating)\n                        build_usage_blocks(gcode_line, line_id);",
+      "new": "if (false)\n                        build_usage_blocks(gcode_line, line_id);",
+      "description": "Disable usage-block construction while preheating is enabled; reachable preheating output must retain its usage blocks.",
+      "test_filter": "GCodeProcessorReachable"
+    },
+    {
+      "id": "preheat-second-pass-gated-off",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (m_enable_pre_heating)\n            run_second_pass_injection();",
+      "new": "if (false)\n            run_second_pass_injection();",
+      "description": "Disable the second injection pass; reachable preheating output must retain its second-pass commands.",
+      "test_filter": "GCodeProcessorReachable"
+    },
+    {
+      "id": "preheat-leading-block-not-seeded",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (m_enable_pre_heating)\n        m_extruder_blocks.push_back(ExtruderPreHeating::ExtruderUsageBlcok());",
+      "new": "if (false)\n        m_extruder_blocks.push_back(ExtruderPreHeating::ExtruderUsageBlcok());",
+      "description": "Disable leading usage-block seeding; the first reachable preheating span must retain its initial block.",
+      "test_filter": "GCodeProcessorReachable"
+    },
+    {
+      "id": "reserved-tag-does-not-stop",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "ret = true;\n                    found_tag = comment;\n                    parser.quit_parsing();\n                    return;",
+      "new": "ret = true;\n                    found_tag = comment;\n                    return;",
+      "description": "Continue parsing after finding a reserved tag; the singular query must preserve the first matching tag.",
+      "test_filter": "GCodeProcessorReachable"
+    },
+    {
+      "id": "preheat-temperature-delta-oracle",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (!pre_cooling && pre_heating)",
+      "new": "if (pre_cooling && pre_heating)",
+      "description": "Invert the heating-only condition so a reachable heating transition enters the wrong injection branch.",
+      "test_filter": "GCodeProcessorReachable"
+    },
+    {
+      "id": "preheat-cooling-only-branch-reversed",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (pre_cooling && !pre_heating)",
+      "new": "if (!pre_cooling && !pre_heating)",
+      "description": "Invert the cooling-only condition so a reachable cooling transition enters the wrong injection branch.",
+      "test_filter": "GCodeProcessorReachable"
+    },
+    {
+      "id": "preheat-target-extruder-sign-reversed",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (target_extruder != -1)",
+      "new": "if (target_extruder == -1)",
+      "description": "Reverse the explicit target-extruder condition so a valid target no longer receives its physical extruder selector.",
+      "test_filter": "GCodeProcessorReachable"
+    },
+    {
+      "id": "preheat-skippable-lines-disabled",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (skippable) {\n                const bool support_dynamic_nozzle_map",
+      "new": "if (false) {\n                const bool support_dynamic_nozzle_map",
+      "description": "Disable the skippable-line branch; reachable transition output must retain its M632 and M633 markers.",
+      "test_filter": "GCodeProcessorReachable"
+    },
+    {
+      "id": "preheat-origin-marker-changed",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "M104_line += \" N0\";",
+      "new": "M104_line += \" N1\";",
+      "description": "Change the generated M104 origin marker; the reachable transition contract requires the slicer-generated N0 marker.",
+      "test_filter": "GCodeProcessorReachable"
+    }
+  ]
+}
