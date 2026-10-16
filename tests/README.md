@@ -37,6 +37,34 @@ test registered with CTest. For reproducible generator inputs, configure with
 the seed with the results and vary it in additional runs to explore other
 inputs. The default empty value keeps Catch2's automatic seed selection.
 
+Run expensive development, coverage, and mutation controllers inside an OS
+resource boundary. Compiler job counts and test timeouts do not impose a memory
+limit. The Linux example below assumes a 64 GiB worker with a systemd user
+manager and cgroup v2. Its shared slice limits concurrent validation jobs to
+16 GiB with no swap and eight CPUs in total; the individual build gets 12 GiB.
+Choose smaller budgets when the worker has less available memory.
+
+```sh
+systemctl --user set-property --runtime orca-validation.slice \
+  MemoryMax=16G MemorySwapMax=0 CPUQuota=800% TasksMax=256
+mkdir -p build/tmp
+systemd-run --user --wait --pipe --slice=orca-validation.slice \
+  --working-directory="$PWD" --setenv="TMPDIR=$PWD/build/tmp" \
+  -p MemoryMax=12G -p MemorySwapMax=0 -p CPUQuota=800% -p TasksMax=128 \
+  -p RuntimeMaxSec=1800 -p LimitFSIZE=4G -p TimeoutStopSec=2 \
+  -p KillMode=control-group -p OOMPolicy=kill \
+  cmake --build build --config Release --parallel 8 --target libslic3r_tests
+```
+
+Place the entire Python controller or CTest command inside the service so its
+descendants share the limits and are stopped when it exits. Use smaller limits
+for focused tests, such as 4 GiB, two CPUs, and a five-minute service deadline.
+`LimitFSIZE` limits each output file, including libraries and coverage exports;
+leave enough room for the expected artifacts and check free storage before a
+run. Verify parent-death, memory-limit, and timeout cleanup with small synthetic
+processes when adopting a new worker. Preserve failed logs and binaries before
+rebuilding; an interrupted run is incomplete evidence.
+
 ## Confidence runs
 
 The checked-in harnesses keep coverage and mutation evidence tied to the real

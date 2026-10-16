@@ -820,9 +820,14 @@ TEST_CASE("Texture atlas material order is a metamorphic permutation", "[Texture
     permuted.material_texture_map = { 1, 0 };
     const PaintedMesh a = paint(first);
     const PaintedMesh b = paint(permuted);
+    require_red_blue_by_side(a);
+    require_red_blue_by_side(b);
     REQUIRE(a.face_colors.size() == b.face_colors.size());
-    for (size_t i = 0; i < a.face_colors.size(); ++i)
+    for (size_t i = 0; i < a.face_colors.size(); ++i) {
+        const RGB expected = face_center_x(a, i) < 1.5 ? RGB{255, 0, 0} : RGB{0, 0, 255};
+        CHECK(a.face_colors[i] == expected);
         CHECK(a.face_colors[i] == b.face_colors[i]);
+    }
 }
 
 TEST_CASE("Texture atlas is deterministic across repeated builds", "[TexturePainting][TextureAtlas]")

@@ -187,9 +187,10 @@ ModelObject *calibration_object(Model &model)
 }
 
 CalibPressureAdvancePattern make_pattern(const DynamicPrintConfig &config, ModelObject &object,
+                                         Calib_Params &params,
                                          double start = 0., double end = 0.02, double step = 0.01)
 {
-    Calib_Params params;
+    // The pattern retains a reference to params; its caller owns that lifetime.
     params.mode = CalibMode::Calib_PA_Pattern;
     params.start = start;
     params.end = end;
@@ -338,7 +339,8 @@ TEST_CASE("Pressure advance pattern returns one custom item per layer", "[Calib]
     Model model;
     ModelObject *object = calibration_object(model);
     object->add_instance();
-    CalibPressureAdvancePattern pattern = make_pattern(config, *object);
+    Calib_Params params;
+    CalibPressureAdvancePattern pattern = make_pattern(config, *object, params);
     const CustomGCode::Info info = pattern.generate_custom_gcodes(config, false, *object, Vec3d::Zero());
 
     REQUIRE(info.gcodes.size() == 4);
@@ -354,7 +356,8 @@ TEST_CASE("Pressure advance pattern contains the requested PA sequence and layer
     Model model;
     ModelObject *object = calibration_object(model);
     object->add_instance();
-    CalibPressureAdvancePattern pattern = make_pattern(config, *object, 0.1, 0.13, 0.01);
+    Calib_Params params;
+    CalibPressureAdvancePattern pattern = make_pattern(config, *object, params, 0.1, 0.13, 0.01);
     const std::string output = join_gcode(pattern.generate_custom_gcodes(config, false, *object, Vec3d::Zero()));
 
     const std::vector<double> values = pressure_advance_values(output);
@@ -379,8 +382,10 @@ TEST_CASE("Pressure advance pattern flow value increases with configured perimet
     ModelObject *fast_object = calibration_object(fast_model);
     fast_object->add_instance();
 
-    CalibPressureAdvancePattern slow = make_pattern(slow_config, *slow_object);
-    CalibPressureAdvancePattern fast = make_pattern(fast_config, *fast_object);
+    Calib_Params slow_params;
+    Calib_Params fast_params;
+    CalibPressureAdvancePattern slow = make_pattern(slow_config, *slow_object, slow_params);
+    CalibPressureAdvancePattern fast = make_pattern(fast_config, *fast_object, fast_params);
     REQUIRE(slow.flow_val() > 0.);
     REQUIRE(fast.flow_val() > slow.flow_val());
 }
@@ -391,7 +396,8 @@ TEST_CASE("Pressure advance pattern start offset is retained and affects generat
     Model model;
     ModelObject *object = calibration_object(model);
     object->add_instance();
-    CalibPressureAdvancePattern pattern = make_pattern(config, *object);
+    Calib_Params params;
+    CalibPressureAdvancePattern pattern = make_pattern(config, *object, params);
     pattern.set_start_offset(Vec3d(17., 23., 0.));
     const Vec3d offset = pattern.get_start_offset();
     CHECK_THAT(offset.x(), Catch::Matchers::WithinAbs(17., 1e-5));
@@ -407,7 +413,8 @@ TEST_CASE("Pressure advance pattern emits BBL pressure-advance syntax when reque
     Model model;
     ModelObject *object = calibration_object(model);
     object->add_instance();
-    CalibPressureAdvancePattern pattern = make_pattern(config, *object, 0., 0.01, 0.01);
+    Calib_Params params;
+    CalibPressureAdvancePattern pattern = make_pattern(config, *object, params, 0., 0.01, 0.01);
     const std::string output = join_gcode(pattern.generate_custom_gcodes(config, true, *object, Vec3d::Zero()));
 
     CHECK(output.find("M900 K") != std::string::npos);

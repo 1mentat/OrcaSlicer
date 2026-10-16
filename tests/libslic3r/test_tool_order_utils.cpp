@@ -10,7 +10,9 @@
 #include <numeric>
 #include <optional>
 #include <set>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "libslic3r/GCode/ToolOrderUtils.hpp"
@@ -19,6 +21,25 @@ using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 
 namespace {
+
+template<class Solver, class = void>
+struct HasPhysicalNozzleIndices : std::false_type {};
+
+template<class Solver>
+struct HasPhysicalNozzleIndices<Solver, std::void_t<decltype(std::declval<Solver &>().solve_indices())>> : std::true_type {};
+
+template<class Solver>
+std::vector<int> solve_physical_indices(Solver &solver)
+{
+    if constexpr (HasPhysicalNozzleIndices<Solver>::value) {
+        return solver.solve_indices();
+    } else {
+        // Test-only overlays also run on PR heads that predate this API. Keep
+        // the missing contract visible without preventing unrelated tests from building.
+        FAIL("This production tree does not expose physical nozzle indices through solve_indices()");
+        return {};
+    }
+}
 
 std::map<int, int> counts(const std::vector<int> &values)
 {
@@ -421,7 +442,7 @@ TEST_CASE("Group matching chooses the independently enumerated minimum cost assi
         if (better(score(assignment), optimum)) optimum = score(assignment);
 
     GroupMinCostFlowSolver solver(matrix, {0, 1}, {2, 3}, {0, 1});
-    const auto indices = solver.solve_indices();
+    const auto indices = solve_physical_indices(solver);
     REQUIRE(indices.size() == 2);
     REQUIRE(indices.at(0) >= 0);
     REQUIRE(indices.at(0) < 2);
@@ -444,7 +465,7 @@ TEST_CASE("Group matching exposes repeated values without changing the legacy va
     matrix[1][0][2] = 100.f;
     matrix[1][1][2] = 1.f;
     GroupMinCostFlowSolver by_index(matrix, {0, 1}, {2, 2}, {0, 1});
-    const auto indices = by_index.solve_indices();
+    const auto indices = solve_physical_indices(by_index);
     REQUIRE(indices.size() == 2);
     CHECK(indices.at(0) == 0);
     CHECK(indices.at(1) == 1);

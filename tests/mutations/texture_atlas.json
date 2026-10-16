@@ -5,8 +5,8 @@
     {
       "id": "atlas-texture-y-offset-drop",
       "path": "src/libslic3r/TexturePainting.cpp",
-      "old": "        y_offsets[i] = atlas_h;",
-      "new": "        y_offsets[i] = 0;",
+      "old": "        y_offsets[i] = atlas_h + 1;",
+      "new": "        y_offsets[i] = 1;",
       "description": "Each stacked texture must retain its own vertical atlas region.",
       "test_filter": "TextureAtlas"
     },
@@ -46,8 +46,8 @@
       "id": "atlas-solid-v-offset",
       "path": "src/libslic3r/TexturePainting.cpp",
       "old": "                const float v_atlas = y_off / static_cast<float>(std::max(1, atlas_h - 1));",
-      "new": "                const float v_atlas = (y_off + 1) / static_cast<float>(std::max(1, atlas_h - 1));",
-      "description": "A base-color swatch must sample its own row rather than a neighboring texture or guard row.",
+      "new": "                const float v_atlas = (y_off + 2) / static_cast<float>(std::max(1, atlas_h - 1));",
+      "description": "A base-color swatch must sample its own three-row region rather than crossing its guard into another material.",
       "test_filter": "TextureAtlas"
     },
     {
@@ -61,8 +61,8 @@
     {
       "id": "atlas-solid-row-overlap",
       "path": "src/libslic3r/TexturePainting.cpp",
-      "old": "        mat_solid_y[mat_idx]     = atlas_h++;",
-      "new": "        mat_solid_y[mat_idx]     = 0;",
+      "old": "        mat_solid_y[mat_idx]     = atlas_h + 1;",
+      "new": "        mat_solid_y[mat_idx]     = 1;",
       "description": "Each untextured material needs a distinct swatch row and must not overwrite a texture row.",
       "test_filter": "TextureAtlas"
     },
@@ -88,6 +88,14 @@
       "old": "if (img.width <= 0 || img.height <= 0) {",
       "new": "if (img.channels == 0)\n        return {};\n    if (img.width <= 0 || img.height <= 0) {",
       "description": "Encoded PNG inputs carry channels in their byte stream and must reach decoding before raw-pixel channel validation.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-leading-edge-guard-drop",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "            out_atlas.at<cv::Vec3b>(y_offsets[i] - 1, x) =\n                out_atlas.at<cv::Vec3b>(y_offsets[i], x);",
+      "new": "            (void)0;",
+      "description": "A constant texture must retain its exact saturated color when quadrature rounds below its first atlas row.",
       "test_filter": "TextureAtlas"
     }
   ]
