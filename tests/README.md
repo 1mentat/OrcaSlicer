@@ -206,6 +206,25 @@ remains an unclaimed survivor; later heap rebuilding masks it in these cases.
 The production fix sizes the area array and uses the same area comparator for
 heap construction and removal.
 
+`[AABBMesh]` checks analytic ray intersections, closest points, unit normals,
+seam deduplication, disconnected surfaces, and mesh ownership. `[LayerTextureContracts]`
+checks packed RGBA and mip dimensions, interpolation limits, numeric guards,
+palette values, and duplicated edge pixels. Its oversized canary lets a bounds
+regression fail an assertion without corrupting the test process; sanitizer
+validation also uses the exact GUI allocation.
+
+`[AdaptivePAValidation]` checks complete decimal fields, physical line numbers,
+blank lines, and strict PA/flow/acceleration ordering. `[TextureAtlas]` checks
+encoded PNG and raw RGB/RGBA conversion, material mapping, patterned tiled UVs,
+color swatches, cancellation, and truncated raw buffers. PNG decoding is exercised
+through the encoded-image route used by model importers.
+
+`[CalibrationContracts]` checks PA command sequences, feedrates, bed extents,
+annotation geometry, layer heights, and coordinate offsets. `[PresetAmsSync]`
+checks physical tray mappings, placeholders, deduplication, mixed-filament
+metadata, and vendor-specific nozzle hardness lookup. The hardness test populates
+its fixtures before the first lookup; it does not claim cache invalidation.
+
 `[AmsValidation]` checks AMS tray temperature reconciliation, per-nozzle
 filament variants, and duplicate system material IDs through the public bundle
 validator. Negative controls cover ignored tags, user/system scope, library

@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "description": "AABB mesh analytic ray intersections, distances, normals and topology.",
+  "mutants": [
+    {
+      "id": "aabb-normal-not-unit",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": "return its_unnormalized_normal(*m_tm, face_id).cast<double>().normalized();",
+      "new": "return its_unnormalized_normal(*m_tm, face_id).cast<double>();",
+      "description": "AABBMesh hit normals are a unit direction used by callers for inside/outside classification.",
+      "test_filter": "AABBMesh"
+    },
+    {
+      "id": "aabb-reverse-hit-order",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": "std::sort(hits.begin(), hits.end(),\n              [](const igl::Hit<float>& a, const igl::Hit<float>& b) { return a.t < b.t; });",
+      "new": "std::sort(hits.begin(), hits.end(),\n              [](const igl::Hit<float>& a, const igl::Hit<float>& b) { return a.t > b.t; });",
+      "description": "query_ray_hits promises distance order from source to mesh crossings.",
+      "test_filter": "AABBMesh"
+    },
+    {
+      "id": "aabb-retain-coplanar-duplicates",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": "{ return a.t == b.t; }),",
+      "new": "{ return false; }),",
+      "description": "Two triangles sharing a coplanar seam must not expose duplicate geometric crossings.",
+      "test_filter": "AABBMesh"
+    },
+    {
+      "id": "aabb-distance-offset",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": "return sqdst;",
+      "new": "return sqdst + 1.;",
+      "description": "squared_distance returns the exact squared distance to the selected triangle.",
+      "test_filter": "AABBMesh"
+    },
+    {
+      "id": "aabb-distance-point-zero",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": "closest = closest_vec3d;",
+      "new": "closest = Vec3d::Zero();",
+      "description": "The closest-point out parameter is part of the public query contract.",
+      "test_filter": "AABBMesh"
+    },
+    {
+      "id": "aabb-neighbor-index-empty",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": ", m_fnidx{its_face_neighbors(tmesh)}",
+      "new": ", m_fnidx{}",
+      "description": "Face-neighbor topology is exposed alongside the acceleration structure.",
+      "test_filter": "AABBMesh"
+    },
+    {
+      "id": "aabb-hit-distance-zero",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": "ret.m_t = double(hit.t);",
+      "new": "ret.m_t = 0.;",
+      "description": "A hit_result distance identifies the reported intersection position.",
+      "test_filter": "AABBMesh"
+    },
+    {
+      "id": "aabb-hit-direction-zero",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": "ret.m_dir = dir;",
+      "new": "ret.m_dir = Vec3d::Zero();",
+      "description": "hit_result retains the supplied ray direction used to compute position and orientation.",
+      "test_filter": "AABBMesh"
+    },
+    {
+      "id": "aabb-hit-source-zero",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": "ret.m_source = s;",
+      "new": "ret.m_source = Vec3d::Zero();",
+      "description": "hit_result retains the ray source for position reconstruction and diagnostics.",
+      "test_filter": "AABBMesh"
+    },
+    {
+      "id": "aabb-all-hit-distance-offset",
+      "path": "src/libslic3r/AABBMesh.cpp",
+      "old": "outs.back().m_t = double(hit.t);",
+      "new": "outs.back().m_t = double(hit.t) + 1.;",
+      "description": "Every query_ray_hits result must carry the actual crossing distance used for its position.",
+      "test_filter": "AABBMesh"
+    }
+  ],
+  "unclaimed_experiments": [
+    {
+      "id": "no-hit-sentinel",
+      "status": "process_failure",
+      "reason": "Earlier private mutant signalled after converting a miss into a fake face; excluded from assertion-kill evidence."
+    }
+  ]
+}

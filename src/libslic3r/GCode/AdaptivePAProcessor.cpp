@@ -13,6 +13,7 @@
 #include <iosfwd>
 #include <algorithm>
 #include <exception>
+#include <stdexcept>
 #include <sstream>
 #include <iostream>
 #include <cmath>
@@ -303,6 +304,13 @@ std::string AdaptivePAProcessor::validate_adaptive_pa_model(const std::string& m
     if (model_str.empty())
         return {}; // Empty model is valid
     
+    const auto parse_decimal = [](const std::string &value) {
+        size_t consumed = 0;
+        const double parsed = std::stod(value, &consumed);
+        if (consumed != value.size())
+            throw std::invalid_argument("incomplete decimal value");
+        return parsed;
+    };
     std::istringstream model_stream(model_str);
     std::string line;
     int line_number = 0;
@@ -345,17 +353,17 @@ std::string AdaptivePAProcessor::validate_adaptive_pa_model(const std::string& m
             // Parse PA
             if (!std::getline(line_stream, value, ','))
                 return "Line " + std::to_string(line_number) + ": missing PA value";
-            double pa = std::stod(value);
+            double pa = parse_decimal(value);
             
             // Parse flow
             if (!std::getline(line_stream, value, ','))
                 return "Line " + std::to_string(line_number) + ": missing flow value";
-            double flow = std::stod(value);
+            double flow = parse_decimal(value);
             
             // Parse acceleration
             if (!std::getline(line_stream, value, ','))
                 return "Line " + std::to_string(line_number) + ": missing acceleration value";
-            double accel = std::stod(value);
+            double accel = parse_decimal(value);
             
             // Validate constraints
             if (pa >= 2.0) {

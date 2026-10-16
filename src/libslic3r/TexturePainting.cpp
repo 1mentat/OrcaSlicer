@@ -36,13 +36,23 @@ static cv::Mat decode_texture_image(const TextureImage& img) {
     if (img.data.empty())
         return {};
 
-    // Raw encoded image data (PNG/JPEG) from glTF loader: width == -1
+    // Raw encoded image data from OBJ/Assimp/glTF loaders uses width/height <= 0
+    // and channels == 0 because the encoded stream carries its own metadata.
+    // Decode it before validating channels for raw pixel buffers.
     if (img.width <= 0 || img.height <= 0) {
         std::vector<unsigned char> buf(img.data.begin(), img.data.end());
         cv::Mat raw(1, static_cast<int>(buf.size()), CV_8UC1, buf.data());
         cv::Mat decoded = cv::imdecode(raw, cv::IMREAD_COLOR);
         return decoded;
     }
+
+    if (img.channels != 3 && img.channels != 4)
+        return {};
+
+    // Validate the raw buffer size before constructing an OpenCV view. Divide
+    // first to avoid overflowing the dimensions' product for malformed input.
+    if (static_cast<size_t>(img.width) > img.data.size() / img.channels / img.height)
+        return {};
 
     int cv_type = (img.channels == 4) ? CV_8UC4 : CV_8UC3;
     std::vector<unsigned char> pixel_buf(img.data.begin(), img.data.end());
@@ -179,7 +189,9 @@ static bool build_multi_texture_atlas(
         if (first_usable_tex < 0) first_usable_tex = static_cast<int>(i);
         y_offsets[i] = atlas_h;
         atlas_w = std::max(atlas_w, decoded[i].cols);
-        atlas_h += decoded[i].rows;
+        // Leave a duplicated edge row between stacked textures so the
+        // bilinear atlas sampler cannot mix neighboring source images.
+        atlas_h += decoded[i].rows + 1;
     }
     if (atlas_w == 0 || atlas_h == 0)
         return false;
@@ -198,12 +210,22 @@ static bool build_multi_texture_atlas(
         mat_solid_y[mat_idx]     = atlas_h++;
         mat_solid_color[mat_idx] = textured.material_colors[mat_idx];
     }
+    if (!mat_solid_y.empty())
+        ++atlas_h;
 
     out_atlas = cv::Mat::zeros(atlas_h, atlas_w, CV_8UC3);
     for (size_t i = 0; i < decoded.size(); ++i) {
         if (decoded[i].empty()) continue;
         cv::Mat roi = out_atlas(cv::Rect(0, y_offsets[i], decoded[i].cols, decoded[i].rows));
         decoded[i].copyTo(roi);
+        for (int y = 0; y < decoded[i].rows; ++y)
+            for (int x = decoded[i].cols; x < atlas_w; ++x)
+                out_atlas.at<cv::Vec3b>(y_offsets[i] + y, x) =
+                    out_atlas.at<cv::Vec3b>(y_offsets[i] + y, decoded[i].cols - 1);
+        for (int x = 0; x < atlas_w; ++x)
+            out_atlas.at<cv::Vec3b>(y_offsets[i] + decoded[i].rows, x) =
+                out_atlas.at<cv::Vec3b>(y_offsets[i] + decoded[i].rows - 1,
+                                        std::min(x, decoded[i].cols - 1));
     }
     for (const auto& kv : mat_solid_color) {
         const auto& c = kv.second;
@@ -212,6 +234,15 @@ static bool build_multi_texture_atlas(
             static_cast<uchar>(std::clamp(c[2] * 255.f, 0.f, 255.f)),
             static_cast<uchar>(std::clamp(c[1] * 255.f, 0.f, 255.f)),
             static_cast<uchar>(std::clamp(c[0] * 255.f, 0.f, 255.f)));
+        for (int x = 1; x < atlas_w; ++x)
+            out_atlas.at<cv::Vec3b>(mat_solid_y[kv.first], x) =
+                out_atlas.at<cv::Vec3b>(mat_solid_y[kv.first], 0);
+    }
+    if (!mat_solid_y.empty()) {
+        const int guard_y = atlas_h - 1;
+        const int source_y = guard_y - 1;
+        for (int x = 0; x < atlas_w; ++x)
+            out_atlas.at<cv::Vec3b>(guard_y, x) = out_atlas.at<cv::Vec3b>(source_y, x);
     }
 
     out_uv_coords.resize(nf);
@@ -261,8 +292,8 @@ static bool build_multi_texture_atlas(
             if (use_solid) {
                 // Aim at the centre of the 1x1 swatch so bilinear sampling
                 // (in tex2color) cannot drift into neighbouring rows.
-                const float u_atlas = (x_off + 0.5f) / static_cast<float>(atlas_w);
-                const float v_atlas = (y_off + 0.5f) / static_cast<float>(atlas_h);
+                const float u_atlas = x_off / static_cast<float>(std::max(1, atlas_w - 1));
+                const float v_atlas = y_off / static_cast<float>(std::max(1, atlas_h - 1));
                 out_uv_coords[fi][vi] = Vec2f(u_atlas, v_atlas);
             } else {
                 // Wrap to [0,1) on both axes (OBJ tile UVs may step outside
@@ -272,8 +303,10 @@ static bool build_multi_texture_atlas(
                 // faces sampled from the right-side zero-padding.
                 u = u - std::floor(u);
                 v = v - std::floor(v);
-                const float u_atlas = (x_off + u * tw) / static_cast<float>(atlas_w);
-                const float v_atlas = (y_off + v * th) / static_cast<float>(atlas_h);
+                const float u_atlas = (x_off + u * std::max(0, tw - 1)) /
+                                      static_cast<float>(std::max(1, atlas_w - 1));
+                const float v_atlas = (y_off + v * std::max(0, th - 1)) /
+                                      static_cast<float>(std::max(1, atlas_h - 1));
                 out_uv_coords[fi][vi] = Vec2f(u_atlas, v_atlas);
             }
         }

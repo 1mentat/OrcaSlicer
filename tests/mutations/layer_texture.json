@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "description": "Packed layer-height texture and mip allocation bounds, numeric guards, palette and row layout.",
+  "mutants": [
+    {
+      "id": "lod_capacity_not_applied",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "const int capacity = level_of_detail_2nd_level ? std::min(base_capacity, 2 * lod_capacity) : base_capacity;",
+      "new": "const int capacity = base_capacity;",
+      "description": "LOD path must retain the half-height packed row contract",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "lod_capacity_factor_halved",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "std::min(base_capacity, 2 * lod_capacity)",
+      "new": "std::min(base_capacity, lod_capacity)",
+      "description": "LOD must reserve two base cells per mip cell",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "base_capacity_off_by_one",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "const int base_capacity = std::max(0, (cols - 1) * rows);",
+      "new": "const int base_capacity = std::max(0, cols * rows);",
+      "description": "Base row packing has cols-1 logical cells per row",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "lod_rows_not_halved",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "const int rows1 = rows / 2;",
+      "new": "const int rows1 = rows;",
+      "description": "Mip storage has half as many rows",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "lod_cols_not_halved",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "const int cols1 = cols / 2;",
+      "new": "const int cols1 = cols;",
+      "description": "Mip storage has half as many columns",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "lod_cell_count_not_halved",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "const int ncells1 = level_of_detail_2nd_level ? ncells / 2 : 0;",
+      "new": "const int ncells1 = level_of_detail_2nd_level ? ncells : 0;",
+      "description": "LOD sequence must use half the base cell count",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "minimum_lod_domain_removed",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "const int minimum_cells = level_of_detail_2nd_level ? 4 : 2;",
+      "new": "const int minimum_cells = level_of_detail_2nd_level ? 2 : 2;",
+      "description": "Interpolation needs at least two LOD cells",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "invalid_scalar_guard_removed",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "!std::isfinite(min_layer_height) || min_layer_height <= 0",
+      "new": "false",
+      "description": "Nonpositive min layer height is rejected before interpolation arithmetic",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "lod_writes_for_base_only",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "if (level_of_detail_2nd_level) {",
+      "new": "if (true) {",
+      "description": "Base-only output must not write the second packed level",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "packed_lod_offset_wrong",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "unsigned char *data1 = reinterpret_cast<unsigned char*>(data) +\n        static_cast<std::size_t>(rows) * cols * 4;",
+      "new": "unsigned char *data1 = reinterpret_cast<unsigned char*>(data) +\n        static_cast<std::size_t>(rows) * cols * 5;",
+      "description": "The mip level begins after the base RGBA texture, with size_t-safe offset",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "base_row_packing_wrong",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "int row = cell / (cols - 1);",
+      "new": "int row = cell / cols;",
+      "description": "Base cell packing uses cols-1 logical cells per row",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "lod_column_packing_wrong",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "int col = cell - row * (cols1 - 1);",
+      "new": "int col = cell - row * cols1;",
+      "description": "LOD cell packing uses cols1-1 logical cells per row",
+      "test_filter": "LayerTextureContracts"
+    },
+    {
+      "id": "lod_z_mapping_wrong",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "coordf_t z_to_cell1 = coordf_t(ncells1-1) / object_height;",
+      "new": "coordf_t z_to_cell1 = z_to_cell;",
+      "description": "LOD interval mapping must use its own cell scale",
+      "test_filter": "LayerTextureContracts"
+    }
+  ],
+  "known_survivors": [
+    {
+      "id": "empty-domain-guard-removed",
+      "reason": "A later guard became redundant after adding the earlier scalar-domain guard; not counted as killed."
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "description": "TexturePainting multi-texture atlas mutation audit with asymmetrical base-color RGB oracle.",
+  "mutants": [
+    {
+      "id": "atlas-texture-y-offset-drop",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "        y_offsets[i] = atlas_h;",
+      "new": "        y_offsets[i] = 0;",
+      "description": "Each stacked texture must retain its own vertical atlas region.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-texture-pixel-copy-drop",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "        decoded[i].copyTo(roi);",
+      "new": "        (void)roi;",
+      "description": "Decoded texture pixels must be copied into the atlas before sampling.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-material-map-drop",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "        const int ti = textured.material_texture_map[mat_idx];",
+      "new": "        const int ti = -1;",
+      "description": "A valid per-material texture mapping must select the mapped texture instead of a base-color fallback.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-u-extent-drop",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "                const float u_atlas = (x_off + u * std::max(0, tw - 1)) /\n                                      static_cast<float>(std::max(1, atlas_w - 1));",
+      "new": "                const float u_atlas = (x_off + u * atlas_w) /\n                                      static_cast<float>(std::max(1, atlas_w - 1));",
+      "description": "Horizontal atlas UVs must use the selected sub-texture's pixel extent, not the full atlas width.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-v-extent-drop",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "                const float v_atlas = (y_off + v * std::max(0, th - 1)) /\n                                      static_cast<float>(std::max(1, atlas_h - 1));",
+      "new": "                const float v_atlas = (y_off + v * atlas_h) /\n                                      static_cast<float>(std::max(1, atlas_h - 1));",
+      "description": "Vertical atlas UVs must use the selected sub-texture's pixel extent, not the full atlas height.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-solid-v-offset",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "                const float v_atlas = y_off / static_cast<float>(std::max(1, atlas_h - 1));",
+      "new": "                const float v_atlas = (y_off + 1) / static_cast<float>(std::max(1, atlas_h - 1));",
+      "description": "A base-color swatch must sample its own row rather than a neighboring texture or guard row.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-base-color-red-channel",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "            static_cast<uchar>(std::clamp(c[2] * 255.f, 0.f, 255.f)),\n            static_cast<uchar>(std::clamp(c[1] * 255.f, 0.f, 255.f)),\n            static_cast<uchar>(std::clamp(c[0] * 255.f, 0.f, 255.f)));",
+      "new": "            static_cast<uchar>(std::clamp(c[0] * 255.f, 0.f, 255.f)),\n            static_cast<uchar>(std::clamp(c[1] * 255.f, 0.f, 255.f)),\n            static_cast<uchar>(std::clamp(c[2] * 255.f, 0.f, 255.f)));",
+      "description": "RGBA material colors must be written into OpenCV's BGR atlas representation without swapping red and blue.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-solid-row-overlap",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "        mat_solid_y[mat_idx]     = atlas_h++;",
+      "new": "        mat_solid_y[mat_idx]     = 0;",
+      "description": "Each untextured material needs a distinct swatch row and must not overwrite a texture row.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-materialless-fallback-row",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "            y_off = y_offsets[first_usable_tex];",
+      "new": "            y_off = y_offsets.back();",
+      "description": "Material-less faces use the first decoded texture as the documented legacy fallback.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-u-wrap-drop",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "                u = u - std::floor(u);",
+      "new": "                u = 0.f;",
+      "description": "Texture tiling coordinates must be wrapped before remapping into the atlas.",
+      "test_filter": "TextureAtlas"
+    },
+    {
+      "id": "atlas-encoded-channel-guard-before-decode",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "if (img.width <= 0 || img.height <= 0) {",
+      "new": "if (img.channels == 0)\n        return {};\n    if (img.width <= 0 || img.height <= 0) {",
+      "description": "Encoded PNG inputs carry channels in their byte stream and must reach decoding before raw-pixel channel validation.",
+      "test_filter": "TextureAtlas"
+    }
+  ]
+}

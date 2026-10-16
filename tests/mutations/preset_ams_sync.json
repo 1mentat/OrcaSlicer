@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "description": "AMS synchronization, mixed-filament metadata preservation, and vendor-specific HRC lookup.",
+  "mutants": [
+    {
+      "id": "hrc_vendor_gate",
+      "old": "if (iter->vendor && iter->vendor->id == \"BBL\")",
+      "new": "if (iter->vendor)",
+      "description": "A non-BBL vendor must not contribute a required HRC value.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "PresetAmsSync"
+    },
+    {
+      "id": "hrc_value_zeroed",
+      "old": "filament_type_to_hrc[type] = hrc;",
+      "new": "filament_type_to_hrc[type] = 0;",
+      "description": "Known BBL filament types retain their configured HRC requirement.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "PresetAmsSync"
+    },
+    {
+      "id": "hrc_known_lookup_disabled",
+      "old": "auto iter = filament_type_to_hrc.find(filament_type);\n    if (iter != filament_type_to_hrc.end())\n        return iter->second;\n    else\n        return 0;",
+      "new": "auto iter = filament_type_to_hrc.find(filament_type);\n    if (iter != filament_type_to_hrc.end())\n        return 0;\n    else\n        return 0;",
+      "description": "Known HRC lookup results must be returned instead of always using the unknown default.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "PresetAmsSync"
+    },
+    {
+      "id": "similarity_prefers_shorter_type",
+      "old": "if (preset_type.size() > best_len && contains_word(upper_type, preset_type))",
+      "new": "if (preset_type.size() < best_len && contains_word(upper_type, preset_type))",
+      "description": "A matching Generic PA-CF preset must beat the shorter Generic PA fallback.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "PresetAmsSync"
+    },
+    {
+      "id": "placeholder_total_minimum",
+      "old": "size_t total      = std::max(tray_count, exist_presets.size());",
+      "new": "size_t total      = std::min(tray_count, exist_presets.size());",
+      "description": "Placeholder trays beyond the existing project slots still receive aligned fallback slots.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "PresetAmsSync"
+    },
+    {
+      "id": "mixed_components_not_preserved",
+      "old": "if (mixed_comp_opt     && i < mixed_comp_opt->values.size())     snap.mixed_components      = mixed_comp_opt->values[i];",
+      "new": "if (mixed_comp_opt     && i < mixed_comp_opt->values.size())     snap.mixed_components      = \"mutated\";",
+      "description": "Mixed filament component metadata survives physical AMS synchronization.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "PresetAmsSync"
+    },
+    {
+      "id": "color_only_no_map_fallback_removed",
+      "old": "if (!use_map || maps.empty() || !mapped_any)",
+      "new": "if (!use_map || maps.empty())",
+      "description": "Color-only synchronization falls back to tray order when no supplied map entry matches.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "PresetAmsSync"
+    },
+    {
+      "id": "append_duplicate_guard_reversed",
+      "old": "if (idx >= 0) {",
+      "new": "if (idx < 0) {",
+      "description": "Identical unmapped trays are deduplicated while appending.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "PresetAmsSync"
+    },
+    {
+      "id": "merge_requires_only_two",
+      "old": "if (same_ams.size() > 1) {",
+      "new": "if (same_ams.size() > 2) {",
+      "description": "Two project slots mapped to one physical tray must be reported as a merge.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "PresetAmsSync"
+    }
+  ]
+}
