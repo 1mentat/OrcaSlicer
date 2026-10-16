@@ -466,6 +466,13 @@ scheduling slots and defaults to `--jobs` when omitted. The examples keep four
 compiler jobs while allowing eight test slots within the resource boundary
 described above. Test affinity reserves two slots for `[Parallel]` cases.
 
+`--test-timeout` sets CTest's default per-test deadline (180 seconds); test
+properties may override that default. `--timeout` separately bounds each
+configure, build, and complete test phase (3600 seconds). Both values are
+recorded in the report. Individual timeouts are listed in
+`timed_out_test_names`, separately from assertion failures; an outer phase
+timeout is identified by `test_timeout_source`.
+
 The native defaults configure Release/Ninja with `SLIC3R_GUI=OFF`,
 `BUILD_TESTS=ON`, `SLIC3R_CAD=ON`, build the five slicer test targets, and run
 CTest while excluding `NotWorking|RequiresApp`. Use repeated `--cmake-arg`

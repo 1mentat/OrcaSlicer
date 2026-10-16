@@ -32,6 +32,7 @@ import argparse
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -56,6 +57,7 @@ DEFAULT_TARGETS = (
 )
 DEFAULT_EXCLUDED_LABELS = "NotWorking|RequiresApp"
 DEFAULT_TIMEOUT = 3600.0
+DEFAULT_TEST_TIMEOUT = 180.0
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 TEST_ONLY_PATHS = ("tests/", "scripts/", "cmake/", ":(top)CMakeLists.txt", ":(top).gitignore")
 INTEGRATION_PATHS = TEST_ONLY_PATHS + ("src/CMakeLists.txt", "src/libslic3r/CMakeLists.txt")
@@ -209,11 +211,26 @@ def _execution_error(text: str) -> bool:
         text, re.IGNORECASE))
 
 
+def _junit_timeout(case: ElementTree.Element) -> bool:
+    """Read timeout diagnostics without matching testcase names or captured output."""
+    for child in case:
+        if _xml_tag(child) not in {"failure", "error"}:
+            continue
+        if any(child.get(key, "").strip().casefold() == "timeout"
+               for key in ("message", "type")):
+            return True
+        diagnostic = "".join(child.itertext()).strip()
+        if re.match(r"(?:\*\*\*Timeout\b|Test (?:timeout|timed out)\b|\(Timeout\))",
+                    diagnostic, re.IGNORECASE):
+            return True
+    return False
+
+
 def read_junit_evidence(junit: Path) -> dict[str, Any]:
     """Require complete, internally consistent testcase identities and totals."""
     evidence: dict[str, Any] = {
         "usable": False, "errors": [], "counts": {
-            "tests": 0, "failures": 0, "errors": 0, "skipped": 0}, "cases": {},
+            "tests": 0, "failures": 0, "errors": 0, "skipped": 0, "timeouts": 0}, "cases": {},
     }
     try:
         if junit.stat().st_size > 64 * 1024 * 1024:
@@ -237,8 +254,10 @@ def read_junit_evidence(junit: Path) -> dict[str, Any]:
         if identity in evidence["cases"]:
             evidence["errors"].append(f"duplicate testcase identity: {identity}")
         tags = {_xml_tag(child) for child in case}
-        if "error" in tags or ("failure" in tags and
-                               _execution_error(ElementTree.tostring(case, encoding="unicode"))):
+        serialized = ElementTree.tostring(case, encoding="unicode")
+        if tags.intersection({"failure", "error"}) and _junit_timeout(case):
+            status = "timeout"
+        elif "error" in tags or ("failure" in tags and _execution_error(serialized)):
             status = "error"
         elif "failure" in tags:
             status = "failed"
@@ -252,6 +271,7 @@ def read_junit_evidence(junit: Path) -> dict[str, Any]:
         "tests": len(statuses), "failures": sum(s == "failed" for s in statuses.values()),
         "errors": sum(s == "error" for s in statuses.values()),
         "skipped": sum(s == "skipped" for s in statuses.values()),
+        "timeouts": sum(s == "timeout" for s in statuses.values()),
     }
     for suite in root.iter():
         if _xml_tag(suite) not in {"testsuite", "testsuites"}:
@@ -279,7 +299,8 @@ def read_junit_evidence(junit: Path) -> dict[str, Any]:
         if "failures" in suite.attrib or "errors" in suite.attrib:
             try:
                 total = int(suite.get("failures", "0")) + int(suite.get("errors", "0"))
-                if total != children.count("failed") + children.count("error"):
+                if total != (children.count("failed") + children.count("error") +
+                             children.count("timeout")):
                     raise ValueError("failure/error total differs from testcase evidence")
             except ValueError as exc:
                 evidence["errors"].append(str(exc))
@@ -306,6 +327,8 @@ def classify_junit_result(result: CommandResult, evidence: dict[str, Any],
     if not evidence["usable"] or console_count != evidence["counts"]["tests"]:
         return "test_evidence_incomplete"
     counts = evidence["counts"]
+    if counts.get("timeouts", 0):
+        return "test_timeout"
     if counts["errors"] or _execution_error(result.stdout + result.stderr):
         return "test_error"
     if counts["skipped"]:
@@ -440,10 +463,11 @@ def _default_build(root: Path, build: Path, jobs: int, targets: Sequence[str]) -
             "--target", *targets]
 
 
-def _default_test(build: Path, jobs: int, junit: Path, excluded_labels: str) -> list[str]:
+def _default_test(build: Path, jobs: int, junit: Path, excluded_labels: str,
+                  test_timeout: float = DEFAULT_TEST_TIMEOUT) -> list[str]:
     return ["ctest", "--test-dir", str(build / "tests"), "-C", "Release",
             "--output-on-failure", "--output-junit", str(junit), "--no-tests=error",
-            "--parallel", str(jobs), "-LE", excluded_labels]
+            "--parallel", str(jobs), "--timeout", str(test_timeout), "-LE", excluded_labels]
 
 
 def _resolve_build_path(worktree: Path, build_dir: str) -> Path:
@@ -594,6 +618,8 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
         "status": "infrastructure_error",
         "commands": {},
     }
+    test_timeout = getattr(args, "test_timeout", DEFAULT_TEST_TIMEOUT)
+    entry["test_timeout_seconds"] = test_timeout
 
     def finish(status: str) -> dict[str, Any]:
         entry["status"] = status
@@ -615,7 +641,7 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
     junit = run_dir / "tests.junit.xml"
     build_path = _resolve_build_path(worktree, args.build_dir)
     test_jobs = args.test_jobs if args.test_jobs is not None else args.jobs
-    test_args = _default_test(build_path, test_jobs, junit, args.exclude_labels)
+    test_args = _default_test(build_path, test_jobs, junit, args.exclude_labels, test_timeout)
     test_args = _format_args(test_args, root=worktree, build=build_path,
                              deps_prefix=args.deps_prefix, uv=args.uv, jobs=args.jobs)
     entry["commands"]["test"] = {"argv": test_args, "junit": str(junit),
@@ -630,10 +656,16 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
     junit_evidence = read_junit_evidence(junit)
     entry["junit_evidence"] = junit_evidence
     entry["skipped_test_evidence"] = junit_evidence["counts"]["skipped"]
+    entry["junit_timeout_evidence"] = junit_evidence["counts"].get("timeouts", 0)
+    entry["test_timeout_source"] = (
+        "outer_phase_timeout" if test.timed_out else
+        "junit_case_timeout" if entry["junit_timeout_evidence"] else None
+    )
     case_statuses = junit_evidence["cases"] if junit_evidence["usable"] else {}
     entry["junit_case_statuses"] = case_statuses
     for field, wanted in (("failed_test_names", "failed"), ("skipped_test_names", "skipped"),
-                          ("error_test_names", "error")):
+                          ("error_test_names", "error"),
+                          ("timed_out_test_names", "timeout")):
         entry[field] = sorted(name for name, case_status in case_statuses.items()
                               if case_status == wanted)
     status = classify_junit_result(test, junit_evidence, entry["test_evidence"],
@@ -652,19 +684,26 @@ def classify_failure_names(reference: dict[str, Any] | None,
     reference_statuses = dict(reference.get("junit_case_statuses", {})) if reference else {}
     head_statuses = dict(head.get("junit_case_statuses", {}))
     head_names = set(head.get("failed_test_names", []))
+    head_timeout_names = {name for name, status in head_statuses.items()
+                          if status == "timeout"}
     reference_names = {name for name, status in reference_statuses.items()
                        if status == "failed"}
+    reference_timeout_names = {name for name, status in reference_statuses.items()
+                               if status == "timeout"}
     if (not reference or not reference.get("junit_reference_usable", False)
             or not head.get("junit_reference_usable", False)):
         return {
             "reference_available": False,
             "inherited": [], "new": [], "resolved": [],
             "raw_observed_head_failures": sorted(head_names),
+            "raw_observed_head_timeouts": sorted(head_timeout_names),
             "uncompared_head_failures": sorted(head_names),
             "not_executed_reference_failures": sorted(reference_names),
+            "reference_timeout_names": sorted(reference_timeout_names),
             "classification_basis": (
                 "No comparable reference testcase execution was available; matching names "
                 "cannot establish a shared root cause."
+                " Timeout cases are recorded separately and are never treated as assertion failures."
             ),
             "reason": "reference or head JUnit evidence unavailable or noncomparable",
         }
@@ -681,9 +720,11 @@ def classify_failure_names(reference: dict[str, Any] | None,
         "new": new,
         "resolved": resolved,
         "raw_observed_head_failures": sorted(head_names),
+        "raw_observed_head_timeouts": sorted(head_timeout_names),
         "uncompared_head_failures": uncompared,
         "not_executed_reference_failures": not_executed,
         "reference_failed": sorted(reference_names),
+        "reference_timeout_names": sorted(reference_timeout_names),
         "head_failed": sorted(head_names),
         "classification_basis": (
             "Testcase names compare execution statuses only; matching failure names do not "
@@ -782,6 +823,15 @@ def run_validation(args: argparse.Namespace) -> int:
             "test_jobs": args.test_jobs if args.test_jobs is not None else args.jobs,
             "build_dir": args.build_dir, "exclude_labels": args.exclude_labels,
             "targets": list(args.targets), "timeout_seconds": args.timeout,
+            "test_timeout_seconds": getattr(args, "test_timeout", DEFAULT_TEST_TIMEOUT),
+            "timeout_provenance": {
+                "phase_timeout_seconds": args.timeout,
+                "ctest_per_case_timeout_seconds": getattr(
+                    args, "test_timeout", DEFAULT_TEST_TIMEOUT),
+                "ctest_option": "--timeout",
+                "default_ctest_per_case_timeout_seconds": DEFAULT_TEST_TIMEOUT,
+                "source": "--test-timeout (default 180 seconds)",
+            },
             "cmake_args": list(args.cmake_arg), "patch_scope": args.patch_scope,
             "patch_include": list(args.patch_include),
             "reference_baseline": args.reference_baseline,
@@ -1042,6 +1092,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="PR numbers, space/comma-separated; may be repeated")
     parser.add_argument("--build-dir", default="build")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--test-timeout", type=float, default=DEFAULT_TEST_TIMEOUT,
+                        help="per-CTest-case timeout in seconds (default: 180)")
     parser.add_argument("--uv-executable", help="local uv executable for ORCA_BUNDLED_UV_EXECUTABLE")
     parser.add_argument("--cmake-arg", action="append", default=[],
                         help="extra CMake cache argument; may use {root}, {build}, {deps_prefix}, {uv}, {jobs}")
@@ -1067,8 +1119,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.test_jobs is not None and args.test_jobs < 1:
         print("slicer_pr_validation: error: --test-jobs must be positive", file=sys.stderr)
         return 2
-    if args.timeout <= 0:
-        print("slicer_pr_validation: error: --timeout must be positive", file=sys.stderr)
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        print("slicer_pr_validation: error: --timeout must be positive and finite", file=sys.stderr)
+        return 2
+    if not math.isfinite(args.test_timeout) or args.test_timeout <= 0:
+        print("slicer_pr_validation: error: --test-timeout must be positive and finite",
+              file=sys.stderr)
         return 2
     args.targets = tuple(args.targets or DEFAULT_TARGETS)
     args.uv = _resolve_uv(args.uv_executable)

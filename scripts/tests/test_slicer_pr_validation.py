@@ -27,6 +27,38 @@ class ParsingTests(unittest.TestCase):
             self.assertEqual(result, 2)
             run.assert_not_called()
 
+    def test_nonpositive_or_nonfinite_test_timeout_fails_before_validation(self):
+        for timeout in ("0", "-1", "nan", "inf"):
+            with self.subTest(timeout=timeout), \
+                 mock.patch.object(slicer_pr_validation, "run_validation") as run, \
+                 mock.patch("sys.stderr"):
+                result = slicer_pr_validation.main([
+                    "--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused", "--test-timeout", timeout,
+                ])
+            self.assertEqual(result, 2)
+            run.assert_not_called()
+
+    def test_default_test_command_records_positive_ctest_timeout(self):
+        command = slicer_pr_validation._default_test(
+            Path("/tmp/build"), 8, Path("/tmp/tests.xml"), "NotWorking")
+        self.assertEqual(command[command.index("--timeout") + 1], "180.0")
+        custom = slicer_pr_validation._default_test(
+            Path("/tmp/build"), 8, Path("/tmp/tests.xml"), "NotWorking", 37.5)
+        self.assertEqual(custom[custom.index("--timeout") + 1], "37.5")
+
+    def test_nonfinite_phase_timeout_fails_before_validation(self):
+        for timeout in ("nan", "inf"):
+            with self.subTest(timeout=timeout), \
+                 mock.patch.object(slicer_pr_validation, "run_validation") as run, \
+                 mock.patch("sys.stderr"):
+                result = slicer_pr_validation.main([
+                    "--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused", "--timeout", timeout,
+                ])
+            self.assertEqual(result, 2)
+            run.assert_not_called()
+
     def test_numbers_accept_repeated_and_comma_separated_values(self):
         self.assertEqual(slicer_pr_validation.parse_numbers(["1, 3", "8"]), [1, 3, 8])
         self.assertEqual(slicer_pr_validation.parse_numbers([["1", "3"], ["8"]]), [1, 3, 8])
@@ -287,7 +319,7 @@ class JUnitEvidenceTests(unittest.TestCase):
             evidence = slicer_pr_validation.read_junit_evidence(junit)
         self.assertTrue(evidence["usable"])
         self.assertEqual(evidence["counts"], {
-            "tests": 4, "failures": 1, "errors": 1, "skipped": 1,
+            "tests": 4, "failures": 1, "errors": 1, "skipped": 1, "timeouts": 0,
         })
         self.assertEqual(evidence["cases"], {
             "suite::pass": "passed",
@@ -313,6 +345,77 @@ class JUnitEvidenceTests(unittest.TestCase):
         self.assertEqual(
             slicer_pr_validation.classify_junit_result(
                 self._result(8), evidence, 2), "test_error")
+
+    def test_ctest_timeout_is_separate_from_assertion_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            junit = self._write(
+                Path(temp), "timeout.xml",
+                """<testsuites><testsuite tests='2' failures='2' errors='0' skipped='0'>
+                <testcase classname='suite' name='assertion'><failure message='CHECK failed'/></testcase>
+                <testcase classname='suite' name='slow'><failure message='Timeout'>
+                  Test timeout after 180 seconds</failure></testcase>
+                </testsuite></testsuites>""",
+            )
+            evidence = slicer_pr_validation.read_junit_evidence(junit)
+        self.assertTrue(evidence["usable"])
+        self.assertEqual(evidence["counts"]["failures"], 1)
+        self.assertEqual(evidence["counts"]["timeouts"], 1)
+        self.assertEqual(evidence["cases"]["suite::assertion"], "failed")
+        self.assertEqual(evidence["cases"]["suite::slow"], "timeout")
+        self.assertEqual(
+            slicer_pr_validation.classify_junit_result(
+                self._result(8), evidence, 2), "test_timeout")
+
+    def test_timeout_does_not_become_inherited_assertion_failure(self):
+        classification = slicer_pr_validation.classify_failure_names(
+            {
+                "status": "test_failed", "junit_reference_usable": True,
+                "junit_case_statuses": {"suite::slow": "failed"},
+                "failed_test_names": ["suite::slow"],
+            },
+            {
+                "status": "test_timeout", "junit_reference_usable": False,
+                "junit_case_statuses": {"suite::slow": "timeout"},
+                "failed_test_names": [],
+                "timed_out_test_names": ["suite::slow"],
+            },
+        )
+        self.assertFalse(classification["reference_available"])
+        self.assertEqual(classification["inherited"], [])
+        self.assertEqual(classification["new"], [])
+        self.assertEqual(classification["raw_observed_head_failures"], [])
+        self.assertEqual(classification["raw_observed_head_timeouts"], ["suite::slow"])
+        self.assertIn("separately", classification["classification_basis"])
+
+    def test_timeout_words_in_test_name_or_output_do_not_hide_assertion_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            junit = self._write(
+                Path(temp), "timeout-words.xml",
+                """<testsuite tests='1' failures='1' errors='0' skipped='0'>
+                <testcase name='A timed out request preserves state'>
+                  <failure message='CHECK failed'>CHECK(status == "timed out")</failure>
+                  <system-out>Test timeout after 180 seconds</system-out>
+                </testcase></testsuite>""",
+            )
+            evidence = slicer_pr_validation.read_junit_evidence(junit)
+        self.assertTrue(evidence["usable"])
+        self.assertEqual(evidence["counts"]["timeouts"], 0)
+        self.assertEqual(evidence["counts"]["failures"], 1)
+        self.assertEqual(slicer_pr_validation.classify_junit_result(
+            self._result(8), evidence, 1), "test_failed")
+
+    def test_empty_ctest_timeout_failure_is_recognized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            for tag in ("failure", "error"):
+                with self.subTest(tag=tag):
+                    junit = self._write(
+                        Path(temp), "timeout.xml",
+                        f"<testsuite tests='1' failures='1'><testcase name='slow'>"
+                        f"<{tag} message='Timeout'/></testcase></testsuite>",
+                    )
+                    evidence = slicer_pr_validation.read_junit_evidence(junit)
+                    self.assertTrue(evidence["usable"])
+                    self.assertEqual(evidence["cases"], {"slow": "timeout"})
 
     def test_exit_zero_with_reported_failure_is_evidence_incomplete(self):
         evidence = {
@@ -684,6 +787,12 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             report = json.loads((output / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["configuration"]["jobs"], 1)
             self.assertEqual(report["configuration"]["test_jobs"], 8)
+            self.assertEqual(report["configuration"]["test_timeout_seconds"], 180.0)
+            self.assertEqual(
+                report["configuration"]["timeout_provenance"]["ctest_option"], "--timeout")
+            self.assertEqual(
+                report["configuration"]["timeout_provenance"][
+                    "default_ctest_per_case_timeout_seconds"], 180.0)
             self.assertEqual(
                 report["snapshot_sha256"], hashlib.sha256(snapshot.read_bytes()).hexdigest())
             self.assertEqual(len(report["preflight_heads"]), 1)
@@ -758,6 +867,8 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                     self.assertEqual(result["status"], "pass")
                     self.assertEqual(calls[1][calls[1].index("--parallel") + 1], "4")
                     self.assertEqual(calls[2][calls[2].index("--parallel") + 1], str(test_jobs or 4))
+                    self.assertEqual(calls[2][calls[2].index("--timeout") + 1], "180.0")
+                    self.assertEqual(result["test_timeout_seconds"], 180.0)
 
     def test_run_tree_requires_junit_when_ctest_console_reports_success(self):
         with tempfile.TemporaryDirectory() as temp:
