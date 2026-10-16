@@ -356,7 +356,7 @@ TEST_CASE("Enabling separated infill recomputes body origins", "[PrintObject][In
     CHECK(area(diff(resliced, fresh)) < scaled<double>(1.) * scaled<double>(1.) * 1e-6);
 }
 
-TEST_CASE("Surface centering survives changes to separated infill settings", "[PrintObject][SurfaceInfill][Regression]")
+TEST_CASE("Surface centering survives changes to separated infill settings", "[PrintObject][SurfaceInfill][SurfaceCenteringMatrix][Regression]")
 {
     const std::string pattern = GENERATE("archimedeanchords", "octagramspiral");
     const std::string initial_center = GENERATE("each_surface", "each_model", "each_assembly");
@@ -388,12 +388,12 @@ TEST_CASE("Surface centering survives changes to separated infill settings", "[P
 
     // Orca: Two disconnected bodies exercise per-body centering. The offset tower also
     // makes each-surface and each-model centering differ on the top surfaces.
-    TriangleMesh mesh = make_cube(30, 24, 2);
-    TriangleMesh tower = make_cube(12, 10, 1);
-    tower.translate(4, 3, 2);
+    TriangleMesh mesh = make_cube(12, 10, 1.2);
+    TriangleMesh tower = make_cube(4, 3, 0.6);
+    tower.translate(2, 2, 1.2);
     mesh.merge(tower);
     TriangleMesh second = mesh;
-    second.translate(50, 0, 0);
+    second.translate(20, 0, 0);
     mesh.merge(second);
 
     // Orca: Equal footprints can hide reordered or reversed paths. Retain their point

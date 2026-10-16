@@ -45,6 +45,14 @@ TriangleMesh scaled(TestMesh id, float scale)
     return mesh;
 }
 
+// Preserve the dense XY node field without repeating the same geometry over extra layers.
+TriangleMesh scaled_z(TestMesh id, float xy_scale, float z_scale)
+{
+    TriangleMesh mesh = Slic3r::Test::mesh(id);
+    mesh.scale(Vec3f(xy_scale, xy_scale, z_scale));
+    return mesh;
+}
+
 // `extra` is applied last, so a caller can add or override any key.
 void slice_with_tree_support(const TriangleMesh &mesh, Slic3r::Print &print, const char *style,
                              int threshold_angle = 30, int build_plate_only = 0, int raft_layers = 0,
@@ -170,15 +178,14 @@ TEST_CASE("A raft is still generated under tree support", "[TreeSupport]")
 // drop_nodes() decides the node merges and spawns the next layer's nodes in parallel. Every one of
 // those decisions has to be applied in a fixed order, or the same model gives different branches on
 // each slice.
-TEST_CASE("Tree support toolpaths do not depend on thread scheduling", "[TreeSupport][Regression][Parallel]")
+TEST_CASE("Tree support toolpaths do not depend on thread scheduling", "[TreeSupport][TreeSupportScheduling][Regression][Parallel]")
 {
     // Scaled up so that a layer holds enough nodes for the parallel range to be split. At stock
     // size it stays in one chunk and the order never varies.
-    SECTION("overhang")            { sliced_twice_matches(scaled(TestMesh::overhang, 2.f), 0); }
-    SECTION("bridge with hole")    { sliced_twice_matches(scaled(TestMesh::bridge_with_hole, 3.f), 0); }
-    // Dropping every branch that cannot reach the bed leaves the survivors dense enough that the
-    // neighbour merge fires in bulk.
-    SECTION("on the build plate")  { sliced_twice_matches(scaled(TestMesh::overhang, 4.f), 1); }
+    SECTION("overhang")            { sliced_twice_matches(scaled_z(TestMesh::overhang, 2.f, 1.f), 0); }
+    SECTION("bridge with hole")    { sliced_twice_matches(scaled_z(TestMesh::bridge_with_hole, 3.f, 1.f), 0); }
+    // Build-plate-only filtering retains enough support points to keep the parallel work substantial.
+    SECTION("on the build plate")  { sliced_twice_matches(scaled_z(TestMesh::overhang, 4.f, 1.f), 1); }
     // Branches resting on the model are what put nodes in a part group other than 0, which is the
     // only way to reach the prune in the second pass. tree_hybrid additionally builds polygon
     // nodes, so it is the only style that exercises the overhang merge.
