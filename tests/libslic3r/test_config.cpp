@@ -6,6 +6,7 @@
 #include <ostream>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
@@ -25,6 +26,7 @@
 #include <cmath>
 #include <cstddef>
 #include <iomanip>
+#include <ios>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -2786,3 +2788,222 @@ TEST_CASE("Preset placeholders retain the public textual name fields", "[Config]
         {"printer_preset", coString}, {"physical_printer_preset", coString}});
 }
 } // namespace config_definition_contracts
+
+namespace config_footer_contracts {
+using namespace Slic3r;
+
+struct FooterDefinition : ConfigDef {
+    FooterDefinition()
+    {
+        add("Alpha_key", coInt)->set_default_value(new ConfigOptionInt(0));
+        add("text_value", coString)->set_default_value(new ConfigOptionString());
+        add("decimal_value", coFloat)->set_default_value(new ConfigOptionFloat(0.));
+        for (int i = 0; i < 80; ++i)
+            add("option_" + std::to_string(i), coInt)->set_default_value(new ConfigOptionInt(0));
+    }
+};
+
+struct FooterConfig : DynamicConfig {
+    FooterDefinition definition;
+    int composite_calls = 0;
+    const ConfigDef *def() const override { return &definition; }
+    void handle_legacy_composite() override { ++composite_calls; }
+};
+
+std::size_t load_legacy(FooterConfig &config, const std::string &data)
+{
+    ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::Disable);
+    std::size_t count = 0;
+    REQUIRE_NOTHROW(count = ConfigBase::load_from_gcode_string_legacy(config, data.c_str(), context));
+    CHECK(context.substitutions.empty());
+    return count;
+}
+
+void write_file(const ScopedTemporaryFile &file, const std::string &data)
+{
+    boost::nowide::ofstream out(file.string(), std::ios::binary);
+    REQUIRE(out.is_open());
+    out << data;
+    out.close();
+    REQUIRE(out.good());
+}
+
+std::string block(int count = 80)
+{
+    std::string data = "; CONFIG_BLOCK_START\n";
+    for (int i = 0; i < count; ++i)
+        data += "; option_" + std::to_string(i) + " = " + std::to_string(10 + i) + "\n";
+    return data + "; CONFIG_BLOCK_END\n";
+}
+
+void check_block_values(const FooterConfig &config)
+{
+    REQUIRE(config.keys().size() == 80);
+    for (int i = 0; i < 80; ++i) {
+        const std::string key = "option_" + std::to_string(i);
+        CAPTURE(key);
+        const auto *value = config.opt<ConfigOptionInt>(key);
+        REQUIRE(value != nullptr);
+        CHECK(value->value == 10 + i);
+    }
+    CHECK(config.composite_calls == 1);
+}
+
+TEST_CASE("Legacy G-code config ignores a null buffer without mutating state", "[Config][ConfigFooter]")
+{
+    FooterConfig config;
+    config.set_deserialize_strict("Alpha_key", "17");
+    ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(ConfigBase::load_from_gcode_string_legacy(config, nullptr, context) == 0);
+    CHECK(config.opt<ConfigOptionInt>("Alpha_key")->value == 17);
+    CHECK(config.composite_calls == 0);
+    CHECK(context.substitutions.empty());
+}
+
+TEST_CASE("Legacy G-code config reads a contiguous tail across line endings", "[Config][ConfigFooter]")
+{
+    for (const std::string ending : {"\n", "\r\n", "\r"}) {
+        CAPTURE(ending);
+        FooterConfig config;
+        const std::string data = "G1 X10" + ending + "; Alpha_key = 42" + ending +
+                                 "; decimal_value = 0.375" + ending + ending;
+        CHECK(load_legacy(config, data) == 2);
+        REQUIRE(config.opt<ConfigOptionInt>("Alpha_key") != nullptr);
+        CHECK(config.opt<ConfigOptionInt>("Alpha_key")->value == 42);
+        REQUIRE(config.opt<ConfigOptionFloat>("decimal_value") != nullptr);
+        CHECK_THAT(config.opt<ConfigOptionFloat>("decimal_value")->value, Catch::Matchers::WithinAbs(0.375, 1e-12));
+        CHECK(config.composite_calls == 1);
+    }
+}
+
+TEST_CASE("Legacy G-code config removes numbered line prefixes", "[Config][ConfigFooter]")
+{
+    FooterConfig config;
+    CHECK(load_legacy(config, "N1 G1 X10\nN20 ; Alpha_key = 37\nN300    ; option_7 = 83\n") == 2);
+    REQUIRE(config.opt<ConfigOptionInt>("Alpha_key") != nullptr);
+    REQUIRE(config.opt<ConfigOptionInt>("option_7") != nullptr);
+    CHECK(config.opt<ConfigOptionInt>("Alpha_key")->value == 37);
+    CHECK(config.opt<ConfigOptionInt>("option_7")->value == 83);
+}
+
+TEST_CASE("Legacy G-code config retains values containing equals and escaped newlines", "[Config][ConfigFooter]")
+{
+    FooterConfig config;
+    CHECK(load_legacy(config, "G1 X0\n; text_value = first=second\\nthird\n") == 1);
+    REQUIRE(config.opt<ConfigOptionString>("text_value") != nullptr);
+    CHECK(config.opt<ConfigOptionString>("text_value")->value == "first=second\nthird");
+}
+
+TEST_CASE("Legacy G-code config skips unknown keys without terminating the tail", "[Config][ConfigFooter]")
+{
+    FooterConfig config;
+    CHECK(load_legacy(config, "G1 X0\n; Alpha_key = 19\n; future_option = opaque\n; option_7 = 27\n") == 2);
+    REQUIRE(config.opt<ConfigOptionInt>("Alpha_key") != nullptr);
+    REQUIRE(config.opt<ConfigOptionInt>("option_7") != nullptr);
+    CHECK(config.opt<ConfigOptionInt>("Alpha_key")->value == 19);
+    CHECK(config.opt<ConfigOptionInt>("option_7")->value == 27);
+    CHECK_FALSE(config.has("future_option"));
+}
+
+TEST_CASE("Legacy G-code config stops at malformed tail records", "[Config][ConfigFooter]")
+{
+    for (const std::string malformed : {"G1 X7", ";Alpha_key = 9", "; 3invalid = 9", "; invalid-key = 9",
+                                        "; ab = 900", "; Alpha_key= 9", "; Alpha_key =9", "; Alpha_key 9"}) {
+        CAPTURE(malformed);
+        FooterConfig config;
+        CHECK(load_legacy(config, "G1 X0\n; Alpha_key = 19\n" + malformed + "\n; option_7 = 27\n") == 1);
+        CHECK_FALSE(config.has("Alpha_key"));
+        REQUIRE(config.opt<ConfigOptionInt>("option_7") != nullptr);
+        CHECK(config.opt<ConfigOptionInt>("option_7")->value == 27);
+        CHECK(config.composite_calls == 1);
+    }
+}
+
+TEST_CASE("Legacy G-code config refuses configuration followed by motion", "[Config][ConfigFooter]")
+{
+    FooterConfig config;
+    CHECK(load_legacy(config, "G90\n; Alpha_key = 99\n; option_7 = 27\nG1 X10\n") == 0);
+    CHECK(config.keys().empty());
+    CHECK(config.composite_calls == 1);
+}
+
+TEST_CASE("Commented INI config removes generated headers and comment prefixes", "[Config][ConfigFooter]")
+{
+    FooterConfig config;
+    ConfigSubstitutions substitutions;
+    REQUIRE_NOTHROW(substitutions = config.load_from_ini_string_commented(
+        "  ; generated by OrcaSlicer test\r\n\n\t; Alpha_key = 51\r\n ; decimal_value = 0.125\r\n"
+        "text_value = alpha=beta\n; future_option = ignored\n", ForwardCompatibilitySubstitutionRule::Disable));
+    CHECK(substitutions.empty());
+    REQUIRE(config.opt<ConfigOptionInt>("Alpha_key") != nullptr);
+    REQUIRE(config.opt<ConfigOptionFloat>("decimal_value") != nullptr);
+    REQUIRE(config.opt<ConfigOptionString>("text_value") != nullptr);
+    CHECK(config.opt<ConfigOptionInt>("Alpha_key")->value == 51);
+    CHECK_THAT(config.opt<ConfigOptionFloat>("decimal_value")->value, Catch::Matchers::WithinAbs(0.125, 1e-12));
+    CHECK(config.opt<ConfigOptionString>("text_value")->value == "alpha=beta");
+    CHECK_FALSE(config.has("future_option"));
+    CHECK(config.composite_calls == 1);
+}
+
+TEST_CASE("Delimited G-code config finds both accepted headers after a preamble", "[Config][ConfigFooter]")
+{
+    for (const std::string header : {"; OrcaSlicer test", "; generated by OrcaSlicer test", " \tN12 ; OrcaSlicer test"}) {
+        CAPTURE(header);
+        ScopedTemporaryFile file(".gcode");
+        write_file(file, "G90\nG1 X20\n" + header + "\n" + block() + "G1 X25\n; Alpha_key = 999\n");
+        FooterConfig config;
+        ConfigSubstitutions substitutions;
+        REQUIRE_NOTHROW(substitutions = config.load_from_gcode_file(file.string(), ForwardCompatibilitySubstitutionRule::Disable));
+        CHECK(substitutions.empty());
+        check_block_values(config);
+        CHECK_FALSE(config.has("Alpha_key"));
+    }
+}
+
+TEST_CASE("Delimited G-code config trims records and ignores malformed or unknown entries", "[Config][ConfigFooter]")
+{
+    ScopedTemporaryFile file(".gcode");
+    std::string records = block();
+    const auto insertion = records.find("; CONFIG_BLOCK_END");
+    REQUIRE(insertion != std::string::npos);
+    records.insert(insertion, "G1 X99\n; ignored text\n;future_option = ignored\n;\t Alpha_key \t= 61 \t\n");
+    write_file(file, "; OrcaSlicer test\n" + records);
+    FooterConfig config;
+    ConfigSubstitutions substitutions;
+    REQUIRE_NOTHROW(substitutions = config.load_from_gcode_file(file.string(), ForwardCompatibilitySubstitutionRule::Disable));
+    CHECK(substitutions.empty());
+    REQUIRE(config.opt<ConfigOptionInt>("Alpha_key") != nullptr);
+    CHECK(config.opt<ConfigOptionInt>("Alpha_key")->value == 61);
+    CHECK(config.keys().size() == 81);
+    CHECK_FALSE(config.has("future_option"));
+    CHECK(config.composite_calls == 1);
+}
+
+TEST_CASE("Delimited G-code config enforces the eighty-record threshold", "[Config][ConfigFooter]")
+{
+    ScopedTemporaryFile file(".gcode");
+    write_file(file, "; OrcaSlicer test\n" + block(79));
+    FooterConfig config;
+    CHECK_THROWS_WITH(config.load_from_gcode_file(file.string(), ForwardCompatibilitySubstitutionRule::Disable),
+                      Catch::Matchers::ContainsSubstring("Suspiciously low number"));
+    CHECK(config.composite_calls == 0);
+}
+
+TEST_CASE("Delimited G-code config reports missing headers and block delimiters", "[Config][ConfigFooter]")
+{
+    const std::vector<std::pair<std::string, std::string>> cases{
+        {"G1 X0\n" + block(), "Not a gcode file generated by"},
+        {"; OrcaSlicer test\nG1 X0\n", "CONFIG_BLOCK_START"},
+        {"; OrcaSlicer test\n; CONFIG_BLOCK_START\n; Alpha_key = 3\n", "CONFIG_BLOCK_END"},
+    };
+    for (const auto &[data, error] : cases) {
+        ScopedTemporaryFile file(".gcode");
+        write_file(file, data);
+        FooterConfig config;
+        CHECK_THROWS_WITH(config.load_from_gcode_file(file.string(), ForwardCompatibilitySubstitutionRule::Disable),
+                          Catch::Matchers::ContainsSubstring(error));
+        CHECK(config.composite_calls == 0);
+    }
+}
+
+} // namespace config_footer_contracts
