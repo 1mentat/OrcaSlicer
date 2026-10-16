@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <vector>
 #include <set>
 #include <array>
@@ -852,3 +853,133 @@ TEST_CASE("Framework copying propagates a failure from a nested directory", "[Ut
     check_bytes(dst / "nested", "occupied by a file");
 }
 } // namespace utils_io_contracts
+
+namespace utils_contracts {
+
+TEST_CASE("Default ScopeGuard accepts ownership and runs it on destruction", "[Utils][UtilsContracts]")
+{
+    size_t calls = 0;
+    {
+        ScopeGuard guard;
+        {
+            ScopeGuard source([&calls] { ++calls; });
+            guard = std::move(source);
+        }
+        CHECK(calls == 0);
+    }
+
+    CHECK(calls == 1);
+}
+
+TEST_CASE("ScopeGuard move construction transfers the callback once", "[Utils][UtilsContracts]")
+{
+    size_t calls = 0;
+    {
+        ScopeGuard original([&calls] { ++calls; });
+        ScopeGuard moved(std::move(original));
+    }
+
+    CHECK(calls == 1);
+}
+
+TEST_CASE("ScopeGuard move assignment replaces the destination callback", "[Utils][UtilsContracts]")
+{
+    size_t calls = 0;
+    {
+        ScopeGuard source([&calls] { ++calls; });
+        ScopeGuard destination([&calls] { calls += 10; });
+        destination = std::move(source);
+    }
+
+    CHECK(calls == 1);
+}
+
+TEST_CASE("ScopeGuard reset suppresses the callback", "[Utils][UtilsContracts]")
+{
+    size_t calls = 0;
+    {
+        ScopeGuard guard([&calls] { ++calls; });
+        guard.reset();
+    }
+
+    CHECK(calls == 0);
+}
+
+TEST_CASE("Published model links accept only their canonical URL forms", "[Utils][UtilsContracts]")
+{
+    CHECK(is_printables_link("https://printables.com"));
+    CHECK(is_printables_link("HTTP://PRINTABLES.COM"));
+    CHECK_FALSE(is_printables_link("https://printables.com/model/1"));
+    CHECK(is_makerworld_link("https://makerworld.com"));
+    CHECK_FALSE(is_makerworld_link("https://makerworld.com/model/1"));
+    CHECK(is_thingiverse_link("https://www.thingiverse.com"));
+    CHECK_FALSE(is_thingiverse_link("https://thingiverse.com"));
+}
+
+TEST_CASE("Power of two overloads preserve bounded integral boundaries", "[Utils][UtilsContracts]")
+{
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(0)) == static_cast<uint16_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(3)) == static_cast<uint16_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(255)) == static_cast<uint16_t>(256));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(0)) == static_cast<uint32_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(3)) == static_cast<uint32_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(1025)) == static_cast<uint32_t>(2048));
+}
+
+TEST_CASE("Round up divide handles exact and partial bounded quotients", "[Utils][UtilsContracts]")
+{
+    CHECK(round_up_divide<long long>(0, 3) == 0);
+    CHECK(round_up_divide<long long>(1, 3) == 1);
+    CHECK(round_up_divide<long long>(3, 3) == 1);
+    CHECK(round_up_divide<long long>(4, 3) == 2);
+}
+
+TEST_CASE("Short time formatting preserves its documented rounding branches", "[Utils][UtilsContracts]")
+{
+    CHECK(short_time("0.5s") == "<1s");
+    CHECK(short_time("12m 30s") == "12m30s");
+    CHECK(short_time("1h 29m 30s") == "1h30m");
+    CHECK(short_time("1h 59m 30s") == "2h0m");
+    CHECK(short_time("23h 59m 30s") == "1d0h0m");
+}
+
+TEST_CASE("Deterministic time formatters preserve day hour minute and second units", "[Utils][UtilsContracts]")
+{
+    CHECK(get_time_dhms(0.f) == "0.000000s");
+    CHECK(get_time_dhms(61.f) == "1m 1s");
+    CHECK(get_time_dhms(3661.f) == "1h 1m 1s");
+    CHECK(get_time_dhms(86400.f) == "1d 0h 0m 0s");
+    CHECK(get_bbl_time_dhms(0.f) == "0s");
+    CHECK(get_bbl_time_dhms(61.f) == "1m1s");
+    CHECK(get_bbl_time_dhms(3661.f) == "1h1m1s");
+    CHECK(get_bbl_time_dhms(86400.f) == "1d0h0m0s");
+}
+
+TEST_CASE("Minute and clock-like formatters use bounded arithmetic", "[Utils][UtilsContracts]")
+{
+    CHECK(get_time_dhm(0.f) == "0m");
+    CHECK(get_time_dhm(60.f) == "1m");
+    CHECK(get_time_dhm(3600.f) == "1h 0m");
+    CHECK(get_time_dhm(86400.f) == "1d 0h 0m");
+    CHECK(get_time_hms(0.f) == "00:00:00");
+    CHECK(get_time_hms(3661.f) == "01:01:01");
+}
+
+TEST_CASE("BBL monitor and remaining time formatters handle finite signs and units", "[Utils][UtilsContracts]")
+{
+    CHECK(get_bbl_monitor_time_dhm(0.f) == "0m");
+    CHECK(get_bbl_monitor_time_dhm(60.f) == "1m");
+    CHECK(get_bbl_monitor_time_dhm(3600.f) == "1h0m");
+    CHECK(get_bbl_monitor_time_dhm(-60.f).empty());
+    CHECK(get_bbl_remain_time_dhms(61.f) == "1m1s");
+    CHECK(get_bbl_remain_time_dhms(3661.f) == "1h1m1s");
+    CHECK(get_bbl_remain_time_dhms(86400.f) == "1d0h0m0s");
+}
+
+TEST_CASE("Character filtering removes only requested bounded characters", "[Utils][UtilsContracts]")
+{
+    CHECK(filter_characters("a-b_c!", "-_") == "abc!");
+    CHECK(filter_characters("stable", "") == "stable");
+}
+
+} // namespace utils_contracts

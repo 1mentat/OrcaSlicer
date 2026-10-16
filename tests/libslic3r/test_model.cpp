@@ -1,3 +1,5 @@
+#include <boost/filesystem/operations.hpp>
+
 #include <ios>
 #include "libslic3r/Semver.hpp"
 #include <array>
@@ -1671,3 +1673,98 @@ TEST_CASE("Model read_from_archive rejects malformed archives and unsupported su
 }
 
 } // namespace model_import_contracts
+
+namespace bbs_project_lifecycle_contracts
+{
+using namespace Slic3r;
+
+TEST_CASE("Model lifecycle transfers project metadata and the backup path",
+          "[Model][ModelLifecycle][Bbs3mfLifecycle]")
+{
+    ScopedTemporaryDir backup{"orca_model_lifecycle_transfer"};
+    Model source;
+    source.set_backup_path(backup.string());
+    source.design_info = std::make_shared<ModelDesignInfo>();
+    source.design_info->Designer = "source-designer";
+    source.model_info = std::make_shared<ModelInfo>();
+    source.model_info->model_name = "source-model";
+    source.profile_info = std::make_shared<ModelProfileInfo>();
+    source.profile_info->ProfileTile = "source-profile";
+    source.mk_name = "maker";
+    source.md_name = {"key"};
+    source.md_value = {"value"};
+
+    Model destination;
+    destination.load_from(source);
+    CHECK(destination.get_backup_path() == backup.string());
+    REQUIRE(destination.design_info != nullptr);
+    CHECK(destination.design_info->Designer == "source-designer");
+    REQUIRE(destination.model_info != nullptr);
+    CHECK(destination.model_info->model_name == "source-model");
+    REQUIRE(destination.profile_info != nullptr);
+    CHECK(destination.profile_info->ProfileTile == "source-profile");
+    CHECK(destination.mk_name == "maker");
+    CHECK(destination.md_name == std::vector<std::string>{"key"});
+    CHECK(destination.md_value == std::vector<std::string>{"value"});
+    CHECK(source.design_info == nullptr);
+    CHECK(source.model_info == nullptr);
+    CHECK(source.profile_info == nullptr);
+
+    const std::string auxiliary = destination.get_auxiliary_file_temp_path();
+    CHECK(boost::filesystem::is_directory(auxiliary));
+    destination.set_need_backup();
+    CHECK(destination.is_need_backup());
+    destination.remove_backup_path_if_exist();
+    CHECK_FALSE(boost::filesystem::exists(backup.path()));
+}
+
+TEST_CASE("Model object lifecycle records source metadata, material copies, and transforms",
+          "[Model][ModelLifecycle]")
+{
+    Model model;
+    ModelObject *object = model.add_object("named-part", "source.stl", make_cube(10., 10., 10.));
+    REQUIRE(object != nullptr);
+    REQUIRE(object->volumes.size() == 1);
+    object->add_instance();
+    CHECK(object->name == "named-part");
+    CHECK(object->input_file == "source.stl");
+    CHECK(object->volumes.front()->name == "named-part");
+    CHECK(object->volumes.front()->source.input_file == "source.stl");
+
+    ModelMaterial *base = model.add_material("base");
+    base->attributes["color"] = "#ff0000";
+    ModelMaterial *copy = model.add_material("copy", *base);
+    REQUIRE(copy != nullptr);
+    CHECK(copy->attributes.at("color") == "#ff0000");
+
+    CHECK_THAT(model.bounding_box_approx().max.z(), Catch::Matchers::WithinAbs(10., 1e-6));
+    CHECK_THAT(model.max_z(), Catch::Matchers::WithinAbs(10., 1e-6));
+    ModelVolume *volume = object->volumes.front();
+    volume->set_offset(Vec3d(1., 2., 3.));
+    volume->set_rotation(Z, Geometry::deg2rad(15.));
+    volume->set_scaling_factor(Vec3d(1.5, 1.25, 1.));
+    const Vec3d offset = volume->get_offset();
+    CHECK_THAT(offset.x(), Catch::Matchers::WithinAbs(1., 1e-9));
+    CHECK_THAT(offset.y(), Catch::Matchers::WithinAbs(2., 1e-9));
+    CHECK_THAT(offset.z(), Catch::Matchers::WithinAbs(3., 1e-9));
+    CHECK_THAT(volume->get_rotation(Z), Catch::Matchers::WithinAbs(Geometry::deg2rad(15.), 1e-9));
+    CHECK_THAT(volume->get_scaling_factor(X), Catch::Matchers::WithinAbs(1.5, 1e-9));
+    const Transform3d before_mirror = volume->get_transformation().get_matrix();
+    volume->set_mirror(X, -1.);
+    const Transform3d after_mirror = volume->get_transformation().get_matrix();
+    CHECK(after_mirror.linear().col(0).isApprox(-before_mirror.linear().col(0), 1e-9));
+    CHECK(after_mirror.linear().col(1).isApprox(before_mirror.linear().col(1), 1e-9));
+    CHECK(after_mirror.linear().col(2).isApprox(before_mirror.linear().col(2), 1e-9));
+    CHECK(after_mirror.translation().isApprox(before_mirror.translation(), 1e-9));
+    CHECK(volume->is_left_handed());
+
+    object->scale(2.);
+    object->mirror(Y);
+    CHECK_FALSE(object->is_multiparts());
+    model.delete_material("copy");
+    CHECK(model.get_material("copy") == nullptr);
+    model.clear_materials();
+    CHECK(model.materials.empty());
+}
+
+} // namespace bbs_project_lifecycle_contracts

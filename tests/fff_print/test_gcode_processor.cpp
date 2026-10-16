@@ -1,3 +1,8 @@
+#include <cstdint>
+#include <filesystem>
+#include <system_error>
+#include <catch2/generators/catch_generators.hpp>
+
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Utils.hpp"
@@ -830,3 +835,312 @@ TEST_CASE("Post process keeps line endings and a final unterminated line", "[GCo
 }
 
 } // namespace post_processor_contracts
+
+namespace gcode_processor_reachable_contracts {
+
+namespace {
+
+// Bound fixture input and rewritten output before reading them into memory.
+constexpr std::size_t kMaxFixtureBytes = 64 * 1024;
+constexpr std::uintmax_t kMaxOutputBytes = 512 * 1024;
+
+struct Processed {
+    std::string output;
+    GCodeProcessorResult result;
+    Processed() = default;
+    Processed(Processed &&other) noexcept : output(std::move(other.output)) { result = std::move(other.result); }
+    Processed &operator=(Processed &&other) noexcept
+    {
+        output = std::move(other.output);
+        result = std::move(other.result);
+        return *this;
+    }
+    Processed(const Processed &) = delete;
+    Processed &operator=(const Processed &) = delete;
+};
+
+FullPrintConfig preheat_config()
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    config.filament_diameter.values = {1.75, 1.75};
+    config.filament_map.values = {1, 2};
+    config.filament_type.values = {"PLA", "PETG"};
+    config.physical_extruder_map.values = {0, 1};
+    config.extruder_max_nozzle_count.values = {1, 1};
+    config.nozzle_diameter.values = {0.4, 0.4};
+    config.nozzle_volume.values = {0., 0.};
+    config.extruder_type.values = {etDirectDrive, etDirectDrive};
+    config.nozzle_temperature_initial_layer.values = {205, 225};
+    config.nozzle_temperature.values = {210, 230};
+    config.filament_pre_cooling_temperature.values = {150, 160};
+    config.filament_preheat_temperature_delta.values = {10., 10.};
+    config.hotend_cooling_rate.values = {4., 4.};
+    config.hotend_heating_rate.values = {4., 4.};
+    config.enable_pre_heating.value = true;
+    config.preheat_time.value = 30;
+    config.preheat_steps.value = 2;
+    config.single_extruder_multi_material.value = false;
+    return config;
+}
+
+void check_group_mapping(const GCodeProcessorResult &result);
+
+Processed process_post(const std::string &gcode, FullPrintConfig config = {}, bool group = false)
+{
+    REQUIRE(gcode.size() <= kMaxFixtureBytes);
+    if (group) {
+        REQUIRE(config.filament_map.values.size() >= 2);
+        REQUIRE(config.filament_diameter.values.size() >= 2);
+        REQUIRE(config.filament_type.values.size() >= 2);
+        REQUIRE(config.physical_extruder_map.values.size() >= 2);
+        REQUIRE(config.extruder_max_nozzle_count.values.size() >= 2);
+        REQUIRE(config.nozzle_diameter.values.size() >= 2);
+        REQUIRE(config.nozzle_volume.values.size() >= 2);
+        REQUIRE(config.extruder_type.values.size() >= 2);
+        REQUIRE(config.hotend_cooling_rate.values.size() >= 2);
+        REQUIRE(config.hotend_heating_rate.values.size() >= 2);
+        REQUIRE(config.nozzle_temperature.values.size() >= 2);
+        REQUIRE(config.nozzle_temperature_initial_layer.values.size() >= 2);
+        REQUIRE(config.filament_pre_cooling_temperature.values.size() >= 2);
+        REQUIRE(config.filament_preheat_temperature_delta.values.size() >= 2);
+    }
+    ScopedTemporaryFile file(".gcode");
+    {
+        std::ofstream out(file.string());
+        REQUIRE(out.good());
+        out << gcode;
+    }
+
+    Print print;
+    GCodeProcessor processor;
+    const bool old_bbl = GCodeProcessor::s_IsBBLPrinter;
+    GCodeProcessor::s_IsBBLPrinter = true;
+    const ScopeGuard restore_bbl([old_bbl] { GCodeProcessor::s_IsBBLPrinter = old_bbl; });
+    processor.apply_config(config);
+    // A fresh processor's public static-config path retains its initialized
+    // handle_hotend_as_extruder=false state; the dynamic overload is private.
+    if (group) {
+        processor.ensure_nozzle_group_result(2);
+        check_group_mapping(processor.get_result());
+    }
+    processor.set_print(&print);
+    processor.initialize(file.string());
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(true);
+
+    std::error_code output_size_error;
+    const std::uintmax_t output_size = std::filesystem::file_size(file.string(), output_size_error);
+    REQUIRE_FALSE(output_size_error);
+    REQUIRE(output_size <= kMaxOutputBytes);
+
+    std::ifstream in(file.string());
+    REQUIRE(in.good());
+    std::ostringstream output;
+    output << in.rdbuf();
+    Processed result;
+    result.output = output.str();
+    REQUIRE(result.output.size() <= kMaxOutputBytes);
+    result.result = std::move(processor.extract_result());
+    if (group)
+        check_group_mapping(result.result);
+    return result;
+}
+
+void check_group_mapping(const GCodeProcessorResult &result)
+{
+    const auto *group = dynamic_cast<const MultiNozzleUtils::LayeredNozzleGroupResult *>(
+        result.nozzle_group_result.get());
+    REQUIRE(group != nullptr);
+    const auto filament0 = group->get_first_nozzle_for_filament(0);
+    const auto filament1 = group->get_first_nozzle_for_filament(1);
+    REQUIRE(filament0.has_value());
+    REQUIRE(filament1.has_value());
+    CHECK(filament0->extruder_id == 0);
+    CHECK(filament1->extruder_id == 1);
+}
+
+} // namespace
+
+TEST_CASE("The singular reserved-tag query returns the first compatible tag and stops", "[GCodeProcessorReachable][GCodeProcessor]")
+{
+    const bool old_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore([old_bbl] { GCodeProcessor::s_IsBBLPrinter = old_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+
+    std::string found;
+    REQUIRE(GCodeProcessor::contains_reserved_tag("; ordinary\n;TYPE:Outer wall\n;LAYER_CHANGE\n", found));
+    CHECK(found == "TYPE:Outer wall");
+    CHECK_FALSE(GCodeProcessor::contains_reserved_tag("G1 X1 Y1\n; ordinary\n", found));
+}
+
+TEST_CASE("The singular reserved-tag query follows BBL feature spelling", "[GCodeProcessorReachable][GCodeProcessor]")
+{
+    const bool old_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore([old_bbl] { GCodeProcessor::s_IsBBLPrinter = old_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = true;
+
+    std::string found;
+    REQUIRE(GCodeProcessor::contains_reserved_tag("; FEATURE: Outer wall\n;TYPE:ignored\n", found));
+    CHECK(found == " FEATURE: Outer wall");
+    CHECK_FALSE(GCodeProcessor::contains_reserved_tag("; the FEATURE: text is not a prefix\n", found));
+}
+
+TEST_CASE("Preheating-enabled post processing records machine and skippable boundaries", "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat]")
+{
+    const std::string gcode =
+        "; MACHINE_START_GCODE_END\n"
+        "M83\nT0\nG1 X20 Y0 Z0.2 E1 F600\n"
+        "; SKIPPABLE_START\n; SKIPTYPE: timelapse\nG4 S3\n; SKIPPABLE_END\n"
+        "; CP_TOOLCHANGE_WIPE CT1 FL0\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "T1 H1\nG1 X40 Y0 E1 F600\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "; MACHINE_END_GCODE_START\nG4 S1\n";
+    const auto processed = process_post(gcode, preheat_config(), true);
+    INFO("preheat output: " << processed.output);
+
+    REQUIRE(processed.result.nozzle_group_result != nullptr);
+    CHECK(processed.output.find("MACHINE_START_GCODE_END") != std::string::npos);
+    CHECK(processed.output.find("MACHINE_END_GCODE_START") != std::string::npos);
+    CHECK(processed.output.find("CP_TOOLCHANGE_WIPE CT1 FL0") != std::string::npos);
+    CHECK(processed.output.find("NOZZLE_CHANGE_START OF0 NF1 ON0 NN1") != std::string::npos);
+    CHECK(processed.output.find("NOZZLE_CHANGE_END OF0 NF1 ON0 NN1") != std::string::npos);
+    CHECK(processed.result.moves.size() > 1);
+}
+
+TEST_CASE("Preheating usage parsing accepts VT and M1020 filament changes", "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat]")
+{
+    const std::string gcode =
+        "; MACHINE_START_GCODE_END\nM83\n;VT0 H0\nG1 X4 Y0 Z0.2 E1 F600\n"
+        "M1020 S1 H1\nG1 X8 Y0 E1 F600\n; MACHINE_END_GCODE_START\n";
+    const auto processed = process_post(gcode, preheat_config(), true);
+    CHECK(processed.output.find("M1020 S1 H1") != std::string::npos);
+    CHECK(processed.output.find(";VT0 H0") != std::string::npos);
+    REQUIRE(processed.result.moves.size() > 2);
+}
+
+TEST_CASE("Preheating mode leaves a valid file unchanged when no idle injection is possible", "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat]")
+{
+    const std::string gcode = "M83\nG1 X2 Y0 Z0.2 E1 F600\n";
+    const auto processed = process_post(gcode, preheat_config(), true);
+    CHECK(processed.output == gcode);
+    REQUIRE(processed.result.moves.size() > 1);
+}
+
+
+
+TEST_CASE("Post processing rewrites all filament summary dimensions independently", "[GCodeProcessor][GCodeProcessorReachable][GcpPost]")
+{
+    FullPrintConfig config;
+    config.filament_diameter.values = {1.75, 2.0};
+    config.filament_density.values = {1.24, 1.10};
+    config.filament_cost.values = {100.0, 200.0};
+    const std::string summaries = "; filament used [mm] = 0, 0\n; filament used [g] = 0, 0\n"
+                                   "; total filament used [g] = 0\n; filament used [cm3] = 0, 0\n"
+                                   "; filament cost = 0, 0\n; total filament cost = 0\n";
+    const auto processed = process_post(summaries + "M83\nT1\nG1 X10 Y0 Z0.2 E2 F600\n", config);
+    CHECK(processed.output.find("filament used [mm] = 0.00, 2.00") != std::string::npos);
+    CHECK(processed.output.find("filament used [g] = 0.00, 0.01") != std::string::npos);
+    CHECK(processed.output.find("filament used [cm3] = 0.00, 0.01") != std::string::npos);
+    CHECK(processed.output.find("filament cost = 0.00, 0.00") != std::string::npos);
+    CHECK(processed.output.find("total filament used [g] = 0.01") != std::string::npos);
+}
+
+
+
+TEST_CASE("Preheating multi-extruder usage emits a temperature transition in a measured idle window", "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat]")
+{
+    const std::string gcode =
+        "; MACHINE_START_GCODE_END\nM83\nT0\nG1 X100 Y0 Z0.2 E1 F60\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "; CP_TOOLCHANGE_WIPE CT0 FL0\nT1\n"
+        "G1 X150 Y0 E0.5 F60\nG1 X200 Y0 E1 F60\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "; MACHINE_END_GCODE_START\n";
+    const auto processed = process_post(gcode, preheat_config(), true);
+    INFO("preheat transition output: " << processed.output);
+    REQUIRE(processed.result.nozzle_group_result != nullptr);
+    CHECK(processed.output.find("M104 T1 S25 N0 ;Multi extruder pre cooling") != std::string::npos);
+    CHECK(processed.output.find("M104 T1 S220 N0 ;Multi extruder pre heating") != std::string::npos);
+    CHECK(processed.output.find("M632 S1 W") != std::string::npos);
+    CHECK(processed.output.find("M633") != std::string::npos);
+    REQUIRE(processed.result.moves.size() > 2);
+}
+
+
+TEST_CASE("Preheating is a gate for inserted temperature commands", "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat]")
+{
+    const std::string gcode =
+        "; MACHINE_START_GCODE_END\nM83\nT0\nG1 X100 Y0 Z0.2 E1 F60\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "; CP_TOOLCHANGE_WIPE CT0 FL0\nT1\n"
+        "G1 X150 Y0 E0.5 F60\nG1 X200 Y0 E1 F60\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "; MACHINE_END_GCODE_START\n";
+    auto disabled = preheat_config();
+    disabled.enable_pre_heating.value = false;
+    const auto without = process_post(gcode, disabled, true);
+    const auto with = process_post(gcode, preheat_config(), true);
+    CHECK(without.output.find("Multi extruder pre heating") == std::string::npos);
+    CHECK(without.output.find("Multi extruder pre cooling") == std::string::npos);
+    CHECK(with.output.find("Multi extruder pre heating") != std::string::npos);
+    CHECK(with.output.find("Multi extruder pre cooling") != std::string::npos);
+}
+
+TEST_CASE("The three supported filament-change spellings drive preheat usage", "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat]")
+{
+    // The preheat usage pass parses all three spellings. ;VT is not a general preview tool change,
+    // so exact injected commands are the shared public oracle for this case.
+    const auto marker = GENERATE(std::string("T1"), std::string(";VT1 H1"), std::string("M1020 S1 H1"));
+    const std::string gcode =
+        "; MACHINE_START_GCODE_END\nM83\nT0\nG1 X100 Y0 Z0.2 E1 F60\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "; CP_TOOLCHANGE_WIPE CT0 FL0\n" + marker + "\n"
+        "G1 X150 Y0 E0.5 F60\nG1 X200 Y0 E1 F60\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "; MACHINE_END_GCODE_START\n";
+    const auto processed = process_post(gcode, preheat_config(), true);
+    INFO("filament marker: " << marker);
+    INFO("preheat output: " << processed.output);
+    REQUIRE(processed.result.nozzle_group_result != nullptr);
+    REQUIRE(processed.result.moves.size() > 2);
+    CHECK(processed.output.find(marker) != std::string::npos);
+    CHECK(processed.output.find("M104 T1 S25 N0 ;Multi extruder pre cooling") != std::string::npos);
+    CHECK(processed.output.find("M104 T1 S220 N0 ;Multi extruder pre heating") != std::string::npos);
+    CHECK(processed.output.find("M632 S1 W") != std::string::npos);
+    CHECK(processed.output.find("M633") != std::string::npos);
+    CHECK(std::isfinite(processed.result.print_statistics.modes[0].time));
+}
+
+TEST_CASE("An optional first-layer flag may be omitted from a wipe marker", "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat]")
+{
+    const std::string gcode =
+        "; MACHINE_START_GCODE_END\nM83\nT0\nG1 X20 Y0 Z0.2 E1 F600\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "; CP_TOOLCHANGE_WIPE CT0\nT1\n"
+        "G1 X40 Y0 E1 F600\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n; MACHINE_END_GCODE_START\n";
+    const auto processed = process_post(gcode, preheat_config(), true);
+    REQUIRE(processed.result.moves.size() > 2);
+    CHECK(processed.output.find("CP_TOOLCHANGE_WIPE CT0") != std::string::npos);
+    CHECK(std::isfinite(processed.result.print_statistics.modes[0].time));
+}
+
+TEST_CASE("Nozzle-change contact metadata still permits a measured preheat transition", "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat]")
+{
+    const std::string gcode =
+        "; MACHINE_START_GCODE_END\nM83\nT0\nG1 X100 Y0 Z0.2 E1 F60\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "; CP_TOOLCHANGE_WIPE CT1 FL1\nT1\n"
+        "G1 X150 Y0 E0.5 F60\nG1 X200 Y0 E1 F60\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "; MACHINE_END_GCODE_START\n";
+    const auto processed = process_post(gcode, preheat_config(), true);
+    CHECK(processed.output.find("Multi extruder pre heating") != std::string::npos);
+    CHECK(processed.output.find("S220 N0 ;Multi extruder pre heating") != std::string::npos);
+}
+
+
+} // namespace gcode_processor_reachable_contracts

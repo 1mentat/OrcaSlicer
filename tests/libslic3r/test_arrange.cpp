@@ -1,3 +1,8 @@
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/ModelArrange.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include <initializer_list>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <catch2/catch_all.hpp>
@@ -827,3 +832,140 @@ TEST_CASE("Shrinking a rectangular bed moves every edge toward its center", "[Ar
 }
 
 } // namespace arrange_surface_contracts
+
+namespace model_arrange_contracts {
+
+Model arrange_model(size_t instance_count = 1)
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name += "model-arrange-contract.stl";
+    TriangleMesh cube(its_make_cube(20., 20., 20.));
+    object->add_volume(cube);
+    object->add_instance();
+    for (size_t i = 1; i < instance_count; ++i)
+        object->add_instance();
+    return model;
+}
+
+DynamicPrintConfig arrange_config(const char *support_type, bool enable_support)
+{
+    // This fixture supplies only fields read by ModelArrange metadata paths.
+    // Every per-filament value is intentionally two entries; no Print/G-code is built.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", enable_support},
+        {"support_type", support_type},
+        {"support_filament", enable_support ? 1 : 0},
+        {"support_interface_filament", enable_support ? 2 : 0},
+        {"curr_bed_type", "Cool Plate"},
+        {"cool_plate_temp", "65,66"},
+        {"cool_plate_temp_initial_layer", "70,71"},
+        {"nozzle_temperature", "205,206"},
+        {"nozzle_temperature_initial_layer", "215,216"},
+        {"temperature_vitrification", "90,91"}
+    });
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PLA", "PETG"}));
+    return config;
+}
+
+void require_bounded_arrange_polygon(const ArrangePolygon &polygon)
+{
+    REQUIRE_FALSE(polygon.poly.contour.points.empty());
+    REQUIRE(polygon.poly.contour.points.size() <= 10000);
+    CHECK(polygon.poly.contour.area() > 0.0);
+    CHECK(std::isfinite(polygon.height));
+    CHECK(std::isfinite(polygon.brim_width));
+}
+
+
+TEST_CASE("Model arrange polygon returns a bounded convex hull", "[Arrange][ModelArrange][ModelArrangeContracts]")
+{
+    Model model = arrange_model(2);
+
+    const ArrangePolygon polygon = get_arrange_poly(model);
+    require_bounded_arrange_polygon(polygon);
+    CHECK(polygon.bed_idx == arrangement::UNARRANGED);
+}
+
+TEST_CASE("Model arrange object duplication uses the original instance snapshot", "[Arrange][ModelArrange][ModelArrangeContracts]")
+{
+    Model model = arrange_model();
+    ModelObject *object = model.objects.front();
+
+    duplicate_objects(model, 4);
+
+    REQUIRE(object->instances.size() == 4);
+    CHECK(object->instances.front() != nullptr);
+}
+
+TEST_CASE("Model instance arrange polygon applies its bounded setter", "[Arrange][ModelArrange][ModelArrangeContracts]")
+{
+    Model model = arrange_model();
+    ModelInstance *instance = model.objects.front()->instances.front();
+    DynamicPrintConfig config = arrange_config("normal(auto)", false);
+
+    ArrangePolygon polygon = get_arrange_poly(instance, config);
+    require_bounded_arrange_polygon(polygon);
+    CHECK(polygon.bed_idx == 0);
+    REQUIRE(static_cast<bool>(polygon.setter));
+    polygon.translation = Vec2crd{scaled(3.), scaled(4.)};
+    polygon.itemid = 17;
+    polygon.apply();
+
+    CHECK(polygon.is_applied == 1);
+    CHECK(instance->arrange_order == 17);
+}
+
+TEST_CASE("Model instance arrangement carries plate and filament metadata", "[Arrange][ModelArrange][ModelArrangeContracts]")
+{
+    Model model = arrange_model();
+    ModelObject *object = model.objects.front();
+    ModelInstance *instance = object->instances.front();
+    DynamicPrintConfig config = arrange_config("normal(auto)", false);
+
+    const ArrangePolygon polygon = get_instance_arrange_poly(instance, config);
+
+    CHECK(polygon.bed_temp == 65);
+    CHECK(polygon.first_bed_temp == 70);
+    CHECK(polygon.print_temp == 205);
+    CHECK(polygon.first_print_temp == 215);
+    CHECK(polygon.vitrify_temp == 90);
+    CHECK(polygon.filament_temp_type != -1);
+    CHECK(polygon.name == object->name);
+    CHECK(polygon.height > 0.0);
+    CHECK_THAT(polygon.brim_width, Catch::Matchers::WithinAbs(1.0, 1e-9));
+    CHECK_FALSE(polygon.has_tree_support);
+}
+
+TEST_CASE("Model instance normal support selects the normal brim contract", "[Arrange][ModelArrange][ModelArrangeContracts]")
+{
+    Model model = arrange_model();
+    DynamicPrintConfig config = arrange_config("normal(manual)", true);
+
+    const ArrangePolygon polygon = get_instance_arrange_poly(model.objects.front()->instances.front(), config);
+
+    CHECK_THAT(polygon.brim_width, Catch::Matchers::WithinAbs(6.0, 1e-9));
+    CHECK_FALSE(polygon.has_tree_support);
+}
+
+TEST_CASE("Model instance tree support selects the tree brim contract", "[Arrange][ModelArrange][ModelArrangeContracts]")
+{
+    Model model = arrange_model();
+    DynamicPrintConfig config = arrange_config("tree(manual)", true);
+
+    const ArrangePolygon polygon = get_instance_arrange_poly(model.objects.front()->instances.front(), config);
+
+    CHECK_THAT(polygon.brim_width, Catch::Matchers::WithinAbs(24.0, 1e-9));
+    CHECK(polygon.has_tree_support);
+}
+
+TEST_CASE("Model arrange out of bed callback has a stable exception contract", "[Arrange][ModelArrange][ModelArrangeContracts]")
+{
+    ArrangePolygon polygon;
+    polygon.bed_idx = 1;
+
+    REQUIRE_THROWS_AS(throw_if_out_of_bed(polygon), RuntimeError);
+}
+
+} // namespace model_arrange_contracts
