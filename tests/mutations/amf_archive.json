@@ -1,0 +1,133 @@
+{
+  "scope": "Compressed AMF import and constellation transformations, with independent geometry and metadata oracles.",
+  "mutants": [
+    {
+      "id": "constellation-offset-x",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_instance->deltax = float(atof(m_value[0].c_str()));",
+      "new": "m_instance->deltax = 0.f;",
+      "description": "The imported instance retains its independent x translation.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "constellation-offset-y",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_instance->deltay = float(atof(m_value[0].c_str()));",
+      "new": "m_instance->deltay = 0.f;",
+      "description": "The imported instance retains its independent y translation.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "constellation-offset-z",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_instance->deltaz = float(atof(m_value[0].c_str()));",
+      "new": "m_instance->deltaz = 0.f;",
+      "description": "The imported instance retains its independent z translation.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "constellation-rotation-x",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_instance->rx = float(atof(m_value[0].c_str()));",
+      "new": "m_instance->rx = 0.f;",
+      "description": "The imported instance retains its independent x rotation.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "constellation-rotation-y",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_instance->ry = float(atof(m_value[0].c_str()));",
+      "new": "m_instance->ry = 0.f;",
+      "description": "The imported instance retains its independent y rotation.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "constellation-rotation-z",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_instance->rz = float(atof(m_value[0].c_str()));",
+      "new": "m_instance->rz = 0.f;",
+      "description": "The imported instance retains its independent z rotation.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "uniform-scale-z",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_instance->scalez = float(atof(m_value[0].c_str()));\n        m_instance->scalez_set = true;\n        m_value[0].clear();\n        break;\n    case NODE_TYPE_SCALEX:",
+      "new": "m_instance->scalez = 1.f;\n        m_instance->scalez_set = true;\n        m_value[0].clear();\n        break;\n    case NODE_TYPE_SCALEX:",
+      "description": "Uniform scale applies to the Z axis as well.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "mirror-x",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_instance->mirrorx = float(atof(m_value[0].c_str()));",
+      "new": "m_instance->mirrorx = 1.f;",
+      "description": "Composed transformation preserves mirror sign without assuming a particular decomposition.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "printable-omitted",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "mi->printable = instance.printable;",
+      "new": "mi->printable = true;",
+      "description": "The second independent instance remains unprintable.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "instance-copy-omitted",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "if (index > 1) {",
+      "new": "if (index > 100) {",
+      "description": "Multiple constellation instances become independently placed objects.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "inch-flag-omitted",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "if (units && (strcmp(units, \"inch\") == 0)) { m_use_inches = true; }",
+      "new": "if (units && (strcmp(units, \"inch\") == 0)) { m_use_inches = false; }",
+      "description": "Inch declaration is reported for subsequent caller conversion.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "reverse-volume-uncorrected",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "if (its_volume(its) < 0)\n                its_flip_triangles(its);",
+      "new": "if (its_volume(its) > 0)\n                its_flip_triangles(its);",
+      "description": "Signed volume is positive after loading either winding.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "archive-extension-filter",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "boost::iends_with(stat.m_filename, \".amf\")",
+      "new": "boost::iends_with(stat.m_filename, \".invalid\")",
+      "description": "The archive finds AMF entries after unrelated members, including uppercase suffixes.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "object-name-omitted",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_object->name = std::move(m_value[1]);",
+      "new": "m_object->name.clear();",
+      "description": "Object Unicode metadata survives parsing.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "volume-name-omitted",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "m_volume->name = std::move(m_value[1]);",
+      "new": "m_volume->name.clear();",
+      "description": "Volume Unicode metadata survives parsing.",
+      "test_filter": "AMFArchive"
+    },
+    {
+      "id": "archive-source-identity",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "v->source.input_file = path;\n\n    return true;",
+      "new": "v->source.input_file.clear();\n\n    return true;",
+      "description": "Imported archived geometry retains its source path.",
+      "test_filter": "AMFArchive"
+    }
+  ]
+}

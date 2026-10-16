@@ -1,0 +1,101 @@
+{
+  "scope": "Split 3MF archive resources, physical geometry, facet paint, units, and malformed object parts.",
+  "mutants": [
+    {
+      "id": "split-parts-disabled",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "m_split_model = store_params.strategy & SaveStrategy::SplitModel;",
+      "new": "m_split_model = false;",
+      "description": "Split export creates distinct referenced object parts.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "part-unit-factor-ignored",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "object_unit_factor = bbs_get_unit_factor(bbs_get_attribute_value_string(attributes, num_attributes, UNIT_ATTR));",
+      "new": "object_unit_factor = 1.;",
+      "description": "Each object part interprets its own physical unit.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "part-x-coordinate-substituted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "object_unit_factor * bbs_get_attribute_value_float(attributes, num_attributes, X_ATTR)",
+      "new": "object_unit_factor * bbs_get_attribute_value_float(attributes, num_attributes, Y_ATTR)",
+      "description": "The imported non-cubic solid preserves the X coordinate independently.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "part-y-coordinate-substituted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "object_unit_factor * bbs_get_attribute_value_float(attributes, num_attributes, Y_ATTR)",
+      "new": "object_unit_factor * bbs_get_attribute_value_float(attributes, num_attributes, Z_ATTR)",
+      "description": "The imported non-cubic solid preserves the Y coordinate independently.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "part-z-coordinate-substituted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "object_unit_factor * bbs_get_attribute_value_float(attributes, num_attributes, Z_ATTR)",
+      "new": "object_unit_factor * bbs_get_attribute_value_float(attributes, num_attributes, X_ATTR)",
+      "description": "The imported non-cubic solid preserves the Z coordinate independently.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "part-support-paint-omitted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "current_object->geometry.custom_supports.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SUPPORTS_ATTR));",
+      "new": "current_object->geometry.custom_supports.push_back(\"\");",
+      "description": "The split-object importer retains support facet selections.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "part-seam-paint-omitted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "current_object->geometry.custom_seam.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_SEAM_ATTR));",
+      "new": "current_object->geometry.custom_seam.push_back(\"\");",
+      "description": "The split-object importer retains seam facet selections.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "part-material-paint-omitted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "current_object->geometry.mmu_segmentation.push_back(bbs_get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));",
+      "new": "current_object->geometry.mmu_segmentation.push_back(\"\");",
+      "description": "The split-object importer retains material facet selections.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "part-fuzzy-paint-omitted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "current_object->geometry.fuzzy_skin.push_back(bbs_get_attribute_value_string(attributes, num_attributes, CUSTOM_FUZZY_SKIN_ATTR));",
+      "new": "current_object->geometry.fuzzy_skin.push_back(\"\");",
+      "description": "The split-object importer retains fuzzy facet selections.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "duplicate-part-object-id-accepted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (object_list.find(id) == object_list.end()) {",
+      "new": "if (true) {",
+      "description": "Object IDs are unique within each part; duplicate resources must fail.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "finite-part-vertices-rejected",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "            if (! v.allFinite()) {\n                obj_parse_error_message = \"Invalid vertex coordinate: not a finite number\";",
+      "new": "            if (v.allFinite()) {\n                obj_parse_error_message = \"Invalid vertex coordinate: not a finite number\";",
+      "description": "Finite coordinates remain loadable while invalid coordinates are rejected.",
+      "test_filter": "SplitModel"
+    },
+    {
+      "id": "valid-part-object-types-rejected",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        if (bbs_is_valid_object_type(object_type)) {\n            if (!current_object) {",
+      "new": "        if (false) {\n            if (!current_object) {",
+      "description": "Supported object types must create importable resources.",
+      "test_filter": "SplitModel"
+    }
+  ]
+}

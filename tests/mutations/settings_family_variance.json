@@ -1,0 +1,119 @@
+{
+  "scope": "Twelve assertion-killed settings-family mutations. The two retained known survivors do not substantiate an infill_anchor length or clamp coverage claim.",
+  "mutants": [
+    {
+      "id": "gc-support-base-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "speed = NOZZLE_CONFIG(support_speed);",
+      "new": "speed = NOZZLE_CONFIG(support_interface_speed);",
+      "description": "Support base role retains configured base speed",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "gc-support-interface-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "speed = NOZZLE_CONFIG(support_interface_speed);",
+      "new": "speed = NOZZLE_CONFIG(support_speed);",
+      "description": "Support interface role retains configured interface speed",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "gc-internal-bridge-flow",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.internal_bridge_flow;",
+      "new": "_mm3_per_mm *= 1.0;",
+      "description": "Internal bridge extrusion E scaling",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "gc-overhang-gate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "const bool need_overhang_detection = NOZZLE_CONFIG(enable_overhang_speed) ||",
+      "new": "const bool need_overhang_detection = false ||",
+      "description": "Enabled/disabled overhang speed gate",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "gc-overhang-gate-restore",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (!NOZZLE_CONFIG(enable_overhang_speed))",
+      "new": "if (false)",
+      "description": "Disabled gate restores configured wall speed",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "gc-overhang_1_4_speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                ConfigOptionFloatsOrPercents dynamic_overhang_speeds(\n                    {FloatOrPercent{100, true},\n                     (NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :\n                         FloatOrPercent{NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) * 100 / ref_speed, true},",
+      "new": "                ConfigOptionFloatsOrPercents dynamic_overhang_speeds(\n                    {FloatOrPercent{100, true},\n                     (NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :\n                         FloatOrPercent{100, true},",
+      "description": "Caged overhang band changes emitted outer-wall feed rates",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "gc-overhang_2_4_speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                ConfigOptionFloatsOrPercents dynamic_overhang_speeds(\n                    {FloatOrPercent{100, true},\n                     (NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :\n                         FloatOrPercent{NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) * 100 / ref_speed, true},\n                     (NOZZLE_CONFIG(overhang_2_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :\n                         FloatOrPercent{NOZZLE_CONFIG(overhang_2_4_speed).get_abs_value(ref_speed) * 100 / ref_speed, true},",
+      "new": "                ConfigOptionFloatsOrPercents dynamic_overhang_speeds(\n                    {FloatOrPercent{100, true},\n                     (NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :\n                         FloatOrPercent{NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) * 100 / ref_speed, true},\n                     (NOZZLE_CONFIG(overhang_2_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :\n                         FloatOrPercent{100, true},",
+      "description": "Caged overhang band changes emitted outer-wall feed rates",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "gc-filament-ironing-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            speed = m_config.filament_ironing_speed.is_nil(filament_idx)\n                ? m_config.ironing_speed.value\n                : m_config.filament_ironing_speed.get_at(filament_idx);",
+      "new": "            speed = m_config.ironing_speed.value;",
+      "description": "Filament ironing speed selected by active filament",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "fill-filament-ironing-flow",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t\t\t\t? config.filament_ironing_flow.get_at(extruder_idx)\n\t\t\t\t\t: config.ironing_flow",
+      "new": "\t\t\t\t\t? config.ironing_flow\n\t\t\t\t\t: config.ironing_flow",
+      "description": "Filament ironing flow controls emitted ironing E",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "fill-ironing-pattern",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t\t\tironing_params.pattern      = config.ironing_pattern;",
+      "new": "\t\t\t\tironing_params.pattern      = ipRectilinear;",
+      "description": "Ironing pattern changes path topology",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "fill-anchor-max",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t\t\t\tparams.anchor_length_max = float(region_config.infill_anchor_max);",
+      "new": "\t\t\t\t\tparams.anchor_length_max = 0.f;",
+      "description": "Infill anchor maximum controls connected sparse geometry",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "fill-ironing-flow-process",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "ironing_params.height = default_layer_height * 0.01 * (!config.filament_ironing_flow.is_nil(extruder_idx)\n\t\t\t\t\t? config.filament_ironing_flow.get_at(extruder_idx)\n\t\t\t\t\t: config.ironing_flow);",
+      "new": "ironing_params.height = default_layer_height * 0.01 * (!config.filament_ironing_flow.is_nil(extruder_idx)\n\t\t\t\t\t? config.filament_ironing_flow.get_at(extruder_idx)\n\t\t\t\t\t: ConfigOptionPercent(100));",
+      "description": "Process ironing flow controls emitted ironing E",
+      "test_filter": "SettingsFamilyVariance"
+    }
+  ],
+  "known_survivors": [
+    {
+      "id": "fill-anchor-length",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t\t        params.anchor_length = float(region_config.infill_anchor);",
+      "new": "\t\t\t        params.anchor_length = 0.f;",
+      "description": "Infill anchor length controls connected sparse geometry",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "fill-anchor-clamp",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t\t\t\tparams.anchor_length = std::min(params.anchor_length, params.anchor_length_max);",
+      "new": "\t\t\t\t\tparams.anchor_length = params.anchor_length_max;",
+      "description": "Infill anchor min/max clamp",
+      "test_filter": "SettingsFamilyVariance"
+    }
+  ]
+}

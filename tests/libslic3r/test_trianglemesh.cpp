@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -621,3 +622,47 @@ TEST_CASE("Legacy center rotation keeps mesh bounds and size synchronized",
     CHECK_THAT(mesh.size().x(), WithinAbs(actual.size().x(), 1e-4));
     CHECK_THAT(mesh.size().y(), WithinAbs(actual.size().y(), 1e-4));
 }
+
+namespace pyramid_winding_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+TEST_CASE("Pyramid facets all face away from an interior point", "[TriangleMesh][PyramidWinding]")
+{
+    const auto mesh = its_make_pyramid(6.f, 9.f);
+    const Vec3f interior(0.f, 0.f, 2.25f);
+    REQUIRE(mesh.indices.size() == 6);
+    for (const auto& face : mesh.indices) {
+        for (int index : face) {
+            REQUIRE(index >= 0);
+            REQUIRE(static_cast<std::size_t>(index) < mesh.vertices.size());
+        }
+        const Vec3f a = mesh.vertices[face[0]], b = mesh.vertices[face[1]], c = mesh.vertices[face[2]];
+        const Vec3f normal = (b - a).cross(c - a);
+        CHECK(normal.dot((a + b + c) / 3.f - interior) > 0.f);
+    }
+}
+
+TEST_CASE("Pyramid topology pairs every directed edge with its reverse", "[TriangleMesh][PyramidWinding]")
+{
+    const auto mesh = its_make_pyramid(6.f, 9.f);
+    CHECK(its_num_open_edges(mesh) == 0);
+    const auto adjacent = its_face_neighbors(mesh);
+    REQUIRE(adjacent.size() == 6);
+    for (const auto& neighbors : adjacent)
+        for (int face : neighbors)
+            CHECK(face >= 0);
+}
+
+TEST_CASE("Pyramid signed volume is invariant under translation", "[TriangleMesh][PyramidWinding]")
+{
+    const Vec3f displacement = GENERATE(Vec3f(0.f, 0.f, 7.f), Vec3f(0.f, 0.f, -7.f), Vec3f(11.f, -13.f, 5.f));
+    auto mesh                = its_make_pyramid(6.f, 9.f);
+    // One third of the 6 by 6 mm base times the 9 mm height.
+    CHECK_THAT(its_volume(mesh), WithinAbs(108., 1e-4));
+    for (auto& vertex : mesh.vertices)
+        vertex += displacement;
+    CHECK_THAT(its_volume(mesh), WithinAbs(108., 1e-3));
+}
+
+} // namespace pyramid_winding_contracts

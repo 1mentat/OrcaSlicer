@@ -17,6 +17,9 @@
 #include <cstddef>
 #include <fstream>
 #include <string>
+#include <sstream>
+#include "libslic3r/Print.hpp"
+#include "libslic3r/CustomGCode.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -520,3 +523,310 @@ TEST_CASE("Malformed optional commands preserve a later valid move", "[GCodeProc
 }
 
 } // namespace public_processor_contracts
+
+namespace post_processor_contracts {
+
+namespace {
+
+struct Processed
+{
+    std::string output;
+    GCodeProcessorResult result;
+    Processed() = default;
+    Processed(Processed&& other) noexcept : output(std::move(other.output)) { result = std::move(other.result); }
+    Processed& operator=(Processed&& other) noexcept
+    {
+        output = std::move(other.output);
+        result = std::move(other.result);
+        return *this;
+    }
+    Processed(const Processed&)            = delete;
+    Processed& operator=(const Processed&) = delete;
+};
+
+Processed process_post(const std::string& gcode, FullPrintConfig config = {})
+{
+    ScopedTemporaryFile file(".gcode");
+    {
+        std::ofstream out(file.string());
+        REQUIRE(out.good());
+        out << gcode;
+    }
+
+    Print print;
+    GCodeProcessor processor;
+    const bool old_bbl             = GCodeProcessor::s_IsBBLPrinter;
+    GCodeProcessor::s_IsBBLPrinter = true;
+    const ScopeGuard restore_bbl([old_bbl] { GCodeProcessor::s_IsBBLPrinter = old_bbl; });
+    processor.apply_config(config);
+    processor.set_print(&print);
+    processor.initialize(file.string());
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(true);
+
+    // finalize(true) atomically renames the temporary postprocess file over the input path.
+    std::ifstream rewritten(file.string());
+    REQUIRE(rewritten.good());
+    std::ostringstream contents;
+    contents << rewritten.rdbuf();
+
+    Processed ret;
+    ret.output = contents.str();
+    ret.result = std::move(processor.extract_result());
+    return ret;
+}
+
+const std::string& tag(GCodeProcessor::ETags which) { return GCodeProcessor::reserved_tag(which); }
+
+} // namespace
+
+TEST_CASE("Post process replaces print time and filament inline placeholders", "[GCodeProcessor][GcpPost][Placeholders]")
+{
+    const std::string gcode = ";" + tag(GCodeProcessor::ETags::Print_Time_Total_Sec_Placeholder) + " " +
+                              tag(GCodeProcessor::ETags::Used_Filament_Length_Placeholder) + "\nG4 S2\nM83\nG1 X20 Y0 Z0.2 E1000 F600\n";
+    const auto processed = process_post(gcode);
+    CHECK(processed.output.find("@PRINT_TIME_TOTAL_SEC@") == std::string::npos);
+    CHECK(processed.output.find("@USED_FILAMENT_LENGTH@") == std::string::npos);
+    CHECK(processed.output.find("1.00") != std::string::npos);
+}
+
+TEST_CASE("Post process expands all clock components consistently", "[GCodeProcessor][GcpPost][Placeholders]")
+{
+    const std::string line = ";" + tag(GCodeProcessor::ETags::Print_Time_Day_Placeholder) + " " +
+                             tag(GCodeProcessor::ETags::Print_Time_Hour_Placeholder) + " " +
+                             tag(GCodeProcessor::ETags::Print_Time_Minute_Placeholder) + " " +
+                             tag(GCodeProcessor::ETags::Print_Time_Sec_Placeholder) + "\n";
+    const auto processed = process_post(line + "G4 S90061\n");
+    CHECK(processed.output.find(";1 1 1 1\n") != std::string::npos);
+    CHECK(processed.output.find("@PRINT_TIME_DAY@") == std::string::npos);
+    CHECK(processed.output.find("@PRINT_TIME_HOUR@") == std::string::npos);
+    CHECK(processed.output.find("@PRINT_TIME_MINUTE@") == std::string::npos);
+    CHECK(processed.output.find("@PRINT_TIME_SEC@") == std::string::npos);
+}
+
+TEST_CASE("Post process rewrites filament length and mass summary lines", "[GCodeProcessor][GcpPost][Filament]")
+{
+    FullPrintConfig config;
+    config.filament_density.values  = {1.24};
+    config.filament_cost.values     = {100.0};
+    config.filament_diameter.values = {1.75};
+    const auto processed            = process_post("; filament used [mm] = 0\n"
+                                                              "; filament used [g] = 0\n"
+                                                              "; total filament used [g] = 0\n"
+                                                              "; filament used [cm3] = 0\n"
+                                                              "; filament cost = 0\n"
+                                                              "; total filament cost = 0\n"
+                                                              "M83\nG1 X20 Y0 Z0.2 E1000 F600\n",
+                                                   config);
+    CHECK(processed.output.find("; filament used [mm] = 0\n") == std::string::npos);
+    CHECK(processed.output.find("; filament used [g] = 0\n") == std::string::npos);
+    CHECK(processed.output.find("; total filament used [g] = 0\n") == std::string::npos);
+    CHECK(processed.output.find("; filament used [mm] = 1000.00\n") != std::string::npos);
+    CHECK(processed.output.find("; filament used [g] = 2.98\n") != std::string::npos);
+    CHECK(processed.output.find("; total filament used [g] = 2.98\n") != std::string::npos);
+    CHECK(processed.output.find("; filament used [cm3] = 2.41\n") != std::string::npos);
+    CHECK(processed.output.find("; filament cost = 0.30\n") != std::string::npos);
+    CHECK(processed.output.find("; total filament cost = 0.30\n") != std::string::npos);
+}
+
+TEST_CASE("Post process emits first and last M73 placeholders", "[GCodeProcessor][GcpPost][M73]")
+{
+    const auto processed = process_post(";_GP_FIRST_LINE_M73_PLACEHOLDER\n"
+                                        "G4 S120\nM83\nG1 X20 Y0 Z0.2 E1 F600\n"
+                                        ";_GP_LAST_LINE_M73_PLACEHOLDER\n");
+    CHECK(processed.output.find("_GP_FIRST_LINE_M73_PLACEHOLDER") == std::string::npos);
+    CHECK(processed.output.find("_GP_LAST_LINE_M73_PLACEHOLDER") == std::string::npos);
+    CHECK(processed.output.find("M73 P0 R2") != std::string::npos);
+    CHECK(processed.output.find("M73 P100 R0") != std::string::npos);
+}
+
+TEST_CASE("Post process expands estimated time and layer placeholders", "[GCodeProcessor][GcpPost][Placeholders]")
+{
+    const auto processed = process_post(";_GP_ESTIMATED_PRINTING_TIME_PLACEHOLDER\n"
+                                        ";_GP_TOTAL_LAYER_NUMBER_PLACEHOLDER\n"
+                                        "; CHANGE_LAYER\n"
+                                        "M83\nG1 X10 Y0 Z0.2 E1 F600\n");
+    CHECK(processed.output.find("_GP_ESTIMATED_PRINTING_TIME_PLACEHOLDER") == std::string::npos);
+    CHECK(processed.output.find("_GP_TOTAL_LAYER_NUMBER_PLACEHOLDER") == std::string::npos);
+    CHECK(processed.output.find("model printing time") != std::string::npos);
+    CHECK(processed.output.find("total layer number: 1") != std::string::npos);
+}
+
+TEST_CASE("Disabling M73 removes generated progress commands but keeps motion", "[GCodeProcessor][GcpPost][M73]")
+{
+    FullPrintConfig config;
+    config.disable_m73.value = true;
+    const auto processed = process_post(";_GP_FIRST_LINE_M73_PLACEHOLDER\nM83\nG1 X10 Y0 Z0.2 E1 F600\n;_GP_LAST_LINE_M73_PLACEHOLDER\n",
+                                        config);
+    CHECK(processed.output.find("M73 P") == std::string::npos);
+    CHECK(processed.output.find("G1 X10 Y0 Z0.2 E1 F600") != std::string::npos);
+}
+
+TEST_CASE("Post process preserves ordinary comments and command order", "[GCodeProcessor][GcpPost][Rewrite]")
+{
+    const auto processed = process_post("; ordinary marker\nG90\nG1 X1 Y2 Z0.2 F600\nM400 S1\n");
+    const size_t marker  = processed.output.find("; ordinary marker");
+    const size_t motion  = processed.output.find("G1 X1 Y2 Z0.2 F600");
+    const size_t sync    = processed.output.find("M400 S1");
+    REQUIRE(marker != std::string::npos);
+    REQUIRE(motion != std::string::npos);
+    REQUIRE(sync != std::string::npos);
+    CHECK(marker < motion);
+    CHECK(motion < sync);
+}
+
+TEST_CASE("Post process replaces repeated inline placeholders", "[GCodeProcessor][GcpPost][Placeholders]")
+{
+    const auto processed = process_post("; " + tag(GCodeProcessor::ETags::Print_Time_Sec_Placeholder) + " " +
+                                        tag(GCodeProcessor::ETags::Print_Time_Sec_Placeholder) + "\nG4 S1\n");
+    CHECK(processed.output.find("@PRINT_TIME_SEC@") == std::string::npos);
+    CHECK(processed.output.find("; 1 1") != std::string::npos);
+}
+
+TEST_CASE("Inline total-time placeholder reports a known dwell", "[GCodeProcessor][GcpPost][Timing]")
+{
+    const auto processed = process_post("; " + tag(GCodeProcessor::ETags::Print_Time_Total_Sec_Placeholder) + "\nG4 S2\n");
+    CHECK(processed.output.find("; 2.00\n") != std::string::npos);
+}
+
+TEST_CASE("Post process leaves unknown inline placeholders untouched", "[GCodeProcessor][GcpPost][Placeholders]")
+{
+    const auto processed = process_post("; @NOT_A_PROCESSOR_PLACEHOLDER@\nG1 X1 Y0 Z0.2 F600\n");
+    CHECK(processed.output.find("@NOT_A_PROCESSOR_PLACEHOLDER@") != std::string::npos);
+}
+
+TEST_CASE("Post process uses the configured filament diameter for length", "[GCodeProcessor][GcpPost][Filament]")
+{
+    FullPrintConfig config;
+    config.filament_diameter.values = {2.0};
+    const auto processed            = process_post("; filament used [mm] = 0\nM83\nG1 X10 Y0 Z0.2 E2 F600\n", config);
+    const size_t pos                = processed.output.find("; filament used [mm] = ");
+    REQUIRE(pos != std::string::npos);
+    CHECK(processed.output.substr(pos, 40).find("2.00") != std::string::npos);
+    CHECK(processed.output.substr(pos, 40).find("0.00") == std::string::npos);
+}
+
+TEST_CASE("End marker remains in output while raw dwell statistics stay explicit", "[GCodeProcessor][GcpPost][Timing]")
+{
+    const auto without_end = process_post("G4 S2\n");
+    const auto with_end    = process_post("G4 S2\n; MACHINE_END_GCODE_START\nG4 S20\n");
+    CHECK_THAT(without_end.result.print_statistics.modes[0].time, WithinAbs(2.f, 1e-4));
+    CHECK_THAT(with_end.result.print_statistics.modes[0].time, WithinAbs(22.f, 1e-4));
+    CHECK(with_end.output.find("MACHINE_END_GCODE_START") != std::string::npos);
+}
+
+TEST_CASE("Start marker is retained while the rewritten file remains parseable", "[GCodeProcessor][GcpPost][Rewrite]")
+{
+    const auto processed = process_post("; MACHINE_START_GCODE_END\nG90\nG1 X2 Y3 Z0.2 F600\n");
+    CHECK(processed.output.find("MACHINE_START_GCODE_END") != std::string::npos);
+    CHECK(processed.output.find("G1 X2 Y3 Z0.2 F600") != std::string::npos);
+}
+
+TEST_CASE("Layer change tracking is independent of ordinary text", "[GCodeProcessor][GcpPost][Layers]")
+{
+    const auto processed = process_post("; CHANGE_LAYER\nG1 X1 Y0 Z0.2 F600\n; CHANGE_LAYER\nG1 X2 Y0 Z0.4 F600\n"
+                                        ";_GP_TOTAL_LAYER_NUMBER_PLACEHOLDER\n");
+    CHECK(processed.output.find("total layer number: 2") != std::string::npos);
+}
+
+TEST_CASE("Wipe moves receive the fixed preview dimensions", "[GCodeProcessor][GcpPost][Metadata]")
+{
+    const auto processed = process_post("M83\n; WIPE_START\nG1 X3 Y0 Z0.2 E-0.2 F600\n; WIPE_END\n");
+    bool found           = false;
+    for (const auto& move : processed.result.moves)
+        if (move.type == EMoveType::Wipe) {
+            found = true;
+            CHECK_THAT(move.width, WithinAbs(GCodeProcessor::Wipe_Width, 1e-6));
+            CHECK_THAT(move.height, WithinAbs(GCodeProcessor::Wipe_Height, 1e-6));
+        }
+    CHECK(found);
+}
+
+TEST_CASE("Color change metadata survives rewriting", "[GCodeProcessor][GcpPost][Metadata]")
+{
+    const auto processed = process_post("M83\nG1 X2 Y0 Z0.2 E1 F600\n; COLOR_CHANGE,T0,#112233\n");
+    CHECK(processed.output.find("COLOR_CHANGE,T0,#112233") != std::string::npos);
+    REQUIRE(!processed.result.custom_gcode_per_print_z.empty());
+    CHECK(processed.result.custom_gcode_per_print_z.back().type == CustomGCode::ColorChange);
+}
+
+TEST_CASE("Pause and custom-code metadata share their print height", "[GCodeProcessor][GcpPost][Metadata]")
+{
+    const auto processed = process_post("M83\nG1 X2 Y0 Z0.4 E1 F600\n; PAUSE_PRINTING\n; CUSTOM_GCODE\n");
+    REQUIRE(processed.result.custom_gcode_per_print_z.size() == 2);
+    CHECK_THAT(processed.result.custom_gcode_per_print_z[0].print_z, WithinAbs(0.4, 1e-4));
+    CHECK_THAT(processed.result.custom_gcode_per_print_z[1].print_z, WithinAbs(0.4, 1e-4));
+}
+
+TEST_CASE("Flush tags remain in output while flush volume is partitioned", "[GCodeProcessor][GcpPost][Filament]")
+{
+    const auto processed = process_post("M83\n; FLUSH_START\n; EXTERNAL_PURGE 3.00\n; FLUSH_END\n");
+    CHECK(processed.output.find("FLUSH_START") != std::string::npos);
+    CHECK(processed.output.find("FLUSH_END") != std::string::npos);
+    const double expected_volume = 3. * PI * .25 * 1.75 * 1.75;
+    REQUIRE(processed.result.print_statistics.flush_per_filament.count(0) == 1);
+    CHECK_THAT(processed.result.print_statistics.flush_per_filament.at(0), WithinAbs(expected_volume, 1e-3));
+    REQUIRE(processed.result.print_statistics.total_volumes_per_extruder.count(0) == 1);
+    CHECK_THAT(processed.result.print_statistics.total_volumes_per_extruder.at(0), WithinAbs(expected_volume, 1e-3));
+}
+
+TEST_CASE("Virtual flush tags do not remove their motion lines", "[GCodeProcessor][GcpPost][Filament]")
+{
+    const auto processed = process_post("M83\n; VFLUSH_START\nG1 X10 Y0 Z0.2 E1 F600\n; VFLUSH_END\n");
+    CHECK(processed.output.find("G1 X10 Y0 Z0.2 E1 F600") != std::string::npos);
+    CHECK(processed.result.print_statistics.total_volumes_per_extruder.size() == 1);
+}
+
+TEST_CASE("External purge is represented in flush statistics without a move", "[GCodeProcessor][GcpPost][Filament]")
+{
+    const auto processed = process_post("; EXTERNAL_PURGE 3.00\n");
+    CHECK(processed.output.find("EXTERNAL_PURGE 3.00") != std::string::npos);
+    const double expected_volume = 3. * PI * .25 * 1.75 * 1.75;
+    REQUIRE(processed.result.print_statistics.flush_per_filament.count(0) == 1);
+    CHECK_THAT(processed.result.print_statistics.flush_per_filament.at(0), WithinAbs(expected_volume, 1e-3));
+    CHECK(processed.result.moves.size() == 1);
+    bool has_extrusion_move = false;
+    for (const auto& move : processed.result.moves)
+        if (move.type == EMoveType::Extrude)
+            has_extrusion_move = true;
+    CHECK_FALSE(has_extrusion_move);
+}
+
+TEST_CASE("Skippable region boundaries survive post processing", "[GCodeProcessor][GcpPost][Skippable]")
+{
+    const auto processed = process_post("; SKIPPABLE_START\n; SKIPTYPE: timelapse\nG1 X5 Y0 Z0.2 F600\n; SKIPPABLE_END\n");
+    CHECK(processed.output.find("SKIPPABLE_START") != std::string::npos);
+    CHECK(processed.output.find("SKIPTYPE: timelapse") != std::string::npos);
+    CHECK(processed.output.find("SKIPPABLE_END") != std::string::npos);
+}
+
+TEST_CASE("Finalization reports first layer time for first-layer motion", "[GCodeProcessor][GcpPost][Timing]")
+{
+    const auto processed = process_post("G1 X10 Y0 Z0.2 F600\n; CHANGE_LAYER\nG1 X30 Y0 Z0.4 F600\n");
+    CHECK(processed.result.initial_layer_time > 0.f);
+}
+
+TEST_CASE("Post process preserves arc source lines and endpoint state", "[GCodeProcessor][GcpPost][Arcs]")
+{
+    const auto processed = process_post("M83\nG1 X10 Y0 Z0.2 E1 F600\nG2 X0 Y10 I-5 J5 E1 F600\n");
+    CHECK(processed.output.find("G2 X0 Y10 I-5 J5 E1 F600") != std::string::npos);
+    CHECK_THAT(processed.result.moves.back().position.x(), WithinAbs(0., 1e-3));
+    CHECK_THAT(processed.result.moves.back().position.y(), WithinAbs(10., 1e-3));
+}
+
+TEST_CASE("Post process handles an empty input without inventing motion", "[GCodeProcessor][GcpPost][Empty]")
+{
+    const auto processed = process_post("");
+    CHECK(processed.result.moves.size() == 1);
+    CHECK(processed.output.empty());
+}
+
+TEST_CASE("Post process keeps line endings and a final unterminated line", "[GCodeProcessor][GcpPost][Rewrite]")
+{
+    const auto processed = process_post("G90\r\nG1 X4 Y0 Z0.2 F600");
+    CHECK(processed.output.find("G90\r\n") != std::string::npos);
+    CHECK(processed.output.find("G1 X4 Y0 Z0.2 F600") != std::string::npos);
+}
+
+} // namespace post_processor_contracts

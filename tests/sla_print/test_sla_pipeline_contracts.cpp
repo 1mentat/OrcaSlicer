@@ -1,3 +1,4 @@
+#include <catch2/generators/catch_generators.hpp>
 #include <Eigen/Geometry>
 #include <Eigen/Core>
 #include "libslic3r/SLA/Hollowing.hpp"
@@ -712,3 +713,44 @@ TEST_CASE("SLA empty models remain empty through processing", "[SLAPrint][SLALif
 }
 
 } // namespace sla_lifecycle_contracts
+
+namespace sla_drain_transform_contracts {
+TEST_CASE("SLA drain-hole normals remain perpendicular after rotated unequal scaling", "[SLAPrint][SLADrainTransforms]")
+{
+    const bool corrected = GENERATE(false, true);
+    auto config          = sla_config(1.0);
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.0, 1.0}));
+    const Vec3d correction = corrected ? Vec3d(1.5, 0.8, 1.2) : Vec3d(1., 1., 1.);
+    config.set_key_value("relative_correction_x", new ConfigOptionFloat(correction.x()));
+    config.set_key_value("relative_correction_y", new ConfigOptionFloat(correction.y()));
+    config.set_key_value("relative_correction_z", new ConfigOptionFloat(correction.z()));
+    sla_lifecycle_contracts::LifecycleFixture fixture(std::move(config));
+    auto* object   = fixture.model.objects.front();
+    auto* instance = object->instances.front();
+    instance->set_scaling_factor(Vec3d(2., 3., 4.));
+    instance->set_rotation(Vec3d(PI / 2., 0., 0.));
+    const Vec3f n           = Vec3f(1., 1., 1.).normalized();
+    object->sla_drain_holes = {sla::DrainHole(Vec3f(1., 2., 1.), n, 2., 5.)};
+    fixture.print.apply(fixture.model, fixture.config);
+    REQUIRE(fixture.print.objects().size() == 1);
+    const auto* printed = fixture.print.objects().front();
+    const auto holes    = printed->transformed_drainhole_points();
+    REQUIRE(holes.size() == 1);
+    const auto& hole = holes.front();
+    // A quarter-turn maps (nx/2,ny/3,nz/4) to (nx/2,-nz/4,ny/3).
+    const Vec3f expected(n.x() / float(2. * correction.x()), -n.z() / float(4. * correction.y()), n.y() / float(3. * correction.z()));
+    for (int axis = 0; axis < 3; ++axis)
+        CHECK_THAT(hole.normal[axis], Catch::Matchers::WithinAbs(expected[axis], 1e-5));
+    // Covectors annihilate two independently transformed source-plane tangents.
+    const Vec3f tangent1 = (printed->trafo().linear() * Vec3d(1., -1., 0.)).cast<float>();
+    const Vec3f tangent2 = (printed->trafo().linear() * Vec3d(0., 1., -1.)).cast<float>();
+    CHECK_THAT(hole.normal.dot(tangent1), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(hole.normal.dot(tangent2), Catch::Matchers::WithinAbs(0., 1e-5));
+    const Vec3f base         = (printed->trafo() * Vec3d(1., 2., 1.)).cast<float>();
+    const Vec3f expected_pos = base - expected.normalized();
+    for (int axis = 0; axis < 3; ++axis)
+        CHECK_THAT(hole.pos[axis], Catch::Matchers::WithinAbs(expected_pos[axis], 1e-5));
+    CHECK_THAT(hole.height, Catch::Matchers::WithinAbs(6., 1e-5));
+    CHECK_THAT(hole.radius, Catch::Matchers::WithinAbs(2., 1e-5));
+}
+} // namespace sla_drain_transform_contracts

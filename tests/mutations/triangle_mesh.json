@@ -144,6 +144,14 @@
       "new": "        its_rotate_z(this->its, (float)angle);\n        this->translate(c(0), c(1), 0);",
       "description": "Center rotation must refresh cached bounds and size after updating vertices.",
       "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "pyramid_base_winding_reversed",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "indexed_triangle_set its_make_pyramid(float base, float height)\n{\n    float a = base / 2.f;\n    return {\n        {\n            {0, 2, 1},\n            {0, 3, 2},",
+      "new": "indexed_triangle_set its_make_pyramid(float base, float height)\n{\n    float a = base / 2.f;\n    return {\n        {\n            {0, 1, 2},\n            {0, 2, 3},",
+      "test_filter": "PyramidWinding",
+      "description": "A closed pyramid has outward base normals and signed volume independent of translation."
     }
   ]
 }

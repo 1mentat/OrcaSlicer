@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "mutants": [
+    {
+      "id": "disable_m73_main",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "        if(this->m_disable_m73)\n            return std::string(\"\");",
+      "new": "        if(!this->m_disable_m73)\n            return std::string(\"\");",
+      "description": "Post-processing behavioral oracle: run_post_process/format_line_M73_main / disable_m73_main",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "m73_placeholder_pair",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (line == reserved_tag(ETags::First_Line_M73_Placeholder) || line == reserved_tag(ETags::Last_Line_M73_Placeholder))",
+      "new": "if (line == reserved_tag(ETags::First_Line_M73_Placeholder) && line == reserved_tag(ETags::Last_Line_M73_Placeholder))",
+      "description": "Post-processing behavioral oracle: run_post_process/process_placeholders / m73_placeholder_pair",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "m73_first_percent",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "(line == reserved_tag(ETags::First_Line_M73_Placeholder)) ? 0 : 100",
+      "new": "(line == reserved_tag(ETags::First_Line_M73_Placeholder)) ? 1 : 100",
+      "description": "Post-processing behavioral oracle: run_post_process/process_placeholders / m73_first_percent",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "m73_first_time",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "(line == reserved_tag(ETags::First_Line_M73_Placeholder)) ? time_in_minutes(machine.time) : 0",
+      "new": "(line == reserved_tag(ETags::First_Line_M73_Placeholder)) ? 0 : 0",
+      "description": "Post-processing behavioral oracle: run_post_process/process_placeholders / m73_first_time",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "estimated_placeholder_condition",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "line == reserved_tag(ETags::Estimated_Printing_Time_Placeholder)",
+      "new": "line != reserved_tag(ETags::Estimated_Printing_Time_Placeholder)",
+      "description": "Post-processing behavioral oracle: run_post_process/process_placeholders / estimated_placeholder_condition",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "layer_placeholder_condition",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "line == reserved_tag(ETags::Total_Layer_Number_Placeholder)",
+      "new": "line != reserved_tag(ETags::Total_Layer_Number_Placeholder)",
+      "description": "Post-processing behavioral oracle: run_post_process/process_placeholders / layer_placeholder_condition",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "inline_total_value",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "gcode_line.replace(pos, print_time_total_placeholder.length(), buf);",
+      "new": "gcode_line.replace(pos, print_time_total_placeholder.length(), \"MUT\");",
+      "description": "Post-processing behavioral oracle: run_post_process/process_inline_placeholders / inline_total_value",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "inline_used_length_value",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "gcode_line.replace(pos, used_filament_placeholder.length(), buf);",
+      "new": "gcode_line.replace(pos, used_filament_placeholder.length(), \"MUT\");",
+      "description": "Post-processing behavioral oracle: run_post_process/process_inline_placeholders / inline_used_length_value",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "inline_seconds_value",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "gcode_line.replace(pos, print_time_sec_placeholder.length(), buf);",
+      "new": "gcode_line.replace(pos, print_time_sec_placeholder.length(), \"MUT\");",
+      "description": "Post-processing behavioral oracle: run_post_process/process_inline_placeholders / inline_seconds_value",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "filament_mm_source",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "ret |= process_tag(gcode_line, PrintStatistics::FilamentUsedMmMask, filament_mm);",
+      "new": "ret |= process_tag(gcode_line, PrintStatistics::FilamentUsedMmMask, filament_g);",
+      "description": "Post-processing behavioral oracle: run_post_process/process_used_filament / filament_mm_source",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "filament_g_source",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "ret |= process_tag(gcode_line, PrintStatistics::FilamentUsedGMask, filament_g);",
+      "new": "ret |= process_tag(gcode_line, PrintStatistics::FilamentUsedGMask, filament_mm);",
+      "description": "Post-processing behavioral oracle: run_post_process/process_used_filament / filament_g_source",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "total_filament_g_source",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "ret |= process_tag(gcode_line, PrintStatistics::TotalFilamentUsedGMask, { filament_total_g });",
+      "new": "ret |= process_tag(gcode_line, PrintStatistics::TotalFilamentUsedGMask, { filament_total_cost });",
+      "description": "Post-processing behavioral oracle: run_post_process/process_used_filament / total_filament_g_source",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "filament_cm3_source",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "ret |= process_tag(gcode_line, PrintStatistics::FilamentUsedCm3Mask, filament_cm3);",
+      "new": "ret |= process_tag(gcode_line, PrintStatistics::FilamentUsedCm3Mask, filament_mm);",
+      "description": "Post-processing behavioral oracle: run_post_process/process_used_filament / filament_cm3_source",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "filament_cost_source",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "ret |= process_tag(gcode_line, PrintStatistics::FilamentCostMask, filament_cost);",
+      "new": "ret |= process_tag(gcode_line, PrintStatistics::FilamentCostMask, filament_mm);",
+      "description": "Post-processing behavioral oracle: run_post_process/process_used_filament / filament_cost_source",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "filament_prefilter_guard",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (gcode_line.size() < 8 || gcode_line[0] != ';' || gcode_line[1] != ' ')",
+      "new": "if (true)",
+      "description": "Post-processing behavioral oracle: run_post_process/process_used_filament / filament_prefilter_guard",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "placeholder_length_guard",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (line.length() > 1)",
+      "new": "if (line.length() > 1000)",
+      "description": "Post-processing behavioral oracle: run_post_process/process_placeholders / placeholder_length_guard",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "postprocess_rename_direction",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (rename_file(out_path, result_filename))",
+      "new": "if (rename_file(result_filename, out_path))",
+      "description": "Post-processing behavioral oracle: run_post_process / postprocess_rename_direction",
+      "test_filter": "GcpPost"
+    },
+    {
+      "id": "filament_total_cost_source",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "ret |= process_tag(gcode_line, PrintStatistics::TotalFilamentCostMask, { filament_total_cost });",
+      "new": "ret |= process_tag(gcode_line, PrintStatistics::TotalFilamentCostMask, { filament_total_g });",
+      "description": "Post-processing behavioral oracle: run_post_process/process_used_filament / filament_total_cost_source",
+      "test_filter": "GcpPost"
+    }
+  ]
+}

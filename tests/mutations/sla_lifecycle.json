@@ -66,14 +66,6 @@
       "test_filter": "SLALifecycle"
     },
     {
-      "id": "inverse_transpose_normal_scale_changed",
-      "path": "src/libslic3r/SLAPrint.cpp",
-      "old": "        hl.normal = Vec3f(hl.normal(0)/(sc(0)*sc(0)),",
-      "new": "        hl.normal = Vec3f(hl.normal(0)/sc(0),",
-      "description": "Use linear rather than squared scale in the x component of the inverse-transpose normal transform.",
-      "test_filter": "SLALifecycle"
-    },
-    {
       "id": "drain_hole_stickout_direction_reversed",
       "path": "src/libslic3r/SLAPrint.cpp",
       "old": "        hl.height += sla::HoleStickOutLength;",
@@ -112,6 +104,30 @@
       "new": "            || opt_key == \"slice_closing_radius\") {\n            steps.emplace_back(slaposSupportPoints);",
       "description": "Send slice-closing-radius changes to support-point invalidation instead of object-slice invalidation.",
       "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "drain_normal_inverse_omitted",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "const Eigen::Matrix3f normal_trafo = tr.linear().inverse().transpose();",
+      "new": "const Eigen::Matrix3f normal_trafo = tr.linear().transpose();",
+      "description": "Normals must use inverse scale when transformed with unequal scaling.",
+      "test_filter": "SLADrainTransforms"
+    },
+    {
+      "id": "drain_normal_transpose_omitted",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "const Eigen::Matrix3f normal_trafo = tr.linear().inverse().transpose();",
+      "new": "const Eigen::Matrix3f normal_trafo = tr.linear().inverse();",
+      "description": "Rotated drain-hole normals must remain perpendicular to transformed surface tangents.",
+      "test_filter": "SLADrainTransforms"
+    },
+    {
+      "id": "drain_normal_rotation_omitted",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "hl.normal = normal_trafo * hl.normal;",
+      "new": "hl.normal = normal_trafo.diagonal().asDiagonal() * hl.normal;",
+      "description": "A quarter turn changes the direction of transformed normals and the stick-out offset.",
+      "test_filter": "SLADrainTransforms"
     }
   ]
 }

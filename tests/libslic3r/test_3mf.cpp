@@ -4695,3 +4695,341 @@ TEST_CASE("Unsupported embedded preset types are omitted without losing supporte
 }
 
 } // namespace plate_metadata_contracts
+
+namespace split_model_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using Entry = std::pair<std::string, std::string>;
+struct LoadedSplit
+{
+    Model model;
+    bbs_archive_contracts::LoadedProject project;
+};
+
+std::vector<Entry> entries(const std::string& path)
+{
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, path));
+    const ScopeGuard close([&] { close_zip_reader(&zip); });
+    std::vector<Entry> result;
+    for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&zip); ++index) {
+        mz_zip_archive_file_stat stat;
+        REQUIRE(mz_zip_reader_file_stat(&zip, index, &stat));
+        if (stat.m_is_directory)
+            continue;
+        std::string data(static_cast<size_t>(stat.m_uncomp_size), '\0');
+        if (!data.empty())
+            REQUIRE(mz_zip_reader_extract_to_mem(&zip, index, data.data(), data.size(), 0));
+        result.emplace_back(stat.m_filename, std::move(data));
+    }
+    return result;
+}
+
+void rewrite(const std::string& path, const std::function<void(std::vector<Entry>&)>& edit)
+{
+    auto contents = entries(path);
+    edit(contents);
+    Zipper zip(path);
+    for (const auto& [name, data] : contents)
+        zip.add_entry(name, data.data(), data.size());
+    zip.finalize();
+}
+
+bool is_part(const std::string& name)
+{
+    return name.find("3D/Objects/") == 0 && name.size() >= 6 && name.substr(name.size() - 6) == ".model";
+}
+
+void edit_first_part(const std::string& path, const std::function<void(std::string&)>& edit)
+{
+    rewrite(path, [&](std::vector<Entry>& data) {
+        const auto found = std::find_if(data.begin(), data.end(), [](const Entry& e) { return is_part(e.first); });
+        REQUIRE(found != data.end());
+        edit(found->second);
+    });
+}
+
+void replace_text(std::string& text, const std::string& from, const std::string& to)
+{
+    auto where = text.find(from);
+    REQUIRE(where != std::string::npos);
+    text.replace(where, from.size(), to);
+}
+
+struct Fixture
+{
+    ScopedTemporaryDir backup{"orca_split_source"};
+    ScopedTemporaryDir loaded_backup{"orca_split_loaded"};
+    ScopedTemporaryFile archive{".3mf"};
+    Model source;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    Fixture()
+    {
+        source.set_backup_path(backup.string());
+        auto* first                                    = source.add_object();
+        first->name                                    = "first-cube";
+        first->add_volume(make_cube(2., 3., 4.))->name = "first-volume";
+        first->add_instance()->set_offset(Vec3d(10., 20., 0.));
+        auto* second                                    = source.add_object();
+        second->name                                    = "second-cube";
+        second->add_volume(make_cube(5., 2., 3.))->name = "second-volume";
+        second->add_instance()->set_offset(Vec3d(30., 0., 0.));
+        config.set_key_value("layer_height", new ConfigOptionFloat(.21));
+    }
+    void store(SaveStrategy extra = SaveStrategy::Default)
+    {
+        PlateData plate;
+        plate.config                = config;
+        plate.plate_index           = 0;
+        plate.objects_and_instances = {{0, 0}, {1, 0}};
+        StoreParams params;
+        params.path            = archive.string();
+        params.model           = &source;
+        params.config          = &config;
+        params.plate_data_list = {&plate};
+        params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel | extra;
+        REQUIRE(store_bbs_3mf(params));
+    }
+    bool load(LoadedSplit& result, LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
+    {
+        result.model.set_backup_path(loaded_backup.string());
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+        bool bbl = false, orca = false;
+        Semver version;
+        return load_bbs_3mf(archive.string().c_str(), &result.project.config, &substitutions, &result.model, &result.project.plates,
+                            &result.project.presets, &bbl, &orca, &version, nullptr, strategy);
+    }
+};
+
+const ModelObject& named(const Model& model, const std::string& name)
+{
+    auto found = std::find_if(model.objects.begin(), model.objects.end(), [&](const ModelObject* object) { return object->name == name; });
+    REQUIRE(found != model.objects.end());
+    return **found;
+}
+
+void check_box(const BoundingBoxf3& actual, const BoundingBoxf3& expected)
+{
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK_THAT(actual.min[axis], WithinAbs(expected.min[axis], 1e-5));
+        CHECK_THAT(actual.max[axis], WithinAbs(expected.max[axis], 1e-5));
+    }
+}
+
+TEST_CASE("Split model archives store each object in a distinct referenced part", "[3MF][SplitModel]")
+{
+    Fixture f;
+    f.store();
+    auto all = entries(f.archive.string());
+    std::set<std::string> part_names;
+    for (const auto& [name, data] : all)
+        if (is_part(name)) {
+            CHECK_FALSE(data.empty());
+            REQUIRE(part_names.insert(name).second);
+        }
+    REQUIRE(part_names.size() == 2);
+    auto rels = std::find_if(all.begin(), all.end(), [](const Entry& e) { return e.first == "3D/_rels/3dmodel.model.rels"; });
+    REQUIRE(rels != all.end());
+    for (const auto& name : part_names)
+        CHECK(rels->second.find(name) != std::string::npos);
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    REQUIRE(loaded.model.objects.size() == 2);
+    for (const auto* expected : f.source.objects) {
+        const auto& actual = named(loaded.model, expected->name);
+        CHECK_THAT(actual.raw_mesh().volume(), WithinAbs(expected->raw_mesh().volume(), 1e-5));
+        check_box(actual.bounding_box_exact(), expected->bounding_box_exact());
+    }
+}
+
+TEST_CASE("Split model archives preserve object and volume settings independently", "[3MF][SplitModel]")
+{
+    Fixture f;
+    f.source.objects[0]->config.set_key_value("wall_loops", new ConfigOptionInt(5));
+    f.source.objects[1]->config.set_key_value("wall_loops", new ConfigOptionInt(2));
+    f.source.objects[0]->volumes[0]->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(37.));
+    f.store();
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    CHECK_THAT(loaded.project.config.opt_float("layer_height"), WithinAbs(.21, 1e-8));
+    CHECK(named(loaded.model, "first-cube").config.opt_int("wall_loops") == 5);
+    CHECK(named(loaded.model, "second-cube").config.opt_int("wall_loops") == 2);
+    const auto& first = named(loaded.model, "first-cube");
+    REQUIRE(first.volumes.size() == 1);
+    CHECK_THAT(first.volumes[0]->config.opt_float("sparse_infill_density"), WithinAbs(37., 1e-8));
+}
+
+TEST_CASE("Split model instances retain their individual placement and printability", "[3MF][SplitModel]")
+{
+    Fixture f;
+    auto* duplicate = f.source.objects[0]->add_instance();
+    duplicate->set_offset(Vec3d(-5., 7., 2.));
+    duplicate->printable = false;
+    f.store();
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    const auto& actual = named(loaded.model, "first-cube");
+    REQUIRE(actual.instances.size() == 2);
+    for (size_t i = 0; i < 2; ++i) {
+        CHECK(actual.instances[i]->printable == f.source.objects[0]->instances[i]->printable);
+        check_box(actual.instance_bounding_box(i), f.source.objects[0]->instance_bounding_box(i));
+    }
+}
+
+TEST_CASE("Split model object names survive Unicode archive part encoding", "[3MF][SplitModel]")
+{
+    Fixture f;
+    f.source.objects[0]->name = "Größe-部品";
+    f.store();
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    const auto& object = named(loaded.model, "Größe-部品");
+    CHECK_THAT(object.raw_mesh().volume(), WithinAbs(24., 1e-5));
+}
+
+TEST_CASE("Split model volumes preserve geometry types and relative transforms", "[3MF][SplitModel]")
+{
+    Fixture f;
+    auto* modifier = f.source.objects[0]->add_volume(make_cube(1., 2., 3.));
+    modifier->name = "modifier";
+    modifier->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    modifier->set_offset(Vec3d(4., -2., 1.));
+    f.store();
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    const auto& actual = named(loaded.model, "first-cube");
+    REQUIRE(actual.volumes.size() == 2);
+    auto found = std::find_if(actual.volumes.begin(), actual.volumes.end(), [](const ModelVolume* v) { return v->name == "modifier"; });
+    REQUIRE(found != actual.volumes.end());
+    CHECK((*found)->type() == ModelVolumeType::PARAMETER_MODIFIER);
+    CHECK_THAT(its_volume((*found)->mesh().its), WithinAbs(6., 1e-5));
+    CHECK((*found)->get_matrix().matrix().isApprox(modifier->get_matrix().matrix(), 1e-6));
+}
+
+TEST_CASE("Split model face paint retains support seam and material selections", "[3MF][SplitModel]")
+{
+    Fixture f;
+    auto* volume = f.source.objects[0]->volumes[0];
+    TriangleSelector support(volume->mesh());
+    support.set_facet(0, EnforcerBlockerType::ENFORCER);
+    REQUIRE(volume->supported_facets.set(support));
+    TriangleSelector seam(volume->mesh());
+    seam.set_facet(1, EnforcerBlockerType::BLOCKER);
+    REQUIRE(volume->seam_facets.set(seam));
+    TriangleSelector material(volume->mesh());
+    material.set_facet(2, EnforcerBlockerType::Extruder2);
+    REQUIRE(volume->mmu_segmentation_facets.set(material));
+    TriangleSelector fuzzy(volume->mesh());
+    fuzzy.set_facet(3, EnforcerBlockerType::ENFORCER);
+    REQUIRE(volume->fuzzy_skin_facets.set(fuzzy));
+    f.store();
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    const auto& actual = named(loaded.model, "first-cube");
+    REQUIRE(actual.volumes.size() == 1);
+    CHECK(actual.volumes[0]->supported_facets.equals(volume->supported_facets));
+    CHECK(actual.volumes[0]->seam_facets.equals(volume->seam_facets));
+    CHECK(actual.volumes[0]->mmu_segmentation_facets.equals(volume->mmu_segmentation_facets));
+    CHECK(actual.volumes[0]->fuzzy_skin_facets.equals(volume->fuzzy_skin_facets));
+}
+
+TEST_CASE("Split model part units scale vertex geometry independently of parent units", "[3MF][SplitModel]")
+{
+    const auto unit     = GENERATE(std::string("centimeter"), std::string("inch"), std::string("meter"));
+    const double factor = unit == "centimeter" ? 10. : unit == "inch" ? 25.4 : 1000.;
+    Fixture f;
+    f.store();
+    rewrite(f.archive.string(), [&](std::vector<Entry>& all) {
+        for (auto& [name, data] : all)
+            if (is_part(name))
+                replace_text(data, "unit=\"millimeter\"", "unit=\"" + unit + "\"");
+    });
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    for (const auto* expected : f.source.objects) {
+        const auto& actual = named(loaded.model, expected->name);
+        const auto size    = actual.raw_mesh().bounding_box().size();
+        const auto before  = expected->raw_mesh().bounding_box().size();
+        for (int axis = 0; axis < 3; ++axis)
+            CHECK_THAT(size[axis], WithinAbs(before[axis] * factor, 1e-3));
+        CHECK_THAT(actual.raw_mesh().volume(),
+                   WithinAbs(expected->raw_mesh().volume() * factor * factor * factor, 1e-5 * factor * factor * factor));
+    }
+}
+
+TEST_CASE("Split model loading rejects a missing referenced object part", "[3MF][SplitModel]")
+{
+    Fixture f;
+    f.store();
+    rewrite(f.archive.string(), [](std::vector<Entry>& all) {
+        auto found = std::find_if(all.begin(), all.end(), [](const Entry& e) { return is_part(e.first); });
+        REQUIRE(found != all.end());
+        all.erase(found);
+    });
+    LoadedSplit loaded;
+    CHECK_FALSE(f.load(loaded));
+}
+
+TEST_CASE("Split model loading rejects malformed XML within an object part", "[3MF][SplitModel]")
+{
+    Fixture f;
+    f.store();
+    edit_first_part(f.archive.string(), [](std::string& data) { data.resize(data.size() / 2); });
+    LoadedSplit loaded;
+    CHECK_FALSE(f.load(loaded));
+}
+
+TEST_CASE("Split model loading rejects nonfinite vertex coordinates", "[3MF][SplitModel]")
+{
+    const auto coordinate = GENERATE(std::string("nan"), std::string("inf"), std::string("-inf"));
+    Fixture f;
+    f.store();
+    edit_first_part(f.archive.string(), [&](std::string& data) {
+        const auto vertex = data.find("<vertex ");
+        REQUIRE(vertex != std::string::npos);
+        const auto start = data.find("x=\"", vertex);
+        REQUIRE(start != std::string::npos);
+        const auto end = data.find('"', start + 3);
+        REQUIRE(end != std::string::npos);
+        data.replace(start + 3, end - start - 3, coordinate);
+    });
+    LoadedSplit loaded;
+    CHECK_FALSE(f.load(loaded));
+}
+
+TEST_CASE("Split model loading rejects duplicate object identifiers within one part", "[3MF][SplitModel]")
+{
+    Fixture f;
+    f.store();
+    edit_first_part(f.archive.string(), [](std::string& data) {
+        const auto start = data.find("<object ");
+        REQUIRE(start != std::string::npos);
+        const auto end = data.find("</object>", start);
+        REQUIRE(end != std::string::npos);
+        const auto object    = data.substr(start, end + 9 - start);
+        const auto resources = data.find("</resources>");
+        REQUIRE(resources != std::string::npos);
+        data.insert(resources, object);
+    });
+    LoadedSplit loaded;
+    CHECK_FALSE(f.load(loaded));
+}
+
+TEST_CASE("Shared meshes in split archives retain separate object identities and placements", "[3MF][SplitModel]")
+{
+    Fixture f;
+    auto* copy = f.source.add_object(*f.source.objects[0]);
+    copy->name = "shared-copy";
+    copy->instances[0]->set_offset(Vec3d(40., 50., 0.));
+    f.store(SaveStrategy::ShareMesh);
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    REQUIRE(loaded.model.objects.size() == 3);
+    for (const auto* expected : f.source.objects) {
+        const auto& actual = named(loaded.model, expected->name);
+        CHECK_THAT(actual.raw_mesh().volume(), WithinAbs(expected->raw_mesh().volume(), 1e-5));
+        check_box(actual.bounding_box_exact(), expected->bounding_box_exact());
+    }
+}
+} // namespace split_model_contracts

@@ -20,6 +20,7 @@
 
 #include <mutex>
 #include <Eigen/Geometry>
+#include <Eigen/Core>
 #include <cassert>
 #include <algorithm>
 #include <set>
@@ -1211,16 +1212,12 @@ sla::DrainHoles SLAPrintObject::transformed_drainhole_points() const
     assert(m_model_object != nullptr);
     auto pts = m_model_object->sla_drain_holes;
     auto tr = trafo().cast<float>();
-    auto sc = m_model_object->instances.front()->get_scaling_factor().cast<float>();
+    // Normals are covectors: apply the inverse transpose of the complete
+    // linear transform, including rotation, nonuniform scale and correction.
+    const Eigen::Matrix3f normal_trafo = tr.linear().inverse().transpose();
     for (sla::DrainHole &hl : pts) {
         hl.pos = tr * hl.pos;
-        hl.normal = tr * hl.normal - tr.translation();
-
-        // The normal scales as a covector (and we must also
-        // undo the damage already done).
-        hl.normal = Vec3f(hl.normal(0)/(sc(0)*sc(0)),
-                          hl.normal(1)/(sc(1)*sc(1)),
-                          hl.normal(2)/(sc(2)*sc(2)));
+        hl.normal = normal_trafo * hl.normal;
 
         // Now shift the hole a bit above the object and make it deeper to
         // compensate for it. This is to avoid problems when the hole is placed

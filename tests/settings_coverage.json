@@ -2172,6 +2172,150 @@
         "pipeline_oracle"
       ],
       "reason": "Changing SLA support pillar diameter from 1.0 to 1.5 invalidates a completed support tree built from an explicit support point. Rebuilt pillar dimensions and the numeric domain remain unclaimed."
+    },
+    "disable_m73": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GcpPost]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The explicitly enabled disable flag suppresses generated M73 output while preserving motion. Default-enabled output is checked independently; exhaustive interaction with every printer flavor is not claimed."
+    },
+    "filament_cost": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GcpPost]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A 100 currency-units/kg filament cost with known extrusion length, diameter, and density produces 0.30 total and per-filament cost; numeric boundaries and multiple-tool costs are not claimed."
+    },
+    "filament_diameter": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GcpPost]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The post-processing fixtures explicitly set 1.75 mm for independent volume/mass accounting and 2.0 mm for length preservation; numeric boundaries and mixed-tool interactions are not claimed."
+    },
+    "relative_correction_y": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLADrainTransforms]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Unit correction and nonuniform correction (Y=0.8, Z=1.2) are applied to rotated, unequally scaled SLA geometry; drain-hole normals are checked analytically and for perpendicularity to transformed surface tangents. Numeric boundaries are not claimed."
+    },
+    "relative_correction_z": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLADrainTransforms]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Unit correction and nonuniform correction (Y=0.8, Z=1.2) are applied to rotated, unequally scaled SLA geometry; drain-hole normals are checked analytically and for perpendicularity to transformed surface tangents. Numeric boundaries are not claimed."
+    },
+    "support_speed": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A real overhang fixture emits both support roles; configured 18 mm/s is observed as 1080 mm/min on base support, and role isolation rejects the interface feed from base paths."
+    },
+    "support_interface_speed": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The same fixture observes configured 31 mm/s as 1860 mm/min on interface support and rejects the base feed from interface paths. Other support fallback speeds are intentionally not claimed."
+    },
+    "internal_bridge_flow": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A ledged two-volume fixture emits internal-bridge paths; changing 1.00 to 1.35 preserves path count and XY length while changing summed E by 1.35."
+    },
+    "overhang_1_4_speed": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Changing the first band from 180 to 25 mm/s changes emitted outer-wall feeds while preserving nonempty finite motion on normal and severe caged slopes."
+    },
+    "overhang_2_4_speed": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Changing the second band from 140 to 25 mm/s changes emitted outer-wall feeds on the bounded caged-slope fixtures."
+    },
+    "ironing_pattern": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Rectilinear and concentric ironing are sliced on a cube and compared through erIroning path topology; this is a representative pair, not a claim over every registered pattern."
+    },
+    "ironing_flow": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Process ironing flow 10% versus 20% preserves XY path length and doubles summed ironing E within tolerance."
+    },
+    "ironing_speed": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Process ironing speed 20 versus 35 mm/s is observed as exact 1200 versus 2100 mm/min ironing feeds."
+    },
+    "filament_ironing_flow": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With top-surface filament 1 selected, 25% versus 10% filament ironing flow preserves path count and changes summed E by 2.5; per-filament vector bounds are not claimed."
+    },
+    "filament_ironing_speed": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The active filament's 35 mm/s ironing override is observed as 2100 mm/min, independently of the process 20 mm/s default."
+    },
+    "infill_anchor_max": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsFamilyVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A concave-hole fixture uses maximum 0 for old no-connect behavior and maximum 1000 with a nonzero requested anchor; sparse path length and endpoint-contact geometry change. The requested anchor-length dimension is intentionally not claimed."
     }
   }
 }

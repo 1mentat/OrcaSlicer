@@ -1,3 +1,9 @@
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polyline.hpp"
+#include <functional>
+#include <limits>
+#include <map>
+#include <numeric>
 #include "libslic3r/Geometry.hpp"
 #include <iterator>
 #include <algorithm>
@@ -1255,3 +1261,599 @@ TEST_CASE("Bridge line width changes external bridge deposition", "[SettingsVari
 }
 
 } // namespace wall_bridge_contracts
+
+namespace settings_family_contracts {
+namespace {
+
+DynamicPrintConfig family_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", 0.4},
+        {"wall_loops", 2},
+        {"top_shell_layers", 2},
+        {"bottom_shell_layers", 2},
+        {"top_shell_thickness", 0},
+        {"bottom_shell_thickness", 0},
+        {"sparse_infill_density", "20%"},
+        {"gcode_comments", true},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"slow_down_for_layer_cooling", false},
+        {"slow_down_layer_time", 0},
+        {"slow_down_min_speed", 1},
+        {"fan_cooling_layer_time", 0},
+        {"filament_max_volumetric_speed", "200"},
+        {"filament_adaptive_volumetric_speed", false},
+        {"machine_max_acceleration_extruding", "20000"},
+        {"machine_max_acceleration_retracting", "20000"},
+        {"machine_max_acceleration_travel", "20000"},
+        {"machine_max_jerk_x", "20000"},
+        {"machine_max_jerk_y", "20000"},
+        {"machine_max_jerk_z", "20000"},
+        {"machine_max_jerk_e", "20000"},
+    });
+    return config;
+}
+
+std::string export_mesh(const TriangleMesh& mesh, const DynamicPrintConfig& config)
+{
+    Model local_model;
+    Print local_print;
+    init_print(std::vector<TriangleMesh>{mesh}, local_print, local_model, config, nullptr, false);
+    const auto validation = local_print.validate();
+    REQUIRE(validation.string.empty());
+    REQUIRE_NOTHROW(local_print.process());
+    REQUIRE_FALSE(local_print.objects().empty());
+    std::string output = gcode(local_print);
+    REQUIRE_FALSE(output.empty());
+    return output;
+}
+
+struct SupportMotion
+{
+    std::vector<double> base_feeds;
+    std::vector<double> interface_feeds;
+};
+
+SupportMotion support_motion(const std::string& output, const DynamicPrintConfig& config)
+{
+    SupportMotion result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string support_role;
+    reader.parse_buffer(output, [&result, &support_role](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos) {
+            if (comment.find("Support interface") != std::string_view::npos ||
+                comment.find("support material interface") != std::string_view::npos)
+                support_role = "interface";
+            else if (comment.find("TYPE:Support") != std::string_view::npos || comment.find("support material") != std::string_view::npos)
+                support_role = "base";
+            else
+                support_role.clear();
+        }
+        if (!line.extruding(self))
+            return;
+        if (support_role == "interface")
+            result.interface_feeds.push_back(line.new_F(self));
+        else if (support_role == "base")
+            result.base_feeds.push_back(line.new_F(self));
+    });
+    return result;
+}
+
+TriangleMesh internal_bridge_fixture()
+{
+    TriangleMesh mesh  = make_cube(30, 24, 3);
+    TriangleMesh tower = make_cube(14, 10, 1);
+    tower.translate(8, 7, 3);
+    mesh.merge(tower);
+    return mesh;
+}
+
+struct InternalBridgeMotion
+{
+    double e     = 0.;
+    double xy    = 0.;
+    size_t moves = 0;
+};
+
+InternalBridgeMotion internal_bridge_motion(const std::string& output, const DynamicPrintConfig& config)
+{
+    InternalBridgeMotion result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool internal_bridge = false;
+    reader.parse_buffer(output, [&result, &internal_bridge](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            internal_bridge = comment.find("Internal Bridge") != std::string_view::npos ||
+                              comment.find("Internal bridge") != std::string_view::npos;
+        if (!internal_bridge || !line.extruding(self))
+            return;
+        result.e += line.dist_E(self);
+        result.xy += line.dist_XY(self);
+        ++result.moves;
+    });
+    return result;
+}
+
+struct IroningMotion
+{
+    size_t moves = 0;
+    double e     = 0.;
+    double xy    = 0.;
+    std::set<int> feeds;
+};
+
+IroningMotion ironing_motion(const std::string& output, const DynamicPrintConfig& config)
+{
+    IroningMotion result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&result](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        if (!line.extruding(self) || line.comment().find("ironing") == std::string_view::npos)
+            return;
+        result.e += line.dist_E(self);
+        result.xy += line.dist_XY(self);
+        result.feeds.insert(int(std::lround(line.new_F(self))));
+        ++result.moves;
+    });
+    return result;
+}
+
+struct IroningShape
+{
+    size_t paths  = 0;
+    size_t closed = 0;
+    double length = 0.;
+};
+
+IroningShape ironing_shape(const DynamicPrintConfig& config)
+{
+    Model model;
+    Print print;
+    init_print({cube(20.)}, print, model, config, nullptr, false);
+    const auto validation = print.validate();
+    REQUIRE(validation.string.empty());
+    REQUIRE_NOTHROW(print.process());
+    IroningShape result;
+    for (const Layer* layer : print.objects().front()->layers())
+        for (const LayerRegion* region : layer->regions())
+            for_each_extrusion_path(region->fills, [&result](const ExtrusionPath& path) {
+                if (path.role() != erIroning)
+                    return;
+                ++result.paths;
+                result.length += unscale<double>(path.length());
+                if (path.first_point3() == path.last_point3())
+                    ++result.closed;
+            });
+    return result;
+}
+
+DynamicPrintConfig ironing_config()
+{
+    DynamicPrintConfig config = family_config();
+    config.set_deserialize_strict({
+        {"top_shell_layers", 2},
+        {"bottom_shell_layers", 1},
+        {"top_surface_pattern", "monotonic"},
+        {"ironing_type", "top"},
+        {"ironing_pattern", "rectilinear"},
+        {"ironing_flow", "10%"},
+        {"ironing_speed", 20},
+        {"ironing_spacing", 0.2},
+        {"ironing_inset", 0},
+    });
+    return config;
+}
+
+constexpr double caged_layer_height     = 0.2;
+constexpr double caged_wall_width       = 0.42;
+constexpr double caged_outer_wall_speed = 200.;
+constexpr double caged_slope_face_sum   = 15.878796;
+constexpr double caged_slope_z_min      = 5.711731;
+constexpr double caged_slope_z_max      = 15.878796;
+constexpr double caged_span_z_min       = caged_slope_z_min + caged_layer_height;
+constexpr double caged_slope_wall_sum   = caged_slope_face_sum + 0.5 * caged_layer_height + 0.5 * caged_wall_width;
+constexpr double caged_slope_span       = 34.914257 - 5.0859995;
+constexpr double caged_wall_tolerance   = 0.18;
+
+TriangleMesh caged_overhang_mesh()
+{
+    return TriangleMesh(
+        {
+            {5.0859987f, 10.167065f, 5.711731f},
+            {34.914257f, 10.167065f, 5.711731f},
+            {34.914257f, 0.f, 15.878796f},
+            {5.0859995f, 0.f, 15.878796f},
+            {0.f, 0.f, 0.f},
+            {0.f, 0.f, 20.f},
+            {0.f, 20.f, 20.f},
+            {0.f, 20.f, 0.f},
+            {40.f, 20.f, 20.f},
+            {40.f, 20.f, 0.f},
+            {40.f, 0.f, 20.f},
+            {40.f, 0.f, 0.f},
+            {34.914257f, 0.f, 0.f},
+            {5.0859995f, 0.f, 0.f},
+            {34.914257f, 10.167065f, 0.f},
+            {5.0859995f, 10.167065f, 0.f},
+        },
+        {
+            {0, 1, 2},  {0, 2, 3},   {4, 5, 6},  {4, 6, 7},   {7, 6, 8},   {7, 8, 9},   {9, 8, 10}, {9, 10, 11}, {12, 11, 10}, {5, 4, 13},
+            {5, 13, 3}, {2, 12, 10}, {5, 3, 2},  {10, 5, 2},  {9, 11, 12}, {9, 12, 14}, {13, 4, 7}, {9, 14, 15}, {15, 13, 7},  {7, 9, 15},
+            {8, 6, 5},  {8, 5, 10},  {14, 1, 0}, {14, 0, 15}, {2, 1, 14},  {2, 14, 12}, {15, 0, 3}, {15, 3, 13},
+        });
+}
+
+TriangleMesh severe_caged_overhang_mesh()
+{
+    // A shallower face complements the first caged slope for speed-gate checks.
+    return TriangleMesh(
+        {
+            {5.0859987f, 10.f, 5.f},
+            {34.914257f, 10.f, 5.f},
+            {34.914257f, 0.f, 10.f},
+            {5.0859995f, 0.f, 10.f},
+            {0.f, 0.f, 0.f},
+            {0.f, 0.f, 20.f},
+            {0.f, 20.f, 20.f},
+            {0.f, 20.f, 0.f},
+            {40.f, 20.f, 20.f},
+            {40.f, 20.f, 0.f},
+            {40.f, 0.f, 20.f},
+            {40.f, 0.f, 0.f},
+            {34.914257f, 0.f, 0.f},
+            {5.0859995f, 0.f, 0.f},
+            {34.914257f, 10.f, 0.f},
+            {5.0859995f, 10.f, 0.f},
+        },
+        {
+            {0, 1, 2},  {0, 2, 3},   {4, 5, 6},  {4, 6, 7},   {7, 6, 8},   {7, 8, 9},   {9, 8, 10}, {9, 10, 11}, {12, 11, 10}, {5, 4, 13},
+            {5, 13, 3}, {2, 12, 10}, {5, 3, 2},  {10, 5, 2},  {9, 11, 12}, {9, 12, 14}, {13, 4, 7}, {9, 14, 15}, {15, 13, 7},  {7, 9, 15},
+            {8, 6, 5},  {8, 5, 10},  {14, 1, 0}, {14, 0, 15}, {2, 1, 14},  {2, 14, 12}, {15, 0, 3}, {15, 3, 13},
+        });
+}
+
+DynamicPrintConfig overhang_config()
+{
+    DynamicPrintConfig config = family_config();
+    config.set_deserialize_strict({
+        {"initial_layer_print_height", caged_layer_height},
+        {"layer_height", caged_layer_height},
+        {"line_width", caged_wall_width},
+        {"outer_wall_line_width", caged_wall_width},
+        {"inner_wall_line_width", 0.45},
+        {"wall_loops", 2},
+        {"wall_generator", "classic"},
+        {"wall_sequence", "inner wall/outer wall"},
+        {"sparse_infill_density", "15%"},
+        {"detect_overhang_wall", true},
+        {"enable_overhang_speed", true},
+        // Keep this fixture about the overhang-speed gate.  The default bridge-fan
+        // path is an independent fallback in GCode.cpp and would otherwise make
+        // disabling enable_overhang_speed look like a no-op.
+        {"enable_overhang_bridge_fan", false},
+        {"slowdown_for_curled_perimeters", true},
+        {"zaa_enabled", false},
+        {"outer_wall_speed", caged_outer_wall_speed},
+        {"inner_wall_speed", 300},
+        {"overhang_1_4_speed", 180},
+        {"overhang_2_4_speed", 140},
+        {"overhang_3_4_speed", 100},
+        {"overhang_4_4_speed", 60},
+        {"bridge_speed", 50},
+        {"slow_down_for_layer_cooling", false},
+        {"slow_down_layers", 0},
+    });
+    return config;
+}
+
+std::vector<double> caged_slope_feeds(const std::string& output, const DynamicPrintConfig& config)
+{
+    std::vector<double> feeds;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool outer_wall = false;
+    reader.parse_buffer(output, [&feeds, &outer_wall](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            outer_wall = comment.find("Outer wall") != std::string_view::npos ||
+                         comment.find("External perimeter") != std::string_view::npos;
+        if (!outer_wall || !line.extruding(self))
+            return;
+        const double z = line.new_Z(self);
+        if (z <= caged_span_z_min || z >= caged_slope_z_max || line.dist_XY(self) <= 1.0)
+            return;
+        if (std::abs(self.y() + z - caged_slope_wall_sum) < caged_wall_tolerance &&
+            std::abs(line.new_Y(self) + z - caged_slope_wall_sum) < caged_wall_tolerance)
+            feeds.push_back(line.new_F(self));
+    });
+    return feeds;
+}
+
+std::vector<double> severe_caged_slope_feeds(const std::string& output, const DynamicPrintConfig& config)
+{
+    std::vector<double> feeds;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool outer_wall = false;
+    reader.parse_buffer(output, [&feeds, &outer_wall](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            outer_wall = comment.find("Outer wall") != std::string_view::npos ||
+                         comment.find("External perimeter") != std::string_view::npos;
+        if (!outer_wall || !line.extruding(self))
+            return;
+        const double z = line.new_Z(self);
+        if (z <= 5.2 || z >= 10.1 || line.dist_XY(self) <= 1.)
+            return;
+        if (std::abs(self.y() + 2. * z - 20.5) < 0.55 && std::abs(line.new_Y(self) + 2. * z - 20.5) < 0.55)
+            feeds.push_back(line.new_F(self));
+    });
+    return feeds;
+}
+
+struct AnchorEvidence
+{
+    size_t paths             = 0;
+    double length            = 0.;
+    size_t endpoint_contacts = 0;
+};
+
+double point_line_distance(const Point3& point, const Point3& a, const Point3& b)
+{
+    const double px = point.x(), py = point.y();
+    const double ax = a.x(), ay = a.y();
+    const double bx = b.x(), by = b.y();
+    const double dx = bx - ax, dy = by - ay;
+    const double denom = dx * dx + dy * dy;
+    const double t     = denom > 0 ? std::clamp(((px - ax) * dx + (py - ay) * dy) / denom, 0., 1.) : 0.;
+    return std::hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+AnchorEvidence anchor_evidence(const DynamicPrintConfig& config)
+{
+    Model model;
+    Print print;
+    init_print({mesh(TestMesh::cube_with_concave_hole)}, print, model, config, nullptr, false);
+    const auto validation = print.validate();
+    REQUIRE(validation.string.empty());
+    REQUIRE_NOTHROW(print.process());
+    AnchorEvidence result;
+    for (const Layer* layer : print.objects().front()->layers()) {
+        Polylines perimeter_lines;
+        for (const LayerRegion* region : layer->regions())
+            region->perimeters.collect_polylines(perimeter_lines);
+        for (const LayerRegion* region : layer->regions())
+            for_each_extrusion_path(region->fills, [&result, &perimeter_lines](const ExtrusionPath& path) {
+                if (path.role() != erInternalInfill)
+                    return;
+                ++result.paths;
+                result.length += unscale<double>(path.length());
+                for (const Point3& endpoint : {path.first_point3(), path.last_point3()}) {
+                    double nearest = std::numeric_limits<double>::max();
+                    for (const Polyline& line : perimeter_lines)
+                        for (size_t i = 1; i < line.points.size(); ++i)
+                            nearest = std::min(nearest,
+                                               point_line_distance(endpoint,
+                                                                   Point3(line.points[i - 1].x(), line.points[i - 1].y(), endpoint.z()),
+                                                                   Point3(line.points[i].x(), line.points[i].y(), endpoint.z())));
+                    if (nearest <= scale_(0.5))
+                        ++result.endpoint_contacts;
+                }
+            });
+    }
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Support base and interface speeds reach their labeled support roles", "[SettingsFamilyVariance][SupportRoleMotion]")
+{
+    DynamicPrintConfig config = family_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"support_on_build_plate_only", false},
+        {"support_interface_top_layers", 3},
+        {"support_interface_bottom_layers", 0},
+        {"support_speed", 18},
+        {"support_interface_speed", 31},
+    });
+    const SupportMotion motion = support_motion(export_mesh(mesh(TestMesh::overhang), config), config);
+    REQUIRE_FALSE(motion.base_feeds.empty());
+    REQUIRE_FALSE(motion.interface_feeds.empty());
+    CHECK(std::all_of(motion.base_feeds.begin(), motion.base_feeds.end(), [](double f) { return std::isfinite(f) && f > 0.; }));
+    CHECK(std::all_of(motion.interface_feeds.begin(), motion.interface_feeds.end(), [](double f) { return std::isfinite(f) && f > 0.; }));
+    CHECK(std::find_if(motion.base_feeds.begin(), motion.base_feeds.end(), [](double f) { return std::abs(f - 1080.) < 1e-3; }) !=
+          motion.base_feeds.end());
+    CHECK(std::find_if(motion.interface_feeds.begin(), motion.interface_feeds.end(), [](double f) { return std::abs(f - 1860.) < 1e-3; }) !=
+          motion.interface_feeds.end());
+    CHECK(std::none_of(motion.base_feeds.begin(), motion.base_feeds.end(), [](double f) { return std::abs(f - 1860.) < 1e-3; }));
+    CHECK(std::none_of(motion.interface_feeds.begin(), motion.interface_feeds.end(), [](double f) { return std::abs(f - 1080.) < 1e-3; }));
+}
+
+TEST_CASE("Internal bridge flow scales extrusion at fixed path length", "[SettingsFamilyVariance][InternalBridgeFlow]")
+{
+    DynamicPrintConfig base = family_config();
+    base.set_deserialize_strict({
+        {"sparse_infill_density", "15%"},
+        {"internal_bridge_flow", "1"},
+        {"top_shell_layers", 3},
+        {"bottom_shell_layers", 2},
+        {"thick_internal_bridges", false},
+    });
+    const InternalBridgeMotion nominal = internal_bridge_motion(export_mesh(internal_bridge_fixture(), base), base);
+    REQUIRE(nominal.moves > 0);
+    REQUIRE(nominal.xy > 0.);
+
+    DynamicPrintConfig changed = base;
+    changed.set_deserialize_strict("internal_bridge_flow", "1.35");
+    const InternalBridgeMotion scaled = internal_bridge_motion(export_mesh(internal_bridge_fixture(), changed), changed);
+    REQUIRE(scaled.moves == nominal.moves);
+    REQUIRE_THAT(scaled.xy, Catch::Matchers::WithinRel(nominal.xy, 1e-9));
+    REQUIRE_THAT(scaled.e / nominal.e, Catch::Matchers::WithinRel(1.35, 0.03));
+}
+
+TEST_CASE("Overhang speed gate and two configured bands affect the caged slope", "[SettingsFamilyVariance][OverhangSpeedBands]")
+{
+    DynamicPrintConfig enabled                 = overhang_config();
+    const std::vector<double> reference        = caged_slope_feeds(export_mesh(caged_overhang_mesh(), enabled), enabled);
+    const std::vector<double> severe_reference = severe_caged_slope_feeds(export_mesh(severe_caged_overhang_mesh(), enabled), enabled);
+    REQUIRE_FALSE(reference.empty());
+    REQUIRE_FALSE(severe_reference.empty());
+    REQUIRE(std::all_of(reference.begin(), reference.end(), [](double f) { return std::isfinite(f) && f > 0.; }));
+    REQUIRE(*std::min_element(reference.begin(), reference.end()) < caged_outer_wall_speed * 60.);
+
+    DynamicPrintConfig disabled = enabled;
+    disabled.set_deserialize_strict("enable_overhang_speed", "0");
+    const std::vector<double> ungated = caged_slope_feeds(export_mesh(caged_overhang_mesh(), disabled), disabled);
+    REQUIRE_FALSE(ungated.empty());
+    CHECK(std::all_of(ungated.begin(), ungated.end(), [](double f) { return std::abs(f - caged_outer_wall_speed * 60.) < 1e-3; }));
+
+    // This second disabled case exercises the bridge-fan fallback's explicit
+    // restoration branch.  The primary gate fixture disables that fallback so
+    // the speed estimator itself remains independently observable.
+    DynamicPrintConfig fan_disabled = enabled;
+    fan_disabled.set_deserialize_strict({
+        {"enable_overhang_bridge_fan", true},
+        {"enable_overhang_speed", false},
+    });
+    const std::vector<double> fan_ungated = caged_slope_feeds(export_mesh(caged_overhang_mesh(), fan_disabled), fan_disabled);
+    REQUIRE_FALSE(fan_ungated.empty());
+    CHECK(std::all_of(fan_ungated.begin(), fan_ungated.end(), [](double f) { return std::abs(f - caged_outer_wall_speed * 60.) < 1e-3; }));
+
+    // The two fixtures cover the first and second bands.  The steeper slope is
+    // still useful for gate coverage, but it does not reliably produce a
+    // segment in the third or fourth overlap interval, so those settings are
+    // deliberately left outside this pipeline claim.
+    for (const char* key : {"overhang_1_4_speed", "overhang_2_4_speed"}) {
+        DynamicPrintConfig changed = enabled;
+        changed.set_deserialize_strict(std::string(key), "25");
+        const std::vector<double> feeds        = caged_slope_feeds(export_mesh(caged_overhang_mesh(), changed), changed);
+        const std::vector<double> severe_feeds = severe_caged_slope_feeds(export_mesh(severe_caged_overhang_mesh(), changed), changed);
+        REQUIRE_FALSE(feeds.empty());
+        REQUIRE_FALSE(severe_feeds.empty());
+        const bool normal_diff = feeds.size() != reference.size() ||
+                                 std::inner_product(feeds.begin(), feeds.begin() + std::min(feeds.size(), reference.size()),
+                                                    reference.begin(), 0., std::plus<>(),
+                                                    [](double a, double b) { return std::abs(a - b) > 1e-3 ? 1. : 0.; }) > 0.;
+        const bool severe_diff = severe_feeds.size() != severe_reference.size() ||
+                                 std::inner_product(severe_feeds.begin(),
+                                                    severe_feeds.begin() + std::min(severe_feeds.size(), severe_reference.size()),
+                                                    severe_reference.begin(), 0., std::plus<>(),
+                                                    [](double a, double b) { return std::abs(a - b) > 1e-3 ? 1. : 0.; }) > 0.;
+        const bool emitted_feeds_changed = normal_diff || severe_diff;
+        CHECK(emitted_feeds_changed);
+        CHECK(std::any_of(feeds.begin(), feeds.end(), [](double f) { return f < caged_outer_wall_speed * 60. - 1e-3; }));
+    }
+}
+
+TEST_CASE("Ironing settings control path topology extrusion and speed", "[SettingsFamilyVariance][IroningMotion]")
+{
+    DynamicPrintConfig rectilinear  = ironing_config();
+    const IroningShape rect_shape   = ironing_shape(rectilinear);
+    const IroningMotion rect_motion = ironing_motion(export_mesh(cube(20.), rectilinear), rectilinear);
+    REQUIRE(rect_shape.paths > 0);
+    REQUIRE(rect_motion.moves > 0);
+    CHECK(rect_motion.feeds == std::set<int>({1200}));
+
+    DynamicPrintConfig no_ironing = rectilinear;
+    no_ironing.set_deserialize_strict("ironing_type", "no ironing");
+    const IroningMotion absent = ironing_motion(export_mesh(cube(20.), no_ironing), no_ironing);
+    CHECK(absent.moves == 0);
+
+    DynamicPrintConfig concentric = rectilinear;
+    concentric.set_deserialize_strict("ironing_pattern", "concentric");
+    const IroningShape concentric_shape = ironing_shape(concentric);
+    REQUIRE(concentric_shape.paths > 0);
+    const bool topology_changed = concentric_shape.closed > rect_shape.closed || concentric_shape.paths != rect_shape.paths;
+    CHECK(topology_changed);
+
+    DynamicPrintConfig flow = rectilinear;
+    flow.set_deserialize_strict("ironing_flow", "20%");
+    const IroningMotion doubled = ironing_motion(export_mesh(cube(20.), flow), flow);
+    REQUIRE(doubled.moves > 0);
+    CHECK_THAT(doubled.e / rect_motion.e, Catch::Matchers::WithinRel(2., 0.08));
+    CHECK_THAT(doubled.xy, Catch::Matchers::WithinRel(rect_motion.xy, 0.02));
+
+    DynamicPrintConfig speed = rectilinear;
+    speed.set_deserialize_strict("ironing_speed", "35");
+    const IroningMotion faster = ironing_motion(export_mesh(cube(20.), speed), speed);
+    REQUIRE(faster.moves > 0);
+    CHECK(faster.feeds == std::set<int>({2100}));
+}
+
+TEST_CASE("Filament ironing overrides select the active top-surface filament", "[SettingsFamilyVariance][IroningMotion]")
+{
+    DynamicPrintConfig config  = multifilament_config(2, {
+                                                            {"layer_height", 0.2},
+                                                            {"initial_layer_print_height", 0.2},
+                                                            {"wall_loops", 2},
+                                                            {"top_shell_layers", 2},
+                                                            {"bottom_shell_layers", 1},
+                                                            {"gcode_comments", true},
+                                                            {"machine_start_gcode", ""},
+                                                            {"machine_end_gcode", ""},
+                                                            {"layer_change_gcode", "G92 E0\n"},
+                                                            {"skirt_loops", 0},
+                                                            {"brim_type", "no_brim"},
+                                                            {"raft_layers", 0},
+                                                            {"slow_down_for_layer_cooling", false},
+                                                            {"filament_max_volumetric_speed", "200"},
+                                                            {"filament_adaptive_volumetric_speed", false},
+                                                            {"top_surface_pattern", "monotonic"},
+                                                            {"ironing_type", "top"},
+                                                            {"ironing_pattern", "rectilinear"},
+                                                            {"ironing_flow", "10%"},
+                                                            {"ironing_speed", 20},
+                                                            {"top_surface_filament_id", 1},
+                                                            {"filament_ironing_flow", "25%,10%"},
+                                                            {"filament_ironing_speed", "35,20"},
+                                                            {"ironing_spacing", 0.2},
+                                                            {"ironing_inset", 0},
+                                                        });
+    const IroningMotion motion = ironing_motion(export_mesh(cube(20.), config), config);
+    REQUIRE(motion.moves > 0);
+    CHECK(motion.feeds == std::set<int>({2100}));
+    CHECK(motion.e > 0.);
+
+    DynamicPrintConfig flow_baseline = config;
+    flow_baseline.set_deserialize_strict("filament_ironing_flow", "10%,10%");
+    const IroningMotion baseline = ironing_motion(export_mesh(cube(20.), flow_baseline), flow_baseline);
+    REQUIRE(baseline.moves == motion.moves);
+    CHECK_THAT(motion.e / baseline.e, Catch::Matchers::WithinRel(2.5, 0.08));
+}
+
+TEST_CASE("Infill anchor maximum enables connected sparse geometry", "[SettingsFamilyVariance][InfillAnchor]")
+{
+    DynamicPrintConfig no_anchor = family_config();
+    no_anchor.set_deserialize_strict({
+        {"sparse_infill_pattern", "rectilinear"},
+        {"sparse_infill_density", "35%"},
+        {"infill_anchor", 0},
+        {"infill_anchor_max", 0},
+    });
+    const AnchorEvidence disabled = anchor_evidence(no_anchor);
+    REQUIRE(disabled.paths > 0);
+
+    DynamicPrintConfig anchored = no_anchor;
+    // Use a nonzero requested anchor together with a large maximum.  The
+    // bounded output contract below is intentionally attributed to the maximum
+    // (the separate anchor-length mutation remains an audit survivor).
+    anchored.set_deserialize_strict({{"infill_anchor", 4}, {"infill_anchor_max", 1000}});
+    const AnchorEvidence enabled = anchor_evidence(anchored);
+    REQUIRE(enabled.paths > 0);
+    CHECK(enabled.length > disabled.length + 0.1);
+    CHECK(enabled.endpoint_contacts < disabled.endpoint_contacts);
+}
+
+} // namespace settings_family_contracts

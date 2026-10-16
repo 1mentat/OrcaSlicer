@@ -121,6 +121,22 @@ source metadata, colors, decoded texture pixels, cancellation, and error types.
 geometry and transformation invariants, including integer-grid partitioning
 and translation far from the coordinate origin.
 
+`[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
+placement, mesh ownership, metadata, and malformed inputs. `[GcpPost]` checks
+rewritten G-code against independently calculated time, filament volume,
+mass, and cost. `[PyramidWinding]` checks oriented topology and analytic
+volume under translation; `[SLADrainTransforms]` checks normals against
+transformed surface tangents under rotation, unequal scaling, and printer
+correction. `[ColorUtilsExtended]` checks clustering, palette preservation,
+UV correspondence, mesh closure, and remeshing invariants.
+
+`[SettingsFamilyVariance]` connects support speeds, bridge flow, overhang
+speed bands, ironing overrides, and infill connection limits to emitted
+motion or geometry. Its mutation manifest retains two `known_survivors`
+for requested infill-anchor length and clamping. They are documented gaps,
+excluded from the executable `mutants` list and from coverage claims for
+those dimensions; they must not be reported as assertion kills.
+
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
 line or segment details are needed. Profile-merge and export diagnostics are retained
