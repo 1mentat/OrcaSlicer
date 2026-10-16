@@ -3431,4 +3431,294 @@ TEST_CASE("ConfigOptionString empty distinguishes empty and nonempty values", "[
     REQUIRE(populated.deserialize(""));
     CHECK(populated.empty());
 }
+
+namespace {
+
+void check_point_components(const Vec2d &actual, double expected_x, double expected_y)
+{
+    CHECK_THAT(actual.x(), WithinAbs(expected_x, 1e-9));
+    CHECK_THAT(actual.y(), WithinAbs(expected_y, 1e-9));
+}
+
+} // namespace
+
+TEST_CASE("ConfigOption base accessors fail closed and scalar overrides copy values", "[Config][ConfigContracts][ConfigBase]")
+{
+    ConfigOptionString text("left");
+    ConfigOption &base = text;
+
+    REQUIRE_THROWS_AS(base.getInt(), BadOptionTypeException);
+    REQUIRE_THROWS_AS(base.getFloat(), BadOptionTypeException);
+    REQUIRE_THROWS_AS(base.getBool(), BadOptionTypeException);
+    REQUIRE_THROWS_AS(base.setInt(9), BadOptionTypeException);
+
+    ConfigOptionInt number(3);
+    ConfigOption &number_base = number;
+    number_base.setInt(-7);
+    CHECK(number_base.getInt() == -7);
+
+    ConfigOptionString same("left");
+    ConfigOptionString replacement("right");
+    std::vector<int> default_index{0};
+    CHECK_FALSE(base.overriden_by(&same));
+    CHECK(base.overriden_by(&replacement));
+    REQUIRE(base.apply_override(&replacement, default_index));
+    CHECK(text.value == "right");
+    CHECK_FALSE(base.apply_override(&text, default_index));
+}
+
+TEST_CASE("ConfigOptionPoint preserves scalar geometry through parsing and ownership", "[Config][ConfigContracts][ConfigPoint]")
+{
+    ConfigOptionPoint source(Vec2d(1.25, -2.5));
+    CHECK(source.serialize() == "1.25,-2.5");
+
+    REQUIRE(source.deserialize("1.25x-2.5"));
+    check_point_components(source.value, 1.25, -2.5);
+    REQUIRE(source.deserialize(" 3.5 , 4.25 "));
+    CHECK(source.serialize() == "3.5,4.25");
+    CHECK_FALSE(source.deserialize("3.5x4.25x9"));
+    CHECK_FALSE(source.deserialize("not-a-point"));
+    REQUIRE(source.deserialize("3.5,4.25"));
+    check_point_components(source.value, 3.5, 4.25);
+
+    ConfigOptionPoint assigned;
+    assigned = &source;
+    CHECK(assigned == source);
+    std::unique_ptr<ConfigOption> clone(source.clone());
+    auto *typed_clone = dynamic_cast<ConfigOptionPoint *>(clone.get());
+    REQUIRE(typed_clone != nullptr);
+    CHECK(*typed_clone == source);
+
+    ConfigOptionPoint lower(Vec2d(3.5, 4.0));
+    CHECK(lower < source);
+    CHECK_FALSE(source < lower);
+}
+
+TEST_CASE("ConfigOptionPoints bounds vector parsing, order, and append semantics", "[Config][ConfigContracts][ConfigPoints]")
+{
+    const std::vector<Vec2d> values{Vec2d(1., 2.), Vec2d(-3., 4.)};
+    ConfigOptionPoints source(values);
+    CHECK(source.serialize() == "1x2,-3x4");
+    CHECK(source.vserialize() == std::vector<std::string>{"1x2", "-3x4"});
+    CHECK_FALSE(source.is_nil(0));
+
+    ConfigOptionPoints decoded;
+    REQUIRE(decoded.deserialize("1x2,-3x4,5x6"));
+    REQUIRE(decoded.values.size() == 3);
+    check_point_components(decoded.values[2], 5., 6.);
+    CHECK(source < decoded);
+    CHECK_FALSE(decoded < source);
+
+    ConfigOptionPoints assigned(3, Vec2d(9., 9.));
+    assigned = &source;
+    CHECK(assigned == source);
+    std::unique_ptr<ConfigOption> clone(source.clone());
+    auto *typed_clone = dynamic_cast<ConfigOptionPoints *>(clone.get());
+    REQUIRE(typed_clone != nullptr);
+    CHECK(*typed_clone == source);
+
+    ConfigOptionPoints extra({Vec2d(8., 9.)});
+    source.append(&extra);
+    CHECK(source.values.size() == 3);
+    CHECK(source.serialize() == "1x2,-3x4,8x9");
+}
+
+TEST_CASE("Grouped point options preserve empty group boundaries", "[Config][ConfigContracts][ConfigGrouped]")
+{
+    ConfigOptionPointsGroups source({Vec2ds{}, Vec2ds{Vec2d(1., 2.)}});
+    CHECK(source.serialize() == "#1x2");
+    CHECK(source.vserialize() == std::vector<std::string>{"", "1x2"});
+    CHECK(source.vserialize_single(0).empty());
+    CHECK_FALSE(source.is_nil(0));
+
+    ConfigOptionPointsGroups decoded;
+    REQUIRE(decoded.deserialize("#1x2"));
+    REQUIRE(decoded.values.size() == 2);
+    CHECK(decoded.values[0].empty());
+    REQUIRE(decoded.values[1].size() == 1);
+    check_point_components(decoded.values[1][0], 1., 2.);
+}
+
+TEST_CASE("Nullable integer vectors retain nil positions and canonical serialization", "[Config][ConfigContracts][ConfigNullable]")
+{
+    ConfigOptionIntsNullable option({1, ConfigOptionIntsNullable::nil_value(), -2});
+    CHECK(option.nullable());
+    CHECK_FALSE(option.is_nil());
+    CHECK_FALSE(option.is_nil(0));
+    CHECK(option.is_nil(1));
+    CHECK(option.serialize() == "1,nil,-2");
+    CHECK(option.vserialize() == std::vector<std::string>{"1", "nil", "-2"});
+    const ConfigOptionIntsNullable identical(option);
+    CHECK(option == identical);
+    const ConfigOptionIntsNullable higher({2, ConfigOptionIntsNullable::nil_value(), -2});
+    CHECK(option < higher);
+
+    ConfigOptionIntsNullable nilled({4, 5});
+    nilled.set_at_to_nil(1);
+    CHECK(nilled.is_nil(1));
+
+    ConfigOptionIntsNullable decoded;
+    REQUIRE(decoded.deserialize("nil,4"));
+    REQUIRE(decoded.values.size() == 2);
+    CHECK(decoded.is_nil(0));
+    CHECK(decoded.values[1] == 4);
+    REQUIRE(decoded.deserialize("8", true));
+    CHECK(decoded.values == std::vector<int>{ConfigOptionIntsNullable::nil_value(), 4, 8});
+
+    ConfigOptionInts non_nullable({1});
+    REQUIRE_THROWS_AS(non_nullable.deserialize("nil"), ConfigurationError);
+}
+
+TEST_CASE("Boolean substitution helpers distinguish enum-shaped and truthy values", "[Config][ConfigContracts][ConfigDeserialize]")
+{
+    const std::vector<std::pair<std::string, bool>> enum_cases{
+        {"enabled", true}, {" On ", true}, {"off", true},
+        {"yes please", false}, {"1future", false}, {"a.b", false},
+        {"", false}, {std::string(64, 'a'), true}, {std::string(65, 'a'), false}
+    };
+    for (const auto &[value, expected] : enum_cases) {
+        CAPTURE(value);
+        CHECK(ConfigHelpers::looks_like_enum_value(value) == expected);
+    }
+    CHECK(ConfigHelpers::enum_looks_like_true_value(" ENABLED "));
+    CHECK(ConfigHelpers::enum_looks_like_true_value("on"));
+    CHECK_FALSE(ConfigHelpers::enum_looks_like_true_value("yes"));
+    CHECK_FALSE(ConfigHelpers::enum_looks_like_true_value("true"));
+
+    ConfigOptionBoolsNullable nullable;
+    CHECK(nullable.deserialize_with_substitutions(
+              "nil, ENABLED, off", false, ConfigHelpers::DeserializationSubstitution::DefaultsToFalse)
+          == ConfigHelpers::DeserializationResult::Substituted);
+    CHECK(nullable.values == std::vector<unsigned char>{ConfigOptionBoolsNullable::nil_value(), 1, 0});
+    CHECK(nullable.serialize() == "nil,1,0");
+    CHECK(nullable.deserialize("1,maybe") == false);
+}
+
+namespace {
+
+struct MigrationDefinition : ConfigDef {
+    MigrationDefinition()
+    {
+        add("new_int", coInt)->set_default_value(new ConfigOptionInt(0));
+    }
+};
+
+struct MigrationConfig : DynamicConfig {
+    MigrationDefinition definition;
+
+    const ConfigDef *def() const override { return &definition; }
+
+protected:
+    void handle_legacy(t_config_option_key &key, std::string &value) const override
+    {
+        if (key == "legacy_int") {
+            key = "new_int";
+            value = "42";
+        } else if (key == "removed_int") {
+            key.clear();
+        }
+    }
+};
+
+} // namespace
+
+TEST_CASE("ConfigBase migration rewrites and records removed keys, then rejects unknown keys", "[Config][ConfigContracts][ConfigMigration]")
+{
+    MigrationConfig config;
+    ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::Disable);
+
+    REQUIRE(config.set_deserialize_nothrow("legacy_int", "7", context));
+    REQUIRE(config.opt<ConfigOptionInt>("new_int") != nullptr);
+    CHECK(config.opt<ConfigOptionInt>("new_int")->value == 42);
+
+    REQUIRE(config.set_deserialize_nothrow("removed_int", "ignored", context));
+    REQUIRE(config.set_deserialize_nothrow("removed_int", "ignored-again", context));
+    CHECK(context.unrecogized_keys == std::vector<std::string>{"removed_int"});
+    CHECK(context.empty());
+    REQUIRE_THROWS_AS(config.set_deserialize_strict("future_int", "7"), UnknownOptionException);
+}
+
+TEST_CASE("Representative scalar options copy through the virtual override setter", "[Config][ConfigContracts][ConfigScalarOverride]")
+{
+    const std::vector<int> initial_index{7, -1};
+    std::vector<int> default_index = initial_index;
+
+    ConfigOptionString text("left");
+    ConfigOptionString replacement_text("right");
+    ConfigOption &text_base = text;
+    REQUIRE(text_base.apply_override(&replacement_text, default_index));
+    CHECK(text.value == "right");
+
+    ConfigOptionInt number(3);
+    ConfigOptionInt replacement_number(7);
+    ConfigOption &number_base = number;
+    REQUIRE(number_base.apply_override(&replacement_number, default_index));
+    CHECK(number.value == 7);
+
+    ConfigOptionFloat decimal(1.25);
+    ConfigOptionFloat replacement_decimal(2.5);
+    ConfigOption &decimal_base = decimal;
+    REQUIRE(decimal_base.apply_override(&replacement_decimal, default_index));
+    CHECK_THAT(decimal.value, WithinAbs(2.5, 1e-12));
+
+    ConfigOptionBool flag(false);
+    ConfigOptionBool replacement_flag(true);
+    ConfigOption &flag_base = flag;
+    REQUIRE(flag_base.apply_override(&replacement_flag, default_index));
+    CHECK(flag.value);
+
+    ConfigOptionPoint point(Vec2d(1., 2.));
+    ConfigOptionPoint replacement_point(Vec2d(3., 4.));
+    ConfigOption &point_base = point;
+    REQUIRE(point_base.apply_override(&replacement_point, default_index));
+    CHECK_THAT(point.value.x(), WithinAbs(3., 1e-12));
+    CHECK_THAT(point.value.y(), WithinAbs(4., 1e-12));
+
+    CHECK_FALSE(number_base.apply_override(&replacement_number, default_index));
+    CHECK(default_index == initial_index);
+}
+
+TEST_CASE("Derived scalar options preserve subtype state through override", "[Config][ConfigContracts][ConfigScalarOverride]")
+{
+    const std::vector<int> initial_index{3, 1};
+    std::vector<int> default_index = initial_index;
+
+    ConfigOptionFloatOrPercent absolute(12.5, false);
+    ConfigOptionFloatOrPercent percentage(25., true);
+    ConfigOption &absolute_base = absolute;
+    REQUIRE(absolute_base.apply_override(&percentage, default_index));
+    CHECK_THAT(absolute.value, WithinAbs(25., 1e-12));
+    CHECK(absolute.percent);
+    CHECK(absolute.serialize() == "25%");
+
+    const t_config_enum_values keys{{"marlin", int(gcfMarlinLegacy)},
+                                    {"reprap", int(gcfRepRapFirmware)}};
+    ConfigOptionEnumGeneric generic(&keys, int(gcfMarlinLegacy));
+    ConfigOptionEnum<GCodeFlavor> specialized(gcfRepRapFirmware);
+    ConfigOption &generic_base = generic;
+    REQUIRE(generic_base.apply_override(&specialized, default_index));
+    CHECK(generic.value == int(gcfRepRapFirmware));
+    CHECK(generic.keys_map == &keys);
+    CHECK(generic.serialize() == "reprap");
+
+    ConfigOptionEnum<GCodeFlavor> specialized_target(gcfMarlinLegacy);
+    ConfigOption &specialized_base = specialized_target;
+    REQUIRE(specialized_base.apply_override(&generic, default_index));
+    CHECK(specialized_target.value == gcfRepRapFirmware);
+    CHECK(default_index == initial_index);
+}
+
+TEST_CASE("Scalar overrides reject incompatible types before changing state", "[Config][ConfigContracts][ConfigScalarOverride]")
+{
+    const std::vector<int> initial_index{5};
+    std::vector<int> default_index = initial_index;
+    ConfigOptionString text("left");
+    ConfigOptionInt incompatible(7);
+    ConfigOption &text_base = text;
+
+    REQUIRE_THROWS_AS(text_base.apply_override(&incompatible, default_index), ConfigurationError);
+    CHECK(text.value == "left");
+    CHECK(default_index == initial_index);
+}
+
 } // namespace config_residual_contracts
