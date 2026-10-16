@@ -1,0 +1,149 @@
+{
+  "scope": "TriangleMesh geometry, topology, serialization, and cached-bounds contracts. Mutation outcomes require native assertion validation.",
+  "mutants": [
+    {
+      "id": "point_rotation_removed",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "its_rotate_z(this->its, (float)angle);",
+      "new": "its_rotate_z(this->its, 0.f);",
+      "description": "The legacy center rotation must move the actual vertices by the requested angle.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "point_rotation_center_restore_removed",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "this->translate(c(0), c(1), 0);",
+      "new": "this->translate(0.f, 0.f, 0.f);",
+      "description": "Rotation about a center must translate the vertices back into the original coordinate frame.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "clipped_bbox_intersection_guard",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "if (num_above < its.vertices.size()) {",
+      "new": "if (num_above == its.vertices.size()) {",
+      "description": "A plane crossing must contribute intersection points to the transformed bounding box.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "clipped_bbox_result_guard",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "if (! bbox.isEmpty()) {",
+      "new": "if (bbox.isEmpty()) {",
+      "description": "A nonempty clipped bounding box must be returned to the caller.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "edge_identifier_increment",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "++ num_edges;",
+      "new": "num_edges += 2;",
+      "description": "Each emitted edge identifier must advance the supplied edge count by exactly one.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "nonuniform_scale_volume",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "m_stats.volume *= s(0) * s(1) * s(2);",
+      "new": "m_stats.volume *= s(0) + s(1) + s(2);",
+      "description": "A nonuniform affine scale changes volume by the product of its three factors.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "translation_guard_disabled",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "if (displacement.x() != 0.f || displacement.y() != 0.f || displacement.z() != 0.f) {",
+      "new": "if (false) {",
+      "description": "A nonzero displacement must update every vertex and cached bounds.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "facet_flip_signed_cache",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "m_stats.volume = - m_stats.volume;",
+      "new": "m_stats.volume = m_stats.volume;",
+      "description": "Flipping all triangle winding must negate the cached signed volume.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "axis_rotation_guard",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "void TriangleMesh::rotate(float angle, const Axis &axis)\n{\n    if (angle != 0.f) {",
+      "new": "void TriangleMesh::rotate(float angle, const Axis &axis)\n{\n    if (angle == 0.f) {",
+      "description": "A nonzero axis rotation must execute the selected axis operation.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "mirror_x_coordinate",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "for (stl_vertex &v : its.vertices)\n            v.x() *= -1.f;",
+      "new": "for (stl_vertex &v : its.vertices)\n            v.x() *= 1.f;",
+      "description": "Mirroring on X must reflect geometry across the YZ plane.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "left_handed_transform_fix",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "void TriangleMesh::transform(const Transform3d& t, bool fix_left_handed)\n{\n    its_transform(its, t);\n    double det = t.matrix().block(0, 0, 3, 3).determinant();\n    if (fix_left_handed && det < 0.) {",
+      "new": "void TriangleMesh::transform(const Transform3d& t, bool fix_left_handed)\n{\n    its_transform(its, t);\n    double det = t.matrix().block(0, 0, 3, 3).determinant();\n    if (false) {",
+      "description": "The explicit left-handed repair option must restore positive orientation after reflection.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "merge_stats_replaced",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "m_stats = m_stats.merge(mesh.m_stats);",
+      "new": "m_stats = mesh.m_stats;",
+      "description": "Merging a second component must retain additive facet, part, volume, and bound statistics.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "signed_volume_accumulation",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "volume += (area * height) / 3.0f;",
+      "new": "volume -= (area * height) / 3.0f;",
+      "description": "Signed tetrahedral contributions must be accumulated, not subtracted.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "split_orientation_correction",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "if (TriangleMesh &triangle_mesh = out.back(); triangle_mesh.volume() < 0)",
+      "new": "if (TriangleMesh &triangle_mesh = out.back(); triangle_mesh.volume() > 0)",
+      "description": "Split parts with reversed winding must be corrected to positive volume.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "average_edge_denominator",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "return float(edge_length / (3 * its.indices.size()));",
+      "new": "return float(edge_length / (2 * its.indices.size()));",
+      "description": "The mean edge length divides the three edges contributed by every triangle.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "frustum_top_radius",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "vec_top = Eigen::Rotation2Df(angle_step * i) * Eigen::Vector2f(0, 0.5f*float(r));",
+      "new": "vec_top = Eigen::Rotation2Df(angle_step * i) * Eigen::Vector2f(0, 0.75f*float(r));",
+      "description": "The frustum's generated top radius determines its analytic volume and bounds.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "empty_volume_neutral_value",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "if (its.empty()) return 0.;",
+      "new": "if (its.empty()) return 1.;",
+      "description": "An empty indexed mesh has zero volume.",
+      "test_filter": "TriangleMeshContracts"
+    },
+    {
+      "id": "center_rotation_cached_bounds",
+      "path": "src/libslic3r/TriangleMesh.cpp",
+      "old": "        its_rotate_z(this->its, (float)angle);\n        this->translate(c(0), c(1), 0);\n        update_bounding_box(this->its, this->m_stats);",
+      "new": "        its_rotate_z(this->its, (float)angle);\n        this->translate(c(0), c(1), 0);",
+      "description": "Center rotation must refresh cached bounds and size after updating vertices.",
+      "test_filter": "TriangleMeshContracts"
+    }
+  ]
+}

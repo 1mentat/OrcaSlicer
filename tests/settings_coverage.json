@@ -2136,6 +2136,42 @@
         "boolean_values"
       ],
       "reason": "Direct Klipper GCodeWriter output emits ACCEL_TO_DECEL=800 when enabled at factor 50 and omits the field when disabled. Representative values only; full numeric ranges and interactions are not claimed."
+    },
+    "relative_correction_x": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLALifecycle]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "SLA correction changes from an explicit 1.0 to 1.5, invalidates slicing, scales a 10 mm width to 15 mm, and changes sliced area from 100 to 150 square mm. Other values and coupled axis interactions remain unclaimed."
+    },
+    "slice_closing_radius": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLALifecycle]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Changing SLA slice closing radius from 0.005 to 0.01 invalidates completed object slices. This tests recomputation state; geometric effects on gaps and the numeric domain remain unclaimed."
+    },
+    "pad_wall_height": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLALifecycle]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Changing SLA pad wall height from 1.0 to 2.0 invalidates a completed pad. Rebuilt pad dimensions and the numeric domain remain unclaimed."
+    },
+    "support_pillar_diameter": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLALifecycle]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Changing SLA support pillar diameter from 1.0 to 1.5 invalidates a completed support tree built from an explicit support point. Rebuilt pillar dimensions and the numeric domain remain unclaimed."
     }
   }
 }

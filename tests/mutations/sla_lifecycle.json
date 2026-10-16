@@ -1,0 +1,117 @@
+{
+  "scope": "SLA apply, invalidation, model ownership, and physical transformation contracts. Native assertion validation is required.",
+  "mutants": [
+    {
+      "id": "unchanged_model_id_list_is_not_reused",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "if (model_object_list_equal(m_model, model)) {",
+      "new": "if (false) {",
+      "description": "Force the equal model-object-list path to be skipped; unchanged apply must remain unchanged.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "full_config_does_not_rebuild_model_objects",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "            invalidate_all_model_objects = true;",
+      "new": "            invalidate_all_model_objects = false;",
+      "description": "Do not request model-object replacement for full geometry correction changes.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "full_config_sync_guard_ignores_invalidation",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    if (model.id() != m_model.id() || invalidate_all_model_objects) {",
+      "new": "    if (model.id() != m_model.id()) {",
+      "description": "Remove the full invalidation guard from model synchronization; transformed geometry must still be rebuilt.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "instance_transform_difference_is_ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "            if (model_parts_differ || sla_trafo_differs) {",
+      "new": "            if (model_parts_differ) {",
+      "description": "Ignore SLA transform differences when deciding whether to replace a print object.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "drain_hole_changes_are_ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "                if (model_object.sla_drain_holes != model_object_new.sla_drain_holes)",
+      "new": "                if (false)",
+      "description": "Ignore model drain-hole edits; drill-hole invalidation regression must fail.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "instance_list_changes_are_ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "                if (new_instances != it_print_object_status->print_object->instances()) {",
+      "new": "                if (false) {",
+      "description": "Ignore changed print-object instance records; scaled geometry regression must fail.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "print_object_vector_changes_are_ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    if (m_objects != print_objects_new) {",
+      "new": "    if (false) {",
+      "description": "Ignore the rebuilt print-object vector; object extension/deletion must fail.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "drill_hole_dependency_propagation_removed",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    } else if (step == slaposDrillHoles) {",
+      "new": "    } else if (false) {",
+      "description": "Remove drill-hole dependent-step invalidation; drain-hole edit contract must fail.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "inverse_transpose_normal_scale_changed",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "        hl.normal = Vec3f(hl.normal(0)/(sc(0)*sc(0)),",
+      "new": "        hl.normal = Vec3f(hl.normal(0)/sc(0),",
+      "description": "Use linear rather than squared scale in the x component of the inverse-transpose normal transform.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "drain_hole_stickout_direction_reversed",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "        hl.height += sla::HoleStickOutLength;",
+      "new": "        hl.height -= sla::HoleStickOutLength;",
+      "description": "Reverse the hole height compensation; transformed drain-hole height contract must fail.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "support_geometry_invalidates_wrong_object_step",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "            || opt_key == \"support_base_safety_distance\"\n            ) {\n            steps.emplace_back(slaposSupportTree);",
+      "new": "            || opt_key == \"support_base_safety_distance\"\n            ) {\n            steps.emplace_back(slaposPad);",
+      "description": "Send support geometry changes to pad invalidation instead of support-tree invalidation.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "pad_geometry_invalidates_wrong_object_step",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "            || opt_key == \"pad_object_connector_penetration\"\n            ) {\n            steps.emplace_back(slaposPad);",
+      "new": "            || opt_key == \"pad_object_connector_penetration\"\n            ) {\n            steps.emplace_back(slaposSliceSupports);",
+      "description": "Send pad geometry changes to slice-support invalidation instead of pad invalidation; the completed pad must remain stale.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "raster_option_invalidation_skipped",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "        if (steps_rasterize.find(opt_key) != steps_rasterize.end()) {\n            // These options only affect the final rasterization, or they are just notes without influence on the output,\n            // so there is nothing to invalidate.\n            steps.emplace_back(slapsMergeSlicesAndEval);",
+      "new": "        if (steps_rasterize.find(opt_key) != steps_rasterize.end()) {\n            // These options only affect the final rasterization, or they are just notes without influence on the output,\n            // so there is nothing to invalidate.\n            continue;",
+      "description": "Skip the raster-only merge invalidation; exposure change must leave the completed print incorrectly marked finished.",
+      "test_filter": "SLALifecycle"
+    },
+    {
+      "id": "slice_closing_invalidates_wrong_object_step",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "            || opt_key == \"slice_closing_radius\") {\n            steps.emplace_back(slaposObjectSlice);",
+      "new": "            || opt_key == \"slice_closing_radius\") {\n            steps.emplace_back(slaposSupportPoints);",
+      "description": "Send slice-closing-radius changes to support-point invalidation instead of object-slice invalidation.",
+      "test_filter": "SLALifecycle"
+    }
+  ]
+}

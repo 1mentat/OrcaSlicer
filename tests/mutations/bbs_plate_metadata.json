@@ -1,0 +1,133 @@
+{
+  "scope": "Filament physical statistics, nozzle assignments, warning ownership, and unique embedded-preset archive parts.",
+  "mutants": [
+    {
+      "id": "filament-length-units",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "double                    koef = 0.001;",
+      "new": "double                    koef = 0.01;",
+      "description": "Filament length is converted from millimeters to meters.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "filament-diameter-index",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "sqr(0.5 * m_filament_diameters[extruder_id])",
+      "new": "sqr(0.5 * m_filament_diameters[0])",
+      "description": "Sparse filament IDs retain their own cross-sectional area.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "filament-density-index",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "volume * m_filament_densities[extruder_id] * 0.001",
+      "new": "volume * m_filament_densities[0] * 0.001",
+      "description": "Mass uses the density of the selected filament.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "zero-diameter-length",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "section_area < EPSILON ? 0 :",
+      "new": "section_area < EPSILON ? 1 :",
+      "description": "Unrepresentable filament area gives finite zero length.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "object-use-from-support",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "auto model_volume_it = ps.model_volumes_per_extruder.find(it->first);",
+      "new": "auto model_volume_it = ps.model_volumes_per_extruder.find(ps.model_volumes_per_extruder.size() + 100);",
+      "description": "Object-use flags require the matching model-volume record.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "support-zero-positive",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "support_volume_it->second > EPSILON",
+      "new": "support_volume_it->second >= 0",
+      "description": "Zero support volume does not imply support usage.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "omit-nozzle-group",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "info.group_id.emplace_back(nozzle.group_id);",
+      "new": "(void)nozzle.group_id;",
+      "description": "Every assigned logical nozzle is retained.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "maximum-nozzle-diameter",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "info.nozzle_diameter = *diameters.begin();",
+      "new": "info.nozzle_diameter = *diameters.rbegin();",
+      "description": "Mixed-diameter assignments select the smallest diameter.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "hybrid-volume-type",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (volume_types.size() > 1)",
+      "new": "if (volume_types.size() > 2)",
+      "description": "Mixed nozzle volume types are marked hybrid.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "single-volume-type",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "info.nozzle_volume_type = get_nozzle_volume_type_string(*volume_types.begin());",
+      "new": "info.nozzle_volume_type = get_nozzle_volume_type_string(nvtHybrid);",
+      "description": "Single nozzle types retain their explicit type.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "omit-layered-mapping",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (layered_group_result)\n        nozzle_group_result = *layered_group_result;",
+      "new": "if (false)\n        nozzle_group_result = *layered_group_result;",
+      "description": "Layered maps retain their per-layer nozzle assignments.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "omit-warnings",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "warnings = result->warnings;",
+      "new": "warnings.clear();",
+      "description": "Plate warning records retain all exported fields.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "print-counter",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                    print_count++;",
+      "new": "                    print_count += 0;",
+      "description": "Independent print preset entries cannot overwrite each other.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "filament-counter",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                    filament_count++;",
+      "new": "                    filament_count += 0;",
+      "description": "Independent filament preset entries cannot overwrite each other.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "printer-counter",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                    printer_count++;",
+      "new": "                    printer_count += 0;",
+      "description": "Independent printer preset entries cannot overwrite each other.",
+      "test_filter": "PlateMetadata"
+    },
+    {
+      "id": "preset-config-empty",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "DynamicPrintConfig& config = preset->config;",
+      "new": "DynamicPrintConfig config;",
+      "description": "Preset identity and configured values survive export and import.",
+      "test_filter": "PlateMetadata"
+    }
+  ]
+}

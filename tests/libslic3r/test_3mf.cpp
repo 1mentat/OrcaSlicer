@@ -4387,3 +4387,311 @@ TEST_CASE("BBS project published flag accepts exactly the producer marker", "[3m
 }
 
 } // namespace bbs_3mf_metadata_contracts
+
+
+namespace plate_metadata_contracts {
+
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+void materials(GCodeProcessorResult& result)
+{
+    result.filament_diameters = {2.f, 1.f, 3.f};
+    result.filament_densities = {1.25f, 2.f, .5f};
+}
+
+std::vector<MultiNozzleUtils::NozzleInfo> two_nozzles() { return {{"0.6", nvtStandard, 0, 0}, {"0.4", nvtHighFlow, 1, 1}}; }
+
+std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> layered_mapping()
+{
+    auto value = MultiNozzleUtils::LayeredNozzleGroupResult::create(std::vector<std::vector<int>>{{0}, {1}, {0}}, two_nozzles(),
+                                                                    std::vector<unsigned int>{0},
+                                                                    std::vector<std::vector<unsigned int>>{{0}, {0}, {0}});
+    REQUIRE(value.has_value());
+    return std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(*value);
+}
+
+const FilamentInfo& filament(const PlateData& plate, int id)
+{
+    const auto found = std::find_if(plate.slice_filaments_info.begin(), plate.slice_filaments_info.end(),
+                                    [id](const FilamentInfo& info) { return info.id == id; });
+    REQUIRE(found != plate.slice_filaments_info.end());
+    return *found;
+}
+
+Preset make_preset(Preset::Type type, const std::string& name, double value)
+{
+    Preset preset(type, name);
+    if (type == Preset::TYPE_PRINT) {
+        preset.config.set_key_value("print_settings_id", new ConfigOptionString(name));
+        preset.config.set_key_value("layer_height", new ConfigOptionFloat(value));
+    } else if (type == Preset::TYPE_FILAMENT) {
+        preset.config.set_key_value("filament_settings_id", new ConfigOptionStrings({name}));
+        preset.config.set_key_value("filament_diameter", new ConfigOptionFloats({value}));
+    } else if (type == Preset::TYPE_PRINTER) {
+        preset.config.set_key_value("printer_settings_id", new ConfigOptionString(name));
+        preset.config.set_key_value("nozzle_diameter", new ConfigOptionFloats({value}));
+    }
+    return preset;
+}
+
+using LoadedPresets = bbs_archive_contracts::LoadedProject;
+
+void roundtrip_presets(std::vector<Preset*> presets,
+                       LoadedPresets& loaded,
+                       SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence)
+{
+    ScopedTemporaryDir backup("orca_embedded_preset_store");
+    ScopedTemporaryFile archive(".3mf");
+    Model source;
+    auto* object = source.add_object();
+    object->add_volume(make_cube(2., 3., 4.));
+    object->add_instance();
+    source.set_backup_path(backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.plate_index = 0;
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &source;
+    params.config          = &config;
+    params.plate_data_list = {&plate};
+    params.project_presets = std::move(presets);
+    params.strategy        = strategy;
+    REQUIRE(store_bbs_3mf(params));
+    // A part name identifies one resource in a 3MF package. The importer can
+    // iterate duplicate ZIP names, so round-trip counts alone miss collisions.
+    {
+        mz_zip_archive zip;
+        mz_zip_zero_struct(&zip);
+        REQUIRE(open_zip_reader(&zip, archive.string()));
+        const ScopeGuard close([&] { close_zip_reader(&zip); });
+        std::set<std::string> names;
+        for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&zip); ++index) {
+            mz_zip_archive_file_stat stat;
+            REQUIRE(mz_zip_reader_file_stat(&zip, index, &stat));
+            REQUIRE(names.insert(stat.m_filename).second);
+        }
+    }
+    Model imported;
+    REQUIRE(bbs_3mf_metadata_contracts::load_followup(archive.string(), imported, loaded));
+    REQUIRE(imported.objects.size() == 1);
+    CHECK_THAT(imported.objects.front()->raw_mesh().volume(), WithinAbs(24., 1e-4));
+}
+} // namespace
+
+TEST_CASE("Plate filament lengths and masses use each filament's physical properties", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}, {1, 2000.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    REQUIRE(plate.slice_filaments_info.size() == 2);
+    CHECK_THAT(filament(plate, 0).used_m, WithinAbs(1. / PI, 1e-6));
+    CHECK_THAT(filament(plate, 0).used_g, WithinAbs(1.25, 1e-6));
+    CHECK_THAT(filament(plate, 1).used_m, WithinAbs(8. / PI, 1e-6));
+    CHECK_THAT(filament(plate, 1).used_g, WithinAbs(4., 1e-6));
+}
+
+TEST_CASE("Sparse filament identifiers select their own diameter and density", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{2, 9000.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    REQUIRE(plate.slice_filaments_info.size() == 1);
+    CHECK_THAT(filament(plate, 2).used_m, WithinAbs(4. / PI, 1e-6));
+    CHECK_THAT(filament(plate, 2).used_g, WithinAbs(4.5, 1e-6));
+}
+
+TEST_CASE("Zero filament diameter yields a finite zero length while retaining mass", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.filament_diameters[0]                       = 0.f;
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK_THAT(filament(plate, 0).used_m, WithinAbs(0., 0.));
+    CHECK_THAT(filament(plate, 0).used_g, WithinAbs(1.25, 1e-6));
+}
+
+TEST_CASE("Object and support usage flags follow their separate positive-volume records", "[3MF][PlateMetadata]")
+{
+    const bool object_used  = GENERATE(false, true);
+    const bool support_used = GENERATE(false, true);
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder   = {{0, 1000.}, {1, 0.}};
+    result.print_statistics.model_volumes_per_extruder   = {{0, object_used ? 3. : 0.}};
+    result.print_statistics.support_volumes_per_extruder = {{0, support_used ? 7. : 0.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK(filament(plate, 0).used_for_object == object_used);
+    CHECK(filament(plate, 0).used_for_support == support_used);
+    CHECK_FALSE(filament(plate, 1).used_for_object);
+    CHECK_FALSE(filament(plate, 1).used_for_support);
+}
+
+TEST_CASE("Absent processor results leave existing plate metadata intact", "[3MF][PlateMetadata]")
+{
+    PlateData plate;
+    FilamentInfo existing;
+    existing.id     = 7;
+    existing.used_g = 2.f;
+    plate.slice_filaments_info.push_back(existing);
+    plate.warnings.push_back({2, "existing", "E1", {"parameter"}});
+    plate.parse_filament_info(nullptr);
+    REQUIRE(plate.slice_filaments_info.size() == 1);
+    CHECK_THAT(filament(plate, 7).used_g, WithinAbs(2., 0.));
+    REQUIRE(plate.warnings.size() == 1);
+    CHECK(plate.warnings.front().msg == "existing");
+}
+
+TEST_CASE("Plate warnings preserve all fields and own a copy of their parameters", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    result.warnings = {{2, "first", "E42", {"a", "b"}}, {1, "second", "W3", {"c"}}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    result.warnings.front().params.front() = "changed";
+    REQUIRE(plate.warnings.size() == 2);
+    CHECK(plate.warnings[0].level == 2);
+    CHECK(plate.warnings[0].msg == "first");
+    CHECK(plate.warnings[0].error_code == "E42");
+    CHECK(plate.warnings[0].params == std::vector<std::string>{"a", "b"});
+    CHECK(plate.warnings[1].level == 1);
+    CHECK(plate.warnings[1].msg == "second");
+    CHECK(plate.warnings[1].error_code == "W3");
+    CHECK(plate.warnings[1].params == std::vector<std::string>{"c"});
+    CHECK(plate.slice_filaments_info.empty());
+}
+
+TEST_CASE("Layered filament mappings retain every used nozzle and hybrid volume type", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}};
+    result.nozzle_group_result                         = layered_mapping();
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    const auto& info = filament(plate, 0);
+    CHECK(info.group_id == std::vector<int>{0, 1});
+    CHECK_THAT(info.nozzle_diameter, WithinAbs(.4, 1e-8));
+    CHECK(info.nozzle_volume_type == get_nozzle_volume_type_string(nvtHybrid));
+    REQUIRE(plate.nozzle_group_result.has_value());
+    CHECK(plate.nozzle_group_result->get_layer_filament_nozzle_maps() == std::vector<std::vector<int>>{{0}, {1}, {0}});
+    CHECK(plate.nozzle_group_result->is_support_dynamic_nozzle_map());
+}
+
+TEST_CASE("A single assigned nozzle retains its exact nonstandard diameter and volume type", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 100.}};
+    auto grouping                                      = MultiNozzleUtils::LayeredNozzleGroupResult::create(std::vector<int>{0},
+                                                                                                            std::vector<MultiNozzleUtils::NozzleInfo>{
+                                                                           {"0.25", nvtStandard, 0, 0}},
+                                                                                                            std::vector<unsigned int>{0});
+    REQUIRE(grouping.has_value());
+    result.nozzle_group_result = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(*grouping);
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK(filament(plate, 0).group_id == std::vector<int>{0});
+    CHECK_THAT(filament(plate, 0).nozzle_diameter, WithinAbs(.25, 1e-8));
+    CHECK(filament(plate, 0).nozzle_volume_type == get_nozzle_volume_type_string(nvtStandard));
+    REQUIRE(plate.nozzle_group_result.has_value());
+    CHECK_FALSE(plate.nozzle_group_result->is_support_dynamic_nozzle_map());
+}
+
+TEST_CASE("Device-side static grouping supplies metadata without becoming a layered result", "[3MF][PlateMetadata]")
+{
+    FilamentInfo input;
+    input.id       = 0;
+    input.group_id = {0, 1};
+    auto grouping  = MultiNozzleUtils::StaticNozzleGroupResult::create({input}, two_nozzles(), {0, 0}, {0, 1}, false);
+    REQUIRE(grouping.has_value());
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 100.}};
+    result.nozzle_group_result                         = std::make_shared<MultiNozzleUtils::StaticNozzleGroupResult>(*grouping);
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK(filament(plate, 0).group_id == std::vector<int>{0, 1});
+    CHECK_THAT(filament(plate, 0).nozzle_diameter, WithinAbs(.4, 1e-8));
+    CHECK_FALSE(plate.nozzle_group_result.has_value());
+}
+
+TEST_CASE("Embedded presets round trip their type identity and configured value", "[3MF][PlateMetadata]")
+{
+    const auto type    = GENERATE(Preset::TYPE_PRINT, Preset::TYPE_FILAMENT, Preset::TYPE_PRINTER);
+    const double value = type == Preset::TYPE_PRINT ? .31 : type == Preset::TYPE_FILAMENT ? 1.82 : .25;
+    Preset preset      = make_preset(type, "Embedded semantic contract", value);
+    LoadedPresets loaded;
+    roundtrip_presets({&preset}, loaded);
+    REQUIRE(loaded.presets.size() == 1);
+    const Preset& actual = *loaded.presets.front();
+    CHECK(actual.name == preset.name);
+    CHECK(actual.type == type);
+    CHECK(actual.is_project_embedded);
+    const char* key = type == Preset::TYPE_PRINT ? "layer_height" : type == Preset::TYPE_FILAMENT ? "filament_diameter" : "nozzle_diameter";
+    if (type == Preset::TYPE_PRINT) {
+        REQUIRE(actual.config.option<ConfigOptionFloat>(key) != nullptr);
+        CHECK_THAT(actual.config.opt_float(key), WithinAbs(value, 1e-6));
+    } else {
+        const auto* values = actual.config.option<ConfigOptionFloats>(key);
+        REQUIRE(values != nullptr);
+        REQUIRE(values->values.size() == 1);
+        CHECK_THAT(values->values.front(), WithinAbs(value, 1e-6));
+    }
+}
+
+TEST_CASE("Independent preset counters preserve two entries of every supported type", "[3MF][PlateMetadata]")
+{
+    std::vector<Preset> presets;
+    for (const auto type : {Preset::TYPE_PRINT, Preset::TYPE_FILAMENT, Preset::TYPE_PRINTER})
+        for (int index : {1, 2})
+            presets.push_back(make_preset(type, "preset-" + std::to_string(int(type)) + "-" + std::to_string(index), .1 * index));
+    std::vector<Preset*> inputs{nullptr};
+    for (auto& preset : presets)
+        inputs.push_back(&preset);
+    inputs.push_back(nullptr);
+    LoadedPresets loaded;
+    roundtrip_presets(inputs, loaded);
+    REQUIRE(loaded.presets.size() == presets.size());
+    for (const Preset& expected : presets) {
+        const auto found = std::find_if(loaded.presets.begin(), loaded.presets.end(),
+                                        [&](const Preset* actual) { return actual->name == expected.name; });
+        REQUIRE(found != loaded.presets.end());
+        CHECK((*found)->type == expected.type);
+        CHECK((*found)->is_project_embedded);
+        const char* key = expected.type == Preset::TYPE_PRINT    ? "layer_height" :
+                          expected.type == Preset::TYPE_FILAMENT ? "filament_diameter" :
+                                                                   "nozzle_diameter";
+        if (expected.type == Preset::TYPE_PRINT) {
+            REQUIRE((*found)->config.option<ConfigOptionFloat>(key) != nullptr);
+            CHECK_THAT((*found)->config.opt_float(key), WithinAbs(expected.config.opt_float(key), 1e-6));
+        } else {
+            const auto* actual_values = (*found)->config.option<ConfigOptionFloats>(key);
+            REQUIRE(actual_values != nullptr);
+            REQUIRE(actual_values->values.size() == 1);
+            CHECK_THAT(actual_values->values.front(), WithinAbs(expected.config.option<ConfigOptionFloats>(key)->values.front(), 1e-6));
+        }
+    }
+}
+
+TEST_CASE("Unsupported embedded preset types are omitted without losing supported presets", "[3MF][PlateMetadata]")
+{
+    Preset ignored(Preset::TYPE_SLA_PRINT, "unsupported-SLA");
+    Preset retained = make_preset(Preset::TYPE_PRINT, "retained-print", .28);
+    LoadedPresets loaded;
+    roundtrip_presets({&ignored, nullptr, &retained}, loaded);
+    REQUIRE(loaded.presets.size() == 1);
+    CHECK(loaded.presets.front()->name == retained.name);
+    CHECK_THAT(loaded.presets.front()->config.opt_float("layer_height"), WithinAbs(.28, 1e-6));
+}
+
+} // namespace plate_metadata_contracts
