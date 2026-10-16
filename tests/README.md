@@ -397,6 +397,18 @@ automatically. The runner does not write the original checkout; if its observed
 state changes during a run, the report records that fact without attributing
 who changed it and exits nonzero.
 
+Use a new or empty output directory for every run. Before building, the runner
+records the snapshot SHA-256 and verifies every selected head resolves to its
+exact commit. Configure, build, and test output goes directly to log files;
+the JSON report keeps only a bounded tail. Run the controller under the resource
+limits described above, including a file-size limit for those logs.
+
+A passing head requires complete JUnit evidence whose testcase count agrees
+with CTest. Missing or contradictory reports and duplicate testcase identities
+are incomplete evidence. Crashes, timeouts, and JUnit errors are execution
+failures; they do not enter the new/inherited/resolved test-failure comparison.
+Both the reference and the head must have comparable execution evidence.
+
 Run all snapshot heads, or select reproducible PR numbers with repeated or
 comma-separated `--numbers` values:
 

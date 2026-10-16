@@ -136,16 +136,17 @@ def _command_entry(result: CommandResult, log_path: Path) -> dict[str, Any]:
 
 
 def test_evidence(output: str) -> int:
-    """Extract a runner count; zero means no trustworthy tests ran."""
+    """Prefer CTest's invocation total over nested Catch assertion output."""
+    ctest = re.findall(r"\b\d+(?:\.\d+)?% tests passed,\s*\d+ tests failed out of\s+(\d+)\b",
+                       output, re.IGNORECASE)
+    if ctest:
+        return int(ctest[-1])
     patterns = (
-        re.compile(r"out of\s+(\d+)\b", re.IGNORECASE),
-        re.compile(r"\bof\s+(\d+)\s+tests?\b", re.IGNORECASE),
-        re.compile(r"\b(\d+)\s+tests?\s+(?:passed|failed|skipped)\b", re.IGNORECASE),
-        re.compile(r"test cases?:\s*(\d+)\b", re.IGNORECASE),
-        re.compile(r"all tests passed\s*\((\d+)\s+assertions?", re.IGNORECASE),
+        r"test cases?:\s*(\d+)\b",
+        r"all tests passed\s*\(\d+\s+assertions?\s+in\s+(\d+)\s+test cases?\)",
     )
-    values = [int(match.group(1)) for pattern in patterns for match in pattern.finditer(output)]
-    return max(values, default=0)
+    return max((int(match.group(1)) for pattern in patterns
+                for match in re.finditer(pattern, output, re.IGNORECASE)), default=0)
 
 
 def classify_test_result(result: CommandResult, evidence: int, *, skipped: int = 0,
@@ -185,51 +186,133 @@ def skipped_test_evidence(output: str, junit: Path | None = None) -> int:
     if junit is not None and junit.is_file():
         try:
             root = ElementTree.parse(junit).getroot()
-            for suite in root.iter():
-                if suite.tag.rsplit("}", 1)[-1] not in {"testsuite", "testsuites"}:
-                    continue
-                try:
-                    count = max(count, int(suite.attrib.get("skipped", "0")))
-                except ValueError:
-                    continue
-        except (ElementTree.ParseError, OSError):
+            suites = [suite for suite in root.iter()
+                      if suite.tag.rsplit("}", 1)[-1] == "testsuite"
+                      and not any(child.tag.rsplit("}", 1)[-1] == "testsuite"
+                                  for child in suite)]
+            count = max(count, sum(int(suite.attrib.get("skipped", "0")) for suite in suites))
+        except (ElementTree.ParseError, OSError, ValueError):
             # A partial JUnit file should not hide command output or a failure.
             pass
     return count
 
 
-def junit_case_statuses(junit: Path) -> dict[str, str]:
-    """Return testcase-name -> pass/fail/skip without trusting suite totals."""
-    if not junit.is_file():
-        return {}
+def _xml_tag(element: ElementTree.Element) -> str:
+    return element.tag.rsplit("}", 1)[-1]
+
+
+def _execution_error(text: str) -> bool:
+    return bool(re.search(
+        r"fatal error condition|unexpected exception|exception:\s*(?:segfault|other)|"
+        r"segmentation fault|subprocess (?:killed|aborted)|signal:\s*SIG[A-Z]+|"
+        r"\*\*\*Timeout|test timed out|test terminated|\(SEGFAULT\)|\(Timeout\)",
+        text, re.IGNORECASE))
+
+
+def read_junit_evidence(junit: Path) -> dict[str, Any]:
+    """Require complete, internally consistent testcase identities and totals."""
+    evidence: dict[str, Any] = {
+        "usable": False, "errors": [], "counts": {
+            "tests": 0, "failures": 0, "errors": 0, "skipped": 0}, "cases": {},
+    }
     try:
+        if junit.stat().st_size > 64 * 1024 * 1024:
+            raise ValueError("JUnit exceeds the 64 MiB evidence limit")
         root = ElementTree.parse(junit).getroot()
-    except (ElementTree.ParseError, OSError):
-        return {}
-    statuses: dict[str, str] = {}
+    except (ElementTree.ParseError, OSError, ValueError) as exc:
+        evidence["errors"].append(str(exc))
+        return evidence
+    if _xml_tag(root) not in {"testsuite", "testsuites"}:
+        evidence["errors"].append("JUnit root is not a test suite")
+        return evidence
+    statuses: dict[ElementTree.Element, str] = {}
     for case in root.iter():
-        if case.tag.rsplit("}", 1)[-1] != "testcase":
+        if _xml_tag(case) != "testcase":
             continue
-        name = case.attrib.get("name", "")
+        name = case.get("name", "")
+        classname = case.get("classname", "")
+        identity = f"{classname}::{name}" if classname else name
         if not name:
-            continue
-        classname = case.attrib.get("classname", "")
-        key = f"{classname}::{name}" if classname else name
-        if key in statuses:
-            # A repeated display name must not let a later passing case hide an
-            # earlier failure.  Keep both observations independently keyed.
-            suffix = 2
-            while f"{key}#{suffix}" in statuses:
-                suffix += 1
-            key = f"{key}#{suffix}"
-        if any(child.tag.rsplit("}", 1)[-1] in {"failure", "error"}
-               for child in case):
-            statuses[key] = "failed"
-        elif any(child.tag.rsplit("}", 1)[-1] == "skipped" for child in case):
-            statuses[key] = "skipped"
+            evidence["errors"].append("testcase lacks a name")
+        if identity in evidence["cases"]:
+            evidence["errors"].append(f"duplicate testcase identity: {identity}")
+        tags = {_xml_tag(child) for child in case}
+        if "error" in tags or ("failure" in tags and
+                               _execution_error(ElementTree.tostring(case, encoding="unicode"))):
+            status = "error"
+        elif "failure" in tags:
+            status = "failed"
+        elif "skipped" in tags or case.get("status") in {"notrun", "disabled"}:
+            status = "skipped"
         else:
-            statuses[key] = "passed"
-    return statuses
+            status = "passed"
+        statuses[case] = status
+        evidence["cases"][identity] = status
+    evidence["counts"] = {
+        "tests": len(statuses), "failures": sum(s == "failed" for s in statuses.values()),
+        "errors": sum(s == "error" for s in statuses.values()),
+        "skipped": sum(s == "skipped" for s in statuses.values()),
+    }
+    for suite in root.iter():
+        if _xml_tag(suite) not in {"testsuite", "testsuites"}:
+            continue
+        for key in ("tests", "failures", "errors", "skipped", "disabled"):
+            if key in suite.attrib:
+                try:
+                    value = int(suite.attrib[key])
+                    if value < 0 or (key == "disabled" and value != 0):
+                        raise ValueError(f"invalid or incomplete {key} total: {value}")
+                except ValueError as exc:
+                    evidence["errors"].append(str(exc))
+        children = [statuses[case] for case in suite.iter() if case in statuses]
+        # CTest encodes crashes in <failure>, while Catch may use <error>.
+        # Verify the reported failure/error sum, then retain the stronger
+        # execution-error classification above.
+        expected = {"tests": len(children), "skipped": children.count("skipped")}
+        for key, actual in expected.items():
+            if key in suite.attrib:
+                try:
+                    if int(suite.attrib[key]) != actual:
+                        raise ValueError(f"{key} total differs from testcase evidence")
+                except ValueError as exc:
+                    evidence["errors"].append(str(exc))
+        if "failures" in suite.attrib or "errors" in suite.attrib:
+            try:
+                total = int(suite.get("failures", "0")) + int(suite.get("errors", "0"))
+                if total != children.count("failed") + children.count("error"):
+                    raise ValueError("failure/error total differs from testcase evidence")
+            except ValueError as exc:
+                evidence["errors"].append(str(exc))
+    if not statuses:
+        evidence["errors"].append("JUnit contains no testcases")
+    evidence["usable"] = not evidence["errors"]
+    return evidence
+
+
+def junit_case_statuses(junit: Path) -> dict[str, str]:
+    evidence = read_junit_evidence(junit)
+    return evidence["cases"] if evidence["usable"] else {}
+
+
+def classify_junit_result(result: CommandResult, evidence: dict[str, Any],
+                          console_count: int, *, no_tests: bool = False) -> str:
+    if result.timed_out:
+        return "test_timeout"
+    if result.returncode is not None and result.returncode < 0:
+        return "test_error"
+    if no_tests:
+        return ("test_evidence_incomplete" if evidence["usable"] and
+                evidence["counts"]["tests"] > 0 else "no_tests")
+    if not evidence["usable"] or console_count != evidence["counts"]["tests"]:
+        return "test_evidence_incomplete"
+    counts = evidence["counts"]
+    if counts["errors"] or _execution_error(result.stdout + result.stderr):
+        return "test_error"
+    if counts["skipped"]:
+        return "test_skipped"
+    if counts["failures"]:
+        return "test_failed" if result.returncode else "test_evidence_incomplete"
+    return "pass" if result.returncode == 0 else "test_error"
 
 
 def classify_command(result: CommandResult, phase: str) -> str:
@@ -264,12 +347,12 @@ def parse_numbers(values: Sequence[Any] | None) -> list[int] | None:
     return numbers
 
 
-def load_snapshot(path: Path) -> list[dict[str, Any]]:
+def load_snapshot(path: Path, *, content: bytes | None = None) -> list[dict[str, Any]]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_bytes() if content is None else content)
     except OSError as exc:
         raise ValidationError(f"cannot read snapshot {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValidationError(f"snapshot is not valid JSON: {path}: {exc}") from exc
     if not isinstance(payload, list) or not payload:
         raise ValidationError("snapshot must be a non-empty JSON list")
@@ -474,16 +557,34 @@ def _reset_worktree(worktree: Path, commit: str) -> list[dict[str, Any]]:
 
 
 def _run_phase(argv: Sequence[str], *, cwd: Path, timeout: float, log: Path) -> CommandResult:
-    result = run_command(argv, cwd=cwd, timeout=timeout)
-    _write_log(log, result)
-    return result
+    """Keep full native output on disk and only a bounded tail in the report."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    returncode, timed_out = None, False
+    with log.open("wb") as stream:
+        try:
+            result = run_captured(argv, cwd=cwd, timeout=timeout, output_file=stream)
+            returncode = result.returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        except OSError as exc:
+            returncode = 127
+            stream.write(str(exc).encode("utf-8", "replace"))
+    with log.open("rb") as stream:
+        size = stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, size - MAX_OUTPUT))
+        tail = stream.read(MAX_OUTPUT).decode("utf-8", "replace")
+    if size > MAX_OUTPUT:
+        tail = "...[earlier output retained in log]...\n" + tail
+    return CommandResult(list(argv), returncode, time.monotonic() - started,
+                         tail, "", timed_out)
 
 
 def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Namespace,
               configure_args: Sequence[str], build_args: Sequence[str],
               *, commit_sha: str, tree_sha: str | None) -> dict[str, Any]:
     run_dir = root_output / name
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     entry: dict[str, Any] = {
         "name": name,
@@ -524,20 +625,19 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
     test_output = test.stdout + test.stderr
     entry["test_evidence"] = test_evidence(test_output)
     entry["no_test_evidence"] = no_test_evidence(test_output)
-    entry["skipped_test_evidence"] = skipped_test_evidence(test_output, junit)
     entry["junit_exists"] = junit.is_file()
-    case_statuses = junit_case_statuses(junit)
+    junit_evidence = read_junit_evidence(junit)
+    entry["junit_evidence"] = junit_evidence
+    entry["skipped_test_evidence"] = junit_evidence["counts"]["skipped"]
+    case_statuses = junit_evidence["cases"] if junit_evidence["usable"] else {}
     entry["junit_case_statuses"] = case_statuses
-    entry["failed_test_names"] = sorted(name for name, status in case_statuses.items()
-                                         if status == "failed")
-    entry["skipped_test_names"] = sorted(name for name, status in case_statuses.items()
-                                          if status == "skipped")
-    status = classify_test_result(test, entry["test_evidence"],
-                                  skipped=entry["skipped_test_evidence"],
-                                  no_tests=entry["no_test_evidence"])
-    entry["junit_reference_usable"] = bool(
-        case_statuses and entry["junit_exists"] and entry["skipped_test_evidence"] == 0 and
-        status in {"pass", "test_failed"})
+    for field, wanted in (("failed_test_names", "failed"), ("skipped_test_names", "skipped"),
+                          ("error_test_names", "error")):
+        entry[field] = sorted(name for name, case_status in case_statuses.items()
+                              if case_status == wanted)
+    status = classify_junit_result(test, junit_evidence, entry["test_evidence"],
+                                   no_tests=entry["no_test_evidence"])
+    entry["junit_reference_usable"] = status in {"pass", "test_failed"}
     return finish(status)
 
 
@@ -553,7 +653,8 @@ def classify_failure_names(reference: dict[str, Any] | None,
     head_names = set(head.get("failed_test_names", []))
     reference_names = {name for name, status in reference_statuses.items()
                        if status == "failed"}
-    if not reference or not reference.get("junit_reference_usable", False):
+    if (not reference or not reference.get("junit_reference_usable", False)
+            or not head.get("junit_reference_usable", False)):
         return {
             "reference_available": False,
             "inherited": [], "new": [], "resolved": [],
@@ -564,7 +665,7 @@ def classify_failure_names(reference: dict[str, Any] | None,
                 "No comparable reference testcase execution was available; matching names "
                 "cannot establish a shared root cause."
             ),
-            "reason": "reference JUnit evidence unavailable",
+            "reason": "reference or head JUnit evidence unavailable or noncomparable",
         }
     inherited = sorted(name for name in head_names if reference_statuses.get(name) == "failed")
     new = sorted(name for name in head_names if reference_statuses.get(name) == "passed")
@@ -601,7 +702,9 @@ def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
     if all(status == "pass" for status in statuses):
         return "pass", 0
     if any(status in {"patch_conflict", "invalid_ref", "reset_failed",
-                      "tree_resolution_failed", "infrastructure_error", "cleanup_failed"}
+                      "tree_resolution_failed", "infrastructure_error", "cleanup_failed",
+                      "test_error", "test_evidence_incomplete", "test_timeout",
+                      "test_skipped", "no_tests", "configure_timeout", "build_timeout"}
            for status in statuses):
         return "infrastructure_error", 2
     if any(status in {"tracked_source_index_changed", "tracked_source_index_resolution_failed"}
@@ -614,9 +717,12 @@ def run_validation(args: argparse.Namespace) -> int:
     repo = Path(args.root).resolve()
     snapshot_path = Path(args.snapshot).resolve()
     output = Path(args.output_dir).resolve()
+    if output.exists() and any(output.iterdir()):
+        raise ValidationError(f"output directory must be new or empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
     numbers = parse_numbers(args.numbers)
-    records = select_snapshot(load_snapshot(snapshot_path), numbers)
+    snapshot_bytes = snapshot_path.read_bytes()
+    records = select_snapshot(load_snapshot(snapshot_path, content=snapshot_bytes), numbers)
 
     original_head, original_head_result = resolve_commit(repo, "HEAD")
     if original_head is None:
@@ -650,6 +756,9 @@ def run_validation(args: argparse.Namespace) -> int:
         "status": "infrastructure_error",
         "started_at_epoch": time.time(),
         "snapshot": str(snapshot_path),
+        "snapshot_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
+        "output_device": output.stat().st_dev,
+        "preflight_heads": [],
         "selected_numbers": [int(item["number"]) for item in records],
         "harness": {
             "base_ref": args.harness_base, "base_sha": harness_base,
@@ -683,6 +792,15 @@ def run_validation(args: argparse.Namespace) -> int:
     cleanup: dict[str, Any] = {}
     started = time.monotonic()
     try:
+        for record in records:
+            resolved, resolution = resolve_commit(repo, record["headRefOid"])
+            report["preflight_heads"].append({
+                "number": record["number"], "requested_oid": record["headRefOid"],
+                "resolved_oid": resolved, "resolution": resolution.json(),
+            })
+        if any(item["resolved_oid"] != item["requested_oid"] for item in report["preflight_heads"]):
+            report["baseline"] = {"status": "invalid_ref"}
+            raise ValidationError("snapshot contains unavailable exact head commits")
         parent = Path(tempfile.mkdtemp(prefix="slicer-pr-validation-", dir=str(output.parent)))
         worktree = parent / "repo"
         add = _git(repo, "worktree", "add", "--detach", str(worktree), harness_ref, timeout=300)

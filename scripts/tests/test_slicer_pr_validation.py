@@ -1,6 +1,7 @@
 """Unit tests for PR-head validation status and cleanup semantics."""
 
 from pathlib import Path
+import hashlib
 import json
 import subprocess
 import sys
@@ -88,6 +89,18 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(slicer_pr_validation._overall_status(report),
                          ("infrastructure_error", 2))
 
+    def test_incomplete_head_statuses_are_infrastructure_failures(self):
+        for status in ("test_timeout", "test_skipped", "no_tests"):
+            with self.subTest(status=status):
+                report = {
+                    "baseline": {"status": "pass"},
+                    "heads": [{"status": status}],
+                }
+                self.assertEqual(
+                    slicer_pr_validation._overall_status(report),
+                    ("infrastructure_error", 2),
+                )
+
     def test_reference_failures_are_classified_without_suppressing_head(self):
         reference = {
             "junit_exists": True,
@@ -101,6 +114,7 @@ class StatusTests(unittest.TestCase):
         }
         head = {
             "status": "pass",
+            "junit_reference_usable": True,
             "junit_case_statuses": {
                 "suite::known base regression": "passed",
                 "suite::resolved on PR": "passed",
@@ -155,6 +169,7 @@ class StatusTests(unittest.TestCase):
         }
         head = {
             "status": "test_failed",
+            "junit_reference_usable": True,
             "junit_case_statuses": {
                 "suite::inherited": "failed",
                 "suite::resolved": "passed",
@@ -201,9 +216,198 @@ class StatusTests(unittest.TestCase):
                 "<testsuites><testsuite><testcase classname='a' name='same'>"
                 "<failure/></testcase><testcase classname='a' name='same'/>"
                 "</testsuite></testsuites>", encoding="utf-8")
-            self.assertEqual(slicer_pr_validation.junit_case_statuses(junit), {
-                "a::same": "failed", "a::same#2": "passed",
-            })
+            # Duplicate identities are deliberately non-comparable now; the
+            # parser returns no cases rather than assigning order-sensitive
+            # #2/#3 suffixes.
+            self.assertEqual(slicer_pr_validation.junit_case_statuses(junit), {})
+
+    def test_head_junit_evidence_is_required_for_differential_classification(self):
+        reference = {
+            "junit_reference_usable": True,
+            "junit_case_statuses": {"suite::new": "passed"},
+            "failed_test_names": [],
+        }
+        head = {
+            "status": "test_failed",
+            "junit_reference_usable": False,
+            "junit_case_statuses": {"suite::new": "failed"},
+            "failed_test_names": ["suite::new"],
+        }
+        classification = slicer_pr_validation.classify_failure_names(reference, head)
+        self.assertFalse(classification["reference_available"])
+        self.assertEqual(classification["new"], [])
+        self.assertEqual(classification["uncompared_head_failures"], ["suite::new"])
+
+
+class JUnitEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def _result(returncode=0, *, timed_out=False, output="100% tests passed, 0 tests failed out of 2"):
+        return slicer_pr_validation.CommandResult(
+            ["ctest"], returncode, 0.01, output, "", timed_out)
+
+    @staticmethod
+    def _write(root, name, contents):
+        path = root / name
+        path.write_text(contents, encoding="utf-8")
+        return path
+
+    def test_catch_case_count_and_explicit_ctest_summary_win(self):
+        self.assertEqual(
+            slicer_pr_validation.test_evidence(
+                "All tests passed (43 assertions in 2 test cases)"), 2)
+        self.assertEqual(
+            slicer_pr_validation.test_evidence(
+                "100% tests passed, 0 tests failed out of 5\n"
+                "All tests passed (43 assertions in 2 test cases)"), 5)
+
+    def test_valid_junit_preserves_error_as_distinct_case_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            junit = self._write(
+                Path(temp), "valid.xml",
+                """<testsuites><testsuite name='suite' tests='4' failures='1'
+                errors='1' skipped='1'>
+                <testcase classname='suite' name='pass'/>
+                <testcase classname='suite' name='assertion'><failure/></testcase>
+                <testcase classname='suite' name='crash'><error/></testcase>
+                <testcase classname='suite' name='skip'><skipped/></testcase>
+                </testsuite></testsuites>""",
+            )
+            evidence = slicer_pr_validation.read_junit_evidence(junit)
+        self.assertTrue(evidence["usable"])
+        self.assertEqual(evidence["counts"], {
+            "tests": 4, "failures": 1, "errors": 1, "skipped": 1,
+        })
+        self.assertEqual(evidence["cases"], {
+            "suite::pass": "passed",
+            "suite::assertion": "failed",
+            "suite::crash": "error",
+            "suite::skip": "skipped",
+        })
+
+    def test_ctest_crash_encoded_as_failure_is_error_but_assertion_is_failed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            junit = self._write(
+                root, "crash.xml",
+                """<testsuites><testsuite tests='2' failures='2' errors='0' skipped='0'>
+                <testcase classname='suite' name='assertion'><failure message='CHECK failed'/></testcase>
+                <testcase classname='suite' name='crash'><failure message='Subprocess killed (SEGFAULT)'/></testcase>
+                </testsuite></testsuites>""",
+            )
+            evidence = slicer_pr_validation.read_junit_evidence(junit)
+        self.assertTrue(evidence["usable"])
+        self.assertEqual(evidence["cases"]["suite::assertion"], "failed")
+        self.assertEqual(evidence["cases"]["suite::crash"], "error")
+        self.assertEqual(
+            slicer_pr_validation.classify_junit_result(
+                self._result(8), evidence, 2), "test_error")
+
+    def test_exit_zero_with_reported_failure_is_evidence_incomplete(self):
+        evidence = {
+            "usable": True,
+            "errors": [],
+            "counts": {"tests": 2, "failures": 1, "errors": 0, "skipped": 0},
+            "cases": {"suite::one": "failed", "suite::two": "passed"},
+        }
+        self.assertEqual(
+            slicer_pr_validation.classify_junit_result(
+                self._result(0), evidence, 2), "test_evidence_incomplete")
+
+    def test_duplicate_invalid_and_contradictory_junit_are_unusable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            duplicate = self._write(
+                root, "duplicate.xml",
+                """<testsuites><testsuite tests='2' failures='0' errors='0' skipped='0'>
+                <testcase classname='suite' name='same'/>
+                <testcase classname='suite' name='same'/>
+                </testsuite></testsuites>""",
+            )
+            contradictory = self._write(
+                root, "contradictory.xml",
+                """<testsuites><testsuite tests='1' failures='0' errors='0' skipped='0'>
+                <testcase classname='suite' name='failed'><failure/></testcase>
+                </testsuite></testsuites>""",
+            )
+            malformed = self._write(root, "malformed.xml", "<testsuites>")
+            negative = self._write(
+                root, "negative.xml",
+                """<testsuites><testsuite tests='-1' failures='0' errors='0' skipped='0'
+                disabled='0'><testcase classname='suite' name='one'/></testsuite></testsuites>""",
+            )
+            disabled = self._write(
+                root, "disabled.xml",
+                """<testsuites><testsuite tests='1' failures='0' errors='0' skipped='0'
+                disabled='1'><testcase classname='suite' name='one'/></testsuite></testsuites>""",
+            )
+            missing = root / "missing.xml"
+            duplicate_evidence = slicer_pr_validation.read_junit_evidence(duplicate)
+            contradictory_evidence = slicer_pr_validation.read_junit_evidence(contradictory)
+            malformed_evidence = slicer_pr_validation.read_junit_evidence(malformed)
+            negative_evidence = slicer_pr_validation.read_junit_evidence(negative)
+            disabled_evidence = slicer_pr_validation.read_junit_evidence(disabled)
+            missing_evidence = slicer_pr_validation.read_junit_evidence(missing)
+        for evidence in (duplicate_evidence, contradictory_evidence,
+                         malformed_evidence, negative_evidence, disabled_evidence,
+                         missing_evidence):
+            self.assertFalse(evidence["usable"])
+            self.assertTrue(evidence["errors"])
+
+    def test_classify_junit_result_is_fail_closed(self):
+        good = {
+            "usable": True,
+            "errors": [],
+            "counts": {"tests": 2, "failures": 0, "errors": 0, "skipped": 0},
+            "cases": {"suite::one": "passed", "suite::two": "passed"},
+        }
+        failed = {
+            **good,
+            "counts": {"tests": 2, "failures": 1, "errors": 0, "skipped": 0},
+            "cases": {"suite::one": "failed", "suite::two": "passed"},
+        }
+        errored = {
+            **good,
+            "counts": {"tests": 2, "failures": 0, "errors": 1, "skipped": 0},
+            "cases": {"suite::one": "error", "suite::two": "passed"},
+        }
+        skipped = {
+            **good,
+            "counts": {"tests": 2, "failures": 0, "errors": 0, "skipped": 1},
+            "cases": {"suite::one": "passed", "suite::two": "skipped"},
+        }
+        classify = slicer_pr_validation.classify_junit_result
+        self.assertEqual(classify(self._result(), good, 2), "pass")
+        self.assertEqual(classify(self._result(1), failed, 2), "test_failed")
+        self.assertEqual(classify(self._result(8), errored, 2), "test_error")
+        self.assertEqual(classify(self._result(), skipped, 2), "test_skipped")
+        self.assertEqual(classify(self._result(None, timed_out=True), good, 2), "test_timeout")
+        self.assertEqual(classify(self._result(), good, 2, no_tests=True),
+                         "test_evidence_incomplete")
+        empty = {
+            "usable": False,
+            "errors": ["JUnit contains no testcases"],
+            "counts": {"tests": 0, "failures": 0, "errors": 0, "skipped": 0},
+            "cases": {},
+        }
+        self.assertEqual(classify(self._result(), empty, 0, no_tests=True), "no_tests")
+        self.assertEqual(classify(self._result(), {**good, "usable": False}, 2),
+                         "test_evidence_incomplete")
+        self.assertEqual(classify(self._result(), good, 3), "test_evidence_incomplete")
+
+
+class ProcessCaptureTests(unittest.TestCase):
+    def test_run_phase_keeps_large_output_on_disk_and_bounds_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "phase.log"
+            code = "import sys; sys.stdout.write('x' * 100000); sys.stderr.write('y' * 100000)"
+            result = slicer_pr_validation._run_phase(
+                [sys.executable, "-c", code], cwd=Path(temp), timeout=10, log=log)
+            self.assertEqual(result.returncode, 0)
+            self.assertFalse(result.timed_out)
+            self.assertEqual(result.stderr, "")
+            self.assertLessEqual(
+                len(result.stdout), slicer_pr_validation.MAX_OUTPUT + 80)
+            self.assertGreater(log.stat().st_size, 190000)
 
 
 class CleanupTests(unittest.TestCase):
@@ -416,6 +620,140 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         }]), encoding="utf-8")
         return snapshot
 
+    def test_nonempty_output_directory_is_rejected_before_worktree_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head)
+            output = root / "evidence"
+            output.mkdir()
+            (output / "stale-report.json").write_text("stale\n", encoding="utf-8")
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with self.assertRaises(slicer_pr_validation.ValidationError):
+                slicer_pr_validation.run_validation(args)
+
+    def test_missing_snapshot_oid_fails_preflight_before_any_tree_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, _ = self._fixture(root)
+            snapshot = root / "snapshot.json"
+            missing = "0" * 40
+            snapshot.write_text(json.dumps([{
+                "number": 1, "headRefName": "missing", "headRefOid": missing,
+            }]), encoding="utf-8")
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with mock.patch.object(slicer_pr_validation, "_run_tree") as run_tree:
+                with self.assertRaises(slicer_pr_validation.ValidationError):
+                    slicer_pr_validation.run_validation(args)
+            run_tree.assert_not_called()
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["preflight_heads"][0]["requested_oid"], missing)
+            self.assertIsNone(report["preflight_heads"][0]["resolved_oid"])
+
+    def test_report_records_snapshot_digest_and_preflight_heads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree):
+                result = slicer_pr_validation.run_validation(args)
+            self.assertEqual(result, 0)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                report["snapshot_sha256"], hashlib.sha256(snapshot.read_bytes()).hexdigest())
+            self.assertEqual(len(report["preflight_heads"]), 1)
+            preflight = report["preflight_heads"][0]
+            self.assertEqual(preflight["number"], 1)
+            self.assertEqual(preflight["requested_oid"], head)
+            self.assertEqual(preflight["resolved_oid"], head)
+            self.assertEqual(preflight["resolution"]["returncode"], 0)
+
+    def test_snapshot_digest_uses_bytes_loaded_before_path_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            original_bytes = snapshot.read_bytes()
+            changed_bytes = json.dumps([{
+                "number": 1,
+                "headRefName": "head",
+                "headRefOid": head,
+                "changed_after_load": True,
+            }]).encode("utf-8")
+            real_load_snapshot = slicer_pr_validation.load_snapshot
+
+            def replace_path_after_read(path, *, content=None):
+                snapshot.write_bytes(changed_bytes)
+                return real_load_snapshot(path, content=content)
+
+            with mock.patch.object(slicer_pr_validation, "load_snapshot",
+                                   side_effect=replace_path_after_read) as load_snapshot, \
+                 mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree):
+                result = slicer_pr_validation.run_validation(args)
+            self.assertEqual(result, 0)
+            load_snapshot.assert_called_once()
+            self.assertEqual(load_snapshot.call_args.kwargs["content"], original_bytes)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            recorded = report["snapshot_sha256"]
+            self.assertEqual(recorded, hashlib.sha256(original_bytes).hexdigest())
+            self.assertNotEqual(recorded, hashlib.sha256(changed_bytes).hexdigest())
+
+    def test_run_tree_requires_junit_when_ctest_console_reports_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head)
+            args = self._args(repo, snapshot, root / "evidence")
+            worktree = root / "worktree"
+            worktree.mkdir()
+            root_output = root / "runs"
+            root_output.mkdir()
+
+            def run_case(name, malformed):
+                configure = slicer_pr_validation.CommandResult(
+                    ["cmake"], 0, 0.01, "", "")
+                build = slicer_pr_validation.CommandResult(
+                    ["cmake-build"], 0, 0.01, "", "")
+                test = slicer_pr_validation.CommandResult(
+                    ["ctest"], 0, 0.01,
+                    "100% tests passed, 0 tests failed out of 1", "")
+                results = [configure, build, test]
+
+                def fake_phase(argv, *, cwd, timeout, log):
+                    result = results.pop(0)
+                    if log.name == "test.log" and malformed:
+                        log.parent.joinpath("tests.junit.xml").write_text(
+                            "<testsuite>", encoding="utf-8")
+                    return result
+
+                with mock.patch.object(slicer_pr_validation, "_run_phase",
+                                       side_effect=fake_phase):
+                    entry = slicer_pr_validation._run_tree(
+                        worktree, root_output, name, args,
+                        ["configure"], ["build"],
+                        commit_sha=head, tree_sha="tree")
+                self.assertEqual(entry["status"], "test_evidence_incomplete")
+                self.assertFalse(entry["junit_reference_usable"])
+                self.assertFalse(entry["junit_evidence"]["usable"])
+
+            run_case("absent", False)
+            run_case("malformed", True)
+
     @staticmethod
     def _fake_run_tree(worktree, root_output, name, args, configure_args, build_args, **kwargs):
         if name == "baseline":
@@ -431,6 +769,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         return {
             "name": name,
             "status": "pass",
+            "junit_reference_usable": True,
             "junit_case_statuses": {"suite::base regression": "passed"},
             "failed_test_names": [],
         }

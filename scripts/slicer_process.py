@@ -6,16 +6,19 @@ import os
 from pathlib import Path
 import signal
 import subprocess
-from typing import Sequence
+from typing import IO, Sequence
 
 
 def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
                  env: dict[str, str] | None = None, timeout: float | None = None,
-                 input_data: str | bytes | None = None) -> subprocess.CompletedProcess:
+                 input_data: str | bytes | None = None,
+                 output_file: IO | None = None) -> subprocess.CompletedProcess:
     """Run a build or test in its own process group, preserving partial output.
 
     Killing only CMake, Ninja, or CTest leaves compiler/test children running
     against a worktree the caller may be about to restore or remove.
+    With ``output_file``, both streams go directly to that file without being
+    buffered in Python; the returned stdout/stderr are then None.
     """
     text_mode = not isinstance(input_data, bytes)
     group_options = ({"start_new_session": True} if os.name == "posix" else
@@ -23,7 +26,8 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
     with subprocess.Popen(
         list(argv), cwd=cwd, env=env, shell=False,
         stdin=subprocess.PIPE if input_data is not None else None,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=output_file if output_file is not None else subprocess.PIPE,
+        stderr=subprocess.STDOUT if output_file is not None else subprocess.PIPE,
         text=text_mode, encoding="utf-8" if text_mode else None,
         errors="replace" if text_mode else None, **group_options,
     ) as process:
