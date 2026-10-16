@@ -65,6 +65,12 @@ run. Verify parent-death, memory-limit, and timeout cleanup with small synthetic
 processes when adopting a new worker. Preserve failed logs and binaries before
 rebuilding; an interrupted run is incomplete evidence.
 
+Serialize heavy controllers on a shared worker. On tmpfs, retained build and
+mutation artifacts also consume memory charged to the cgroup; check both free
+storage and the shared slice's memory use between runs. Archive successful
+artifacts with verified hashes before pruning them, and retain failures for
+diagnosis. An OOM termination is an infrastructure failure, never a mutation kill.
+
 ## Confidence runs
 
 The checked-in harnesses keep coverage and mutation evidence tied to the real
@@ -287,9 +293,10 @@ current ripple dispatch ignores those parameters.
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
 line or segment details are needed. Profile-merge and export diagnostics are retained
-in the report even when the LLVM commands succeed. Investigate mismatch warnings
-with `llvm-cov export --dump` against the same binaries and profile; an integrity
-pass checks mapping presence and does not certify that LLVM emitted no warnings. A zero-summary header that the successful
+in the report even when the LLVM commands succeed. A nonzero function-profile
+mismatch count fails the integrity gate, because LLVM can omit those functions
+from the denominator while returning success. Investigate these warnings with
+`llvm-cov export --dump` against the same binaries and profile. A zero-summary header that the successful
 object audit proves has no executable mapping is recorded as
 `mapping_free_headers`. A header with an executable object mapping but no final
 mapping remains an integrity failure. Reports expose `integrity_status`

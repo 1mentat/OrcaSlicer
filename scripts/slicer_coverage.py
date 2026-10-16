@@ -557,6 +557,13 @@ def _exported_executable_paths(export: dict[str, Any], *, path_base: Path) -> se
     return paths
 
 
+def _profile_mapping_errors(stderr: str) -> list[str]:
+    # LLVM can exit successfully after dropping functions whose profile hashes
+    # do not match their coverage maps. Their absence can shrink the denominator.
+    return [line.strip() for line in stderr.splitlines()
+            if re.search(r"\b[1-9][0-9]* functions have mismatched data\b", line)]
+
+
 def _compiler_source_evidence(llvm_cov: str, manifest: Sequence[Path],
                               compile_commands: Path, *, timeout: float | None,
                               profile: Path | None = None) -> dict[str, Any]:
@@ -624,6 +631,14 @@ def _compiler_source_evidence(llvm_cov: str, manifest: Sequence[Path],
                     errors.append({"source": source_name, "reason": "compiler_export_failed",
                                    "object": str(object_path), "stderr": export.stderr})
                     source_had_error = True
+                object_records.append(object_record)
+                continue
+            mapping_errors = _profile_mapping_errors(export.stderr or "")
+            if mapping_errors:
+                object_record["status"] = "profile_mapping_error"
+                errors.append({"source": source_name, "reason": "compiler_profile_mapping_error",
+                               "object": str(object_path), "diagnostics": mapping_errors})
+                source_had_error = True
                 object_records.append(object_record)
                 continue
             try:
@@ -873,6 +888,7 @@ def run_coverage(args: argparse.Namespace) -> int:
         if key not in report["summary"] or int(report["summary"][key].get("count", 0)) <= 0
     ]
     integrity_failures = {
+        "profile_mapping": _profile_mapping_errors(export.stderr or ""),
         "compiler_evidence": compiler_errors,
         "missing_compiled_source_mappings": linked_missing,
         "missing_object_executable_mappings": missing_object_mappings,

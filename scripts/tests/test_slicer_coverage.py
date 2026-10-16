@@ -276,7 +276,7 @@ class CoverageExportTests(unittest.TestCase):
 
 
 class CoverageDiagnosticTests(unittest.TestCase):
-    def test_successful_export_preserves_profile_diagnostics(self):
+    def test_hash_mismatch_fails_gate_even_when_export_succeeds_at_full_coverage(self):
         import subprocess
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -315,12 +315,49 @@ class CoverageDiagnosticTests(unittest.TestCase):
                     "run", "--root", str(root), "--object", str(binary),
                     "--test-command", "fixture-tests", "--out", "report",
                 ])
-            self.assertEqual(status, 0)
+            self.assertEqual(status, 1)
             report = json.loads((root / "report/coverage-report.json").read_text())
+            self.assertEqual(report["status"], "coverage_integrity_error")
+            self.assertEqual(report["integrity_status"], "error")
+            self.assertEqual(report["integrity_failures"]["profile_mapping"],
+                             ["warning: 1 functions have mismatched data"])
             self.assertEqual(report["export"]["stderr"], "warning: 1 functions have mismatched data\n")
             self.assertEqual(report["merge"]["stdout"], "profile merge notice\n")
             self.assertEqual(report["merge"]["stderr"], "profile merge diagnostic\n")
             self.assertNotIn("stdout", report["export"])  # The large JSON export has its own file.
+            self.assertEqual(json.loads((root / "report/coverage-export.json").read_text()), exported)
+
+    def test_unrelated_diagnostics_are_not_profile_mismatches(self):
+        for diagnostics in ("", "informational diagnostic\n",
+                            "warning: 0 functions have mismatched data\n"):
+            with self.subTest(diagnostics=diagnostics):
+                self.assertEqual(slicer_coverage._profile_mapping_errors(diagnostics), [])
+
+    def test_mismatched_object_is_not_classified_as_mapping_free(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "omitted.cpp"
+            source.write_text("int omitted() { return 1; }\n")
+            obj = root / "omitted.o"
+            obj.touch()
+            commands = root / "compile_commands.json"
+            commands.write_text(json.dumps([{
+                "directory": str(root), "file": str(source), "arguments": [
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    str(source), "-o", str(obj),
+                ],
+            }]))
+            result = slicer_coverage.subprocess.CompletedProcess(
+                ["llvm-cov"], 0, '{"data": [{"files": []}]}',
+                "warning: 3878 functions have mismatched data\n",
+            )
+            with mock.patch.object(slicer_coverage, "_run", return_value=result):
+                evidence = slicer_coverage._compiler_source_evidence(
+                    "llvm-cov", [source], commands, timeout=1,
+                )
+            self.assertEqual(evidence["status"], "error")
+            self.assertEqual(evidence["mapping_free_sources"], [])
+            self.assertEqual(evidence["errors"][0]["reason"], "compiler_profile_mapping_error")
 
 
 class CommandTests(unittest.TestCase):

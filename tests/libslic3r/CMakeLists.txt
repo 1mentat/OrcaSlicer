@@ -74,6 +74,7 @@ add_executable(${_TEST_NAME}_tests
     test_obj.cpp
     test_obj_color_utils.cpp
     test_sl1.cpp
+    test_zipper_archive_import.cpp
     test_step.cpp
     test_stl.cpp
     test_svg.cpp
