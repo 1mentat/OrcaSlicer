@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed normal-support pattern mutants for runtime enum mapping, fallback warnings, and alternating grid direction. Header changes require rebuilding every affected consumer. Execution results are recorded separately.",
+  "mutants": [
+    {
+      "id": "support-base-pattern-honeycomb-mapping-remapped",
+      "path": "src/libslic3r/Support/SupportParameters.hpp",
+      "old": "            support_pattern == smpHoneycomb ? ipHoneycomb :",
+      "new": "            support_pattern == smpHoneycomb ? ipSupportBase :",
+      "description": "The honeycomb partition requires observed.base_fill_pattern == ipHoneycomb and a direction signature distinct from rectilinear.",
+      "test_filter": "SupportBasePattern"
+    },
+    {
+      "id": "normal-lightning-fallback-warning-removed",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                } else if (object->config().support_base_pattern == SupportMaterialPattern::smpLightning) {\n                    // Orca: check if the Lightning base pattern selected\n                    warn(L(\"The Lightning base pattern is not supported by this support type; Rectilinear will be used instead.\"), \"support_base_pattern\");",
+      "new": "                } else if (object->config().support_base_pattern == SupportMaterialPattern::smpLightning) {\n                    // mutation: omit the structured lightning fallback warning",
+      "description": "The lightning case requires a warning with is_warning=true, opt_key support_base_pattern, and the Rectilinear fallback token.",
+      "test_filter": "SupportBasePattern"
+    },
+    {
+      "id": "normal-hollow-fallback-warning-removed",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                    warn(L(\"The Hollow base pattern is not supported by this support type; Rectilinear will be used instead.\"), \"support_base_pattern\");",
+      "new": "                    /* mutation: omit the structured hollow fallback warning */",
+      "description": "The hollow case requires a warning with is_warning=true, opt_key support_base_pattern, and the Rectilinear fallback token.",
+      "test_filter": "SupportBasePattern"
+    },
+    {
+      "id": "support-base-pattern-rectilinear-grid-angle-removed",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "    if (config.support_base_pattern == smpRectilinearGrid)\n        angles.push_back(support_params.interface_angle);",
+      "new": "    if (false)\n        angles.push_back(support_params.interface_angle);",
+      "description": "The rectilinear-grid case requires at least one interior common layer whose weighted axial base direction differs from rectilinear by more than 0.2 radians.",
+      "test_filter": "SupportBasePattern"
+    },
+    {
+      "id": "support-pattern-enum-value-remapped",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    { \"honeycomb\",          smpHoneycomb },",
+      "new": "    { \"honeycomb\",          smpRectilinear },",
+      "description": "The honeycomb partition requires observed.base_fill_pattern == ipHoneycomb; the remapped canonical token reaches the test and fails that behavior assertion.",
+      "test_filter": "SupportBasePattern"
+    }
+  ]
+}
