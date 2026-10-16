@@ -1289,12 +1289,24 @@ std::set<double> lift_height_deltas(const std::string &output, const DynamicPrin
     GCodeReader reader;
     reader.apply_config(config);
     bool has_printed = false;
-    reader.parse_buffer(output, [&heights, &has_printed](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+    bool awaiting_restore = false;
+    double lifted_z = 0.;
+    reader.parse_buffer(output, [&heights, &has_printed, &awaiting_restore, &lifted_z](GCodeReader &self,
+                                                                                 const GCodeReader::GCodeLine &line) {
         if (line.extruding(self) && line.dist_XY(self) > EPSILON)
             has_printed = true;
         if (has_printed && line.comment().find("lift Z") != std::string_view::npos &&
-            line.dist_Z(self) > EPSILON && std::isfinite(line.dist_Z(self)))
-            heights.insert(line.dist_Z(self));
+            line.dist_Z(self) > EPSILON && std::isfinite(line.dist_Z(self))) {
+            lifted_z = line.new_Z(self);
+            awaiting_restore = true;
+        } else if (awaiting_restore && line.comment().find("restore layer Z") != std::string_view::npos) {
+            // A lift move may also advance to the next layer. Measure the hop
+            // above its destination print plane, excluding that layer advance.
+            REQUIRE(std::isfinite(line.new_Z(self)));
+            REQUIRE(line.dist_Z(self) < -EPSILON);
+            heights.insert(lifted_z - line.new_Z(self));
+            awaiting_restore = false;
+        }
     });
     return heights;
 }
@@ -1431,6 +1443,7 @@ TEST_CASE("Nullable filament z hop inherits and overrides the normal lift height
     bool have_baseline = false;
     for (const auto &[value, expected_lift] : std::vector<std::pair<const char *, double>>{
              {"nil", 0.4}, {"0", 0.}, {"0.8", 0.8}}) {
+        CAPTURE(value, expected_lift);
         DynamicPrintConfig config = filament_retraction_config("filament_z_hop", value, "z_hop", "0.4");
         const std::string output = bounded_retraction_export(short_cube(), config);
         require_layer_marker_count(output, config, 5);
@@ -1444,6 +1457,7 @@ TEST_CASE("Nullable filament z hop inherits and overrides the normal lift height
         const std::set<double> lift_heights = lift_height_deltas(output, config);
         if (expected_lift == 0.) {
             CHECK(lift_heights.empty());
+            CHECK(retraction_stats(output, config).lift_zs.empty());
         } else {
             REQUIRE_FALSE(lift_heights.empty());
             for (const double height : lift_heights)

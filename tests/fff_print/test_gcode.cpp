@@ -752,6 +752,7 @@ struct SpiralLayerEvidence {
     double spiral_xy_path_length = 0.0;
     double flat_filament_length = 0.0;
     double post_spiral_flat_filament_length = 0.0;
+    std::vector<Vec2d> spiral_xy_endpoints;
     bool saw_spiral = false;
 };
 
@@ -800,7 +801,9 @@ SpiralSettingsEvidence parse_spiral_settings_output(const std::string &gcode,
         if (comment.rfind("LAYER_CHANGE", 0) == 0) {
             ++current_layer;
             evidence.layers.emplace_back();
-            active_role.clear();
+            // GCode emits role tags only when the role changes.  Keep the
+            // previous role across layer markers until a new TYPE/FEATURE
+            // tag is encountered.
         }
         if (comment.rfind("TYPE:", 0) == 0)
             active_role.assign(trim_spiral_comment(comment.substr(5)));
@@ -828,6 +831,10 @@ SpiralSettingsEvidence parse_spiral_settings_output(const std::string &gcode,
             evidence.finite = false;
             return;
         }
+        if (dz < -EPSILON) {
+            ++evidence.negative_z_extrusions;
+            return;
+        }
         const bool spiral_move = dz > EPSILON;
         layer.filament_length += de;
         layer.xy_path_length += dxy;
@@ -836,10 +843,9 @@ SpiralSettingsEvidence parse_spiral_settings_output(const std::string &gcode,
             ++evidence.spiral_z_extrusions;
             layer.spiral_filament_length += de;
             layer.spiral_xy_path_length += dxy;
+            layer.spiral_xy_endpoints.emplace_back(line.new_X(self), line.new_Y(self));
             layer.saw_spiral = true;
         } else {
-            if (dz < -EPSILON)
-                ++evidence.negative_z_extrusions;
             ++layer.flat_extrusions;
             layer.flat_filament_length += de;
             if (layer.saw_spiral) {
@@ -852,6 +858,24 @@ SpiralSettingsEvidence parse_spiral_settings_output(const std::string &gcode,
     REQUIRE(evidence.finite);
     REQUIRE(evidence.negative_z_extrusions == 0);
     return evidence;
+}
+
+bool spiral_xy_geometry_equal(const SpiralSettingsEvidence &candidate,
+                               const SpiralSettingsEvidence &baseline)
+{
+    if (candidate.layers.size() != baseline.layers.size())
+        return false;
+    for (size_t layer_idx = 0; layer_idx < baseline.layers.size(); ++layer_idx) {
+        const auto &candidate_points = candidate.layers[layer_idx].spiral_xy_endpoints;
+        const auto &baseline_points = baseline.layers[layer_idx].spiral_xy_endpoints;
+        if (candidate_points.size() != baseline_points.size())
+            return false;
+        for (size_t point_idx = 0; point_idx < baseline_points.size(); ++point_idx)
+            if (std::abs(candidate_points[point_idx].x() - baseline_points[point_idx].x()) > 1e-4 ||
+                std::abs(candidate_points[point_idx].y() - baseline_points[point_idx].y()) > 1e-4)
+                return false;
+    }
+    return true;
 }
 
 DynamicPrintConfig spiral_settings_config(bool smooth, const char *max_xy_smoothing,
@@ -943,14 +967,19 @@ TEST_CASE("Spiral settings preserve smooth geometry and flow transitions", "[GCo
                                smooth_zero.perimeter_extrusions == smooth_off.perimeter_extrusions &&
                                smooth_zero.spiral_z_extrusions == smooth_off.spiral_z_extrusions;
     if (zero_geometry_equal) {
-        for (size_t index = 0; index < smooth_off.layers.size(); ++index)
+        for (size_t index = 0; index < smooth_off.layers.size(); ++index) {
             zero_geometry_equal = zero_geometry_equal &&
                 std::abs(smooth_zero.layers[index].xy_path_length - smooth_off.layers[index].xy_path_length) <= 1e-4 &&
                 std::abs(smooth_zero.layers[index].spiral_filament_length - smooth_off.layers[index].spiral_filament_length) <= 1e-4;
+            if (!zero_geometry_equal)
+                break;
+        }
     }
+    zero_geometry_equal = zero_geometry_equal && spiral_xy_geometry_equal(smooth_zero, smooth_off);
     CHECK(zero_geometry_equal);
     const bool geometry_changed = smooth_high.layers.size() != smooth_off.layers.size() ||
-                                  smooth_high.perimeter_extrusions != smooth_off.perimeter_extrusions;
+                                  smooth_high.perimeter_extrusions != smooth_off.perimeter_extrusions ||
+                                  !spiral_xy_geometry_equal(smooth_high, smooth_off);
     bool path_changed = false;
     for (size_t index = 0; index < std::min(smooth_high.layers.size(), smooth_off.layers.size()); ++index)
         path_changed = path_changed ||
@@ -986,7 +1015,8 @@ TEST_CASE("Spiral settings preserve smooth geometry and flow transitions", "[GCo
     REQUIRE(base_transition != nullptr);
     REQUIRE(finish_transition != nullptr);
     CHECK(start_first.filament_length > base_first.filament_length + 1e-4);
-    CHECK(finish_transition->flat_filament_length > base_transition->flat_filament_length + 1e-4);
+    CHECK(finish_transition->flat_filament_length >
+          base_transition->flat_filament_length + 1e-4);
 }
 
 TEST_CASE("Arc fitting converts eligible perimeter motion to arcs", "[GCode][GCodeExportWorkflows]")

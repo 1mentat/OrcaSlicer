@@ -222,9 +222,19 @@ Evidence evidence_for(const Print &print, const std::string &output)
                 case erTopSolidInfill:
                     evidence.roles[top].geometry_path_length += path.length();
                     break;
+                case erSolidInfill:
+                    evidence.roles[internal_solid].geometry_path_length += path.length();
+                    break;
+                case erBottomSurface:
+                    evidence.roles[bottom].geometry_path_length += path.length();
+                    break;
                 default:
                     break;
                 }
+            });
+            for_each_extrusion_path(region->thin_fills, [&evidence](const ExtrusionPath &path) {
+                if (path.role() == erGapFill)
+                    evidence.roles[gap_fill].geometry_path_length += path.length();
             });
         }
     }
@@ -245,10 +255,8 @@ Evidence evidence_for(const Print &print, const std::string &output)
         // Match the role text itself because the compatible marker includes a
         // leading space and the exporter can select either tag spelling.
         const std::string_view comment = line.comment();
-        if (comment.find("LAYER_CHANGE") != std::string_view::npos) {
+        if (comment.find("LAYER_CHANGE") != std::string_view::npos)
             ++layer_index;
-            active_role.reset();
-        }
         if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos) {
             ++evidence.role_marker_count;
             if (evidence.role_marker_samples.size() < 8)
@@ -750,6 +758,9 @@ DynamicPrintConfig role_flow_config()
     DynamicPrintConfig config = matrix_config();
     config.set_deserialize_strict({
         { "wall_generator",              "classic" },
+        { "outer_wall_line_width",       0.42 },
+        { "inner_wall_line_width",       0.45 },
+        { "detect_thin_wall",            false },
         { "set_other_flow_ratios",       true },
         { "first_layer_flow_ratio",      1.0 },
         { "top_solid_infill_flow_ratio",  "1.0" },
@@ -758,6 +769,7 @@ DynamicPrintConfig role_flow_config()
         { "gap_fill_flow_ratio",         1.0 },
         { "use_relative_e_distances",    true },
         { "minimum_sparse_infill_area",  0.0 },
+        { "filter_out_gap_fill",        0.0 },
         { "extra_solid_infills",         "3" },
         { "sparse_infill_density",       "20%" },
         { "wall_loops",                  2 },
@@ -767,20 +779,28 @@ DynamicPrintConfig role_flow_config()
         { "initial_layer_print_height",  0.2 },
         { "gcode_comments",              true },
     });
+    // Pin positive gap speed instead of relying on profile-sized nullable defaults.
+    config.set_key_value("gap_infill_speed", new ConfigOptionFloatsNullable({ 30.0 }));
     return config;
 }
 
-TriangleMesh role_flow_fixture()
+void init_role_flow_fixture(Print &print, Model &model, const DynamicPrintConfig &config)
 {
-    // Six 0.2 mm layers plus an explicit third solid layer leave bottom,
-    // internal-solid, top, sparse, and outer roles available. The attached 1 mm-wide bar is deliberately narrow so
-    // classic wall generation has a gap-fill region, while its 1.2 mm height
-    // keeps the export bounded.
-    TriangleMesh shape = make_cube(10.0, 10.0, 1.2);
-    TriangleMesh narrow_bar = make_cube(1.0, 4.0, 1.2);
-    narrow_bar.translate(10.0f, 3.0f, 0.0f);
-    shape.merge(narrow_bar);
-    return shape;
+    // Reuse init_print for the primary object so evidence_for() sees every
+    // volume through its single front object. The separate 1mm-wall cavity is
+    // based on test_perimeters.cpp:square_tube and supplies a real erGapFill
+    // region without removing the solid island's sparse-fill witness.
+    init_print({ make_cube(10.0, 10.0, 1.2) }, print, model, config);
+    ModelObject *object = model.objects.front();
+    TriangleMesh outer = make_cube(20.0, 20.0, 1.2);
+    outer.translate(14.0f, 0.0f, 0.0f);
+    object->add_volume(std::move(outer), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh cavity = make_cube(18.0, 18.0, 1.2);
+    cavity.translate(15.0f, 1.0f, 0.0f);
+    object->add_volume(std::move(cavity), ModelVolumeType::NEGATIVE_VOLUME, false);
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
 }
 
 void require_bounded_role_output(const std::string &output)
@@ -796,8 +816,7 @@ Evidence fresh_role_flow_evidence(const DynamicPrintConfig &config)
 {
     Print print;
     Model model;
-    TriangleMesh shape = role_flow_fixture();
-    init_print({ shape }, print, model, config);
+    init_role_flow_fixture(print, model, config);
     const StringObjectException validation = print.validate();
     INFO("validation.string: " + validation.string);
     INFO("validation.opt_key: " + validation.opt_key);
@@ -806,6 +825,7 @@ Evidence fresh_role_flow_evidence(const DynamicPrintConfig &config)
     require_bounded_role_output(output);
     Evidence evidence = evidence_for(print, output);
     require_valid(evidence);
+    REQUIRE(evidence.roles[gap_fill].geometry_path_length > 0.);
     return evidence;
 }
 
