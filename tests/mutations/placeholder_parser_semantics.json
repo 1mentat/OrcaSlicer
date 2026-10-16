@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Nullable expression predicates, one_of operand semantics, and selective configuration updates.",
+  "mutants": [
+    {
+      "id": "placeholder-is-nil-vector-result-inverted",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "output.set_b(static_cast<const ConfigOptionVectorBase*>(opt.opt)->is_nil(opt.index >= int(vec->size()) ? 0 : size_t(opt.index)));",
+      "new": "output.set_b(! static_cast<const ConfigOptionVectorBase*>(opt.opt)->is_nil(opt.index >= int(vec->size()) ? 0 : size_t(opt.index)));",
+      "description": "Nullable vector predicates must report the element's nil state rather than its complement.",
+      "test_filter": "PlaceholderParserExpressions"
+    },
+    {
+      "id": "placeholder-one-of-literal-equality-inverted",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "out.set_b(match.s() == pattern.s());",
+      "new": "out.set_b(match.s() != pattern.s());",
+      "description": "one_of literal alternatives must become true on equality and remain false when no alternative matches.",
+      "test_filter": "PlaceholderParserExpressions"
+    },
+    {
+      "id": "placeholder-apply-config-always-modified",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "    bool modified = false;",
+      "new": "    bool modified = true;",
+      "description": "apply_config must distinguish an initial update from a second idempotent application.",
+      "test_filter": "PlaceholderParserConfig"
+    }
+  ]
+}

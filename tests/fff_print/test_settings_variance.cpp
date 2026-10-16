@@ -905,6 +905,22 @@ BridgeSnapshot bridges(const Print &print)
     return result;
 }
 
+std::vector<std::vector<double>> bridge_angles_by_layer(const Print &print)
+{
+    std::vector<std::vector<double>> result;
+    const PrintObject &object = *print.objects().front();
+    result.reserve(object.layers().size());
+    for (const Layer *layer : object.layers()) {
+        std::vector<double> angles;
+        for (const LayerRegion *region : layer->regions())
+            for (const Surface &surface : region->fill_surfaces.surfaces)
+                if (surface.surface_type == stInternalBridge)
+                    angles.push_back(surface.bridge_angle);
+        result.push_back(std::move(angles));
+    }
+    return result;
+}
+
 struct ExternalBridgeSnapshot {
     size_t paths = 0;
     double volume = 0.0;
@@ -1130,6 +1146,89 @@ TEST_CASE("Internal bridge angle overrides automatic direction", "[SettingsVaria
     const double expected = std::fmod(Geometry::deg2rad(angle), PI);
     for (double observed : actual.angles)
         CHECK_THAT(observed, Catch::Matchers::WithinAbs(expected, 1e-3));
+}
+
+TEST_CASE("Relative internal bridge angle adds to automatic direction", "[SettingsVariance][SettingsWallBridgeVariance][RelativeBridgeAngle]")
+{
+    struct Run {
+        BridgeSnapshot snapshot;
+        std::vector<std::vector<double>> angles_by_layer;
+    };
+    auto run = [](double angle, bool relative) {
+        DynamicPrintConfig config = bridge_config();
+        config.set_deserialize_strict({
+            {"internal_bridge_angle", angle},
+            {"relative_bridge_angle", relative},
+        });
+        Print print;
+        Model model;
+        init_print({internal_bridge_step()}, print, model, config, nullptr, false);
+        process(print, model, config);
+        return Run{bridges(print), bridge_angles_by_layer(print)};
+    };
+
+    const Run automatic = run(0., false);
+    const Run absolute  = run(30., false);
+    const Run relative  = run(30., true);
+    REQUIRE(automatic.snapshot.surfaces > 0);
+    REQUIRE(automatic.snapshot.paths > 0);
+    REQUIRE(absolute.snapshot.paths > 0);
+    REQUIRE(relative.snapshot.paths > 0);
+    REQUIRE_FALSE(automatic.snapshot.angles.empty());
+    REQUIRE_FALSE(absolute.snapshot.angles.empty());
+    REQUIRE_FALSE(relative.snapshot.angles.empty());
+    REQUIRE(absolute.snapshot.surfaces == automatic.snapshot.surfaces);
+    REQUIRE(relative.snapshot.surfaces == automatic.snapshot.surfaces);
+    REQUIRE(absolute.angles_by_layer.size() == automatic.angles_by_layer.size());
+    REQUIRE(relative.angles_by_layer.size() == automatic.angles_by_layer.size());
+
+    const double offset = Geometry::deg2rad(30.);
+    const auto modulo_pi = [](double angle) {
+        double result = std::fmod(angle, PI);
+        if (result < 0.)
+            result += PI;
+        return result;
+    };
+    const auto angle_delta = [&modulo_pi](double lhs, double rhs) {
+        const double delta = std::abs(modulo_pi(lhs) - modulo_pi(rhs));
+        return std::min(delta, PI - delta);
+    };
+    const auto sorted_angles = [&modulo_pi](const std::vector<double> &source) {
+        std::vector<double> result;
+        result.reserve(source.size());
+        for (double angle : source)
+            result.push_back(modulo_pi(angle));
+        std::sort(result.begin(), result.end());
+        return result;
+    };
+    const auto sorted_offset_angles = [&modulo_pi, offset](const std::vector<double> &source) {
+        std::vector<double> result;
+        result.reserve(source.size());
+        for (double angle : source)
+            result.push_back(modulo_pi(angle + offset));
+        std::sort(result.begin(), result.end());
+        return result;
+    };
+    bool distinct_modes = false;
+    for (size_t layer = 0; layer < automatic.angles_by_layer.size(); ++layer) {
+        const std::vector<double> base = sorted_angles(automatic.angles_by_layer[layer]);
+        const std::vector<double> abs   = sorted_angles(absolute.angles_by_layer[layer]);
+        const std::vector<double> rel   = sorted_angles(relative.angles_by_layer[layer]);
+        const std::vector<double> expected_rel = sorted_offset_angles(automatic.angles_by_layer[layer]);
+        CAPTURE(layer);
+        REQUIRE(abs.size() == base.size());
+        REQUIRE(rel.size() == base.size());
+        REQUIRE(expected_rel.size() == base.size());
+        for (size_t i = 0; i < base.size(); ++i) {
+            CAPTURE(i, base[i], abs[i], rel[i], expected_rel[i]);
+            CHECK(angle_delta(abs[i], offset) < 1e-3);
+            CHECK(angle_delta(rel[i], expected_rel[i]) < 1e-3);
+            distinct_modes |= angle_delta(rel[i], abs[i]) > 0.01;
+        }
+    }
+    // The fixture's automatic bridge direction is intentionally non-zero, so
+    // absolute and relative modes exercise different semantics.
+    REQUIRE(distinct_modes);
 }
 
 TEST_CASE("Overhang detection partitions perimeter roles", "[SettingsVariance][SettingsWallBridgeVariance]")
@@ -1857,6 +1956,98 @@ TEST_CASE("Infill anchor maximum enables connected sparse geometry", "[SettingsF
     REQUIRE(enabled.paths > 0);
     CHECK(enabled.length > disabled.length + 0.1);
     CHECK(enabled.endpoint_contacts < disabled.endpoint_contacts);
+}
+
+// Keep short connectors out of the principal per-layer ironing direction.
+std::vector<int> ironing_layer_directions(const std::string &output, const DynamicPrintConfig &config)
+{
+    std::map<size_t, std::pair<double, int>> longest;
+    size_t layer = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&longest, &layer](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.comment().find("LAYER_CHANGE") != std::string_view::npos)
+            ++layer;
+        if (line.comment().find("ironing") == std::string_view::npos)
+            return;
+        if (!line.extruding(self))
+            return;
+        const double dx = line.dist_X(self);
+        const double dy = line.dist_Y(self);
+        const double length = std::hypot(dx, dy);
+        if (!std::isfinite(length) || length <= 1.0)
+            return;
+        double degrees = std::fmod(Geometry::rad2deg(std::atan2(dy, dx)), 180.0);
+        if (degrees < 0.0)
+            degrees += 180.0;
+        const int direction = int(std::lround(degrees)) % 180;
+        auto &best = longest[layer];
+        if (length > best.first)
+            best = {length, direction};
+    });
+    std::vector<int> result;
+    result.reserve(longest.size());
+    for (const auto &[layer_id, direction] : longest)
+        result.push_back(direction.second);
+    return result;
+}
+
+TEST_CASE("Fixed ironing angle controls inherited solid direction and layer alternation",
+          "[SettingsFamilyVariance][IroningAngleFixed]")
+{
+    auto make_config = [](bool fixed) {
+        DynamicPrintConfig config = family_config();
+        config.set_deserialize_strict({
+            {"wall_loops", 1}, {"top_shell_layers", 1}, {"bottom_shell_layers", 1},
+            {"sparse_infill_density", "100%"}, {"solid_infill_direction", 45.0},
+            {"solid_infill_rotate_template", ""}, {"top_layer_direction", -1.0},
+            {"ironing_type", "solid"}, {"ironing_pattern", "rectilinear"},
+            {"ironing_angle", 0.0}, {"ironing_angle_fixed", fixed},
+            {"ironing_flow", "10%"}, {"ironing_spacing", 0.2}, {"ironing_inset", 0.0},
+        });
+        return config;
+    };
+    const DynamicPrintConfig relative_config = make_config(false);
+    const DynamicPrintConfig fixed_config = make_config(true);
+    REQUIRE(relative_config.opt_string("solid_infill_rotate_template").empty());
+    REQUIRE(fixed_config.opt_string("solid_infill_rotate_template").empty());
+
+    const std::string relative_output = export_mesh(cube(4.), relative_config);
+    const std::string fixed_output = export_mesh(cube(4.), fixed_config);
+    const IroningMotion relative_motion = ironing_motion(relative_output, relative_config);
+    const IroningMotion fixed_motion = ironing_motion(fixed_output, fixed_config);
+    const std::vector<int> relative_layers = ironing_layer_directions(relative_output, relative_config);
+    const std::vector<int> fixed_layers = ironing_layer_directions(fixed_output, fixed_config);
+    REQUIRE(relative_motion.moves > 4);
+    REQUIRE(fixed_motion.moves > 4);
+    REQUIRE(relative_motion.e > 0.0);
+    REQUIRE(fixed_motion.e > 0.0);
+    REQUIRE(relative_layers.size() > 2);
+    REQUIRE(fixed_layers.size() == relative_layers.size());
+
+    const auto near = [](int actual, int expected) {
+        int delta = std::abs(actual - expected);
+        if (delta > 90)
+            delta = 180 - delta;
+        return delta <= 5;
+    };
+    bool relative_has_45 = false;
+    bool relative_has_135 = false;
+    for (const int direction : relative_layers) {
+        CAPTURE(direction);
+        const bool at_45 = near(direction, 45);
+        const bool at_135 = near(direction, 135);
+        const bool expected_direction = at_45 || at_135;
+        CHECK(expected_direction);
+        relative_has_45 = relative_has_45 || at_45;
+        relative_has_135 = relative_has_135 || at_135;
+    }
+    for (const int direction : fixed_layers) {
+        CAPTURE(direction);
+        CHECK(near(direction, 90));
+    }
+    CHECK(relative_has_45);
+    CHECK(relative_has_135);
 }
 
 } // namespace settings_family_contracts

@@ -1,4 +1,6 @@
 #include <catch2/catch_all.hpp>
+#include <algorithm>
+#include <vector>
 #include <string>
 #include <memory>
 #include "libslic3r/Config.hpp"
@@ -397,4 +399,75 @@ SCENARIO("Placeholder parser names in branches that are not taken", "[Placeholde
         // Boolean expressions are not checked, so compatibility conditions keep their behaviour.
         CHECK(PlaceholderParser::evaluate_boolean_expression("false ? no_such_var == 1 : true", config));
     }
+}
+
+TEST_CASE("Placeholder parser preserves nullable vector nil semantics", "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "outer_wall_speed", "60,70" },
+        { "nozzle_diameter", "0.4,0.4" }
+    });
+    auto *outer_wall_speed = config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(outer_wall_speed != nullptr);
+    REQUIRE(outer_wall_speed->values.size() == 2);
+    outer_wall_speed->set_at_to_nil(1);
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    CHECK(parser.process("{is_nil(outer_wall_speed[0])}") == "false");
+    CHECK(parser.process("{is_nil(outer_wall_speed[1])}") == "true");
+    // Indexed config access clamps out-of-range indexes to element zero; nil inspection follows that rule.
+    CHECK(parser.process("{is_nil(outer_wall_speed[99])}") == "false");
+    CHECK_THROWS_WITH(parser.process("{outer_wall_speed[1]}"),
+                      Catch::Matchers::ContainsSubstring("undefined (nil)"));
+    CHECK_THROWS_WITH(parser.process("{is_nil(outer_wall_speed)}"),
+                      Catch::Matchers::ContainsSubstring("vector variable when scalar is expected"));
+}
+
+TEST_CASE("Placeholder parser validates one_of literal and regex operands", "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{one_of(\"ABS\", \"NO\", \"ABS\")}") == "true");
+    CHECK(parser.process("{one_of(\"ABS\", \"NO\", \"OTHER\")}") == "false");
+    CHECK(parser.process("{one_of(\"ABS-12\", /ABS-[0-9]+/)}") == "true");
+    CHECK_THROWS_WITH(parser.process("{one_of(12, \"12\")}"),
+                      Catch::Matchers::ContainsSubstring("First parameter"));
+    CHECK_THROWS_WITH(parser.process("{one_of(\"12\", 12)}"),
+                      Catch::Matchers::ContainsSubstring("Pattern has to be a string"));
+}
+
+TEST_CASE("Placeholder parser reports and applies only changed configuration", "[PlaceholderParser][PlaceholderParserConfig]")
+{
+    auto base = DynamicPrintConfig::full_print_config();
+    base.set_deserialize_strict({
+        { "layer_height", "0.2" },
+        { "wall_loops", "2" }
+    });
+    auto changed = base;
+    changed.set_deserialize_strict({
+        { "layer_height", "0.3" },
+        { "wall_loops", "3" }
+    });
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(base));
+    CHECK_FALSE(parser.apply_config(base));
+    const std::string original_wall_loops = parser.process("{wall_loops}");
+
+    const std::vector<std::string> diff = parser.config_diff(changed);
+    CHECK(diff.size() == 2);
+    CHECK(std::find(diff.begin(), diff.end(), "layer_height") != diff.end());
+    CHECK(std::find(diff.begin(), diff.end(), "wall_loops") != diff.end());
+
+    parser.apply_only(changed, { "layer_height" });
+    CHECK(parser.process("{layer_height}") == "0.3");
+    CHECK(parser.process("{wall_loops}") == original_wall_loops);
+
+    const std::vector<std::string> remaining_diff = parser.config_diff(changed);
+    REQUIRE(remaining_diff.size() == 1);
+    REQUIRE(remaining_diff.front() == "wall_loops");
+    REQUIRE(parser.apply_config(changed));
+    CHECK_FALSE(parser.apply_config(changed));
+    CHECK(parser.config_diff(changed).empty());
 }

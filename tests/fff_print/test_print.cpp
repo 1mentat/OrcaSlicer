@@ -579,9 +579,12 @@ TEST_CASE("A default slice emits perimeter, infill, and skirt", "[Print]")
 // The G-code carries a config-comment block describing the resolved settings. The
 // per-region width lines are always present; the support and first-layer lines appear
 // only when those features are configured.
-TEST_CASE("G-code lists the resolved extrusion-width settings", "[Print]")
+TEST_CASE("G-code lists the resolved extrusion-width settings", "[Print][ConfigBlock]")
 {
-    const std::string gcode = slice({ cube(20) }, { { "initial_layer_line_width", 0 } });
+    const std::string gcode = slice({ cube(20) }, {
+        { "initial_layer_line_width", 0 },
+        { "gcode_skip_config_block", false },
+    });
     CHECK(gcode.find("; external perimeters extrusion width") != std::string::npos);
     CHECK(gcode.find("; perimeters extrusion width")          != std::string::npos);
     CHECK(gcode.find("; infill extrusion width")              != std::string::npos);
@@ -603,7 +606,7 @@ TEST_CASE("G-code lists the resolved extrusion-width settings", "[Print]")
 
 // gcode_skip_config_block suppresses the resolved-settings block while leaving the
 // header and executable blocks intact.
-TEST_CASE("gcode_skip_config_block omits the resolved-settings comment block", "[Print]")
+TEST_CASE("gcode_skip_config_block omits the resolved-settings comment block", "[Print][ConfigBlock]")
 {
     const std::string gcode = slice({ cube(20) }, {
         { "gcode_skip_config_block", true },

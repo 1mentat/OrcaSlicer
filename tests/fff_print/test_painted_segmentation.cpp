@@ -37,7 +37,9 @@ struct PaintedSegmentationFixture {
     DynamicPrintConfig   config;
 
     PaintedSegmentationFixture(int top_shell_layers = 0, int bottom_shell_layers = 0,
-                               bool horizontal_paint = false)
+                               bool horizontal_paint = false,
+                               double max_width = 0., double interlocking_depth = 0.,
+                               bool interlocking_beam = false)
     {
         config = multifilament_config(2, {
             { "layer_height",                 0.2 },
@@ -47,6 +49,9 @@ struct PaintedSegmentationFixture {
             { "bottom_shell_layers",          bottom_shell_layers },
             { "sparse_infill_density",        "0%" },
             { "raft_layers",                  0 },
+            { "mmu_segmented_region_max_width", max_width },
+            { "mmu_segmented_region_interlocking_depth", interlocking_depth },
+            { "interlocking_beam",             interlocking_beam },
         });
 
         // A cube keeps the fixture small while giving the slicer vertical,
@@ -301,5 +306,87 @@ TEST_CASE("painted top and bottom layers honor the include gate and shell depth"
             CHECK(included[layer_idx][0].empty());
         if (top_expected && !bottom_expected)
             CHECK(included[layer_idx][1].empty());
+    }
+}
+
+TEST_CASE("painted segmentation wrapper honors width depth parity and beam bypass", "[PaintedSegmentation][PaintedCutWidth]")
+{
+    const auto [mode, mode_name] = GENERATE(table<int, const char *>({
+        { 0, "valid-depth" }, { 1, "zero-depth" }, { 2, "beam-bypass" }
+    }));
+    CAPTURE(mode_name);
+
+    if (mode == 0) {
+        PaintedSegmentationFixture fixture(0, 0, false, 1.0, 0.5, false);
+        const auto segmented = multi_material_segmentation_by_painting(fixture.object(), [] {});
+        REQUIRE(segmented.size() == fixture.object().layers().size());
+        REQUIRE(segmented.size() >= 2);
+
+        for (size_t layer_idx = 0; layer_idx + 1 < segmented.size(); layer_idx += 2) {
+            REQUIRE(segmented[layer_idx].size() == PAINTED_STATES - 1);
+            REQUIRE(segmented[layer_idx + 1].size() == PAINTED_STATES - 1);
+            const ExPolygons even_source = sliced_layer(*fixture.object().layers()[layer_idx]);
+            const ExPolygons odd_source = sliced_layer(*fixture.object().layers()[layer_idx + 1]);
+            const double even_source_area = polygon_area(even_source);
+            const double odd_source_area = polygon_area(odd_source);
+            REQUIRE(even_source_area > 0.);
+            REQUIRE(odd_source_area > 0.);
+
+            const double even_assigned = region_area(segmented[layer_idx]);
+            const double odd_assigned = region_area(segmented[layer_idx + 1]);
+            const double even_area = union_region_area(segmented[layer_idx]);
+            const double odd_area = union_region_area(segmented[layer_idx + 1]);
+            // Polygon areas are in squared scaled coordinates, not square millimeters.
+            const double even_tolerance = std::max(100.0, even_source_area * 1e-5);
+            const double odd_tolerance = std::max(100.0, odd_source_area * 1e-5);
+            CHECK_THAT(even_assigned, Catch::Matchers::WithinAbs(even_area, even_tolerance));
+            CHECK_THAT(odd_assigned, Catch::Matchers::WithinAbs(odd_area, odd_tolerance));
+            CHECK(outside_area(segmented[layer_idx], even_source) <= even_tolerance);
+            CHECK(outside_area(segmented[layer_idx + 1], odd_source) <= odd_tolerance);
+            REQUIRE(even_area > 0.);
+            REQUIRE(odd_area > 0.);
+            CHECK(even_area < even_source_area - even_tolerance);
+            CHECK(odd_area < odd_source_area - odd_tolerance);
+            CHECK(even_area + even_tolerance < odd_area);
+        }
+    } else if (mode == 1) {
+        PaintedSegmentationFixture fixture(0, 0, false, 1.0, 0., false);
+        const auto segmented = multi_material_segmentation_by_painting(fixture.object(), [] {});
+        REQUIRE_FALSE(segmented.empty());
+        REQUIRE(segmented.size() == fixture.object().layers().size());
+        const double reference = union_region_area(segmented.front());
+        REQUIRE(reference > 0.);
+        for (size_t layer_idx = 0; layer_idx < segmented.size(); ++layer_idx) {
+            REQUIRE(segmented[layer_idx].size() == PAINTED_STATES - 1);
+            const ExPolygons source = sliced_layer(*fixture.object().layers()[layer_idx]);
+            REQUIRE(polygon_area(source) > 0.);
+            const double area = union_region_area(segmented[layer_idx]);
+            REQUIRE(area > 0.);
+            CHECK_THAT(area, Catch::Matchers::WithinAbs(reference, std::max(100.0, reference * 1e-5)));
+        }
+    } else {
+        PaintedSegmentationFixture beam_fixture(0, 0, false, 1.0, 0.5, true);
+        PaintedSegmentationFixture unbounded_fixture;
+        const auto beam = multi_material_segmentation_by_painting(beam_fixture.object(), [] {});
+        const auto unbounded = multi_material_segmentation_by_painting(unbounded_fixture.object(), [] {});
+        REQUIRE_FALSE(beam.empty());
+        REQUIRE_FALSE(unbounded.empty());
+        REQUIRE(beam.size() == beam_fixture.object().layers().size());
+        REQUIRE(unbounded.size() == unbounded_fixture.object().layers().size());
+        REQUIRE(beam.size() == unbounded.size());
+        for (size_t layer_idx = 0; layer_idx < beam.size(); ++layer_idx) {
+            REQUIRE(beam[layer_idx].size() == PAINTED_STATES - 1);
+            REQUIRE(unbounded[layer_idx].size() == PAINTED_STATES - 1);
+            const ExPolygons source = sliced_layer(*beam_fixture.object().layers()[layer_idx]);
+            REQUIRE(polygon_area(source) > 0.);
+            const double beam_area = union_region_area(beam[layer_idx]);
+            const double unbounded_area = union_region_area(unbounded[layer_idx]);
+            REQUIRE(beam_area > 0.);
+            REQUIRE(unbounded_area > 0.);
+            CHECK(outside_area(beam[layer_idx], source) <= std::max(100.0, unbounded_area * 1e-5));
+            CHECK_THAT(beam_area,
+                       Catch::Matchers::WithinAbs(unbounded_area,
+                                                  std::max(100.0, unbounded_area * 1e-5)));
+        }
     }
 }

@@ -26,6 +26,7 @@
 #include "libslic3r/GCodeReader.hpp"
 #include "test_utils.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
@@ -606,6 +607,168 @@ TEST_CASE("Bed temperature formula emits the configured first-layer command", "[
     REQUIRE(temperature_commands(out.text, config, "M190", 57.f) + temperature_commands(out.text, config, "M140", 57.f) > 0);
     REQUIRE(temperature_commands(out.text, config, "M109", 208.f) + temperature_commands(out.text, config, "M104", 208.f) > 0);
     CHECK(temperature_commands(out.text, config, "M109", 202.f) + temperature_commands(out.text, config, "M104", 202.f) > 0);
+}
+
+TEST_CASE("Power-loss recovery modes emit the documented Marlin transition", "[GCode][GCodeExportWorkflows][PowerLossRecovery]")
+{
+    const std::array<const char *, 3> modes = {
+        "printer_configuration", "enable", "disable",
+    };
+    std::optional<MotionEvidence> reference_motion;
+
+    for (const char *mode : modes) {
+        INFO("power-loss recovery mode " << mode);
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({
+            { "layer_height",                 0.2 },
+            { "initial_layer_print_height",   0.2 },
+            { "enable_power_loss_recovery",   mode },
+            { "gcode_flavor",                 "marlin2" },
+        });
+        const ExportedPrint exported = fresh_custom_mesh_export(config, make_cube(10., 10., 0.4));
+        const MotionEvidence motion = motion_evidence(exported.text, config);
+        REQUIRE(motion.extrusion_moves > 0);
+        REQUIRE(count_text(exported.text, ";LAYER_CHANGE") == 2);
+
+        if (reference_motion.has_value())
+            require_same_material(*reference_motion, motion);
+        else
+            reference_motion = motion;
+
+        struct Transition {
+            float state;
+            size_t layer;
+            size_t preceding_extrusions;
+        };
+        std::vector<Transition> transitions;
+        size_t layer = 0;
+        size_t extrusions = 0;
+        GCodeReader reader;
+        reader.apply_config(config);
+        reader.parse_buffer(exported.text, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+                ++layer;
+            if (line.cmd_is("M413")) {
+                float state = -1.f;
+                REQUIRE(line.has_value('S', state));
+                transitions.push_back({state, layer, extrusions});
+            }
+            if (line.extruding(self) && line.dist_XY(self) > EPSILON)
+                ++extrusions;
+        });
+        REQUIRE(layer == 2);
+        REQUIRE(extrusions == motion.extrusion_moves);
+        if (std::string(mode) == "printer_configuration") {
+            CHECK(transitions.empty());
+        } else {
+            const bool enabled = std::string(mode) == "enable";
+            REQUIRE(transitions.size() == (enabled ? 2 : 1));
+            CHECK_THAT(transitions.front().state, Catch::Matchers::WithinAbs(enabled ? 1.f : 0.f, 1e-6));
+            CHECK(transitions.front().layer == 2);
+            CHECK(transitions.front().preceding_extrusions > 0);
+            CHECK(transitions.front().preceding_extrusions < extrusions);
+            if (enabled) {
+                CHECK_THAT(transitions.back().state, Catch::Matchers::WithinAbs(0.f, 1e-6));
+                CHECK(transitions.back().preceding_extrusions == extrusions);
+            }
+        }
+    }
+}
+
+TEST_CASE("Bed temperature formula selects the used filament set", "[GCode][GCodeExportWorkflows][BedTemperatureFormula]")
+{
+    struct BedCommand {
+        double temperature = 0.0;
+        size_t layer = 0;
+        bool   wait = false;
+    };
+
+    const std::array<const char *, 2> formulas = {"by_first_filament", "by_highest_temp"};
+    for (const char *formula : formulas) {
+        INFO("bed temperature formula " << formula);
+        DynamicPrintConfig config = Test::multifilament_config(2, {
+            {"layer_height", 0.2},
+            {"initial_layer_print_height", 0.2},
+            {"wall_loops", 1},
+            {"top_shell_layers", 1},
+            {"bottom_shell_layers", 1},
+            {"sparse_infill_density", "25%"},
+            {"outer_wall_filament_id", 1},
+            {"inner_wall_filament_id", 1},
+            {"sparse_infill_filament_id", 2},
+            {"internal_solid_filament_id", 2},
+            {"top_surface_filament_id", 2},
+            {"bottom_surface_filament_id", 2},
+            {"hot_plate_temp_initial_layer", "61,73"},
+            {"hot_plate_temp", "41,53"},
+            {"curr_bed_type", "High Temp Plate"},
+            {"bed_temperature_formula", formula},
+            {"first_layer_sequence_choice", "Customize"},
+            {"first_layer_print_sequence", "1,2"},
+            {"other_layers_sequence_choice", "Customize"},
+            {"other_layers_print_sequence_nums", 1},
+            {"other_layers_print_sequence", "2,10,1,2"},
+            {"gcode_flavor", "marlin2"},
+            {"gcode_comments", true},
+            {"machine_start_gcode", ""},
+            {"machine_end_gcode", ""},
+            {"layer_change_gcode", "G92 E0\n"},
+            {"skirt_loops", 0},
+            {"brim_type", "no_brim"},
+            {"raft_layers", 0},
+            {"print_sequence", "by layer"},
+        });
+        const ExportedPrint exported = fresh_custom_mesh_export(config, make_cube(5., 5., 2.));
+        REQUIRE(exported.text.size() < 4 * 1024 * 1024);
+
+        std::vector<BedCommand> bed_commands;
+        std::array<double, 2> tool_path{};
+        std::array<int, 3> first_tool_by_layer = {-1, -1, -1};
+        size_t layer_markers = 0;
+        int current_tool = 0;
+        GCodeReader reader;
+        reader.apply_config(config);
+        reader.parse_buffer(exported.text, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+                ++layer_markers;
+            if (line.cmd_is("T0"))
+                current_tool = 0;
+            else if (line.cmd_is("T1"))
+                current_tool = 1;
+
+            const bool is_m140 = line.cmd_is("M140");
+            const bool is_m190 = line.cmd_is("M190");
+            if (is_m140 || is_m190) {
+                float value = 0.f;
+                REQUIRE(line.has_value('S', value));
+                bed_commands.push_back({double(value), layer_markers, is_m190});
+            }
+            if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
+                tool_path[size_t(current_tool)] += line.dist_XY(self);
+                if (layer_markers == 1 && first_tool_by_layer[1] < 0)
+                    first_tool_by_layer[1] = current_tool;
+                if (layer_markers == 2 && first_tool_by_layer[2] < 0)
+                    first_tool_by_layer[2] = current_tool;
+            }
+        });
+
+        REQUIRE(layer_markers > 2);
+        REQUIRE(tool_path[0] > 1.0);
+        REQUIRE(tool_path[1] > 1.0);
+        REQUIRE(first_tool_by_layer[1] == 0);
+        REQUIRE(first_tool_by_layer[2] == 0);
+
+        const bool highest = std::string(formula) == "by_highest_temp";
+        const double expected_first = highest ? 73.0 : 61.0;
+        const double expected_ordinary = highest ? 53.0 : 41.0;
+        REQUIRE(bed_commands.size() == 2);
+        CHECK_THAT(bed_commands[0].temperature, Catch::Matchers::WithinAbs(expected_first, 1e-4));
+        CHECK(bed_commands[0].layer == 0);
+        CHECK(bed_commands[0].wait);
+        CHECK_THAT(bed_commands[1].temperature, Catch::Matchers::WithinAbs(expected_ordinary, 1e-4));
+        CHECK(bed_commands[1].layer == 2);
+        CHECK_FALSE(bed_commands[1].wait);
+    }
 }
 
 TEST_CASE("Klipper omits Marlin machine envelope while preserving motion", "[GCode][GCodeExportWorkflows]")

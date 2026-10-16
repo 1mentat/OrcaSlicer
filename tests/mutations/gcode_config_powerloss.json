@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "G-code config-block suppression and Marlin power-loss mode transitions.",
+  "mutants": [
+    {
+      "id": "gcode-config-block-condition-inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (!is_bbl_printers && !skip_config_block) {",
+      "new": "if (!is_bbl_printers && skip_config_block) {",
+      "test_filter": "ConfigBlock",
+      "description": "Invert the resolved-settings block gate; explicit false must retain the block and explicit true must suppress it while header/executable blocks remain."
+    },
+    {
+      "id": "gcode-power-loss-mode-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "const auto plr_mode = print.config().enable_power_loss_recovery.value;\n        gcode += m_writer.enable_power_loss_recovery(plr_mode);",
+      "new": "const auto plr_mode = PowerLossRecoveryMode::PrinterConfiguration;\n        gcode += m_writer.enable_power_loss_recovery(plr_mode);",
+      "test_filter": "PowerLossRecovery",
+      "description": "Ignore the configured mode at the second-layer transition; enable and disable exports must fail their parsed M413 command contracts."
+    },
+    {
+      "id": "gcode-power-loss-cleanup-omitted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (m_second_layer_things_done && print.config().enable_power_loss_recovery.value == PowerLossRecoveryMode::Enable) {",
+      "new": "if (false) {",
+      "test_filter": "PowerLossRecovery",
+      "description": "Omit the final disable after a by-layer print; enabled mode must turn recovery off after the last deposition."
+    }
+  ]
+}

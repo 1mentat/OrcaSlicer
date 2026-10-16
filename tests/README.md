@@ -160,6 +160,20 @@ against bounded obstacle geometry and configured endpoints.
 `[ValidationContracts]` exercises rejected configurations and warning gates;
 that evidence is declared separately from sliced-output coverage.
 
+`[RelativeBridgeAngle]` compares automatic, absolute, and relative internal
+bridge directions. `[PaintedCutWidth]` checks bounded painted-region areas,
+alternating interlocking depth, and beam bypass. `[IroningAngleFixed]` uses an
+empty rotation template and the longest emitted ironing segment on each layer
+to distinguish absolute direction from inherited direction and alternation.
+
+`[PowerLossRecovery]` checks all three Marlin recovery modes, including the
+second-layer transition and disabling recovery after the last extrusion.
+`[BedTemperatureFormula]` uses two printed filaments with distinct bed
+temperatures to distinguish first-filament and highest-temperature selection.
+`[ConfigBlock]` checks explicit inclusion and suppression of resolved settings.
+`[PlaceholderParserExpressions]` and `[PlaceholderParserConfig]` check nullable
+expressions, literal/regex alternatives, and selective configuration updates.
+
 `[SettingsSpeedAccelVariance]` checks first-layer and role-specific feedrates,
 acceleration, and jerk against every eligible parsed move. Layer markers keep
 first-layer travel separate from later motion. Its direct firmware-writer
