@@ -53,6 +53,7 @@ add_executable(${_TEST_NAME}_tests
     test_flush_volume_contracts.cpp
     test_intersection_points_contracts.cpp
     test_fill_corner_smoothing.cpp
+    test_fuzzy_skin.cpp
     test_filament_mixer.cpp
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
@@ -73,6 +74,7 @@ add_executable(${_TEST_NAME}_tests
     test_step.cpp
     test_stl.cpp
     test_svg.cpp
+    test_nsvg_utils.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp
     test_trianglemesh.cpp

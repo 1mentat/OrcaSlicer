@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "description": "Painted facet projection and bridge contact geometry contracts. Only native assertion kills are executable acceptance cases.",
+  "mutants": [
+    {
+      "id": "projection-empty-guard",
+      "old": "if (custom_facets.indices.empty())\n        return;",
+      "new": "if (!custom_facets.indices.empty())\n        return;",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "an unpainted volume must leave the public output empty while painted facets still project",
+      "test_filter": "PrintObjectPainted"
+    },
+    {
+      "id": "projection-support-normal-filter",
+      "old": "if (! seam && tr_det_sign * z_comp > 0.)\n            continue;",
+      "new": "if (seam && tr_det_sign * z_comp > 0.)\n            continue;",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "support projections intentionally ignore upward-facing facets while seam projections retain them",
+      "test_filter": "PrintObjectPainted"
+    },
+    {
+      "id": "projection-single-slab-branch",
+      "old": "if (first_layer_id == last_layer_id) {",
+      "new": "if (first_layer_id != last_layer_id) {",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "horizontal facets and one-slab projections must avoid interpolation and retain their analytic area",
+      "test_filter": "PrintObjectPainted"
+    },
+    {
+      "id": "projection-output-layer-count",
+      "old": "out.resize(layers.size());",
+      "new": "out.resize(layers.size() + 1);",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "public projection output is indexed one-for-one with PrintObject layers",
+      "test_filter": "PrintObjectPainted"
+    },
+    {
+      "id": "bridge-length-boundary",
+      "old": "if (polyline.length() > max_bridge_length + 10) {",
+      "new": "if (polyline.length() < max_bridge_length + 10) {",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "long bridge handling must not be selected for short perimeter bridges",
+      "test_filter": "PrintObjectPainted"
+    },
+    {
+      "id": "bridge-breaking-polyline-gate",
+      "old": "if (polyline.length() > max_bridge_length + 10) {\n                        if (break_bridge) {",
+      "new": "if (polyline.length() > max_bridge_length + 10) {\n                        if (!break_bridge) {",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "the public break_bridge option controls whether an overlong perimeter bridge is segmented",
+      "test_filter": "PrintObjectPainted"
+    }
+  ],
+  "known_survivors": [
+    {
+      "id": "projection-vertical-tilt-gate",
+      "old": "if (seam && z_comp == 0.f)\n            facet[0].x() += float(EPSILON);",
+      "new": "if (seam && z_comp != 0.f)\n            facet[0].x() += float(EPSILON);",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "vertical painted seams need the degeneracy guard; sloped facets must remain unchanged",
+      "test_filter": "PrintObjectPainted",
+      "status": "survived",
+      "scope": "Not counted as an assertion kill or proven equivalent; retained for future fixture refinement."
+    },
+    {
+      "id": "projection-first-layer-epsilon-direction",
+      "old": "auto it = std::lower_bound(layers.begin(), layers.end(), facet[0].z()+EPSILON,",
+      "new": "auto it = std::lower_bound(layers.begin(), layers.end(), facet[0].z()-EPSILON,",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "the first slice at or above a painted facet must use the documented positive epsilon",
+      "test_filter": "PrintObjectPainted",
+      "status": "survived",
+      "scope": "Not counted as an assertion kill or proven equivalent; retained for future fixture refinement."
+    },
+    {
+      "id": "projection-last-layer-boundary",
+      "old": "&& float(layers[last_layer_id]->slice_z) <= facet[2].z())",
+      "new": "&& float(layers[last_layer_id]->slice_z) < facet[2].z())",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "a triangle touching the highest slice boundary still contributes to that layer",
+      "test_filter": "PrintObjectPainted",
+      "status": "survived",
+      "scope": "Not counted as an assertion kill or proven equivalent; retained for future fixture refinement."
+    },
+    {
+      "id": "projection-middle-vertex-transition",
+      "old": "if (z > facet[1].z() && ! passed_first) {",
+      "new": "if (z >= facet[1].z() && ! passed_first) {",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "the middle vertex transition must be stable at an exact slice height",
+      "test_filter": "PrintObjectPainted",
+      "status": "survived",
+      "scope": "Not counted as an assertion kill or proven equivalent; retained for future fixture refinement."
+    },
+    {
+      "id": "bridge-breaking-surface-gate",
+      "old": "else {\n                    if (break_bridge) {",
+      "new": "else {\n                    if (!break_bridge) {",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "the public break_bridge option controls whether an overlong painted bridge surface is segmented",
+      "test_filter": "PrintObjectPainted",
+      "status": "survived",
+      "scope": "Not counted as an assertion kill or proven equivalent; retained for future fixture refinement."
+    },
+    {
+      "id": "bridge-surface-size-gate",
+      "old": "if (bbox_size[0] < max_bridge_length && bbox_size[1] < max_bridge_length)",
+      "new": "if (bbox_size[0] < max_bridge_length || bbox_size[1] < max_bridge_length)",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "surface bridge segmentation must use the configured limit on both dimensions",
+      "test_filter": "PrintObjectPainted",
+      "status": "survived",
+      "scope": "Not counted as an assertion kill or proven equivalent; retained for future fixture refinement."
+    }
+  ],
+  "unclaimed_experiments": [
+    {
+      "id": "projection-terminal-slab-condition",
+      "old": "if (z > facet[2].z() || it+1 == layers.end()) {",
+      "new": "if (z > facet[2].z() && it+1 == layers.end()) {",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "description": "the final crossed slab must append the triangle apex when either termination condition holds",
+      "test_filter": "PrintObjectPainted",
+      "status": "unclaimed_process_failure",
+      "scope": "Not counted as an assertion kill or proven equivalent; retained for future fixture refinement."
+    }
+  ]
+}

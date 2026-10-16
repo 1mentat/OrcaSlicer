@@ -205,6 +205,27 @@ solid patterns, fill ordering, gap fill, bridge layers, and activated geometry
 settings. The settings inventory distinguishes observable variants from negative
 controls; combined expansion direction and close-holes behavior remain partial.
 
+`[PrintObjectPainted]` checks painted facet projections against independent
+Z-slab clipping and analytic areas, including transformed and combined volumes.
+Bridge-contact checks retain supported anchors and split overlong spans. Six
+mutation survivors and one process failure remain explicit, unclaimed experiments.
+
+`[GCodeBeltApron]` checks extrusion in every prologue band, ordered layer markers,
+first-layer speed and fan, filament selection, instances, and exact hook counts
+before the first object layer. Disabling and inner-only controls must suppress
+the leading apron; widening and lengthening must increase the emitted path.
+
+`[NSVGUtils]` checks SVG import against analytic fill areas, stroke bounds,
+dash periods, and a cubic Bézier area integral, along with lazy loading, source
+IDs, holes, and coordinate transforms. Odd dash arrays must repeat after twice
+the sum of their lengths; finer tessellation must approach the integral.
+
+`[FuzzyRipple]` checks phase groups, full- and half-wave offsets, sampling,
+amplitude, degenerate paths, and Arachne width metadata. A truth table covers
+all fuzzy-skin selection modes across layer, loop, and contour choices. Open
+ripple paths and mode-specific ripple width behavior remain unclaimed; the
+current ripple dispatch ignores those parameters.
+
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
 line or segment details are needed. Profile-merge and export diagnostics are retained

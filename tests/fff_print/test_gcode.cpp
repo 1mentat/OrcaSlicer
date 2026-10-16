@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <cctype>
 #include <sstream>
 #include <memory>
 #include <limits>
@@ -2154,3 +2156,399 @@ TEST_CASE("GCode belt path remains finite for a sloped test mesh", "[GCode][GCod
 }
 
 } // namespace gcode_broad_contracts
+
+namespace belt_apron_contracts {
+using namespace Slic3r::Test;
+
+namespace {
+
+DynamicPrintConfig belt_apron_config(const double leading = 50.0,
+                                     const double width = 4.0,
+                                     const double lateral = 0.0,
+                                     const char *brim_type = "outer_only")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"belt_printer", true},
+        {"belt_slice_rotation", "x"},
+        {"belt_slice_rotation_angle", 45.0},
+        {"gcode_remap_x", "rev_x"},
+        {"gcode_remap_y", "pos_z"},
+        {"gcode_remap_z", "pos_y"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 1},
+        {"brim_type", brim_type},
+        {"brim_width", width},
+        {"leading_brim_length", leading},
+        {"extra_brim_width", lateral},
+        {"brim_object_gap", 0},
+        {"use_relative_e_distances", false},
+        {"machine_start_gcode", "T[initial_tool]\n"},
+    });
+    return config;
+}
+
+struct ExportedBelt {
+    std::string gcode;
+    size_t prologue_bands = 0;
+    double first_object_z = 0.0;
+};
+
+ExportedBelt export_belt(DynamicPrintConfig config,
+                         std::vector<TriangleMesh> meshes = {cube(20)},
+                         const std::vector<std::vector<ConfigBase::SetDeserializeItem>> *overrides = nullptr,
+                         const bool arrange = true,
+                         const size_t instances = 1)
+{
+    Print print;
+    Model model;
+    init_print(std::move(meshes), print, model, config, overrides, arrange, instances);
+    const auto validation = print.validate();
+    INFO("validation=" << validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE_FALSE(print.objects().empty());
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    const PrintObject &object = *print.objects().front();
+    const double first_object_z = object.layers().empty() ? std::numeric_limits<double>::max()
+                                                          : object.layers().front()->print_z;
+    return {output, object.belt_brim_prologue().size(), first_object_z};
+}
+
+struct BeltMotion {
+    std::vector<double> brim_feedrates;
+    std::vector<size_t> apron_extrusions_by_band;
+    std::vector<double> apron_band_z_tags;
+    std::vector<double> apron_z_tags;
+    std::vector<double> apron_height_tags;
+    std::set<int> brim_tools;
+    size_t brim_extrusions = 0;
+    size_t all_extrusions = 0;
+    size_t layer_changes_before_perimeter = 0;
+    double brim_xy_length = 0.0;
+    bool finite = true;
+};
+
+bool is_wall_type_marker(const std::string &raw)
+{
+    std::string lower = raw;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](const unsigned char c) { return char(std::tolower(c)); });
+    return lower.find(";type:") != std::string::npos &&
+           (lower.find("perimeter") != std::string::npos ||
+            lower.find("outer wall") != std::string::npos ||
+            lower.find("inner wall") != std::string::npos);
+}
+
+std::set<int> fan_percents_before_object_z(const std::string &gcode, const double first_object_z)
+{
+    std::set<int> result;
+    double current_z = std::numeric_limits<double>::max();
+    bool seen_z = false;
+    std::istringstream lines(gcode);
+    std::string raw;
+    while (std::getline(lines, raw)) {
+        if (raw.rfind(";Z:", 0) == 0) {
+            seen_z = true;
+            try {
+                current_z = std::stod(raw.substr(3));
+            } catch (...) {
+                current_z = std::numeric_limits<double>::max();
+            }
+        }
+        if (is_wall_type_marker(raw))
+            break;
+        const auto pos = raw.find("M106 S");
+        if ((seen_z && current_z >= first_object_z - 1e-4) || pos == std::string::npos || (pos > 0 && !std::isspace(static_cast<unsigned char>(raw[pos - 1]))))
+            continue;
+        const char *begin = raw.c_str() + pos + 6;
+        char *end = nullptr;
+        const long pwm = std::strtol(begin, &end, 10);
+        if (end == begin || pwm <= 0)
+            continue;
+        result.insert(int(std::lround(double(pwm) * 100.0 / 255.0)));
+    }
+    return result;
+}
+
+BeltMotion inspect_belt(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    BeltMotion out;
+    bool before_perimeter = true;
+    int current_tool = 0;
+    std::istringstream lines(gcode);
+    std::string raw;
+    while (std::getline(lines, raw)) {
+        if (raw.rfind(";Z:", 0) == 0 && before_perimeter) {
+            try {
+                out.apron_z_tags.push_back(std::stod(raw.substr(3)));
+            } catch (...) {
+                out.finite = false;
+            }
+        }
+        if (raw.rfind(";HEIGHT:", 0) == 0 && before_perimeter) {
+            try {
+                out.apron_height_tags.push_back(std::stod(raw.substr(8)));
+            } catch (...) {
+                out.finite = false;
+            }
+        }
+        if (is_wall_type_marker(raw))
+            before_perimeter = false;
+
+    }
+
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool reader_before_wall = true;
+    size_t reader_band = size_t(-1);
+    reader.parse_buffer(gcode, [&out, &current_tool, &reader_before_wall, &reader_band](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string raw(line.raw());
+        if (reader_before_wall && raw.find(";LAYER_CHANGE") != std::string::npos) {
+            ++out.layer_changes_before_perimeter;
+            out.apron_extrusions_by_band.push_back(0);
+            out.apron_band_z_tags.push_back(std::numeric_limits<double>::quiet_NaN());
+            reader_band = out.apron_extrusions_by_band.size() - 1;
+        }
+        if (reader_before_wall && raw.rfind(";Z:", 0) == 0 && reader_band != size_t(-1)) {
+            try {
+                out.apron_band_z_tags[reader_band] = std::stod(raw.substr(3));
+            } catch (...) {
+                out.finite = false;
+            }
+        }
+        if (reader_before_wall && is_wall_type_marker(raw))
+            reader_before_wall = false;
+        const std::string cmd(line.cmd());
+        if (cmd.size() >= 2 && cmd[0] == 'T' && std::isdigit(static_cast<unsigned char>(cmd[1]))) {
+            current_tool = std::stoi(cmd.substr(1));
+            return;
+        }
+        if (!line.extruding(self))
+            return;
+        ++out.all_extrusions;
+        out.finite = out.finite && std::isfinite(double(self.x())) && std::isfinite(double(self.y()))
+                   && std::isfinite(double(self.z())) && std::isfinite(double(self.e()))
+                   && std::isfinite(double(self.f()));
+        const std::string comment(line.comment());
+        if (comment.find("Brim") == std::string::npos && comment.find("brim") == std::string::npos)
+            return;
+        ++out.brim_extrusions;
+        if (reader_before_wall && reader_band != size_t(-1))
+            ++out.apron_extrusions_by_band[reader_band];
+        out.brim_tools.insert(current_tool);
+        out.brim_feedrates.push_back(double(self.f()));
+        out.brim_xy_length += double(line.dist_XY(self));
+    });
+    return out;
+}
+
+std::vector<int> hook_layer_numbers_before_object_z(const std::string &gcode,
+                                                     const std::string &prefix,
+                                                     const double first_object_z)
+{
+    std::vector<int> result;
+    double current_z = std::numeric_limits<double>::max();
+    std::istringstream lines(gcode);
+    for (std::string raw; std::getline(lines, raw);) {
+        if (raw.rfind(";Z:", 0) == 0) {
+            try {
+                current_z = std::stod(raw.substr(3));
+            } catch (...) {
+                current_z = std::numeric_limits<double>::max();
+            }
+        }
+        if (current_z >= first_object_z - 1e-4)
+            continue;
+        const std::string marker = "M117 " + prefix;
+        if (raw.rfind(marker, 0) != 0)
+            continue;
+        const char *begin = raw.c_str() + marker.size();
+        char *end = nullptr;
+        const long layer_num = std::strtol(begin, &end, 10);
+        if (end != begin)
+            result.push_back(int(layer_num));
+    }
+    return result;
+}
+
+bool has_token_before_perimeter(const std::string &gcode, const std::string &token)
+{
+    std::istringstream lines(gcode);
+    std::string raw;
+    while (std::getline(lines, raw)) {
+        if (is_wall_type_marker(raw))
+            return false;
+        if (raw.find(token) != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("belt apron emits a real prologue before object perimeter", "[GCode][GCodeBeltApron]")
+{
+    const DynamicPrintConfig config = belt_apron_config();
+    const ExportedBelt out = export_belt(config);
+    const BeltMotion motion = inspect_belt(out.gcode, config);
+    REQUIRE(out.prologue_bands > 0);
+    REQUIRE(motion.brim_extrusions > 0);
+    std::vector<size_t> prologue_band_extrusions;
+    for (size_t band = 0; band < motion.apron_extrusions_by_band.size(); ++band)
+        if (std::isfinite(motion.apron_band_z_tags[band]) && motion.apron_band_z_tags[band] < out.first_object_z - 1e-4)
+            prologue_band_extrusions.push_back(motion.apron_extrusions_by_band[band]);
+    REQUIRE(prologue_band_extrusions.size() == out.prologue_bands);
+    for (const size_t band_extrusions : prologue_band_extrusions)
+        CHECK(band_extrusions > 0);
+    REQUIRE(motion.layer_changes_before_perimeter >= out.prologue_bands + 1);
+    const size_t emitted_apron_markers = size_t(std::count_if(
+        motion.apron_z_tags.begin(), motion.apron_z_tags.end(),
+        [&out](const double z) { return z < out.first_object_z - 1e-4; }));
+    CHECK(emitted_apron_markers == out.prologue_bands);
+    REQUIRE(!motion.apron_height_tags.empty());
+    CHECK(std::all_of(motion.apron_height_tags.begin(), motion.apron_height_tags.end(), [](const double h) {
+        return std::isfinite(h) && h > 0.0;
+    }));
+    CHECK(std::all_of(motion.apron_height_tags.begin(), motion.apron_height_tags.end(), [](const double h) {
+        return h <= 0.2001;
+    }));
+    CHECK(motion.brim_xy_length > 0.0);
+}
+
+TEST_CASE("belt apron layer markers are ordered and each band has positive motion", "[GCode][GCodeBeltApron]")
+{
+    const DynamicPrintConfig config = belt_apron_config(50.0);
+    const ExportedBelt out = export_belt(config);
+    const BeltMotion motion = inspect_belt(out.gcode, config);
+    REQUIRE(motion.apron_z_tags.size() > 3);
+    REQUIRE(motion.brim_extrusions > out.prologue_bands);
+    CHECK(motion.finite);
+    for (size_t i = 1; i < motion.apron_z_tags.size(); ++i)
+        CHECK(motion.apron_z_tags[i] > motion.apron_z_tags[i - 1]);
+}
+
+TEST_CASE("belt apron uses first layer speed for every apron extrusion", "[GCode][GCodeBeltApron]")
+{
+    DynamicPrintConfig config = belt_apron_config();
+    config.set_deserialize_strict({{"initial_layer_speed", "8"}, {"outer_wall_speed", "80"}});
+    const ExportedBelt out = export_belt(config);
+    const BeltMotion motion = inspect_belt(out.gcode, config);
+    REQUIRE(motion.brim_extrusions > 20);
+    REQUIRE(motion.finite);
+    CHECK(std::all_of(motion.brim_feedrates.begin(), motion.brim_feedrates.end(), [](const double f) {
+        return f > 0.0 && f <= 8.0 * 60.0 + 1e-3;
+    }));
+    CHECK(std::any_of(motion.brim_feedrates.begin(), motion.brim_feedrates.end(), [](const double f) {
+        return std::abs(f - 8.0 * 60.0) < 1e-3;
+    }));
+}
+
+TEST_CASE("belt apron first layer fan override appears before the object", "[GCode][GCodeBeltApron]")
+{
+    DynamicPrintConfig config = belt_apron_config();
+    config.set_deserialize_strict({{"cooling", true}, {"close_fan_the_first_x_layers", 0}, {"fan_max_speed", 100}, {"fan_min_speed", 100},
+                                   {"full_fan_speed_layer", 0}, {"slow_down_layer_time", 0}, {"fan_cooling_layer_time", 0},
+                                   {"initial_layer_fan_speed", "37"}});
+    const ExportedBelt out = export_belt(config);
+    REQUIRE(out.prologue_bands > 0);
+    const std::set<int> fan_percents = fan_percents_before_object_z(out.gcode, out.first_object_z);
+    REQUIRE(!fan_percents.empty());
+    CHECK(fan_percents == std::set<int>{37});
+}
+
+TEST_CASE("leading belt apron length adds bands and path", "[GCode][GCodeBeltApron]")
+{
+    const ExportedBelt short_apron = export_belt(belt_apron_config(30.0));
+    const ExportedBelt long_apron = export_belt(belt_apron_config(50.0));
+    const BeltMotion short_motion = inspect_belt(short_apron.gcode, belt_apron_config(30.0));
+    const BeltMotion long_motion = inspect_belt(long_apron.gcode, belt_apron_config(50.0));
+    REQUIRE(long_apron.prologue_bands > 0);
+    CHECK(long_apron.prologue_bands > short_apron.prologue_bands);
+    CHECK(long_motion.brim_xy_length > short_motion.brim_xy_length);
+}
+
+TEST_CASE("belt apron remains finite with lateral widening", "[GCode][GCodeBeltApron]")
+{
+    const DynamicPrintConfig narrow_config = belt_apron_config(50.0, 4.0, 0.0);
+    const DynamicPrintConfig wide_config = belt_apron_config(50.0, 4.0, 6.0);
+    const ExportedBelt narrow = export_belt(narrow_config);
+    const ExportedBelt wide = export_belt(wide_config);
+    const BeltMotion narrow_motion = inspect_belt(narrow.gcode, narrow_config);
+    const BeltMotion wide_motion = inspect_belt(wide.gcode, wide_config);
+    REQUIRE(narrow_motion.brim_extrusions > 0);
+    REQUIRE(wide_motion.brim_extrusions > 0);
+    CHECK(narrow_motion.finite);
+    CHECK(wide_motion.finite);
+    CHECK(wide_motion.brim_xy_length > narrow_motion.brim_xy_length);
+}
+
+TEST_CASE("disabled belt brim has no apron or brim motion", "[GCode][GCodeBeltApron]")
+{
+    const DynamicPrintConfig config = belt_apron_config(0.0, 0.0, 0.0);
+    const ExportedBelt out = export_belt(config);
+    const BeltMotion motion = inspect_belt(out.gcode, config);
+    CHECK(out.prologue_bands == 0);
+    CHECK(motion.brim_extrusions == 0);
+    CHECK_FALSE(has_token_before_perimeter(out.gcode, ";TYPE:Brim"));
+}
+
+TEST_CASE("inner-only belt brim does not create a leading apron", "[GCode][GCodeBeltApron]")
+{
+    const DynamicPrintConfig config = belt_apron_config(50.0, 4.0, 0.0, "inner_only");
+    const ExportedBelt out = export_belt(config, {mesh(TestMesh::cube_with_hole)});
+    const BeltMotion motion = inspect_belt(out.gcode, config);
+    CHECK(out.prologue_bands == 0);
+    CHECK(motion.finite);
+}
+
+TEST_CASE("belt apron uses the configured wall filament", "[GCode][GCodeBeltApron]")
+{
+    DynamicPrintConfig config = multifilament_config(2);
+    config.set_deserialize_strict({
+        {"belt_printer", true}, {"belt_slice_rotation", "x"}, {"belt_slice_rotation_angle", 45.0},
+        {"gcode_remap_x", "rev_x"}, {"gcode_remap_y", "pos_z"}, {"gcode_remap_z", "pos_y"},
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2}, {"skirt_loops", 0},
+        {"top_shell_layers", 0}, {"bottom_shell_layers", 1}, {"brim_type", "outer_only"},
+        {"brim_width", 4.0}, {"leading_brim_length", 50.0}, {"brim_object_gap", 0}, {"use_relative_e_distances", false},
+        {"outer_wall_filament_id", 2}, {"inner_wall_filament_id", 2},
+        {"machine_start_gcode", "T[initial_tool]\n"},
+    });
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{{{"extruder", 2}}};
+    const ExportedBelt out = export_belt(config, {cube(20)}, &overrides);
+    const BeltMotion motion = inspect_belt(out.gcode, config);
+    REQUIRE(out.prologue_bands > 0);
+    CHECK(motion.brim_tools == std::set<int>{1});
+}
+
+TEST_CASE("belt apron is emitted once per object instance", "[GCode][GCodeBeltApron]")
+{
+    const DynamicPrintConfig config = belt_apron_config();
+    const ExportedBelt one = export_belt(config, {cube(20)}, nullptr, true, 1);
+    const ExportedBelt two = export_belt(config, {cube(20)}, nullptr, true, 2);
+    const BeltMotion one_motion = inspect_belt(one.gcode, config);
+    const BeltMotion two_motion = inspect_belt(two.gcode, config);
+    REQUIRE(one_motion.brim_extrusions > 0);
+    CHECK(two_motion.brim_extrusions >= 2 * one_motion.brim_extrusions);
+    CHECK(two_motion.brim_xy_length >= 2.0 * one_motion.brim_xy_length - 1e-3);
+}
+
+TEST_CASE("belt apron runs before and after layer change hooks", "[GCode][GCodeBeltApron]")
+{
+    DynamicPrintConfig config = belt_apron_config();
+    config.set_deserialize_strict({
+        {"before_layer_change_gcode", "M117 APRON_BEFORE_[layer_num]\n"},
+        {"layer_change_gcode", "M117 APRON_CHANGE_[layer_num]\n"},
+    });
+    const ExportedBelt out = export_belt(config);
+    REQUIRE(out.prologue_bands > 0);
+    const std::vector<int> before_layers = hook_layer_numbers_before_object_z(out.gcode, "APRON_BEFORE_", out.first_object_z);
+    const std::vector<int> change_layers = hook_layer_numbers_before_object_z(out.gcode, "APRON_CHANGE_", out.first_object_z);
+    REQUIRE(before_layers.size() == out.prologue_bands);
+    REQUIRE(change_layers.size() == out.prologue_bands);
+
+}
+
+} // namespace belt_apron_contracts

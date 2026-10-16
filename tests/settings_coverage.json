@@ -159,7 +159,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed."
+      "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed. [GCodeBeltApron] additionally counts one expanded layer-change hook per prologue band before the first object layer."
     },
     "ironing_type": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
@@ -528,7 +528,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The exporter sets initial-layer fan speed zero and requires an emitted fan-off command; the full percent domain is not claimed."
+      "reason": "The exporter sets initial-layer fan speed zero and requires an emitted fan-off command; the full percent domain is not claimed. [GCodeBeltApron] additionally requires the 37 percent override before the first object layer, parsed from executable fan PWM commands."
     },
     "full_fan_speed_layer": {
       "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
@@ -1350,7 +1350,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed."
+      "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed. [GCodeBeltApron] additionally counts one expanded before-layer hook per prologue band before the first object layer."
     },
     "printing_by_object_gcode": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2379,7 +2379,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Separate zero-to-five variations on a belt step fixture increase parsed extrusion-path length. Broader dimensions and printer interactions remain unclaimed."
+      "reason": "Separate zero-to-five variations on a belt step fixture increase parsed extrusion-path length. Broader dimensions and printer interactions remain unclaimed. Additional [GCodeBeltApron] cases compare 30 and 50 mm leading lengths and require extrusion in every prologue band."
     },
     "extra_brim_width": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2388,7 +2388,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Separate zero-to-five variations on a belt step fixture increase parsed extrusion-path length. Broader dimensions and printer interactions remain unclaimed."
+      "reason": "Separate zero-to-five variations on a belt step fixture increase parsed extrusion-path length. Broader dimensions and printer interactions remain unclaimed. Additional [GCodeBeltApron] cases isolate 0 versus 6 mm lateral extension and require increased emitted brim path."
     },
     "belt_printer": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2812,6 +2812,60 @@
         "pipeline_oracle"
       ],
       "reason": "An overlapping-volume fixture distinguishes regular from even-odd parity and checks fresh/incremental/restored equality; close-holes is currently only a negative control on a mesh without the needed hole geometry."
+    },
+    "fuzzy_skin_ripples_per_layer": {
+      "test": "tests/libslic3r/test_fuzzy_skin.cpp",
+      "tag": "[FuzzyRipple]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct ripple consumer checks 1, 4, and 15 cycles plus disabled zero/negative controls, with bounded amplitude and sampling invariants. Deserialization, complete frequency response, and Print pipeline interactions remain unclaimed."
+    },
+    "fuzzy_skin_ripple_offset": {
+      "test": "tests/libslic3r/test_fuzzy_skin.cpp",
+      "tag": "[FuzzyRipple]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct consumer checks zero, quarter, half, and full wavelength offsets; half cycles invert displacement and full cycles restore it. Print pipeline and complete percentage domain remain unclaimed."
+    },
+    "fuzzy_skin_layers_between_ripple_offset": {
+      "test": "tests/libslic3r/test_fuzzy_skin.cpp",
+      "tag": "[FuzzyRipple]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct consumer checks groups of 1, 3, and 7 layers, their adjacent boundaries, negative layer indices, and disabled nonpositive groups. Print pipeline interactions remain unclaimed."
+    },
+    "fuzzy_skin": {
+      "test": "tests/libslic3r/test_fuzzy_skin.cpp",
+      "tag": "[FuzzyRipple]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct selection truth table checks every FuzzySkinType against contour/hole, outer/inner loop, and first-layer gates. Geometry across all styles and full Print pipeline wiring remain unclaimed."
+    },
+    "fuzzy_skin_thickness": {
+      "test": "tests/libslic3r/test_fuzzy_skin.cpp",
+      "tag": "[FuzzyRipple]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct ripple consumer checks zero, 0.4, and 0.8 mm amplitudes against linear displacement and amplitude bounds. Other noise types and Print pipeline interactions remain unclaimed."
+    },
+    "fuzzy_skin_point_distance": {
+      "test": "tests/libslic3r/test_fuzzy_skin.cpp",
+      "tag": "[FuzzyRipple]",
+      "dimensions": [
+        "representative_values",
+        "fixture_only"
+      ],
+      "reason": "Direct ripple consumer checks 0.25, 0.5, 1, and 2 mm sampling with exact counts on an analytic perimeter and disabled/subresolution controls. Other noise types and Print pipeline interactions remain unclaimed."
     }
   }
 }

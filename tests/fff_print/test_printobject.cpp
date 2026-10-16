@@ -1,3 +1,6 @@
+#include "libslic3r/TriangleSelector.hpp"
+#include <array>
+#include <limits>
 #include <algorithm>
 #include <catch2/catch_all.hpp>
 
@@ -596,3 +599,613 @@ TEST_CASE("Body centering survives islands merging and splitting between layers"
         }
     }
 }
+
+namespace painted_projection_contracts {
+
+namespace {
+DynamicPrintConfig projection_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"raft_layers", 0},
+        {"skirt_loops", 0},
+        {"nozzle_diameter", 0.4},
+        {"outer_wall_line_width", 0.4},
+        {"initial_layer_line_width", 0.4},
+    });
+    return config;
+}
+
+struct PaintedFixture {
+    Model model;
+    Print print;
+    DynamicPrintConfig config = projection_config();
+
+    explicit PaintedFixture(TriangleMesh mesh = Test::cube(20))
+    {
+        Test::init_print({std::move(mesh)}, print, model, config);
+    }
+
+    ModelVolume &volume() { return *model.objects.front()->volumes.front(); }
+
+    PrintObject &slice()
+    {
+        print.apply(model, config);
+        auto *object = print.get_object(0);
+        REQUIRE(object != nullptr);
+        object->slice();
+        REQUIRE_FALSE(object->layers().empty());
+        return *object;
+    }
+};
+
+std::vector<size_t> bottom_facets(const TriangleMesh &mesh)
+{
+    const float min_z = mesh.bounding_box().min.z();
+    std::vector<size_t> facets;
+    for (size_t i = 0; i < mesh.its.indices.size(); ++i) {
+        const auto &tri = mesh.its.indices[i];
+        if (std::abs(mesh.its.vertices[tri[0]].z() - min_z) < 1e-5f &&
+            std::abs(mesh.its.vertices[tri[1]].z() - min_z) < 1e-5f &&
+            std::abs(mesh.its.vertices[tri[2]].z() - min_z) < 1e-5f)
+            facets.push_back(i);
+    }
+    return facets;
+}
+
+size_t bottom_facet(const TriangleMesh &mesh)
+{
+    const std::vector<size_t> facets = bottom_facets(mesh);
+    REQUIRE_FALSE(facets.empty());
+    return facets.front();
+}
+
+size_t side_facet(const TriangleMesh &mesh)
+{
+    const float min_z = mesh.bounding_box().min.z();
+    const float max_z = mesh.bounding_box().max.z();
+    for (size_t i = 0; i < mesh.its.indices.size(); ++i) {
+        const auto &tri = mesh.its.indices[i];
+        int on_min = 0, on_max = 0;
+        for (int j = 0; j < 3; ++j) {
+            on_min += std::abs(mesh.its.vertices[tri[j]].z() - min_z) < 1e-5f;
+            on_max += std::abs(mesh.its.vertices[tri[j]].z() - max_z) < 1e-5f;
+        }
+        if (on_min > 0 && on_max > 0)
+            return i;
+    }
+    FAIL("cube has no vertical side facet");
+    return 0;
+}
+
+size_t sloped_facet(const TriangleMesh &mesh)
+{
+    for (size_t i = 0; i < mesh.its.indices.size(); ++i) {
+        const auto &tri = mesh.its.indices[i];
+        const Vec3f a = mesh.its.vertices[tri[0]];
+        const Vec3f b = mesh.its.vertices[tri[1]];
+        const Vec3f c = mesh.its.vertices[tri[2]];
+        const float zmin = std::min({a.z(), b.z(), c.z()});
+        const float zmax = std::max({a.z(), b.z(), c.z()});
+        const float zcomp = (b-a).cross(c-a).z();
+        if (zmax - zmin > 0.1f && std::abs(zcomp) > 0.01f)
+            return i;
+    }
+    FAIL("mesh has no sloped facet");
+    return 0;
+}
+
+double polygon_area_mm2(const Polygons &polygons)
+{
+    double area = 0.;
+    for (const Polygon &polygon : polygons)
+        area += std::abs(polygon.area());
+    return area * (SCALING_FACTOR * SCALING_FACTOR);
+}
+
+BoundingBox extents(const Polygons &polygons)
+{
+    BoundingBox bbox;
+    for (const Polygon &polygon : polygons)
+        bbox.merge(get_extents(polygon));
+    return bbox;
+}
+
+void paint_one(ModelVolume &volume, size_t facet, EnforcerBlockerType state)
+{
+    TriangleSelector selector(volume.mesh());
+    selector.set_facet(static_cast<int>(facet), state);
+    REQUIRE(volume.supported_facets.set(selector));
+}
+
+void paint_seam_one(ModelVolume &volume, size_t facet)
+{
+    TriangleSelector selector(volume.mesh());
+    selector.set_facet(static_cast<int>(facet), EnforcerBlockerType::ENFORCER);
+    REQUIRE(volume.seam_facets.set(selector));
+}
+
+Polygon rectangle_mm(double x0, double y0, double x1, double y1)
+{
+    return Polygon({Point::new_scale(x0, y0), Point::new_scale(x1, y0), Point::new_scale(x1, y1), Point::new_scale(x0, y1)});
+}
+
+double expolygons_area_mm2(const ExPolygons &polygons)
+{
+    double area = 0.;
+    for (const ExPolygon &polygon : polygons)
+        area += polygon.area();
+    return area * (SCALING_FACTOR * SCALING_FACTOR);
+}
+
+bool polygons_contain(const Polygons &polygons, const Point &point)
+{
+    return std::any_of(polygons.begin(), polygons.end(), [&point](const Polygon &polygon) {
+        return polygon.contains(point);
+    });
+}
+
+std::array<Vec3d, 3> transformed_triangle(const PrintObject &object, const ModelVolume &volume, size_t facet)
+{
+    std::array<Vec3d, 3> result;
+    const auto &triangle = volume.mesh().its.indices[facet];
+    for (int i = 0; i < 3; ++i)
+        result[i] = object.trafo_sliced() * volume.get_matrix() * volume.mesh().its.vertices[triangle[i]].cast<double>();
+    return result;
+}
+
+Point triangle_centroid_xy(const std::array<Vec3d, 3> &triangle)
+{
+    return Point::new_scale((triangle[0].x() + triangle[1].x() + triangle[2].x()) / 3.,
+                            (triangle[0].y() + triangle[1].y() + triangle[2].y()) / 3.);
+}
+
+std::pair<size_t, size_t> projected_slab_range(const PrintObject &object, const std::array<Vec3d, 3> &triangle)
+{
+    double min_z = triangle[0].z();
+    double max_z = triangle[0].z();
+    for (size_t i = 1; i < triangle.size(); ++i) {
+        min_z = std::min(min_z, triangle[i].z());
+        max_z = std::max(max_z, triangle[i].z());
+    }
+    size_t first = 0;
+    while (first < object.layers().size() && float(object.layers()[first]->slice_z) < min_z + EPSILON)
+        ++first;
+    REQUIRE(first < object.layers().size());
+    size_t last = first;
+    while (last + 1 < object.layers().size() && float(object.layers()[last]->slice_z) <= max_z)
+        ++last;
+    return {first, last};
+}
+
+std::vector<Vec3d> clip_z(const std::vector<Vec3d> &polygon, double z, bool keep_above)
+{
+    std::vector<Vec3d> clipped;
+    if (polygon.empty())
+        return clipped;
+    auto inside = [z, keep_above](const Vec3d &point) {
+        return keep_above ? point.z() >= z : point.z() <= z;
+    };
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        const Vec3d &a = polygon[i];
+        const Vec3d &b = polygon[(i + 1) % polygon.size()];
+        const bool a_inside = inside(a);
+        const bool b_inside = inside(b);
+        if (a_inside != b_inside) {
+            const double dz = b.z() - a.z();
+            if (std::abs(dz) > 1e-12)
+                clipped.emplace_back(a + ((z - a.z()) / dz) * (b - a));
+        }
+        if (b_inside)
+            clipped.push_back(b);
+    }
+    return clipped;
+}
+
+double convex_xy_area_mm2(std::vector<Vec3d> polygon)
+{
+    std::vector<std::pair<double, double>> points;
+    points.reserve(polygon.size());
+    for (const Vec3d &point : polygon)
+        points.emplace_back(point.x(), point.y());
+    std::sort(points.begin(), points.end());
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+    if (points.size() < 3)
+        return 0.;
+    auto cross = [](const auto &o, const auto &a, const auto &b) {
+        return (a.first - o.first) * (b.second - o.second) - (a.second - o.second) * (b.first - o.first);
+    };
+    std::vector<std::pair<double, double>> hull;
+    hull.reserve(points.size() * 2);
+    for (const auto &point : points) {
+        while (hull.size() >= 2 && cross(hull[hull.size() - 2], hull.back(), point) <= 1e-12)
+            hull.pop_back();
+        hull.push_back(point);
+    }
+    const size_t lower_size = hull.size();
+    for (auto it = points.rbegin(); it != points.rend(); ++it) {
+        while (hull.size() > lower_size && cross(hull[hull.size() - 2], hull.back(), *it) <= 1e-12)
+            hull.pop_back();
+        hull.push_back(*it);
+    }
+    hull.pop_back();
+    double area = 0.;
+    for (size_t i = 0; i < hull.size(); ++i)
+        area += hull[i].first * hull[(i + 1) % hull.size()].second - hull[(i + 1) % hull.size()].first * hull[i].second;
+    return std::abs(area) * 0.5;
+}
+
+std::vector<double> independently_projected_slab_areas(const PrintObject &object, const std::array<Vec3d, 3> &triangle)
+{
+    const auto range = projected_slab_range(object, triangle);
+    double min_z = triangle[0].z();
+    double max_z = triangle[0].z();
+    for (size_t i = 1; i < triangle.size(); ++i) {
+        min_z = std::min(min_z, triangle[i].z());
+        max_z = std::max(max_z, triangle[i].z());
+    }
+    std::vector<double> areas;
+    for (size_t layer_id = range.first; layer_id <= range.second; ++layer_id) {
+        const double lower = layer_id == range.first ? min_z : double(object.layers()[layer_id - 1]->slice_z);
+        const double upper = layer_id == range.second ? max_z : double(object.layers()[layer_id]->slice_z);
+        std::vector<Vec3d> clipped(triangle.begin(), triangle.end());
+        clipped = clip_z(clipped, lower, true);
+        clipped = clip_z(clipped, upper, false);
+        areas.push_back(convex_xy_area_mm2(std::move(clipped)));
+    }
+    return areas;
+}
+
+void install_bridge_fixture(PrintObject &object, size_t layer_id)
+{
+    Layer *lower = object.get_layer(static_cast<int>(layer_id - 1));
+    Layer *current = object.get_layer(static_cast<int>(layer_id));
+    REQUIRE(lower != nullptr);
+    REQUIRE(current != nullptr);
+    lower->lslices = {ExPolygon(rectangle_mm(-12., -2., -8., 2.)), ExPolygon(rectangle_mm(8., -2., 12., 2.))};
+    lower->lslices_bboxes.clear();
+    for (const ExPolygon &slice : lower->lslices)
+        lower->lslices_bboxes.push_back(get_extents(slice));
+
+    LayerRegion *region = current->get_region(0);
+    REQUIRE(region != nullptr);
+    region->perimeters.clear();
+    ExtrusionPath path(erExternalPerimeter, 0.08, 0.4f, 0.2f);
+    path.polyline = Polyline3(Polyline(Points{Point::new_scale(-10., 0.), Point::new_scale(10., 0.)}));
+    region->perimeters.append(path);
+}
+}
+
+TEST_CASE("Painted seam projection assigns a horizontal facet to its slice slab", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    ModelVolume &volume = fixture.volume();
+    const size_t facet = bottom_facet(volume.mesh());
+    paint_seam_one(volume, facet);
+
+    PrintObject &object = fixture.slice();
+    std::vector<Polygons> projected;
+    object.project_and_append_custom_facets(true, EnforcerBlockerType::ENFORCER, projected);
+
+    REQUIRE(projected.size() == object.layers().size());
+    REQUIRE_FALSE(projected.front().empty());
+    CHECK_THAT(polygon_area_mm2(projected.front()), Catch::Matchers::WithinAbs(200., 0.01));
+    for (size_t i = 1; i < projected.size(); ++i)
+        CHECK(projected[i].empty());
+}
+
+TEST_CASE("Painted seam projection follows the volume transform", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    ModelVolume &volume = fixture.volume();
+    const size_t facet = bottom_facet(volume.mesh());
+    volume.set_offset(Vec3d(3., -4., 0.));
+    paint_seam_one(volume, facet);
+
+    PrintObject &object = fixture.slice();
+    std::vector<Polygons> projected;
+    object.project_and_append_custom_facets(true, EnforcerBlockerType::ENFORCER, projected);
+    REQUIRE_FALSE(projected.empty());
+    REQUIRE_FALSE(projected.front().empty());
+
+    const BoundingBox bbox = extents(projected.front());
+    BoundingBoxf3 expected_bbox;
+    const auto &triangle = volume.mesh().its.indices[facet];
+    for (int i = 0; i < 3; ++i) {
+        const Vec3d expected_world = object.trafo_sliced() * volume.get_matrix() * volume.mesh().its.vertices[triangle[i]].cast<double>();
+        expected_bbox.merge(expected_world);
+    }
+    CHECK_THAT(unscale<double>(bbox.min.x()), Catch::Matchers::WithinAbs(expected_bbox.min.x(), 0.02));
+    CHECK_THAT(unscale<double>(bbox.min.y()), Catch::Matchers::WithinAbs(expected_bbox.min.y(), 0.02));
+    CHECK_THAT(polygon_area_mm2(projected.front()), Catch::Matchers::WithinAbs(200., 0.01));
+}
+
+TEST_CASE("Painted support projection isolates enforcer and blocker facets", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    ModelVolume &volume = fixture.volume();
+    const std::vector<size_t> bottoms = bottom_facets(volume.mesh());
+    REQUIRE(bottoms.size() >= 2);
+    const size_t enforcer = bottoms[0];
+    const size_t blocker = bottoms[1];
+    TriangleSelector selector(volume.mesh());
+    selector.set_facet(static_cast<int>(enforcer), EnforcerBlockerType::ENFORCER);
+    selector.set_facet(static_cast<int>(blocker), EnforcerBlockerType::BLOCKER);
+    REQUIRE(volume.supported_facets.set(selector));
+
+    PrintObject &object = fixture.slice();
+    std::vector<Polygons> enforcer_layers;
+    std::vector<Polygons> blocker_layers;
+    object.project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, enforcer_layers);
+    object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blocker_layers);
+
+    REQUIRE(enforcer_layers.size() == object.layers().size());
+    REQUIRE(blocker_layers.size() == object.layers().size());
+    REQUIRE_FALSE(enforcer_layers.front().empty());
+    REQUIRE_FALSE(blocker_layers.front().empty());
+    CHECK_THAT(polygon_area_mm2(enforcer_layers.front()), Catch::Matchers::WithinAbs(200., 0.05));
+    CHECK_THAT(polygon_area_mm2(blocker_layers.front()), Catch::Matchers::WithinAbs(200., 0.05));
+    CHECK_THAT(polygon_area_mm2(blocker_layers.front()), Catch::Matchers::WithinAbs(polygon_area_mm2(enforcer_layers.front()), 0.05));
+    const Point enforcer_center = triangle_centroid_xy(transformed_triangle(object, volume, enforcer));
+    const Point blocker_center = triangle_centroid_xy(transformed_triangle(object, volume, blocker));
+    CHECK(polygons_contain(enforcer_layers.front(), enforcer_center));
+    CHECK_FALSE(polygons_contain(enforcer_layers.front(), blocker_center));
+    CHECK(polygons_contain(blocker_layers.front(), blocker_center));
+    CHECK_FALSE(polygons_contain(blocker_layers.front(), enforcer_center));
+    for (size_t i = 1; i < blocker_layers.size(); ++i)
+        CHECK(blocker_layers[i].empty());
+}
+
+TEST_CASE("Empty painted facets leave public projections empty", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    PrintObject &object = fixture.slice();
+    std::vector<Polygons> seam;
+    std::vector<Polygons> support;
+    object.project_and_append_custom_facets(true, EnforcerBlockerType::ENFORCER, seam);
+    object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, support);
+    CHECK(seam.empty());
+    CHECK(support.empty());
+}
+
+
+TEST_CASE("Vertical painted seams are projected on every crossed slab", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    paint_seam_one(fixture.volume(), side_facet(fixture.volume().mesh()));
+    PrintObject &object = fixture.slice();
+    std::vector<Polygons> projected;
+    object.project_and_append_custom_facets(true, EnforcerBlockerType::ENFORCER, projected);
+    REQUIRE(projected.size() == object.layers().size());
+    const auto range = projected_slab_range(object, transformed_triangle(object, fixture.volume(), side_facet(fixture.volume().mesh())));
+    size_t populated = 0;
+    for (size_t layer_id = 0; layer_id < projected.size(); ++layer_id) {
+        const Polygons &layer = projected[layer_id];
+        const bool crosses_triangle = layer_id >= range.first && layer_id <= range.second;
+        if (crosses_triangle)
+            CHECK_FALSE(layer.empty());
+        else
+            CHECK(layer.empty());
+        if (!layer.empty()) {
+            ++populated;
+            size_t points = 0;
+            for (const Polygon &polygon : layer) {
+                points += polygon.points.size();
+                for (const Point &point : polygon.points) {
+                    CHECK(std::isfinite(unscale<double>(point.x())));
+                    CHECK(std::isfinite(unscale<double>(point.y())));
+                }
+            }
+            CHECK(points >= 3);
+        }
+    }
+    CHECK(populated == range.second - range.first + 1);
+}
+
+TEST_CASE("Sloped painted seams interpolate their footprint across layers", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture(Test::mesh(Test::TestMesh::pyramid));
+    paint_seam_one(fixture.volume(), sloped_facet(fixture.volume().mesh()));
+    PrintObject &object = fixture.slice();
+    std::vector<Polygons> projected;
+    object.project_and_append_custom_facets(true, EnforcerBlockerType::ENFORCER, projected);
+    REQUIRE(projected.size() == object.layers().size());
+    const auto range = projected_slab_range(object, transformed_triangle(object, fixture.volume(), sloped_facet(fixture.volume().mesh())));
+    const std::vector<double> expected_areas = independently_projected_slab_areas(
+        object, transformed_triangle(object, fixture.volume(), sloped_facet(fixture.volume().mesh())));
+    REQUIRE(expected_areas.size() == range.second - range.first + 1);
+    size_t populated = 0;
+    double first_area = 0., last_area = 0.;
+    double expected_total = 0.;
+    double actual_total = 0.;
+    for (size_t layer_id = 0; layer_id < projected.size(); ++layer_id) {
+        const Polygons &layer = projected[layer_id];
+        if (layer_id < range.first || layer_id > range.second) {
+            CHECK(layer.empty());
+            continue;
+        }
+        CHECK_FALSE(layer.empty());
+        if (!layer.empty()) {
+            const double a = polygon_area_mm2(layer);
+            const double expected = expected_areas[populated];
+            if (populated == 0) first_area = a;
+            last_area = a;
+            expected_total += expected;
+            actual_total += a;
+            CHECK_THAT(a, Catch::Matchers::WithinAbs(expected, 0.05));
+            ++populated;
+            CHECK(a > 0.);
+        }
+    }
+    REQUIRE(populated > 2);
+    CHECK_THAT(actual_total, Catch::Matchers::WithinAbs(expected_total, 0.1));
+    CHECK(first_area > last_area);
+    CHECK(first_area > 2. * last_area);
+}
+
+TEST_CASE("Painted projection handles a triangle with three distinct heights", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture(Test::mesh(Test::TestMesh::pyramid));
+    ModelVolume &volume = fixture.volume();
+    volume.set_rotation(Vec3d(Geometry::deg2rad(11.), Geometry::deg2rad(-7.), 0.));
+    const size_t facet = sloped_facet(volume.mesh());
+    paint_seam_one(volume, facet);
+    PrintObject &object = fixture.slice();
+    const auto triangle = transformed_triangle(object, volume, facet);
+    CHECK(std::abs(triangle[0].z() - triangle[1].z()) > 0.001);
+    CHECK(std::abs(triangle[1].z() - triangle[2].z()) > 0.001);
+    CHECK(std::abs(triangle[0].z() - triangle[2].z()) > 0.001);
+    std::vector<Polygons> projected;
+    object.project_and_append_custom_facets(true, EnforcerBlockerType::ENFORCER, projected);
+    REQUIRE(projected.size() == object.layers().size());
+    const auto range = projected_slab_range(object, triangle);
+    const std::vector<double> expected = independently_projected_slab_areas(object, triangle);
+    REQUIRE(expected.size() == range.second - range.first + 1);
+    for (size_t layer_id = 0; layer_id < projected.size(); ++layer_id) {
+        if (layer_id < range.first || layer_id > range.second) {
+            CHECK(projected[layer_id].empty());
+            continue;
+        }
+        REQUIRE_FALSE(projected[layer_id].empty());
+        CHECK_THAT(polygon_area_mm2(projected[layer_id]),
+                   Catch::Matchers::WithinAbs(expected[layer_id - range.first], 0.05));
+    }
+}
+
+TEST_CASE("Painted support projection reports vertical facet endpoints", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    paint_one(fixture.volume(), side_facet(fixture.volume().mesh()), EnforcerBlockerType::ENFORCER);
+    PrintObject &object = fixture.slice();
+    std::vector<Polygons> projected;
+    std::vector<std::pair<Vec3f, Vec3f>> vertical_points;
+    object.project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, projected, &vertical_points);
+    REQUIRE(projected.size() == object.layers().size());
+    REQUIRE_FALSE(vertical_points.empty());
+    const size_t facet = side_facet(fixture.volume().mesh());
+    BoundingBoxf3 selected_bbox;
+    const auto &triangle = fixture.volume().mesh().its.indices[facet];
+    for (int i = 0; i < 3; ++i) {
+        const Vec3d point = object.trafo_sliced() * fixture.volume().get_matrix() * fixture.volume().mesh().its.vertices[triangle[i]].cast<double>();
+        selected_bbox.merge(point);
+    }
+    for (const auto &segment : vertical_points) {
+        CHECK(std::isfinite(segment.first.x()));
+        CHECK(std::isfinite(segment.first.y()));
+        CHECK(std::isfinite(segment.first.z()));
+        CHECK(std::isfinite(segment.second.x()));
+        CHECK(std::isfinite(segment.second.y()));
+        CHECK(std::isfinite(segment.second.z()));
+        CHECK(segment.first.z() >= selected_bbox.min.z() - 0.02f);
+        CHECK(segment.first.z() <= selected_bbox.max.z() + 0.02f);
+        CHECK(segment.second.z() >= selected_bbox.min.z() - 0.02f);
+        CHECK(segment.second.z() <= selected_bbox.max.z() + 0.02f);
+        CHECK(std::abs(segment.first.z() - segment.second.z()) > 0.01f);
+    }
+}
+
+TEST_CASE("Projection visits every painted model volume", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    ModelVolume &primary = fixture.volume();
+    ModelVolume *secondary = fixture.model.objects.front()->add_volume(Test::cube(10.));
+    secondary->set_offset(Vec3d(15., 0., 0.));
+    paint_seam_one(primary, bottom_facet(primary.mesh()));
+    paint_seam_one(*secondary, bottom_facet(secondary->mesh()));
+    PrintObject &object = fixture.slice();
+    std::vector<Polygons> projected;
+    object.project_and_append_custom_facets(true, EnforcerBlockerType::ENFORCER, projected);
+    REQUIRE_FALSE(projected.empty());
+    REQUIRE_FALSE(projected.front().empty());
+    CHECK_THAT(polygon_area_mm2(projected.front()), Catch::Matchers::WithinAbs(250., 0.02));
+    CHECK(projected.front().size() >= 2);
+}
+
+TEST_CASE("Support projection merges successive facet selections", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    ModelVolume &volume = fixture.volume();
+    const std::vector<size_t> bottoms = bottom_facets(volume.mesh());
+    REQUIRE(bottoms.size() >= 2);
+    TriangleSelector selector(volume.mesh());
+    selector.set_facet(static_cast<int>(bottoms[0]), EnforcerBlockerType::ENFORCER);
+    selector.set_facet(static_cast<int>(bottoms[1]), EnforcerBlockerType::BLOCKER);
+    REQUIRE(volume.supported_facets.set(selector));
+    PrintObject &object = fixture.slice();
+    std::vector<Polygons> projected;
+    object.project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, projected);
+    object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, projected);
+    REQUIRE_FALSE(projected.empty());
+    REQUIRE_FALSE(projected.front().empty());
+    CHECK_THAT(polygon_area_mm2(projected.front()), Catch::Matchers::WithinAbs(400., 0.05));
+}
+
+TEST_CASE("Bridge contact removal drops only the unsupported middle span", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    PrintObject &object = fixture.slice();
+    REQUIRE(object.layers().size() >= 2);
+    install_bridge_fixture(object, 1);
+
+    ExPolygons contacts{ExPolygon(rectangle_mm(-10., -2., 10., 2.))};
+    const double before = expolygons_area_mm2(contacts);
+    PrintObject::remove_bridges_from_contacts(object.get_layer(0), object.get_layer(1),
+        float(scale_(0.4)), &contacts, float(scale_(100.)), false);
+    REQUIRE_FALSE(contacts.empty());
+    CHECK_THAT(before, Catch::Matchers::WithinAbs(80., 1e-3));
+    CHECK(expolygons_area_mm2(contacts) < before);
+    CHECK_FALSE(std::any_of(contacts.begin(), contacts.end(), [](const ExPolygon &polygon) { return polygon.contains(Point::new_scale(0., 0.)); }));
+    CHECK(std::any_of(contacts.begin(), contacts.end(), [](const ExPolygon &polygon) { return polygon.contains(Point::new_scale(-9., 0.)); }));
+    CHECK(std::any_of(contacts.begin(), contacts.end(), [](const ExPolygon &polygon) { return polygon.contains(Point::new_scale(9., 0.)); }));
+}
+
+TEST_CASE("Breaking a long bridge removes each unsupported segment", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    PrintObject &object = fixture.slice();
+    REQUIRE(object.layers().size() >= 2);
+    install_bridge_fixture(object, 1);
+    ExPolygons contacts{ExPolygon(rectangle_mm(-10., -2., 10., 2.))};
+    PrintObject::remove_bridges_from_contacts(object.get_layer(0), object.get_layer(1),
+        float(scale_(0.4)), &contacts, float(scale_(4.)), true);
+    REQUIRE_FALSE(contacts.empty());
+    CHECK(expolygons_area_mm2(contacts) > 0.);
+    CHECK(expolygons_area_mm2(contacts) < 80.);
+}
+
+TEST_CASE("An overlong bridge is retained when bridge breaking is disabled", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    PrintObject &object = fixture.slice();
+    REQUIRE(object.layers().size() >= 2);
+    install_bridge_fixture(object, 1);
+    ExPolygons contacts{ExPolygon(rectangle_mm(-10., -2., 10., 2.))};
+    PrintObject::remove_bridges_from_contacts(object.get_layer(0), object.get_layer(1),
+        float(scale_(0.4)), &contacts, float(scale_(4.)), false);
+    REQUIRE_FALSE(contacts.empty());
+    CHECK_THAT(expolygons_area_mm2(contacts), Catch::Matchers::WithinAbs(80., 0.01));
+    CHECK(std::any_of(contacts.begin(), contacts.end(), [](const ExPolygon &polygon) { return polygon.contains(Point::new_scale(0., 0.)); }));
+}
+
+
+TEST_CASE("Bridge surface metadata also removes its contact footprint", "[PrintObject][PrintObjectPainted]")
+{
+    PaintedFixture fixture;
+    PrintObject &object = fixture.slice();
+    REQUIRE(object.layers().size() >= 2);
+    install_bridge_fixture(object, 1);
+    LayerRegion *region = object.get_layer(1)->get_region(0);
+    REQUIRE(region != nullptr);
+    Surface bridge_surface(stBottomBridge, ExPolygon(rectangle_mm(-10., -2., 10., 2.)));
+    bridge_surface.bridge_angle = 0.;
+    region->fill_surfaces.surfaces.push_back(std::move(bridge_surface));
+    ExPolygons contacts{ExPolygon(rectangle_mm(-10., -2., 10., 2.))};
+    PrintObject::remove_bridges_from_contacts(object.get_layer(0), object.get_layer(1),
+        float(scale_(0.4)), &contacts, float(scale_(100.)), false);
+    CHECK(contacts.empty());
+}
+
+} // namespace painted_projection_contracts
