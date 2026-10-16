@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Brim material scaling and first-layer flow exclusion.",
+  "mutants": [
+    {
+      "id": "brim-flow-ratio-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        _mm3_per_mm *= m_config.brim_flow_ratio;",
+      "new": "        _mm3_per_mm *= 1.0;",
+      "description": "Zero, half and double brim material assertions fail while object controls remain stable.",
+      "test_filter": "BrimFlowVariance"
+    },
+    {
+      "id": "brim-flow-ratio-clamped-to-one",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        _mm3_per_mm *= m_config.brim_flow_ratio;",
+      "new": "        _mm3_per_mm *= std::min(1.0, m_config.brim_flow_ratio.value);",
+      "description": "Upper-bound ratio2 must double brim material; clamping to1 fails.",
+      "test_filter": "BrimFlowVariance"
+    },
+    {
+      "id": "brim-first-layer-flow-exclusion-removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        if (path_on_first_layer && (path.role() != erBrim && path.role() != erSkirt)) {",
+      "new": "        if (path_on_first_layer && path.role() != erSkirt) {",
+      "description": "First-layer ratio0.6 changes actual object extrusion but must preserve brim extrusion.",
+      "test_filter": "BrimFlowVariance"
+    }
+  ]
+}

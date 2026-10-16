@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/libslic3r.h"
 #include <cstddef>
@@ -1148,5 +1149,354 @@ TEST_CASE("Retract lift enforcement separates top and bottom surface policies", 
     CHECK(lifts[rletTopAndBottom].size() >= lifts[rletTopOnly].size());
     CHECK(lifts[rletTopAndBottom].size() >= lifts[rletBottomOnly].size());
 }
+
+
+void require_bounded_retraction_output(const std::string &output)
+{
+    REQUIRE(output.size() <= 4 * 1024 * 1024);
+    REQUIRE(std::count(output.begin(), output.end(), '\n') <= 100000);
+}
+
+DynamicPrintConfig nullable_retraction_config()
+{
+    DynamicPrintConfig config = retraction_config();
+    config.set_deserialize_strict({
+        {"skirt_loops", "0"},
+        {"brim_type", "no_brim"},
+        {"brim_width", "0"},
+        {"enable_arc_fitting", "0"},
+        {"seam_position", "aligned"},
+        {"retract_restart_extra", "0"},
+    });
+
+    auto *filament_map = config.option<ConfigOptionInts>("filament_map", true);
+    REQUIRE(filament_map != nullptr);
+    filament_map->values = {1};
+
+    // Explicitly nil every generated filament override so a default value
+    // cannot make an inheritance case pass accidentally.
+    for (const std::string &key : filament_extruder_override_keys) {
+        ConfigOption *option = config.option(key, true);
+        REQUIRE(option != nullptr);
+        REQUIRE(option->nullable());
+        config.set_deserialize_strict(key, "nil");
+        REQUIRE(option->is_nil());
+    }
+    return config;
+}
+
+DynamicPrintConfig filament_retraction_config(const char *filament_key, const char *filament_value,
+                                              const char *machine_key = nullptr, const char *machine_value = nullptr)
+{
+    DynamicPrintConfig config = nullable_retraction_config();
+    if (machine_key != nullptr)
+        config.set_deserialize_strict(machine_key, machine_value);
+    config.set_deserialize_strict(filament_key, filament_value);
+    const ConfigOption *override_option = config.option(filament_key, true);
+    REQUIRE(override_option != nullptr);
+    if (std::string(filament_value) == "nil")
+        REQUIRE(override_option->is_nil());
+    else
+        REQUIRE_FALSE(override_option->is_nil());
+    return config;
+}
+
+std::string bounded_retraction_export(TriangleMesh mesh, const DynamicPrintConfig &config)
+{
+    std::string output = export_mesh(std::move(mesh), config);
+    require_bounded_retraction_output(output);
+    return output;
+}
+
+void require_layer_marker_count(const std::string &output, const DynamicPrintConfig &config, size_t expected)
+{
+    const LayerRetractionStats layers = layer_retraction_stats(output, config);
+    REQUIRE(layers.markers == expected);
+}
+
+struct DepositionStats {
+    size_t positive_xy_moves = 0;
+    double xy_path = 0.;
+    double filament = 0.;
+    double xy_error_bound = 0.;
+    double filament_error_bound = 0.;
+    bool finite = true;
+};
+
+DepositionStats deposition_stats(const std::string &output, const DynamicPrintConfig &config)
+{
+    DepositionStats stats;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&stats](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const double old_x = self.x();
+        const double old_y = self.y();
+        const double old_z = self.z();
+        const double old_e = self.e();
+        const double new_x = line.new_X(self);
+        const double new_y = line.new_Y(self);
+        const double new_z = line.new_Z(self);
+        const double new_e = line.new_E(self);
+        // Reject malformed coordinates before the extrusion predicate can
+        // hide a NaN or infinity in a non-extruding line.
+        if (!std::isfinite(old_x) || !std::isfinite(old_y) || !std::isfinite(old_z) ||
+            !std::isfinite(old_e) || !std::isfinite(new_x) || !std::isfinite(new_y) ||
+            !std::isfinite(new_z) || !std::isfinite(new_e)) {
+            stats.finite = false;
+            return;
+        }
+        const double xy = line.dist_XY(self);
+        const double e_delta = line.dist_E(self);
+        if (!std::isfinite(xy) || !std::isfinite(e_delta)) {
+            stats.finite = false;
+            return;
+        }
+        if (!line.extruding(self) || xy <= EPSILON)
+            return;
+        ++stats.positive_xy_moves;
+        stats.xy_path += xy;
+        stats.filament += std::abs(e_delta);
+
+        const double max_coordinate = std::max(std::max(std::abs(old_x), std::abs(old_y)),
+            std::max(std::abs(new_x), std::abs(new_y)));
+        const double float_epsilon = std::numeric_limits<float>::epsilon();
+        // XYZF_EXPORT_DIGITS is 3: each endpoint contributes 0.5e-3, with
+        // an additional conservative float-read term in each axis.
+        stats.xy_error_bound += 2. * std::sqrt(2.) *
+            (0.5e-3 + float_epsilon * max_coordinate);
+        // E_EXPORT_DIGITS is 5: a delta has two endpoint quantization errors.
+        const double max_e = std::max(std::abs(old_e), std::abs(line.e()));
+        stats.filament_error_bound += 1e-5 + 4. * float_epsilon * max_e;
+    });
+    REQUIRE(stats.finite);
+    return stats;
+}
+
+void require_same_deposition(const DepositionStats &baseline, const DepositionStats &candidate)
+{
+    REQUIRE(baseline.positive_xy_moves > 0);
+    REQUIRE(candidate.positive_xy_moves > 0);
+    CHECK(candidate.positive_xy_moves == baseline.positive_xy_moves);
+    CHECK_THAT(candidate.xy_path, Catch::Matchers::WithinAbs(
+        baseline.xy_path, baseline.xy_error_bound + candidate.xy_error_bound));
+    CHECK_THAT(candidate.filament, Catch::Matchers::WithinAbs(
+        baseline.filament, baseline.filament_error_bound + candidate.filament_error_bound));
+}
+
+std::set<double> lift_height_deltas(const std::string &output, const DynamicPrintConfig &config)
+{
+    std::set<double> heights;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool has_printed = false;
+    reader.parse_buffer(output, [&heights, &has_printed](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.extruding(self) && line.dist_XY(self) > EPSILON)
+            has_printed = true;
+        if (has_printed && line.comment().find("lift Z") != std::string_view::npos &&
+            line.dist_Z(self) > EPSILON && std::isfinite(line.dist_Z(self)))
+            heights.insert(line.dist_Z(self));
+    });
+    return heights;
+}
+
+TEST_CASE("Nullable filament retraction length inherits or overrides the machine length", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const auto &[value, expected] : std::vector<std::pair<const char *, double>>{
+             {"nil", 0.8}, {"0.35", 0.35}, {"1.25", 1.25}}) {
+        DynamicPrintConfig config = filament_retraction_config("filament_retraction_length", value, "retraction_length", "0.8");
+        const std::string output = bounded_retraction_export(separated_cubes(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const RetractionStats stats = retraction_stats(output, config);
+        REQUIRE_FALSE(stats.retract_lengths.empty());
+        for (const double actual : stats.retract_lengths)
+            CHECK_THAT(actual, Catch::Matchers::WithinAbs(expected, 0.0001));
+    }
+}
+
+TEST_CASE("Nullable filament retraction speed inherits or overrides the machine speed", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const auto &[value, expected] : std::vector<std::pair<const char *, double>>{
+             {"nil", 30.}, {"13", 13.}, {"47", 47.}}) {
+        DynamicPrintConfig config = filament_retraction_config("filament_retraction_speed", value, "retraction_speed", "30");
+        config.set_deserialize_strict("deretraction_speed", "7");
+        const std::string output = bounded_retraction_export(separated_cubes(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const RetractionStats stats = retraction_stats(output, config);
+        REQUIRE_FALSE(stats.retract_feedrates.empty());
+        for (const double feedrate : stats.retract_feedrates)
+            CHECK_THAT(feedrate, Catch::Matchers::WithinAbs(expected * 60., 0.01));
+    }
+}
+
+TEST_CASE("Nullable filament deretraction speed preserves zero fallback and explicit values", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const auto &[value, expected] : std::vector<std::pair<const char *, double>>{
+             {"nil", 7.}, {"0", 30.}, {"13", 13.}, {"51", 51.}}) {
+        DynamicPrintConfig config = filament_retraction_config("filament_deretraction_speed", value, "deretraction_speed", "7");
+        config.set_deserialize_strict("retraction_speed", "30");
+        const std::string output = bounded_retraction_export(separated_cubes(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const RetractionStats stats = retraction_stats(output, config);
+        REQUIRE_FALSE(stats.deretract_feedrates.empty());
+        for (const double feedrate : stats.deretract_feedrates)
+            CHECK_THAT(feedrate, Catch::Matchers::WithinAbs(expected * 60., 0.01));
+    }
+}
+
+TEST_CASE("Nullable filament layer retraction inherits and overrides both boolean states", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    struct LayerCase { bool machine; const char *filament; bool expected; };
+    const std::vector<LayerCase> cases{
+        {false, "nil", false}, {true, "nil", true}, {true, "0", false}, {false, "1", true}};
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const LayerCase &layer_case : cases) {
+        DynamicPrintConfig config = filament_retraction_config(
+            "filament_retract_when_changing_layer", layer_case.filament,
+            "retract_when_changing_layer", layer_case.machine ? "1" : "0");
+        config.set_deserialize_strict("retraction_minimum_travel", "100");
+        const std::string output = bounded_retraction_export(short_cube(2.0), config);
+        require_layer_marker_count(output, config, 10);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const LayerRetractionStats stats = layer_retraction_stats(output, config);
+        REQUIRE(stats.markers == 10);
+        CHECK(stats.retractions == (layer_case.expected ? stats.markers : 0));
+    }
+}
+
+TEST_CASE("Nullable filament minimum travel inherits and suppresses long travel retractions", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    size_t baseline_retractions = 0;
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const char *value : {"nil", "0", "1000"}) {
+        DynamicPrintConfig config = filament_retraction_config("filament_retraction_minimum_travel", value, "retraction_minimum_travel", "0");
+        const std::string output = bounded_retraction_export(separated_cubes(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const RetractionStats stats = retraction_stats(output, config);
+        if (std::string(value) == "1000") {
+            CHECK(stats.retract_lengths.size() < baseline_retractions);
+        } else if (std::string(value) == "nil") {
+            REQUIRE_FALSE(stats.retract_lengths.empty());
+            baseline_retractions = stats.retract_lengths.size();
+        } else {
+            CHECK(stats.retract_lengths.size() == baseline_retractions);
+        }
+    }
+}
+
+TEST_CASE("Nullable filament z hop inherits and overrides the normal lift height", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const auto &[value, expected_lift] : std::vector<std::pair<const char *, double>>{
+             {"nil", 0.4}, {"0", 0.}, {"0.8", 0.8}}) {
+        DynamicPrintConfig config = filament_retraction_config("filament_z_hop", value, "z_hop", "0.4");
+        const std::string output = bounded_retraction_export(short_cube(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const std::set<double> lift_heights = lift_height_deltas(output, config);
+        if (expected_lift == 0.) {
+            CHECK(lift_heights.empty());
+        } else {
+            REQUIRE_FALSE(lift_heights.empty());
+            for (const double height : lift_heights)
+                CHECK_THAT(height, Catch::Matchers::WithinAbs(expected_lift, 0.001));
+        }
+    }
+}
+
+TEST_CASE("Nullable filament upper lift bound inherits and overrides the machine bound", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const char *value : {"nil", "0", "2"}) {
+        DynamicPrintConfig config = filament_retraction_config("filament_retract_lift_above", value, "retract_lift_above", "0");
+        const std::string output = bounded_retraction_export(short_cube(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const RetractionStats stats = retraction_stats(output, config);
+        if (std::string(value) == "2")
+            CHECK(stats.lift_zs.empty());
+        else
+            REQUIRE_FALSE(stats.lift_zs.empty());
+    }
+}
+
+TEST_CASE("Nullable filament lower lift bound inherits and overrides the machine bound", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const char *value : {"nil", "0", "0.1"}) {
+        DynamicPrintConfig config = filament_retraction_config("filament_retract_lift_below", value, "retract_lift_below", "0");
+        const std::string output = bounded_retraction_export(short_cube(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const RetractionStats stats = retraction_stats(output, config);
+        if (std::string(value) == "0.1")
+            CHECK(stats.lift_zs.empty());
+        else
+            REQUIRE_FALSE(stats.lift_zs.empty());
+    }
+}
+
 
 } // namespace retraction_variance_contracts

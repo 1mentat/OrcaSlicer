@@ -45,6 +45,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "test_helpers.hpp"
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -1408,4 +1409,191 @@ TEST_CASE("Belt brim slices when every object is a flush target", "[SkirtBrim][b
     REQUIRE(print.validate().string.empty());
     const std::string out = gcode(print);
     CHECK(out.find(";TYPE:Brim") != std::string::npos);
+}
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace brim_flow_variance {
+namespace {
+
+struct Material {
+    double e = 0.0;
+    double xy = 0.0;
+    size_t moves = 0;
+};
+
+struct Evidence {
+    Material brim;
+    Material first_layer_object;
+    Material later_object;
+    size_t layers = 0;
+    size_t brim_xy_moves = 0;
+    size_t brim_loops = 0;
+    double brim_geometry_length = 0.0;
+};
+
+DynamicPrintConfig configuration(double brim_ratio, double first_layer_ratio)
+{
+    const ConfigOptionDef *definition = print_config_def.get("brim_flow_ratio");
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->type == coFloat);
+    REQUIRE(definition->is_value_valid(brim_ratio));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2}, {"top_shell_layers", 0}, {"bottom_shell_layers", 1},
+        {"bottom_shell_thickness", 0.0}, {"sparse_infill_density", "20%"},
+        {"minimum_sparse_infill_area", 0.0},
+        {"brim_type", "outer_only"}, {"brim_width", 2.0},
+        {"brim_object_gap", 0.1}, {"skirt_loops", 0}, {"raft_layers", 0},
+        {"enable_support", false}, {"gcode_comments", true},
+        {"gcode_flavor", "marlin"}, {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"}, {"enable_arc_fitting", false},
+        {"slow_down_for_layer_cooling", false},
+        {"filament_max_volumetric_speed", "200"},
+        {"set_other_flow_ratios", true}, {"first_layer_flow_ratio", first_layer_ratio},
+        {"brim_flow_ratio", brim_ratio}, {"filament_flow_ratio", "1.0"},
+        {"print_flow_ratio", 1.0}
+    });
+    return config;
+}
+
+// Accept role markers only at the beginning of the comment, so serialized
+// settings and custom text cannot masquerade as a production role transition.
+std::string_view role_marker(std::string_view comment)
+{
+    while (!comment.empty() && comment.front() == ' ')
+        comment.remove_prefix(1);
+    for (std::string_view prefix : {std::string_view("TYPE:"), std::string_view("FEATURE:")}) {
+        if (comment.substr(0, prefix.size()) == prefix) {
+            comment.remove_prefix(prefix.size());
+            while (!comment.empty() && comment.front() == ' ')
+                comment.remove_prefix(1);
+            while (!comment.empty() && (comment.back() == ' ' || comment.back() == '\r'))
+                comment.remove_suffix(1);
+            return comment;
+        }
+    }
+    return {};
+}
+
+Evidence slice(double brim_ratio, double first_layer_ratio = 1.0)
+{
+    const DynamicPrintConfig config = configuration(brim_ratio, first_layer_ratio);
+    Print print;
+    Model model;
+    TriangleMesh mesh = cube(8.0);
+    mesh.scale(Vec3f(1.0f, 1.0f, 0.1f));
+    init_print({mesh}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE(output.size() < 4u * 1024u * 1024u);
+    REQUIRE(std::count(output.begin(), output.end(), '\n') < 100000);
+
+    Evidence result;
+    for (const auto &entry : print.get_brimMap()) {
+        result.brim_loops += entry.second.items_count();
+        for_each_extrusion_path(entry.second, [&](const ExtrusionPath &path) {
+            result.brim_geometry_length += path.length();
+        });
+    }
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string role;
+    reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            ++result.layers;
+        if (const std::string_view marker = role_marker(line.comment()); !marker.empty())
+            role = std::string(marker);
+        if (!line.cmd_is("G1"))
+            return;
+        const double xy = line.dist_XY(self);
+        REQUIRE(std::isfinite(xy));
+        if (xy <= EPSILON)
+            return;
+        if (role == "Brim")
+            ++result.brim_xy_moves;
+        if (!line.extruding(self))
+            return;
+        const double e = line.dist_E(self);
+        REQUIRE(std::isfinite(e));
+        REQUIRE(e > 0.0);
+        Material *material = role == "Brim" ? &result.brim
+            : result.layers == 1 ? &result.first_layer_object : &result.later_object;
+        // The cube has no support, skirt, purge tower or custom extrusion.
+        // Require a named role to prevent preamble moves entering the oracle.
+        REQUIRE_FALSE(role.empty());
+        material->e += e;
+        material->xy += xy;
+        ++material->moves;
+    });
+    REQUIRE(result.layers == 4);
+    REQUIRE(result.brim_loops > 0);
+    REQUIRE(result.brim_geometry_length > 0.0);
+    REQUIRE(result.brim_xy_moves > 0);
+    REQUIRE(result.first_layer_object.moves > 0);
+    REQUIRE(result.later_object.moves > 0);
+    return result;
+}
+
+double rounding_bound(const Material &base, const Material &changed, double ratio)
+{
+    // Relative E is emitted to five decimal places. Each independent summed
+    // move contributes at most half a decimal quantum plus float parse error.
+    return 0.000006 * (ratio * base.moves + changed.moves)
+        + 4.0 * std::numeric_limits<float>::epsilon() * (ratio * base.e + changed.e);
+}
+
+void require_material(const Material &base, const Material &changed, double ratio)
+{
+    REQUIRE(base.moves > 0);
+    REQUIRE(base.e > 0.0);
+    const double tolerance = rounding_bound(base, changed, ratio);
+    if (ratio > 0.0) {
+        CHECK(changed.moves == base.moves);
+        CHECK_THAT(changed.xy, Catch::Matchers::WithinAbs(base.xy, 1e-5));
+    } else {
+        CHECK(changed.moves == 0);
+    }
+    if (ratio != 1.0)
+        REQUIRE(tolerance < std::abs(base.e * (ratio - 1.0)));
+    CHECK_THAT(changed.e, Catch::Matchers::WithinAbs(base.e * ratio, tolerance));
+}
+
+void require_same_brim_geometry(const Evidence &base, const Evidence &changed)
+{
+    CHECK(changed.brim_loops == base.brim_loops);
+    CHECK_THAT(changed.brim_geometry_length,
+               Catch::Matchers::WithinAbs(base.brim_geometry_length, 1e-5));
+}
+
+} // namespace
+} // namespace brim_flow_variance
+
+TEST_CASE("Brim flow boundaries scale brim material independently of first layer flow",
+          "[SkirtBrim][BrimFlowVariance][SettingsVariance]")
+{
+    using namespace brim_flow_variance;
+    const Evidence base = slice(1.0);
+    REQUIRE(base.brim.moves > 0);
+    REQUIRE(base.brim.e > 0.0);
+    for (double ratio : {0.0, 0.5, 2.0}) {
+        CAPTURE(ratio);
+        const Evidence changed = slice(ratio);
+        require_same_brim_geometry(base, changed);
+        require_material(base.brim, changed.brim, ratio);
+        require_material(base.first_layer_object, changed.first_layer_object, 1.0);
+        require_material(base.later_object, changed.later_object, 1.0);
+    }
+    // The public option contract excludes brims from the first-layer ratio.
+    // Positive object extrusion proves that this control actually took effect.
+    const Evidence first_layer_changed = slice(1.0, 0.6);
+    require_same_brim_geometry(base, first_layer_changed);
+    require_material(base.brim, first_layer_changed.brim, 1.0);
+    require_material(base.first_layer_object, first_layer_changed.first_layer_object, 0.6);
+    require_material(base.later_object, first_layer_changed.later_object, 1.0);
 }

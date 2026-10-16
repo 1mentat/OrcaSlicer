@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Role-specific material scaling for first layer, top, bottom, internal solid infill, and gap fill.",
+  "mutants": [
+    {
+      "id": "role-flow-first-layer-flow-ratio-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.first_layer_flow_ratio;",
+      "new": "_mm3_per_mm *= (0.0 * m_config.first_layer_flow_ratio + 1.0);",
+      "description": "Retain the setting read but suppress its multiplier. The 0.8 and 1.2 variants must scale only eligible material with stable path geometry.",
+      "test_filter": "RoleFlowVariance"
+    },
+    {
+      "id": "role-flow-top-solid-infill-flow-ratio-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= NOZZLE_CONFIG(top_solid_infill_flow_ratio);",
+      "new": "_mm3_per_mm *= (0.0 * NOZZLE_CONFIG(top_solid_infill_flow_ratio) + 1.0);",
+      "description": "Retain the setting read but suppress its multiplier. The 0.8 and 1.2 variants must scale only eligible material with stable path geometry.",
+      "test_filter": "RoleFlowVariance"
+    },
+    {
+      "id": "role-flow-bottom-solid-infill-flow-ratio-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.bottom_solid_infill_flow_ratio;",
+      "new": "_mm3_per_mm *= (0.0 * m_config.bottom_solid_infill_flow_ratio + 1.0);",
+      "description": "Retain the setting read but suppress its multiplier. The 0.8 and 1.2 variants must scale only eligible material with stable path geometry.",
+      "test_filter": "RoleFlowVariance"
+    },
+    {
+      "id": "role-flow-internal-solid-infill-flow-ratio-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.internal_solid_infill_flow_ratio;",
+      "new": "_mm3_per_mm *= (0.0 * m_config.internal_solid_infill_flow_ratio + 1.0);",
+      "description": "Retain the setting read but suppress its multiplier. The 0.8 and 1.2 variants must scale only eligible material with stable path geometry.",
+      "test_filter": "RoleFlowVariance"
+    },
+    {
+      "id": "role-flow-gap-fill-flow-ratio-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.gap_fill_flow_ratio;",
+      "new": "_mm3_per_mm *= (0.0 * m_config.gap_fill_flow_ratio + 1.0);",
+      "description": "Retain the setting read but suppress its multiplier. The 0.8 and 1.2 variants must scale only eligible material with stable path geometry.",
+      "test_filter": "RoleFlowVariance"
+    }
+  ]
+}

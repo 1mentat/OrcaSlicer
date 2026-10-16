@@ -706,6 +706,245 @@ std::string slice_tunnel(std::initializer_list<ConfigBase::SetDeserializeItem> i
     return slice_checked(tunnel_fixture(), config);
 }
 
+enum class SupportFlowRole { none, base, interface, object };
+
+struct ParsedSupportRoleMarker {
+    bool recognized = false;
+    SupportFlowRole role = SupportFlowRole::none;
+};
+
+// GCodeWriter emits role comments as either a direct canonical label or a TYPE:/FEATURE:
+// marker. Only an anchored marker and an exact canonical payload can update state. This keeps
+// arbitrary custom comments containing words such as "support material" from relabeling the next
+// extrusion, and explicitly retires transition/ironing state before the next material role.
+std::string_view trim_role_text(std::string_view text)
+{
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
+        text.remove_prefix(1);
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r'))
+        text.remove_suffix(1);
+    return text;
+}
+
+ParsedSupportRoleMarker parse_support_role_marker(std::string_view comment)
+{
+    comment = trim_role_text(comment);
+    bool tagged = false;
+    for (const std::string_view prefix : {std::string_view("TYPE:"), std::string_view("FEATURE:")}) {
+        if (comment.size() >= prefix.size() && comment.substr(0, prefix.size()) == prefix) {
+            comment = trim_role_text(comment.substr(prefix.size()));
+            tagged = true;
+            break;
+        }
+    }
+
+    SupportFlowRole role = SupportFlowRole::none;
+    bool exact_role = false;
+    if (comment == "support material" || comment == "Support" || comment == "Support material" || comment == "SupportMaterial") {
+        role = SupportFlowRole::base;
+        exact_role = true;
+    } else if (comment == "support material interface" || comment == "Support material interface" ||
+               comment == "SupportMaterialInterface" || comment == "Support interface") {
+        role = SupportFlowRole::interface;
+        exact_role = true;
+    } else if (comment == "Outer wall" || comment == "External perimeter" || comment == "ExternalPerimeter") {
+        role = SupportFlowRole::object;
+        exact_role = true;
+    } else if (comment == "support transition" || comment == "Support transition" ||
+               comment == "SupportTransition" || comment == "support ironing" ||
+               comment == "Support ironing" || comment == "SupportIroning") {
+        // Explicitly recognized as none so a transition/ironing block cannot inherit support E.
+        role = SupportFlowRole::none;
+        exact_role = true;
+    }
+    return {tagged || exact_role, role};
+}
+
+struct SupportRoleFlowStats {
+    double xy = 0.0;
+    double e = 0.0;
+    double max_pair_abs_e = 0.0;
+    std::size_t moves = 0;
+};
+
+struct SupportFlowStats {
+    SupportRoleFlowStats base;
+    SupportRoleFlowStats interface;
+    SupportRoleFlowStats object;
+    bool finite = true;
+};
+
+SupportFlowStats inspect_support_flow(const std::string &gcode)
+{
+    REQUIRE(gcode.size() <= kMaxGCodeBytes);
+    REQUIRE(std::count(gcode.begin(), gcode.end(), '\n') < kMaxGCodeLines);
+    REQUIRE(count_occurrences(gcode, "support material") < kMaxSupportSegments);
+
+    SupportFlowStats out;
+    SupportFlowRole active_role = SupportFlowRole::none;
+    GCodeReader parser;
+    // Pin the reader to the same relative-E contract as support_config().
+    parser.apply_config(support_config());
+    parser.parse_buffer(gcode, [&out, &active_role](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const ParsedSupportRoleMarker marker = parse_support_role_marker(line.comment());
+        if (marker.recognized)
+            active_role = marker.role;
+
+        if (!line.extruding(self))
+            return;
+        const double xy = static_cast<double>(line.dist_XY(self));
+        if (xy <= EPSILON)
+            return;
+        const double delta_e = static_cast<double>(line.dist_E(self));
+        const double previous_e = static_cast<double>(self.e());
+        const double current_e = static_cast<double>(line.e());
+        const double max_pair_abs_e = std::max(std::abs(previous_e), std::abs(current_e));
+        if (!std::isfinite(xy))
+            out.finite = false;
+        if (!std::isfinite(delta_e))
+            out.finite = false;
+        if (!std::isfinite(previous_e))
+            out.finite = false;
+        if (!std::isfinite(current_e))
+            out.finite = false;
+        if (!out.finite)
+            return;
+
+        SupportRoleFlowStats *role = nullptr;
+        if (active_role == SupportFlowRole::base)
+            role = &out.base;
+        else if (active_role == SupportFlowRole::interface)
+            role = &out.interface;
+        else if (active_role == SupportFlowRole::object)
+            role = &out.object;
+        if (role == nullptr)
+            return;
+        role->xy += xy;
+        role->e += delta_e;
+        role->max_pair_abs_e = std::max(role->max_pair_abs_e, max_pair_abs_e);
+        ++role->moves;
+    });
+    return out;
+}
+
+constexpr double kSupportEExportQuantum = 1e-5;
+
+double support_e_pair_error_bound(double max_pair_abs_e)
+{
+    // E words are exported to five decimal places, then parsed as float; dist_E()
+    // subtracts the current and previous parsed values.
+    return kSupportEExportQuantum +
+           4.0 * std::numeric_limits<float>::epsilon() * max_pair_abs_e;
+}
+
+double support_ratio_tolerance(const SupportRoleFlowStats &baseline,
+                               const SupportRoleFlowStats &observed,
+                               const double ratio)
+{
+    const double baseline_bound = static_cast<double>(baseline.moves) *
+                                  support_e_pair_error_bound(baseline.max_pair_abs_e);
+    const double observed_bound = static_cast<double>(observed.moves) *
+                                  support_e_pair_error_bound(observed.max_pair_abs_e);
+    const double expected = baseline.e * ratio;
+    const double arithmetic_guard = 64.0 * std::numeric_limits<double>::epsilon() *
+                                    std::max({1.0, std::abs(expected), std::abs(observed.e)});
+    return observed_bound + std::abs(ratio) * baseline_bound + arithmetic_guard;
+}
+
+double support_equal_e_tolerance(const SupportRoleFlowStats &baseline,
+                                  const SupportRoleFlowStats &observed)
+{
+    const double baseline_bound = static_cast<double>(baseline.moves) *
+                                  support_e_pair_error_bound(baseline.max_pair_abs_e);
+    const double observed_bound = static_cast<double>(observed.moves) *
+                                  support_e_pair_error_bound(observed.max_pair_abs_e);
+    const double arithmetic_guard = 64.0 * std::numeric_limits<double>::epsilon() *
+                                    std::max({1.0, std::abs(baseline.e), std::abs(observed.e)});
+    return baseline_bound + observed_bound + arithmetic_guard;
+}
+
+void require_support_geometry(const SupportRoleFlowStats &baseline,
+                              const SupportRoleFlowStats &observed)
+{
+    REQUIRE(baseline.moves > 0);
+    REQUIRE(observed.moves > 0);
+    REQUIRE(observed.moves == baseline.moves);
+    CHECK_THAT(observed.xy, Catch::Matchers::WithinAbs(baseline.xy, 1e-5));
+}
+
+void require_scaled_support_role(const SupportRoleFlowStats &baseline,
+                                 const SupportRoleFlowStats &observed,
+                                 const double ratio)
+{
+    require_support_geometry(baseline, observed);
+    const double expected = baseline.e * ratio;
+    const double tolerance = support_ratio_tolerance(baseline, observed, ratio);
+    REQUIRE(std::isfinite(tolerance));
+    REQUIRE(tolerance >= 0.0);
+    const double signal = std::abs(expected - baseline.e);
+    REQUIRE(signal > 0.0);
+    // The analytic parser/export bound must not swallow the 25% signal.
+    CHECK(tolerance < signal);
+    CHECK_THAT(observed.e, Catch::Matchers::WithinAbs(expected, tolerance));
+}
+
+void require_unchanged_support_role(const SupportRoleFlowStats &baseline,
+                                    const SupportRoleFlowStats &observed)
+{
+    require_support_geometry(baseline, observed);
+    const double tolerance = support_equal_e_tolerance(baseline, observed);
+    REQUIRE(std::isfinite(tolerance));
+    REQUIRE(tolerance >= 0.0);
+    CHECK_THAT(observed.e, Catch::Matchers::WithinAbs(baseline.e, tolerance));
+}
+
+void require_flow_option(const char *key, const ConfigOptionType expected_type)
+{
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->type == expected_type);
+    REQUIRE(definition->is_value_valid(1.0));
+}
+
+DynamicPrintConfig support_flow_ratio_config()
+{
+    // Fail before any slicing if a registered selector is renamed, changes type, or rejects the
+    // neutral ratio. This prevents a silently ignored fixture setting from looking like a control.
+    require_flow_option("support_flow_ratio", coFloat);
+    require_flow_option("support_interface_flow_ratio", coFloat);
+    require_flow_option("top_solid_infill_flow_ratio", coFloats);
+    require_flow_option("bottom_solid_infill_flow_ratio", coFloat);
+    require_flow_option("internal_bridge_flow", coFloat);
+
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"gcode_flavor", "marlin"},
+        {"support_type", "normal(auto)"},
+        {"support_style", "default"},
+        {"support_interface_top_layers", 2},
+        {"support_interface_bottom_layers", 0},
+        {"set_other_flow_ratios", true},
+        {"first_layer_flow_ratio", 1.0},
+        {"outer_wall_flow_ratio", 1.0},
+        {"inner_wall_flow_ratio", 1.0},
+        {"overhang_flow_ratio", 1.0},
+        {"sparse_infill_flow_ratio", 1.0},
+        {"internal_solid_infill_flow_ratio", 1.0},
+        {"gap_fill_flow_ratio", 1.0},
+        {"filament_flow_ratio", "1.0"},
+        {"print_flow_ratio", 1.0},
+        {"scarf_joint_flow_ratio", 1.0},
+        // Pin the other production flow selectors explicitly; these are real registered keys,
+        // including the top-surface vector and the internal-bridge scalar.
+        {"top_solid_infill_flow_ratio", "1.0"},
+        {"bottom_solid_infill_flow_ratio", 1.0},
+        {"internal_bridge_flow", 1.0},
+        {"support_flow_ratio", 1.0},
+        {"support_interface_flow_ratio", 1.0}
+    });
+    return config;
+}
+
 std::string slice_manual(const char *support_type, bool with_enforcer)
 {
     DynamicPrintConfig config = support_config();
@@ -903,6 +1142,63 @@ TEST_CASE("Support and interface filament selections reach distinct tools", "[Su
 }
 
 
+TEST_CASE("Support flow ratios scale only their labeled support roles",
+          "[SupportSettingsVariance][SupportMaterial][SupportFlowRatio]")
+{
+    const DynamicPrintConfig baseline_config = support_flow_ratio_config();
+    const std::string baseline_gcode = slice_checked(capital_fixture(), baseline_config);
+    const SupportStats baseline_shape = inspect_support(baseline_gcode);
+    const SupportFlowStats baseline = inspect_support_flow(baseline_gcode);
+    REQUIRE(baseline_shape.finite);
+    REQUIRE(baseline.finite);
+    REQUIRE(baseline.base.moves > 0);
+    REQUIRE(baseline.interface.moves > 0);
+    // The capital fixture always has ordinary external-wall deposition. Every support-flow
+    // variant must leave that positive object control unchanged.
+    REQUIRE(baseline.object.moves > 0);
+
+    struct RatioCase {
+        const char *key;
+        double ratio;
+        bool base_target;
+    };
+    const std::vector<RatioCase> cases = {
+        {"support_flow_ratio", 0.75, true},
+        {"support_flow_ratio", 1.25, true},
+        {"support_interface_flow_ratio", 0.75, false},
+        {"support_interface_flow_ratio", 1.25, false}
+    };
+
+    for (const RatioCase &test_case : cases) {
+        CAPTURE(test_case.key, test_case.ratio);
+        DynamicPrintConfig changed_config = baseline_config;
+        changed_config.set_deserialize_strict(test_case.key, std::to_string(test_case.ratio));
+        const std::string changed_gcode = slice_checked(capital_fixture(), changed_config);
+        const SupportStats changed_shape = inspect_support(changed_gcode);
+        const SupportFlowStats changed = inspect_support_flow(changed_gcode);
+        REQUIRE(changed_shape.finite);
+        REQUIRE(changed.finite);
+        REQUIRE(changed.base.moves > 0);
+        REQUIRE(changed.interface.moves > 0);
+        REQUIRE(changed.object.moves > 0);
+
+        CHECK(changed_shape.base_segments == baseline_shape.base_segments);
+        CHECK(changed_shape.interface_segments == baseline_shape.interface_segments);
+        CHECK(changed_shape.base_layers == baseline_shape.base_layers);
+        CHECK(changed_shape.interface_layers == baseline_shape.interface_layers);
+        require_support_geometry(baseline.base, changed.base);
+        require_support_geometry(baseline.interface, changed.interface);
+        require_unchanged_support_role(baseline.object, changed.object);
+        if (test_case.base_target) {
+            require_scaled_support_role(baseline.base, changed.base, test_case.ratio);
+            require_unchanged_support_role(baseline.interface, changed.interface);
+        } else {
+            require_unchanged_support_role(baseline.base, changed.base);
+            require_scaled_support_role(baseline.interface, changed.interface, test_case.ratio);
+        }
+    }
+}
+
 struct BasePatternObservation {
     SupportStats stats;
     StringObjectException validation;
@@ -1020,5 +1316,294 @@ TEST_CASE("Normal support base patterns honor supported and fallback partitions"
         }
     }
 }
+
+
+namespace support_ironing_settings_candidate {
+
+enum class IroningMarkerRole { none, ironing, other };
+
+struct IroningMarker {
+    bool recognized = false;
+    IroningMarkerRole role = IroningMarkerRole::none;
+};
+
+std::string_view ironing_trim(std::string_view text)
+{
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
+        text.remove_prefix(1);
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r'))
+        text.remove_suffix(1);
+    return text;
+}
+
+IroningMarker parse_ironing_marker(std::string_view comment)
+{
+    comment = ironing_trim(comment);
+    bool tagged = false;
+    for (const std::string_view prefix : {std::string_view("TYPE:"), std::string_view("FEATURE:")}) {
+        if (comment.size() >= prefix.size() && comment.substr(0, prefix.size()) == prefix) {
+            comment = ironing_trim(comment.substr(prefix.size()));
+            tagged = true;
+            break;
+        }
+    }
+
+    if (comment == "support ironing" || comment == "Support ironing" || comment == "SupportIroning")
+        return {true, IroningMarkerRole::ironing};
+    if (comment == "support material" || comment == "support material interface" ||
+        comment == "support transition" || comment == "Support" ||
+        comment == "Support material" || comment == "Support material interface" ||
+        comment == "Support transition" || comment == "SupportMaterial" ||
+        comment == "SupportMaterialInterface" || comment == "SupportTransition")
+        return {true, IroningMarkerRole::other};
+    return {tagged, IroningMarkerRole::other};
+}
+
+struct SupportIroningStats {
+    std::size_t moves = 0;
+    std::set<double> layers;
+    double xy_length = 0.0;
+    double e_length = 0.0;
+    double orientation_alignment = 0.0;
+    double orientation_error_bound = 0.0;
+    double xy_error_bound = 0.0;
+    double e_error_bound = 0.0;
+    double max_pair_abs_e = 0.0;
+    bool finite = true;
+};
+
+constexpr std::size_t kIroningMaxGCodeBytes = 4u * 1024u * 1024u;
+constexpr std::size_t kIroningMaxGCodeLines = 100000u;
+constexpr std::size_t kIroningMaxMoves = 100000u;
+
+void require_ironing_registry()
+{
+    const ConfigOptionDef *pattern = print_config_def.get("support_ironing_pattern");
+    const ConfigOptionDef *flow = print_config_def.get("support_ironing_flow");
+    const ConfigOptionDef *spacing = print_config_def.get("support_ironing_spacing");
+    REQUIRE(pattern != nullptr);
+    REQUIRE(flow != nullptr);
+    REQUIRE(spacing != nullptr);
+    REQUIRE(pattern->type == coEnum);
+    REQUIRE(std::find(pattern->enum_values.begin(), pattern->enum_values.end(), "rectilinear") != pattern->enum_values.end());
+    REQUIRE(std::find(pattern->enum_values.begin(), pattern->enum_values.end(), "concentric") != pattern->enum_values.end());
+    CHECK(flow->min <= 10.0);
+    CHECK(flow->max >= 25.0);
+    CHECK(spacing->min <= 0.08);
+    CHECK(spacing->max >= 0.30);
+}
+
+SupportIroningStats inspect_support_ironing(const std::string &gcode)
+{
+    REQUIRE(gcode.size() <= kIroningMaxGCodeBytes);
+    REQUIRE(std::count(gcode.begin(), gcode.end(), '\n') <= kIroningMaxGCodeLines);
+
+    SupportIroningStats out;
+    IroningMarkerRole active_role = IroningMarkerRole::none;
+    GCodeReader parser;
+    parser.apply_config(support_config());
+    parser.parse_buffer(gcode, [&out, &active_role](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const IroningMarker marker = parse_ironing_marker(line.comment());
+        if (marker.recognized)
+            active_role = marker.role;
+
+        // Validate coordinates and E before the extrusion predicate can hide malformed values.
+        const double old_x = self.x();
+        const double old_y = self.y();
+        const double old_z = self.z();
+        const double old_e = self.e();
+        const double new_x = line.new_X(self);
+        const double new_y = line.new_Y(self);
+        const double new_z = line.new_Z(self);
+        const double new_e = line.new_E(self);
+        if (!std::isfinite(old_x) || !std::isfinite(old_y) || !std::isfinite(old_z) ||
+            !std::isfinite(old_e) || !std::isfinite(new_x) || !std::isfinite(new_y) ||
+            !std::isfinite(new_z) || !std::isfinite(new_e)) {
+            out.finite = false;
+            return;
+        }
+        const double xy = static_cast<double>(line.dist_XY(self));
+        const double delta_e = static_cast<double>(line.dist_E(self));
+        if (!std::isfinite(xy) || !std::isfinite(delta_e)) {
+            out.finite = false;
+            return;
+        }
+        if (active_role != IroningMarkerRole::ironing || !line.extruding(self) || xy <= EPSILON)
+            return;
+        REQUIRE(out.moves < kIroningMaxMoves);
+
+        ++out.moves;
+        out.layers.insert(self.z());
+        out.xy_length += xy;
+        out.e_length += std::abs(delta_e);
+        const double max_coordinate = std::max(std::max(std::abs(old_x), std::abs(old_y)),
+                                               std::max(std::abs(new_x), std::abs(new_y)));
+        const double endpoint_error = 0.5e-3 +
+            std::numeric_limits<float>::epsilon() * max_coordinate;
+        out.xy_error_bound += 2.0 * std::sqrt(2.0) * endpoint_error;
+        const double max_e = std::max(std::abs(old_e), std::abs(new_e));
+        out.max_pair_abs_e = std::max(out.max_pair_abs_e, max_e);
+        out.e_error_bound += 1e-5 + 4.0 * std::numeric_limits<float>::epsilon() * max_e;
+
+        // support_angle=45 fixes the ironing angle at support_angle+90=135 degrees.
+        // Compare length-weighted axial alignment to that actual fill direction. The
+        // derivative bound below covers coordinate quantization and avoids a tuned angle bin.
+        const double angle = std::atan2(line.dist_Y(self), line.dist_X(self));
+        const double expected_angle = 0.75 * M_PI;
+        out.orientation_alignment += xy * std::abs(std::cos(2.0 * (angle - expected_angle)));
+        out.orientation_error_bound += 8.0 * endpoint_error;
+    });
+    REQUIRE(out.finite);
+    return out;
+}
+
+DynamicPrintConfig support_ironing_config(const char *pattern, double flow, double spacing)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"support_type", "normal(auto)"},
+        {"support_style", "default"},
+        {"support_interface_top_layers", 3},
+        {"support_interface_bottom_layers", 0},
+        {"support_interface_pattern", "rectilinear"},
+        {"support_interface_spacing", 0.5},
+        {"support_angle", 45.0},
+        {"support_ironing", 1},
+        {"support_ironing_pattern", pattern},
+        {"support_ironing_flow", flow},
+        {"support_ironing_spacing", spacing},
+        {"ironing_type", "no ironing"},
+        {"enable_arc_fitting", 0},
+        {"nozzle_diameter", "0.4"},
+        {"support_flow_ratio", 1.0},
+        {"support_interface_flow_ratio", 1.0},
+        {"initial_layer_print_height", 0.2},
+        {"support_line_width", 0.4}
+    });
+    return config;
+}
+
+struct SupportIroningExport {
+    SupportIroningStats stats;
+    SupportStats support;
+    double interface_width = 0.0;
+    double interface_height = 0.0;
+};
+
+SupportIroningExport slice_support_ironing(const char *pattern, double flow, double spacing)
+{
+    const DynamicPrintConfig config = support_ironing_config(pattern, flow, spacing);
+    Print print;
+    Model model;
+    init_print({capital_fixture()}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE_FALSE(print.objects().empty());
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    const SupportParameters support_params(*print.objects().front());
+    REQUIRE(output.size() <= kIroningMaxGCodeBytes);
+    REQUIRE(std::count(output.begin(), output.end(), '\n') <= kIroningMaxGCodeLines);
+    return {inspect_support_ironing(output), inspect_support(output),
+            support_params.support_material_interface_flow.width(),
+            support_params.support_material_interface_flow.height()};
+}
+
+double flow_area(double width, double height)
+{
+    return height * (width - height * (1.0 - 0.25 * M_PI));
+}
+
+void require_positive_support_ironing(const SupportIroningExport &exported)
+{
+    const SupportIroningStats &stats = exported.stats;
+    REQUIRE(stats.finite);
+    REQUIRE(stats.moves > 0);
+    REQUIRE(stats.layers.size() > 0);
+    REQUIRE(stats.xy_length > 0.0);
+    REQUIRE(stats.e_length > 0.0);
+    REQUIRE(exported.support.finite);
+    REQUIRE(exported.support.base_segments > 0);
+    REQUIRE(exported.support.interface_segments > 0);
+}
+
+void require_same_support_geometry(const SupportIroningExport &expected,
+                                   const SupportIroningExport &observed)
+{
+    REQUIRE(expected.support.base_segments == observed.support.base_segments);
+    REQUIRE(expected.support.interface_segments == observed.support.interface_segments);
+    REQUIRE(expected.support.base_layers == observed.support.base_layers);
+    REQUIRE(expected.support.interface_layers == observed.support.interface_layers);
+    CHECK_THAT(observed.support.base_length, Catch::Matchers::WithinAbs(expected.support.base_length, 1e-5));
+    CHECK_THAT(observed.support.interface_length, Catch::Matchers::WithinAbs(expected.support.interface_length, 1e-5));
+}
+
+TEST_CASE("Support ironing pattern selects the requested ironing path family",
+          "[SupportIroningSettings][SupportSettingsVariance][SupportMaterial]")
+{
+    require_ironing_registry();
+    const SupportIroningExport rectilinear = slice_support_ironing("rectilinear", 10.0, 0.10);
+    const SupportIroningExport concentric = slice_support_ironing("concentric", 10.0, 0.10);
+    require_positive_support_ironing(rectilinear);
+    require_positive_support_ironing(concentric);
+    require_same_support_geometry(rectilinear, concentric);
+    REQUIRE(rectilinear.stats.layers == concentric.stats.layers);
+    // With support_angle pinned at 45 degrees, the rectilinear family is aligned to
+    // the actual 135-degree interface angle. Axis-aligned concentric square segments
+    // have zero axial cosine at that diagonal angle. Compare length-weighted orientation,
+    // with an error bound derived from the three-decimal coordinate export.
+    const double alignment_gap = rectilinear.stats.orientation_alignment -
+                                 concentric.stats.orientation_alignment;
+    REQUIRE(alignment_gap > rectilinear.stats.orientation_error_bound +
+            concentric.stats.orientation_error_bound);
+}
+
+TEST_CASE("Support ironing flow scales ironing material at fixed geometry",
+          "[SupportIroningSettings][SupportSettingsVariance][SupportMaterial]")
+{
+    require_ironing_registry();
+    const SupportIroningExport low = slice_support_ironing("rectilinear", 10.0, 0.10);
+    const SupportIroningExport high = slice_support_ironing("rectilinear", 25.0, 0.10);
+    require_positive_support_ironing(low);
+    require_positive_support_ironing(high);
+    require_same_support_geometry(low, high);
+    REQUIRE(low.stats.layers == high.stats.layers);
+    REQUIRE(low.stats.moves == high.stats.moves);
+    CHECK_THAT(high.stats.xy_length, Catch::Matchers::WithinAbs(low.stats.xy_length,
+        low.stats.xy_error_bound + high.stats.xy_error_bound));
+    REQUIRE(low.interface_width > 0.0);
+    REQUIRE(low.interface_height > 0.0);
+    CHECK_THAT(high.interface_width, Catch::Matchers::WithinAbs(low.interface_width, 0.0));
+    CHECK_THAT(high.interface_height, Catch::Matchers::WithinAbs(low.interface_height, 0.0));
+
+    const double low_height = low.interface_height * 0.01 * 10.0;
+    const double high_height = high.interface_height * 0.01 * 25.0;
+    const double expected_ratio = flow_area(low.interface_width, high_height) /
+                                  flow_area(low.interface_width, low_height);
+    const double expected = low.stats.e_length * expected_ratio;
+    const double tolerance = high.stats.e_error_bound + expected_ratio * low.stats.e_error_bound +
+        64.0 * std::numeric_limits<double>::epsilon() *
+            std::max({1.0, std::abs(expected), std::abs(high.stats.e_length)});
+    REQUIRE(tolerance < std::abs(expected - low.stats.e_length));
+    CHECK_THAT(high.stats.e_length, Catch::Matchers::WithinAbs(expected, tolerance));
+}
+
+TEST_CASE("Support ironing spacing changes ironing density",
+          "[SupportIroningSettings][SupportSettingsVariance][SupportMaterial]")
+{
+    require_ironing_registry();
+    const SupportIroningExport dense = slice_support_ironing("rectilinear", 10.0, 0.08);
+    const SupportIroningExport wide = slice_support_ironing("rectilinear", 10.0, 0.30);
+    require_positive_support_ironing(dense);
+    require_positive_support_ironing(wide);
+    require_same_support_geometry(dense, wide);
+    REQUIRE(dense.stats.layers == wide.stats.layers);
+    CHECK(dense.stats.moves > wide.stats.moves);
+    CHECK(dense.stats.xy_length > wide.stats.xy_length);
+    CHECK(dense.stats.e_length > wide.stats.e_length);
+}
+
+} // namespace support_ironing_settings_candidate
 
 } // namespace support_settings_variance_contracts

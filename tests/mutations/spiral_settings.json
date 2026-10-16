@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Spiral smoothing distance and starting and finishing flow ratios.",
+  "mutants": [
+    {
+      "id": "spiral-smooth-mode-inverted",
+      "path": "src/libslic3r/GCode/SpiralVase.cpp",
+      "old": "    bool smooth_spiral = m_smooth_spiral;",
+      "new": "    bool smooth_spiral = !m_smooth_spiral;",
+      "description": "Invert spiral_mode_smooth while retaining field read; smoothing witnesses must fail.",
+      "test_filter": "SpiralSettings"
+    },
+    {
+      "id": "spiral-max-xy-smoothing-predicate-flipped",
+      "path": "src/libslic3r/GCode/SpiralVase.cpp",
+      "old": "                                if (found && dist < max_xy_dist_for_smoothing) {",
+      "new": "                                if (found && dist >= max_xy_dist_for_smoothing) {",
+      "description": "Flip max XY gate while retaining both reads; no-op/effective geometry witnesses must fail.",
+      "test_filter": "SpiralSettings"
+    },
+    {
+      "id": "spiral-starting-flow-ignored",
+      "path": "src/libslic3r/GCode/SpiralVase.cpp",
+      "old": "    float starting_flowrate  = float(m_config.spiral_starting_flow_ratio.value);",
+      "new": "    float starting_flowrate  = float(m_config.spiral_starting_flow_ratio.value) * 0.f;",
+      "description": "Read but suppress starting flow; first positive-Z E witness must fail.",
+      "test_filter": "SpiralSettings"
+    },
+    {
+      "id": "spiral-finishing-flow-ignored",
+      "path": "src/libslic3r/GCode/SpiralVase.cpp",
+      "old": "    float finishing_flowrate = float(m_config.spiral_finishing_flow_ratio.value);",
+      "new": "    float finishing_flowrate = float(m_config.spiral_finishing_flow_ratio.value) * 0.f;",
+      "description": "Read but suppress finishing flow; appended flat-transition E witness must fail.",
+      "test_filter": "SpiralSettings"
+    }
+  ]
+}

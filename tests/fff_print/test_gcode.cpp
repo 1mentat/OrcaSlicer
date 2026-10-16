@@ -741,6 +741,254 @@ TEST_CASE("Spiral vase raises Z during deposited perimeter motion", "[GCode][GCo
     CHECK(rising_extrusions(ordinary.text, base_config()) == 0);
 }
 
+struct SpiralLayerEvidence {
+    size_t perimeter_extrusions = 0;
+    size_t spiral_z_extrusions = 0;
+    size_t flat_extrusions = 0;
+    size_t post_spiral_flat_extrusions = 0;
+    double filament_length = 0.0;
+    double xy_path_length = 0.0;
+    double spiral_filament_length = 0.0;
+    double spiral_xy_path_length = 0.0;
+    double flat_filament_length = 0.0;
+    double post_spiral_flat_filament_length = 0.0;
+    bool saw_spiral = false;
+};
+
+struct SpiralSettingsEvidence {
+    std::vector<SpiralLayerEvidence> layers;
+    size_t perimeter_extrusions = 0;
+    size_t spiral_z_extrusions = 0;
+    size_t negative_z_extrusions = 0;
+    bool finite = true;
+    size_t parsed_lines = 0;
+};
+
+std::string_view trim_spiral_comment(std::string_view comment)
+{
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.front())))
+        comment.remove_prefix(1);
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.back())))
+        comment.remove_suffix(1);
+    return comment;
+}
+
+bool spiral_perimeter_role(std::string_view role)
+{
+    const std::string_view trimmed = trim_spiral_comment(role);
+    return trimmed == "Outer wall" || trimmed == "Inner wall" ||
+           trimmed == "External perimeter" || trimmed == "Internal perimeter";
+}
+
+SpiralSettingsEvidence parse_spiral_settings_output(const std::string &gcode,
+                                                     const DynamicPrintConfig &config)
+{
+    constexpr size_t max_gcode_bytes = 4u * 1024u * 1024u;
+    constexpr size_t max_gcode_lines = 100000u;
+    REQUIRE(gcode.size() <= max_gcode_bytes);
+    REQUIRE(static_cast<size_t>(std::count(gcode.begin(), gcode.end(), '\n')) <= max_gcode_lines);
+
+    SpiralSettingsEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    int current_layer = -1;
+    std::string active_role;
+    reader.parse_buffer(gcode, [&evidence, &current_layer, &active_role](GCodeReader &self,
+                                                                          const GCodeReader::GCodeLine &line) {
+        ++evidence.parsed_lines;
+        const std::string_view comment = trim_spiral_comment(line.comment());
+        if (comment.rfind("LAYER_CHANGE", 0) == 0) {
+            ++current_layer;
+            evidence.layers.emplace_back();
+            active_role.clear();
+        }
+        if (comment.rfind("TYPE:", 0) == 0)
+            active_role.assign(trim_spiral_comment(comment.substr(5)));
+        else if (comment.rfind("FEATURE:", 0) == 0)
+            active_role.assign(trim_spiral_comment(comment.substr(8)));
+
+        const auto finite = [](float value) { return std::isfinite(static_cast<double>(value)); };
+        const bool finite_state = finite(self.x()) && finite(self.y()) && finite(self.z()) && finite(self.e()) &&
+                                  (!line.has_x() || finite(line.x())) && (!line.has_y() || finite(line.y())) &&
+                                  (!line.has_z() || finite(line.z())) && (!line.has_e() || finite(line.e()));
+        if (!finite_state)
+            evidence.finite = false;
+        if (current_layer < 0 || current_layer >= static_cast<int>(evidence.layers.size()) ||
+            !spiral_perimeter_role(active_role) || !finite_state || !line.extruding(self) ||
+            line.dist_XY(self) <= EPSILON)
+            return;
+
+        SpiralLayerEvidence &layer = evidence.layers[static_cast<size_t>(current_layer)];
+        ++layer.perimeter_extrusions;
+        ++evidence.perimeter_extrusions;
+        const double de = line.dist_E(self);
+        const double dxy = line.dist_XY(self);
+        const double dz = line.dist_Z(self);
+        if (!std::isfinite(de) || !std::isfinite(dxy) || !std::isfinite(dz)) {
+            evidence.finite = false;
+            return;
+        }
+        const bool spiral_move = dz > EPSILON;
+        layer.filament_length += de;
+        layer.xy_path_length += dxy;
+        if (spiral_move) {
+            ++layer.spiral_z_extrusions;
+            ++evidence.spiral_z_extrusions;
+            layer.spiral_filament_length += de;
+            layer.spiral_xy_path_length += dxy;
+            layer.saw_spiral = true;
+        } else {
+            if (dz < -EPSILON)
+                ++evidence.negative_z_extrusions;
+            ++layer.flat_extrusions;
+            layer.flat_filament_length += de;
+            if (layer.saw_spiral) {
+                ++layer.post_spiral_flat_extrusions;
+                layer.post_spiral_flat_filament_length += de;
+            }
+        }
+    });
+    REQUIRE(evidence.parsed_lines <= max_gcode_lines);
+    REQUIRE(evidence.finite);
+    REQUIRE(evidence.negative_z_extrusions == 0);
+    return evidence;
+}
+
+DynamicPrintConfig spiral_settings_config(bool smooth, const char *max_xy_smoothing,
+                                          double starting_flow, double finishing_flow)
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        { "wall_loops",                  1 },
+        { "top_shell_layers",            0 },
+        { "bottom_shell_layers",         2 },
+        { "nozzle_diameter",             0.4 },
+        { "top_shell_thickness",         0.0 },
+        { "bottom_shell_thickness",      0.0 },
+        { "sparse_infill_density",       "0%" },
+        { "spiral_mode",                 true },
+        { "spiral_mode_smooth",          smooth },
+        { "spiral_mode_max_xy_smoothing", max_xy_smoothing },
+        { "spiral_starting_flow_ratio",  starting_flow },
+        { "spiral_finishing_flow_ratio", finishing_flow },
+        { "use_relative_e_distances",    true },
+    });
+    return config;
+}
+
+SpiralSettingsEvidence export_spiral_settings(const DynamicPrintConfig &config)
+{
+    TriangleMesh shape = Test::mesh(Test::TestMesh::slopy_cube);
+    shape.scale(Vec3f(1.0f, 1.0f, 0.2f));
+    const ExportedPrint exported = fresh_custom_mesh_export(config, std::move(shape));
+    return parse_spiral_settings_output(exported.text, config);
+}
+
+size_t first_spiral_settings_layer(const SpiralSettingsEvidence &evidence)
+{
+    for (size_t index = 0; index < evidence.layers.size(); ++index)
+        if (evidence.layers[index].spiral_z_extrusions > 0)
+            return index;
+    return evidence.layers.size();
+}
+
+size_t last_spiral_settings_layer(const SpiralSettingsEvidence &evidence)
+{
+    for (size_t index = evidence.layers.size(); index > 0; --index)
+        if (evidence.layers[index - 1].spiral_z_extrusions > 0)
+            return index - 1;
+    return evidence.layers.size();
+}
+
+const SpiralLayerEvidence *final_flat_transition(const SpiralSettingsEvidence &evidence,
+                                                 size_t last_spiral_layer)
+{
+    if (last_spiral_layer >= evidence.layers.size())
+        return nullptr;
+    for (size_t index = evidence.layers.size(); index > last_spiral_layer + 1; --index) {
+        const SpiralLayerEvidence &candidate = evidence.layers[index - 1];
+        if (candidate.flat_extrusions > 0)
+            return &candidate;
+    }
+    const SpiralLayerEvidence &last = evidence.layers[last_spiral_layer];
+    return last.post_spiral_flat_extrusions > 0 ? &last : nullptr;
+}
+
+TEST_CASE("Spiral settings preserve smooth geometry and flow transitions", "[GCode][GCodeExportWorkflows][SpiralSettings]")
+{
+    // Five bounded public exports. The smooth-off output is also the flow baseline.
+    const DynamicPrintConfig smooth_off_config = spiral_settings_config(false, "0%", 0.0, 0.0);
+    const DynamicPrintConfig smooth_zero_config = spiral_settings_config(true, "0%", 0.0, 0.0);
+    const DynamicPrintConfig smooth_high_config = spiral_settings_config(true, "1000%", 0.0, 0.0);
+    const DynamicPrintConfig flow_start_config = spiral_settings_config(false, "0%", 0.5, 0.0);
+    const DynamicPrintConfig flow_finish_config = spiral_settings_config(false, "0%", 0.0, 0.5);
+
+    const SpiralSettingsEvidence smooth_off = export_spiral_settings(smooth_off_config);
+    const SpiralSettingsEvidence smooth_zero = export_spiral_settings(smooth_zero_config);
+    const SpiralSettingsEvidence smooth_high = export_spiral_settings(smooth_high_config);
+    const SpiralSettingsEvidence flow_baseline = smooth_off;
+    const SpiralSettingsEvidence flow_start = export_spiral_settings(flow_start_config);
+    const SpiralSettingsEvidence flow_finish = export_spiral_settings(flow_finish_config);
+
+    REQUIRE(smooth_off.layers.size() >= 3);
+    REQUIRE(smooth_off.perimeter_extrusions > 0);
+    REQUIRE(smooth_off.spiral_z_extrusions > 0);
+    REQUIRE(smooth_high.spiral_z_extrusions > 0);
+
+    // max_xy_smoothing=0 is an explicit no-op control. Effective smoothing is
+    // judged geometrically; it may change path length and segment count.
+    CHECK(smooth_zero.perimeter_extrusions == smooth_off.perimeter_extrusions);
+    CHECK(smooth_zero.spiral_z_extrusions == smooth_off.spiral_z_extrusions);
+    bool zero_geometry_equal = smooth_zero.layers.size() == smooth_off.layers.size() &&
+                               smooth_zero.perimeter_extrusions == smooth_off.perimeter_extrusions &&
+                               smooth_zero.spiral_z_extrusions == smooth_off.spiral_z_extrusions;
+    if (zero_geometry_equal) {
+        for (size_t index = 0; index < smooth_off.layers.size(); ++index)
+            zero_geometry_equal = zero_geometry_equal &&
+                std::abs(smooth_zero.layers[index].xy_path_length - smooth_off.layers[index].xy_path_length) <= 1e-4 &&
+                std::abs(smooth_zero.layers[index].spiral_filament_length - smooth_off.layers[index].spiral_filament_length) <= 1e-4;
+    }
+    CHECK(zero_geometry_equal);
+    const bool geometry_changed = smooth_high.layers.size() != smooth_off.layers.size() ||
+                                  smooth_high.perimeter_extrusions != smooth_off.perimeter_extrusions;
+    bool path_changed = false;
+    for (size_t index = 0; index < std::min(smooth_high.layers.size(), smooth_off.layers.size()); ++index)
+        path_changed = path_changed ||
+            std::abs(smooth_high.layers[index].xy_path_length - smooth_off.layers[index].xy_path_length) > 1e-3;
+    const bool smoothing_witness = geometry_changed || path_changed;
+    CHECK(smoothing_witness);
+
+    const size_t baseline_first_index = first_spiral_settings_layer(flow_baseline);
+    const size_t start_first_index = first_spiral_settings_layer(flow_start);
+    const size_t baseline_last_index = last_spiral_settings_layer(flow_baseline);
+    const size_t finish_last_index = last_spiral_settings_layer(flow_finish);
+    REQUIRE(baseline_first_index < flow_baseline.layers.size());
+    REQUIRE(start_first_index < flow_start.layers.size());
+    REQUIRE(baseline_last_index < flow_baseline.layers.size());
+    REQUIRE(finish_last_index < flow_finish.layers.size());
+
+    const SpiralLayerEvidence &base_first = flow_baseline.layers[baseline_first_index];
+    const SpiralLayerEvidence &start_first = flow_start.layers[start_first_index];
+    const SpiralLayerEvidence &base_last = flow_baseline.layers[baseline_last_index];
+    const SpiralLayerEvidence &finish_last = flow_finish.layers[finish_last_index];
+    REQUIRE(base_first.perimeter_extrusions > 0);
+    REQUIRE(base_last.perimeter_extrusions > 0);
+
+    // Finishing flow changes only the appended flat transition loop; its rising
+    // final loop remains unchanged and is checked independently.
+    CHECK(finish_last.spiral_z_extrusions == base_last.spiral_z_extrusions);
+    CHECK_THAT(finish_last.spiral_filament_length,
+               Catch::Matchers::WithinAbs(base_last.spiral_filament_length, 1e-4));
+    CHECK_THAT(finish_last.spiral_xy_path_length,
+               Catch::Matchers::WithinAbs(base_last.spiral_xy_path_length, 1e-4));
+    const SpiralLayerEvidence *base_transition = final_flat_transition(flow_baseline, baseline_last_index);
+    const SpiralLayerEvidence *finish_transition = final_flat_transition(flow_finish, finish_last_index);
+    REQUIRE(base_transition != nullptr);
+    REQUIRE(finish_transition != nullptr);
+    CHECK(start_first.filament_length > base_first.filament_length + 1e-4);
+    CHECK(finish_transition->flat_filament_length > base_transition->flat_filament_length + 1e-4);
+}
+
 TEST_CASE("Arc fitting converts eligible perimeter motion to arcs", "[GCode][GCodeExportWorkflows]")
 {
     auto off = base_config();

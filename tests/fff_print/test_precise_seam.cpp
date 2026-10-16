@@ -28,6 +28,14 @@
 #include <string>
 #include <string_view>
 #include <cstdlib>
+#include "libslic3r/Config.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/PrintBase.hpp"
+#include <cmath>
+#include <initializer_list>
+#include <limits>
 
 using namespace Slic3r;
 
@@ -1469,4 +1477,267 @@ TEST_CASE("Belt printers slice Precise Seam modifiers in the frame the object wa
         CHECK(std::abs(modifier_area - object_area) < tolerance);
         CHECK(get_extents(slices[i]).inflated(scale_(0.05)).contains(get_extents(islands)));
     }
+}
+
+using namespace Slic3r;
+
+namespace {
+
+// The cube is deliberately only 2 mm tall: layer_id() > 0 still gives nine
+// independent scarf layers while keeping the exporter fixture small.
+DynamicPrintConfig seam_slope_config(const std::string &type,
+                                     bool conditional,
+                                     const std::string &start_height,
+                                     double min_length,
+                                     int steps,
+                                     int angle_threshold = 155)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",              "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "wall_loops",                "1" },
+        { "top_shell_layers",          "0" },
+        { "bottom_shell_layers",       "0" },
+        { "sparse_infill_density",     "0%" },
+        { "skirt_loops",               "0" },
+        { "brim_width",                "0" },
+        { "seam_position",             "back" },
+        { "seam_gap",                  "0" },
+        { "seam_slope_type",           type },
+        { "seam_slope_conditional",    conditional ? "1" : "0" },
+        { "scarf_angle_threshold",     std::to_string(angle_threshold) },
+        { "seam_slope_start_height",   start_height },
+        { "seam_slope_min_length",     std::to_string(min_length) },
+        { "seam_slope_steps",           std::to_string(steps) },
+        { "seam_slope_entire_loop",    "0" },
+        { "seam_slope_inner_walls",    "0" },
+        // Pin exporter/parser semantics used by the G-code oracle. Relative E
+        // is paired with the canonical layer reset so each layer starts from a
+        // bounded parser state; flow ratios are neutral so only seam settings
+        // change the measured witnesses.
+        { "gcode_comments",            true },
+        { "gcode_flavor",              "marlin" },
+        { "use_relative_e_distances",   true },
+        { "layer_change_gcode",         "G92 E0\n" },
+        { "scarf_joint_flow_ratio",     1.0 },
+        { "filament_flow_ratio",        "1.0" },
+        { "spiral_mode",               "0" },
+        { "belt_printer",              "0" },
+        { "enable_arc_fitting",        "0" },
+    });
+    return config;
+}
+
+struct SeamSlopeEvidence {
+    size_t layer_changes = 0;
+    size_t outer_moves = 0;
+    double output_outer_xy = 0.0;
+    double print_outer_geometry = 0.0;
+    size_t rising_outer_moves = 0;
+    double min_rising_outer_flow = std::numeric_limits<double>::infinity();
+    bool has_rising_outer_flow = false;
+    double scarf_distance = 0.0;
+};
+
+std::string_view role_marker(std::string_view comment)
+{
+    while (!comment.empty() && comment.front() == ' ')
+        comment.remove_prefix(1);
+    for (const std::string_view prefix : {std::string_view("TYPE:"), std::string_view("FEATURE:")}) {
+        if (comment.substr(0, prefix.size()) != prefix)
+            continue;
+        comment.remove_prefix(prefix.size());
+        while (!comment.empty() && comment.front() == ' ')
+            comment.remove_prefix(1);
+        while (!comment.empty() && (comment.back() == ' ' || comment.back() == '\r'))
+            comment.remove_suffix(1);
+        return comment;
+    }
+    return {};
+}
+
+double pre_export_outer_geometry(const Print &print)
+{
+    double length = 0.0;
+    for (const PrintObject *object : print.objects())
+        for (const Layer *layer : object->layers())
+            for (const LayerRegion *region : layer->regions())
+                for_each_extrusion_path(region->perimeters, [&length](const ExtrusionPath &path) {
+                    if (path.role() == erExternalPerimeter)
+                        length += unscale<double>(path.length());
+                });
+    return length;
+}
+
+SeamSlopeEvidence export_seam_slope(const DynamicPrintConfig &config)
+{
+    Model model;
+    Print print;
+    Test::init_print({ make_cube(20, 20, 2) }, print, model, config);
+
+    const StringObjectException validation = print.validate();
+    INFO("validation.string: " << validation.string);
+    INFO("validation.opt_key: " << validation.opt_key);
+    REQUIRE(validation.string.empty());
+
+    // Process once before export so this is an actual Print geometry invariant,
+    // independent of G-code duplication/quantization in the scarf writer.
+    print.process();
+    SeamSlopeEvidence evidence;
+    evidence.print_outer_geometry = pre_export_outer_geometry(print);
+    REQUIRE(std::isfinite(evidence.print_outer_geometry));
+    REQUIRE(evidence.print_outer_geometry > 0.0);
+
+    GCodeProcessorResult result;
+    const std::string output = Test::gcode(print, &result);
+    REQUIRE_FALSE(output.empty());
+    constexpr size_t max_output_bytes = 4u * 1024u * 1024u;
+    constexpr size_t max_output_lines = 100000u;
+    REQUIRE(output.size() <= max_output_bytes);
+    REQUIRE(std::count(output.begin(), output.end(), '\n') < max_output_lines);
+
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string role;
+    reader.parse_buffer(output, [&evidence, &role](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        // The compatible exporter emits this exact reserved marker. Keep the
+        // anchor exact so unrelated comments cannot inflate the layer count.
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            ++evidence.layer_changes;
+
+        if (const std::string_view marker = role_marker(line.comment()); !marker.empty())
+            role.assign(marker.begin(), marker.end());
+
+        if (!(line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")))
+            return;
+        const double xy = line.dist_XY(self);
+        // A finite XY distance is a parser invariant for this bounded fixture.
+        // Fail closed if it is violated instead of silently dropping a corrupt
+        // move from the seam-length witness.
+        REQUIRE(std::isfinite(xy));
+        if (xy <= EPSILON || role != "Outer wall")
+            return;
+
+        if (!line.extruding(self))
+            return;
+        const double e = line.dist_E(self);
+        REQUIRE(std::isfinite(e));
+        REQUIRE(e > 0.0);
+        // Count only positive-E outer-wall extrusion. Role comments persist
+        // across travel/interlayer moves, so counting before this guard would
+        // make the 4-to-12 mm comparison depend on unrelated travel motion.
+        evidence.output_outer_xy += xy;
+        ++evidence.outer_moves;
+
+        // The start-height witness is restricted to the rising positive-Z
+        // external extrusion ramp. Falling end paths are deliberately excluded.
+        const double dz = line.dist_Z(self);
+        if (dz > 1e-5) {
+            ++evidence.rising_outer_moves;
+            const double flow = e / xy;
+            REQUIRE(std::isfinite(flow));
+            REQUIRE(flow > 0.0);
+            evidence.has_rising_outer_flow = true;
+            evidence.min_rising_outer_flow = std::min(evidence.min_rising_outer_flow, flow);
+        }
+    });
+
+    constexpr size_t expected_layers = 10; // 2 mm cube at 0.2 mm layer height.
+    REQUIRE(evidence.layer_changes == expected_layers);
+    evidence.scarf_distance = result.print_statistics.total_seam_scarf_distance;
+    return evidence;
+}
+
+} // namespace
+
+TEST_CASE("Scarf seam type activates a bounded outer-wall ramp", "[SeamSlopeSettings][GCodeExport]")
+{
+    const SeamSlopeEvidence inactive = export_seam_slope(
+        seam_slope_config("none", false, "0", 8.0, 4));
+    const SeamSlopeEvidence active = export_seam_slope(
+        seam_slope_config("external", false, "0", 8.0, 4));
+
+    REQUIRE(inactive.layer_changes == 10);
+    REQUIRE(active.layer_changes == 10);
+    REQUIRE(inactive.outer_moves > 0);
+    REQUIRE(active.outer_moves > inactive.outer_moves);
+    REQUIRE(active.has_rising_outer_flow);
+    CHECK_THAT(active.print_outer_geometry,
+               Catch::Matchers::WithinAbs(inactive.print_outer_geometry, 1e-6));
+    CHECK_THAT(inactive.scarf_distance, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK(active.scarf_distance > 0.0);
+}
+
+TEST_CASE("Scarf length and steps have independent geometric witnesses", "[SeamSlopeSettings][GCodeExport]")
+{
+    const SeamSlopeEvidence inactive = export_seam_slope(
+        seam_slope_config("none", false, "0", 8.0, 4));
+    REQUIRE(inactive.layer_changes == 10);
+
+    const SeamSlopeEvidence length_zero = export_seam_slope(
+        seam_slope_config("external", false, "0", 0.0, 4));
+    const SeamSlopeEvidence length_four = export_seam_slope(
+        seam_slope_config("external", false, "0", 4.0, 4));
+    const SeamSlopeEvidence length_twelve = export_seam_slope(
+        seam_slope_config("external", false, "0", 12.0, 4));
+    for (const SeamSlopeEvidence &observed : {length_zero, length_four, length_twelve}) {
+        REQUIRE(observed.layer_changes == inactive.layer_changes);
+        CHECK_THAT(observed.print_outer_geometry,
+                   Catch::Matchers::WithinAbs(inactive.print_outer_geometry, 1e-6));
+    }
+    CHECK_THAT(length_zero.scarf_distance, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK(length_four.scarf_distance > 0.0);
+    CHECK(length_twelve.scarf_distance > length_four.scarf_distance);
+
+    // A longer scarf repeats more of the wall. The terminal falling segment
+    // has zero E and is excluded from positive extrusion. With four steps its
+    // length is bounded by configured_length / 4, but corners can make it
+    // shorter; it is not necessarily an equal quarter. A ramp endpoint can
+    // also snap forward by at most 1 mm. These independent geometric bounds
+    // give [8 - 1 - 3, 8 + 1 + 1] mm extra positive-E XY per active layer.
+    const double active_layers = static_cast<double>(length_twelve.layer_changes - 1);
+    const double observed_delta_xy = length_twelve.output_outer_xy - length_four.output_outer_xy;
+    const double minimum_delta_xy = active_layers * ((12.0 - 4.0) - 1.0 - 12.0 / 4.0);
+    const double maximum_delta_xy = active_layers * ((12.0 - 4.0) + 1.0 + 4.0 / 4.0);
+    CHECK(observed_delta_xy >= minimum_delta_xy - 0.25);
+    CHECK(observed_delta_xy <= maximum_delta_xy + 0.25);
+
+    const SeamSlopeEvidence few_steps = export_seam_slope(
+        seam_slope_config("external", false, "0", 12.0, 1));
+    const SeamSlopeEvidence many_steps = export_seam_slope(
+        seam_slope_config("external", false, "0", 12.0, 8));
+    REQUIRE(few_steps.layer_changes == many_steps.layer_changes);
+    CHECK_THAT(many_steps.scarf_distance, Catch::Matchers::WithinAbs(few_steps.scarf_distance, 0.05));
+    CHECK(many_steps.outer_moves > few_steps.outer_moves);
+    CHECK_THAT(many_steps.print_outer_geometry,
+               Catch::Matchers::WithinAbs(few_steps.print_outer_geometry, 1e-6));
+}
+
+TEST_CASE("Scarf start height changes rising flow and conditional mode can disable it", "[SeamSlopeSettings][GCodeExport]")
+{
+    const SeamSlopeEvidence start_at_layer = export_seam_slope(
+        seam_slope_config("external", false, "0", 8.0, 4));
+    const SeamSlopeEvidence start_half_layer = export_seam_slope(
+        seam_slope_config("external", false, "50%", 8.0, 4));
+    REQUIRE(start_at_layer.layer_changes == start_half_layer.layer_changes);
+    REQUIRE(start_at_layer.has_rising_outer_flow);
+    REQUIRE(start_half_layer.has_rising_outer_flow);
+    CHECK_THAT(start_half_layer.scarf_distance,
+               Catch::Matchers::WithinAbs(start_at_layer.scarf_distance, 0.05));
+    CHECK(start_at_layer.min_rising_outer_flow < start_half_layer.min_rising_outer_flow);
+    CHECK_THAT(start_half_layer.print_outer_geometry,
+               Catch::Matchers::WithinAbs(start_at_layer.print_outer_geometry, 1e-6));
+
+    // A square has sharp corners. With conditional mode and a 180 degree
+    // threshold, the loop.is_smooth() gate rejects it, so this is an explicit
+    // inactive partition of seam_slope_conditional rather than a presence-only check.
+    const SeamSlopeEvidence conditional_disabled = export_seam_slope(
+        seam_slope_config("external", true, "0", 8.0, 4, 180));
+    const SeamSlopeEvidence none = export_seam_slope(
+        seam_slope_config("none", false, "0", 8.0, 4));
+    CHECK_THAT(conditional_disabled.scarf_distance, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK(conditional_disabled.outer_moves == none.outer_moves);
+    CHECK_THAT(conditional_disabled.print_outer_geometry,
+               Catch::Matchers::WithinAbs(none.print_outer_geometry, 1e-6));
 }

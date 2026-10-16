@@ -25,6 +25,11 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <catch2/catch_message.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include "libslic3r/Config.hpp"
+#include "libslic3r/libslic3r.h"
+#include <set>
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
@@ -288,4 +293,205 @@ TEST_CASE("Exporter settings emit thermal cooling and machine limit commands", "
     REQUIRE(contains_value(fans, 255));
     CHECK(gcode.find("M201 X1000 Y1100 Z100 E5000") != std::string::npos);
     CHECK(gcode.find("M203 X100 Y110 Z10 E50") != std::string::npos);
+}
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace initial_layer_fan_speed_contracts {
+namespace {
+
+constexpr int kNormalCoolingPercent = 80;
+constexpr std::size_t kMaxGCodeBytes = 4u * 1024u * 1024u;
+constexpr std::size_t kMaxGCodeLines = 100000u;
+
+DynamicPrintConfig initial_layer_fan_config(int initial_layer_fan_speed)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", 0.4},
+        {"wall_loops", 2},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "20%"},
+        {"minimum_sparse_infill_area", 0.0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+        {"gcode_comments", true},
+        {"gcode_flavor", "marlin"},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"close_fan_the_first_x_layers", 0},
+        {"full_fan_speed_layer", 0},
+        {"fan_min_speed", 25},
+        {"fan_max_speed", kNormalCoolingPercent},
+        {"slow_down_layer_time", 1000.0},
+        {"fan_cooling_layer_time", 1001.0},
+        {"slow_down_for_layer_cooling", false},
+        {"reduce_fan_stop_start_freq", false},
+        {"part_cooling_fan_min_pwm", 0},
+        {"initial_layer_fan_speed", initial_layer_fan_speed}
+    });
+    return config;
+}
+
+struct DepositionEvidence {
+    double path_length = 0.0;
+    double filament_length = 0.0;
+    std::size_t extrusion_moves = 0;
+    bool finite = true;
+};
+
+struct FanEvidence {
+    DepositionEvidence deposition;
+    std::set<int> first_layer_deposition_fan_states;
+    std::set<int> second_layer_deposition_fan_states;
+    std::size_t layer_changes = 0;
+};
+
+std::string export_four_layer_cube(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    TriangleMesh shape = cube(8.0);
+    shape.scale(Vec3f(1.0f, 1.0f, 0.1f));
+    init_print({shape}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO("validation.string: " << validation.string);
+    INFO("validation.opt_key: " << validation.opt_key);
+    REQUIRE(validation.string.empty());
+
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE(output.size() <= kMaxGCodeBytes);
+    REQUIRE(std::count(output.begin(), output.end(), '\n') < kMaxGCodeLines);
+    return output;
+}
+
+std::optional<int> fan_pwm_command(const std::string &line)
+{
+    std::istringstream words(line);
+    std::string command;
+    if (!(words >> command))
+        return std::nullopt;
+    if (command == "M107")
+        return 0;
+    if (command != "M106")
+        return std::nullopt;
+
+    std::optional<int> pwm;
+    for (std::string word; words >> word;) {
+        if (word.size() < 2)
+            continue;
+        if (word.front() == 'P')
+            return std::nullopt; // P2/P3 are auxiliary/exhaust fans, not part cooling.
+        if (word.front() != 'S')
+            continue;
+        try {
+            std::size_t parsed = 0;
+            const int value = std::stoi(word.substr(1), &parsed);
+            if (parsed == word.size() - 1)
+                pwm = value;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return pwm;
+}
+
+FanEvidence inspect_four_layer_cube(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    FanEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::optional<int> part_fan_state;
+    reader.parse_buffer(gcode, [&evidence, &part_fan_state](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            ++evidence.layer_changes;
+        if (const auto pwm = fan_pwm_command(line.raw()); pwm.has_value())
+            part_fan_state = *pwm;
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        const double path = line.dist_XY(self);
+        const double filament = line.dist_E(self);
+        evidence.deposition.finite = evidence.deposition.finite && std::isfinite(path) && std::isfinite(filament);
+        if (!std::isfinite(path) || !std::isfinite(filament))
+            return;
+        evidence.deposition.path_length += path;
+        evidence.deposition.filament_length += filament;
+        ++evidence.deposition.extrusion_moves;
+        // Fan commands persist until replaced. Observe state during actual
+        // deposition: a stable fan need not emit a new command on layer two.
+        if (evidence.layer_changes == 1 || evidence.layer_changes == 2) {
+            REQUIRE(part_fan_state.has_value());
+            if (evidence.layer_changes == 1)
+                evidence.first_layer_deposition_fan_states.insert(*part_fan_state);
+            else
+                evidence.second_layer_deposition_fan_states.insert(*part_fan_state);
+        }
+    });
+    return evidence;
+}
+
+int pwm_for_percent(int percent)
+{
+    if (percent <= 0)
+        return 0;
+    return static_cast<int>(255.5 * static_cast<double>(percent) / 100.0);
+}
+
+void require_valid_evidence(const FanEvidence &evidence)
+{
+    REQUIRE(evidence.deposition.finite);
+    REQUIRE(evidence.layer_changes == 4);
+    REQUIRE(evidence.deposition.extrusion_moves > 0);
+    REQUIRE(evidence.deposition.path_length > 0.0);
+    REQUIRE(evidence.deposition.filament_length > 0.0);
+    REQUIRE_FALSE(evidence.first_layer_deposition_fan_states.empty());
+    REQUIRE_FALSE(evidence.second_layer_deposition_fan_states.empty());
+}
+
+void require_same_deposition(const DepositionEvidence &expected, const DepositionEvidence &observed)
+{
+    REQUIRE(expected.extrusion_moves > 0);
+    REQUIRE(observed.extrusion_moves > 0);
+    CHECK(observed.extrusion_moves == expected.extrusion_moves);
+    CHECK_THAT(observed.path_length, Catch::Matchers::WithinRel(expected.path_length, 1e-6));
+    CHECK_THAT(observed.filament_length, Catch::Matchers::WithinAbs(expected.filament_length, 1e-3));
+}
+
+} // namespace
+} // namespace initial_layer_fan_speed_contracts
+
+TEST_CASE("Initial-layer fan values override only the first layer and preserve deposition",
+          "[GCodeSettings][InitialLayerFanSpeed][SettingsVariance]")
+{
+    using namespace initial_layer_fan_speed_contracts;
+    const int initial_layer_fan_speed = GENERATE(-1, 0, 37, 100);
+    CAPTURE(initial_layer_fan_speed);
+
+    const DynamicPrintConfig baseline_config = initial_layer_fan_config(-1);
+    const DynamicPrintConfig variant_config = initial_layer_fan_config(initial_layer_fan_speed);
+    const FanEvidence baseline = inspect_four_layer_cube(
+        export_four_layer_cube(baseline_config), baseline_config);
+    const FanEvidence variant = inspect_four_layer_cube(
+        export_four_layer_cube(variant_config), variant_config);
+    require_valid_evidence(baseline);
+    require_valid_evidence(variant);
+    require_same_deposition(baseline.deposition, variant.deposition);
+
+    const std::set<int> normal_state{pwm_for_percent(kNormalCoolingPercent)};
+    const std::set<int> expected_first_state{
+        initial_layer_fan_speed < 0 ? pwm_for_percent(kNormalCoolingPercent)
+                                    : pwm_for_percent(initial_layer_fan_speed)};
+    CHECK(baseline.first_layer_deposition_fan_states == normal_state);
+    CHECK(baseline.second_layer_deposition_fan_states == normal_state);
+    CHECK(variant.first_layer_deposition_fan_states == expected_first_state);
+    CHECK(variant.second_layer_deposition_fan_states == normal_state);
+    if (initial_layer_fan_speed >= 0)
+        CHECK(variant.first_layer_deposition_fan_states != baseline.first_layer_deposition_fan_states);
 }

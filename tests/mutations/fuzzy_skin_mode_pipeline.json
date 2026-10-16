@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Arachne fuzzy-skin mode width routing and interior centerline behavior.",
+  "mutants": [
+    {
+      "id": "fuzzy-mode-displacement-width-routing",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "                    out.emplace_back(pa + (perp(p0p1).cast<double>().normalized() * r).cast<coord_t>(), p1.w, p1.perimeter_index);",
+      "new": "                    out.emplace_back(pa, std::max(p1.w + r + min_extrusion_width, min_extrusion_width), p1.perimeter_index);",
+      "test_filter": "FuzzySkinModePipeline",
+      "description": "Route displacement samples through the extrusion-width formula. The displacement width-range oracle should reject this non-crash selector/branch mutation."
+    },
+    {
+      "id": "fuzzy-mode-extrusion-width-source",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "                    out.emplace_back(pa, std::max(p1.w + r + min_extrusion_width,  min_extrusion_width), p1.perimeter_index); ",
+      "new": "                    out.emplace_back(pa, p1.w, p1.perimeter_index);",
+      "test_filter": "FuzzySkinModePipeline",
+      "description": "Remove the positive extrusion-mode width adjustment. The extrusion minimum-width oracle should reject this non-crash mutation."
+    },
+    {
+      "id": "fuzzy-mode-combined-offset-removed",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "                    out.emplace_back(pa + (perp(p0p1).cast<double>().normalized() * ((rad  - p1.w) / 2)).cast<coord_t>(), rad, p1.perimeter_index); //0.05 - minimum width of extruded line",
+      "new": "                    out.emplace_back(pa + (perp(p0p1).cast<double>().normalized() * 0.0).cast<coord_t>(), rad, p1.perimeter_index); //0.05 - minimum width of extruded line",
+      "test_filter": "FuzzySkinModePipeline",
+      "description": "Remove the combined transverse offset while retaining its width change. The combined off-centerline oracle should reject this non-crash mutation."
+    }
+  ]
+}

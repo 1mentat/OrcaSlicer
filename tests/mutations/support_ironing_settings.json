@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Support-ironing pattern, extrusion cross section, and path density.",
+  "mutants": [
+    {
+      "id": "support-ironing-pattern-inversion-retained-read",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "Fill::new_from_type(support_params.ironing_pattern)",
+      "new": "Fill::new_from_type(support_params.ironing_pattern == ipConcentric ? ipRectilinear : ipConcentric)",
+      "test_filter": "SupportIroningSettings",
+      "description": "retain the setting read while inverting the requested path family; pattern direction-bin oracle must fail"
+    },
+    {
+      "id": "support-ironing-flow-ignored-retained-read",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "support_params.ironing_flow);",
+      "new": "support_params.ironing_flow.with_height(support_params.support_material_interface_flow.height() * 0.01 + support_params.ironing_flow.height() * 0.0));",
+      "test_filter": "SupportIroningSettings",
+      "description": "retain the ironing-flow read but make the emitted height independent of the selected 10/25 percent; flow-ratio oracle must fail"
+    },
+    {
+      "id": "support-ironing-spacing-swap-retained-read",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "f->spacing         = support_params.ironing_spacing;",
+      "new": "f->spacing = 0.38f - support_params.ironing_spacing;",
+      "test_filter": "SupportIroningSettings",
+      "description": "retain the spacing read while swapping the two candidate densities; spacing-density ordering must fail"
+    }
+  ]
+}

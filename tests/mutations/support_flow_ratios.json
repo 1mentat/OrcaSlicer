@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Independent base-support and interface-support material scaling.",
+  "mutants": [
+    {
+      "id": "support-flow-ratio-multiply",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.support_flow_ratio;",
+      "new": "_mm3_per_mm *= (0.0 * m_config.support_flow_ratio + 1.0);",
+      "description": "retaining the support-flow member read while removing the base-support multiplier must fail the role-specific 0.75/1.25 E oracle",
+      "test_filter": "SupportFlowRatio"
+    },
+    {
+      "id": "support-interface-flow-ratio-multiply",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.support_interface_flow_ratio;",
+      "new": "_mm3_per_mm *= (0.0 * m_config.support_interface_flow_ratio + 1.0);",
+      "description": "retaining the support-interface-flow member read while removing its multiplier must fail the interface-specific 0.75/1.25 E oracle",
+      "test_filter": "SupportFlowRatio"
+    }
+  ]
+}

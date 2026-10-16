@@ -67,6 +67,13 @@ struct RoleEvidence {
     double max_positive_e_pair = 0.0;
     double feedrate = 0.0;
     size_t moves = 0;
+    // Layer-split material evidence keeps first-layer flow distinct from a
+    // role-specific ratio. A role can legitimately occur only on one side of
+    // the split (bottom on the first layers, top on later layers).
+    double first_layer_filament_length = 0.0;
+    double later_layer_filament_length = 0.0;
+    size_t first_layer_moves = 0;
+    size_t later_layer_moves = 0;
 };
 
 struct Evidence {
@@ -225,7 +232,8 @@ Evidence evidence_for(const Print &print, const std::string &output)
     GCodeReader reader;
     reader.apply_config(print.config());
     std::optional<size_t> active_role;
-    reader.parse_buffer(output, [&evidence, &active_role](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+    int layer_index = -1;
+    reader.parse_buffer(output, [&evidence, &active_role, &layer_index](GCodeReader &self, const GCodeReader::GCodeLine &line) {
         if (line.cmd_is("M204") || line.cmd_is("M201") || line.cmd_is("M205")) {
             evidence.acceleration_commands.emplace_back(line.raw());
             evidence.acceleration_states.emplace(line.raw());
@@ -237,6 +245,10 @@ Evidence evidence_for(const Print &print, const std::string &output)
         // Match the role text itself because the compatible marker includes a
         // leading space and the exporter can select either tag spelling.
         const std::string_view comment = line.comment();
+        if (comment.find("LAYER_CHANGE") != std::string_view::npos) {
+            ++layer_index;
+            active_role.reset();
+        }
         if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos) {
             ++evidence.role_marker_count;
             if (evidence.role_marker_samples.size() < 8)
@@ -292,6 +304,13 @@ Evidence evidence_for(const Print &print, const std::string &output)
             // feedrate before this callback updates the reader coordinates.
             role_evidence.feedrate = std::max(role_evidence.feedrate, static_cast<double>(line.new_F(self)));
             ++role_evidence.moves;
+            if (layer_index == 0) {
+                role_evidence.first_layer_filament_length += static_cast<double>(delta_e_f);
+                ++role_evidence.first_layer_moves;
+            } else if (layer_index > 0) {
+                role_evidence.later_layer_filament_length += static_cast<double>(delta_e_f);
+                ++role_evidence.later_layer_moves;
+            }
         } else if (!extrusion && xy > EPSILON)
             evidence.travel_feedrate = std::max(evidence.travel_feedrate, static_cast<double>(line.f()));
     });
@@ -721,4 +740,377 @@ TEST_CASE("Filament volumetric cap changes feedrate without changing deposited g
         else
             CHECK(fresh.roles[outer].feedrate > baseline_evidence.roles[outer].feedrate);
     }
+}
+
+
+namespace {
+
+DynamicPrintConfig role_flow_config()
+{
+    DynamicPrintConfig config = matrix_config();
+    config.set_deserialize_strict({
+        { "wall_generator",              "classic" },
+        { "set_other_flow_ratios",       true },
+        { "first_layer_flow_ratio",      1.0 },
+        { "top_solid_infill_flow_ratio",  "1.0" },
+        { "bottom_solid_infill_flow_ratio", 1.0 },
+        { "internal_solid_infill_flow_ratio", 1.0 },
+        { "gap_fill_flow_ratio",         1.0 },
+        { "use_relative_e_distances",    true },
+        { "minimum_sparse_infill_area",  0.0 },
+        { "extra_solid_infills",         "3" },
+        { "sparse_infill_density",       "20%" },
+        { "wall_loops",                  2 },
+        { "top_shell_layers",            2 },
+        { "bottom_shell_layers",         2 },
+        { "layer_height",                0.2 },
+        { "initial_layer_print_height",  0.2 },
+        { "gcode_comments",              true },
+    });
+    return config;
+}
+
+TriangleMesh role_flow_fixture()
+{
+    // Six 0.2 mm layers plus an explicit third solid layer leave bottom,
+    // internal-solid, top, sparse, and outer roles available. The attached 1 mm-wide bar is deliberately narrow so
+    // classic wall generation has a gap-fill region, while its 1.2 mm height
+    // keeps the export bounded.
+    TriangleMesh shape = make_cube(10.0, 10.0, 1.2);
+    TriangleMesh narrow_bar = make_cube(1.0, 4.0, 1.2);
+    narrow_bar.translate(10.0f, 3.0f, 0.0f);
+    shape.merge(narrow_bar);
+    return shape;
+}
+
+void require_bounded_role_output(const std::string &output)
+{
+    constexpr size_t max_output_bytes = 16u * 1024u * 1024u;
+    constexpr size_t max_output_lines = 250000u;
+    REQUIRE(output.size() <= max_output_bytes);
+    const size_t output_lines = static_cast<size_t>(std::count(output.begin(), output.end(), '\n'));
+    REQUIRE(output_lines <= max_output_lines);
+}
+
+Evidence fresh_role_flow_evidence(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    TriangleMesh shape = role_flow_fixture();
+    init_print({ shape }, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO("validation.string: " + validation.string);
+    INFO("validation.opt_key: " + validation.opt_key);
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    require_bounded_role_output(output);
+    Evidence evidence = evidence_for(print, output);
+    require_valid(evidence);
+    return evidence;
+}
+
+void require_same_material_section(size_t expected_moves, double expected_length, double expected_max_pair_e,
+                                   size_t observed_moves, double observed_length, double observed_max_pair_e)
+{
+    CHECK(observed_moves == expected_moves);
+    if (expected_moves == 0) {
+        CHECK_THAT(observed_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+        return;
+    }
+    REQUIRE(expected_length > 0.0);
+    const double tolerance = ratio_material_tolerance(
+        expected_moves, expected_max_pair_e, observed_moves, observed_max_pair_e,
+        1.0, expected_length, observed_length);
+    REQUIRE(std::isfinite(tolerance));
+    REQUIRE(tolerance >= 0.0);
+    CHECK_THAT(observed_length, Catch::Matchers::WithinAbs(expected_length, tolerance));
+}
+
+void require_scaled_material_section(size_t expected_moves, double expected_length, double expected_max_pair_e,
+                                     size_t observed_moves, double observed_length, double observed_max_pair_e,
+                                     double ratio)
+{
+    REQUIRE(expected_moves > 0);
+    REQUIRE(observed_moves == expected_moves);
+    REQUIRE(expected_length > 0.0);
+    const double tolerance = ratio_material_tolerance(
+        expected_moves, expected_max_pair_e, observed_moves, observed_max_pair_e,
+        ratio, expected_length, observed_length);
+    REQUIRE(std::isfinite(tolerance));
+    REQUIRE(tolerance >= 0.0);
+    const double expected_length_after_ratio = expected_length * ratio;
+    const double signal = std::abs(expected_length_after_ratio - expected_length);
+    REQUIRE(signal > 0.0);
+    CHECK(tolerance < signal);
+    CHECK_THAT(observed_length,
+               Catch::Matchers::WithinAbs(expected_length_after_ratio, tolerance));
+}
+
+void require_same_role_material(const RoleEvidence &expected, const RoleEvidence &observed)
+{
+    require_same_material_section(expected.moves, expected.filament_length, expected.max_positive_e_pair,
+                                   observed.moves, observed.filament_length, observed.max_positive_e_pair);
+    require_same_material_section(expected.first_layer_moves, expected.first_layer_filament_length,
+                                   expected.max_positive_e_pair, observed.first_layer_moves,
+                                   observed.first_layer_filament_length, observed.max_positive_e_pair);
+    require_same_material_section(expected.later_layer_moves, expected.later_layer_filament_length,
+                                   expected.max_positive_e_pair, observed.later_layer_moves,
+                                   observed.later_layer_filament_length, observed.max_positive_e_pair);
+}
+
+void require_scaled_role_material(const RoleEvidence &expected, const RoleEvidence &observed, double ratio)
+{
+    REQUIRE(expected.moves > 0);
+    REQUIRE(observed.moves == expected.moves);
+    if (expected.first_layer_moves > 0)
+        require_scaled_material_section(expected.first_layer_moves, expected.first_layer_filament_length,
+                                        expected.max_positive_e_pair, observed.first_layer_moves,
+                                        observed.first_layer_filament_length, observed.max_positive_e_pair, ratio);
+    else
+        require_same_material_section(expected.first_layer_moves, expected.first_layer_filament_length,
+                                      expected.max_positive_e_pair, observed.first_layer_moves,
+                                      observed.first_layer_filament_length, observed.max_positive_e_pair);
+    if (expected.later_layer_moves > 0)
+        require_scaled_material_section(expected.later_layer_moves, expected.later_layer_filament_length,
+                                        expected.max_positive_e_pair, observed.later_layer_moves,
+                                        observed.later_layer_filament_length, observed.max_positive_e_pair, ratio);
+    else
+        require_same_material_section(expected.later_layer_moves, expected.later_layer_filament_length,
+                                      expected.max_positive_e_pair, observed.later_layer_moves,
+                                      observed.later_layer_filament_length, observed.max_positive_e_pair);
+    require_scaled_material_section(expected.moves, expected.filament_length, expected.max_positive_e_pair,
+                                    observed.moves, observed.filament_length, observed.max_positive_e_pair, ratio);
+}
+
+void require_first_layer_ratio(const Evidence &baseline, const Evidence &changed, double ratio)
+{
+    for (size_t i = 0; i < baseline.roles.size(); ++i) {
+        CAPTURE(i);
+        const RoleEvidence &before = baseline.roles[i];
+        const RoleEvidence &after = changed.roles[i];
+        if (before.first_layer_moves > 0)
+            require_scaled_material_section(before.first_layer_moves, before.first_layer_filament_length,
+                                            before.max_positive_e_pair, after.first_layer_moves,
+                                            after.first_layer_filament_length, after.max_positive_e_pair, ratio);
+        else
+            require_same_material_section(before.first_layer_moves, before.first_layer_filament_length,
+                                          before.max_positive_e_pair, after.first_layer_moves,
+                                          after.first_layer_filament_length, after.max_positive_e_pair);
+        require_same_material_section(before.later_layer_moves, before.later_layer_filament_length,
+                                      before.max_positive_e_pair, after.later_layer_moves,
+                                      after.later_layer_filament_length, after.max_positive_e_pair);
+    }
+}
+
+void require_role_ratio(const Evidence &baseline, const Evidence &changed, size_t target_role, double ratio)
+{
+    for (size_t i = 0; i < baseline.roles.size(); ++i) {
+        CAPTURE(i);
+        const RoleEvidence &before = baseline.roles[i];
+        const RoleEvidence &after = changed.roles[i];
+        if (i == target_role)
+            require_scaled_role_material(before, after, ratio);
+        else
+            require_same_role_material(before, after);
+    }
+}
+
+struct RoleFlowCase {
+    MatrixCase matrix;
+    size_t target_role;
+    bool first_layer_only;
+};
+
+std::array<RoleFlowCase, 5> role_flow_cases()
+{
+    return {{
+        { { "first_layer_flow_ratio",          coFloat,  Signal::all_filament, { 0.8, 1.2 } }, outer, true },
+        { { "top_solid_infill_flow_ratio",     coFloats, Signal::all_filament, { 0.8, 1.2 } }, top, false },
+        { { "bottom_solid_infill_flow_ratio",  coFloat,  Signal::all_filament, { 0.8, 1.2 } }, bottom, false },
+        { { "internal_solid_infill_flow_ratio",coFloat,  Signal::all_filament, { 0.8, 1.2 } }, internal_solid, false },
+        { { "gap_fill_flow_ratio",             coFloat,  Signal::all_filament, { 0.8, 1.2 } }, gap_fill, false },
+    }};
+}
+
+struct NamedRoleFactors {
+    double outer;
+    double inner;
+    double sparse;
+    double top;
+    double internal_solid;
+    double bottom;
+    double gap_fill;
+};
+
+void require_role_flow_registry()
+{
+    const ConfigOptionDef *gate = print_config_def.get("set_other_flow_ratios");
+    REQUIRE(gate != nullptr);
+    REQUIRE(gate->type == coBool);
+    for (const RoleFlowCase &flow_case : role_flow_cases())
+        require_registry_case(flow_case.matrix, 1.0);
+}
+
+void require_changed_role_flow_options(const DynamicPrintConfig &baseline,
+                                        const DynamicPrintConfig &changed)
+{
+    const auto require_changed = [&baseline, &changed](const char *key) {
+        REQUIRE(baseline.option(key) != nullptr);
+        REQUIRE(changed.option(key) != nullptr);
+        REQUIRE(changed.option(key)->serialize() != baseline.option(key)->serialize());
+    };
+    require_changed("set_other_flow_ratios");
+    for (const RoleFlowCase &flow_case : role_flow_cases())
+        require_changed(flow_case.matrix.key);
+}
+
+void require_role_section_factor(const RoleEvidence &expected, const RoleEvidence &observed,
+                                 double ratio, bool first_layer, const char *role_name)
+{
+    INFO("role: " + std::string(role_name));
+    const size_t expected_moves = first_layer ? expected.first_layer_moves : expected.later_layer_moves;
+    const double expected_length = first_layer ? expected.first_layer_filament_length
+                                               : expected.later_layer_filament_length;
+    const size_t observed_moves = first_layer ? observed.first_layer_moves : observed.later_layer_moves;
+    const double observed_length = first_layer ? observed.first_layer_filament_length
+                                               : observed.later_layer_filament_length;
+    if (expected_moves == 0 || std::abs(ratio - 1.0) <= 1e-12) {
+        require_same_material_section(expected_moves, expected_length, expected.max_positive_e_pair,
+                                      observed_moves, observed_length, observed.max_positive_e_pair);
+    } else {
+        require_scaled_material_section(expected_moves, expected_length, expected.max_positive_e_pair,
+                                        observed_moves, observed_length, observed.max_positive_e_pair, ratio);
+    }
+}
+
+void require_named_role_factors(const Evidence &baseline, const Evidence &changed,
+                                const NamedRoleFactors &first_layer, const NamedRoleFactors &later_layer)
+{
+    const auto require_role = [&baseline, &changed](
+                                  size_t role, double first_ratio, double later_ratio, const char *name) {
+        const RoleEvidence &expected = baseline.roles[role];
+        const RoleEvidence &observed = changed.roles[role];
+        REQUIRE(observed.moves == expected.moves);
+        require_role_section_factor(expected, observed, first_ratio, true, name);
+        require_role_section_factor(expected, observed, later_ratio, false, name);
+    };
+
+    // Spell out the role mapping so a future enum insertion cannot silently
+    // move a factor to a different semantic role.
+    require_role(outer, first_layer.outer, later_layer.outer, "outer");
+    require_role(inner, first_layer.inner, later_layer.inner, "inner");
+    require_role(sparse, first_layer.sparse, later_layer.sparse, "sparse");
+    require_role(top, first_layer.top, later_layer.top, "top");
+    require_role(internal_solid, first_layer.internal_solid, later_layer.internal_solid, "internal_solid");
+    require_role(bottom, first_layer.bottom, later_layer.bottom, "bottom");
+    require_role(gap_fill, first_layer.gap_fill, later_layer.gap_fill, "gap_fill");
+}
+
+} // namespace
+
+TEST_CASE("Role flow ratios scale declared deposited material by role and layer",
+          "[MotionFlowVariance][RoleFlowVariance][SettingsVariance]")
+{
+    const DynamicPrintConfig baseline_config = role_flow_config();
+    const Evidence baseline = fresh_role_flow_evidence(baseline_config);
+    for (size_t i = 0; i < baseline.roles.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(baseline.roles[i].moves > 0);
+        REQUIRE(baseline.roles[i].filament_length > 0.0);
+    }
+    REQUIRE(baseline.roles[outer].first_layer_moves > 0);
+    REQUIRE(baseline.roles[outer].later_layer_moves > 0);
+    REQUIRE(baseline.roles[bottom].first_layer_moves > 0);
+    REQUIRE(baseline.roles[top].later_layer_moves > 0);
+
+    for (const RoleFlowCase &flow_case : role_flow_cases()) {
+        CAPTURE(flow_case.matrix.key);
+        for (const double value : flow_case.matrix.values) {
+            CAPTURE(value);
+            DynamicPrintConfig changed_config = baseline_config;
+            set_registry_value(changed_config, flow_case.matrix, value);
+            REQUIRE(changed_config.option(flow_case.matrix.key) != nullptr);
+            REQUIRE(changed_config.option(flow_case.matrix.key)->serialize()
+                    != baseline_config.option(flow_case.matrix.key)->serialize());
+            const Evidence changed = fresh_role_flow_evidence(changed_config);
+            INFO("baseline evidence: " + evidence_summary(baseline));
+            INFO("changed evidence: " + evidence_summary(changed));
+            require_same_geometry(baseline, changed);
+            if (flow_case.first_layer_only)
+                require_first_layer_ratio(baseline, changed, value);
+            else
+                require_role_ratio(baseline, changed, flow_case.target_role, value);
+        }
+    }
+}
+
+TEST_CASE("Role flow gate leaves top and bottom ratios active while disabling other ratios",
+          "[MotionFlowVariance][RoleFlowVariance][SettingsVariance]")
+{
+    require_role_flow_registry();
+    const DynamicPrintConfig baseline_config = role_flow_config();
+    const Evidence baseline = fresh_role_flow_evidence(baseline_config);
+    for (size_t i = 0; i < baseline.roles.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(baseline.roles[i].moves > 0);
+        REQUIRE(baseline.roles[i].filament_length > 0.0);
+    }
+    REQUIRE(baseline.roles[bottom].first_layer_moves > 0);
+    REQUIRE(baseline.roles[bottom].later_layer_moves > 0);
+
+    DynamicPrintConfig changed_config = baseline_config;
+    changed_config.set_deserialize_strict({
+        { "set_other_flow_ratios",          false },
+        { "first_layer_flow_ratio",         0.7 },
+        { "top_solid_infill_flow_ratio",    "1.2" },
+        { "bottom_solid_infill_flow_ratio", 1.2 },
+        { "internal_solid_infill_flow_ratio", 0.7 },
+        { "gap_fill_flow_ratio",            0.7 },
+    });
+    require_changed_role_flow_options(baseline_config, changed_config);
+    const Evidence changed = fresh_role_flow_evidence(changed_config);
+    INFO("baseline evidence: " + evidence_summary(baseline));
+    INFO("changed evidence: " + evidence_summary(changed));
+    require_same_geometry(baseline, changed);
+    const NamedRoleFactors expected{ 1.0, 1.0, 1.0, 1.2, 1.0, 1.2, 1.0 };
+    require_named_role_factors(baseline, changed, expected, expected);
+}
+
+TEST_CASE("Role flow gate compounds first-layer and role ratios",
+          "[MotionFlowVariance][RoleFlowVariance][SettingsVariance]")
+{
+    require_role_flow_registry();
+    const DynamicPrintConfig baseline_config = role_flow_config();
+    const Evidence baseline = fresh_role_flow_evidence(baseline_config);
+    for (size_t i = 0; i < baseline.roles.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(baseline.roles[i].moves > 0);
+        REQUIRE(baseline.roles[i].filament_length > 0.0);
+    }
+    REQUIRE(baseline.roles[bottom].first_layer_moves > 0);
+    REQUIRE(baseline.roles[bottom].later_layer_moves > 0);
+
+    DynamicPrintConfig changed_config = baseline_config;
+    changed_config.set_deserialize_strict({
+        { "set_other_flow_ratios",          true },
+        { "first_layer_flow_ratio",         0.8 },
+        { "top_solid_infill_flow_ratio",    "1.1" },
+        { "bottom_solid_infill_flow_ratio", 1.2 },
+        { "internal_solid_infill_flow_ratio", 0.7 },
+        { "gap_fill_flow_ratio",            1.4 },
+    });
+    // The gate remains true in both configs; the five ratio serializations
+    // must still differ so this case cannot silently become a baseline rerun.
+    for (const RoleFlowCase &flow_case : role_flow_cases()) {
+        REQUIRE(changed_config.option(flow_case.matrix.key) != nullptr);
+        REQUIRE(changed_config.option(flow_case.matrix.key)->serialize()
+                != baseline_config.option(flow_case.matrix.key)->serialize());
+    }
+    const Evidence changed = fresh_role_flow_evidence(changed_config);
+    INFO("baseline evidence: " + evidence_summary(baseline));
+    INFO("changed evidence: " + evidence_summary(changed));
+    require_same_geometry(baseline, changed);
+    const NamedRoleFactors first_layer{ 0.8, 0.8, 0.8, 0.88, 0.56, 0.96, 1.12 };
+    const NamedRoleFactors later_layer{ 1.0, 1.0, 1.0, 1.1, 0.7, 1.2, 1.4 };
+    require_named_role_factors(baseline, changed, first_layer, later_layer);
 }

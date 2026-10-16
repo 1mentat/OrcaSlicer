@@ -9,6 +9,7 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/Config.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -1037,3 +1038,241 @@ TEST_CASE("Zero bottom shells keep every wall on a flat first layer", "[Perimete
     REQUIRE(normal > 0.);
     CHECK_THAT(one_wall_enabled, Catch::Matchers::WithinAbs(normal, 1.0));
 }
+
+
+namespace fuzzy_mode_pipeline_contracts {
+
+struct Segment {
+    Point a;
+    Point b;
+};
+
+struct OuterPerimeterSnapshot {
+    std::vector<float> widths;
+    std::vector<Segment> segments;
+    std::vector<Point> points;
+};
+
+void append_path(const ExtrusionPath &path, OuterPerimeterSnapshot &snapshot)
+{
+    if (path.role() != erExternalPerimeter || path.polyline.points.size() < 2)
+        return;
+
+    snapshot.widths.push_back(path.width);
+    snapshot.points.reserve(snapshot.points.size() + path.polyline.points.size());
+    for (size_t i = 0; i < path.polyline.points.size(); ++i) {
+        snapshot.points.push_back(path.polyline.points[i].to_point());
+        if (i > 0)
+            snapshot.segments.push_back({path.polyline.points[i - 1].to_point(), path.polyline.points[i].to_point()});
+    }
+}
+
+OuterPerimeterSnapshot outer_perimeters_at(const Print &print, size_t layer_index)
+{
+    REQUIRE(print.objects().size() == 1);
+    const auto &layers = print.objects().front()->layers();
+    REQUIRE(layer_index < layers.size());
+    OuterPerimeterSnapshot snapshot;
+    for (const LayerRegion *region : layers[layer_index]->regions()) {
+        for (const ExtrusionEntity *entity : region->perimeters.flatten().entities) {
+            if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity)) {
+                if (loop->inset_idx != 0)
+                    continue;
+                for (const ExtrusionPath &path : loop->paths)
+                    append_path(path, snapshot);
+            } else if (const auto *multi_path = dynamic_cast<const ExtrusionMultiPath *>(entity)) {
+                if (entity->role() != erExternalPerimeter)
+                    continue;
+                for (const ExtrusionPath &path : multi_path->paths)
+                    append_path(path, snapshot);
+            } else if (const auto *path = dynamic_cast<const ExtrusionPath *>(entity)) {
+                append_path(*path, snapshot);
+            }
+        }
+    }
+    REQUIRE_FALSE(snapshot.widths.empty());
+    REQUIRE_FALSE(snapshot.segments.empty());
+    REQUIRE_FALSE(snapshot.points.empty());
+    REQUIRE(snapshot.points.size() <= 4000);
+    return snapshot;
+}
+
+DynamicPrintConfig fuzzy_mode_config(const char *mode)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "arachne"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"outer_wall_line_width", 0.45},
+        {"line_width", 0.45},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"fuzzy_skin", "external"},
+        {"fuzzy_skin_first_layer", true},
+        {"fuzzy_skin_mode", mode},
+        {"fuzzy_skin_noise_type", "classic"},
+        // This is below the minimum extrusion-width floor, making the
+        // Extrusion/Combined width increase strictly positive for every
+        // possible Classic-noise sample.
+        {"fuzzy_skin_thickness", 0.02},
+        {"fuzzy_skin_point_distance", 0.75},
+        {"enable_arc_fitting", false},
+        {"nozzle_diameter", "0.4"},
+    });
+    return config;
+}
+
+OuterPerimeterSnapshot slice_mode(const char *mode, size_t &layer_index)
+{
+    Print print;
+    // The control disables fuzzy_skin, but fuzzy_skin_mode itself is an enum
+    // with no "none" value. Keep the registered mode key valid in the
+    // control configuration before disabling the independent type key.
+    DynamicPrintConfig config = fuzzy_mode_config(std::string(mode) == "none" ? "displacement" : mode);
+    if (std::string(mode) == "none")
+        config.set_deserialize_strict({{"fuzzy_skin", "none"}});
+    init_and_process_print({make_cube(12., 12., 0.8)}, print, config);
+    REQUIRE_FALSE(print.objects().empty());
+    const size_t layer_count = print.objects().front()->layers().size();
+    REQUIRE(layer_count == 4);
+    layer_index = layer_count / 2;
+    return outer_perimeters_at(print, layer_index);
+}
+
+constexpr double kFuzzyMaxSampleIntervalMm = 0.75 * 1.25;
+constexpr double kFuzzyDistanceTieMm = 1e-9;
+
+double reference_segment_distance_mm(const Point &point, const Segment &segment, double &t, double &length)
+{
+    const Vec2d p(unscale_(point.x()), unscale_(point.y()));
+    const Vec2d a(unscale_(segment.a.x()), unscale_(segment.a.y()));
+    const Vec2d b(unscale_(segment.b.x()), unscale_(segment.b.y()));
+    const Vec2d ab = b - a;
+    length = ab.norm();
+    if (length <= 1e-12) {
+        t = 0.;
+        return (p - a).norm();
+    }
+    t = std::clamp((p - a).dot(ab) / ab.squaredNorm(), 0., 1.);
+    return (p - (a + t * ab)).norm();
+}
+
+double nearest_safe_reference_distance_mm(const Point &point,
+                                          const OuterPerimeterSnapshot &reference,
+                                          bool &is_interior)
+{
+    double nearest = std::numeric_limits<double>::max();
+    for (const Segment &segment : reference.segments) {
+        double t = 0., length = 0.;
+        nearest = std::min(nearest, reference_segment_distance_mm(point, segment, t, length));
+    }
+    is_interior = false;
+    if (!std::isfinite(nearest))
+        return nearest;
+
+    // First choose the nearest segment over the complete reference. Then reject
+    // the point when any tied nearest segment is in a corner neighborhood. This
+    // prevents an eligible farther segment from hiding a corner chord.
+    bool have_nearest = false;
+    for (const Segment &segment : reference.segments) {
+        double t = 0., length = 0.;
+        const double distance = reference_segment_distance_mm(point, segment, t, length);
+        if (distance > nearest + kFuzzyDistanceTieMm)
+            continue;
+        have_nearest = true;
+        if (length <= 1e-12 || t * length <= kFuzzyMaxSampleIntervalMm ||
+            (1.0 - t) * length <= kFuzzyMaxSampleIntervalMm) {
+            is_interior = false;
+            return nearest;
+        }
+    }
+    is_interior = have_nearest;
+    return nearest;
+}
+
+double maximum_width(const OuterPerimeterSnapshot &snapshot)
+{
+    return *std::max_element(snapshot.widths.begin(), snapshot.widths.end());
+}
+
+void require_fuzzy_mode_registry()
+{
+    const ConfigOptionDef *mode = print_config_def.get("fuzzy_skin_mode");
+    REQUIRE(mode != nullptr);
+    REQUIRE(mode->type == coEnum);
+    REQUIRE(std::find(mode->enum_values.begin(), mode->enum_values.end(), "displacement") != mode->enum_values.end());
+    REQUIRE(std::find(mode->enum_values.begin(), mode->enum_values.end(), "extrusion") != mode->enum_values.end());
+    REQUIRE(std::find(mode->enum_values.begin(), mode->enum_values.end(), "combined") != mode->enum_values.end());
+}
+
+TEST_CASE("Arachne fuzzy skin modes preserve their mode-specific perimeter contract", "[FuzzySkinModePipeline][Perimeters]")
+{
+    require_fuzzy_mode_registry();
+    const char *mode = GENERATE("displacement", "extrusion", "combined");
+    CAPTURE(mode);
+
+    size_t control_layer = 0;
+    const OuterPerimeterSnapshot control = slice_mode("none", control_layer);
+    size_t mode_layer = 0;
+    const OuterPerimeterSnapshot actual = slice_mode(mode, mode_layer);
+    REQUIRE(mode_layer == control_layer);
+    REQUIRE(actual.points.size() <= 4000);
+
+    const double control_min_width = *std::min_element(control.widths.begin(), control.widths.end());
+    const double control_max_width = maximum_width(control);
+    size_t interior_samples = 0;
+    double max_interior_distance = 0.;
+    for (const Point &point : actual.points) {
+        bool is_interior = false;
+        const double distance = nearest_safe_reference_distance_mm(point, control, is_interior);
+        if (is_interior) {
+            ++interior_samples;
+            max_interior_distance = std::max(max_interior_distance, distance);
+        }
+    }
+    REQUIRE(interior_samples > 0);
+
+    if (std::string(mode) == "displacement") {
+        // Displacement copies p1.w at every generated junction. The final
+        // variable-width conversion therefore stays within the smooth
+        // control's width range. This case intentionally claims width routing,
+        // not a full geometric displacement invariant.
+        for (const float width : actual.widths) {
+            CHECK(width >= control_min_width - 0.002);
+            CHECK(width <= *std::max_element(control.widths.begin(), control.widths.end()) + 0.002);
+        }
+        return;
+    }
+
+    // min_extrusion_width is positive and thickness is 0.02mm, so a generated
+    // sample has a positive width increase. Use a maximum-width witness so an
+    // untouched closed junction cannot hide the conversion result.
+
+    CHECK(maximum_width(actual) > control_max_width + 0.01);
+
+    if (std::string(mode) == "extrusion") {
+        // Extrusion mode leaves pa on p0-p1. Exclude the exact corner neighborhoods
+        // where conversion can legally bridge adjacent segments; every retained
+        // interior sample must remain on its source segment within coordinate rounding.
+        size_t checked_interior_samples = 0;
+        for (const Point &point : actual.points) {
+            bool is_interior = false;
+            const double distance = nearest_safe_reference_distance_mm(point, control, is_interior);
+            if (!is_interior)
+                continue;
+            ++checked_interior_samples;
+            CHECK(distance <= 0.002);
+        }
+        REQUIRE(checked_interior_samples > 0);
+    } else {
+        // Combined mode uses the same positive width delta as a transverse
+        // offset of half that amount. The interior witness avoids counting a
+        // corner-connection chord as mode displacement.
+        CHECK(max_interior_distance > 0.005);
+    }
+}
+
+} // namespace fuzzy_mode_pipeline_contracts
