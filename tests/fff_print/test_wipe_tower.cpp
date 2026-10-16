@@ -1,3 +1,7 @@
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/Polyline.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include <initializer_list>
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include <numeric>
 #include <optional>
@@ -1274,3 +1278,979 @@ TEST_CASE("Legacy WipeTower separates same-extruder nozzle changes from extruder
 
 
 } // namespace legacy_tower_direct_contracts
+
+namespace multimaterial_wipe_variance_contracts {
+using namespace Slic3r;
+using namespace Slic3r::Test;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+DynamicPrintConfig tower_dynamic(std::initializer_list<ConfigBase::SetDeserializeItem> extra = {})
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        {"single_extruder_multi_material", true},
+        {"purge_in_prime_tower", true},
+        {"enable_prime_tower", true},
+        {"prime_tower_width", 35},
+        {"prime_tower_brim_width", 0},
+        {"wipe_tower_x", 20},
+        {"wipe_tower_y", 20},
+        {"wipe_tower_wall_type", "rectangle"},
+        {"prime_tower_skip_points", false},
+        {"wipe_tower_no_sparse_layers", false},
+        {"wipe_tower_extra_flow", 100},
+        {"wipe_tower_extra_spacing", 100},
+        {"wipe_tower_bridging", 10},
+        {"wipe_tower_max_purge_speed", 90},
+        {"enable_arc_fitting", false},
+        {"filament_ramming_parameters", "100 100 20 20 20"},
+        {"filament_cooling_moves", "0,0"},
+        {"filament_diameter", "1.75,1.75"},
+    });
+    if (!extra.size())
+        return config;
+    config.set_deserialize_strict(extra);
+    return config;
+}
+
+struct DirectRun {
+    std::vector<std::vector<WipeTower::ToolChangeResult>> layers;
+    float depth = 0.f;
+    float height = 0.f;
+    float width = 0.f;
+    float brim = 0.f;
+    float rib_width = 0.f;
+    float rib_length = 0.f;
+    BoundingBoxf box;
+    double elapsed = 0.;
+    double extrusion_length = 0.;
+    size_t extrusion_count = 0;
+    std::string gcode;
+};
+
+DirectRun run_tower(const DynamicPrintConfig &dynamic,
+                    const std::vector<std::tuple<float, float, unsigned int, unsigned int, float>> &plan)
+{
+    FullPrintConfig full;
+    full.apply(dynamic);
+    const std::vector<std::vector<float>> wipe_matrix{{0.f, 120.f}, {120.f, 0.f}};
+    WipeTower2 tower(full, static_cast<const PrintRegionConfig &>(full), 0, Vec3d::Zero(), wipe_matrix, 0);
+    tower.set_extruder(0, full);
+    tower.set_extruder(1, full);
+    for (const auto &[z, h, old_tool, new_tool, purge] : plan)
+        tower.plan_toolchange(z, h, old_tool, new_tool, purge);
+
+    DirectRun result;
+    tower.generate(result.layers);
+    result.depth = tower.get_depth();
+    result.height = tower.get_wipe_tower_height();
+    result.width = tower.width();
+    result.brim = tower.get_brim_width();
+    result.rib_width = tower.get_rib_width();
+    result.rib_length = tower.get_rib_length();
+    result.box = tower.get_bbx();
+    for (const auto &layer : result.layers)
+        for (const auto &change : layer) {
+            result.elapsed += change.elapsed_time;
+            result.gcode += change.gcode;
+            for (size_t i = 1; i < change.extrusions.size(); ++i) {
+                if (change.extrusions[i].width > 0.f) {
+                    result.extrusion_length += (change.extrusions[i].pos - change.extrusions[i - 1].pos).norm();
+                    ++result.extrusion_count;
+                }
+            }
+        }
+    return result;
+}
+
+void require_finite(const DirectRun &run)
+{
+    REQUIRE(run.depth > 0.f);
+    REQUIRE(run.height > 0.f);
+    REQUIRE(run.extrusion_count > 0);
+    CHECK(std::isfinite(double(run.depth)));
+    CHECK(std::isfinite(double(run.elapsed)));
+    CHECK(std::isfinite(run.box.min.x()));
+    CHECK(std::isfinite(run.box.max.y()));
+    CHECK_FALSE(run.gcode.empty());
+}
+
+std::vector<std::vector<float>> folded_flush_config(const DynamicPrintConfig &dynamic)
+{
+    return WipeTower2::extract_wipe_volumes(dynamic);
+}
+
+} // namespace
+
+namespace {
+std::set<int> feedrates(const std::string &gcode);
+}
+
+TEST_CASE("SEMM flush matrix folds every nozzle block and keeps destination purge floors", "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(3);
+    config.set_deserialize_strict({
+        {"single_extruder_multi_material", true},
+        {"purge_in_prime_tower", true},
+        {"nozzle_diameter", "0.4,0.8"},
+        {"flush_volumes_matrix", "0,10,11,12,0,13,14,15,0,0,41,42,43,0,44,45,46,0"},
+        {"flush_multiplier", "1,2"},
+        {"filament_minimal_purge_on_wipe_tower", "3,7,17"},
+    });
+
+    const auto folded = folded_flush_config(config);
+    REQUIRE(folded.size() == 3);
+    REQUIRE(folded[0].size() == 3);
+    // The second nozzle block is scaled by 2 and dominates each non-diagonal pair.
+    CHECK_THAT(folded[0][1], WithinAbs(82.f, 1e-5f));
+    CHECK_THAT(folded[1][0], WithinAbs(86.f, 1e-5f));
+    CHECK_THAT(folded[1][2], WithinAbs(88.f, 1e-5f));
+    CHECK_THAT(folded[2][1], WithinAbs(92.f, 1e-5f));
+    // A destination floor applies even where the matrix entry is zero.
+    CHECK_THAT(folded[0][0], WithinAbs(3.f, 1e-5f));
+    CHECK_THAT(folded[0][2], WithinAbs(84.f, 1e-5f));
+    CHECK_THAT(folded[2][2], WithinAbs(17.f, 1e-5f));
+
+    config.set_deserialize_strict({{"purge_in_prime_tower", false}});
+    const auto minimum_only = folded_flush_config(config);
+    CHECK_THAT(minimum_only[0][1], WithinAbs(7.f, 1e-5f));
+    CHECK_THAT(minimum_only[2][0], WithinAbs(3.f, 1e-5f));
+}
+
+TEST_CASE("WipeTower2 purge flow and spacing alter emitted tower geometry", "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f}, {0.4f, 0.2f, 1, 0, 80.f}};
+    const DirectRun baseline = run_tower(tower_dynamic(), plan);
+    const DirectRun spaced = run_tower(tower_dynamic({{"wipe_tower_extra_spacing", 200}}), plan);
+    const DirectRun high_flow = run_tower(tower_dynamic({{"wipe_tower_extra_flow", 200}}), plan);
+    require_finite(baseline);
+    require_finite(spaced);
+    require_finite(high_flow);
+    CHECK(spaced.depth > baseline.depth);
+    CHECK(high_flow.extrusion_count != baseline.extrusion_count);
+    CHECK(std::abs(high_flow.extrusion_length - baseline.extrusion_length) > 1e-6);
+    CHECK(high_flow.gcode.find("G1") != std::string::npos);
+}
+
+TEST_CASE("WipeTower2 wall geometry honors brim, rib, fillet, cone and width settings", "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{{0.2f, 0.2f, 0, 1, 70.f}};
+    const DirectRun rectangle = run_tower(tower_dynamic({
+        {"prime_tower_brim_width", 0}, {"prime_tower_width", 32}, {"wipe_tower_wall_type", "rectangle"}}), plan);
+    const DirectRun brim = run_tower(tower_dynamic({
+        {"prime_tower_brim_width", 4}, {"prime_tower_width", 32}, {"wipe_tower_wall_type", "rectangle"}}), plan);
+    const DirectRun rib = run_tower(tower_dynamic({
+        {"prime_tower_width", 32}, {"wipe_tower_wall_type", "rib"},
+        {"wipe_tower_rib_width", 6}, {"wipe_tower_extra_rib_length", 8}, {"wipe_tower_fillet_wall", true}}), plan);
+    const DirectRun rib_plain = run_tower(tower_dynamic({
+        {"prime_tower_width", 32}, {"wipe_tower_wall_type", "rib"},
+        {"wipe_tower_rib_width", 6}, {"wipe_tower_extra_rib_length", 0}, {"wipe_tower_fillet_wall", false}}), plan);
+    const auto tall_plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 70.f}, {10.f, 0.2f, 1, 0, 70.f}};
+    const DirectRun cone0 = run_tower(tower_dynamic({
+        {"prime_tower_width", 32}, {"wipe_tower_wall_type", "cone"}, {"wipe_tower_cone_angle", 0}}), tall_plan);
+    const DirectRun cone90 = run_tower(tower_dynamic({
+        {"prime_tower_width", 32}, {"wipe_tower_wall_type", "cone"}, {"wipe_tower_cone_angle", 90}}), tall_plan);
+    require_finite(rectangle);
+    require_finite(brim);
+    require_finite(rib);
+    require_finite(rib_plain);
+    require_finite(cone0);
+    require_finite(cone90);
+    CHECK_THAT(rectangle.width, WithinAbs(32.f, 1e-4f));
+    CHECK(brim.brim > rectangle.brim);
+    CHECK(rib.rib_width > 0.f);
+    CHECK(rib.rib_length > rib_plain.rib_length);
+    CHECK(std::abs(rib.extrusion_length - rib_plain.extrusion_length) > 1e-6);
+    CHECK(cone90.box.size().y() > cone0.box.size().y());
+}
+
+TEST_CASE("WipeTower2 ramming gate and cooling settings change unload geometry", "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{{0.2f, 0.2f, 0, 1, 60.f}, {0.4f, 0.2f, 1, 0, 60.f}};
+    const DynamicPrintConfig enabled = tower_dynamic({
+        {"enable_filament_ramming", true},
+        {"filament_ramming_parameters", "100 100 30 30 30 30"},
+        {"filament_cooling_moves", "2,2"},
+        {"filament_cooling_initial_speed", "2,2"},
+        {"filament_cooling_final_speed", "6,6"},
+        {"filament_stamping_distance", "2,2"},
+        {"filament_stamping_loading_speed", "20,20"},
+        {"cooling_tube_length", 40},
+        {"cooling_tube_retraction", 10},
+        {"filament_toolchange_delay", "1,1"},
+    });
+    const DynamicPrintConfig disabled = tower_dynamic({
+        {"enable_filament_ramming", false},
+        {"filament_cooling_moves", "0,0"},
+    });
+    const DirectRun rammed = run_tower(enabled, plan);
+    const DirectRun plain = run_tower(disabled, plan);
+    require_finite(rammed);
+    require_finite(plain);
+    CHECK(rammed.gcode.find("; Ramming start") != std::string::npos);
+    CHECK(rammed.gcode.find("; Cooling") != std::string::npos);
+    CHECK(plain.gcode.find("; Ramming start") == std::string::npos);
+    CHECK(rammed.extrusion_length > plain.extrusion_length);
+    CHECK(rammed.elapsed > plain.elapsed);
+}
+
+TEST_CASE("WipeTower2 multi-tool ramming uses volume and flow as a finite purge move", "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{{0.2f, 0.2f, 0, 1, 50.f}};
+    const DirectRun low = run_tower(tower_dynamic({
+        {"single_extruder_multi_material", false},
+        {"filament_multitool_ramming", true},
+        {"filament_multitool_ramming_volume", "4,4"},
+        {"filament_multitool_ramming_flow", "2,2"},
+    }), plan);
+    const DirectRun high = run_tower(tower_dynamic({
+        {"single_extruder_multi_material", false},
+        {"filament_multitool_ramming", true},
+        {"filament_multitool_ramming_volume", "16,16"},
+        {"filament_multitool_ramming_flow", "8,8"},
+    }), plan);
+    require_finite(low);
+    require_finite(high);
+    CHECK(high.extrusion_length > low.extrusion_length);
+    CHECK(high.elapsed >= low.elapsed);
+}
+
+TEST_CASE("SEMM optional loading moves use parking and configured load rates", "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{{0.2f, 0.2f, 0, 1, 50.f}};
+    const DynamicPrintConfig plain_config = tower_dynamic({
+        {"enable_filament_ramming", true},
+        {"filament_ramming_parameters", "100 100 30 30 30 30"},
+        {"filament_cooling_moves", "0,0"},
+        {"cooling_tube_length", 40},
+        {"cooling_tube_retraction", 10},
+        {"parking_pos_retraction", 0},
+        {"extra_loading_move", 0},
+        {"high_current_on_filament_swap", false},
+    });
+    const DynamicPrintConfig loaded_config = tower_dynamic({
+        {"enable_filament_ramming", true},
+        {"filament_ramming_parameters", "100 100 30 30 30 30"},
+        {"filament_cooling_moves", "0,0"},
+        {"cooling_tube_length", 40},
+        {"cooling_tube_retraction", 10},
+        {"parking_pos_retraction", 4},
+        {"extra_loading_move", 8},
+        {"filament_loading_speed", "12,12"},
+        {"filament_loading_speed_start", "12,12"},
+        {"filament_unloading_speed", "35,35"},
+        {"filament_unloading_speed_start", "55,55"},
+        {"high_current_on_filament_swap", true},
+    });
+    const DirectRun plain = run_tower(plain_config, plan);
+    const DirectRun loaded = run_tower(loaded_config, plan);
+    require_finite(plain);
+    require_finite(loaded);
+    CHECK(plain.gcode.find("; CP TOOLCHANGE LOAD") == std::string::npos);
+    CHECK(loaded.gcode.find("; CP TOOLCHANGE LOAD") != std::string::npos);
+    CHECK(feedrates(loaded.gcode).count(2297) == 1);
+    CHECK(feedrates(loaded.gcode).count(720) == 1);
+    CHECK(feedrates(loaded.gcode).count(2100) == 1);
+    CHECK(feedrates(loaded.gcode).count(3300) == 1);
+    CHECK(feedrates(loaded.gcode).count(1608) == 1);
+    CHECK(loaded.gcode.find("M907 E550") != std::string::npos);
+    CHECK(loaded.gcode != plain.gcode);
+}
+
+namespace {
+
+std::string command_section(const std::string &gcode, const std::string &begin, const std::string &end)
+{
+    const size_t first = gcode.find(begin);
+    if (first == std::string::npos)
+        return {};
+    const size_t start = first + begin.size();
+    const size_t last = gcode.find(end, start);
+    const std::string body = gcode.substr(start, last == std::string::npos ? std::string::npos : last - start);
+    std::string result;
+    size_t line_start = 0;
+    while (line_start < body.size()) {
+        size_t line_end = body.find('\n', line_start);
+        if (line_end == std::string::npos)
+            line_end = body.size();
+        const std::string line = body.substr(line_start, line_end - line_start);
+        if (!line.empty() && line.front() != ';') {
+            result += line;
+            result.push_back('\n');
+        }
+        line_start = line_end + (line_end < body.size() ? 1 : 0);
+    }
+    return result;
+}
+
+std::set<int> feedrates(const std::string &gcode)
+{
+    std::set<int> result;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&result](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.has_f())
+            result.insert(static_cast<int>(std::lround(line.f())));
+    });
+    return result;
+}
+
+std::string cooling_motion(const DirectRun &run)
+{
+    return command_section(run.gcode, "; Cooling\n", "; Cooling park\n");
+}
+
+std::string load_motion(const DirectRun &run)
+{
+    return command_section(run.gcode, "; CP TOOLCHANGE LOAD\n", "; CP TOOLCHANGE WIPE\n");
+}
+
+std::string unload_motion(const DirectRun &run)
+{
+    return command_section(run.gcode, "; CP TOOLCHANGE UNLOAD\n", "; CP TOOLCHANGE CHANGE\n");
+}
+
+std::string cooling_park_motion(const DirectRun &run)
+{
+    return command_section(run.gcode, "; Cooling park\n", "; Ramming end\n");
+}
+
+}
+
+TEST_CASE("WipeTower2 cooling moves, rates and stamping settings alter emitted cooling motions",
+          "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 60.f}, {0.4f, 0.2f, 1, 0, 60.f}};
+    const DynamicPrintConfig active = tower_dynamic({
+        {"enable_filament_ramming", true},
+        {"filament_ramming_parameters", "100 100 30 30 30 30"},
+        {"filament_cooling_moves", "2,2"},
+        {"filament_cooling_initial_speed", "2,2"},
+        {"filament_cooling_final_speed", "6,6"},
+        {"filament_stamping_distance", "2,2"},
+        {"filament_stamping_loading_speed", "20,20"},
+        {"cooling_tube_length", 40},
+        {"cooling_tube_retraction", 10},
+        {"filament_toolchange_delay", "1,1"},
+    });
+    const auto variant = [&](const char *key, const char *value) {
+        DynamicPrintConfig changed = active;
+        changed.set_deserialize_strict({{key, value}});
+        return run_tower(changed, plan);
+    };
+    const DirectRun enabled = run_tower(active, plan);
+    const DirectRun no_moves = variant("filament_cooling_moves", "0,0");
+    const DirectRun initial_variant = variant("filament_cooling_initial_speed", "4,4");
+    const DirectRun final_variant = variant("filament_cooling_final_speed", "8,8");
+    const DirectRun no_stamp = variant("filament_stamping_distance", "0,0");
+    const DirectRun faster_stamp = variant("filament_stamping_loading_speed", "50,50");
+    require_finite(enabled);
+    REQUIRE_FALSE(cooling_motion(enabled).empty());
+    CHECK(cooling_motion(no_moves).empty());
+    CHECK(cooling_motion(enabled) != cooling_motion(initial_variant));
+    CHECK(cooling_motion(enabled) != cooling_motion(final_variant));
+    CHECK(cooling_motion(enabled) != cooling_motion(no_stamp));
+    CHECK(cooling_motion(enabled) != cooling_motion(faster_stamp));
+    CHECK(feedrates(cooling_motion(enabled)).count(80) == 1);
+    CHECK(feedrates(cooling_motion(enabled)).count(240) == 1);
+}
+
+TEST_CASE("WipeTower2 multi-tool flow is observed with fixed purge volume",
+          "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{{0.2f, 0.2f, 0, 1, 50.f}};
+    const auto multi = [&](float flow) {
+        return run_tower(tower_dynamic({
+            {"single_extruder_multi_material", false},
+            {"filament_multitool_ramming", true},
+            {"filament_multitool_ramming_volume", "16,16"},
+            {"filament_multitool_ramming_flow", std::to_string(flow) + "," + std::to_string(flow)},
+        }), plan);
+    };
+    const DirectRun slow = multi(2.f);
+    const DirectRun fast = multi(8.f);
+    require_finite(slow);
+    require_finite(fast);
+    CHECK(unload_motion(slow) != unload_motion(fast));
+    CHECK(std::abs(slow.elapsed - fast.elapsed) > 1e-6);
+}
+
+TEST_CASE("WipeTower2 cooling delay appears as an independent wait command",
+          "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{{0.2f, 0.2f, 0, 1, 60.f}};
+    const auto with_delay = [&](float delay) {
+        return run_tower(tower_dynamic({
+            {"enable_filament_ramming", true},
+            {"filament_ramming_parameters", "100 100 30 30 30 30"},
+            {"filament_cooling_moves", "2,2"},
+            {"filament_cooling_initial_speed", "2,2"},
+            {"filament_cooling_final_speed", "6,6"},
+            {"cooling_tube_length", 40},
+            {"cooling_tube_retraction", 10},
+            {"filament_toolchange_delay", std::to_string(delay) + "," + std::to_string(delay)},
+        }), plan);
+    };
+    const DirectRun zero = with_delay(0.f);
+    const DirectRun two = with_delay(2.f);
+    require_finite(zero);
+    require_finite(two);
+    CHECK(cooling_park_motion(zero) != cooling_park_motion(two));
+    CHECK(cooling_park_motion(two).find("G4") != std::string::npos);
+}
+
+TEST_CASE("WipeTower2 initial loading speed is observed in the load motion",
+          "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{{0.2f, 0.2f, 0, 1, 50.f}};
+    const auto loaded = [&](float start_speed) {
+        return run_tower(tower_dynamic({
+            {"enable_filament_ramming", true},
+            {"filament_ramming_parameters", "100 100 30 30 30 30"},
+            {"filament_cooling_moves", "0,0"},
+            {"cooling_tube_length", 40},
+            {"cooling_tube_retraction", 10},
+            {"parking_pos_retraction", 4},
+            {"extra_loading_move", 8},
+            {"filament_loading_speed", "12,12"},
+            {"filament_loading_speed_start", std::to_string(start_speed) + "," + std::to_string(start_speed)},
+        }), plan);
+    };
+    const DirectRun twelve = loaded(12.f);
+    const DirectRun twenty_four = loaded(24.f);
+    require_finite(twelve);
+    require_finite(twenty_four);
+    REQUIRE_FALSE(load_motion(twelve).empty());
+    CHECK(load_motion(twelve) != load_motion(twenty_four));
+    CHECK(feedrates(load_motion(twelve)).count(720) == 1);
+}
+
+TEST_CASE("WipeTower2 extra flow changes purge motion at fixed requested volume",
+          "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{{0.2f, 0.2f, 0, 1, 120.f}};
+    const DirectRun nominal = run_tower(tower_dynamic({{"wipe_tower_extra_flow", 100}}), plan);
+    const DirectRun high = run_tower(tower_dynamic({{"wipe_tower_extra_flow", 200}}), plan);
+    require_finite(nominal);
+    require_finite(high);
+    const std::string nominal_wipe = command_section(nominal.gcode, "; CP TOOLCHANGE WIPE\n", "; CP TOOLCHANGE END\n");
+    const std::string high_wipe = command_section(high.gcode, "; CP TOOLCHANGE WIPE\n", "; CP TOOLCHANGE END\n");
+    REQUIRE_FALSE(nominal_wipe.empty());
+    CHECK(nominal_wipe != high_wipe);
+}
+
+TEST_CASE("WipeTower2 extra spacing changes later-layer purge depth",
+          "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f}, {0.4f, 0.2f, 1, 0, 900.f}};
+    const DirectRun nominal = run_tower(tower_dynamic({{"enable_filament_ramming", false}, {"wipe_tower_extra_spacing", 100}}), plan);
+    const DirectRun wide = run_tower(tower_dynamic({{"enable_filament_ramming", false}, {"wipe_tower_extra_spacing", 300}}), plan);
+    require_finite(nominal);
+    require_finite(wide);
+    CHECK(wide.depth > nominal.depth);
+}
+} // namespace multimaterial_wipe_variance_contracts
+
+namespace legacy_wipe_toolordering_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+FullPrintConfig legacy_config(bool semm = false,
+                              WipeTowerWallType wall = WipeTowerWallType::wtwRectangle,
+                              bool sparse = false,
+                              bool arc_fitting = false)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        {"single_extruder_multi_material", semm},
+        {"enable_prime_tower", true},
+        {"prime_tower_width", 35},
+        {"prime_tower_infill_gap", 150},
+        {"nozzle_diameter", "0.4"},
+        {"filament_diameter", "1.75,1.75"},
+        {"prime_tower_brim_width", 0},
+        {"wipe_tower_x", 20},
+        {"wipe_tower_y", 20},
+        {"wipe_tower_wall_type", wall == WipeTowerWallType::wtwRib ? "rib" : "rectangle"},
+        {"prime_tower_skip_points", false},
+        {"wipe_tower_no_sparse_layers", !sparse},
+        {"wipe_tower_extra_flow", 100},
+        {"wipe_tower_extra_spacing", 100},
+        {"enable_arc_fitting", arc_fitting},
+        {"filament_prime_volume", "80,80"},
+        {"filament_prime_volume_nc", "80,80"},
+        {"filament_change_length", "10,10"},
+        {"filament_change_length_nc", "30,30"},
+        {"flush_volumes_matrix", "0,80,80,0"},
+        {"filament_adhesiveness_category", "0,1"},
+    });
+    FullPrintConfig full;
+    full.apply(config);
+    return full;
+}
+
+std::optional<MultiNozzleUtils::LayeredNozzleGroupResult> group_for_two_filaments(bool same_extruder = false)
+{
+    std::vector<MultiNozzleUtils::NozzleInfo> nozzles;
+    nozzles.push_back({"0.4", nvtStandard, 0, 0});
+    nozzles.push_back({"0.4", nvtStandard, same_extruder ? 0 : 1, 1});
+    return MultiNozzleUtils::LayeredNozzleGroupResult::create(
+        std::vector<int>{0, 1}, nozzles, std::vector<unsigned int>{0, 1});
+}
+
+double polygon_area_abs(const Polygon &polygon)
+{
+    return std::abs(polygon.area()) * double(SCALING_FACTOR) * double(SCALING_FACTOR);
+}
+
+Polygon rectangle(double left, double bottom, double right, double top)
+{
+    return Polygon::new_scale(Pointfs{{left, bottom}, {right, bottom}, {right, top}, {left, top}});
+}
+
+struct DirectRun {
+    std::vector<std::vector<WipeTower::ToolChangeResult>> layers;
+    float depth = 0.f;
+    float width = 0.f;
+};
+
+DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, unsigned int, float>> &plan,
+                     bool semm = false,
+                     WipeTowerWallType wall = WipeTowerWallType::wtwRectangle,
+                     bool sparse = false,
+                     bool arc_fitting = false,
+                     bool same_extruder = false)
+{
+    FullPrintConfig config = legacy_config(semm, wall, sparse, arc_fitting);
+    auto group = group_for_two_filaments(same_extruder);
+    REQUIRE(group.has_value());
+    WipeTower tower(config, 0, Vec3d::Zero(), 0, 8.f, {0, 1});
+    tower.set_nozzle_group_result(*group);
+    tower.set_used_filament_ids({0, 1});
+    tower.set_filament_categories({0, 1});
+    tower.set_extruder(0, config);
+    tower.set_extruder(1, config);
+    for (const auto &[z, h, old_tool, new_tool, purge] : plan)
+        tower.plan_toolchange(z, h, old_tool, new_tool, purge, purge, purge);
+    DirectRun result;
+    tower.generate_new(result.layers);
+    result.depth = tower.get_depth();
+    result.width = tower.width();
+    return result;
+}
+
+void require_finite_result(const DirectRun &run)
+{
+    REQUIRE_FALSE(run.layers.empty());
+    REQUIRE(run.width > 0.f);
+    REQUIRE(run.depth > 0.f);
+    for (const auto &layer : run.layers) {
+        REQUIRE_FALSE(layer.empty());
+        for (const auto &tcr : layer) {
+            CHECK(std::isfinite(double(tcr.print_z)));
+            CHECK(std::isfinite(double(tcr.layer_height)));
+            CHECK(std::isfinite(double(tcr.elapsed_time)));
+            CHECK(std::isfinite(double(tcr.purge_volume)));
+            CHECK(tcr.layer_height > 0.f);
+            CHECK(tcr.elapsed_time >= 0.f);
+            float length = 0.f;
+            for (size_t i = 1; i < tcr.extrusions.size(); ++i) {
+                if (tcr.extrusions[i].width > 0.f)
+                    length += (tcr.extrusions[i].pos - tcr.extrusions[i - 1].pos).norm();
+            }
+            CHECK(length > 0.f);
+            CHECK(std::isfinite(double(tcr.start_pos.x())));
+            CHECK(std::isfinite(double(tcr.start_pos.y())));
+            CHECK(std::isfinite(double(tcr.end_pos.x())));
+            CHECK(std::isfinite(double(tcr.end_pos.y())));
+        }
+    }
+}
+
+PrintRegion make_region()
+{
+    PrintRegionConfig config;
+    config.outer_wall_filament_id.value = 1;
+    config.inner_wall_filament_id.value = 2;
+    config.sparse_infill_filament_id.value = 3;
+    config.internal_solid_filament_id.value = 4;
+    config.top_surface_filament_id.value = 5;
+    config.bottom_surface_filament_id.value = 6;
+    return PrintRegion(config);
+}
+
+ExtrusionEntityCollection one_path(ExtrusionRole role)
+{
+    ExtrusionPath path(role, 0.4, 0.5f, 0.2f);
+    path.polyline = Polyline3(Polyline({Point::new_scale(0., 0.), Point::new_scale(10., 0.)}));
+    ExtrusionEntityCollection collection;
+    collection.append(std::move(path));
+    return collection;
+}
+
+} // namespace
+
+TEST_CASE("Legacy wipe tower estimators preserve their geometric limits", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(0.f), WithinAbs(5.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(50.f), WithinAbs(12.1052637f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(250.f), WithinAbs(40.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f), WithinAbs(60.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_auto_brim_by_height(50.f), WithinAbs(4.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_auto_brim_by_height(100.f), WithinAbs(8.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_auto_brim_by_height(500.f), WithinAbs(8.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_wrapping_detection_depth(), WithinAbs(10.f, 1e-6f));
+}
+
+TEST_CASE("Legacy wipe tower nozzle and brim estimators honor nozzle geometry", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    CHECK_THAT(WipeTower::nozzle_change_perimeter_width(0.4f), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(WipeTower::nozzle_change_perimeter_width(0.5f), WithinAbs(1.25f, 1e-6f));
+    CHECK_THAT(WipeTower::estimate_brim_real_width(0.f, 0.4f, 0.2f, false), WithinAbs(0.f, 1e-6f));
+    const float type1 = WipeTower::estimate_brim_real_width(4.f, 0.4f, 0.2f, false);
+    const float type2 = WipeTower::estimate_brim_real_width(4.f, 0.4f, 0.2f, true);
+    CHECK(type1 > type2);
+    CHECK(type2 > 0.f);
+    CHECK(WipeTower::estimate_brim_real_width(4.f, 0.4f, 0.5f, false) > 4.f);
+}
+
+TEST_CASE("Legacy wipe tower block estimates scale purge categories and ramming", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    using P = WipeTower::PurgeEstimate;
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth({}, 35.f, 0.2f, 0.4f, 1.f), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth({P{20.f, 0, 0.f, 1.75f}}, 1.f, 0.2f, 0.4f, 1.f), WithinAbs(0.f, 1e-6f));
+    const float one_category = WipeTower::estimate_tower_blocks_depth(
+        {P{20.f, 0, 0.f, 1.75f}, P{80.f, 0, 0.f, 1.75f}}, 35.f, 0.2f, 0.4f, 1.5f);
+    const float two_categories = WipeTower::estimate_tower_blocks_depth(
+        {P{20.f, 0, 0.f, 1.75f}, P{80.f, 1, 10.f, 1.75f}}, 35.f, 0.2f, 0.4f, 1.5f);
+    CHECK_THAT(one_category, WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(two_categories, WithinAbs(30.25f, 1e-5f));
+    CHECK(one_category > 0.f);
+    CHECK(two_categories > one_category);
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth({P{20.f, 0, 0.f, 1.75f}}, 35.f, 0.f, 0.4f, 1.f), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth({P{20.f, 0, 0.f, 1.75f}}, 35.f, 0.2f, 0.f, 1.f), WithinAbs(0.f, 1e-6f));
+}
+
+TEST_CASE("Legacy rib footprint and mesh constructors preserve positive solids", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    const float square = WipeTower::rib_footprint_side(30.f, 20.f, 2.f, 0.f, 20.f);
+    const float extended = WipeTower::rib_footprint_side(30.f, 20.f, 2.f, 10.f, 20.f);
+    CHECK(square >= 30.f);
+    CHECK(extended > square);
+    CHECK_THAT(WipeTower::rib_footprint_side(0.f, 20.f, 2.f, 0.f, 20.f), WithinAbs(0.f, 1e-6f));
+    const float bbox = WipeTower::estimate_rib_tower_bbox_side(
+        {{40.f, 0, 0.f, 1.75f}, {80.f, 1, 12.f, 1.75f}}, 35.f, 0.2f, 0.4f, 1.5f, 2.f, 3.f, 20.f);
+    CHECK(bbox > 0.f);
+    const Polygon section = WipeTower::rib_section(30.f, 20.f, 15.f, 2.f, false);
+    REQUIRE(section.points.size() >= 4);
+    CHECK(polygon_area_abs(section) > 0.0);
+    const TriangleMesh tower = WipeTower::its_make_rib_tower(30.f, 20.f, 8.f, 60.f, 2.f, false);
+    // The helper fills indexed_triangle_set directly and does not refresh TriangleMesh::m_stats.
+    REQUIRE(!tower.its.indices.empty());
+    REQUIRE(!tower.its.vertices.empty());
+    CHECK_THAT(tower.its.vertices.front().z(), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(tower.its.vertices.back().z(), WithinAbs(8.f, 1e-6f));
+    Polygon brim = rectangle(0., 0., 30., 20.);
+    const TriangleMesh brim_mesh = WipeTower::its_make_rib_brim(brim, 0.2f);
+    REQUIRE(!brim_mesh.its.indices.empty());
+    REQUIRE(!brim_mesh.its.vertices.empty());
+    CHECK_THAT(brim_mesh.its.vertices.front().z(), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(brim_mesh.its.vertices.back().z(), WithinAbs(0.2f, 1e-6f));
+}
+
+TEST_CASE("Legacy rounding transforms corners while retaining footprint area", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    Polygon p = rectangle(0., 0., 30., 20.);
+    const double original = polygon_area_abs(p);
+    Polygon rounded = WipeTower::rounding_polygon(p, 2.0);
+    REQUIRE(rounded.points.size() > p.points.size());
+    CHECK(polygon_area_abs(rounded) > original * 0.8);
+    CHECK(polygon_area_abs(rounded) < original * 1.01);
+    Polygon degenerate;
+    degenerate.points = {Point::new_scale(0., 0.), Point::new_scale(1., 0.)};
+    CHECK(WipeTower::rounding_polygon(degenerate, 2.).points.size() == degenerate.points.size());
+}
+
+TEST_CASE("Legacy gap construction cuts skip points without losing wall area", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    const Polygon wall = rectangle(0., 0., 30., 20.);
+    Polygon inserted;
+    const auto no_skips = construct_gap_for_skip_points(wall, {}, 30.f, 2.f, inserted);
+    REQUIRE(no_skips.size() == 1);
+    CHECK(inserted.points.size() == wall.points.size());
+    Polygon inserted_one;
+    const auto one_skip = construct_gap_for_skip_points(
+        wall, {Vec2f(30.f, 10.f)}, 30.f, 2.f, inserted_one);
+    REQUIRE_FALSE(one_skip.empty());
+    CHECK(one_skip.size() == 2);
+    CHECK_FALSE(inserted_one.points.empty());
+    CHECK_THAT(polygon_area_abs(inserted_one), WithinAbs(600.0, 1e-3));
+    Polygon inserted_two;
+    const auto two_skips = construct_gap_for_skip_points(
+        wall, {Vec2f(30.f, 10.f), Vec2f(0.f, 10.f)}, 30.f, 2.f, inserted_two);
+    REQUIRE_FALSE(two_skips.empty());
+    CHECK(two_skips.size() == 3);
+    CHECK_THAT(polygon_area_abs(inserted_two), WithinAbs(600.0, 1e-3));
+}
+
+TEST_CASE("Sparse tower layer predicates and compacted heights agree", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    WipeTower::ToolChangeResult sparse;
+    sparse.initial_tool = 1;
+    sparse.new_tool = 1;
+    WipeTower::ToolChangeResult change;
+    change.initial_tool = 0;
+    change.new_tool = 1;
+    change.layer_height = 0.4f;
+    REQUIRE(wipe_tower_layer_is_sparse({sparse}));
+    REQUIRE_FALSE(wipe_tower_layer_is_sparse({change}));
+    REQUIRE_FALSE(wipe_tower_layer_is_sparse({}));
+    sparse.combined_away = true;
+    REQUIRE(wipe_tower_layer_is_combined_away({sparse}));
+    CHECK_FALSE(wipe_tower_layer_is_combined_away({}));
+    const std::vector<std::vector<WipeTower::ToolChangeResult>> layers = {{change}, {sparse}, {change}};
+    const auto z = compute_compacted_wipe_tower_z(layers, 0.1f);
+    REQUIRE(z.size() == 3);
+    CHECK_THAT(z[0], WithinAbs(0.5f, 1e-6f));
+    CHECK_THAT(z[1], WithinAbs(0.5f, 1e-6f));
+    CHECK_THAT(z[2], WithinAbs(0.9f, 1e-6f));
+}
+
+TEST_CASE("Sparse tower combination folds only layers within nozzle caps", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    std::vector<float> heights{0.2f, 0.2f, 0.2f, 0.2f, 0.2f};
+    const std::vector<char> sparse{0, 1, 1, 0, 1};
+    const std::vector<float> caps{0.2f, 0.4f, 0.4f, 0.2f, 0.4f};
+    const auto folded = combine_sparse_wipe_tower_layers(heights, sparse, caps, 0);
+    REQUIRE(folded.size() == heights.size());
+    CHECK(folded[0] == 0);
+    CHECK(folded[1] == 1);
+    CHECK(folded[2] == 0);
+    CHECK_THAT(heights[2], WithinAbs(0.4f, 1e-6f));
+    CHECK(folded[4] == 0);
+}
+
+TEST_CASE("Sparse tower plan applies filament-specific layer-height caps", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    struct Change {
+        unsigned int old_tool;
+        unsigned int new_tool;
+    };
+    struct Layer {
+        float height;
+        std::vector<Change> tool_changes;
+        bool combined_away = false;
+    };
+    std::vector<Layer> plan(4);
+    for (auto &layer : plan) layer.height = 0.2f;
+    plan[0].tool_changes.push_back({0, 0});
+    plan[3].tool_changes.push_back({0, 0});
+    std::vector<WipeTower::FilamentParameters> filpar(2);
+    filpar[0].max_layer_height = 0.4f;
+    filpar[1].max_layer_height = 0.2f;
+    combine_sparse_wipe_tower_plan(plan, filpar, 0, 0);
+    CHECK(plan[1].combined_away);
+    CHECK_FALSE(plan[2].combined_away);
+    CHECK_THAT(plan[2].height, WithinAbs(0.4f, 1e-6f));
+}
+
+TEST_CASE("Legacy tower direct generation keeps purge, timing, and layer invariants", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    const DirectRun run = run_direct({
+        {0.2f, 0.2f, 0, 1, 50.f},
+        {0.4f, 0.2f, 1, 0, 120.f},
+        {0.6f, 0.3f, 0, 1, 80.f},
+    }, false, WipeTowerWallType::wtwRectangle, false, true);
+    require_finite_result(run);
+    REQUIRE(run.layers.size() == 3);
+    CHECK_THAT(run.layers[0].front().purge_volume, WithinAbs(50.f, 1e-5f));
+    CHECK_THAT(run.layers[1].front().purge_volume, WithinAbs(120.f, 1e-5f));
+    CHECK_THAT(run.layers[2].front().layer_height, WithinAbs(0.3f, 1e-5f));
+    CHECK(run.layers[0].front().gcode.find("WIPE_TOWER_START") != std::string::npos);
+    CHECK(run.layers[0].front().gcode.find("WIPE_TOWER_END") != std::string::npos);
+}
+
+TEST_CASE("Legacy tower rib generation changes wall footprint while preserving transitions", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    const DirectRun rectangle_run = run_direct({{0.2f, 0.2f, 0, 1, 80.f}}, false, WipeTowerWallType::wtwRectangle);
+    const DirectRun rib_run = run_direct({{0.2f, 0.2f, 0, 1, 80.f}}, false, WipeTowerWallType::wtwRib);
+    require_finite_result(rectangle_run);
+    require_finite_result(rib_run);
+    REQUIRE_FALSE(rectangle_run.layers.front().empty());
+    REQUIRE_FALSE(rib_run.layers.front().empty());
+    CHECK(rectangle_run.layers.front().front().initial_tool == rib_run.layers.front().front().initial_tool);
+    CHECK(rectangle_run.layers.front().front().new_tool == rib_run.layers.front().front().new_tool);
+    float rib_length = 0.f;
+    for (size_t i = 1; i < rib_run.layers.front().front().extrusions.size(); ++i)
+        if (rib_run.layers.front().front().extrusions[i].width > 0.f)
+            rib_length += (rib_run.layers.front().front().extrusions[i].pos - rib_run.layers.front().front().extrusions[i - 1].pos).norm();
+    CHECK(rib_length > 0.f);
+    CHECK(rib_run.depth >= rectangle_run.depth);
+}
+
+TEST_CASE("Legacy tower sparse generation keeps compacted layer state finite", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    const DirectRun run = run_direct({
+        {0.2f, 0.2f, 0, 1, 80.f},
+        {0.6f, 0.4f, 1, 0, 80.f},
+        {1.0f, 0.4f, 0, 1, 80.f},
+    }, false, WipeTowerWallType::wtwRectangle, true);
+    require_finite_result(run);
+    CHECK(run.layers.size() >= 2);
+    for (const auto &layer : run.layers)
+        for (const auto &tcr : layer)
+            CHECK(tcr.layer_height > 0.f);
+}
+
+TEST_CASE("LayerTools resolves role filaments and explicit overrides", "[WipeTower][ToolOrderingLegacy][WipeTowerBroad]")
+{
+    PrintRegion region = make_region();
+    LayerTools tools(0.2);
+    tools.extruders = {2, 0, 1};
+    CHECK(tools.is_extruder_order(2, 0));
+    CHECK(tools.is_extruder_order(0, 1));
+    CHECK_FALSE(tools.is_extruder_order(1, 0));
+    CHECK_FALSE(tools.is_extruder_order(7, 0));
+    CHECK(tools.wall_extruder_id(region) == 0u);
+    CHECK(tools.sparse_infill_filament_id(region) == 2u);
+    CHECK(tools.internal_solid_filament_id(region) == 3u);
+    tools.mixed_filament_resolution[2] = 0;
+    CHECK(tools.sparse_infill_filament_id(region) == 0u);
+    tools.extruder_override = 5;
+    CHECK(tools.wall_extruder_id(region) == 4u);
+    CHECK(tools.has_extruder(2));
+    CHECK_FALSE(tools.has_extruder(8));
+}
+
+TEST_CASE("LayerTools selects role-specific extrusion filaments", "[WipeTower][ToolOrderingLegacy][WipeTowerBroad]")
+{
+    PrintRegion region = make_region();
+    LayerTools tools(0.2);
+    auto perimeter = one_path(erPerimeter);
+    auto sparse = one_path(erInternalInfill);
+    auto top = one_path(erTopSolidInfill);
+    auto bottom = one_path(erBottomSurface);
+    CHECK(tools.extruder(perimeter, region) == 1u);
+    CHECK(tools.extruder(sparse, region) == 2u);
+    CHECK(tools.extruder(top, region) == 4u);
+    CHECK(tools.extruder(bottom, region) == 5u);
+    tools.extruder_override = 6;
+    CHECK(tools.extruder(perimeter, region) == 5u);
+}
+
+TEST_CASE("ToolOrdering locates the nearest layer and honors custom order", "[WipeTower][ToolOrderingLegacy][WipeTowerBroad]")
+{
+    ToolOrdering ordering;
+    ordering.layer_tools().emplace_back(0.2);
+    ordering.layer_tools().emplace_back(0.4);
+    ordering.layer_tools().emplace_back(0.8);
+    ordering.layer_tools()[0].extruders = {2, 0, 1};
+    CHECK_THAT(ordering.tools_for_layer(0.4).print_z, WithinAbs(0.4, 1e-9));
+    CHECK_THAT(ordering.tools_for_layer(0.8).print_z, WithinAbs(0.8, 1e-9));
+    CHECK_THAT(ordering.tools_for_layer(0.4 + 0.25 * EPSILON).print_z, WithinAbs(0.4, 1e-9));
+    CHECK(ordering.layer_tools()[0].is_extruder_order(2, 1));
+}
+
+TEST_CASE("WipingExtrusions gates object and support wiping by role", "[WipeTower][ToolOrderingLegacy][WipeTowerBroad]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        {"flush_into_objects", true}, {"flush_into_infill", true}, {"flush_into_support", true},
+        {"support_filament", 0}, {"support_interface_filament", 0},
+        {"filament_soluble", "0,0"}, {"filament_is_support", "0,0"},
+        {"sparse_infill_filament_id", 1}, {"outer_wall_filament_id", 1},
+        {"inner_wall_filament_id", 1}, {"internal_solid_filament_id", 1},
+        {"top_surface_filament_id", 1}, {"bottom_surface_filament_id", 1},
+    });
+    Model model;
+    model.add_object("cube", "", make_cube(10, 10, 10))->add_instance();
+    Print print;
+    print.apply(model, config);
+    REQUIRE_FALSE(print.objects().empty());
+    const PrintObject *object = print.objects().front();
+    LayerTools tools(0.2);
+    tools.extruders = {0, 1};
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+    PrintRegionConfig region_config;
+    region_config.apply(config, true);
+    PrintRegion region(region_config);
+    auto infill = one_path(erInternalInfill);
+    auto perimeter = one_path(erPerimeter);
+    CHECK(wiping.is_overriddable(infill, print.config(), *object, region));
+    CHECK(wiping.is_overriddable(perimeter, print.config(), *object, region));
+    DynamicPrintConfig no_objects = config;
+    no_objects.set_deserialize_strict({{"flush_into_objects", false}, {"flush_into_infill", true}});
+    print.apply(model, no_objects);
+    object = print.objects().front();
+    CHECK(wiping.is_overriddable(infill, print.config(), *object, region));
+    CHECK_FALSE(wiping.is_overriddable(perimeter, print.config(), *object, region));
+    CHECK(wiping.is_support_overriddable(erSupportMaterial, *object));
+    CHECK(wiping.is_support_overriddable(erSupportMaterialInterface, *object));
+    CHECK_FALSE(wiping.is_support_overriddable(erPerimeter, *object));
+}
+
+TEST_CASE("WipingExtrusions support role gates follow dedicated filament assignment", "[WipeTower][ToolOrderingLegacy][WipeTowerBroad]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"flush_into_support", true}, {"support_filament", 0}, {"support_interface_filament", 0}});
+    Model model;
+    model.add_object("cube", "", make_cube(10, 10, 10))->add_instance();
+    Print print;
+    print.apply(model, config);
+    REQUIRE_FALSE(print.objects().empty());
+    const PrintObject *object = print.objects().front();
+    LayerTools tools(0.2);
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+    CHECK(wiping.is_support_overriddable(erMixed, *object));
+    CHECK(wiping.is_support_overriddable(erSupportMaterial, *object));
+    CHECK(wiping.is_support_overriddable(erSupportMaterialInterface, *object));
+    CHECK_FALSE(wiping.is_support_overriddable(erNone, *object));
+}
+
+TEST_CASE("ToolOrdering cyclic parser remains strict and 1-based", "[WipeTower][ToolOrderingLegacy][WipeTowerBroad]")
+{
+    CHECK(parse_cyclic_order("4, 2, 2, 0, 9, abc, 1x, 3", 4) == std::vector<unsigned int>{3, 1, 2});
+    CHECK(parse_cyclic_order("", 4).empty());
+    CHECK(parse_cyclic_order("-1,0,5", 4).empty());
+}
+
+TEST_CASE("Wipe tower sparse config gates distinguish skip and combine modes", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"wipe_tower_no_sparse_layers", true}, {"wipe_tower_sparse_layers_combination", true}});
+    FullPrintConfig full;
+    full.apply(config);
+    CHECK(wipe_tower_sparse_layers_skipped(full));
+    CHECK_FALSE(wipe_tower_sparse_layers_combined(full));
+    full.timelapse_type.value = TimelapseType::tlSmooth;
+    CHECK_FALSE(wipe_tower_sparse_layers_skipped(full));
+    CHECK_FALSE(wipe_tower_sparse_layers_combined(full));
+    full.timelapse_type.value = TimelapseType::tlTraditional;
+    full.enable_wrapping_detection.value = true;
+    CHECK_FALSE(wipe_tower_sparse_layers_skipped(full));
+    CHECK_FALSE(wipe_tower_sparse_layers_combined(full));
+}
+
+TEST_CASE("Legacy direct tower preserves changing tool and purge records", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    const DirectRun run = run_direct({{0.2f, 0.2f, 0, 1, 40.f}}, true,
+                                     WipeTowerWallType::wtwRectangle, false, false, true);
+    require_finite_result(run);
+    REQUIRE_FALSE(run.layers.front().empty());
+    const auto &change = run.layers.front().front();
+    CHECK(change.is_tool_change);
+    CHECK(change.initial_tool == 0);
+    CHECK(change.new_tool == 1);
+    CHECK_THAT(change.purge_volume, WithinAbs(40.f, 1e-5f));
+    CHECK_FALSE(change.gcode.empty());
+}
+} // namespace legacy_wipe_toolordering_contracts

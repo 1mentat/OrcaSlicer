@@ -1,3 +1,7 @@
+#include <cstdlib>
+#include <exception>
+#include <boost/nowide/cstdlib.hpp>
+#include "libslic3r/Point.hpp"
 #include <string>
 #include <catch2/catch_all.hpp>
 
@@ -3007,3 +3011,424 @@ TEST_CASE("Delimited G-code config reports missing headers and block delimiters"
 }
 
 } // namespace config_footer_contracts
+
+namespace config_residual_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+void check_values(const std::vector<double> &actual, const std::vector<double> &expected)
+{
+    REQUIRE(actual.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+        CHECK_THAT(actual[i], WithinAbs(expected[i], 1e-9));
+}
+
+struct EnvironmentRestore {
+    std::string name;
+    std::string old_value;
+    bool had_value;
+
+    explicit EnvironmentRestore(std::string key) : name(std::move(key))
+    {
+        const char *value = std::getenv(name.c_str());
+        had_value = value != nullptr;
+        if (had_value)
+            old_value = value;
+    }
+
+    ~EnvironmentRestore()
+    {
+        if (had_value)
+            boost::nowide::setenv(name.c_str(), old_value.c_str(), 1);
+        else
+            boost::nowide::unsetenv(name.c_str());
+    }
+};
+
+DynamicConfig dynamic_pair(double left, double right)
+{
+    DynamicConfig config;
+    config.set_key_value("left", new ConfigOptionFloat(left));
+    config.set_key_value("right", new ConfigOptionFloat(right));
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("FloatOrPercent keeps absolute and percentage semantics distinct", "[Config][ConfigContracts]")
+{
+    const FloatOrPercent absolute(12.5, false);
+    const FloatOrPercent percentage(12.5, true);
+
+    CHECK_THAT(absolute.get_abs_value(80.), WithinAbs(12.5, 1e-9));
+    CHECK_THAT(percentage.get_abs_value(80.), WithinAbs(10., 1e-9));
+    CHECK(absolute != percentage);
+    CHECK(absolute < percentage);
+}
+
+TEST_CASE("ConfigOptionFloatOrPercent parses and serializes both forms", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloatOrPercent option;
+    REQUIRE(option.deserialize("37.5%"));
+    CHECK(option.percent);
+    CHECK_THAT(option.value, WithinAbs(37.5, 1e-9));
+    CHECK(option.serialize() == "37.5%");
+    CHECK_THAT(option.get_abs_value(80.), WithinAbs(30., 1e-9));
+
+    REQUIRE(option.deserialize("4.25"));
+    CHECK_FALSE(option.percent);
+    CHECK_THAT(option.value, WithinAbs(4.25, 1e-9));
+    CHECK(option.serialize() == "4.25");
+}
+
+TEST_CASE("Nullable float-or-percent vectors preserve nil and value positions", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloatsOrPercentsNullable option;
+    REQUIRE(option.deserialize("nil,25%,3.5"));
+    REQUIRE(option.values.size() == 3);
+    CHECK(option.is_nil(0));
+    CHECK_FALSE(option.is_nil(1));
+    CHECK_FALSE(option.is_nil(2));
+    CHECK(option.vserialize() == std::vector<std::string>{"nil", "25%", "3.5"});
+    CHECK(option.serialize() == "nil,25%,3.5");
+}
+
+TEST_CASE("ConfigOptionPoint3 round trips comma and x separators", "[Config][ConfigContracts]")
+{
+    ConfigOptionPoint3 point(Vec3d(1.25, -2.5, 9.75));
+    const std::string encoded = point.serialize();
+    CHECK(encoded == "1.25,-2.5,9.75");
+
+    ConfigOptionPoint3 decoded;
+    REQUIRE(decoded.deserialize("1.25,-2.5,9.75"));
+    CHECK_THAT(decoded.value.x(), WithinAbs(1.25, 1e-9));
+    CHECK_THAT(decoded.value.y(), WithinAbs(-2.5, 1e-9));
+    CHECK_THAT(decoded.value.z(), WithinAbs(9.75, 1e-9));
+    REQUIRE(decoded.deserialize("1.25x-2.5x9.75"));
+    CHECK_THAT(decoded.value.x(), WithinAbs(1.25, 1e-9));
+    CHECK_THAT(decoded.value.y(), WithinAbs(-2.5, 1e-9));
+    CHECK_THAT(decoded.value.z(), WithinAbs(9.75, 1e-9));
+    CHECK_FALSE(decoded.deserialize("1.25x-2.5"));
+}
+
+TEST_CASE("ConfigOptionPointsGroups preserves group and point boundaries", "[Config][ConfigContracts]")
+{
+    const std::vector<Vec2ds> groups{
+        Vec2ds{Vec2d(1., 2.), Vec2d(3., 4.)},
+        Vec2ds{Vec2d(-5., 6.)}
+    };
+    ConfigOptionPointsGroups source(groups);
+    const std::string encoded = source.serialize();
+    CHECK(encoded == "1x2,3x4#-5x6");
+
+    ConfigOptionPointsGroups decoded;
+    decoded.values = {Vec2ds{Vec2d(99., 99.)}};
+    REQUIRE(decoded.deserialize(encoded));
+    REQUIRE(decoded.values.size() == 2);
+    REQUIRE(decoded.values[0].size() == 2);
+    REQUIRE(decoded.values[1].size() == 1);
+    CHECK_THAT(decoded.values[0][1].x(), WithinAbs(3., 1e-9));
+    CHECK_THAT(decoded.values[0][1].y(), WithinAbs(4., 1e-9));
+    CHECK_THAT(decoded.values[1][0].x(), WithinAbs(-5., 1e-9));
+    CHECK(decoded.vserialize_single(0) == std::vector<std::string>{"1x2", "3x4"});
+}
+
+TEST_CASE("ConfigOptionIntsGroups preserves append and per-group serialization", "[Config][ConfigContracts]")
+{
+    ConfigOptionIntsGroups groups({std::vector<int>{1, 2}, std::vector<int>{7}});
+    CHECK(groups.serialize() == "1,2#7");
+    CHECK(groups.vserialize() == std::vector<std::string>{"1,2", "7"});
+
+    REQUIRE(groups.deserialize("9,10", true));
+    REQUIRE(groups.values.size() == 3);
+    CHECK(groups.values[0] == std::vector<int>{1, 2});
+    CHECK(groups.values[2] == std::vector<int>{9, 10});
+    CHECK(groups.vserialize_single(1) == std::vector<std::string>{"7"});
+    REQUIRE(groups.deserialize("4,5", false));
+    REQUIRE(groups.values.size() == 1);
+    CHECK(groups.values[0] == std::vector<int>{4, 5});
+}
+
+TEST_CASE("ConfigSubstitutionContext empty tracks substitution records, not unknown keys", "[Config][ConfigContracts]")
+{
+    ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(context.empty());
+    context.unrecogized_keys.emplace_back("future_option");
+    CHECK(context.empty());
+    CHECK(context.unrecogized_keys == std::vector<std::string>{"future_option"});
+}
+
+TEST_CASE("DynamicConfig equality, diff, equal, and skipped keys are coherent", "[Config][ConfigContracts]")
+{
+    DynamicConfig left = dynamic_pair(1., 2.);
+    DynamicConfig right = dynamic_pair(1., 5.);
+
+    CHECK_FALSE(left.equals(right));
+    CHECK(left.equal(right) == t_config_option_keys{"left"});
+    CHECK(left.diff(right) == t_config_option_keys{"right"});
+
+    const auto report = left.diff_report(right);
+    REQUIRE(report.is_different());
+    REQUIRE(report.differences.count("right") == 1);
+    CHECK(report.differences.at("right").is_different_value());
+    CHECK(report.differences.at("right").left_value == "2");
+    CHECK(report.differences.at("right").right_value == "5");
+
+    const std::set<std::string> skipped{"right"};
+    CHECK(left.equals(right, &skipped));
+}
+
+TEST_CASE("DynamicConfig diff report distinguishes missing keys", "[Config][ConfigContracts]")
+{
+    DynamicConfig left;
+    DynamicConfig right;
+    left.set_key_value("only_left", new ConfigOptionInt(3));
+    right.set_key_value("only_right", new ConfigOptionString("yes"));
+
+    const auto report = left.diff_report(right);
+    REQUIRE(report.differences.size() == 2);
+    REQUIRE(report.differences.count("only_left") == 1);
+    REQUIRE(report.differences.count("only_right") == 1);
+    CHECK(report.differences.at("only_left").left_value == "3");
+    CHECK_FALSE(report.differences.at("only_left").right_value.has_value());
+    CHECK_FALSE(report.differences.at("only_right").left_value.has_value());
+    CHECK(report.differences.at("only_right").right_value == "yes");
+}
+
+TEST_CASE("DynamicConfig copy, move, plus, swap, and erase preserve ownership", "[Config][ConfigContracts]")
+{
+    DynamicConfig original;
+    original.set_key_value("count", new ConfigOptionInt(4));
+
+    DynamicConfig copied(original);
+    copied.opt<ConfigOptionInt>("count")->value = 9;
+    CHECK(original.opt<ConfigOptionInt>("count")->value == 4);
+    CHECK_FALSE(original == copied);
+
+    // Exercise the final, all-keys-equal return path as well as the early
+    // mismatch path above.  A mutation of that final return must be visible
+    // to this independent equality contract.
+    DynamicConfig identical(original);
+    CHECK(original == identical);
+
+    DynamicConfig extra;
+    extra.set_key_value("label", new ConfigOptionString("extra"));
+    copied += extra;
+    REQUIRE(copied.has("label"));
+    CHECK(copied.opt_string("label") == "extra");
+
+    DynamicConfig moved(std::move(copied));
+    CHECK(copied.empty());
+    CHECK(moved.size() == 2);
+    DynamicConfig swapped;
+    swapped.set_key_value("other", new ConfigOptionBool(true));
+    moved.swap(swapped);
+    CHECK(moved.has("other"));
+    CHECK(swapped.has("count"));
+    CHECK(swapped.erase("count"));
+    CHECK_FALSE(swapped.erase("count"));
+}
+
+TEST_CASE("ConfigOptionFloats appends and resizes values with explicit defaults", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloats storage({1., 2.});
+    ConfigOptionFloats *values = &storage;
+    const ConfigOptionFloat appended(3.);
+    values->append(&appended);
+    check_values(values->values, {1., 2., 3.});
+    values->resize(5);
+    check_values(values->values, {1., 2., 3., 1., 1.});
+    values->clear();
+    ConfigOptionFloat default_value(8.);
+    values->resize(2, &default_value);
+    check_values(values->values, {8., 8.});
+}
+
+TEST_CASE("DynamicConfig remove_nil_options removes only fully nil vectors", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("nil", new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value()}));
+    config.set_key_value("mixed", new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value(), 2.}));
+    config.set_key_value("value", new ConfigOptionInt(7));
+
+    const size_t removed = config.remove_nil_options();
+    CHECK(removed == 1);
+    CHECK_FALSE(config.has("nil"));
+    CHECK(config.has("mixed"));
+    CHECK(config.has("value"));
+}
+
+TEST_CASE("DynamicPrintConfig null_nullables clears nullable values without removing options", "[Config][ConfigContracts]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *speed = config.option<ConfigOptionFloatsOrPercentsNullable>("small_perimeter_speed");
+    REQUIRE(speed != nullptr);
+    speed->values = {FloatOrPercent(37., false), FloatOrPercent(12., true)};
+    std::string exception;
+    bool threw = false;
+    try {
+        config.null_nullables();
+    } catch (const std::exception &error) {
+        threw = true;
+        exception = error.what();
+    } catch (...) {
+        threw = true;
+        exception = "non-standard exception";
+    }
+    INFO(exception);
+    REQUIRE_FALSE(threw);
+    REQUIRE(config.has("small_perimeter_speed"));
+    CHECK(speed->is_nil());
+    CHECK(speed->serialize() == "nil");
+}
+
+TEST_CASE("ConfigBase setenv serializes the selected option using uppercase names", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.275));
+    EnvironmentRestore restore("SLIC3R_LAYER_HEIGHT");
+    REQUIRE(boost::nowide::unsetenv("SLIC3R_LAYER_HEIGHT") == 0);
+
+    config.setenv_();
+    const char *value = std::getenv("SLIC3R_LAYER_HEIGHT");
+    REQUIRE(value != nullptr);
+    CHECK(std::string(value) == config.option<ConfigOptionFloat>("layer_height")->serialize());
+}
+
+TEST_CASE("Static print config exposes only its initialized option set", "[Config][ConfigContracts]")
+{
+    PrintObjectConfig object_config;
+    const auto keys = object_config.keys();
+    REQUIRE_FALSE(keys.empty());
+    CHECK(object_config.has("layer_height"));
+    CHECK_FALSE(object_config.has("not_a_print_object_option"));
+    CHECK(object_config.def() != nullptr);
+    CHECK(object_config.def()->has("layer_height"));
+    CHECK_FALSE(object_config.def()->options.empty());
+}
+
+TEST_CASE("Config definitions retain defaults and metadata for a static option", "[Config][ConfigContracts]")
+{
+    PrintObjectConfig object_config;
+    const ConfigOptionDef *definition = object_config.def()->get("layer_height");
+    REQUIRE(definition != nullptr);
+    REQUIRE(static_cast<bool>(definition->default_value));
+    CHECK(definition->type == coFloat);
+    CHECK(definition->default_value->serialize() == object_config.option("layer_height")->serialize());
+    CHECK(object_config.def()->keys().size() >= object_config.keys().size());
+}
+
+TEST_CASE("DynamicPrintConfig set_deserialize updates typed values and absolute ratios", "[Config][ConfigContracts]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.24},
+        {"outer_wall_line_width", "120%"},
+        {"inner_wall_line_width", 0.42}
+    });
+    CHECK_THAT(config.option<ConfigOptionFloat>("layer_height")->value, WithinAbs(0.24, 1e-9));
+    CHECK(config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->percent);
+    CHECK_THAT(config.get_abs_value("outer_wall_line_width", 0.42), WithinAbs(0.504, 1e-9));
+}
+
+TEST_CASE("ConfigOptionFloats vector set_at and set range preserve defaults", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloats destination({10., 10., 10.});
+    ConfigOptionFloats source({1., 2., 3., 4.});
+    destination.set_at(&source, 1, 1);
+    check_values(destination.values, {10., 2., 10.});
+    destination.set(&source, 2, 2);
+    check_values(destination.values, {3., 4.});
+}
+
+TEST_CASE("ConfigOptionFloats nullable index assignment retains nil state", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloatsNullable option({1., 2., 3.});
+    option.set_at_to_nil(1);
+    REQUIRE(option.is_nil(1));
+    CHECK_FALSE(option.is_nil(0));
+    CHECK(std::isnan(option.get_at(1)));
+    CHECK(option.serialize() == "1,nil,3");
+}
+
+TEST_CASE("ConfigOptionPoint3 clone and assignment retain all coordinates", "[Config][ConfigContracts]")
+{
+    ConfigOptionPoint3 source(Vec3d(4., 5., 6.));
+    std::unique_ptr<ConfigOption> clone(source.clone());
+    auto *typed = dynamic_cast<ConfigOptionPoint3 *>(clone.get());
+    REQUIRE(typed != nullptr);
+    CHECK(*typed == source);
+
+    ConfigOptionPoint3 assigned;
+    assigned = &source;
+    CHECK_THAT((assigned.value - Vec3d(4., 5., 6.)).norm(), WithinAbs(0., 1e-9));
+}
+
+TEST_CASE("ConfigOptionPointsGroups append and clone preserve nested values", "[Config][ConfigContracts]")
+{
+    ConfigOptionPointsGroups source({Vec2ds{Vec2d(1., 1.)}});
+    ConfigOptionPointsGroups extra({Vec2ds{Vec2d(2., 2.), Vec2d(3., 3.)}});
+    source.append(&extra);
+    REQUIRE(source.values.size() == 2);
+    CHECK(source.values[1].size() == 2);
+    std::unique_ptr<ConfigOption> clone(source.clone());
+    auto *typed = dynamic_cast<ConfigOptionPointsGroups *>(clone.get());
+    REQUIRE(typed != nullptr);
+    CHECK(*typed == source);
+}
+
+TEST_CASE("Grouped integer settings form a strict lexicographic order", "[Config][ConfigContracts][ConfigGroupOrder]")
+{
+    ConfigOptionIntsGroups value({std::vector<int>{1, 9}});
+    REQUIRE_FALSE(value < value);
+    const ConfigOptionIntsGroups identical(value);
+    CHECK_FALSE(value < identical);
+    CHECK_FALSE(identical < value);
+    const ConfigOptionIntsGroups empty;
+    CHECK_FALSE(empty < empty);
+    CHECK(empty < value);
+    CHECK_FALSE(value < empty);
+    const ConfigOptionIntsGroups longer({std::vector<int>{1, 9}, std::vector<int>{2}});
+    CHECK(value < longer);
+    CHECK_FALSE(longer < value);
+    const ConfigOptionIntsGroups higher({std::vector<int>{2, 0}});
+    CHECK(value < higher);
+    CHECK_FALSE(higher < value);
+}
+
+TEST_CASE("ConfigBase equality ignores missing options but reports present differences", "[Config][ConfigContracts]")
+{
+    DynamicConfig left;
+    DynamicConfig right;
+    left.set_key_value("shared", new ConfigOptionString("same"));
+    left.set_key_value("left_only", new ConfigOptionInt(1));
+    right.set_key_value("shared", new ConfigOptionString("same"));
+    right.set_key_value("right_only", new ConfigOptionInt(2));
+
+    const ConfigBase &left_base = left;
+    const ConfigBase &right_base = right;
+    CHECK(left_base.equals(right_base));
+    CHECK(left_base.equal(right_base) == t_config_option_keys{"shared"});
+    CHECK(left_base.diff(right_base).empty());
+
+    right.opt_string("shared") = "changed";
+    CHECK_FALSE(left_base.equals(right_base));
+    CHECK(left_base.diff(right_base) == t_config_option_keys{"shared"});
+
+    const std::set<std::string> skipped{"shared"};
+    CHECK(left_base.equals(right_base, &skipped));
+}
+
+TEST_CASE("ConfigOptionString empty distinguishes empty and nonempty values", "[Config][ConfigContracts]")
+{
+    ConfigOptionString empty;
+    ConfigOptionString populated("config");
+    CHECK(empty.empty());
+    CHECK_FALSE(populated.empty());
+    CHECK(populated.serialize() == "config");
+    REQUIRE(populated.deserialize(""));
+    CHECK(populated.empty());
+}
+} // namespace config_residual_contracts

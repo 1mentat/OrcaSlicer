@@ -2425,6 +2425,267 @@
         "pipeline_oracle"
       ],
       "reason": "Direct PresetBundle composition checks complete purge matrices for two nozzles and two filaments: default multipliers 2/2 and fast multipliers 5/7 produce independently calculated entries. This is direct configuration-consumer evidence, not full purge geometry or numeric boundary coverage."
+    },
+    "single_extruder_multi_material": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "SEMM and separate-tool direct WipeTower2 runs consume both values and produce finite purge output. These are separate fixtures; a one-factor boolean comparison and complete Print pipeline remain unclaimed."
+    },
+    "purge_in_prime_tower": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A one-factor toggle selects the scaled flush matrix or destination minimum-purge floors; independently calculated entries are checked. Scope is the direct WipeTower2 configuration consumer."
+    },
+    "flush_volumes_matrix": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A complete matrix for two nozzles and three filaments has zero diagonals and asymmetric off-diagonal values; folded entries are checked independently. Empty or malformed matrices and full purge geometry remain unclaimed."
+    },
+    "flush_multiplier": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Nozzle multipliers 1 and 2 produce independently calculated folded flush entries. Scope is the direct configuration consumer; numeric boundaries remain unclaimed."
+    },
+    "filament_minimal_purge_on_wipe_tower": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Destination floors 3, 7, and 17 are checked against zero diagonals and against scaled nonzero flush entries. Full numeric-domain and Print pipeline coverage remain unclaimed."
+    },
+    "wipe_tower_extra_spacing": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A one-factor 100% versus 200% comparison with ramming disabled changes later-layer tower depth. Scope is direct WipeTower2 geometry; numeric boundaries remain unclaimed."
+    },
+    "wipe_tower_extra_flow": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A one-factor 100% versus 200% comparison at fixed requested purge volume changes executable purge motion. Scope is direct WipeTower2 output; numeric boundaries remain unclaimed."
+    },
+    "prime_tower_brim_width": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Brim widths 0 and 4 produce different generated brim widths with other rectangle settings held fixed. Scope is direct tower geometry; the upper numeric range remains unclaimed."
+    },
+    "prime_tower_width": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct WipeTower2 width consumer retains an explicitly configured 32 mm width. Boundary values and complete Print pipeline behavior remain unclaimed."
+    },
+    "wipe_tower_wall_type": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Rectangle, rib, and cone fixtures generate finite geometry and check their relevant dimensions. Independent comparisons across the entire registered domain remain unclaimed."
+    },
+    "wipe_tower_rib_width": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A configured rib width of 6 produces a positive generated rib width. Numeric boundaries and a complete pipeline comparison remain unclaimed."
+    },
+    "wipe_tower_extra_rib_length": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zero and 8 are exercised in rib fixtures with generated rib lengths compared. Fillet also varies, so isolated numeric variation remains unclaimed."
+    },
+    "wipe_tower_fillet_wall": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Enabled and disabled fillets occur in rib fixtures that compare generated extrusion length. Extra rib length also varies, so a one-factor boolean comparison remains unclaimed."
+    },
+    "wipe_tower_cone_angle": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Angles 0 and 90 on a tall direct tower plan produce distinct bounding-box dimensions and finite extrusion. Full angle-domain and complete Print pipeline coverage remain unclaimed."
+    },
+    "enable_filament_ramming": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Enabled and disabled direct SEMM runs check the presence or absence of the ramming section and generated extrusion. Cooling parameters also differ; a one-factor boolean comparison remains unclaimed."
+    },
+    "filament_cooling_moves": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With the same active ramming configuration, 0 versus 2 cooling moves removes or retains executable cooling motion. Scope is direct WipeTower2 output; the full numeric range remains unclaimed."
+    },
+    "filament_cooling_initial_speed": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Initial speeds 2 and 4 are varied independently while final speed stays 6; parsed cooling motion changes and baseline feedrates are checked. Scope is direct WipeTower2 output."
+    },
+    "filament_cooling_final_speed": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Final speeds 6 and 8 are varied independently while initial speed stays 2; parsed cooling motion changes and baseline feedrates are checked. Scope is direct WipeTower2 output."
+    },
+    "filament_stamping_distance": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Distances 0 and 2 are varied independently in the same cooling fixture and must change executable cooling motion. Full numeric boundaries and complete Print pipeline behavior remain unclaimed."
+    },
+    "filament_stamping_loading_speed": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Stamping speeds 20 and 50 are varied independently at fixed stamping distance and must change executable cooling motion. Full numeric boundaries remain unclaimed."
+    },
+    "filament_toolchange_delay": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Delays 0 and 2 are varied independently in the same cooling fixture; executable park motion changes and includes a dwell command for the positive delay. Scope is direct WipeTower2 output."
+    },
+    "filament_multitool_ramming": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Enabled separate-tool ramming produces finite motion in two purge fixtures. Disabled behavior and the complete Print pipeline remain unclaimed."
+    },
+    "filament_multitool_ramming_volume": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Volumes 4 and 16 are exercised and the larger fixture extrudes more. Flow also varies; independent volume variation and numeric boundaries remain unclaimed."
+    },
+    "filament_multitool_ramming_flow": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Flows 2 and 8 at fixed volume 16 produce different executable unloading motion and elapsed times. Scope is direct WipeTower2 output; numeric boundaries remain unclaimed."
+    },
+    "filament_loading_speed": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A configured speed of 12 is checked through the resulting parsed feedrates in an active loading path. Other loading parameters are explicit; independent numeric variation remains unclaimed."
+    },
+    "filament_loading_speed_start": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Initial loading speeds 12 and 24 are varied independently; loading motion changes and the 12 mm/s case includes a parsed 720 mm/min feedrate. Scope is direct WipeTower2 output."
+    },
+    "filament_unloading_speed": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A configured unloading speed of 35 mm/s produces a parsed 2100 mm/min feedrate in the direct unload path. Numeric boundaries and independent speed variation remain unclaimed."
+    },
+    "filament_unloading_speed_start": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A configured initial unloading speed of 55 mm/s produces a parsed 3300 mm/min feedrate in the direct unload path. Numeric boundaries remain unclaimed."
+    },
+    "high_current_on_filament_swap": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[MultimaterialWipe]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "An enabled high-current fixture emits the M907 E550 command during direct SEMM loading. The disabled command behavior is not independently asserted."
     }
   }
 }

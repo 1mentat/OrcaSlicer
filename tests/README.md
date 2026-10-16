@@ -150,6 +150,21 @@ survivor; that process-layer gate is unclaimed. `[PresetBundleContracts]` checks
 complete per-nozzle purge matrices, selected profiles, inheritance, and the
 ownership of embedded preset files.
 
+`[MultimaterialWipe]` checks direct WipeTower2 purge matrices, wall geometry,
+ramming, cooling, stamping, loading, and delay commands. Independent cooling
+variants change one setting at a time, with feedrates read from executable
+G-code. These direct-consumer checks do not establish complete Print pipeline
+coverage; joint variations and numeric-domain gaps remain explicit in the
+settings map. `[WipeTowerBroad]` covers tower estimators, sparse-layer folding,
+role-specific filament selection, and object/support wiping eligibility.
+
+`[ConfigContracts]` checks typed values, grouped serialization, ownership,
+nullable options, equality and difference reports, and environment export with
+restoration. `[ConfigGroupOrder]` requires strict lexicographic ordering for
+identical, empty, and unequal-length integer groups. Header mutations require
+recompiling consumers; an isolated header check must avoid archived weak inline
+definitions masking the changed implementation.
+
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
 line or segment details are needed. Profile-merge and export diagnostics are retained
