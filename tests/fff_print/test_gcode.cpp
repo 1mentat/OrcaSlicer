@@ -1,3 +1,8 @@
+#include <sstream>
+#include <memory>
+#include <limits>
+#include "libslic3r/GCode.hpp"
+#include <catch2/catch_all.hpp>
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCodeWriter.hpp"
@@ -1289,3 +1294,863 @@ TEST_CASE("Configured acceleration and jerk boundaries remain finite in emitted 
 }
 
 } // namespace settings_speed_accel_contracts
+
+namespace gcode_broad_contracts {
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace {
+
+class TestGCode : public GCode
+{
+public:
+    using GCode::change_layer;
+    using GCode::cur_extruder_index;
+    using GCode::mass_load_limited_machine_acceleration;
+    using GCode::calc_max_volumetric_speed;
+    using GCode::set_extruders;
+    using GCode::set_last_pos;
+    using GCode::to_lift_type;
+};
+
+DynamicPrintConfig base_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", 0.4},
+        {"wall_loops", 1},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "20%"},
+        {"line_width", 0.5},
+        {"initial_layer_line_width", 0.5},
+        {"outer_wall_line_width", 0.5},
+        {"inner_wall_line_width", 0.5},
+        {"sparse_infill_line_width", 0.5},
+        {"internal_solid_infill_line_width", 0.5},
+        {"top_surface_line_width", 0.5},
+        {"skin_infill_line_width", 0.5},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"file_start_gcode", ""},
+        {"before_layer_change_gcode", ""},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"printing_by_object_gcode", ""},
+        {"gcode_label_objects", false},
+        {"exclude_object", false},
+        {"gcode_comments", true},
+        {"slow_down_for_layer_cooling", false},
+        {"fan_cooling_layer_time", 0.0},
+        {"slow_down_layer_time", 0.0},
+        {"retraction_length", 0.8},
+        {"retraction_minimum_travel", 0.0},
+        {"z_hop", 0.0},
+    });
+    return config;
+}
+
+void require_valid(const Print& print)
+{
+    const StringObjectException error = print.validate();
+    INFO("print validation error: " << error.string << " [" << error.opt_key << "]");
+    REQUIRE(error.string.empty());
+}
+
+struct Exported
+{
+    std::string text;
+    std::unique_ptr<GCodeProcessorResult> result;
+};
+
+Exported export_cube(const DynamicPrintConfig& config, TestMesh mesh_id = TestMesh::A, bool bbl = false)
+{
+    Print print;
+    Model model;
+    init_print({mesh_id}, print, model, config);
+    print.is_BBL_printer() = bbl;
+    require_valid(print);
+    print.set_status_silent();
+    print.process();
+    ScopedTemporaryFile temp(".gcode");
+    Exported result;
+    result.result = std::make_unique<GCodeProcessorResult>();
+    print.export_gcode(temp.string(), result.result.get(), nullptr);
+    std::ifstream input(temp.string(), std::ios::binary);
+    result.text.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(result.text.empty());
+    return result;
+}
+
+struct Motion
+{
+    size_t extrusion_moves = 0;
+    size_t z_only_moves    = 0;
+    double xy_path         = 0.0;
+    double filament        = 0.0;
+    double max_feed        = 0.0;
+    std::map<std::string, size_t> commands;
+};
+
+Motion motion(const std::string& text, const DynamicPrintConfig& config)
+{
+    Motion result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&result](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        const std::string command(line.cmd());
+        if (!command.empty())
+            ++result.commands[command];
+        const double xy = line.dist_XY(self);
+        if (std::abs(line.dist_Z(self)) > EPSILON && xy <= EPSILON)
+            ++result.z_only_moves;
+        if (!line.extruding(self) || xy <= EPSILON)
+            return;
+        ++result.extrusion_moves;
+        result.xy_path += xy;
+        result.filament += std::abs(line.dist_E(self));
+        result.max_feed = std::max(result.max_feed, static_cast<double>(line.new_F(self)));
+    });
+    return result;
+}
+
+size_t count_command(const std::string& text, const DynamicPrintConfig& config, const char* command)
+{
+    size_t count = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&count, command](GCodeReader&, const GCodeReader::GCodeLine& line) {
+        if (line.cmd_is(command))
+            ++count;
+    });
+    return count;
+}
+
+PrintConfig direct_print_config()
+{
+    DynamicPrintConfig dynamic = base_config();
+    PrintConfig config;
+    config.apply(dynamic, true);
+    config.extruder_offset.values     = {Vec2d(1.25, -2.5)};
+    config.filament_diameter.values   = {1.75};
+    config.filament_flow_ratio.values = {1.0};
+    return config;
+}
+
+void init_direct_gcode(TestGCode& gcode, bool relative_e = true)
+{
+    PrintConfig config                    = direct_print_config();
+    config.use_relative_e_distances.value = relative_e;
+    gcode.apply_print_config(config);
+    gcode.set_extruders({0});
+    gcode.writer().set_extruder(0);
+}
+
+size_t count_substring(const std::string& text, std::string_view needle)
+{
+    size_t count = 0;
+    for (size_t pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, pos + needle.size()))
+        ++count;
+    return count;
+}
+
+std::vector<std::string> command_lines(const std::string& text, const std::string& prefix)
+{
+    std::istringstream stream(text);
+    std::vector<std::string> result;
+    for (std::string line; std::getline(stream, line);)
+        if (line.rfind(prefix, 0) == 0)
+            result.push_back(line);
+    return result;
+}
+
+std::vector<Vec3d> snapshot_positions(const std::string& text, const DynamicPrintConfig& config)
+{
+    std::vector<Vec3d> positions;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&positions](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.cmd_is("M117"))
+            positions.emplace_back(state.x(), state.y(), state.z());
+    });
+    return positions;
+}
+
+} // namespace
+
+TEST_CASE("GCode coordinate conversion round-trips the configured origin and nozzle offset", "[GCode][GCodeBroad]")
+{
+    TestGCode gcode;
+    init_direct_gcode(gcode);
+    gcode.set_origin(Vec2d(10.5, -4.25));
+    const Point point      = Point::new_scale(12.345, 6.789);
+    const Vec2d emitted    = gcode.point_to_gcode(point);
+    const Point round_trip = gcode.gcode_to_point(emitted);
+    CHECK_THAT(unscale<double>(round_trip.x()), Catch::Matchers::WithinAbs(12.345, 1e-6));
+    CHECK_THAT(unscale<double>(round_trip.y()), Catch::Matchers::WithinAbs(6.789, 1e-6));
+    CHECK_THAT(emitted.x(), Catch::Matchers::WithinAbs(21.595, 1e-6));
+    CHECK_THAT(emitted.y(), Catch::Matchers::WithinAbs(5.039, 1e-6));
+}
+
+TEST_CASE("GCode quantized coordinates stay within formatter precision", "[GCode][GCodeBroad]")
+{
+    TestGCode gcode;
+    init_direct_gcode(gcode);
+    gcode.set_origin(Vec2d(-2.0, 3.0));
+    const Point point     = Point::new_scale(4.123456, -8.765432);
+    const Vec2d raw       = gcode.point_to_gcode(point);
+    const Vec2d quantized = gcode.point_to_gcode_quantized(point);
+    CHECK_THAT(quantized.x(), Catch::Matchers::WithinAbs(raw.x(), 0.001));
+    CHECK_THAT(quantized.y(), Catch::Matchers::WithinAbs(raw.y(), 0.001));
+    CHECK(std::isfinite(quantized.x()));
+}
+
+TEST_CASE("Changing GCode origin preserves the model-space last position delta", "[GCode][GCodeBroad]")
+{
+    TestGCode gcode;
+    init_direct_gcode(gcode);
+    gcode.set_origin(Vec2d(2.0, 3.0));
+    const Point before = Point::new_scale(15.0, 16.0);
+    gcode.set_last_pos(before);
+    gcode.set_origin(Vec2d(7.0, -1.0));
+    const Point after = gcode.last_pos();
+    CHECK_THAT(unscale<double>(after.x() - before.x()), Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    CHECK_THAT(unscale<double>(after.y() - before.y()), Catch::Matchers::WithinAbs(4.0, 1e-6));
+}
+
+TEST_CASE("GCode layer interpolation handles initial, gradual, and stepped bands", "[GCode][GCodeBroad]")
+{
+    TestGCode gcode;
+    init_direct_gcode(gcode);
+    gcode.set_layer_count(5);
+    CHECK_THAT(gcode.interpolate_value_across_layers(10.f, 20.f), Catch::Matchers::WithinAbs(10.f, 1e-6));
+    gcode.change_layer(0.2);
+    CHECK_THAT(gcode.interpolate_value_across_layers(10.f, 20.f), Catch::Matchers::WithinAbs(10.f, 1e-6));
+    gcode.change_layer(0.4);
+    CHECK_THAT(gcode.interpolate_value_across_layers(10.f, 20.f), Catch::Matchers::WithinAbs(10.f, 1e-6));
+    CHECK_THAT(gcode.interpolate_value_across_layers(10.f, 20.f, 5.f), Catch::Matchers::WithinAbs(10.f, 1e-6));
+    gcode.change_layer(0.6);
+    CHECK_THAT(gcode.interpolate_value_across_layers(10.f, 20.f), Catch::Matchers::WithinAbs(15.f, 1e-6));
+    CHECK_THAT(gcode.interpolate_value_across_layers(10.f, 20.f, 5.f), Catch::Matchers::WithinAbs(15.f, 1e-6));
+    gcode.change_layer(0.8);
+    CHECK_THAT(gcode.interpolate_value_across_layers(10.f, 20.f), Catch::Matchers::WithinAbs(17.5f, 1e-6));
+    gcode.change_layer(1.0);
+    CHECK_THAT(gcode.interpolate_value_across_layers(10.f, 20.f), Catch::Matchers::WithinAbs(20.f, 1e-6));
+}
+
+TEST_CASE("GCode extrusion-role parser names preserve every printable role", "[GCode][GCodeBroad]")
+{
+    TestGCode gcode;
+    const std::vector<std::pair<ExtrusionRole, std::string>> roles = {
+        {erExternalPerimeter, "ExternalPerimeter"},
+        {erPerimeter, "Perimeter"},
+        {erOverhangPerimeter, "OverhangPerimeter"},
+        {erInternalInfill, "InternalInfill"},
+        {erSolidInfill, "SolidInfill"},
+        {erTopSolidInfill, "TopSolidInfill"},
+        {erBottomSurface, "BottomSurface"},
+        {erBridgeInfill, "BridgeInfill"},
+        {erInternalBridgeInfill, "BridgeInfill"},
+        {erGapFill, "GapFill"},
+        {erIroning, "Ironing"},
+        {erSkirt, "Skirt"},
+        {erBrim, "Brim"},
+        {erSupportMaterial, "SupportMaterial"},
+        {erSupportMaterialInterface, "SupportMaterialInterface"},
+        {erSupportTransition, "SupportTransition"},
+        {erWipeTower, "WipeTower"},
+    };
+    for (const auto& [role, expected] : roles) {
+        INFO("role " << expected);
+        CHECK(gcode.extrusion_role_to_string_for_parser(role) == expected);
+    }
+    CHECK(gcode.extrusion_role_to_string_for_parser(erNone) == "Mixed");
+    CHECK(gcode.extrusion_role_to_string_for_parser(erCustom) == "Mixed");
+}
+
+TEST_CASE("GCode lift policy maps every configured Z-hop mode", "[GCode][GCodeBroad]")
+{
+    TestGCode gcode;
+    CHECK(gcode.to_lift_type(ZHopType::zhtNormal) == LiftType::NormalLift);
+    CHECK(gcode.to_lift_type(ZHopType::zhtSlope) == LiftType::SlopeLift);
+    CHECK(gcode.to_lift_type(ZHopType::zhtSpiral) == LiftType::SpiralLift);
+    CHECK(gcode.to_lift_type(ZHopType::zhtAuto) == LiftType::NormalLift);
+}
+
+TEST_CASE("GCode mass load acceleration is capped by machine force and bed mass", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({{"machine_max_acceleration_y", "1000"}, {"machine_max_force_Y", 0.001}, {"machine_bed_mass_Y", 10.0}});
+    Print print;
+    Model model;
+    init_print({cube(10)}, print, model, config);
+    TestGCode gcode;
+    PrintStatistics stats;
+    stats.total_weight = 100.0;
+    double limit       = 0.0;
+    double mass        = 0.0;
+    gcode.mass_load_limited_machine_acceleration(stats, print, limit, mass);
+    CHECK_THAT(mass, Catch::Matchers::WithinAbs(100.0, 1e-6));
+    CHECK_THAT(limit, Catch::Matchers::WithinAbs(1000.0 / 110.0, 1e-6));
+}
+
+TEST_CASE("GCode mass load acceleration falls back to configured limit without force", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({{"machine_max_acceleration_y", "777"}, {"machine_max_force_Y", 0.0}, {"machine_bed_mass_Y", 100.0}});
+    Print print;
+    Model model;
+    init_print({cube(10)}, print, model, config);
+    TestGCode gcode;
+    PrintStatistics stats;
+    stats.total_weight = 0.0;
+    double limit       = 0.0;
+    double mass        = 0.0;
+    gcode.mass_load_limited_machine_acceleration(stats, print, limit, mass);
+    CHECK_THAT(mass, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(limit, Catch::Matchers::WithinAbs(777.0, 1e-6));
+}
+
+TEST_CASE("GCode object metadata selects the supported firmware label protocol", "[GCode][GCodeBroad]")
+{
+    const std::vector<std::pair<std::string, std::string>> flavors = {
+        {"marlin", "M486 S"}, {"marlin2", "M486 S"}, {"reprapfirmware", "M486 S"}, {"klipper", "EXCLUDE_OBJECT_DEFINE NAME="},
+        {"repetier", ""},
+    };
+    for (const auto& [flavor, marker] : flavors) {
+        INFO("flavor " << flavor);
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({{"gcode_flavor", flavor}, {"exclude_object", true}});
+        Print print;
+        Model model;
+        init_print({cube(10), cube(10)}, print, model, config);
+        TestGCode gcode;
+        PrintConfig full;
+        full.apply(config, true);
+        gcode.apply_print_config(full);
+        gcode.set_extruders(print.extruders());
+        const std::string labels = gcode.set_object_info(&print);
+        if (marker.empty()) {
+            CHECK(labels.empty());
+        } else {
+            CHECK(labels.find(marker) != std::string::npos);
+        }
+        CHECK(labels.find("object_id") == std::string::npos);
+    }
+}
+
+TEST_CASE("GCode full config dump contains applied settings but omits device-only keys", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({{"farthest_point_timelapse", true}, {"machine_start_gcode", "M117 START\n"}});
+    Print print;
+    Model model;
+    init_print({cube(10)}, print, model, config);
+    std::string dumped;
+    GCode::append_full_config(print, dumped);
+    REQUIRE_FALSE(dumped.empty());
+    CHECK(dumped.find("machine_start_gcode") != std::string::npos);
+    CHECK(dumped.find("farthest_point_timelapse") == std::string::npos);
+    CHECK(dumped.find("compatible_printers") == std::string::npos);
+}
+
+TEST_CASE("GCode volumetric polynomial evaluates six coefficients and rejects malformed models", "[GCode][GCodeBroad]")
+{
+    TestGCode gcode;
+    init_direct_gcode(gcode);
+    CHECK_THAT(gcode.calc_max_volumetric_speed(0.2, 0.5, "1 2 3 4 5 6"), Catch::Matchers::WithinAbs(10.14, 1e-9));
+    CHECK_THAT(gcode.calc_max_volumetric_speed(0.2, 0.5, "0 0 0 0 0 1"), Catch::Matchers::WithinAbs(1.0, 1e-9));
+    CHECK(gcode.calc_max_volumetric_speed(0.2, 0.5, "1 2 3") >= std::numeric_limits<double>::max() / 2.0);
+    CHECK(gcode.calc_max_volumetric_speed(0.2, 0.5, "0 0 0 0 0 0") >= std::numeric_limits<double>::max() / 2.0);
+}
+
+TEST_CASE("Adaptive volumetric speed caps otherwise unlimited sparse infill", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig baseline = base_config();
+    baseline.set_deserialize_strict({
+        {"wall_loops", 0},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "25%"},
+        {"sparse_infill_speed", 0.0},
+        {"filament_max_volumetric_speed", 1000.0},
+        {"filament_adaptive_volumetric_speed", false},
+    });
+    DynamicPrintConfig adaptive = baseline;
+    adaptive.set_deserialize_strict({
+        {"filament_adaptive_volumetric_speed", true},
+        {"volumetric_speed_coefficients", "0 0 0 0 0 1"},
+    });
+    const Exported a = export_cube(baseline, TestMesh::A);
+    const Exported b = export_cube(adaptive, TestMesh::A);
+    const Motion ma  = motion(a.text, baseline);
+    const Motion mb  = motion(b.text, adaptive);
+    REQUIRE(ma.extrusion_moves > 0);
+    REQUIRE(mb.extrusion_moves > 0);
+    CHECK_THAT(mb.filament, Catch::Matchers::WithinRel(ma.filament, 1e-6));
+    CHECK(mb.max_feed < ma.max_feed);
+    CHECK(count_command(b.text, adaptive, "G1") > 0);
+    CHECK(mb.xy_path > 0.0);
+}
+
+TEST_CASE("Farthest-point timelapse changes the emitted snapshot sequence on CoreXY", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig off = base_config();
+    off.set_deserialize_strict({
+        {"printer_structure", "corexy"},
+        {"timelapse_type", "0"},
+        {"time_lapse_gcode", "M117 SNAPSHOT-[layer_num]\n"},
+        {"farthest_point_timelapse", false},
+    });
+    DynamicPrintConfig on = off;
+    on.set_deserialize_strict({{"farthest_point_timelapse", true}});
+    const Exported a    = export_cube(off, TestMesh::A);
+    const Exported b    = export_cube(on, TestMesh::A);
+    const auto disabled = snapshot_positions(a.text, off);
+    const auto enabled  = snapshot_positions(b.text, on);
+    REQUIRE_FALSE(disabled.empty());
+    REQUIRE_FALSE(enabled.empty());
+    bool changed = disabled.size() != enabled.size();
+    for (size_t i = 0; i < std::min(disabled.size(), enabled.size()); ++i)
+        changed = changed || (disabled[i] - enabled[i]).norm() > 1e-5;
+    CHECK(changed);
+}
+
+TEST_CASE("Farthest-point timelapse is gated off for I3 and smooth timelapse", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig corexy = base_config();
+    corexy.set_deserialize_strict({
+        {"printer_structure", "corexy"},
+        {"timelapse_type", "0"},
+        {"time_lapse_gcode", "M117 SNAPSHOT-[layer_num]\n"},
+        {"farthest_point_timelapse", false},
+    });
+    for (const auto& [key, value] : std::vector<std::pair<std::string, std::string>>{{"printer_structure", "i3"}, {"timelapse_type", "1"}}) {
+        CAPTURE(key, value);
+        DynamicPrintConfig off = corexy;
+        off.set_deserialize_strict(key, value);
+        DynamicPrintConfig on = off;
+        on.set_deserialize_strict("farthest_point_timelapse", "1");
+        const Exported a = export_cube(off), b = export_cube(on);
+        const auto disabled = snapshot_positions(a.text, off), gated = snapshot_positions(b.text, on);
+        REQUIRE_FALSE(disabled.empty());
+        REQUIRE(gated.size() == disabled.size());
+        for (size_t i = 0; i < disabled.size(); ++i)
+            CHECK_THAT((gated[i] - disabled[i]).norm(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    }
+}
+
+TEST_CASE("Belt brim leading and sideways widths increase belt apron motion", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig base = base_config();
+    base.set_deserialize_strict({
+        {"belt_printer", true},
+        {"belt_slice_rotation", "x"},
+        {"belt_slice_rotation_angle", 45.0},
+        {"brim_type", "outer_only"},
+        {"brim_width", 1.0},
+        {"leading_brim_length", 0.0},
+        {"extra_brim_width", 0.0},
+    });
+    DynamicPrintConfig leading = base;
+    leading.set_deserialize_strict({{"leading_brim_length", 5.0}});
+    DynamicPrintConfig sideways = base;
+    sideways.set_deserialize_strict({{"extra_brim_width", 5.0}});
+    const Exported plain = export_cube(base, TestMesh::step);
+    const Exported lead  = export_cube(leading, TestMesh::step);
+    const Exported side  = export_cube(sideways, TestMesh::step);
+    const Motion mp      = motion(plain.text, base);
+    const Motion ml      = motion(lead.text, leading);
+    const Motion ms      = motion(side.text, sideways);
+    REQUIRE(mp.extrusion_moves > 0);
+    REQUIRE(ml.extrusion_moves > 0);
+    REQUIRE(ms.extrusion_moves > 0);
+    CHECK(ml.xy_path > mp.xy_path);
+    CHECK(ms.xy_path > mp.xy_path);
+}
+
+TEST_CASE("GCode belt configuration leaves the nonbelt exporter path unchanged", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig normal    = base_config();
+    DynamicPrintConfig belt_keys = normal;
+    belt_keys.set_deserialize_strict({
+        {"belt_printer", false},
+        {"belt_printer_infinite_y", true},
+        {"belt_slice_rotation", "y"},
+        {"belt_slice_rotation_angle", 30.0},
+        {"belt_frame_tilt_decouple", true},
+        {"belt_frame_tilt_angle", 25.0},
+        {"gcode_remap_x", "pos_y"},
+        {"gcode_remap_y", "pos_z"},
+        {"gcode_remap_z", "pos_x"},
+        {"belt_support_floor_offset", -5.0},
+    });
+    const Exported a = export_cube(normal, TestMesh::A);
+    const Exported b = export_cube(belt_keys, TestMesh::A);
+    const Motion ma  = motion(a.text, normal);
+    const Motion mb  = motion(b.text, belt_keys);
+    REQUIRE(ma.extrusion_moves > 0);
+    REQUIRE(mb.extrusion_moves > 0);
+    CHECK(ma.extrusion_moves == mb.extrusion_moves);
+    CHECK_THAT(ma.xy_path, Catch::Matchers::WithinRel(mb.xy_path, 1e-6));
+    CHECK_THAT(ma.filament, Catch::Matchers::WithinRel(mb.filament, 1e-6));
+}
+
+TEST_CASE("GCode pressure advance settings add a firmware-specific command", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig disabled = base_config();
+    disabled.set_deserialize_strict({{"gcode_flavor", "klipper"}, {"enable_pressure_advance", false}, {"pressure_advance", 0.55}});
+    DynamicPrintConfig enabled = disabled;
+    enabled.set_deserialize_strict({{"enable_pressure_advance", true}, {"pressure_advance", 0.55}});
+    const Exported a = export_cube(disabled);
+    const Exported b = export_cube(enabled);
+    CHECK(a.text.find("SET_PRESSURE_ADVANCE") == std::string::npos);
+    const auto commands = command_lines(b.text, "SET_PRESSURE_ADVANCE ");
+    REQUIRE_FALSE(commands.empty());
+    for (const auto& line : commands) {
+        const auto marker = line.find("ADVANCE=");
+        REQUIRE(marker != std::string::npos);
+        CHECK_THAT(std::stod(line.substr(marker + 8)), Catch::Matchers::WithinAbs(0.55, 1e-5));
+    }
+    CHECK(motion(a.text, disabled).extrusion_moves > 0);
+    CHECK(motion(b.text, enabled).extrusion_moves > 0);
+}
+
+TEST_CASE("GCode firmware flavor changes command dialect without changing deposited path", "[GCode][GCodeBroad]")
+{
+    const std::vector<std::string> flavors = {"marlin", "marlin2", "klipper", "reprapfirmware", "repetier"};
+    const Exported reference               = export_cube(base_config());
+    const Motion expected                  = motion(reference.text, base_config());
+    REQUIRE(expected.extrusion_moves > 0);
+    for (const std::string& flavor : flavors) {
+        INFO("flavor " << flavor);
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict("gcode_flavor", flavor);
+        if (flavor == "reprapfirmware" || flavor == "repetier")
+            config.set_deserialize_strict("layer_change_gcode", "");
+        const Exported out  = export_cube(config);
+        const Motion actual = motion(out.text, config);
+        REQUIRE(actual.extrusion_moves > 0);
+        CHECK_THAT(actual.xy_path, Catch::Matchers::WithinRel(expected.xy_path, 1e-6));
+        CHECK_THAT(actual.filament, Catch::Matchers::WithinRel(expected.filament, 1e-6));
+        CHECK(out.text.find("G1") != std::string::npos);
+    }
+}
+
+TEST_CASE("GCode machine load placeholders expose the current acceleration limit", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"filament_density", 1.24},
+        {"machine_max_acceleration_y", "1000"},
+        {"machine_max_force_Y", 0.001},
+        {"machine_bed_mass_Y", 10.0},
+        {"layer_change_gcode", "G92 E0\nM117 LIM-[curr_y_acceleration_limit]-M-[curr_accumulated_mass]\n"},
+    });
+    const Exported out       = export_cube(config, TestMesh::A);
+    const size_t limit_lines = count_substring(out.text, "M117 LIM-");
+    REQUIRE(limit_lines > 1);
+    CHECK(count_substring(out.text, "LIM-1000") < limit_lines);
+    CHECK(out.text.find("M-") != std::string::npos);
+}
+
+TEST_CASE("GCode fan and slowdown branches preserve material while changing feeds", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig fast = base_config();
+    fast.set_deserialize_strict({
+        {"cooling", true},
+        {"slow_down_for_layer_cooling", false},
+        {"fan_cooling_layer_time", 0.0},
+        {"slow_down_layer_time", 0.0},
+        {"fan_min_speed", 100},
+        {"fan_max_speed", 100},
+    });
+    DynamicPrintConfig slow = fast;
+    slow.set_deserialize_strict({
+        {"slow_down_for_layer_cooling", true},
+        {"fan_cooling_layer_time", 1001.0},
+        {"slow_down_layer_time", 1000.0},
+        {"slow_down_min_speed", 5.0},
+        {"slow_down_layers", 3},
+    });
+    const Exported a = export_cube(fast, TestMesh::A);
+    const Exported b = export_cube(slow, TestMesh::A);
+    const Motion ma  = motion(a.text, fast);
+    const Motion mb  = motion(b.text, slow);
+    REQUIRE(ma.extrusion_moves > 0);
+    REQUIRE(mb.extrusion_moves > 0);
+    CHECK_THAT(mb.xy_path, Catch::Matchers::WithinRel(ma.xy_path, 1e-6));
+    CHECK_THAT(mb.filament, Catch::Matchers::WithinRel(ma.filament, 1e-6));
+    CHECK(mb.max_feed < ma.max_feed);
+    CHECK(a.text != b.text);
+}
+
+TEST_CASE("GCode acceleration and jerk settings emit firmware commands", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"default_acceleration", 1200},
+        {"default_jerk", 8},
+        {"outer_wall_acceleration", 333},
+        {"outer_wall_jerk", 9},
+        {"gcode_flavor", "marlin2"},
+    });
+    const Exported out = export_cube(config);
+    REQUIRE(out.text.find("M204") != std::string::npos);
+    REQUIRE(out.text.find("M205") != std::string::npos);
+    CHECK(motion(out.text, config).extrusion_moves > 0);
+}
+
+TEST_CASE("Fresh GCode exports enable object labels consistently", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({{"exclude_object", true}, {"gcode_flavor", "klipper"}});
+    const Exported first  = export_cube(config, TestMesh::A);
+    const Exported second = export_cube(config, TestMesh::A);
+    REQUIRE(count_substring(first.text, "EXCLUDE_OBJECT_DEFINE") > 0);
+    REQUIRE(count_substring(second.text, "EXCLUDE_OBJECT_DEFINE") > 0);
+    CHECK(count_substring(first.text, "EXCLUDE_OBJECT_DEFINE") == count_substring(second.text, "EXCLUDE_OBJECT_DEFINE"));
+    REQUIRE(first.result != nullptr);
+    REQUIRE(second.result != nullptr);
+    CHECK(first.result->label_object_enabled);
+    CHECK(second.result->label_object_enabled);
+}
+
+TEST_CASE("GCode processor result reports output filament statistics for a real export", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({{"filament_diameter", 1.75}, {"filament_density", 1.24}, {"filament_cost", 100.0}});
+    const Exported out = export_cube(config);
+    REQUIRE(out.result != nullptr);
+    REQUIRE_FALSE(out.result->print_statistics.total_volumes_per_extruder.empty());
+    double total_volume = 0.0;
+    for (const auto& [extruder, volume] : out.result->print_statistics.total_volumes_per_extruder) {
+        (void) extruder;
+        CHECK(volume > 0.0);
+        total_volume += volume;
+    }
+    CHECK(total_volume > 0.0);
+    CHECK(out.result->print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time > 0.0f);
+}
+
+TEST_CASE("GCode placeholder layer count remains finite for a small real export", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({{"before_layer_change_gcode", "M117 L-[layer_num]-[layer_z]-[max_layer_z]\n"}});
+    const Exported out = export_cube(config, TestMesh::A);
+    REQUIRE(count_substring(out.text, "M117 L-") > 1);
+    size_t marker = out.text.find("M117 L-");
+    while (marker != std::string::npos) {
+        const size_t end       = out.text.find('\n', marker);
+        const std::string line = out.text.substr(marker, end == std::string::npos ? std::string::npos : end - marker);
+        CHECK(line.find("nan") == std::string::npos);
+        CHECK(line.find("inf") == std::string::npos);
+        marker = out.text.find("M117 L-", end == std::string::npos ? out.text.size() : end + 1);
+    }
+}
+
+TEST_CASE("GCode relative and absolute extrusion modes preserve exported material", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig relative = base_config();
+    DynamicPrintConfig absolute = relative;
+    absolute.set_deserialize_strict({{"use_relative_e_distances", false}, {"layer_change_gcode", ""}});
+    const Exported r = export_cube(relative);
+    const Exported a = export_cube(absolute);
+    const Motion mr  = motion(r.text, relative);
+    const Motion ma  = motion(a.text, absolute);
+    REQUIRE(mr.extrusion_moves > 0);
+    REQUIRE(ma.extrusion_moves > 0);
+    CHECK_THAT(ma.xy_path, Catch::Matchers::WithinRel(mr.xy_path, 1e-6));
+    CHECK_THAT(ma.filament, Catch::Matchers::WithinRel(mr.filament, 1e-5));
+    CHECK(r.text.find("M83") != std::string::npos);
+    CHECK(a.text.find("M82") != std::string::npos);
+}
+
+namespace {
+
+Exported export_prime_tower(const DynamicPrintConfig& config)
+{
+    Print print;
+    Model model;
+    init_print({TestMesh::A}, print, model, config);
+    // The first apply sees only one used filament and normalizes a prime tower away;
+    // reapply after regions have settled to exercise the real two-filament tower path.
+    print.apply(model, config);
+    require_valid(print);
+    print.set_status_silent();
+    print.process();
+    ScopedTemporaryFile temp(".gcode");
+    Exported result;
+    result.result = std::make_unique<GCodeProcessorResult>();
+    print.export_gcode(temp.string(), result.result.get(), nullptr);
+    std::ifstream input(temp.string(), std::ios::binary);
+    result.text.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(result.text.empty());
+    return result;
+}
+
+DynamicPrintConfig belt_contract_config()
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"belt_printer", true},
+        {"belt_slice_rotation", "x"},
+        {"belt_slice_rotation_angle", 45.0},
+        {"gcode_remap_x", "rev_x"},
+        {"gcode_remap_y", "pos_z"},
+        {"gcode_remap_z", "pos_y"},
+        {"brim_type", "outer_only"},
+        {"brim_width", 4.0},
+        {"brim_object_gap", 0.0},
+        {"leading_brim_length", 2.0},
+        {"extra_brim_width", 1.0},
+    });
+    return config;
+}
+
+DynamicPrintConfig tower_contract_config(const char* type)
+{
+    return multifilament_config(2, {
+                                       {"sparse_infill_filament_id", 1},
+                                       {"internal_solid_filament_id", 1},
+                                       {"top_surface_filament_id", 1},
+                                       {"bottom_surface_filament_id", 1},
+                                       {"outer_wall_filament_id", 2},
+                                       {"inner_wall_filament_id", 2},
+                                       {"enable_prime_tower", true},
+                                       {"prime_tower_width", 35.0},
+                                       {"wipe_tower_x", 50.0},
+                                       {"wipe_tower_y", 50.0},
+                                       {"wipe_tower_type", type},
+                                       {"layer_height", 0.3},
+                                       {"skirt_loops", 0},
+                                       {"brim_type", "no_brim"},
+                                       {"use_relative_e_distances", true},
+                                       {"layer_change_gcode", "G92 E0\n"},
+                                       {"flush_volumes_matrix", "0,70,80,0"},
+                                   });
+}
+
+} // namespace
+
+TEST_CASE("GCode belt export emits brim geometry and layer markers", "[GCode][GCodeBroad]")
+{
+    const DynamicPrintConfig config = belt_contract_config();
+    const Exported out              = export_cube(config, TestMesh::A);
+    const Motion m                  = motion(out.text, config);
+    REQUIRE(m.extrusion_moves > 0);
+    CHECK(count_substring(out.text, ";TYPE:Brim") > 0);
+    CHECK(count_substring(out.text, ";LAYER_CHANGE") > 2);
+    CHECK(m.xy_path > 100.0);
+}
+
+TEST_CASE("GCode belt apron width settings increase brim material path", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig narrow = belt_contract_config();
+    narrow.set_deserialize_strict({{"leading_brim_length", 0.0}, {"extra_brim_width", 0.0}});
+    DynamicPrintConfig wide = narrow;
+    wide.set_deserialize_strict({{"leading_brim_length", 8.0}, {"extra_brim_width", 5.0}});
+    const Exported a = export_cube(narrow, TestMesh::A);
+    const Exported b = export_cube(wide, TestMesh::A);
+    const Motion ma  = motion(a.text, narrow);
+    const Motion mb  = motion(b.text, wide);
+    REQUIRE(ma.extrusion_moves > 0);
+    REQUIRE(mb.extrusion_moves > 0);
+    CHECK(mb.xy_path > ma.xy_path);
+    CHECK(mb.filament > ma.filament);
+}
+
+TEST_CASE("GCode prime tower records two-filament transitions", "[GCode][GCodeBroad]")
+{
+    const DynamicPrintConfig config = tower_contract_config("type2");
+    const Exported out              = export_prime_tower(config);
+    const Motion m                  = motion(out.text, config);
+    REQUIRE(m.extrusion_moves > 0);
+    REQUIRE(count_substring(out.text, "WIPE_TOWER_START") > 0);
+    CHECK(count_command(out.text, config, "T1") > 0);
+    CHECK(count_command(out.text, config, "T0") > 0);
+    CHECK(count_substring(out.text, "WIPE_TOWER_END") > 0);
+    CHECK(m.filament > 0.0);
+}
+
+TEST_CASE("GCode prime tower implementation changes purge path", "[GCode][GCodeBroad]")
+{
+    const Exported rib       = export_prime_tower(tower_contract_config("type2"));
+    const Exported rectangle = export_prime_tower(tower_contract_config("type1"));
+    const Motion mr          = motion(rib.text, tower_contract_config("type2"));
+    const Motion mc          = motion(rectangle.text, tower_contract_config("type1"));
+    REQUIRE(mr.extrusion_moves > 0);
+    REQUIRE(mc.extrusion_moves > 0);
+    CHECK(count_substring(rib.text, "WIPE_TOWER_START") > 0);
+    CHECK(count_substring(rectangle.text, "WIPE_TOWER_START") > 0);
+    CHECK(mr.xy_path > 0.0);
+    CHECK(mc.xy_path > 0.0);
+    CHECK(std::abs(mr.xy_path - mc.xy_path) > 1e-6);
+}
+
+TEST_CASE("GCode sequential objects emit a distinct object transition", "[GCode][GCodeBroad]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"print_sequence", "by object"},
+        {"printing_by_object_gcode", "M117 BETWEEN-[current_object_idx]\n"},
+        {"gcode_label_objects", true},
+        {"z_hop", 0.0},
+    });
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    TriangleMesh first = cube(20.0);
+    first.translate(80., 80., 0.);
+    TriangleMesh second = cube(20.0);
+    second.translate(140., 80., 0.);
+    meshes.emplace_back(std::move(first));
+    meshes.emplace_back(std::move(second));
+    init_print(std::move(meshes), print, model, config, nullptr, false);
+    require_valid(print);
+    print.set_status_silent();
+    print.process();
+    ScopedTemporaryFile temp(".gcode");
+    Exported out;
+    out.result = std::make_unique<GCodeProcessorResult>();
+    print.export_gcode(temp.string(), out.result.get(), nullptr);
+    std::ifstream input(temp.string(), std::ios::binary);
+    out.text.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(out.text.empty());
+    const Motion m = motion(out.text, config);
+    REQUIRE(m.extrusion_moves > 0);
+    CHECK(count_substring(out.text, "M117 BETWEEN-") > 0);
+    CHECK(count_substring(out.text, "; stop printing object ") > 0);
+    CHECK(m.xy_path > 100.0);
+}
+
+TEST_CASE("GCode direct extruder index is stable before Print binding", "[GCode][GCodeBroad]")
+{
+    TestGCode gcode;
+    init_direct_gcode(gcode);
+    CHECK(gcode.cur_extruder_index() == 0);
+    gcode.set_extruders({0, 1});
+    gcode.writer().set_extruder(1);
+    CHECK(gcode.cur_extruder_index() == 0);
+}
+
+TEST_CASE("GCode belt path remains finite for a sloped test mesh", "[GCode][GCodeBroad]")
+{
+    const DynamicPrintConfig config = belt_contract_config();
+    const Exported out              = export_cube(config, TestMesh::step);
+    const Motion m                  = motion(out.text, config);
+    REQUIRE(m.extrusion_moves > 0);
+    CHECK(std::isfinite(m.xy_path));
+    CHECK(std::isfinite(m.filament));
+    CHECK(m.z_only_moves > 0);
+}
+
+} // namespace gcode_broad_contracts

@@ -137,6 +137,19 @@ for requested infill-anchor length and clamping. They are documented gaps,
 excluded from the executable `mutants` list and from coverage claims for
 those dimensions; they must not be reported as assertion kills.
 
+`[UtilsIOContracts]` checks layer-pattern boundaries, file content across buffer
+boundaries, recursive copy filtering, UTF-8 byte spans, and formatting contracts.
+`[UtilsFrameworkFailure]` checks that nested framework-copy errors propagate to
+the caller. Unicode NFC composition remains unclaimed: the current build leaves
+decomposed accents unchanged, and its Boost.Locale dependency disables ICU.
+
+`[GCodeBroad]` checks coordinate transforms, volumetric limits, object labels,
+firmware commands, belt and prime-tower exports, and snapshot positions parsed
+from executable commands. Its delayed-slowdown mutation remains a documented
+survivor; that process-layer gate is unclaimed. `[PresetBundleContracts]` checks
+complete per-nozzle purge matrices, selected profiles, inheritance, and the
+ownership of embedded preset files.
+
 The export is summary-only because the report and integrity checks consume
 file-level LLVM summaries; rerun `llvm-cov export` without `--summary-only` when
 line or segment details are needed. Profile-merge and export diagnostics are retained

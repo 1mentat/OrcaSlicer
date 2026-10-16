@@ -1131,7 +1131,8 @@ bool copy_framework(const std::string &from, const std::string &to)
             if (boost::filesystem::is_symlink(entry)) {
                 boost::filesystem::copy_symlink(entry, dest_path);
             } else if (boost::filesystem::is_directory(entry)) {
-                copy_framework(it->path().string(), dest_path.string());
+                if (!copy_framework(it->path().string(), dest_path.string()))
+                    return false;
             } else {
                 boost::filesystem::copy(entry, dest_path, boost::filesystem::copy_options::overwrite_existing);
             }

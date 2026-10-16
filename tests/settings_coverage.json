@@ -2316,6 +2316,115 @@
         "pipeline_oracle"
       ],
       "reason": "A concave-hole fixture uses maximum 0 for old no-connect behavior and maximum 1000 with a nonzero requested anchor; sparse path length and endpoint-contact geometry change. The requested anchor-length dimension is intentionally not claimed."
+    },
+    "farthest_point_timelapse": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Both values alter the actual M117 snapshot position sequence for CoreXY traditional mode; paired on/off runs on I3 and smooth mode preserve the same positions. This checks gating and snapshot sequence, not every possible farthest geometry."
+    },
+    "printer_structure": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "CoreXY and I3 are exercised with paired farthest-point toggle values and parsed snapshot locations. Other structures remain unclaimed."
+    },
+    "filament_adaptive_volumetric_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A constant one-unit adaptive volumetric model lowers sparse-infill feedrates while preserving emitted material; direct polynomial tests independently verify six coefficients and malformed input fallback. Other models and interactions remain unclaimed."
+    },
+    "volumetric_speed_coefficients": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A constant one-unit adaptive volumetric model lowers sparse-infill feedrates while preserving emitted material; direct polynomial tests independently verify six coefficients and malformed input fallback. Other models and interactions remain unclaimed."
+    },
+    "machine_max_force_Y": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Direct GCode mass-limit consumer checks force 0 fallback and force 0.001 cap using explicit bed and accumulated masses. This is direct consumer evidence, not a full force-domain or load evolution sweep."
+    },
+    "machine_bed_mass_Y": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Direct GCode mass-limit consumer uses an explicit bed mass 10 plus print mass 100 to check the force-derived cap; numeric boundaries and independent bed-mass variation remain unclaimed."
+    },
+    "leading_brim_length": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Separate zero-to-five variations on a belt step fixture increase parsed extrusion-path length. Broader dimensions and printer interactions remain unclaimed."
+    },
+    "extra_brim_width": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Separate zero-to-five variations on a belt step fixture increase parsed extrusion-path length. Broader dimensions and printer interactions remain unclaimed."
+    },
+    "belt_printer": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Disabled belt-only settings preserve parsed path/material while enabled belt exports emit brim motion and finite transformed output. This is representative behavior, not a complete belt-axis matrix."
+    },
+    "enable_pressure_advance": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeBroad]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Paired Klipper exports omit the pressure-advance command when disabled and emit the explicitly configured 0.55 value when enabled. Other firmware dialects remain unclaimed."
+    },
+    "flush_multiplier_fast": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleContracts]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Direct PresetBundle composition checks complete purge matrices for two nozzles and two filaments: default multipliers 2/2 and fast multipliers 5/7 produce independently calculated entries. This is direct configuration-consumer evidence, not full purge geometry or numeric boundary coverage."
+    },
+    "prime_volume_mode": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleContracts]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Direct PresetBundle composition checks complete purge matrices for two nozzles and two filaments: default multipliers 2/2 and fast multipliers 5/7 produce independently calculated entries. This is direct configuration-consumer evidence, not full purge geometry or numeric boundary coverage."
     }
   }
 }
