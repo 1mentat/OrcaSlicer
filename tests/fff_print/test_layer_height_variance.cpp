@@ -1,17 +1,24 @@
 #include <catch2/catch_all.hpp>
+#include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <libslic3r/libslic3r.h>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "catch2/catch_test_macros.hpp"
 #include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "test_helpers.hpp"
 #include "libslic3r/Slicing.hpp"
@@ -201,3 +208,228 @@ TEST_CASE("Layer-height editing changes free bands but respects ranges", "[Layer
     for (size_t i = 0; i < initial.size(); ++i)
         CHECK_THAT(protected_profile[i], Catch::Matchers::WithinAbs(initial[i], EPSILON));
 }
+
+
+namespace layer_geometry_settings_contracts {
+namespace {
+
+struct LayerGeometryEvidence {
+    double first_extrusion_z = std::numeric_limits<double>::quiet_NaN();
+    double max_extrusion_z = -std::numeric_limits<double>::infinity();
+    double top_length = 0.0;
+    double bottom_length = 0.0;
+    double solid_length = 0.0;
+    double sparse_length = 0.0;
+    std::vector<double> extrusion_layers;
+    std::size_t motion_moves = 0;
+    std::size_t extrusion_moves = 0;
+    bool finite = true;
+};
+
+DynamicPrintConfig layer_geometry_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", 0.4},
+        {"wall_loops", 2},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"top_surface_density", "100%"},
+        {"bottom_surface_density", "100%"},
+        {"sparse_infill_density", "15%"},
+        {"minimum_sparse_infill_area", 0.0},
+        {"ensure_vertical_shell_thickness", "ensure_all"},
+        {"top_surface_pattern", "rectilinear"},
+        {"bottom_surface_pattern", "rectilinear"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+        {"gcode_comments", true},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    return config;
+}
+
+TriangleMesh layer_geometry_fixture()
+{
+    TriangleMesh shape = cube(10.0);
+    shape.scale(Vec3f(1.0f, 1.0f, 0.12f));
+    return shape;
+}
+
+void add_distinct_layer(std::vector<double> &layers, double z)
+{
+    for (const double old_z : layers)
+        if (std::abs(old_z - z) < 1e-5)
+            return;
+    layers.push_back(z);
+}
+
+LayerGeometryEvidence export_evidence(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({layer_geometry_fixture()}, print, model, config);
+    const auto validation = print.validate();
+    INFO("validation.string: " << validation.string);
+    INFO("validation.opt_key: " << validation.opt_key);
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE(output.size() <= 4u * 1024u * 1024u);
+
+    LayerGeometryEvidence evidence;
+    enum class Role { Other, Top, Bottom, Solid, Sparse };
+    Role active_role = Role::Other;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&evidence, &active_role](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("Top surface") != std::string_view::npos ||
+            comment.find("Top solid infill") != std::string_view::npos)
+            active_role = Role::Top;
+        else if (comment.find("Bottom surface") != std::string_view::npos)
+            active_role = Role::Bottom;
+        else if (comment.find("Internal solid infill") != std::string_view::npos)
+            active_role = Role::Solid;
+        else if (comment.find("Sparse infill") != std::string_view::npos)
+            active_role = Role::Sparse;
+        else if (comment.find("TYPE:") != std::string_view::npos ||
+                 comment.find("FEATURE:") != std::string_view::npos)
+            active_role = Role::Other;
+
+        const bool motion = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+        if (!motion)
+            return;
+        ++evidence.motion_moves;
+        const double z = line.new_Z(self);
+        if (!std::isfinite(z)) {
+            evidence.finite = false;
+            return;
+        }
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        ++evidence.extrusion_moves;
+        if (!std::isfinite(line.dist_XY(self))) {
+            evidence.finite = false;
+            return;
+        }
+        if (!std::isfinite(evidence.first_extrusion_z))
+            evidence.first_extrusion_z = z;
+        evidence.max_extrusion_z = std::max(evidence.max_extrusion_z, z);
+        add_distinct_layer(evidence.extrusion_layers, z);
+        const double length = line.dist_XY(self);
+        if (active_role == Role::Top)
+            evidence.top_length += length;
+        else if (active_role == Role::Bottom)
+            evidence.bottom_length += length;
+        else if (active_role == Role::Solid)
+            evidence.solid_length += length;
+        else if (active_role == Role::Sparse)
+            evidence.sparse_length += length;
+    });
+    return evidence;
+}
+
+void require_valid_evidence(const LayerGeometryEvidence &evidence)
+{
+    REQUIRE(evidence.finite);
+    REQUIRE(std::isfinite(evidence.first_extrusion_z));
+    REQUIRE(std::isfinite(evidence.max_extrusion_z));
+    REQUIRE(evidence.motion_moves > 0);
+    REQUIRE(evidence.extrusion_moves > 0);
+    REQUIRE_FALSE(evidence.extrusion_layers.empty());
+}
+
+} // namespace
+
+TEST_CASE("Initial layer print height reaches the first extrusion and preserves object height",
+          "[LayerHeightVariance][LayerGeometrySettings][SettingsVariance]")
+{
+    DynamicPrintConfig thin_config = layer_geometry_config();
+    DynamicPrintConfig thick_config = thin_config;
+    thick_config.set_deserialize_strict("initial_layer_print_height", "0.4");
+
+    const LayerGeometryEvidence thin = export_evidence(thin_config);
+    const LayerGeometryEvidence thick = export_evidence(thick_config);
+    require_valid_evidence(thin);
+    require_valid_evidence(thick);
+
+    CHECK_THAT(thin.first_extrusion_z, Catch::Matchers::WithinAbs(0.2, 1e-4));
+    CHECK_THAT(thick.first_extrusion_z, Catch::Matchers::WithinAbs(0.4, 1e-4));
+    CHECK_THAT(thin.max_extrusion_z, Catch::Matchers::WithinAbs(1.2, 1e-3));
+    CHECK_THAT(thick.max_extrusion_z, Catch::Matchers::WithinAbs(1.2, 1e-3));
+    CHECK(thick.extrusion_layers.size() < thin.extrusion_layers.size());
+}
+
+TEST_CASE("Shell thickness propagates solid material beyond the configured shell count",
+          "[LayerHeightVariance][LayerGeometrySettings][SettingsVariance]")
+{
+    const std::string key = GENERATE("top_shell_thickness", "bottom_shell_thickness");
+    DYNAMIC_SECTION("shell thickness " << key) {
+        DynamicPrintConfig thin_config = layer_geometry_config();
+        DynamicPrintConfig thick_config = thin_config;
+        thick_config.set_deserialize_strict(key, "0.6");
+
+        const LayerGeometryEvidence thin = export_evidence(thin_config);
+        const LayerGeometryEvidence thick = export_evidence(thick_config);
+        require_valid_evidence(thin);
+        require_valid_evidence(thick);
+
+        REQUIRE(thin.top_length > 0.0);
+        REQUIRE(thin.bottom_length > 0.0);
+        REQUIRE(thin.sparse_length > 0.0);
+        REQUIRE(thick.top_length > 0.0);
+        REQUIRE(thick.bottom_length > 0.0);
+        CHECK(thick.solid_length > thin.solid_length);
+        CHECK(thick.extrusion_layers.size() == thin.extrusion_layers.size());
+        CHECK_THAT(thick.first_extrusion_z, Catch::Matchers::WithinAbs(thin.first_extrusion_z, 1e-4));
+        CHECK_THAT(thick.max_extrusion_z, Catch::Matchers::WithinAbs(thin.max_extrusion_z, 1e-3));
+    }
+}
+
+TEST_CASE("Top and bottom surface densities change their generated surface material",
+          "[LayerHeightVariance][LayerGeometrySettings][SettingsVariance]")
+{
+    const DynamicPrintConfig dense_config = layer_geometry_config();
+    const LayerGeometryEvidence full = export_evidence(dense_config);
+    require_valid_evidence(full);
+    REQUIRE(full.top_length > 0.0);
+    REQUIRE(full.bottom_length > 0.0);
+
+    const std::vector<std::pair<std::string, std::string>> cases{
+        {"top_surface_density", "0%"},
+        {"top_surface_density", "40%"},
+        {"bottom_surface_density", "10%"},
+        {"bottom_surface_density", "40%"}};
+    for (const auto &[key, sparse_value] : cases) {
+        INFO("density setting: " << key);
+        INFO("density value: " << sparse_value);
+        DynamicPrintConfig sparse_config = layer_geometry_config();
+        sparse_config.set_deserialize_strict(key, sparse_value);
+        const LayerGeometryEvidence sparse = export_evidence(sparse_config);
+        require_valid_evidence(sparse);
+
+        if (key == "top_surface_density") {
+            if (sparse_value == "0%")
+                CHECK_THAT(sparse.top_length, Catch::Matchers::WithinAbs(0.0, 1e-6));
+            else
+                REQUIRE(sparse.top_length > 0.0);
+            CHECK(full.top_length > sparse.top_length);
+            CHECK_THAT(sparse.bottom_length, Catch::Matchers::WithinRel(full.bottom_length, 1e-6));
+        } else {
+            REQUIRE(sparse.top_length > 0.0);
+            REQUIRE(sparse.bottom_length > 0.0);
+            CHECK(full.bottom_length > sparse.bottom_length);
+            CHECK_THAT(sparse.top_length, Catch::Matchers::WithinRel(full.top_length, 1e-6));
+        }
+    }
+}
+
+} // namespace layer_geometry_settings_contracts

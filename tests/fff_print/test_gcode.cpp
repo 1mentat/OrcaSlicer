@@ -1,6 +1,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include <cstdlib>
+#include <cstdio>
 #include <cctype>
 #include <sstream>
 #include <memory>
@@ -2633,3 +2634,324 @@ TEST_CASE("Adaptive PA errors identify the first invalid physical line", "[GCode
     CHECK_THAT(result, ContainsSubstring("acceleration"));
 }
 } // namespace adaptive_pa_validation_contracts
+
+namespace gcode_travel_point_reachable_contracts {
+
+namespace {
+
+constexpr std::size_t kMaxOutputBytes = 2u * 1024u * 1024u;
+
+struct RoutePoints
+{
+    double p1_x = 0.;
+    double p1_y = 0.;
+    double p2_x = 0.;
+    double p2_y = 0.;
+    double p3_x = 0.;
+    double p3_y = 0.;
+};
+
+DynamicPrintConfig route_config(double end_x, double end_y)
+{
+    // This is the validated fff_print helper: it sizes registered filament
+    // vectors and the filament-by-filament flush matrix before export.  The
+    // route fixture then sizes the physical mapping vectors it indexes.
+    DynamicPrintConfig config = Test::multifilament_config(2);
+    config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfMarlinFirmware));
+    // The route fixture models two physical nozzles.  Keep this setting
+    // explicit, but verify the effective object assignment below: the
+    // production writer decides whether a tool change is possible from the
+    // effective zero-based filament IDs, not this flag alone.
+    config.set_key_value("single_extruder_multi_material", new ConfigOptionBool(false));
+    config.set_key_value("manual_filament_change", new ConfigOptionBool(false));
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    config.set_key_value("emit_machine_limits_to_gcode", new ConfigOptionBool(false));
+    config.set_key_value("machine_start_gcode", new ConfigOptionString(""));
+    config.set_key_value("machine_end_gcode", new ConfigOptionString(""));
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.2));
+    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0., false));
+    config.set_key_value("z_hop", new ConfigOptionFloats({0., 0.}));
+    // By-layer avoids sequential-print clearance validation while still
+    // emitting a real tool change between the two same-layer objects.
+    config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
+    config.set_deserialize_strict({
+        {"seam_position", "back"},
+        {"use_relative_e_distances", 1},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0}
+    });
+
+    // The marker is emitted by the change-filament context.  It makes all six
+    // dynamic values observable without relying on the trailing raw-config dump.
+    config.set_key_value("change_filament_gcode", new ConfigOptionString(
+        ";TP p1={travel_point_1_x},{travel_point_1_y} "
+        "p2={travel_point_2_x},{travel_point_2_y} "
+        "p3={travel_point_3_x},{travel_point_3_y}\n"));
+    config.set_key_value("start_end_points", new ConfigOptionPoints{
+        Vec2d(30., -3.), Vec2d(end_x, end_y)
+    });
+    // get_path_of_change_filament uses point [2] as the cutter-area corner and
+    // adds two millimetres to its Y coordinate.  All four points are supplied
+    // so the production cardinality gate is passed.
+    config.set_key_value("bed_exclude_area", new ConfigOptionPoints{
+        Vec2d(90., 90.), Vec2d(108., 90.), Vec2d(108., 118.), Vec2d(90., 118.)
+    });
+
+    // Two physical extruders, one filament per extruder.  The validated helper
+    // sizes registered filament vectors; these route-sensitive physical maps
+    // and temperature/flush vectors are explicitly sized here.
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.4, 0.4}));
+    config.set_key_value("printer_extruder_id", new ConfigOptionInts({1, 2}));
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({
+        "Direct Drive Standard", "Direct Drive Standard"
+    }));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.75, 1.75}));
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"#FF0000", "#00FF00"}));
+    config.set_key_value("default_filament_colour", new ConfigOptionStrings({"#FF0000", "#00FF00"}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PLA", "PLA"}));
+    config.set_key_value("filament_soluble", new ConfigOptionBools({false, false}));
+    config.set_key_value("filament_is_support", new ConfigOptionBools({false, false}));
+    config.option<ConfigOptionEnum<FilamentMapMode>>("filament_map_mode", true)->value = fmmManual;
+    config.set_key_value("filament_map", new ConfigOptionInts({1, 2}));
+    config.set_key_value("nozzle_temperature", new ConfigOptionInts({210, 210}));
+    config.set_key_value("nozzle_temperature_range_low", new ConfigOptionInts({190, 190}));
+    config.set_key_value("nozzle_temperature_range_high", new ConfigOptionInts({240, 240}));
+    config.set_key_value("hotend_cooling_rate", new ConfigOptionFloatsNullable({2., 2.}));
+    config.set_key_value("hotend_heating_rate", new ConfigOptionFloatsNullable({2., 2.}));
+    config.set_key_value("flush_multiplier", new ConfigOptionFloats({1.}));
+    config.set_key_value("flush_volumes_matrix", new ConfigOptionFloats({0., 140., 140., 0.}));
+    config.set_key_value("wipe_tower_x", new ConfigOptionFloats({50.}));
+    config.set_key_value("wipe_tower_y", new ConfigOptionFloats({50.}));
+    return config;
+}
+
+std::string export_with_object_rows(double object_y, double end_x, double end_y, GCodeProcessorResult *result = nullptr)
+{
+    DynamicPrintConfig config = route_config(end_x, end_y);
+    Model model;
+
+    ModelObject *first = model.add_object();
+    first->add_volume(make_cube(20., 20., 2.));
+    ModelInstance *first_instance = first->add_instance();
+    first_instance->set_offset(Vec3d(0., object_y, 0.));
+
+    ModelObject *second = model.add_object();
+    second->add_volume(make_cube(20., 20., 2.));
+    ModelInstance *second_instance = second->add_instance();
+    second_instance->set_offset(Vec3d(26., object_y, 0.));
+    // `extruder` is the canonical 1-based object setting.  PrintApply
+    // normalizes it into the region feature filament IDs used by
+    // Print::extruders(); keep the assignment at the object level so the
+    // contract exercises that production path rather than bypassing it.
+    second->config.set_key_value("extruder", new ConfigOptionInt(2));
+
+    Print print;
+    print.is_BBL_printer() = true;
+    for (ModelObject *object : model.objects) {
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+    }
+    const PrintBase::ApplyStatus status = print.apply(model, config);
+    REQUIRE(status != PrintBase::APPLY_STATUS_UNCHANGED);
+    const auto validation = print.validate();
+    INFO("Print validation error: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+
+    // GCodeWriter::multiple_extruders is derived from the effective IDs and
+    // is independent of single_extruder_multi_material.  Prove the fixture
+    // reached both physical extruders before process/export; otherwise a
+    // missing marker would only report a downstream symptom.
+    const std::vector<unsigned int> used_extruders = print.extruders();
+    std::ostringstream used_extruder_info;
+    used_extruder_info << "print.extruders count=" << used_extruders.size() << " ids=";
+    constexpr std::size_t kMaxReportedExtruders = 8;
+    const std::size_t reported_count = std::min(kMaxReportedExtruders, used_extruders.size());
+    for (std::size_t index = 0; index < reported_count; ++index) {
+        if (index > 0)
+            used_extruder_info << ',';
+        used_extruder_info << used_extruders[index];
+    }
+    if (reported_count < used_extruders.size())
+        used_extruder_info << ",...";
+    INFO(used_extruder_info.str());
+    const bool uses_first_extruder = std::find(used_extruders.begin(), used_extruders.end(), 0u) != used_extruders.end();
+    const bool uses_second_extruder = std::find(used_extruders.begin(), used_extruders.end(), 1u) != used_extruders.end();
+    REQUIRE(uses_first_extruder);
+    REQUIRE(uses_second_extruder);
+
+    print.set_status_silent();
+    print.process();
+    const std::string output = Test::gcode(print, result);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE(output.size() < kMaxOutputBytes);
+    return output;
+}
+
+// Keep a missing-toolchange failure actionable without copying the full G-code
+// into Catch output.  Only the route marker and bounded tool tokens are useful
+// for this contract; everything else is unrelated slicing noise.
+std::string bounded_custom_token_excerpt(const std::string &gcode)
+{
+    constexpr std::size_t kMaxExcerptBytes = 4096;
+    constexpr std::size_t kMaxExcerptLines = 32;
+    std::string excerpt;
+    std::size_t cursor = 0;
+    std::size_t lines = 0;
+    while (cursor < gcode.size() && lines < kMaxExcerptLines && excerpt.size() < kMaxExcerptBytes) {
+        const std::size_t end = gcode.find('\n', cursor);
+        const std::size_t line_end = end == std::string::npos ? gcode.size() : end;
+        const std::string_view line(gcode.data() + cursor, line_end - cursor);
+        const bool interesting = line.rfind(";TP ", 0) == 0 || line.rfind("T0", 0) == 0
+                              || line.rfind("T1", 0) == 0 || line.find("M1020") != std::string_view::npos;
+        if (interesting) {
+            const std::size_t remaining = kMaxExcerptBytes - excerpt.size();
+            const bool truncated = line.size() > remaining;
+            const std::size_t body_size = truncated && remaining >= 3 ? remaining - 3 : std::min(line.size(), remaining);
+            excerpt.append(line.data(), body_size);
+            if (truncated && remaining >= 3)
+                excerpt += "...";
+            if (excerpt.size() < kMaxExcerptBytes)
+                excerpt.push_back('\n');
+            ++lines;
+        }
+        cursor = end == std::string::npos ? gcode.size() : end + 1;
+    }
+    if (excerpt.empty())
+        return "<no TP/tool tokens>";
+    return excerpt;
+}
+
+std::string bounded_filament_sequence(const GCodeProcessorResult &result)
+{
+    constexpr std::size_t kMaxSequenceItems = 16;
+    std::ostringstream sequence;
+    sequence << "filament_changes=" << result.filament_change_sequence.size() << " sequence=";
+    const std::size_t count = std::min(kMaxSequenceItems, result.filament_change_sequence.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i > 0)
+            sequence << ',';
+        sequence << result.filament_change_sequence[i];
+    }
+    if (count < result.filament_change_sequence.size())
+        sequence << ",...";
+    return sequence.str();
+}
+
+bool finite_route_points(const RoutePoints &points)
+{
+    return std::isfinite(points.p1_x) && std::isfinite(points.p1_y)
+        && std::isfinite(points.p2_x) && std::isfinite(points.p2_y)
+        && std::isfinite(points.p3_x) && std::isfinite(points.p3_y);
+}
+
+std::optional<RoutePoints> route_marker(const std::string &gcode)
+{
+    // The configuration dump can contain the literal template `;TP ` before
+    // the actual emitted G-code.  Only inspect a marker at the beginning of a
+    // complete line, then require all six finite values before accepting it.
+    std::size_t line_start = 0;
+    while (line_start <= gcode.size()) {
+        const std::size_t line_end = gcode.find('\n', line_start);
+        const std::size_t length = line_end == std::string::npos
+            ? gcode.size() - line_start : line_end - line_start;
+        const std::string line = gcode.substr(line_start, length);
+        if (line.rfind(";TP ", 0) == 0) {
+            RoutePoints points;
+            const int parsed = std::sscanf(line.c_str(), ";TP p1=%lf,%lf p2=%lf,%lf p3=%lf,%lf",
+                                           &points.p1_x, &points.p1_y, &points.p2_x, &points.p2_y,
+                                           &points.p3_x, &points.p3_y);
+            if (parsed == 6 && finite_route_points(points))
+                return points;
+        }
+        if (line_end == std::string::npos)
+            break;
+        line_start = line_end + 1;
+    }
+    return std::nullopt;
+}
+
+void require_finite(const RoutePoints &points)
+{
+    const bool finite = std::isfinite(points.p1_x);
+    REQUIRE(finite);
+    const bool finite_y = std::isfinite(points.p1_y);
+    REQUIRE(finite_y);
+    const bool finite_p2 = std::isfinite(points.p2_x);
+    REQUIRE(finite_p2);
+    const bool finite_p2_y = std::isfinite(points.p2_y);
+    REQUIRE(finite_p2_y);
+    const bool finite_p3 = std::isfinite(points.p3_x);
+    REQUIRE(finite_p3);
+    const bool finite_p3_y = std::isfinite(points.p3_y);
+    REQUIRE(finite_p3_y);
+}
+
+} // namespace
+
+TEST_CASE("Filament change placeholders expose a bounded obstacle route",
+          "[GCodeTravelPointReachable][GCodeExportWorkflows]")
+{
+    // The 20x20x2 meshes occupy x=0..20 and x=26..46; get_path_of_change_filament
+    // expands each interval by 2 mm, leaving a left candidate at 24 below the
+    // configured start x=30 and a right candidate at 48.  With end_x=30, the
+    // right candidate is farther (18 mm) than the left candidate (6 mm). With both
+    // objects below the cutter area, the production left-travel guard rejects
+    // the left candidate and emits the right route.
+    GCodeProcessorResult processor_result;
+    const std::string blocked_output = export_with_object_rows(10., 30., 180., &processor_result);
+    INFO(bounded_filament_sequence(processor_result));
+    INFO("bounded custom-token excerpt:\n" << bounded_custom_token_excerpt(blocked_output));
+    const auto blocked = route_marker(blocked_output);
+    REQUIRE(blocked.has_value());
+    require_finite(*blocked);
+    CHECK_THAT(blocked->p1_x, Catch::Matchers::WithinAbs(blocked->p2_x, 1e-6));
+    CHECK_THAT(blocked->p2_x, Catch::Matchers::WithinAbs(blocked->p3_x, 1e-6));
+    CHECK_THAT(blocked->p1_y, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(blocked->p2_y, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(blocked->p1_x, Catch::Matchers::WithinAbs(48., 1e-6));
+    CHECK_THAT(blocked->p3_y, Catch::Matchers::WithinAbs(180., 1e-6));
+}
+
+TEST_CASE("Filament change route keeps the left candidate when the cutter is clear",
+          "[GCodeTravelPointReachable][GCodeExportWorkflows]")
+{
+    // Move both small objects above cutter_area_y=120.  The same interval
+    // geometry now permits the left route.  Its three points must be the
+    // production turn at (start_x, cutter_y), the left candidate, and the
+    // configured end Y; this proves route shape and all six placeholder values.
+    GCodeProcessorResult processor_result;
+    const std::string clear_output = export_with_object_rows(150., 30., 180., &processor_result);
+    INFO(bounded_filament_sequence(processor_result));
+    INFO("bounded custom-token excerpt:\n" << bounded_custom_token_excerpt(clear_output));
+    const auto clear = route_marker(clear_output);
+    REQUIRE(clear.has_value());
+    require_finite(*clear);
+    CHECK_THAT(clear->p1_x, Catch::Matchers::WithinAbs(30., 1e-6));
+    CHECK_THAT(clear->p1_y, Catch::Matchers::WithinAbs(120., 1e-6));
+    CHECK_THAT(clear->p2_x, Catch::Matchers::WithinAbs(24., 1e-6));
+    CHECK_THAT(clear->p2_y, Catch::Matchers::WithinAbs(120., 1e-6));
+    CHECK_THAT(clear->p3_x, Catch::Matchers::WithinAbs(24., 1e-6));
+    CHECK_THAT(clear->p3_y, Catch::Matchers::WithinAbs(180., 1e-6));
+}
+
+TEST_CASE("Filament change route responds to endpoint configuration",
+          "[GCodeTravelPointReachable][GCodeExportWorkflows]")
+{
+    // This case is intentionally independent of the interval constants above:
+    // a valid route with no left-travel restriction must carry a changed end Y
+    // through placeholder publication.  The helper is kept tiny and bounded.
+    GCodeProcessorResult processor_result;
+    const std::string output = export_with_object_rows(150., 30., 160., &processor_result);
+    REQUIRE(output.size() < kMaxOutputBytes);
+    INFO(bounded_filament_sequence(processor_result));
+    INFO("bounded custom-token excerpt:\n" << bounded_custom_token_excerpt(output));
+    const auto route = route_marker(output);
+    REQUIRE(route.has_value());
+    require_finite(*route);
+    CHECK_THAT(route->p3_y, Catch::Matchers::WithinAbs(160., 1e-6));
+}
+
+} // namespace gcode_travel_point_reachable_contracts

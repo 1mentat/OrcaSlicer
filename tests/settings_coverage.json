@@ -104,44 +104,51 @@
       "reason": "The focused Slicing contract tests use a nominal 0.2 mm height alongside 0.1 and 0.3 mm range overrides and check contiguous bounded layers, fixed-profile detection, smoothing, and editing. These are direct Slicing API contracts rather than a full Print pipeline matrix, so boundary and pipeline coverage remain unclaimed."
     },
     "initial_layer_print_height": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance]",
+      "test": "tests/fff_print/test_layer_height_variance.cpp",
+      "tag": "[LayerGeometrySettings]",
       "dimensions": [
-        "fixture_only"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The fixture supplies a valid initial-layer height; no dedicated variance oracle claims its boundary behavior."
+      "reason": "First extrusion Z follows the configured initial height, final extrusion Z stays at the fixed 1.2 mm fixture height, and the larger first layer reduces the finite extrusion-layer count. Representative values only; full numeric ranges and interactions remain unclaimed."
     },
     "top_shell_thickness": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance]",
+      "test": "tests/fff_print/test_layer_height_variance.cpp",
+      "tag": "[LayerGeometrySettings]",
       "dimensions": [
-        "fixture_only"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The fixture sets top-shell thickness to zero to make layer-count behavior deterministic; no dedicated thickness variance oracle is claimed."
+      "reason": "Independently changing top shell thickness changes Internal solid infill length while role presence, layer count, and first/max extrusion Z remain stable. Representative values only; full numeric ranges and interactions remain unclaimed."
     },
     "bottom_shell_thickness": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance]",
+      "test": "tests/fff_print/test_layer_height_variance.cpp",
+      "tag": "[LayerGeometrySettings]",
       "dimensions": [
-        "fixture_only"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The fixture sets bottom-shell thickness to zero to make layer-count behavior deterministic; no dedicated thickness variance oracle is claimed."
+      "reason": "Independently changing bottom shell thickness changes Internal solid infill length under the same fixed-height and layer/Z invariants. Representative values only; full numeric ranges and interactions remain unclaimed."
     },
     "top_surface_density": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance]",
+      "test": "tests/fff_print/test_layer_height_variance.cpp",
+      "tag": "[LayerGeometrySettings]",
       "dimensions": [
-        "fixture_only"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The fixture enables top-surface material so surface-pattern tests have an observable role; no density boundary claim is made."
+      "reason": "0% suppresses top-surface extrusion, 40% remains positive, 100% is greater than each sparse case, and bottom role length is unchanged."
     },
     "bottom_surface_density": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance]",
+      "test": "tests/fff_print/test_layer_height_variance.cpp",
+      "tag": "[LayerGeometrySettings]",
       "dimensions": [
-        "fixture_only"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The fixture enables bottom-surface material so surface-pattern tests have an observable role; no density boundary claim is made."
+      "reason": "10% and 40% are positive sparse cases, 100% is greater than each, and top role length is unchanged."
     },
     "gcode_comments": {
       "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
@@ -2967,6 +2974,33 @@
         "pipeline_oracle"
       ],
       "reason": "Support-interface filament selections 0 (current/default) and 2 are exercised in the same two-filament slice; the same-selection case reaches one support tool while the split-selection comparison reaches at least two support tools. The open integer selector domain and isolated interface-only oracle remain unclaimed."
+    },
+    "start_end_points": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeTravelPointReachable]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two physical extruders emit change-filament route placeholders with a configured endpoint Y of 160 or 180 mm. Blocked and clear cutter routes check all six finite coordinates against the fixture geometry. Other endpoints, malformed cardinalities and arbitrary obstacle layouts remain unclaimed."
+    },
+    "filament_flow_ratio": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[FilamentFlowVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "XY and role geometry remain stable, positive emitted E length scales by the configured ratio within the derived parser/export bound, outer feedrate follows the cap bound and direction, and fresh/incremental results agree. Representative values only; full numeric ranges and interactions remain unclaimed."
+    },
+    "filament_max_volumetric_speed": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[FilamentMaxVolumetricSpeed]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Geometry and material remain stable, outer feedrate obeys the derived volumetric cap and direction, and fresh/incremental results agree. Numeric boundaries remain unclaimed."
     }
   }
 }

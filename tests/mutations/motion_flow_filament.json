@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed filament flow and maximum volumetric speed mutants with feedrate, deposited-material, and incremental-invalidation oracles.",
+  "mutants": [
+    {
+      "id": "motion-flow-filament-ratio-defaulted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "double filament_flow_ratio = FILAMENT_CONFIG(filament_flow_ratio);",
+      "new": "double filament_flow_ratio = 1.0; /* mutation: ignore configured filament flow ratio */",
+      "description": "Ignore the configured filament flow ratio when generating extrusion feedrate and material.",
+      "test_filter": "FilamentFlowVariance"
+    },
+    {
+      "id": "motion-flow-filament-ratio-omitted-from-cap",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= filament_flow_ratio;",
+      "new": "/* mutation: omit filament flow ratio from volumetric speed */",
+      "description": "Omit filament flow ratio from effective volumetric flow and remove the expected feedrate variance.",
+      "test_filter": "FilamentFlowVariance"
+    },
+    {
+      "id": "motion-flow-filament-ratio-double-counted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "e_per_mm /= filament_flow_ratio;",
+      "new": "/* mutation: retain filament ratio in emitted E */",
+      "description": "Retain the filament ratio in emitted E after the filament area calculation, double-counting the ratio.",
+      "test_filter": "FilamentFlowVariance"
+    },
+    {
+      "id": "motion-flow-filament-volumetric-cap-omitted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (FILAMENT_CONFIG(filament_max_volumetric_speed) > 0) {\n        // cap speed with max_volumetric_speed anyway (even if user is not using autospeed)\n        speed = std::min(speed, FILAMENT_CONFIG(filament_max_volumetric_speed) / _mm3_per_mm);\n    }",
+      "new": "    if (false) {\n        // mutation: omit filament max volumetric speed cap\n        speed = std::min(speed, FILAMENT_CONFIG(filament_max_volumetric_speed) / _mm3_per_mm);\n    }",
+      "description": "Omit the positive filament maximum volumetric speed cap and lose the bounded feedrate response.",
+      "test_filter": "FilamentMaxVolumetricSpeed"
+    },
+    {
+      "id": "motion-flow-filament-ratio-invalidation-omitted",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "            || opt_key == \"filament_flow_ratio\"\n",
+      "new": "            || false /* mutation: omit filament flow ratio invalidation */\n",
+      "description": "Omit filament flow ratio from incremental invalidation so a changed configuration can retain stale G-code.",
+      "test_filter": "FilamentFlowVariance"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed layer geometry setting mutants for first-layer height, shell-thickness propagation, and surface-density roles.",
+  "mutants": [
+    {
+      "id": "layer-geometry-initial-height-ignored",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "    coordf_t initial_layer_print_height                      = (print_config.initial_layer_print_height.value <= 0) ? \n        object_config.layer_height.value : print_config.initial_layer_print_height.value;",
+      "new": "    coordf_t initial_layer_print_height                      = object_config.layer_height.value;",
+      "description": "Ignore the configured initial layer print height and always use the object layer height.",
+      "test_filter": "LayerGeometrySettings"
+    },
+    {
+      "id": "layer-geometry-top-shell-thickness-ignored",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "                    for (; i < int(cache_top_botom_regions.size()) &&\n\t                         (i < itop || m_layers[i]->print_z - print_z < region_config.top_shell_thickness - EPSILON);\n\t                        ++ i) {",
+      "new": "                    for (; i < int(cache_top_botom_regions.size()) &&\n\t                         i < itop;\n\t                        ++ i) {",
+      "description": "Remove top shell thickness from vertical shell propagation while retaining the configured shell-layer count.",
+      "test_filter": "LayerGeometrySettings"
+    },
+    {
+      "id": "layer-geometry-bottom-shell-thickness-ignored",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "\t                    for (; i >= 0 &&\n\t                         (i > ibottom || bottom_z - m_layers[i]->bottom_z() < region_config.bottom_shell_thickness - EPSILON);\n\t                        -- i) {",
+      "new": "\t                    for (; i >= 0 &&\n\t                         i > ibottom;\n\t                        -- i) {",
+      "description": "Remove bottom shell thickness from vertical shell propagation while retaining the configured shell-layer count.",
+      "test_filter": "LayerGeometrySettings"
+    },
+    {
+      "id": "layer-geometry-top-density-forced-solid",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "                            params.density = float(region_config.top_surface_density);\n                            if (params.density <= 0.0f) continue;",
+      "new": "                            params.density = 100.f;\n                            if (params.density <= 0.0f) continue;",
+      "description": "Force top external-solid fill to 100 percent and mask the configured top surface density.",
+      "test_filter": "LayerGeometrySettings"
+    },
+    {
+      "id": "layer-geometry-bottom-density-forced-solid",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "                            params.density = float(region_config.bottom_surface_density);",
+      "new": "                            params.density = 100.f;",
+      "description": "Force bottom external-solid fill to 100 percent and mask the configured bottom surface density.",
+      "test_filter": "LayerGeometrySettings"
+    }
+  ]
+}

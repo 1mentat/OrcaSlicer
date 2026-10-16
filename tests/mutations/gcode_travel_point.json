@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed filament-change travel-route mutants for obstacle-side selection, cutter geometry, route point publication, and endpoint propagation.",
+  "mutants": [
+    {
+      "id": "gcode-travel-left-guard-inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            } else if (!can_travel_form_left && available_interval.second < start_x_position) {\n                continue;",
+      "new": "            } else if (can_travel_form_left && available_interval.second < start_x_position) {\n                continue;",
+      "description": "Invert the obstacle-side guard so the bounded blocked-left and clear-left route fixtures select the wrong interval.",
+      "test_filter": "GCodeTravelPointReachable"
+    },
+    {
+      "id": "gcode-travel-cutter-y-offset-shifted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    double cutter_area_y = excluse_area[2].y() + 2;",
+      "new": "    double cutter_area_y = excluse_area[2].y() + 3;",
+      "description": "Shift the published cutter crossing Y coordinate away from the configured excluded-area boundary.",
+      "test_filter": "GCodeTravelPointReachable"
+    },
+    {
+      "id": "gcode-travel-left-route-points-swapped",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (new_path < start_x_position) {\n        out_point_1 = Vec2d(start_x_position, cutter_area_y);\n        out_point_2 = Vec2d(new_path, cutter_area_y);\n        out_point_3 = Vec2d(new_path, end_y_position);\n    }",
+      "new": "    if (new_path < start_x_position) {\n        out_point_1 = Vec2d(new_path, cutter_area_y);\n        out_point_2 = Vec2d(start_x_position, cutter_area_y);\n        out_point_3 = Vec2d(new_path, end_y_position);\n    }",
+      "description": "Swap the left-route crossing points and violate the ordered route geometry exposed by the placeholders.",
+      "test_filter": "GCodeTravelPointReachable"
+    },
+    {
+      "id": "gcode-travel-point-two-x-reuses-point-one",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    dyn_config.set_key_value(\"travel_point_2_x\", new ConfigOptionFloat(float(travel_point_2.x())));",
+      "new": "    dyn_config.set_key_value(\"travel_point_2_x\", new ConfigOptionFloat(float(travel_point_1.x())));",
+      "description": "In the physical-extruder toolchange path, publish the first route X coordinate for the second point and hide the distinct left candidate.",
+      "test_filter": "GCodeTravelPointReachable"
+    },
+    {
+      "id": "gcode-travel-end-y-replaced-by-start-y",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    } else {\n        out_point_1 = Vec2d(new_path, 0);\n        out_point_2 = Vec2d(new_path, 0);\n        out_point_3 = Vec2d(new_path, end_y_position);\n    }",
+      "new": "    } else {\n        out_point_1 = Vec2d(new_path, 0);\n        out_point_2 = Vec2d(new_path, 0);\n        out_point_3 = Vec2d(new_path, start_point.y());\n    }",
+      "description": "Replace the configured endpoint Y with the route start Y in the right-route branch.",
+      "test_filter": "GCodeTravelPointReachable"
+    }
+  ]
+}

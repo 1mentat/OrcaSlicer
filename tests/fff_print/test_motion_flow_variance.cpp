@@ -6,7 +6,6 @@
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
-#include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "test_helpers.hpp"
@@ -22,6 +21,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -62,6 +62,9 @@ struct RoleEvidence {
     double geometry_path_length = 0.0;
     double gcode_path_length = 0.0;
     double filament_length = 0.0;
+    // Maximum of |previous E| and |current E| for positive moves. This is
+    // needed because GCodeReader::dist_E() subtracts two parsed float E values.
+    double max_positive_e_pair = 0.0;
     double feedrate = 0.0;
     size_t moves = 0;
 };
@@ -76,6 +79,8 @@ struct Evidence {
     size_t extrusion_moves = 0;
     double gcode_path_length = 0.0;
     double gcode_filament_length = 0.0;
+    // Maximum of |previous E| and |current E| for every positive move.
+    double max_positive_e_pair = 0.0;
     std::vector<std::string> acceleration_commands;
     std::set<std::string> acceleration_states;
     size_t role_marker_count = 0;
@@ -257,20 +262,31 @@ Evidence evidence_for(const Print &print, const std::string &output)
             return;
 
         const double xy = line.dist_XY(self);
+        // Keep the production predicate and measure its rounded E delta only
+        // after the predicate succeeds. This avoids duplicating its semantics.
         const bool extrusion = line.extruding(self) && xy > EPSILON;
+        const float delta_e_f = extrusion ? line.dist_E(self) : 0.f;
+        double max_pair_abs_e = 0.0;
+        if (extrusion) {
+            const double previous_e = static_cast<double>(self.e());
+            const double current_e = static_cast<double>(line.e());
+            max_pair_abs_e = std::max(std::abs(previous_e), std::abs(current_e));
+        }
         if (xy > EPSILON || std::abs(line.dist_Z(self)) > EPSILON)
             ++evidence.motion_moves;
         if (extrusion)
             ++evidence.extrusion_moves;
         if (extrusion) {
+            evidence.max_positive_e_pair = std::max(evidence.max_positive_e_pair, max_pair_abs_e);
             evidence.gcode_path_length += xy;
-            evidence.gcode_filament_length += line.dist_E(self);
+            evidence.gcode_filament_length += static_cast<double>(delta_e_f);
         }
 
         if (active_role.has_value() && extrusion) {
             RoleEvidence &role_evidence = evidence.roles[*active_role];
+            role_evidence.max_positive_e_pair = std::max(role_evidence.max_positive_e_pair, max_pair_abs_e);
             role_evidence.gcode_path_length += xy;
-            role_evidence.filament_length += line.dist_E(self);
+            role_evidence.filament_length += static_cast<double>(delta_e_f);
             // Most G-code moves inherit F from an earlier move. GCodeLine::f()
             // is zero when F is absent, while new_F() reports the effective
             // feedrate before this callback updates the reader coordinates.
@@ -293,10 +309,12 @@ std::string evidence_summary(const Evidence &evidence)
         summary << " role" << i << "{moves=" << role.moves
                 << ",feed=" << role.feedrate
                 << ",gcode=" << role.gcode_path_length
-                << ",filament=" << role.filament_length << '}';
+                << ",filament=" << role.filament_length
+                << ",max_pair_e=" << role.max_positive_e_pair << '}';
     }
     summary << " totals{gcode=" << evidence.gcode_path_length
             << ",filament=" << evidence.gcode_filament_length
+            << ",max_pair_e=" << evidence.max_positive_e_pair
             << ",accel_states=" << evidence.acceleration_states.size() << '}';
     return summary.str();
 }
@@ -307,10 +325,12 @@ void require_valid(const Evidence &evidence)
     REQUIRE(evidence.perimeter_length > 0.0);
     REQUIRE(evidence.motion_moves > 0);
     REQUIRE(evidence.extrusion_moves > 0);
+    REQUIRE(std::isfinite(evidence.max_positive_e_pair));
     for (const RoleEvidence &role : evidence.roles) {
         REQUIRE(std::isfinite(role.geometry_path_length));
         REQUIRE(std::isfinite(role.gcode_path_length));
         REQUIRE(std::isfinite(role.filament_length));
+        REQUIRE(std::isfinite(role.max_positive_e_pair));
     }
 }
 
@@ -320,7 +340,10 @@ Evidence fresh_evidence(const DynamicPrintConfig &config)
     Model model;
     TriangleMesh shape = matrix_fixture();
     init_print({ shape }, print, model, config);
-    REQUIRE(print.validate().string.empty());
+    const StringObjectException validation = print.validate();
+    INFO("validation.string: " + validation.string);
+    INFO("validation.opt_key: " + validation.opt_key);
+    REQUIRE(validation.string.empty());
     const std::string output = gcode(print);
     Evidence evidence = evidence_for(print, output);
     require_valid(evidence);
@@ -334,12 +357,18 @@ Evidence incremental_evidence(const DynamicPrintConfig &baseline, const DynamicP
     Model model;
     TriangleMesh shape = matrix_fixture();
     init_print({ shape }, print, model, baseline);
-    REQUIRE(print.validate().string.empty());
+    const StringObjectException baseline_validation = print.validate();
+    INFO("baseline validation.string: " + baseline_validation.string);
+    INFO("baseline validation.opt_key: " + baseline_validation.opt_key);
+    REQUIRE(baseline_validation.string.empty());
     REQUIRE_FALSE(gcode(print).empty());
 
     apply_status = print.apply(model, changed);
     REQUIRE(apply_status != PrintBase::APPLY_STATUS_UNCHANGED);
-    REQUIRE(print.validate().string.empty());
+    const StringObjectException validation = print.validate();
+    INFO("validation.string: " + validation.string);
+    INFO("validation.opt_key: " + validation.opt_key);
+    REQUIRE(validation.string.empty());
     const std::string output = gcode(print);
     Evidence evidence = evidence_for(print, output);
     require_valid(evidence);
@@ -355,10 +384,12 @@ void compare_fresh_and_incremental(const Evidence &fresh, const Evidence &increm
     // paths in untracked roles while preserving deposited path length.
     CHECK_THAT(incremental.gcode_path_length, Catch::Matchers::WithinRel(fresh.gcode_path_length, 1e-6));
     CHECK_THAT(incremental.gcode_filament_length, Catch::Matchers::WithinRel(fresh.gcode_filament_length, 1e-6));
+    CHECK_THAT(incremental.max_positive_e_pair, Catch::Matchers::WithinAbs(fresh.max_positive_e_pair, 1e-5));
     for (size_t i = 0; i < fresh.roles.size(); ++i) {
         CHECK_THAT(incremental.roles[i].geometry_path_length, Catch::Matchers::WithinRel(fresh.roles[i].geometry_path_length, 1e-7));
         CHECK_THAT(incremental.roles[i].gcode_path_length, Catch::Matchers::WithinRel(fresh.roles[i].gcode_path_length, 1e-6));
         CHECK_THAT(incremental.roles[i].filament_length, Catch::Matchers::WithinRel(fresh.roles[i].filament_length, 1e-6));
+        CHECK_THAT(incremental.roles[i].max_positive_e_pair, Catch::Matchers::WithinAbs(fresh.roles[i].max_positive_e_pair, 1e-5));
         CHECK_THAT(incremental.roles[i].feedrate, Catch::Matchers::WithinAbs(fresh.roles[i].feedrate, 1e-4));
         CHECK(incremental.roles[i].moves == fresh.roles[i].moves);
     }
@@ -456,5 +487,238 @@ TEST_CASE("Motion and flow settings preserve fresh and incremental equivalence",
             compare_fresh_and_incremental(fresh, incremental);
             CHECK(changed_signal(test_case, baseline_evidence, fresh));
         }
+    }
+}
+
+namespace {
+
+DynamicPrintConfig filament_flow_config()
+{
+    DynamicPrintConfig config = matrix_config();
+    config.set_deserialize_strict({
+        // Keep the existing cube fixture (20 x 20 x 4 mm) bounded at 0.2 mm
+        // layers, with one explicitly sized filament column.
+        { "nozzle_diameter",                 "0.4" },
+        { "filament_diameter",               "1.75" },
+        { "filament_flow_ratio",             "1.0" },
+        { "filament_max_volumetric_speed",   "8.0" },
+        { "filament_adaptive_volumetric_speed", false },
+        { "volumetric_speed_coefficients",   "" },
+        { "outer_wall_speed",                "120" },
+        { "inner_wall_speed",                "120" },
+        { "sparse_infill_speed",             "120" },
+        { "top_surface_speed",               "120" },
+        { "use_relative_e_distances",        false },
+        // Absolute-E mode rejects a G92 E0 layer hook.  The shared matrix
+        // fixture keeps that hook for relative-E tests, so clear it here
+        // rather than weakening Print::validate() or changing the oracle.
+        { "layer_change_gcode",              "" },
+    });
+    return config;
+}
+
+void require_same_geometry(const Evidence &expected, const Evidence &observed)
+{
+    REQUIRE(observed.layers == expected.layers);
+    REQUIRE(observed.perimeter_items == expected.perimeter_items);
+    CHECK_THAT(observed.perimeter_length, Catch::Matchers::WithinRel(expected.perimeter_length, 1e-7));
+    CHECK(observed.motion_moves == expected.motion_moves);
+    CHECK(observed.extrusion_moves == expected.extrusion_moves);
+    CHECK_THAT(observed.gcode_path_length, Catch::Matchers::WithinRel(expected.gcode_path_length, 1e-6));
+    for (size_t i = 0; i < expected.roles.size(); ++i) {
+        CAPTURE(i);
+        CHECK_THAT(observed.roles[i].geometry_path_length,
+                   Catch::Matchers::WithinRel(expected.roles[i].geometry_path_length, 1e-7));
+        CHECK_THAT(observed.roles[i].gcode_path_length,
+                   Catch::Matchers::WithinRel(expected.roles[i].gcode_path_length, 1e-6));
+    }
+}
+
+void require_same_material(const Evidence &expected, const Evidence &observed)
+{
+    CHECK_THAT(observed.gcode_filament_length,
+               Catch::Matchers::WithinRel(expected.gcode_filament_length, 1e-6));
+    for (size_t i = 0; i < expected.roles.size(); ++i) {
+        CAPTURE(i);
+        CHECK_THAT(observed.roles[i].filament_length,
+                   Catch::Matchers::WithinRel(expected.roles[i].filament_length, 1e-6));
+    }
+}
+
+double minimum_outer_flow_mm3_per_mm(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    TriangleMesh shape = matrix_fixture();
+    init_print({ shape }, print, model, config);
+    REQUIRE(print.validate().string.empty());
+    REQUIRE_FALSE(gcode(print).empty());
+    REQUIRE_FALSE(print.objects().empty());
+
+    double minimum = std::numeric_limits<double>::max();
+    for (const Layer *layer : print.objects().front()->layers()) {
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->perimeters, [&minimum](const ExtrusionPath &path) {
+                if (path.role() == erExternalPerimeter && path.mm3_per_mm > 0.0)
+                    minimum = std::min(minimum, path.mm3_per_mm);
+            });
+            for_each_extrusion_path(region->fills, [&minimum](const ExtrusionPath &path) {
+                if (path.role() == erExternalPerimeter && path.mm3_per_mm > 0.0)
+                    minimum = std::min(minimum, path.mm3_per_mm);
+            });
+        }
+    }
+    REQUIRE(std::isfinite(minimum));
+    REQUIRE(minimum < std::numeric_limits<double>::max());
+    return minimum;
+}
+
+double outer_feedrate_cap_bound(double cap_mm3_per_s, double filament_flow_ratio,
+                                double minimum_flow_mm3_per_mm)
+{
+    constexpr double requested_speed_mm_per_s = 120.0;
+    constexpr double feedrate_per_speed = 60.0;
+    const double capped_speed = cap_mm3_per_s / (minimum_flow_mm3_per_mm * filament_flow_ratio);
+    return feedrate_per_speed * std::min(requested_speed_mm_per_s, capped_speed);
+}
+
+void require_incremental_equivalence(const DynamicPrintConfig &baseline,
+                                      const DynamicPrintConfig &changed,
+                                      const Evidence &fresh)
+{
+    PrintBase::ApplyStatus apply_status = PrintBase::APPLY_STATUS_UNCHANGED;
+    const Evidence incremental = incremental_evidence(baseline, changed, apply_status);
+    REQUIRE(apply_status == PrintBase::APPLY_STATUS_INVALIDATED);
+    compare_fresh_and_incremental(fresh, incremental);
+}
+
+
+constexpr double kEExportQuantum = 1e-5; // GCodeFormatter::E_EXPORT_DIGITS == 5.
+
+// For an absolute-E positive move, two decimal coordinates are rounded to
+// five digits, each is parsed into float, and dist_E() subtracts those floats
+// with a float result. The q term covers two half-quantum decimal errors. The
+// 4*epsilon*M term conservatively covers both float conversions and the float
+// subtraction, where M is max(|previous E|, |current E|).
+double e_pair_error_bound(double max_pair_abs_e)
+{
+    return kEExportQuantum + 4.0 * std::numeric_limits<float>::epsilon() * max_pair_abs_e;
+}
+
+double ratio_material_tolerance(size_t baseline_moves, double baseline_max_pair_e,
+                                size_t observed_moves, double observed_max_pair_e,
+                                double ratio, double baseline_total, double observed_total)
+{
+    const double baseline_bound = static_cast<double>(baseline_moves) * e_pair_error_bound(baseline_max_pair_e);
+    const double observed_bound = static_cast<double>(observed_moves) * e_pair_error_bound(observed_max_pair_e);
+    const double expected = baseline_total * ratio;
+    const double arithmetic_guard = 64.0 * std::numeric_limits<double>::epsilon()
+                                  * std::max({1.0, std::abs(expected), std::abs(observed_total)});
+    return observed_bound + std::abs(ratio) * baseline_bound + arithmetic_guard;
+}
+
+void require_ratio_material(const Evidence &baseline, const Evidence &observed, double ratio)
+{
+    const double expected_total = baseline.gcode_filament_length * ratio;
+    const double total_tolerance = ratio_material_tolerance(
+        baseline.extrusion_moves, baseline.max_positive_e_pair,
+        observed.extrusion_moves, observed.max_positive_e_pair,
+        ratio, baseline.gcode_filament_length, observed.gcode_filament_length);
+    REQUIRE(std::isfinite(total_tolerance));
+    REQUIRE(total_tolerance >= 0.0);
+    const double total_signal = std::abs(expected_total - baseline.gcode_filament_length);
+    REQUIRE(total_signal > 0.0);
+    // A 0.75/1.25 ratio has a 25% signal; this prevents the analytic bound
+    // from swallowing the defining flow-ratio behavior.
+    CHECK(total_tolerance < total_signal);
+    CHECK_THAT(observed.gcode_filament_length,
+               Catch::Matchers::WithinAbs(expected_total, total_tolerance));
+
+    for (size_t i = 0; i < baseline.roles.size(); ++i) {
+        CAPTURE(i);
+        const double expected = baseline.roles[i].filament_length * ratio;
+        const double tolerance = ratio_material_tolerance(
+            baseline.roles[i].moves, baseline.roles[i].max_positive_e_pair,
+            observed.roles[i].moves, observed.roles[i].max_positive_e_pair,
+            ratio, baseline.roles[i].filament_length, observed.roles[i].filament_length);
+        REQUIRE(std::isfinite(tolerance));
+        REQUIRE(tolerance >= 0.0);
+        CHECK_THAT(observed.roles[i].filament_length,
+                   Catch::Matchers::WithinAbs(expected, tolerance));
+        if (baseline.roles[i].filament_length > 0.0) {
+            const double signal = std::abs(expected - baseline.roles[i].filament_length);
+            CHECK(signal > 0.0);
+            CHECK(tolerance < signal);
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("Filament flow ratio changes capped feedrate without changing deposited geometry",
+          "[MotionFlowVariance][FilamentFlowVariance]")
+{
+    const DynamicPrintConfig baseline = filament_flow_config();
+    const Evidence baseline_evidence = fresh_evidence(baseline);
+    const double minimum_outer_flow = minimum_outer_flow_mm3_per_mm(baseline);
+    REQUIRE(baseline_evidence.roles[outer].moves > 0);
+    REQUIRE(baseline_evidence.roles[outer].feedrate > 0.0);
+
+    const MatrixCase flow_case{
+        "filament_flow_ratio", coFloats, Signal::outer_feedrate, { 0.75, 1.25 }
+    };
+    for (const double value : flow_case.values) {
+        CAPTURE(value);
+        DynamicPrintConfig changed = baseline;
+        set_registry_value(changed, flow_case, value);
+        REQUIRE(changed.option(flow_case.key)->serialize() != baseline.option(flow_case.key)->serialize());
+
+        const Evidence fresh = fresh_evidence(changed);
+        INFO("baseline evidence: " + evidence_summary(baseline_evidence));
+        INFO("fresh evidence: " + evidence_summary(fresh));
+        require_same_geometry(baseline_evidence, fresh);
+        require_ratio_material(baseline_evidence, fresh, value);
+        require_incremental_equivalence(baseline, changed, fresh);
+        const double cap_bound = outer_feedrate_cap_bound(8.0, value, minimum_outer_flow);
+        CHECK(fresh.roles[outer].feedrate <= cap_bound + 1e-3);
+
+        if (value < 1.0)
+            CHECK(fresh.roles[outer].feedrate > baseline_evidence.roles[outer].feedrate);
+        else
+            CHECK(fresh.roles[outer].feedrate < baseline_evidence.roles[outer].feedrate);
+    }
+}
+
+TEST_CASE("Filament volumetric cap changes feedrate without changing deposited geometry",
+          "[MotionFlowVariance][FilamentMaxVolumetricSpeed]")
+{
+    const DynamicPrintConfig baseline = filament_flow_config();
+    const Evidence baseline_evidence = fresh_evidence(baseline);
+    const double minimum_outer_flow = minimum_outer_flow_mm3_per_mm(baseline);
+    REQUIRE(baseline_evidence.roles[outer].moves > 0);
+    REQUIRE(baseline_evidence.roles[outer].feedrate > 0.0);
+
+    const MatrixCase cap_case{
+        "filament_max_volumetric_speed", coFloats, Signal::outer_feedrate, { 1.5, 20.0 }
+    };
+    for (const double value : cap_case.values) {
+        CAPTURE(value);
+        DynamicPrintConfig changed = baseline;
+        set_registry_value(changed, cap_case, value);
+        REQUIRE(changed.option(cap_case.key)->serialize() != baseline.option(cap_case.key)->serialize());
+
+        const Evidence fresh = fresh_evidence(changed);
+        INFO("baseline evidence: " + evidence_summary(baseline_evidence));
+        INFO("fresh evidence: " + evidence_summary(fresh));
+        require_same_geometry(baseline_evidence, fresh);
+        require_same_material(baseline_evidence, fresh);
+        require_incremental_equivalence(baseline, changed, fresh);
+        const double cap_bound = outer_feedrate_cap_bound(value, 1.0, minimum_outer_flow);
+        CHECK(fresh.roles[outer].feedrate <= cap_bound + 1e-3);
+
+        if (value < 8.0)
+            CHECK(fresh.roles[outer].feedrate < baseline_evidence.roles[outer].feedrate);
+        else
+            CHECK(fresh.roles[outer].feedrate > baseline_evidence.roles[outer].feedrate);
     }
 }

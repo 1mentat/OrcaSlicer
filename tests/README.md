@@ -148,6 +148,12 @@ applying the same changed setting. It checks separate geometry and parsed
 G-code evidence, deposited material, feature feedrates, and acceleration
 states. Its speed/width/flow partitions have explicit companion settings so
 cooling or volumetric limits cannot silently mask the tested effect.
+`[FilamentFlowVariance]` and `[FilamentMaxVolumetricSpeed]` check deposited
+material and volumetric feedrate limits, including fresh/incremental agreement.
+`[LayerGeometrySettings]` checks initial height, independent shell thicknesses,
+and both registered surface-density bounds through emitted extrusion roles.
+`[GCodeTravelPointReachable]` checks the six toolchange route placeholders
+against bounded obstacle geometry and configured endpoints.
 `[ValidationContracts]` exercises rejected configurations and warning gates;
 that evidence is declared separately from sliced-output coverage.
 
