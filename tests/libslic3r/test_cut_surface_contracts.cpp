@@ -256,6 +256,39 @@ Emboss::OrthoProject cube_projection(float depth = 30.f)
 
 } // namespace
 
+TEST_CASE("its_cut_AoI preserves selection under projection reflection", "[CutSurface][CutSurfaceExtended]")
+{
+    const indexed_triangle_set input = aoi_fixture();
+    const BoundingBox query(Point {0, 0}, Point {5, 5});
+    const indexed_triangle_set forward = its_cut_AoI(input, query, Emboss::ProjectZ(5.0));
+    const indexed_triangle_set reflected = its_cut_AoI(input, query, Emboss::ProjectZ(-5.0));
+
+    REQUIRE(forward.indices.size() == 2);
+    REQUIRE(reflected.indices.size() == forward.indices.size());
+    REQUIRE(reflected.vertices.size() == forward.vertices.size());
+    for (size_t i = 0; i < forward.indices.size(); ++i) {
+        CHECK(reflected.indices[i] == forward.indices[i]);
+    }
+    for (size_t i = 0; i < forward.vertices.size(); ++i)
+        CHECK(reflected.vertices[i].isApprox(forward.vertices[i]));
+    check_mesh_indices(reflected);
+}
+
+TEST_CASE("its_cut_AoI keeps triangles lying on the projected boundary", "[CutSurface][CutSurfaceExtended]")
+{
+    const indexed_triangle_set input = {
+        {{0, 1, 2}},
+        {stl_vertex(0.f, 1.f, 0.f), stl_vertex(0.f, 4.f, 0.f), stl_vertex(0.f, 1.f, 1.f)}};
+    const indexed_triangle_set selected = its_cut_AoI(
+        input, BoundingBox(Point {0, 0}, Point {3, 5}), Emboss::ProjectZ(5.0));
+
+    REQUIRE(selected.indices.size() == 1);
+    REQUIRE(selected.vertices.size() == 3);
+    check_mesh_indices(selected);
+    for (const Vec3f &vertex : selected.vertices)
+        CHECK_THAT(vertex.x(), WithinAbs(0., 1e-6));
+}
+
 TEST_CASE("its_mask keeps all selected faces and preserves volume", "[CutSurface][CutSurfaceExtended]")
 {
     const indexed_triangle_set input = its_make_cube(10., 20., 30.);
