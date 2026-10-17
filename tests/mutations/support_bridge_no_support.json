@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Normal support bridge suppression preserves cantilever support.",
+  "mutants": [
+    {
+      "id": "support-bridge-no-support-gate-disabled",
+      "path": "src/libslic3r/Support/SupportMaterial.cpp",
+      "old": "            if (bridge_no_support) {\n                //FIXME Expensive, potentially not precise enough. Misses gap fill extrusions, which bridge.",
+      "new": "            if (bridge_no_support && false) {\n                //FIXME Expensive, potentially not precise enough. Misses gap fill extrusions, which bridge.",
+      "description": "Disable the active normal-support bridge-contact removal call; the true two-sided bridge window should regain support while the one-sided cantilever control remains supported.",
+      "test_filter": "BridgeNoSupport"
+    },
+    {
+      "id": "support-bridge-no-support-gate-inverted",
+      "path": "src/libslic3r/Support/SupportMaterial.cpp",
+      "old": "    const bool bridge_no_support = object_config.bridge_no_support.value;",
+      "new": "    const bool bridge_no_support = ! object_config.bridge_no_support.value;",
+      "description": "Invert the public bridge_no_support gate; the paired false/true process rows should reject the swapped bridge-area behavior.",
+      "test_filter": "BridgeNoSupport"
+    }
+  ]
+}

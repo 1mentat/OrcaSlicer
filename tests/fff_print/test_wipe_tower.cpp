@@ -928,7 +928,7 @@ TEST_CASE("WipeTower2 SEMM estimate averages row maxima and scales by filament c
     CHECK_THAT(WipeTower2::estimate_semm_flush_volume(config, 0), WithinAbs(0.f, 1e-6f));
 }
 
-TEST_CASE("WipeTower2 gap walls are disabled for cone walls", "[WipeTower][WipeTowerExtended]")
+TEST_CASE("WipeTower2 gap walls are disabled for cone walls", "[WipeTower][WipeTowerExtended][WipeTowerGapWall]")
 {
     FullPrintConfig config;
     config.prime_tower_skip_points.value = true;
@@ -939,6 +939,11 @@ TEST_CASE("WipeTower2 gap walls are disabled for cone walls", "[WipeTower][WipeT
     config.wipe_tower_wall_type.value = WipeTowerWallType::wtwCone;
     CHECK_FALSE(WipeTower2::use_gap_wall(config));
     config.prime_tower_skip_points.value = false;
+    config.wipe_tower_wall_type.value = WipeTowerWallType::wtwRectangle;
+    CHECK_FALSE(WipeTower2::use_gap_wall(config));
+    config.wipe_tower_wall_type.value = WipeTowerWallType::wtwRib;
+    CHECK_FALSE(WipeTower2::use_gap_wall(config));
+    config.wipe_tower_wall_type.value = WipeTowerWallType::wtwCone;
     CHECK_FALSE(WipeTower2::use_gap_wall(config));
 }
 
@@ -1280,6 +1285,150 @@ TEST_CASE("Legacy WipeTower separates same-extruder nozzle changes from extruder
     CHECK_THAT(nozzle.depth - extruder.depth, WithinAbs(8.f * 1.25f, 1e-4f));
 }
 
+
+namespace {
+
+struct PrimeTowerSettingRun {
+    std::vector<std::vector<WipeTower::ToolChangeResult>> layers;
+    std::vector<double> layer_extrusion;
+    std::vector<float> layer_positive_y_span;
+    std::string gcode;
+    std::size_t travel_moves = 0;
+    std::size_t extrusion_moves = 0;
+    float depth = 0.f;
+    float height = 0.f;
+};
+
+FullPrintConfig prime_tower_setting_config(bool framework, bool flat_ironing, bool gap_wall,
+                                           float ironing_area = 16.f)
+{
+    FullPrintConfig config = legacy_config();
+    config.prime_tower_enable_framework.value = framework;
+    config.prime_tower_flat_ironing.value = flat_ironing;
+    config.prime_tower_skip_points.value = gap_wall;
+    config.filament_tower_ironing_area.values.assign(2, ironing_area);
+    config.filament_adhesiveness_category.values.assign(2, 0);
+    return config;
+}
+
+PrimeTowerSettingRun run_prime_tower_settings(
+    const std::vector<std::tuple<float, float, unsigned int, unsigned int, float>> &plan,
+    bool framework, bool flat_ironing, bool gap_wall, float ironing_area = 16.f)
+{
+    const FullPrintConfig config = prime_tower_setting_config(framework, flat_ironing, gap_wall, ironing_area);
+    const auto group = group_for_two_filaments(false);
+    REQUIRE(group.has_value());
+
+    WipeTower tower(config, 0, Vec3d::Zero(), 0, 8.f, {0, 1});
+    tower.set_nozzle_group_result(*group);
+    tower.set_used_filament_ids({0, 1});
+    tower.set_filament_categories({0, 0});
+    tower.set_extruder(0, config);
+    tower.set_extruder(1, config);
+    for (const auto &[z, height, old_tool, new_tool, purge] : plan)
+        tower.plan_toolchange(z, height, old_tool, new_tool, purge, purge, purge);
+
+    PrimeTowerSettingRun result;
+    tower.generate_new(result.layers);
+    result.depth = tower.get_depth();
+    result.height = tower.get_height();
+    result.layer_extrusion.reserve(result.layers.size());
+    result.layer_positive_y_span.reserve(result.layers.size());
+    for (const auto &layer : result.layers) {
+        double length = 0.;
+        float min_y = std::numeric_limits<float>::infinity();
+        float max_y = -std::numeric_limits<float>::infinity();
+        for (const auto &change : layer) {
+            result.gcode += change.gcode;
+            for (size_t i = 1; i < change.extrusions.size(); ++i) {
+                if (change.extrusions[i].width > 0.f) {
+                    length += (change.extrusions[i].pos - change.extrusions[i - 1].pos).norm();
+                    min_y = std::min({min_y, change.extrusions[i - 1].pos.y(), change.extrusions[i].pos.y()});
+                    max_y = std::max({max_y, change.extrusions[i - 1].pos.y(), change.extrusions[i].pos.y()});
+                }
+            }
+        }
+        result.layer_extrusion.push_back(length);
+        result.layer_positive_y_span.push_back(max_y - min_y);
+    }
+
+    GCodeReader parser;
+    parser.parse_buffer(result.gcode, [&result](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("G1") || (!line.has_x() && !line.has_y()))
+            return;
+        if (line.has_e())
+            ++result.extrusion_moves;
+        else
+            ++result.travel_moves;
+    });
+    return result;
+}
+
+void require_prime_tower_run(const PrimeTowerSettingRun &run, std::size_t expected_layers)
+{
+    REQUIRE(run.layers.size() == expected_layers);
+    REQUIRE(run.layer_extrusion.size() == expected_layers);
+    REQUIRE(run.layer_positive_y_span.size() == expected_layers);
+    REQUIRE_FALSE(run.gcode.empty());
+    REQUIRE(run.travel_moves > 0);
+    REQUIRE(run.extrusion_moves > 0);
+    CHECK(std::isfinite(double(run.depth)));
+    CHECK(std::isfinite(double(run.height)));
+    CHECK(run.depth > 0.f);
+    CHECK(run.height > 0.f);
+    for (const auto &layer : run.layer_extrusion) {
+        CHECK(std::isfinite(layer));
+        CHECK(layer > 0.);
+    }
+    for (const float span : run.layer_positive_y_span) {
+        CHECK(std::isfinite(double(span)));
+        CHECK(span > 0.f);
+    }
+}
+
+} // namespace
+
+TEST_CASE("Prime tower framework keeps later direct layers at the first purge depth", "[WipeTower][PrimeTowerFramework]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 160.f},
+        {0.4f, 0.2f, 1, 0, 20.f},
+        {0.6f, 0.2f, 0, 1, 20.f},
+    };
+    const PrimeTowerSettingRun disabled = run_prime_tower_settings(plan, false, false, false);
+    const PrimeTowerSettingRun enabled = run_prime_tower_settings(plan, true, false, false);
+    require_prime_tower_run(disabled, 3);
+    require_prime_tower_run(enabled, 3);
+
+    CHECK_THAT(enabled.depth, WithinAbs(disabled.depth, 1e-4f));
+    CHECK_THAT(enabled.height, WithinAbs(disabled.height, 1e-4f));
+    CHECK(enabled.layer_extrusion[1] > disabled.layer_extrusion[1] + 0.5);
+    CHECK(enabled.layer_extrusion[2] > disabled.layer_extrusion[2] + 0.5);
+    CHECK(enabled.layer_positive_y_span[1] > disabled.layer_positive_y_span[1] + 0.5f);
+    CHECK(enabled.layer_positive_y_span[2] > disabled.layer_positive_y_span[2] + 0.5f);
+    CHECK_THAT(enabled.layer_positive_y_span[1], WithinAbs(enabled.layer_positive_y_span[0], 0.5f));
+    CHECK_THAT(enabled.layer_positive_y_span[2], WithinAbs(enabled.layer_positive_y_span[0], 0.5f));
+}
+
+TEST_CASE("Prime tower flat ironing adds area dependent travel after the gap wall", "[WipeTower][PrimeTowerFlatIroning]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f},
+    };
+    const PrimeTowerSettingRun disabled = run_prime_tower_settings(plan, false, false, true);
+    const PrimeTowerSettingRun small_area = run_prime_tower_settings(plan, false, true, true, 4.f);
+    const PrimeTowerSettingRun large_area = run_prime_tower_settings(plan, false, true, true, 16.f);
+    require_prime_tower_run(disabled, 1);
+    require_prime_tower_run(small_area, 1);
+    require_prime_tower_run(large_area, 1);
+
+    CHECK(small_area.travel_moves > disabled.travel_moves);
+    CHECK(large_area.travel_moves > small_area.travel_moves);
+    CHECK(small_area.extrusion_moves == disabled.extrusion_moves);
+    CHECK(large_area.extrusion_moves == disabled.extrusion_moves);
+    CHECK(small_area.layer_extrusion.front() > 0.);
+    CHECK(large_area.layer_extrusion.front() > 0.);
+}
 
 } // namespace legacy_tower_direct_contracts
 

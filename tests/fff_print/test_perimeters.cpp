@@ -565,7 +565,7 @@ std::string layer_gcode(const std::string &gcode, double print_z)
 // Whatever the wall order asks for, a loop with nothing under it cannot be extruded before the loops it
 // leans on. The flared cone gives every layer an outer wall that lands completely off the one below, and
 // the outer wall first sequence would otherwise put it down before any of them.
-TEST_CASE("Unsupported wall loops are extruded after the walls that anchor them", "[Perimeters]")
+TEST_CASE("Unsupported wall loops are extruded after the walls that anchor them", "[Perimeters][UnsupportedWallOrdering]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
     CAPTURE(wall_generator);
@@ -604,7 +604,7 @@ TEST_CASE("Unsupported wall loops are extruded after the walls that anchor them"
 // A loop the walls cannot reach is a different case: only the bridges of its own layer will ever hold it,
 // so it has to wait for them - while a loop that runs alongside a wall keeps its place, because the
 // bridges anchor on it instead.
-TEST_CASE("A wall loop out of reach of the layer below waits for the infill", "[Perimeters]")
+TEST_CASE("A wall loop out of reach of the layer below waits for the infill", "[Perimeters][UnsupportedWallOrdering]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
     CAPTURE(wall_generator);
@@ -640,7 +640,7 @@ TEST_CASE("A wall loop out of reach of the layer below waits for the infill", "[
 // The held back loops reach the G-code in a second pass, after the infill of their layer: on the layer
 // that closes the cavity the walls of the hole are extruded once the bridge is down, so the layer emits
 // perimeters, then infill, then the perimeters that were waiting for it.
-TEST_CASE("Loops waiting for the infill are extruded after it", "[Perimeters]")
+TEST_CASE("Loops waiting for the infill are extruded after it", "[Perimeters][UnsupportedWallOrdering]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
     CAPTURE(wall_generator);

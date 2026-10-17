@@ -3263,6 +3263,85 @@
         "pipeline_oracle"
       ],
       "reason": "Zigzag and crosszag slices compare disabled and enabled infill on an asymmetric L against an independently reflected mirrored-L control. Positive per-layer infill polylines change to match the reflected control while object bounds, slice area, and perimeters remain unchanged. Locked-zag interactions are not claimed."
+    },
+    "unsupported_wall_last": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[UnsupportedWallOrdering]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Classic and Arachne fixtures compare disabled/enabled ordering with positive unsupported loops. Anchored stacks place unsupported loops last and innermost first; isolated hole loops wait for infill, while loops beside supported walls do not. Parsed layer G-code verifies perimeter/infill/perimeter ordering only when enabled."
+    },
+    "belt_frame_tilt_decouple": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeFrame]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Paired exports of one sliced belt object compare coupled 30-degree slicing and enabled 45-degree machine frames. Every remapped extrusion endpoint matches an independent trigonometric transform, with equal point counts and a positive changed-coordinate witness."
+    },
+    "wipe_tower_sparse_layers_combination": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTower]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Disabled/enabled real Print fixtures compare 0.1 mm sparse layers under a 0.32 mm nozzle cap: the enabled run folds layers into 0.3 mm output while preserving total printed height. A 0.2/0.32 no-fold control and 0.2/0.42 emitted height tags check whole-layer limits and G-code metadata."
+    },
+    "prime_volume": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Real two-filament Print runs compare 35 and 120 cubic millimeters of prime volume. Positive transition counts and emitted extrusion are required; the larger value increases extrusion while retaining transition count, pairs and tools. Full numeric bounds are not claimed."
+    },
+    "bridge_no_support": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[BridgeNoSupport]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Normal-support Print runs compare a two-sided bridge with a one-sided cantilever. Positive bridge-classified model surfaces and support paths are required; enabling bridge suppression reduces support area in the bridge window while retaining positive cantilever support. Tree max_bridge_length behavior is separate."
+    },
+    "prime_tower_enable_framework": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[PrimeTowerFramework]",
+      "dimensions": [
+        "boolean_values"
+      ],
+      "reason": "Direct legacy WipeTower generation compares disabled/enabled framework with one large first purge and two smaller later purges. Enabled later-layer positive extrusion spans stay near the first depth and exceed disabled spans. Print wiring and Type2 behavior are not exercised."
+    },
+    "prime_tower_flat_ironing": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[PrimeTowerFlatIroning]",
+      "dimensions": [
+        "boolean_values"
+      ],
+      "reason": "Direct legacy WipeTower generation compares disabled ironing with enabled 4 and 16 square millimeter areas. Parsed non-extruding XY command counts increase with enabled ironing while extrusion command counts stay unchanged. Print wiring and Type2 behavior are not exercised."
+    },
+    "filament_tower_ironing_area": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[PrimeTowerFlatIroning]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Direct legacy WipeTower generation compares 4 and 16 square millimeter ironing areas with the gate enabled. The larger area increases parsed non-extruding XY travel commands while retaining positive extrusion and the same extrusion command count. Numeric bounds and Print wiring are not exercised."
+    },
+    "prime_tower_skip_points": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerGapWall]",
+      "dimensions": [
+        "boolean_values",
+        "interaction_matrix"
+      ],
+      "reason": "The public WipeTower2 gap-wall helper compares both skip-points values for rectangle, rib, and cone walls. Rectangle and rib permit gap walls only when enabled; cone walls reject them in both rows. Print output is not exercised by this direct contract."
     }
   }
 }

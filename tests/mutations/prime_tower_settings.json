@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Direct tower geometry and travel contracts for framework, flat ironing, and gap-wall skip points.",
+  "mutants": [
+    {
+      "id": "prime-tower-framework-gate-inverted",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "if (m_tower_framework) {",
+      "new": "if (!m_tower_framework) {",
+      "description": "Inverting the framework gate makes the disabled control copy the first-layer depth and makes the enabled run retain varying purge-depth geometry.",
+      "test_filter": "PrimeTowerFramework"
+    },
+    {
+      "id": "prime-tower-framework-first-depth-copy-removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "                block.layer_depths[layer_id] = block.layer_depths[0];",
+      "new": "                block.layer_depths[layer_id] = block.layer_depths[layer_id];",
+      "description": "Removing framework first-layer depth propagation leaves later direct layers at their varying planned depths.",
+      "test_filter": "PrimeTowerFramework"
+    },
+    {
+      "id": "prime-tower-flat-ironing-constructor-gate-disabled",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "    m_flat_ironing = (m_flat_ironing && m_use_gap_wall);",
+      "new": "    m_flat_ironing = false;",
+      "description": "Disabling the unique constructor gate removes flat-ironing travel from the enabled direct-generator case while retaining ordinary gap-wall line ironing.",
+      "test_filter": "PrimeTowerFlatIroning"
+    },
+    {
+      "id": "wipe-tower-gap-wall-skip-points-dropped",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    return config.prime_tower_skip_points.value && config.wipe_tower_wall_type.value != wtwCone;",
+      "new": "    return config.wipe_tower_wall_type.value != wtwCone;",
+      "description": "Dropping the skip-points condition incorrectly enables gap walls for rectangle and rib controls when skip points are disabled; the cone negative control remains false.",
+      "test_filter": "WipeTowerGapWall"
+    }
+  ]
+}

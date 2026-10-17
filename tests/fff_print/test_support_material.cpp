@@ -1,4 +1,7 @@
 #include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Surface.hpp"
+#include "libslic3r/SurfaceCollection.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Point.hpp"
 #include <initializer_list>
@@ -2019,3 +2022,191 @@ TEST_CASE("Independent support layer height preserves a non-grid top Z gap",
 } // namespace independent_support_layer_height_contracts
 
 } // namespace support_settings_variance_contracts
+
+namespace support_bridge_no_support_contracts {
+
+struct BridgeSupportEvidence {
+    double bridge_area_mm2 = 0.0;
+    double cantilever_area_mm2 = 0.0;
+    double total_area_mm2 = 0.0;
+    double bridge_surface_area_mm2 = 0.0;
+    double support_path_length_mm = 0.0;
+    size_t support_layers = 0;
+    size_t bridge_surface_count = 0;
+    size_t support_path_count = 0;
+    bool bridge_surface_angles_valid = true;
+    bool finite = true;
+};
+
+// Two disconnected roof slabs keep the oracle local: the first spans two 4 mm pillars
+// (x=4..16 is a genuine two-sided bridge), while the second extends past one 4 mm pillar
+// and is therefore a non-bridge support control. Both slabs are at the same height.
+static TriangleMesh bridge_and_cantilever_fixture()
+{
+    TriangleMesh result = make_cube(4.0, 8.0, 4.0); // left bridge pillar
+    TriangleMesh right_pillar = make_cube(4.0, 8.0, 4.0);
+    right_pillar.translate(16.0, 0.0, 0.0);
+    result.merge(right_pillar);
+
+    TriangleMesh bridge_roof = make_cube(20.0, 8.0, 0.4);
+    bridge_roof.translate(0.0, 0.0, 4.0);
+    result.merge(bridge_roof);
+
+    TriangleMesh cantilever_pillar = make_cube(4.0, 8.0, 4.0);
+    cantilever_pillar.translate(26.0, 0.0, 0.0);
+    result.merge(cantilever_pillar);
+    TriangleMesh cantilever_roof = make_cube(12.0, 8.0, 0.4);
+    cantilever_roof.translate(26.0, 0.0, 4.0);
+    result.merge(cantilever_roof);
+    return result;
+}
+
+static ExPolygon model_rectangle(double x0, double y0, double x1, double y1, const Point &center_offset)
+{
+    return ExPolygon({ Point::new_scale(x0, y0) - center_offset,
+                       Point::new_scale(x1, y0) - center_offset,
+                       Point::new_scale(x1, y1) - center_offset,
+                       Point::new_scale(x0, y1) - center_offset });
+}
+
+static double polygons_area_mm2(const ExPolygons &polygons)
+{
+    double area = 0.0;
+    for (const ExPolygon &polygon : polygons)
+        area += std::abs(polygon.area());
+    return unscale<double>(unscale<double>(area));
+}
+
+static BridgeSupportEvidence process_bridge_fixture(bool bridge_no_support)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", 1},
+        {"support_type", "normal(auto)"},
+        {"support_style", "default"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", "0.4"},
+        {"line_width", 0.42},
+        {"outer_wall_line_width", 0.42},
+        {"inner_wall_line_width", 0.42},
+        {"wall_generator", "classic"},
+        {"detect_overhang_wall", 1},
+        {"support_threshold_angle", 0},
+        {"support_threshold_overlap", 0.0},
+        {"support_on_build_plate_only", 1},
+        {"support_object_xy_distance", 0.35},
+        {"support_top_z_distance", 0.2},
+        {"support_bottom_z_distance", 0.2},
+        {"support_interface_top_layers", 0},
+        {"support_interface_bottom_layers", 0},
+        {"support_remove_small_overhang", 0},
+        {"support_expansion", 0.0},
+        {"support_critical_regions_only", 0},
+        {"bridge_no_support", bridge_no_support},
+        // max_bridge_length belongs to the tree-support path; keep it neutral here so this
+        // normal-support test isolates bridge_no_support.
+        {"max_bridge_length", 0.0},
+        {"wall_loops", 2},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"sparse_infill_density", "0%"},
+        {"skirt_loops", 0},
+        {"brim_width", 0.0},
+        {"raft_layers", 0},
+        {"gcode_flavor", "marlin"},
+        {"use_relative_e_distances", 1},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"enable_prime_tower", 0},
+        {"z_hop", 0.0}
+    });
+
+    Print print;
+    Model model;
+    init_print({bridge_and_cantilever_fixture()}, print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE(print.objects().size() == 1);
+    print.process();
+
+    const PrintObject &object = *print.objects().front();
+    BridgeSupportEvidence out;
+    out.support_layers = object.support_layers().size();
+    REQUIRE(out.support_layers > 0);
+
+    // Slice coordinates are centered by PrintObject; convert the model-space bridge and
+    // cantilever windows with the public center offset before clipping support islands.
+    const Point &center_offset = object.center_offset();
+    const ExPolygon bridge_window = model_rectangle(4.5, 1.0, 15.5, 7.0, center_offset);
+    const ExPolygon cantilever_window = model_rectangle(30.5, 1.0, 37.5, 7.0, center_offset);
+
+    // stBottomBridge belongs to model LayerRegion fill surfaces, not SupportLayer regions.
+    // Scan the processed object layers independently from support-island evidence.
+    for (const Layer *layer : object.layers()) {
+        for (const LayerRegion *region : layer->regions()) {
+            for (const Surface &surface : region->fill_surfaces.surfaces) {
+                if (surface.surface_type != stBottomBridge)
+                    continue;
+                const double clipped = polygons_area_mm2(intersection_ex(surface.expolygon, bridge_window));
+                if (clipped <= 0.0)
+                    continue;
+                ++out.bridge_surface_count;
+                out.bridge_surface_area_mm2 += clipped;
+                out.bridge_surface_angles_valid = out.bridge_surface_angles_valid &&
+                    std::isfinite(surface.bridge_angle) && surface.bridge_angle >= 0.0;
+            }
+        }
+    }
+
+    for (const SupportLayer *layer : object.support_layers()) {
+        const double total = polygons_area_mm2(layer->support_islands);
+        const double bridge = polygons_area_mm2(intersection_ex(layer->support_islands, bridge_window));
+        const double cantilever = polygons_area_mm2(intersection_ex(layer->support_islands, cantilever_window));
+        out.total_area_mm2 += total;
+        out.bridge_area_mm2 += bridge;
+        out.cantilever_area_mm2 += cantilever;
+        out.finite = out.finite && std::isfinite(total) && std::isfinite(bridge) && std::isfinite(cantilever);
+
+        for_each_extrusion_path(layer->support_fills, [&out](const ExtrusionPath &path) {
+            if (path.role() != erSupportMaterial && path.role() != erSupportMaterialInterface)
+                return;
+            ++out.support_path_count;
+            out.finite = out.finite && std::isfinite(path.mm3_per_mm) && path.mm3_per_mm > 0.0;
+            for (size_t i = 1; i < path.polyline.points.size(); ++i) {
+                const Point3 &a = path.polyline.points[i - 1];
+                const Point3 &b = path.polyline.points[i];
+                const double dx = unscale<double>(static_cast<double>(b.x()) - static_cast<double>(a.x()));
+                const double dy = unscale<double>(static_cast<double>(b.y()) - static_cast<double>(a.y()));
+                const double length = std::hypot(dx, dy);
+                out.finite = out.finite && std::isfinite(dx) && std::isfinite(dy) && std::isfinite(length);
+                if (std::isfinite(length))
+                    out.support_path_length_mm += length;
+            }
+        });
+    }
+    return out;
+}
+
+} // namespace support_bridge_no_support_contracts
+
+TEST_CASE("Bridge suppression reduces bridge support while retaining cantilever support",
+          "[BridgeNoSupport][SupportMaterial]")
+{
+    const auto with_bridge_support = support_bridge_no_support_contracts::process_bridge_fixture(false);
+    const auto without_bridge_support = support_bridge_no_support_contracts::process_bridge_fixture(true);
+    REQUIRE(with_bridge_support.finite);
+    REQUIRE(without_bridge_support.finite);
+    REQUIRE(with_bridge_support.total_area_mm2 > 0.0);
+    REQUIRE(without_bridge_support.total_area_mm2 > 0.0);
+    REQUIRE(with_bridge_support.bridge_surface_count > 0);
+    REQUIRE(with_bridge_support.bridge_surface_area_mm2 > 1.0);
+    REQUIRE(with_bridge_support.bridge_surface_angles_valid);
+    REQUIRE(with_bridge_support.support_path_count > 0);
+    REQUIRE(with_bridge_support.support_path_length_mm > 1.0);
+    REQUIRE(without_bridge_support.support_path_count > 0);
+    REQUIRE(without_bridge_support.support_path_length_mm > 1.0);
+    REQUIRE(with_bridge_support.bridge_area_mm2 > 1.0);
+    REQUIRE(with_bridge_support.cantilever_area_mm2 > 1.0);
+    REQUIRE(without_bridge_support.cantilever_area_mm2 > 1.0);
+    CHECK(with_bridge_support.bridge_area_mm2 > without_bridge_support.bridge_area_mm2 + 1.0);
