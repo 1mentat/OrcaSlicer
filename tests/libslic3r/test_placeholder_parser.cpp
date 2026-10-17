@@ -546,3 +546,27 @@ TEST_CASE("Placeholder output vector writes preserve untouched elements and reje
         Catch::Matchers::ContainsSubstring("Right side is not a numeric expression"));
     check_percent_values(nonnumeric, { 10., 20., 30. });
 }
+
+TEST_CASE("Placeholder parser uses the external filament map for vector access",
+          "[PlaceholderParser][PlaceholderParserMapping]")
+{
+    DynamicPrintConfig stored = DynamicPrintConfig::full_print_config();
+    auto *outer_wall_speed = stored.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(outer_wall_speed != nullptr);
+    outer_wall_speed->values = { 60., 70., 80. };
+
+    DynamicPrintConfig external = DynamicPrintConfig::full_print_config();
+    auto *filament_map = external.option<ConfigOptionInts>("filament_map");
+    REQUIRE(filament_map != nullptr);
+    // Requests 0 and 1 resolve to distinct nonzero stored slots 1 and 2.
+    // Thus both the mapping branch and its last-slot bound are observable;
+    // the fallback 0 cannot accidentally satisfy either row.
+    filament_map->values = { 1, 2 };
+
+    PlaceholderParser parser(&external);
+    REQUIRE(parser.apply_config(stored));
+    const std::string mapped_first = parser.process("{outer_wall_speed}", 0);
+    const std::string mapped_last = parser.process("{outer_wall_speed}", 1);
+    CHECK(mapped_first == "70");
+    CHECK(mapped_last == "80");
+}

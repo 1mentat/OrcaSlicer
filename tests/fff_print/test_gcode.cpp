@@ -6182,3 +6182,133 @@ TEST_CASE("G1 transformation preserves the position of repeated untagged moves",
 }
 
 } // namespace transform_gcode_contracts
+namespace gcode_resonance_contracts {
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace {
+
+struct OuterWallFeeds {
+    std::array<std::vector<double>, 6> by_layer;
+    size_t layer_changes = 0;
+    bool finite = true;
+};
+
+std::string export_resonance_cube(const DynamicPrintConfig &config)
+{
+    Model model;
+    Print print;
+    init_print({make_cube(12.0, 12.0, 1.2)}, print, model, config);
+    const auto validation = print.validate();
+    INFO("Print validation error: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    return output;
+}
+
+OuterWallFeeds parse_later_outer_wall_feeds(const std::string &text, const DynamicPrintConfig &config)
+{
+    OuterWallFeeds result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    int layer = -1;
+    bool outer_wall = false;
+    reader.parse_buffer(text, [&result, &layer, &outer_wall](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("LAYER_CHANGE") != std::string_view::npos) {
+            ++layer;
+            ++result.layer_changes;
+            outer_wall = false;
+        }
+        if (comment.rfind("TYPE:", 0) == 0)
+            outer_wall = comment == "TYPE:Outer wall";
+        if (layer < 1 || layer >= 6 || !outer_wall || !line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        const double feed = double(line.new_F(self));
+        if (!std::isfinite(feed) || feed <= 0.)
+            result.finite = false;
+        else
+            result.by_layer[static_cast<size_t>(layer)].push_back(feed);
+    });
+    return result;
+}
+
+void check_resonance_row(double requested, double expected, bool enabled)
+{
+    DynamicPrintConfig config = gcode_broad_contracts::base_config();
+    config.set_deserialize_strict({
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+        {"outer_wall_speed", requested},
+        {"initial_layer_speed", 5.0},
+        {"initial_layer_infill_speed", 5.0},
+        {"slow_down_layers", 0},
+        {"slow_down_for_layer_cooling", false},
+        {"slow_down_layer_time", 0.0},
+        {"slow_down_min_speed", 1.0},
+        {"fan_cooling_layer_time", 0.0},
+        {"small_perimeter_speed", "0"},
+        {"small_perimeter_threshold", 0.0},
+        {"small_support_perimeter_speed", "0"},
+        {"small_support_perimeter_threshold", 0.0},
+        {"slowdown_for_curled_perimeters", false},
+        {"enable_overhang_speed", false},
+        {"filament_max_volumetric_speed", "1000"},
+        {"filament_adaptive_volumetric_speed", false},
+        {"resonance_avoidance", enabled},
+        {"min_resonance_avoidance_speed", 30.0},
+        {"max_resonance_avoidance_speed", 60.0},
+    });
+
+    const std::string output = export_resonance_cube(config);
+    const OuterWallFeeds feeds = parse_later_outer_wall_feeds(output, config);
+    REQUIRE(feeds.layer_changes == 6);
+    REQUIRE(feeds.finite);
+    for (size_t layer = 1; layer < feeds.by_layer.size(); ++layer) {
+        INFO("layer=" << layer << " requested_mm_per_s=" << requested);
+        REQUIRE_FALSE(feeds.by_layer[layer].empty());
+        for (const double feed : feeds.by_layer[layer]) {
+            INFO("feed_mm_per_s=" << feed / 60.0);
+            CHECK_THAT(feed, Catch::Matchers::WithinAbs(expected * 60.0, 0.25));
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("Resonance avoidance clamps lower and upper outer-wall speeds",
+          "[GCode][ResonanceAvoidanceGCode]")
+{
+    const auto [requested, expected] = GENERATE(table<double, double>({
+        {40., 30.}, // lower half clamps to the configured minimum.
+        {45., 60.}, // exact midpoint takes the strict upper branch.
+        {50., 60.}, // upper half selects the configured maximum.
+    }));
+    check_resonance_row(requested, expected, true);
+}
+
+TEST_CASE("Resonance avoidance preserves the exact upper bound and bypasses over-band speed",
+          "[GCode][ResonanceAvoidanceGCode]")
+{
+    const auto [requested, expected] = GENERATE(table<double, double>({
+        {60., 60.}, // speed < max is false at the exact upper bound.
+        {80., 80.}, // the source speed above max disables avoidance for this loop.
+    }));
+    check_resonance_row(requested, expected, true);
+}
+
+TEST_CASE("Resonance avoidance is a public feature gate for outer-wall speed",
+          "[GCode][ResonanceAvoidanceGCode]")
+{
+    check_resonance_row(40., 40., false);
+}
+
+} // namespace gcode_resonance_contracts

@@ -41,6 +41,7 @@
 #include "libslic3r/CAD/SketchImport.hpp"
 #include "libslic3r/CAD/ThreadStandards.hpp"
 #include "libslic3r/Utils.hpp"
+#include "test_utils.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -9485,4 +9486,106 @@ TEST_CASE("A hole owns its bore", "[CadDocument][highlight]")
     for (const auto& bf : bore)
         CHECK(made_face_type(doc, bf) == GeomAbs_Cylinder);
     CHECK(doc.faces_made_by(ex).size() == 6);
+}
+
+TEST_CASE("STEP export preserves imported solids and applies per-body rigid transforms", "[CadDocument][CadDocumentStepExport]")
+{
+    const int scenario = GENERATE(0, 1, 2);
+    CAPTURE(scenario);
+
+    const TopoDS_Shape first_shape = BRepPrimAPI_MakeBox(gp_Pnt(0., 0., 0.), 4., 5., 6.).Shape();
+    const TopoDS_Shape second_shape = BRepPrimAPI_MakeBox(gp_Pnt(10., 0., 0.), 2., 3., 4.).Shape();
+    REQUIRE_FALSE(first_shape.IsNull());
+    REQUIRE_FALSE(second_shape.IsNull());
+
+    CadDocument doc;
+    CadFeature first;
+    first.type = CadFeatureType::Import;
+    first.name = "ExportFirst";
+    first.imported_solid = first_shape;
+    doc.features.push_back(first);
+
+    CadFeature second;
+    second.type = CadFeatureType::Import;
+    second.name = "ExportSecond";
+    second.imported_solid = second_shape;
+    doc.features.push_back(second);
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 2);
+
+    std::vector<GeometryEngine::MassProps> source_before;
+    source_before.reserve(doc.bodies.size());
+    for (size_t index = 0; index < doc.bodies.size(); ++index) {
+        const auto props = doc.body_mass_properties(int(index));
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        source_before.push_back(props);
+    }
+
+    std::vector<Transform3d> body_transforms(static_cast<size_t>(scenario), Transform3d::Identity());
+    if (scenario == 1) {
+        body_transforms[0].linear() << 0., -1., 0.,
+                                       1.,  0., 0.,
+                                       0.,  0., 1.;
+        body_transforms[0].translation() = Vec3d(10., 20., 30.);
+    } else if (scenario == 2) {
+        body_transforms[1].translation() = Vec3d(-20., 5., 7.);
+    }
+
+    ScopedTemporaryFile step_file(".step");
+    std::string export_error = "previous operation failed";
+    REQUIRE(doc.export_step(step_file.string(), body_transforms, export_error));
+    CHECK(export_error.empty());
+
+    std::string import_error;
+    const std::vector<TopoDS_Shape> exported_solids =
+        GeometryEngine::read_step_solids(step_file.string(), import_error);
+    CHECK(import_error.empty());
+    REQUIRE(exported_solids.size() == 2);
+
+    std::vector<GeometryEngine::MassProps> exported_props;
+    exported_props.reserve(exported_solids.size());
+    for (const TopoDS_Shape &shape : exported_solids) {
+        REQUIRE_FALSE(shape.IsNull());
+        const auto props = GeometryEngine::mass_properties(shape);
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        REQUIRE(std::isfinite(props.volume));
+        REQUIRE(props.volume > 0.);
+        REQUIRE(std::isfinite(props.center_of_mass.x()));
+        REQUIRE(std::isfinite(props.center_of_mass.y()));
+        REQUIRE(std::isfinite(props.center_of_mass.z()));
+        exported_props.push_back(props);
+    }
+    std::sort(exported_props.begin(), exported_props.end(),
+              [](const auto &left, const auto &right) { return left.volume < right.volume; });
+
+    const std::vector<double> expected_volumes = {24., 120.};
+    const std::vector<Vec3d> expected_centers = scenario == 0
+        ? std::vector<Vec3d>{Vec3d(11., 1.5, 2.), Vec3d(2., 2.5, 3.)}
+        : scenario == 1
+            ? std::vector<Vec3d>{Vec3d(11., 1.5, 2.), Vec3d(7.5, 22., 33.)}
+            : std::vector<Vec3d>{Vec3d(-9., 6.5, 9.), Vec3d(2., 2.5, 3.)};
+
+    REQUIRE(exported_props.size() == expected_volumes.size());
+    REQUIRE(exported_props.size() == expected_centers.size());
+    for (size_t index = 0; index < exported_props.size(); ++index) {
+        CHECK_THAT(exported_props[index].volume, Catch::Matchers::WithinRel(expected_volumes[index], 1e-8));
+        CHECK_THAT(exported_props[index].center_of_mass.x(), Catch::Matchers::WithinAbs(expected_centers[index].x(), 1e-8));
+        CHECK_THAT(exported_props[index].center_of_mass.y(), Catch::Matchers::WithinAbs(expected_centers[index].y(), 1e-8));
+        CHECK_THAT(exported_props[index].center_of_mass.z(), Catch::Matchers::WithinAbs(expected_centers[index].z(), 1e-8));
+    }
+
+    REQUIRE(doc.bodies.size() == source_before.size());
+    for (size_t index = 0; index < source_before.size(); ++index) {
+        const auto after = doc.body_mass_properties(int(index));
+        REQUIRE(after.valid);
+        REQUIRE(after.is_solid);
+        CHECK_THAT(after.volume, Catch::Matchers::WithinRel(source_before[index].volume, 1e-8));
+        CHECK_THAT(after.center_of_mass.x(), Catch::Matchers::WithinAbs(source_before[index].center_of_mass.x(), 1e-8));
+        CHECK_THAT(after.center_of_mass.y(), Catch::Matchers::WithinAbs(source_before[index].center_of_mass.y(), 1e-8));
+        CHECK_THAT(after.center_of_mass.z(), Catch::Matchers::WithinAbs(source_before[index].center_of_mass.z(), 1e-8));
+    }
 }

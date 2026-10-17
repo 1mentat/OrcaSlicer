@@ -11260,3 +11260,90 @@ TEST_CASE("JSON vendor malformed list fields preserve their distinct load outcom
 }
 
 } // namespace preset_bundle_workflow_contracts
+
+namespace preset_extended_contracts {
+
+TEST_CASE("Preset parent save emits nil for inherited filament variants",
+          "[Preset][PresetNullableSave][PresetExtendedVariance]")
+{
+    ScopedTemporaryDir dir("preset-nullable-save");
+    ScopedDataDir data(dir.path() / "data");
+
+    Preset parent(Preset::TYPE_FILAMENT, "Base", false);
+    parent.config = DynamicPrintConfig::full_print_config();
+    auto *parent_flow = parent.config.option<ConfigOptionFloatsNullable>("filament_flow_ratio", true);
+    REQUIRE(parent_flow != nullptr);
+    parent_flow->values = { 0.95, 0.96 };
+    auto *parent_variants = parent.config.option<ConfigOptionStrings>("filament_extruder_variant", true);
+    REQUIRE(parent_variants != nullptr);
+    parent_variants->values = { "Direct Drive Standard", "Direct Drive High Flow" };
+
+    Preset child(Preset::TYPE_FILAMENT, "Child", false);
+    child.config = parent.config;
+    child.inherits() = parent.name;
+    auto *child_flow = child.config.option<ConfigOptionFloatsNullable>("filament_flow_ratio", true);
+    REQUIRE(child_flow != nullptr);
+    child_flow->values = { 0.99, 0.96 };
+    child.file = (dir.path() / "Child.json").string();
+
+    REQUIRE(child.save(&parent.config));
+    REQUIRE(fs::exists(child.file));
+
+    std::string serialized;
+    load_string_file(child.file, serialized);
+    const nlohmann::json saved = nlohmann::json::parse(serialized);
+    REQUIRE(saved.contains("filament_flow_ratio"));
+    const nlohmann::json &saved_flow = saved.at("filament_flow_ratio");
+    REQUIRE(saved_flow.is_array());
+    REQUIRE(saved_flow.size() == 2);
+    REQUIRE(saved_flow.at(0).is_string());
+    REQUIRE(saved_flow.at(1).is_string());
+    CHECK(saved_flow.at(0).get<std::string>() == "0.99");
+    CHECK(saved_flow.at(1).get<std::string>() == "nil");
+
+    // The saved nil marker remains an inherited slot when the public reload path
+    // applies the child delta over its parent.
+    Preset reloaded(Preset::TYPE_FILAMENT, "Child", false);
+    reloaded.file = child.file;
+    reloaded.reload(parent);
+    const auto *reloaded_flow = reloaded.config.option<ConfigOptionFloatsNullable>("filament_flow_ratio");
+    REQUIRE(reloaded_flow != nullptr);
+    REQUIRE(reloaded_flow->values.size() == 2);
+    CHECK_THAT(reloaded_flow->values[0], WithinAbs(0.99, 1e-9));
+    CHECK(reloaded_flow->is_nil(1));
+
+    // Load both entries before taking pointers.  load_preset inserts into the
+    // collection, so obtaining references between insertions would make the
+    // fixture depend on container insertion details.
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    load_local_preset(collection, "Base");
+    load_local_preset(collection, "Child", "Base");
+    Preset *collection_parent = collection.find_preset("Base", false, true);
+    Preset *collection_child = collection.find_preset("Child", false, true);
+    REQUIRE(collection_parent != nullptr);
+    REQUIRE(collection_child != nullptr);
+
+    auto *collection_parent_flow = collection_parent->config.option<ConfigOptionFloatsNullable>("filament_flow_ratio", true);
+    auto *collection_child_flow = collection_child->config.option<ConfigOptionFloatsNullable>("filament_flow_ratio", true);
+    auto *collection_parent_variants = collection_parent->config.option<ConfigOptionStrings>("filament_extruder_variant", true);
+    auto *collection_child_variants = collection_child->config.option<ConfigOptionStrings>("filament_extruder_variant", true);
+    REQUIRE(collection_parent_flow != nullptr);
+    REQUIRE(collection_child_flow != nullptr);
+    REQUIRE(collection_parent_variants != nullptr);
+    REQUIRE(collection_child_variants != nullptr);
+    collection_parent_flow->values = { 0.95, 0.96 };
+    collection_child_flow->values = { 0.99, 0.96 };
+    collection_parent_variants->values = { "Direct Drive Standard", "Direct Drive High Flow" };
+    collection_child_variants->values = { "Direct Drive Standard", "Direct Drive High Flow" };
+
+    std::unique_ptr<Preset> differed(collection.get_preset_differed_for_save(*collection_child));
+    REQUIRE(differed != nullptr);
+    const auto *differed_flow = differed->config.option<ConfigOptionFloatsNullable>("filament_flow_ratio");
+    REQUIRE(differed_flow != nullptr);
+    REQUIRE(differed_flow->values.size() == 2);
+    CHECK_THAT(differed_flow->values[0], WithinAbs(0.99, 1e-9));
+    CHECK(differed_flow->is_nil(1));
+}
+
+} // namespace preset_extended_contracts

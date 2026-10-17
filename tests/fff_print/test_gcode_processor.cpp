@@ -386,6 +386,70 @@ TEST_CASE("M106 P0 is ignored while the print fan and P1 are accepted", "[GCodeP
     CHECK_THAT(extrusions[1]->fan_speed, WithinAbs(100. * 64. / 255., 1e-4));
 }
 
+TEST_CASE("G28 homes only the selected Z axis", "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorModal]")
+{
+    const auto result = process_buffer("G90\nG1 X20 Y30 Z4 F600\nG28 Z\n");
+    const auto travels = moves_of(result, EMoveType::Travel);
+    REQUIRE(!travels.empty());
+    // G28 Z must synthesize a Z-only zero move while preserving the current XY position.
+    CHECK_THAT(travels.back()->position.x(), WithinAbs(20., 1e-4));
+    CHECK_THAT(travels.back()->position.y(), WithinAbs(30., 1e-4));
+    CHECK_THAT(travels.back()->position.z(), WithinAbs(0., 1e-4));
+}
+
+TEST_CASE("M106 without S selects full print fan while auxiliary channels stay isolated",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorFan]")
+{
+    const auto result = process_buffer(
+        "M83\nM106 S32\nM106 P2 S255\nG1 X10 Y0 Z0.2 E1 F600\n"
+        "M106\nG1 X20 Y0 E1 F600\n"
+        "M106 P1 S64\nG1 X30 Y0 E1 F600\n");
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 3);
+    // P2 must not alter the print fan; a missing S means 100%, and P1 is the accepted
+    // Bambu print-fan channel.
+    CHECK_THAT(extrusions[0]->fan_speed, WithinAbs(100. * 32. / 255., 1e-4));
+    CHECK_THAT(extrusions[1]->fan_speed, WithinAbs(100., 1e-4));
+    CHECK_THAT(extrusions[2]->fan_speed, WithinAbs(100. * 64. / 255., 1e-4));
+}
+
+TEST_CASE("Processor reports bed and nozzle compatibility warnings from public motion",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorWarnings]")
+{
+    FullPrintConfig conflict;
+    conflict.filament_diameter.values = {1.75};
+    conflict.filament_map.values = {1};
+    conflict.temperature_vitrification.values = {180};
+    conflict.required_nozzle_HRC.values = {5};
+    conflict.nozzle_hrc.value = 2;
+    const std::string gcode =
+        "M83\nG90\nM140 S170\nM190 S180\nG1 X10 Y0 Z0.2 E1 F600\n";
+    const auto conflict_result = process_buffer(gcode, conflict);
+
+    const auto has_warning = [](const GCodeProcessorResult &result, const std::string &code) {
+        return std::any_of(result.warnings.begin(), result.warnings.end(),
+                           [&](const GCodeProcessorResult::SliceWarning &warning) { return warning.error_code == code; });
+    };
+    REQUIRE(has_warning(conflict_result, "1000C001"));
+    REQUIRE(has_warning(conflict_result, "1000C002"));
+    const auto bed_warning = std::find_if(conflict_result.warnings.begin(), conflict_result.warnings.end(),
+                                          [](const GCodeProcessorResult::SliceWarning &warning) { return warning.error_code == "1000C001"; });
+    const auto hrc_warning = std::find_if(conflict_result.warnings.begin(), conflict_result.warnings.end(),
+                                          [](const GCodeProcessorResult::SliceWarning &warning) { return warning.error_code == "1000C002"; });
+    REQUIRE(bed_warning != conflict_result.warnings.end());
+    REQUIRE(hrc_warning != conflict_result.warnings.end());
+    CHECK(bed_warning->params == std::vector<std::string>{"0"});
+    CHECK(hrc_warning->params == std::vector<std::string>{"0"});
+
+    FullPrintConfig control = conflict;
+    control.temperature_vitrification.values = {180};
+    control.required_nozzle_HRC.values = {2};
+    const auto safe_result = process_buffer(
+        "M83\nG90\nM190 S179\nG1 X10 Y0 Z0.2 E1 F600\n", control);
+    CHECK_FALSE(has_warning(safe_result, "1000C001"));
+    CHECK_FALSE(has_warning(safe_result, "1000C002"));
+}
+
 TEST_CASE("M203 limits the normal feedrate but is ignored for Repetier", "[GCodeProcessor][GCodeProcessorPublic]")
 {
     const auto limited = process_buffer("M83\nM203 X5\nG1 X0 Y0 Z0.2 F1200\nG1 X20 Y0 E1 F1200\n");

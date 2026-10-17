@@ -6426,3 +6426,159 @@ TEST_CASE("BBS import maps scoped color groups and reuses equal colors publicly"
 }
 
 } // namespace bbs_import_color_contracts
+
+namespace bbs_remaining_public_gap_contracts {
+
+using namespace Slic3r;
+using archive_variant_contracts::BbsLoaded;
+using archive_variant_contracts::load_bbs;
+using archive_variant_contracts::make_cube_model;
+
+void store_sliced_archive(const std::string &path, Model &model, DynamicPrintConfig &config,
+                          PlateData &plate, SaveStrategy strategy)
+{
+    ScopedTemporaryDir backup("orca_bbs_remaining_gap_store");
+    model.set_backup_path(backup.string());
+    plate.plate_index = 0;
+    plate.objects_and_instances = {{0, 0}};
+    plate.config = config;
+
+    StoreParams params;
+    params.path = path;
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.strategy = strategy;
+    REQUIRE(store_bbs_3mf(params));
+}
+
+std::string read_slice_info(const std::string &path)
+{
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(path, slice_info, "Metadata/slice_info.config"));
+    return slice_info;
+}
+
+std::map<std::string, std::string> read_model_metadata(const std::string &xml)
+{
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+
+    std::map<std::string, std::string> metadata;
+    const auto model_node = tree.get_child_optional("model");
+    REQUIRE(model_node);
+    for (const auto &node : *model_node) {
+        if (node.first != "metadata")
+            continue;
+        const auto attributes = node.second.get_child_optional("<xmlattr>");
+        REQUIRE(attributes);
+        const auto name = attributes->get_optional<std::string>("name");
+        REQUIRE(name);
+        metadata[*name] = node.second.data();
+    }
+    return metadata;
+}
+
+TEST_CASE("BBS slice metadata labels external-firmware objects with safe names",
+          "[3MF][BbsRemaining][BbsGcodeObjects]")
+{
+    const auto [flavor, expected_name] = GENERATE(table<GCodeFlavor, std::string>({
+        {gcfKlipper,        "Bracket_A_B_id_0_copy_0"},
+        {gcfMarlinLegacy,   "Bracket_A_B_id_0_copy_0"},
+        {gcfMarlinFirmware, "Bracket_A_B_id_0_copy_0"},
+        {gcfRepRapFirmware, "Bracket_A_B_id_0_copy_0"},
+    }));
+
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+
+    Model model = make_cube_model();
+    model.objects.front()->name = "  Bracket [A] @ B  ";
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(flavor));
+
+    PlateData plate;
+    plate.is_sliced_valid = true;
+    ScopedTemporaryFile archive(".3mf");
+    store_sliced_archive(archive.string(), model, config, plate,
+                         SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithSliceInfo);
+
+    const std::string slice_info = read_slice_info(archive.string());
+    const std::string object_name = "name=\"" + expected_name + "\"";
+    CHECK(slice_info.find(object_name) != std::string::npos);
+    CHECK(slice_info.find("identify_id=\"") != std::string::npos);
+}
+
+TEST_CASE("BBS slice metadata keeps raw XML-escaped names for Bambu printers",
+          "[3MF][BbsRemaining][BbsGcodeObjects]")
+{
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = true;
+
+    Model model = make_cube_model();
+    model.objects.front()->name = "Raw & <Label>";
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfMarlinFirmware));
+
+    PlateData plate;
+    plate.is_sliced_valid = true;
+    ScopedTemporaryFile archive(".3mf");
+    store_sliced_archive(archive.string(), model, config, plate,
+                         SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithSliceInfo);
+
+    const std::string slice_info = read_slice_info(archive.string());
+    CHECK(slice_info.find("name=\"Raw &amp; &lt;Label&gt;\"") != std::string::npos);
+    CHECK(slice_info.find("name=\"Raw_Label_id_0_copy_0\"") == std::string::npos);
+}
+
+TEST_CASE("BBS export round-trips XML-sensitive MakerLab and custom metadata",
+          "[3MF][BbsRemaining][BbsMakerLabMetadata]")
+{
+    Model source = make_cube_model();
+    const std::string maker_name = "Maker & <Lab> \"quoted\" 'single' &amp; literal";
+    const std::string maker_version = "maker-7 & <rev> \"quoted\" 'single' &amp; literal";
+    const std::string workflow_value = "prototype & <inside> \"quoted\" 'single' &amp; literal";
+    const std::string revision_value = "rev <7> &amp;";
+    source.mk_name = maker_name;
+    source.mk_version = maker_version;
+    source.md_name = {"MakerWorkflow", "MakerRevision"};
+    source.md_value = {workflow_value, revision_value};
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_sliced_archive(archive.string(), source, config, plate,
+                         SaveStrategy::Zip64 | SaveStrategy::Silence);
+
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+    // Parsing the complete model XML is the serialization contract; this deliberately avoids
+    // asserting indentation or element order while still rejecting malformed entity escaping.
+    const auto serialized_metadata = read_model_metadata(model_xml);
+    REQUIRE(serialized_metadata.find("MakerLab") != serialized_metadata.end());
+    REQUIRE(serialized_metadata.find("MakerLabVersion") != serialized_metadata.end());
+    REQUIRE(serialized_metadata.find("MakerWorkflow") != serialized_metadata.end());
+    REQUIRE(serialized_metadata.find("MakerRevision") != serialized_metadata.end());
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.model_info != nullptr);
+    const auto &loaded_metadata = loaded_model.model_info->metadata_items;
+    const std::array<std::pair<const char *, std::string>, 4> expected_metadata = {{
+        {"MakerLab", maker_name},
+        {"MakerLabVersion", maker_version},
+        {"MakerWorkflow", workflow_value},
+        {"MakerRevision", revision_value},
+    }};
+    for (const auto &[key, expected] : expected_metadata) {
+        const auto found = loaded_metadata.find(key);
+        REQUIRE(found != loaded_metadata.end());
+        CHECK(found->second == expected);
+    }
+}
+
+} // namespace bbs_remaining_public_gap_contracts

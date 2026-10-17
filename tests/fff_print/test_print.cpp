@@ -57,6 +57,8 @@
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/LifecycleEvents.hpp"
+#include "libslic3r/GCode/ThumbnailData.hpp"
+#include <stdexcept>
 
 #include "test_helpers.hpp"
 #include "test_utils.hpp"
@@ -3634,4 +3636,126 @@ TEST_CASE("Print validation enforces mixed filament temperature policy by sequen
         CHECK(validation.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP);
         CHECK_FALSE(validation.is_warning);
     }
+}
+
+TEST_CASE("Failed G-code exports report their outcome and remain retryable",
+          "[Print][LifecycleEvents][GCodeExportFailures]")
+{
+    enum class Failure { TemporaryPathIsDirectory, ThumbnailCallback, DestinationCollision };
+    const Failure failure = GENERATE(Failure::TemporaryPathIsDirectory,
+                                     Failure::ThumbnailCallback,
+                                     Failure::DestinationCollision);
+    CAPTURE(static_cast<int>(failure));
+
+    ScopedTemporaryDir directory("orca-export-failure");
+    const boost::filesystem::path output = directory.path() / "output.gcode";
+    const boost::filesystem::path temporary(output.string() + ".tmp");
+    const boost::filesystem::path sentinel = output / "existing.txt";
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"gcode_flavor", "marlin2"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_support", false},
+        {"enable_prime_tower", false},
+        {"thumbnails", "32x32/PNG"},
+    });
+    Print print;
+    Model model;
+    ModelInfo info;
+    info.model_name = "Export failure fixture";
+    model.model_info = std::make_shared<ModelInfo>(std::move(info));
+    init_print({TriangleMesh(make_cube(5., 5., 0.4))}, print, model, config);
+    REQUIRE_FALSE(print.is_BBL_printer());
+    REQUIRE(print.validate().string.empty());
+    print.process();
+
+    struct Event {
+        LifecycleEvent kind;
+        LifecycleEvtCode code;
+        std::string id;
+        std::string name;
+        std::string message;
+    };
+    std::vector<Event> events;
+    bool inject_failure = true;
+    ScopedLifecycleHook hook([&](LifecycleEvent event, const LifecycleEventContext &context) {
+        if (event != LifecycleEvent::GCodeExportStarted && event != LifecycleEvent::GCodeExportFinished)
+            return;
+        events.push_back({event, context.code, context.id, context.name, context.msg});
+        // output_filepath() has already resolved a file name. Simulate a destination
+        // appearing while the exporter works, without relying on a racing thread.
+        if (event == LifecycleEvent::GCodeExportStarted && inject_failure &&
+            failure == Failure::DestinationCollision) {
+            boost::filesystem::create_directory(output);
+            std::ofstream stream(sentinel.string());
+            stream << "preserve existing destination\n";
+        }
+    });
+    size_t thumbnail_calls = 0;
+    const ThumbnailsGeneratorCallback thumbnails = [&](const ThumbnailsParams &) -> ThumbnailsList {
+        ++thumbnail_calls;
+        if (inject_failure && failure == Failure::ThumbnailCallback)
+            throw std::runtime_error("thumbnail callback failed");
+        return {};
+    };
+    if (failure == Failure::TemporaryPathIsDirectory)
+        REQUIRE(boost::filesystem::create_directory(temporary));
+
+    REQUIRE_THROWS_AS(print.export_gcode(output.string(), nullptr, thumbnails), std::runtime_error);
+    REQUIRE(events.size() == 2);
+    CHECK(events[0].kind == LifecycleEvent::GCodeExportStarted);
+    CHECK(events[0].code == LifecycleEvtCode::Ok);
+    CHECK(events[1].kind == LifecycleEvent::GCodeExportFinished);
+    CHECK(events[1].code == LifecycleEvtCode::Error);
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+    for (const Event &event : events) {
+        CHECK(event.id == std::to_string(print.model().id().id));
+        CHECK(event.name == "Export failure fixture");
+        CHECK(event.message.find(output.string()) != std::string::npos);
+    }
+
+    if (failure == Failure::ThumbnailCallback) {
+        REQUIRE(thumbnail_calls == 1);
+        CHECK_FALSE(boost::filesystem::exists(temporary));
+        CHECK_FALSE(boost::filesystem::exists(output));
+    } else if (failure == Failure::DestinationCollision) {
+        REQUIRE(thumbnail_calls == 1);
+        REQUIRE(boost::filesystem::is_regular_file(temporary));
+        REQUIRE(boost::filesystem::is_directory(output));
+        std::ifstream stream(sentinel.string());
+        std::string preserved;
+        std::getline(stream, preserved);
+        CHECK(preserved == "preserve existing destination");
+        boost::filesystem::remove_all(output);
+    } else {
+        CHECK(thumbnail_calls == 0);
+        REQUIRE(boost::filesystem::is_directory(temporary));
+        boost::filesystem::remove_all(temporary);
+    }
+
+    // A handled export error must not mark the print complete or poison the next export.
+    inject_failure = false;
+    REQUIRE_NOTHROW(print.export_gcode(output.string(), nullptr, thumbnails));
+    REQUIRE(events.size() == 4);
+    CHECK(events[2].kind == LifecycleEvent::GCodeExportStarted);
+    CHECK(events[3].kind == LifecycleEvent::GCodeExportFinished);
+    CHECK(events[3].code == LifecycleEvtCode::Ok);
+    CHECK(print.is_step_done(psGCodeExport));
+    CHECK(boost::filesystem::is_regular_file(output));
+    CHECK_FALSE(boost::filesystem::exists(temporary));
+
+    std::ifstream stream(output.string());
+    const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    size_t deposited_moves = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.extruding(self) && line.dist_XY(self) > EPSILON)
+            ++deposited_moves;
+    });
+    CHECK(deposited_moves > 0);
 }

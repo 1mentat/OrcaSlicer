@@ -481,6 +481,16 @@ preheating. Geometry cases use analytic distances and preserved fitting metadata
 pipeline cases verify the effective settings before checking output. Mutants
 target those assertions without treating crashes or build failures as kills.
 
+The same manifest covers export recovery, resonance speed limits, motion warnings,
+project migration, and format round trips. `[GCodeExportFailures]` retries the same
+Print after temporary-file, thumbnail, and destination errors while checking
+lifecycle outcomes and preserved files. `[ResonanceAvoidanceGCode]` checks emitted
+outer-wall speeds at the midpoint and bounds, with cooling and flow limits set
+explicitly. `[ConfigJsonMigration]`, `[PresetNullableSave]`, and
+`[PlaceholderParserMapping]` check persisted migration markers, inherited variant
+slots, and externally mapped vector values. `[CadDocumentStepExport]` reimports
+two solids and checks analytic volumes and centers after per-body transforms.
+
 `[ConfigContracts]` checks typed values, grouped serialization, ownership,
 nullable options, equality and difference reports, and environment export with
 restoration. `[ConfigGroupOrder]` requires strict lexicographic ordering for

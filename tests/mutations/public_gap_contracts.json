@@ -284,6 +284,222 @@
       "test_filter": "PrintMultiFilamentValidation",
       "expected_matches": 1,
       "description": "Require both recommended range bounds to be missing before material defaults are resolved. The PLA row with an explicit low bound and missing high bound must remain a valid HighLowMixed result; the mutant returns InvalidTemperatureRange."
+    },
+    {
+      "id": "gcode-export-open-failure-reported-success",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            ctx.code = LifecycleEvtCode::Error;\n            ctx.msg  = std::string(path) + \"\\n\" + err_msg;",
+      "new": "            ctx.code = LifecycleEvtCode::Ok;\n            ctx.msg  = std::string(path) + \"\\n\" + err_msg;",
+      "expected_matches": 1,
+      "test_filter": "GCodeExportFailures",
+      "description": "Report a failed export as successful while retaining the exception and filesystem behavior. The public event outcome must fail an ordinary assertion."
+    },
+    {
+      "id": "gcode-export-callback-failure-reported-success",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            ctx.code = LifecycleEvtCode::Error;\n            ctx.msg  = std::string(path) + \"\\n\" + ex.what();",
+      "new": "            ctx.code = LifecycleEvtCode::Ok;\n            ctx.msg  = std::string(path) + \"\\n\" + ex.what();",
+      "expected_matches": 1,
+      "test_filter": "GCodeExportFailures",
+      "description": "Report a failed export as successful while retaining the exception and filesystem behavior. The public event outcome must fail an ordinary assertion."
+    },
+    {
+      "id": "gcode-export-rename-failure-reported-success",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            ctx.code = LifecycleEvtCode::Error;\n            ctx.msg  = std::string(path) + \"\\nFailed to rename the output G-code file: \" + ret.message();",
+      "new": "            ctx.code = LifecycleEvtCode::Ok;\n            ctx.msg  = std::string(path) + \"\\nFailed to rename the output G-code file: \" + ret.message();",
+      "expected_matches": 1,
+      "test_filter": "GCodeExportFailures",
+      "description": "Report a failed export as successful while retaining the exception and filesystem behavior. The public event outcome must fail an ordinary assertion."
+    },
+    {
+      "id": "gcode-export-callback-temporary-file-retained",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        file.close();\n        boost::nowide::remove(path_tmp.c_str());\n        {\n            LifecycleEventContext ctx;",
+      "new": "        file.close();\n        {\n            LifecycleEventContext ctx;",
+      "expected_matches": 1,
+      "test_filter": "GCodeExportFailures",
+      "description": "Keep the temporary output after a thumbnail callback throws; the file-cleanup assertion must fail, while the expected exception is still handled normally."
+    },
+    {
+      "id": "gcode-resonance-lower-clamp-reversed-703",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "speed = std::min(speed, m_config.min_resonance_avoidance_speed.value);",
+      "new": "speed = std::max(speed, m_config.min_resonance_avoidance_speed.value);",
+      "test_filter": "ResonanceAvoidanceGCode",
+      "expected_matches": 1,
+      "description": "Reverse the lower-half clamp. The 40 mm/s row must emit 30 mm/s, so this changes the ordinary feed oracle to 40 mm/s."
+    },
+    {
+      "id": "gcode-resonance-upper-target-replaced-703",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "speed = m_config.max_resonance_avoidance_speed.value;",
+      "new": "speed = std::min(speed, m_config.max_resonance_avoidance_speed.value);",
+      "test_filter": "ResonanceAvoidanceGCode",
+      "expected_matches": 1,
+      "description": "Replace the upper-half boost with a cap. The 50 and midpoint 45 mm/s rows require the 60 mm/s target and kill this ordinary assertion mutant."
+    },
+    {
+      "id": "gcode-resonance-feature-gate-disabled-703",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "&& m_config.resonance_avoidance.value",
+      "new": "&& false",
+      "test_filter": "ResonanceAvoidanceGCode",
+      "expected_matches": 1,
+      "description": "Disable the public resonance_avoidance gate. Enabled rows differ from the requested speed while the disabled control remains at 40 mm/s."
+    },
+    {
+      "id": "gcode-g28-selected-z-emits-z-zero",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    if (line.has('Z')) {\n        new_line_raw += \" Z0\";\n        found = true;\n    }",
+      "new": "    if (line.has('Z')) {\n        new_line_raw += \" X0\";\n        found = true;\n    }",
+      "test_filter": "GCodeProcessorModal",
+      "expected_matches": 1,
+      "description": "Replace the selected-Z home coordinate with X0; the public G28 Z row must retain XY and set Z to zero."
+    },
+    {
+      "id": "gcode-m106-missing-s-falls-to-zero",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "        else\n            m_fan_speed = 100.0f;",
+      "new": "        else\n            m_fan_speed = 0.0f;",
+      "test_filter": "GCodeProcessorFan",
+      "expected_matches": 1,
+      "description": "Drop the documented no-S full-fan fallback; the no-S extrusion must no longer carry 100 percent fan."
+    },
+    {
+      "id": "gcode-bed-warning-equality-boundary-opened",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            if (temperature != 0 && m_highest_bed_temp >= temperature)",
+      "new": "            if (temperature != 0 && m_highest_bed_temp > temperature)",
+      "test_filter": "GCodeProcessorWarnings",
+      "expected_matches": 1,
+      "description": "Open the bed-temperature equality boundary; the conflict row at bed 180 and vitrification 180 must still emit 1000C001."
+    },
+    {
+      "id": "gcode-hrc-equal-requirement-warns",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "        if (extruder_hrc!=0 && extruder_hrc < filament_hrc)",
+      "new": "        if (extruder_hrc!=0 && extruder_hrc <= filament_hrc)",
+      "test_filter": "GCodeProcessorWarnings",
+      "expected_matches": 1,
+      "description": "Treat equal nozzle and filament HRC as a warning; the safe control with both values 2 must remain warning-free."
+    },
+    {
+      "id": "bbs-gcode-object-label-sanitization-dropped",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                        if (use_gcode_object_name)\n                            // Matches GCode::get_instance_name(): sanitize(sanitize(name) + \"_id_<obj>_copy_<inst>\").\n                            object_name = sanitize_object_label(sanitize_object_label(obj->name) + \"_id_\" +\n                                          std::to_string(gcode_object_index) + \"_copy_\" + std::to_string(gcode_copy_index));",
+      "new": "                        if (use_gcode_object_name)\n                            object_name = obj->name;",
+      "description": "External-firmware slice metadata must use the sanitized per-object/per-copy name that matches G-code object labels.",
+      "test_filter": "BbsGcodeObjects",
+      "expected_matches": 1
+    },
+    {
+      "id": "bbs-gcode-object-label-bambu-gate-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                const bool        use_gcode_object_name  = !GCodeProcessor::s_IsBBLPrinter &&\n                    (slice_gcode_flavor == gcfKlipper || slice_gcode_flavor == gcfMarlinLegacy ||\n                     slice_gcode_flavor == gcfMarlinFirmware || slice_gcode_flavor == gcfRepRapFirmware);",
+      "new": "                const bool        use_gcode_object_name  = GCodeProcessor::s_IsBBLPrinter &&\n                    (slice_gcode_flavor == gcfKlipper || slice_gcode_flavor == gcfMarlinLegacy ||\n                     slice_gcode_flavor == gcfMarlinFirmware || slice_gcode_flavor == gcfRepRapFirmware);",
+      "description": "Bambu printers keep the raw XML-escaped object name while external firmware receives the sanitized object label.",
+      "test_filter": "BbsGcodeObjects",
+      "expected_matches": 1
+    },
+    {
+      "id": "bbs-makerlab-metadata-version-value-misbound",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                metadata_item_map[BBL_MAKERLAB_VERSION_TAG] = xml_escape(model.mk_version);",
+      "new": "                metadata_item_map[BBL_MAKERLAB_VERSION_TAG] = xml_escape(model.mk_name);",
+      "description": "MakerLab version metadata must preserve the model's selected version independently from the MakerLab name.",
+      "test_filter": "BbsMakerLabMetadata",
+      "expected_matches": 1
+    },
+    {
+      "id": "config_project_json_support_style_omitted",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "different_settings_append.push_back(\"support_style\");",
+      "new": "different_settings_append.push_back(\"support_type\");",
+      "expected_matches": 1,
+      "test_filter": "ConfigJsonMigration",
+      "description": "Omitting the support_style migration marker changes the persisted project difference list."
+    },
+    {
+      "id": "config_project_json_infill_marker_omitted",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "different_settings_append.push_back(\"is_infill_first\");",
+      "new": "different_settings_append.push_back(\"support_style\");",
+      "expected_matches": 1,
+      "test_filter": "ConfigJsonMigration",
+      "description": "Replacing the wall-order-derived infill marker removes the expected is_infill_first entry."
+    },
+    {
+      "id": "config_project_json_wall_sequence_cleanup_inverted",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "if (get_wall_sequence.empty()) {",
+      "new": "if (!get_wall_sequence.empty()) {",
+      "expected_matches": 1,
+      "test_filter": "ConfigJsonMigration",
+      "description": "Inverting cleanup retains wall_sequence for an order that should discard it and removes it for an explicit order."
+    },
+    {
+      "id": "config_project_json_empty_diff_resize_truncated",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "size = (filament_ids ? filament_ids->values.size() : 0) + 2;",
+      "new": "size = 1;",
+      "expected_matches": 1,
+      "test_filter": "ConfigJsonMigration",
+      "description": "Truncating the project-difference resize loses the two filament slots and fails empty-seed rows."
+    },
+    {
+      "id": "preset-parent-save-nullable-keyset-copy-omits-nil",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        for (auto option: dirty_options)\n        {\n            ConfigOption *opt_src = config.option(option);\n            ConfigOption *opt_dst = temp_config.option(option, true);\n            if (opt_dst->is_scalar() || !(opt_dst->nullable()))\n                opt_dst->set(opt_src);\n            else {\n                ConfigOptionVectorBase* opt_vec_src = static_cast<ConfigOptionVectorBase*>(opt_src);\n                ConfigOptionVectorBase* opt_vec_dst = static_cast<ConfigOptionVectorBase*>(opt_dst);\n                ConfigOptionVectorBase* opt_vec_inherit = static_cast<ConfigOptionVectorBase*>(parent_config->option(option));\n                if (opt_vec_src->size() == 1)\n                    opt_dst->set(opt_src);\n                else if (key_set1->find(option) != key_set1->end()) {\n                    opt_vec_dst->set_with_nil(opt_vec_src, opt_vec_inherit, 1);\n                }\n",
+      "new": "        for (auto option: dirty_options)\n        {\n            ConfigOption *opt_src = config.option(option);\n            ConfigOption *opt_dst = temp_config.option(option, true);\n            if (opt_dst->is_scalar() || !(opt_dst->nullable()))\n                opt_dst->set(opt_src);\n            else {\n                ConfigOptionVectorBase* opt_vec_src = static_cast<ConfigOptionVectorBase*>(opt_src);\n                ConfigOptionVectorBase* opt_vec_dst = static_cast<ConfigOptionVectorBase*>(opt_dst);\n                ConfigOptionVectorBase* opt_vec_inherit = static_cast<ConfigOptionVectorBase*>(parent_config->option(option));\n                if (opt_vec_src->size() == 1)\n                    opt_dst->set(opt_src);\n                else if (key_set1->find(option) != key_set1->end()) {\n                    opt_dst->set(opt_src);\n                }\n",
+      "description": "Replace Preset::save keyset-1 nullable serialization with a full copy. The unchanged second variant must be serialized as nil and remain inherited after reload.",
+      "test_filter": "PresetNullableSave",
+      "expected_matches": 1
+    },
+    {
+      "id": "preset-parent-save-nullable-keyset-wrong-stride",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        for (auto option: dirty_options)\n        {\n            ConfigOption *opt_src = config.option(option);\n            ConfigOption *opt_dst = temp_config.option(option, true);\n            if (opt_dst->is_scalar() || !(opt_dst->nullable()))\n                opt_dst->set(opt_src);\n            else {\n                ConfigOptionVectorBase* opt_vec_src = static_cast<ConfigOptionVectorBase*>(opt_src);\n                ConfigOptionVectorBase* opt_vec_dst = static_cast<ConfigOptionVectorBase*>(opt_dst);\n                ConfigOptionVectorBase* opt_vec_inherit = static_cast<ConfigOptionVectorBase*>(parent_config->option(option));\n                if (opt_vec_src->size() == 1)\n                    opt_dst->set(opt_src);\n                else if (key_set1->find(option) != key_set1->end()) {\n                    opt_vec_dst->set_with_nil(opt_vec_src, opt_vec_inherit, 1);\n                }\n",
+      "new": "        for (auto option: dirty_options)\n        {\n            ConfigOption *opt_src = config.option(option);\n            ConfigOption *opt_dst = temp_config.option(option, true);\n            if (opt_dst->is_scalar() || !(opt_dst->nullable()))\n                opt_dst->set(opt_src);\n            else {\n                ConfigOptionVectorBase* opt_vec_src = static_cast<ConfigOptionVectorBase*>(opt_src);\n                ConfigOptionVectorBase* opt_vec_dst = static_cast<ConfigOptionVectorBase*>(opt_dst);\n                ConfigOptionVectorBase* opt_vec_inherit = static_cast<ConfigOptionVectorBase*>(parent_config->option(option));\n                if (opt_vec_src->size() == 1)\n                    opt_dst->set(opt_src);\n                else if (key_set1->find(option) != key_set1->end()) {\n                    opt_vec_dst->set_with_nil(opt_vec_src, opt_vec_inherit, 2);\n                }\n",
+      "description": "Use the two-value stride for the filament keyset-1 option. The changed/equal pair must still produce a nil marker for its inherited second slot.",
+      "test_filter": "PresetNullableSave",
+      "expected_matches": 1
+    },
+    {
+      "id": "placeholder-external-filament-map-ignored",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "return filament_map_opt->values[current_extruder_id];",
+      "new": "return current_extruder_id;",
+      "description": "Ignore the public external filament map and use the requested id. The two exact string outputs 70 and 80 fail because the stored vector slots are 1 and 2.",
+      "test_filter": "PlaceholderParserMapping",
+      "expected_matches": 1
+    },
+    {
+      "id": "placeholder-external-filament-map-last-slot-skipped",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "if (filament_map_opt && current_extruder_id < filament_map_opt->values.size()) {",
+      "new": "if (filament_map_opt && current_extruder_id + 1 < filament_map_opt->values.size()) {",
+      "description": "Reject the final valid external map entry. The current-extruder-1 row must select slot 2 (80) rather than fallback slot 0 (60).",
+      "test_filter": "PlaceholderParserMapping",
+      "expected_matches": 1
+    },
+    {
+      "id": "cad_step_export_ignores_body_transforms",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "if (i < body_xforms.size() && !body_xforms[i].isApprox(Transform3d::Identity())) {",
+      "new": "if (i < body_xforms.size() && false && !body_xforms[i].isApprox(Transform3d::Identity())) {",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentStepExport",
+      "description": "Skipping the per-body transform branch leaves the transformed center at its source position."
+    },
+    {
+      "id": "cad_step_export_omits_second_body",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "bld.Add(comp, s);",
+      "new": "if (i != 1) bld.Add(comp, s);",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentStepExport",
+      "description": "Dropping the second compound member violates the two-solid export/import contract."
     }
   ]
 }
