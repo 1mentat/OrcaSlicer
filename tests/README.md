@@ -223,6 +223,10 @@ through public slicing and G-code export. Tower deposition must decrease while
 the object's deposition segments remain unchanged. Its mutations are in
 `wipe_tower_sparse_pipeline.json`.
 
+`[PrintValidationTravelAcceleration]` checks firmware-specific travel acceleration
+limits, equality, and disabled-limit controls. Its mutations are in
+`print_travel_validation.json`.
+
 `[PrintValidationInteractions]` checks belt/raft/draft-shield constraints,
 sequential-print feature gates, and the full ooze-prevention/single-extruder
 multi-material truth table, including valid controls and blocking-error keys.

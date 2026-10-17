@@ -1732,6 +1732,101 @@ TEST_CASE("Print validation gates junction-deviation warnings on firmware suppor
 
 namespace {
 
+struct TravelAccelerationCase {
+    const char *flavor;
+    double      travel_acceleration;
+    double      maximum_travel_acceleration;
+    bool        expects_warning;
+};
+
+struct TravelAccelerationGateCase {
+    const char *flavor;
+    double      maximum_travel_acceleration;
+    double      default_acceleration;
+    bool        expects_warning;
+};
+
+void check_travel_acceleration_validation(const char *flavor, double travel_acceleration,
+                                          double maximum_travel_acceleration,
+                                          double default_acceleration, bool expects_warning)
+{
+    auto config = validation_contract_config();
+    const std::string travel = std::to_string(travel_acceleration) + "," + std::to_string(travel_acceleration);
+    const std::string travel_limit = std::to_string(maximum_travel_acceleration) + "," +
+                                      std::to_string(maximum_travel_acceleration);
+    const std::string default_accel = std::to_string(default_acceleration);
+    config.set_deserialize_strict({
+        { "gcode_flavor", flavor },
+        { "machine_max_acceleration_extruding", "1000,1000" },
+        { "machine_max_acceleration_travel", travel_limit },
+        { "machine_max_junction_deviation", "0,0" },
+        { "default_junction_deviation", "0,0" },
+        { "default_acceleration", default_accel },
+        { "inner_wall_acceleration", "100,100" },
+        { "outer_wall_acceleration", "100,100" },
+        { "bridge_acceleration", "100,100" },
+        { "initial_layer_acceleration", "100,100" },
+        { "sparse_infill_acceleration", "100,100" },
+        { "internal_solid_infill_acceleration", "100,100" },
+        { "top_surface_acceleration", "100,100" },
+        { "travel_acceleration", travel },
+        { "default_jerk", "0,0" },
+        { "outer_wall_jerk", "0,0" },
+        { "inner_wall_jerk", "0,0" },
+        { "infill_jerk", "0,0" },
+        { "top_surface_jerk", "0,0" },
+        { "initial_layer_jerk", "0,0" },
+        { "travel_jerk", "0,0" },
+    });
+
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    std::vector<StringObjectException> warnings;
+    const auto error = print.validate(&warnings);
+    CAPTURE(flavor, travel_acceleration, maximum_travel_acceleration, default_acceleration,
+            error.string, error.opt_key);
+    REQUIRE(error.string.empty());
+    CHECK_FALSE(error.is_warning);
+
+    const auto warning_count = std::count_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.opt_key == "travel_acceleration";
+    });
+    CHECK(warning_count == (expects_warning ? 1 : 0));
+    if (expects_warning) {
+        const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+            return entry.opt_key == "travel_acceleration";
+        });
+        REQUIRE(warning != warnings.end());
+        CHECK(warning->is_warning);
+        CHECK_FALSE(warning->string.empty());
+    }
+}
+
+TEST_CASE("Print validation reports travel acceleration against supported firmware limits",
+          "[Print][ValidationContracts][PrintValidationTravelAcceleration]")
+{
+    const auto part = GENERATE(
+        TravelAccelerationCase{"marlin2", 400., 500., false},
+        TravelAccelerationCase{"marlin2", 500., 500., false},
+        TravelAccelerationCase{"marlin2", 600., 500., true},
+        TravelAccelerationCase{"reprapfirmware", 600., 500., true},
+        TravelAccelerationCase{"repetier", 600., 500., true});
+    check_travel_acceleration_validation(part.flavor, part.travel_acceleration,
+                                         part.maximum_travel_acceleration, 100., part.expects_warning);
+}
+
+TEST_CASE("Print validation gates travel acceleration warnings on firmware and limits",
+          "[Print][ValidationContracts][PrintValidationTravelAcceleration]")
+{
+    const auto part = GENERATE(
+        TravelAccelerationGateCase{"klipper", 500., 100., false},
+        TravelAccelerationGateCase{"marlin2", 0., 100., false},
+        TravelAccelerationGateCase{"marlin2", 500., 0., false});
+    check_travel_acceleration_validation(part.flavor, 600., part.maximum_travel_acceleration,
+                                         part.default_acceleration, part.expects_warning);
+}
+
 struct BeltValidationCase {
     int         raft_layers;
     DraftShield draft_shield;
