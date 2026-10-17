@@ -6368,7 +6368,7 @@ TEST_CASE("BBS import maps scoped color groups and reuses equal colors publicly"
         REQUIRE(mesh.facets_count() == 4);
         CHECK(mesh.its.vertices.size() == 4);
         CHECK(normalized_tetra_faces(mesh) == expected_faces);
-        CHECK_THAT(mesh.volume(), Catch::Matchers::WithinAbs(1000.0 / 6.0, 1e-3));
+        CHECK_THAT(its_volume(mesh.its), Catch::Matchers::WithinAbs(1000.0 / 6.0, 1e-3));
         // BBS consumes the raw color string into this public assignment; Model does not retain
         // an exposed raw color-group table after import.
         REQUIRE(object->config.has("extruder"));
