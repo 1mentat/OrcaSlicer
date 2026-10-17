@@ -1620,15 +1620,37 @@ DynamicPrintConfig crossing_wall_config(bool enabled)
         { "layer_change_gcode",           "" },
         { "machine_start_gcode",          "" },
         { "machine_end_gcode",            "" },
+        { "print_sequence",               "by layer" },
+        { "print_order",                  "as_obj_list" },
+        { "gcode_label_objects",          "1" },
+        { "exclude_object",               "1" },
+        { "raft_layers",                  "0" },
+        { "enable_prime_tower",           "0" },
     });
+    config.set_key_value("extruder_offset", new ConfigOptionPoints{Vec2d(0., 0.)});
     return config;
 }
 
-TriangleMesh crossing_wall_fixture()
+std::vector<TriangleMesh> crossing_wall_fixture()
 {
-    TriangleMesh fixture = Test::mesh(Test::TestMesh::cube_with_hole);
-    fixture.scale(Vec3f(1.f, 1.f, 0.4f));
-    return fixture;
+    std::vector<TriangleMesh> meshes;
+    meshes.reserve(3);
+
+    // Keep explicit model order and coordinates: the stretched hollow barrier
+    // is followed by endpoint cubes on either side for the paired witness.
+    TriangleMesh barrier = Test::mesh(Test::TestMesh::cube_with_hole);
+    barrier.scale(Vec3f(1.f, 2.f, 0.04f));
+    barrier.translate(100.f, 60.f, 0.f);
+    meshes.emplace_back(std::move(barrier));
+
+    TriangleMesh left = make_cube(10., 10., 0.4);
+    left.translate(70., 75., 0.);
+    meshes.emplace_back(std::move(left));
+
+    TriangleMesh right = make_cube(10., 10., 0.4);
+    right.translate(140., 75., 0.);
+    meshes.emplace_back(std::move(right));
+    return meshes;
 }
 
 double cross_2d(const Vec2d &a, const Vec2d &b)
@@ -1651,6 +1673,20 @@ bool proper_crossing(const Vec2d &a, const Vec2d &b, const Vec2d &c, const Vec2d
     const double u = cross_2d(offset, r) / denominator;
     return t > parameter_margin && t < 1. - parameter_margin &&
            u > parameter_margin && u < 1. - parameter_margin;
+}
+
+// Restrict the paired oracle to a route spanning the two explicit endpoint
+// squares. Other same-endpoint routes are retained in diagnostics but are not
+// evidence for the barrier-crossing contract.
+bool spans_endpoint_squares(const TravelRoute &route)
+{
+    if (route.points.size() < 2)
+        return false;
+    const Vec2d &start = route.points.front();
+    const Vec2d &end = route.points.back();
+    const bool left_to_right = start.x() < 95. && end.x() > 125.;
+    const bool right_to_left = end.x() < 95. && start.x() > 125.;
+    return left_to_right || right_to_left;
 }
 
 bool wall_crosses_route(const TravelRoute &route, const std::vector<Segment> &walls,
@@ -1802,7 +1838,7 @@ ParsedOutput export_fixture(const DynamicPrintConfig &config)
 {
     Model model;
     Print print;
-    init_print({crossing_wall_fixture()}, print, model, config);
+    init_print(crossing_wall_fixture(), print, model, config, nullptr, /*arrange=*/false);
     REQUIRE(print.validate().string.empty());
     const std::string output = Test::gcode(print);
     REQUIRE(!output.empty());
@@ -1845,10 +1881,10 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
     size_t same_endpoint_pairs_with_disabled_crossing = 0;
     size_t fully_eligible_pairs = 0;
     for (const TravelRoute &candidate : disabled.routes) {
-        if (!candidate.had_retraction)
+        if (!candidate.had_retraction || !spans_endpoint_squares(candidate))
             continue;
         for (const TravelRoute &route : enabled.routes) {
-            if (!same_endpoints(route, candidate))
+            if (!same_endpoints(route, candidate) || !spans_endpoint_squares(route))
                 continue;
             ++same_endpoint_pairs;
             if (candidate.direct_crosses_wall)
@@ -1868,12 +1904,12 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
     // one whose enabled counterpart is detoured by AvoidCrossingPerimeters.
     for (const TravelRoute &candidate : disabled.routes) {
         if (!candidate.had_retraction || !candidate.direct_crosses_wall ||
-            candidate.path_mm > candidate.direct_mm + 0.05)
+            !spans_endpoint_squares(candidate) || candidate.path_mm > candidate.direct_mm + 0.05)
             continue;
         const auto enabled_match = std::find_if(enabled.routes.begin(), enabled.routes.end(),
                                                 [&](const TravelRoute &route) {
-            return same_endpoints(route, candidate) && route.direct_crosses_wall &&
-                   route.path_mm > route.direct_mm + 0.05 && route.legs_clear;
+            return same_endpoints(route, candidate) && spans_endpoint_squares(route) &&
+                   route.direct_crosses_wall && route.path_mm > route.direct_mm + 0.05 && route.legs_clear;
         });
         if (enabled_match != enabled.routes.end()) {
             direct = &candidate;
@@ -1982,6 +2018,9 @@ DynamicPrintConfig reduce_infill_retraction_config(bool enabled)
         {"bottom_shell_thickness",          "0"},
         {"sparse_infill_density",           "20%"},
         {"sparse_infill_pattern",           "rectilinear"},
+        // Separate sparse lines leave real internal travel for the retraction comparison.
+        {"infill_anchor",                   "0"},
+        {"infill_anchor_max",               "0"},
         {"reduce_infill_retraction",        enabled},
         {"reduce_crossing_wall",            false},
         {"retraction_length",               "0.8"},
