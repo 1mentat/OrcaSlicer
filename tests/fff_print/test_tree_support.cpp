@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <limits>
 #include <utility>
 #include <vector>
 #include "libslic3r/Config.hpp"
@@ -24,6 +25,7 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
+#include "libslic3r/Slicing.hpp"
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -509,4 +511,174 @@ TEST_CASE("Tree support auto brim and wall loops change public support geometry"
     // retained as a finite positive control; zero explicitly permits infill-only output.
     REQUIRE(one_wall.closed_nonfirst_loop_count > 0);
     REQUIRE(two_walls.closed_nonfirst_loop_count > one_wall.closed_nonfirst_loop_count);
+}
+
+namespace belt_tree_landing_contracts {
+
+struct Evidence {
+    size_t point_count = 0;
+    size_t nonempty_layers = 0;
+    double total_path_mm = 0.0;
+    double total_extrusion_mm3 = 0.0;
+    double lowest_print_z = std::numeric_limits<double>::max();
+    double lowest_plane_gap_mm = std::numeric_limits<double>::max();
+    bool finite = true;
+};
+
+static TriangleMesh belt_tree_fixture()
+{
+    // The same leading-overhang geometry as the existing belt regression, with an explicit
+    // transformed fin so support contacts remain in the belt slicing frame.
+    TriangleMesh body = make_cube(20.0, 20.0, 20.0);
+    TriangleMesh leading = make_cube(20.0, 20.0, 2.0);
+    Transform3d shear = Transform3d::Identity();
+    shear.matrix() << 1., 0., 0.,   0.,
+                      0., 1., 0., -20.,
+                      0., -1., 1., 38.,
+                      0., 0., 0.,   1.;
+    leading.transform(shear);
+    body.merge(leading);
+    return body;
+}
+
+static DynamicPrintConfig belt_tree_config(int wall_count, double floor_offset)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "printable_area",                 "-100x-100,300x-100,300x300,-100x300" },
+        { "belt_printer",                   1 },
+        { "belt_printer_infinite_y",        1 },
+        { "belt_slice_rotation",            "x" },
+        { "belt_slice_rotation_angle",      45 },
+        { "gcode_remap_x",                  "rev_x" },
+        { "gcode_remap_y",                  "pos_z" },
+        { "gcode_remap_z",                  "pos_y" },
+        { "belt_support_floor_offset",     floor_offset },
+        { "nozzle_diameter",               "1.0" },
+        { "layer_height",                   0.8 },
+        { "initial_layer_print_height",     0.8 },
+        { "min_layer_height",              "0.1" },
+        { "max_layer_height",              "0.8" },
+        { "initial_layer_line_width",       1.0 },
+        { "line_width",                     1.0 },
+        { "outer_wall_line_width",          1.0 },
+        { "inner_wall_line_width",          1.0 },
+        { "sparse_infill_line_width",       1.0 },
+        { "internal_solid_infill_line_width", 1.0 },
+        { "top_surface_line_width",         1.0 },
+        { "skin_infill_line_width",         1.0 },
+        { "skeleton_infill_line_width",     1.0 },
+        { "bridge_line_width",              1.0 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+        { "brim_width",                     0.0 },
+        { "raft_layers",                    0 },
+        { "z_hop",                          0 },
+        { "enable_support",                 1 },
+        { "support_type",                   "tree(auto)" },
+        { "support_style",                  "tree_slim" },
+        { "support_on_build_plate_only",    0 },
+        { "independent_support_layer_height", false },
+        { "support_threshold_angle",        30 },
+        { "support_top_z_distance",         0.2 },
+        { "support_interface_top_layers",   0 },
+        { "support_interface_bottom_layers",0 },
+        { "support_base_pattern",            "rectilinear" },
+        { "support_line_width",              1.5 },
+        { "tree_support_branch_distance",   1.0 },
+        { "tree_support_branch_diameter",   1.0 },
+        { "tree_support_branch_angle",      60.0 },
+        { "tree_support_wall_count",        wall_count },
+        { "tree_support_auto_brim",         false },
+        { "tree_support_brim_width",        0.0 },
+        { "tree_support_with_infill",       false },
+        { "max_bridge_length",              0.0 },
+        { "bridge_no_support",              0 },
+        { "thick_bridges",                  0 },
+        { "machine_start_gcode",            "T[initial_tool]\n" },
+        { "layer_change_gcode",             "G92 E0\n" },
+        { "use_relative_e_distances",       true },
+    });
+    return config;
+}
+
+static Evidence observe(int wall_count, double floor_offset)
+{
+    Print print;
+    Model model;
+    const DynamicPrintConfig config = belt_tree_config(wall_count, floor_offset);
+    init_print({ belt_tree_fixture() }, print, model, config);
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    model.objects.front()->instances.front()->set_offset(Vec3d(100., 100., 0.));
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    print.process();
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const auto &slicing = object.slicing_parameters();
+    REQUIRE(std::abs(slicing.belt_floor_shear_factor) > EPSILON);
+    REQUIRE(slicing.belt_floor_from_axis == 1);
+    Evidence result;
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer->support_fills.empty())
+            continue;
+        ++result.nonempty_layers;
+        result.lowest_print_z = std::min(result.lowest_print_z, double(layer->print_z));
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            const double length_mm = unscale<double>(path.length());
+            const double volume_mm3 = path.mm3_per_mm * length_mm;
+            result.finite = result.finite && std::isfinite(length_mm) && std::isfinite(volume_mm3) &&
+                length_mm > 0.0 && volume_mm3 > 0.0;
+            result.total_path_mm += length_mm;
+            result.total_extrusion_mm3 += volume_mm3;
+            result.point_count += path.polyline.points.size();
+            for (const Point3 &point : path.polyline.points) {
+                const Point xy = point.to_point();
+                // For the explicit X/45 degree belt, the source plane equation is
+                // shear*Y + z_shift + configured floor offset.  This is an independent
+                // test-owned calculation; it does not invoke BeltFloorContext.
+                const double axis_position = unscale<double>(xy.y());
+                const double plane_z = slicing.belt_floor_shear_factor * axis_position +
+                    slicing.belt_floor_z_shift + floor_offset;
+                const double gap = double(layer->print_z) - plane_z;
+                result.finite = result.finite && std::isfinite(gap);
+                result.lowest_plane_gap_mm = std::min(result.lowest_plane_gap_mm, gap);
+            }
+        });
+    }
+    return result;
+}
+
+} // namespace belt_tree_landing_contracts
+
+TEST_CASE("Belt tree support floor offset shifts public support landing",
+          "[TreeSupport][Belt][BeltTreeLanding]")
+{
+    using namespace belt_tree_landing_contracts;
+    const Evidence one_wall = observe(1, 0.0);
+    const Evidence two_walls = observe(2, 0.0);
+    const Evidence lower_floor = observe(2, -5.0);
+    const Evidence raised_floor = observe(2, 5.0);
+
+    for (const Evidence &evidence : { one_wall, two_walls, lower_floor, raised_floor }) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.nonempty_layers > 0);
+        REQUIRE(evidence.point_count > 2);
+        REQUIRE(evidence.total_path_mm > 0.0);
+        REQUIRE(evidence.total_extrusion_mm3 > 0.0);
+        REQUIRE(std::isfinite(evidence.lowest_print_z));
+        REQUIRE(std::isfinite(evidence.lowest_plane_gap_mm));
+        REQUIRE(evidence.lowest_plane_gap_mm > -0.8);
+        CHECK(evidence.lowest_plane_gap_mm < 0.8 + EPSILON);
+    }
+    // Wall count changes the emitted support geometry.
+    CHECK(std::abs(two_walls.total_path_mm - one_wall.total_path_mm) > 0.05);
+    // Lowering the belt floor is a real output control, not merely a configured value.
+    CHECK(lower_floor.lowest_print_z < two_walls.lowest_print_z - 1.0);
+    CHECK(raised_floor.lowest_print_z > two_walls.lowest_print_z + 1.0);
 }

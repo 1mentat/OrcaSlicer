@@ -254,6 +254,12 @@ technology, deduplicated nozzle and material lists, bed assets, empty lists, and
 error accounting for a malformed material list. Its mutations are in
 `vendor_json_metadata.json`; these metadata tests do not imply settings pipeline coverage.
 
+`[BeltTreeLanding]` checks positive support extrusion and its distance from the
+belt floor, with lower/raised floor controls and one/two wall configurations on
+an explicit 0.8 mm support layer grid. `belt_tree_landing.json` challenges the
+two-neighbour merge termination; branch reachability and mutation kills require
+native validation.
+
 `[AdaptivePressureAdvanceRamps]` checks emitted pressure-advance values against a
 linear calibration model for overhang events with an immediate feed update,
 including retained values when duplicate commands are omitted. A disabled

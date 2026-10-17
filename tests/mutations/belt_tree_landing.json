@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "description": "Public belt tree support landing contracts with a valid large-nozzle configuration. Exact two-neighbour merge reachability and kills require native validation.",
+  "test_filter": "BeltTreeLanding",
+  "mutants": [
+    {
+      "id": "tree-belt-merged-landing-disabled-large-nozzle",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "                    if (has_belt_floor && belt_node_landed(next_position, std::max(node.radius, neighbour->radius), print_z_next)) {",
+      "new": "                    if (false) {",
+      "expected_matches": 1,
+      "test_filter": "BeltTreeLanding",
+      "description": "Disable the two-neighbour merged-node belt termination. The public floor-distance and extrusion checks test the resulting geometry if the fixture reaches this branch."
+    },
+    {
+      "id": "tree-belt-merged-node-keeps-buildplate-large-nozzle",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "                        node_parent->to_buildplate = false;",
+      "new": "                        node_parent->to_buildplate = true;",
+      "expected_matches": 1,
+      "test_filter": "BeltTreeLanding",
+      "description": "Keep a merged node buildplate-bound after belt landing. The public support geometry checks challenge the classification if the fixture reaches this branch."
+    },
+    {
+      "id": "tree-belt-merged-landing-radius-zero-large-nozzle",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "belt_node_landed(next_position, std::max(node.radius, neighbour->radius), print_z_next)",
+      "new": "belt_node_landed(next_position, 0., print_z_next)",
+      "expected_matches": 1,
+      "test_filter": "BeltTreeLanding",
+      "description": "Ignore the merged circle radius in the landing clearance. The large-nozzle floor controls challenge the altered termination boundary if the fixture reaches this branch."
+    }
+  ]
+}
