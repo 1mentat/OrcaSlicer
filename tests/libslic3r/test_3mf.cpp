@@ -4792,10 +4792,11 @@ struct Fixture
 {
     ScopedTemporaryDir backup{"orca_split_source"};
     ScopedTemporaryDir loaded_backup{"orca_split_loaded"};
-    // Restore creates a sibling directory by removing the archive's extension.
-    // Its error path deliberately preserves that directory, so own both paths.
+    // Restore reads <backup-folder>/.3mf and external parts below that folder.
+    // Its error path preserves the folder, so keep a separate cleanup owner.
     ScopedTemporaryDir archive_root{"orca_split_archive"};
     boost::filesystem::path archive = archive_root.path() / "project.3mf";
+    boost::filesystem::path backup_archive = archive_root.path() / ".3mf";
     Model source;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     Fixture()
@@ -4813,9 +4814,7 @@ struct Fixture
     }
     boost::filesystem::path restore_root() const
     {
-        boost::filesystem::path root = archive;
-        root.replace_extension();
-        return root;
+        return backup_archive.parent_path();
     }
 
     boost::filesystem::path backup_part_path(const ModelObject &object) const
@@ -4847,10 +4846,19 @@ struct Fixture
         for (const auto &[name, data] : entries(embedded.string())) {
             if (!is_part(name))
                 continue;
-            const boost::filesystem::path destination = root / name;
+            const std::string filename = boost::filesystem::path(name).filename().string();
+            const auto separator = filename.rfind('_');
+            REQUIRE(separator != std::string::npos);
+            const std::string object_name = filename.substr(0, separator);
+            const auto object = std::find_if(source.objects.begin(), source.objects.end(),
+                [&](const ModelObject *candidate) { return candidate->name == object_name; });
+            REQUIRE(object != source.objects.end());
+            const std::string target_name = "3D/Objects/" + object_name + "_" +
+                std::to_string(source.get_object_backup_id(**object)) + ".model";
+            const boost::filesystem::path destination = root / target_name;
             boost::filesystem::create_directories(destination.parent_path());
             Zipper zip(destination.string());
-            zip.add_entry(name, data.data(), data.size());
+            zip.add_entry(target_name, data.data(), data.size());
             zip.finalize();
             ++part_count;
         }
@@ -4864,7 +4872,7 @@ struct Fixture
         plate.plate_index           = 0;
         plate.objects_and_instances = {{0, 0}, {1, 0}};
         StoreParams params;
-        params.path            = archive.string();
+        params.path            = (extra & SaveStrategy::Backup ? backup_archive : archive).string();
         params.model           = &source;
         params.config          = &config;
         params.plate_data_list = {&plate};
@@ -4879,7 +4887,8 @@ struct Fixture
         ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
         bool bbl = false, orca = false;
         Semver version;
-        return load_bbs_3mf(archive.string().c_str(), &result.project.config, &substitutions, &result.model, &result.project.plates,
+        const boost::filesystem::path &input = (strategy & LoadStrategy::Restore) ? backup_archive : archive;
+        return load_bbs_3mf(input.string().c_str(), &result.project.config, &substitutions, &result.model, &result.project.plates,
                             &result.project.presets, &bbl, &orca, &version, nullptr, strategy);
     }
 };
@@ -4957,7 +4966,7 @@ TEST_CASE("Split model Restore rejects a missing referenced object part",
         LoadedSplit intact;
         REQUIRE(f.load(intact, LoadStrategy::Restore));
         REQUIRE(intact.model.objects.size() == f.source.objects.size());
-        // Restore assigns the archive stem as the model backup path. Detach before the
+        // Restore assigns the archive's parent as the model backup path. Detach before the
         // positive control dies so Model::~Model() cannot remove the staged part directory.
         intact.model.set_backup_path("detach");
     }

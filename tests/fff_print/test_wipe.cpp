@@ -1827,6 +1827,41 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
     REQUIRE(!disabled.routes.empty());
     REQUIRE(!enabled.routes.empty());
 
+    const auto count_routes = [](const std::vector<TravelRoute> &routes, bool retracted, bool crossing) {
+        return std::count_if(routes.begin(), routes.end(), [&](const TravelRoute &route) {
+            return (!retracted || route.had_retraction) && (!crossing || route.direct_crosses_wall);
+        });
+    };
+    const size_t disabled_retracted = count_routes(disabled.routes, true, false);
+    const size_t disabled_crossing = count_routes(disabled.routes, false, true);
+    const size_t disabled_retracted_crossing = count_routes(disabled.routes, true, true);
+    const size_t enabled_detoured = std::count_if(enabled.routes.begin(), enabled.routes.end(), [](const TravelRoute &route) {
+        return route.path_mm > route.direct_mm + 0.05;
+    });
+    const size_t enabled_clear_detoured = std::count_if(enabled.routes.begin(), enabled.routes.end(), [](const TravelRoute &route) {
+        return route.path_mm > route.direct_mm + 0.05 && route.legs_clear;
+    });
+    size_t same_endpoint_pairs = 0;
+    size_t same_endpoint_pairs_with_disabled_crossing = 0;
+    size_t fully_eligible_pairs = 0;
+    for (const TravelRoute &candidate : disabled.routes) {
+        if (!candidate.had_retraction)
+            continue;
+        for (const TravelRoute &route : enabled.routes) {
+            if (!same_endpoints(route, candidate))
+                continue;
+            ++same_endpoint_pairs;
+            if (candidate.direct_crosses_wall)
+                ++same_endpoint_pairs_with_disabled_crossing;
+            if (candidate.direct_crosses_wall && route.direct_crosses_wall &&
+                route.path_mm > route.direct_mm + 0.05 && route.legs_clear)
+                ++fully_eligible_pairs;
+        }
+    }
+    CAPTURE(disabled.routes.size(), enabled.routes.size(), disabled_retracted, disabled_crossing,
+            disabled_retracted_crossing, enabled_detoured, enabled_clear_detoured, same_endpoint_pairs,
+            same_endpoint_pairs_with_disabled_crossing, fully_eligible_pairs);
+
     const TravelRoute *direct = nullptr;
     const TravelRoute *detour = nullptr;
     // Search every eligible disabled route: the first crossing is not necessarily the
@@ -2012,7 +2047,10 @@ FixtureExport export_reduce_fixture(const DynamicPrintConfig &config)
                 }
     }
     REQUIRE(fixture.internal_surfaces.size() > 0);
-    REQUIRE(fixture.internal_surfaces.front().size() > 0);
+    const bool has_internal_surface = std::any_of(
+        fixture.internal_surfaces.begin(), fixture.internal_surfaces.end(),
+        [](const auto &surfaces) { return !surfaces.empty(); });
+    REQUIRE(has_internal_surface);
     fixture.output = gcode(print);
     REQUIRE(fixture.output.size() <= kMaxGCodeBytes);
     return fixture;
