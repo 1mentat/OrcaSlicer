@@ -564,9 +564,67 @@ def _profile_mapping_errors(stderr: str) -> list[str]:
             if re.search(r"\b[1-9][0-9]* functions have mismatched data\b", line)]
 
 
+_EMPTY_INDEXED_PROFILE_TEXT = ":ir\n"
+
+
+def _create_empty_indexed_profile(llvm_profdata: str, output: Path, *,
+                                  timeout: float | None) -> dict[str, Any]:
+    """Create a valid empty indexed profile for compiler-object inspection.
+
+    LLVM object inspection requires an indexed instrumentation profile.  The
+    inventory profile is deliberately created from a tiny indexed-profile text
+    input and is kept separate from the runtime profile merged from test
+    execution.  A successful command that does not create a non-empty output
+    is an error, rather than permission to inspect objects without a profile.
+    """
+    output = Path(output).absolute()
+    profile_text = output.with_suffix(".proftext")
+    if output.is_symlink() or profile_text.is_symlink():
+        raise CoverageError(
+            f"refusing to replace symlinked compiler inventory path: {output} or {profile_text}"
+        )
+    try:
+        output.unlink(missing_ok=True)
+        profile_text.write_text(_EMPTY_INDEXED_PROFILE_TEXT, encoding="utf-8")
+    except OSError as exc:
+        raise CoverageError(f"cannot prepare empty indexed profile {profile_text}: {exc}") from exc
+
+    merge_argv = [llvm_profdata, "merge", "-sparse", "-o", str(output), str(profile_text)]
+    merge = _run(merge_argv, cwd=output.parent, timeout=timeout)
+    if merge.returncode != 0:
+        raise CoverageError(
+            "compiler inventory profile generation failed "
+            f"(returncode {merge.returncode}): {merge.stderr.strip()}"
+        )
+    try:
+        if output.is_symlink() or not output.is_file() or output.stat().st_size <= 0:
+            raise CoverageError(
+                "compiler inventory profile generation produced no non-empty profile"
+            )
+    except OSError as exc:
+        raise CoverageError(f"cannot validate empty indexed profile {output}: {exc}") from exc
+
+    return {
+        "status": "ok",
+        "purpose": "compiler object coverage-map inventory; runtime hit counts are not used",
+        "profile": str(output),
+        "profile_text": str(profile_text),
+        "profile_kind": "synthetic_empty_indexed_instrumentation_profile_from_llvm_profdata_text",
+        "profile_text_sha256": hashlib.sha256(_EMPTY_INDEXED_PROFILE_TEXT.encode("utf-8")).hexdigest(),
+        "profile_artifact": _artifact_provenance(output),
+        "profile_text_artifact": _artifact_provenance(profile_text),
+        "merge": {
+            "argv": merge_argv,
+            "returncode": merge.returncode,
+            "stdout": merge.stdout,
+            "stderr": merge.stderr,
+        },
+    }
+
+
 def _compiler_source_evidence(llvm_cov: str, manifest: Sequence[Path],
                               compile_commands: Path, *, timeout: float | None,
-                              profile: Path | None = None) -> dict[str, Any]:
+                              inventory_profile: Path) -> dict[str, Any]:
     """Classify manifest TUs using their compiled object coverage maps.
 
     A source-level export cannot tell an include-only TU from a TU whose
@@ -576,8 +634,17 @@ def _compiler_source_evidence(llvm_cov: str, manifest: Sequence[Path],
     contributed only by an inline or generated header. An instrumented object
     with no executable map is a mapping-free TU (for example a PCH-only
     source). A mapped object absent from the final executable remains an
-    integrity failure in the caller.
+    integrity failure in the caller. ``inventory_profile`` must be the
+    separately generated non-empty indexed profile; this function never
+    supplies an LLVM command-line empty-profile fallback.
     """
+    try:
+        if not inventory_profile.is_file() or inventory_profile.stat().st_size <= 0:
+            raise CoverageError(
+                f"compiler inventory profile is missing or empty: {inventory_profile}"
+            )
+    except OSError as exc:
+        raise CoverageError(f"cannot inspect compiler inventory profile {inventory_profile}: {exc}") from exc
     by_source = _load_compile_commands(compile_commands)
     records: list[dict[str, Any]] = []
     mapping_free: list[str] = []
@@ -613,10 +680,10 @@ def _compiler_source_evidence(llvm_cov: str, manifest: Sequence[Path],
                 continue
             # Object audits only need the file-level summaries.  Full line and
             # segment records make this one-export-per-TU audit needlessly
-            # expensive, especially for a large production build.
-            # LLVM 18 requires a profile even when only mapping counts are
-            # inspected. Runtime hit counts never classify an object as mapped.
-            profile_args = ["-instr-profile", str(profile)] if profile else ["-empty-profile"]
+            # expensive, especially for a large production build. This uses
+            # the separately generated empty indexed inventory profile, never
+            # the runtime merged profile.
+            profile_args = ["-instr-profile", str(inventory_profile)]
             export = _run([llvm_cov, "export", "-format=text", "-summary-only", *profile_args,
                            "-object", str(object_path)], cwd=candidate["directory"], timeout=timeout)
             if export.stderr:
@@ -846,10 +913,15 @@ def run_coverage(args: argparse.Namespace) -> int:
         }, provenance)
         raise
     compiler_evidence: dict[str, Any] | None = None
+    compiler_inventory: dict[str, Any] | None = None
     if manifest:
         if compile_commands.is_file():
+            compiler_inventory = _create_empty_indexed_profile(
+                llvm_profdata, out / "compiler-inventory-empty.profdata", timeout=args.timeout
+            )
             compiler_evidence = _compiler_source_evidence(
-                llvm_cov, manifest, compile_commands, timeout=args.timeout, profile=merged
+                llvm_cov, manifest, compile_commands, timeout=args.timeout,
+                inventory_profile=Path(compiler_inventory["profile"]),
             )
         else:
             compiler_evidence = {
@@ -929,6 +1001,7 @@ def run_coverage(args: argparse.Namespace) -> int:
         "integrity_status": "error" if integrity_failed else "pass",
         "integrity_failures": integrity_failures,
         "compiler_evidence": compiler_evidence,
+        "compiler_inventory_profile": compiler_inventory,
         "run": run_record,
         "merge": {"argv": merge_argv, "returncode": merge.returncode,
                   "stdout": merge.stdout, "stderr": merge.stderr},

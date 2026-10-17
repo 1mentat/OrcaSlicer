@@ -44,6 +44,151 @@ class CoverageEvidenceTests(unittest.TestCase):
 
 
 class CoverageExportTests(unittest.TestCase):
+    def test_empty_indexed_profile_generation_fails_closed(self):
+        for returncode, reason in ((1, "failed"), (0, "missing")):
+            with self.subTest(returncode=returncode, reason=reason), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                output = root / "compiler-inventory-empty.profdata"
+                output.write_bytes(b"stale profile from an earlier run")
+                calls = []
+
+                def run(argv, **kwargs):
+                    calls.append(list(argv))
+                    if returncode:
+                        output.write_bytes(b"partial profile from failed merge")
+                    return slicer_coverage.subprocess.CompletedProcess(
+                        argv, returncode, "", "failed" if returncode else ""
+                    )
+
+                with mock.patch.object(slicer_coverage, "_run", side_effect=run):
+                    with self.assertRaises(slicer_coverage.CoverageError):
+                        slicer_coverage._create_empty_indexed_profile(
+                            "llvm-profdata", output, timeout=5
+                        )
+
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][0:3], ["llvm-profdata", "merge", "-sparse"])
+                self.assertNotIn("--text", calls[0])
+                self.assertTrue((root / "compiler-inventory-empty.proftext").is_file())
+                self.assertEqual(
+                    (root / "compiler-inventory-empty.proftext").read_text(encoding="utf-8"),
+                    ":ir\n",
+                )
+
+    def test_empty_indexed_profile_rejects_symlink_paths_without_touching_targets(self):
+        for path_kind in ("output", "profile_text"):
+            with self.subTest(path_kind=path_kind), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                output = root / "compiler-inventory-empty.profdata"
+                target = root / f"protected-{path_kind}"
+                target.write_bytes(b"runtime profile that must remain unchanged")
+                symlink = output if path_kind == "output" else output.with_suffix(".proftext")
+                symlink.symlink_to(target)
+
+                with mock.patch.object(slicer_coverage, "_run") as run:
+                    with self.assertRaises(slicer_coverage.CoverageError):
+                        slicer_coverage._create_empty_indexed_profile(
+                            "llvm-profdata", output, timeout=5
+                        )
+                    run.assert_not_called()
+
+                self.assertEqual(target.read_bytes(), b"runtime profile that must remain unchanged")
+
+    def test_runtime_and_inventory_profiles_are_separate_in_coverage_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "src" / "libslic3r"
+            source_root.mkdir(parents=True)
+            source = source_root / "fixture.cpp"
+            source.write_text("int fixture() { return 1; }\n", encoding="utf-8")
+            obj = root / "fixture.o"
+            obj.touch()
+            binary = root / "fixture-tests"
+            binary.touch()
+            build = root / "build"
+            build.mkdir()
+            manifest = build / "sources.txt"
+            manifest.write_text("src/libslic3r/fixture.cpp\n", encoding="utf-8")
+            compile_commands = build / "compile_commands.json"
+            compile_commands.write_text(json.dumps([{
+                "directory": str(root),
+                "file": str(source),
+                "arguments": [
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    str(source), "-o", str(obj),
+                ],
+            }]), encoding="utf-8")
+
+            metric = {"covered": 1, "count": 1, "percent": 100.0}
+            runtime_export = {"data": [{"files": [{
+                "filename": str(source),
+                "summary": {"lines": metric, "functions": metric, "branches": metric},
+            }]}]}
+            inventory_metric = {"covered": 0, "count": 1, "percent": 0.0}
+            inventory_export = {"data": [{"files": [{
+                "filename": str(source),
+                "summary": {"lines": inventory_metric, "functions": inventory_metric,
+                            "branches": inventory_metric},
+            }]}]}
+            calls = []
+
+            def run(argv, **kwargs):
+                calls.append(list(argv))
+                if argv[0] == "fixture-tests":
+                    profile = Path(kwargs["env"]["LLVM_PROFILE_FILE"].replace("%4m", "runtime"))
+                    profile.write_bytes(b"runtime profile")
+                    return slicer_coverage.subprocess.CompletedProcess(
+                        argv, 0, "100% tests passed, 0 tests failed out of 1\n", ""
+                    )
+                if argv[0] == "llvm-profdata" and argv[1] == "--version":
+                    return slicer_coverage.subprocess.CompletedProcess(argv, 0, "fake LLVM\n", "")
+                if argv[0] == "llvm-profdata":
+                    output = Path(argv[argv.index("-o") + 1])
+                    output.write_bytes(b"empty inventory" if output.name.startswith("compiler-")
+                                       else b"runtime counts")
+                    return slicer_coverage.subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "llvm-cov" and argv[1] == "--version":
+                    return slicer_coverage.subprocess.CompletedProcess(argv, 0, "fake LLVM\n", "")
+                if argv[0] == "llvm-cov" and argv[1] == "export":
+                    profile = Path(argv[argv.index("-instr-profile") + 1])
+                    self.assertNotIn("-empty-profile", argv)
+                    exported_object = Path(argv[argv.index("-object") + 1])
+                    self.assertIn(exported_object, {obj.resolve(), binary.resolve()})
+                    inventory_call = exported_object == obj.resolve()
+                    self.assertEqual(profile.name, "compiler-inventory-empty.profdata"
+                                     if inventory_call else "merged.profdata")
+                    self.assertEqual(profile.read_bytes(), b"empty inventory"
+                                     if inventory_call else b"runtime counts")
+                    return slicer_coverage.subprocess.CompletedProcess(
+                        argv, 0, json.dumps(inventory_export if inventory_call else runtime_export), ""
+                    )
+                self.fail(f"unexpected command {argv}")
+
+            with mock.patch.object(slicer_coverage, "_which", side_effect=lambda name, explicit: name), \
+                 mock.patch.object(slicer_coverage, "_run", side_effect=run):
+                status = slicer_coverage.main([
+                    "run", "--root", str(root), "--build-dir", str(build),
+                    "--source-root", str(source_root), "--object", str(binary),
+                    "--manifest", str(manifest), "--compile-commands", str(compile_commands),
+                    "--test-command", "fixture-tests", "--out", str(root / "report"),
+                ])
+
+            self.assertEqual(status, 0)
+            report = json.loads((root / "report" / "coverage-report.json").read_text())
+            runtime_profiles = report["profiles"]
+            inventory = report["compiler_inventory_profile"]
+            self.assertEqual(report["summary"]["lines"]["covered"], 1)
+            self.assertEqual(report["summary"]["lines"]["count"], 1)
+            self.assertEqual(len(runtime_profiles), 1)
+            self.assertNotEqual(runtime_profiles[0], inventory["profile"])
+            self.assertEqual(inventory["purpose"],
+                             "compiler object coverage-map inventory; runtime hit counts are not used")
+            self.assertNotIn("inventory_profile", report["compiler_evidence"])
+            merge_calls = [call for call in calls if call[:2] == ["llvm-profdata", "merge"]]
+            self.assertEqual(len(merge_calls), 2)
+            export_calls = [call for call in calls if call[:2] == ["llvm-cov", "export"]]
+            self.assertEqual(len(export_calls), 2)
+
     def test_profile_based_object_audit_retains_zero_hit_mappings(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -51,8 +196,8 @@ class CoverageExportTests(unittest.TestCase):
             source.write_text("int never_called() { return 1; }\n")
             obj = root / "never_called.o"
             obj.touch()
-            profile = root / "merged.profdata"
-            profile.touch()
+            inventory_profile = root / "compiler-inventory-empty.profdata"
+            inventory_profile.write_bytes(b"indexed inventory profile")
             commands = root / "compile_commands.json"
             commands.write_text(json.dumps([{
                 "directory": str(root), "file": str(source), "arguments": [
@@ -71,7 +216,8 @@ class CoverageExportTests(unittest.TestCase):
             )
             fake_cov.chmod(0o755)
             evidence = slicer_coverage._compiler_source_evidence(
-                str(fake_cov), [source], commands, timeout=5, profile=profile,
+                str(fake_cov), [source], commands, timeout=5,
+                inventory_profile=inventory_profile,
             )
             self.assertEqual(evidence["status"], "ok")
             self.assertEqual(evidence["mapped_sources"], [str(source)])
@@ -93,6 +239,8 @@ class CoverageExportTests(unittest.TestCase):
             mapped_object.touch()
             mapping_free_object.touch()
             header_only_object.touch()
+            inventory_profile = root / "compiler-inventory-empty.profdata"
+            inventory_profile.write_bytes(b"indexed inventory profile")
             compile_commands = root / "compile_commands.json"
             compile_commands.write_text(json.dumps([
                 {"directory": str(root), "file": str(mapped), "arguments": [
@@ -128,6 +276,7 @@ class CoverageExportTests(unittest.TestCase):
 
             evidence = slicer_coverage._compiler_source_evidence(
                 str(fake_cov), [mapped, mapping_free, header_only], compile_commands, timeout=10,
+                inventory_profile=inventory_profile,
             )
 
             self.assertEqual(evidence["status"], "ok")
@@ -159,9 +308,12 @@ class CoverageExportTests(unittest.TestCase):
             timeout_result = slicer_coverage.subprocess.CompletedProcess(
                 ["llvm-cov"], 124, "", "error: no coverage data found\n"
             )
+            inventory_profile = root / "compiler-inventory-empty.profdata"
+            inventory_profile.write_bytes(b"indexed inventory profile")
             with mock.patch.object(slicer_coverage, "_run", return_value=timeout_result):
                 evidence = slicer_coverage._compiler_source_evidence(
                     "llvm-cov", [source], compile_commands, timeout=1,
+                    inventory_profile=inventory_profile,
                 )
 
             self.assertEqual(evidence["mapping_free_sources"], [])
@@ -356,9 +508,12 @@ class CoverageDiagnosticTests(unittest.TestCase):
                 ["llvm-cov"], 0, '{"data": [{"files": []}]}',
                 "warning: 3878 functions have mismatched data\n",
             )
+            inventory_profile = root / "compiler-inventory-empty.profdata"
+            inventory_profile.write_bytes(b"indexed inventory profile")
             with mock.patch.object(slicer_coverage, "_run", return_value=result):
                 evidence = slicer_coverage._compiler_source_evidence(
                     "llvm-cov", [source], commands, timeout=1,
+                    inventory_profile=inventory_profile,
                 )
             self.assertEqual(evidence["status"], "error")
             self.assertEqual(evidence["mapping_free_sources"], [])
