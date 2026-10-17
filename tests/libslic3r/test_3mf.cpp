@@ -5397,6 +5397,172 @@ TEST_CASE("Shared meshes in split archives retain separate object identities and
         check_box(actual.bounding_box_exact(), expected->bounding_box_exact());
     }
 }
+int first_object_id(const std::string &object)
+{
+    const size_t object_begin = object.find("<object ");
+    REQUIRE(object_begin != std::string::npos);
+    const size_t object_end = object.find('>', object_begin);
+    REQUIRE(object_end != std::string::npos);
+    const size_t id_begin = object.find("id=\"", object_begin);
+    REQUIRE(id_begin != std::string::npos);
+    REQUIRE(id_begin < object_end);
+    const size_t value_begin = id_begin + std::string("id=\"").size();
+    const size_t value_end = object.find('"', value_begin);
+    REQUIRE(value_end != std::string::npos);
+    REQUIRE(value_end < object_end);
+    return std::stoi(object.substr(value_begin, value_end - value_begin));
+}
+
+void replace_first_object_id(std::string &object, int old_id, int new_id)
+{
+    const size_t object_begin = object.find("<object ");
+    REQUIRE(object_begin != std::string::npos);
+    const size_t object_end = object.find('>', object_begin);
+    REQUIRE(object_end != std::string::npos);
+    const std::string old_attr = "id=\"" + std::to_string(old_id) + "\"";
+    const std::string new_attr = "id=\"" + std::to_string(new_id) + "\"";
+    const size_t attr = object.find(old_attr, object_begin);
+    REQUIRE(attr != std::string::npos);
+    REQUIRE(attr < object_end);
+    object.replace(attr, old_attr.size(), new_attr);
+}
+
+void set_object_uuid(std::string &object, const std::string &uuid)
+{
+    const size_t attr = object.find("p:UUID=\"");
+    REQUIRE(attr != std::string::npos);
+    const size_t begin = attr + std::string("p:UUID=\"").size();
+    const size_t end = object.find('"', begin);
+    REQUIRE(end != std::string::npos);
+    object.replace(begin, end - begin, uuid);
+}
+
+size_t strip_bbs_version_metadata(std::string &xml)
+{
+    size_t removed = 0;
+    for (const char *name : {"BambuStudio:3mfVersion", "bamboo_slicer:Version3mf"}) {
+        const std::string open = "<metadata name=\"" + std::string(name) + "\">";
+        const std::string close = "</metadata>";
+        while (true) {
+            const size_t begin = xml.find(open);
+            if (begin == std::string::npos)
+                break;
+            const size_t end = xml.find(close, begin + open.size());
+            REQUIRE(end != std::string::npos);
+            xml.erase(begin, end + close.size() - begin);
+            ++removed;
+        }
+    }
+    return removed;
+}
+
+void rewrite_restore_component_fixture(Fixture &fixture, bool keep_bbs_marker)
+{
+    fixture.source.set_object_backup_id(*fixture.source.objects[0], 17);
+    fixture.source.set_object_backup_id(*fixture.source.objects[1], 42);
+    fixture.store(SaveStrategy::Backup);
+
+    const boost::filesystem::path part = fixture.backup_part_path(*fixture.source.objects[0]);
+    auto part_entries = entries(part.string());
+    auto part_model = std::find_if(part_entries.begin(), part_entries.end(), [](const Entry &entry) {
+        return is_part(entry.first);
+    });
+    REQUIRE(part_model != part_entries.end());
+
+    const std::string original = part_model->second;
+    const size_t first_object = original.find("<object ");
+    REQUIRE(first_object != std::string::npos);
+    const size_t first_object_end = original.find("</object>", first_object);
+    REQUIRE(first_object_end != std::string::npos);
+    REQUIRE(original.find("<object ", first_object + 1) == std::string::npos);
+    const std::string original_object = original.substr(first_object, first_object_end + 9 - first_object);
+    const int ordinary_part_id = first_object_id(original_object);
+    // materialize_backup_parts uses ordinary SplitModel numbering: the first
+    // volume object is id 1, even though its backup volume id is 0x10011.
+    REQUIRE(ordinary_part_id == 1);
+    REQUIRE(original.find("name=\"BambuStudio:3mfVersion\"") != std::string::npos);
+
+    std::string child = original_object;
+    set_object_uuid(child, "00000001-81cb-4c03-9d28-80fed5dfa1dc");
+
+    // The external part's first ordinary object becomes a mesh-less restore
+    // wrapper.  Its UUID encodes backup object 0x11, while its serialized id
+    // is deliberately 123.  The child stays at ordinary id 1 until the
+    // wrapper closes and the production branch moves it to 0x10011 (65553).
+    std::string wrapper = original_object;
+    replace_first_object_id(wrapper, ordinary_part_id, 123);
+    set_object_uuid(wrapper, "00000011-61cb-4c03-9d28-80fed5dfa1dc");
+    const size_t mesh_begin = wrapper.find("<mesh>");
+    REQUIRE(mesh_begin != std::string::npos);
+    const size_t mesh_end = wrapper.find("</mesh>", mesh_begin);
+    REQUIRE(mesh_end != std::string::npos);
+    wrapper.erase(mesh_begin, mesh_end + std::string("</mesh>").size() - mesh_begin);
+    const size_t wrapper_close = wrapper.rfind("</object>");
+    REQUIRE(wrapper_close != std::string::npos);
+    wrapper.insert(wrapper_close,
+                   "\n    <components>\n"
+                   "      <component objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/>\n"
+                   "    </components>\n");
+
+    // Parse the child first so ObjectImporter can move it from ordinary id 1
+    // to 65553 when the wrapper closes.
+    part_model->second = original.substr(0, first_object) + child + wrapper +
+                         original.substr(first_object_end + 9);
+    if (!keep_bbs_marker) {
+        // The ordinary sub-model exporter writes the BBS marker in its model
+        // header too.  Remove inherited part-level markers for the true
+        // negative control; omitting a newly-added object marker is insufficient.
+        REQUIRE(strip_bbs_version_metadata(part_model->second) >= 1);
+    }
+    rewrite(part.string(), [&](std::vector<Entry> &all) { all = part_entries; });
+
+    // The root backup model normally points at external volume 65553.  Route
+    // it through restored id 17 when marked, and serialized id 123 when
+    // unmarked. Both inputs are valid graphs in their own format.
+    // Suffix2 keeps the root wrapper
+    // from running the separate main-model remap before external assembly.
+    rewrite(fixture.backup_archive.string(), [&](std::vector<Entry> &all) {
+        auto root_model = std::find_if(all.begin(), all.end(), [](const Entry &entry) {
+            return entry.first == "3D/3dmodel.model";
+        });
+        REQUIRE(root_model != all.end());
+        const std::string root_wrapper_uuid = "p:UUID=\"00000011-61cb-4c03-9d28-80fed5dfa1dc\"";
+        const std::string root_shared_uuid = "p:UUID=\"00000011-71cb-4c03-9d28-80fed5dfa1dc\"";
+        REQUIRE(root_model->second.find(root_wrapper_uuid) != std::string::npos);
+        replace_text(root_model->second, root_wrapper_uuid, root_shared_uuid);
+
+        const std::string path_token = "3D/Objects/first-cube_17.model";
+        const size_t path = root_model->second.find(path_token);
+        REQUIRE(path != std::string::npos);
+        const size_t external_id = root_model->second.find("objectid=\"65553\"", path);
+        REQUIRE(external_id != std::string::npos);
+        root_model->second.replace(external_id, std::string("objectid=\"65553\"").size(),
+                                   "objectid=\"" + std::to_string(keep_bbs_marker ? 17 : 123) + "\"");
+    });
+}
+
+TEST_CASE("Split restore component graphs preserve geometry with and without BBS markers",
+          "[3MF][SplitModelRestore][Bbs3mfRestore][Bbs3mfUUID]")
+{
+    for (bool keep_bbs_marker : {true, false}) {
+        CAPTURE(keep_bbs_marker);
+        Fixture fixture;
+        rewrite_restore_component_fixture(fixture, keep_bbs_marker);
+        LoadedSplit loaded;
+        REQUIRE(fixture.load(loaded, LoadStrategy::Restore));
+        REQUIRE(loaded.model.objects.size() == 2);
+        for (const ModelObject *expected : fixture.source.objects) {
+            CAPTURE(expected->name);
+            const auto &actual = named(loaded.model, expected->name);
+            REQUIRE(actual.volumes.size() == 1);
+            REQUIRE(actual.instances.size() == 1);
+            const double expected_volume = expected->name == "first-cube" ? 24. : 30.;
+            CHECK_THAT(actual.raw_mesh().volume(), WithinAbs(expected_volume, 1e-5));
+            check_box(actual.bounding_box_exact(), expected->bounding_box_exact());
+        }
+    }
+}
+
 } // namespace split_model_contracts
 
 namespace bbs_project_lifecycle_contracts

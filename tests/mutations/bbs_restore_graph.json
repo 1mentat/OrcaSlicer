@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Public restore graph mutations checked by successful loading, named object/volume counts, analytic volumes, and world-space placement. Both marked and unmarked inputs have valid identifiers. Crashes, exceptions, timeouts and build errors are not assertion kills.",
+  "mutants": [
+    {
+      "id": "bbs3mf-object-restore-backup-id-not-applied",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "current_object->id = backup_id;",
+      "new": "current_object->id = current_object->id;",
+      "line": 5655,
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfUUID",
+      "description": "Keeping serialized wrapper id 123 leaves the marked root reference17 unresolved; named first-object volume count and geometry must catch missing mesh even if load succeeds."
+    },
+    {
+      "id": "bbs3mf-object-restore-component-id-not-remapped",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "component.object_id.second = temp_id;",
+      "new": "component.object_id.second = component.object_id.second;",
+      "line": 5684,
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfUUID",
+      "description": "Leaving child id1 after moving its mesh to65553 loses the marked first-object volume; the count and analytic geometry oracles must detect it."
+    },
+    {
+      "id": "bbs3mf-object-restore-marker-disabled",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if ((obj_curr_metadata_name == BBS_3MF_VERSION)||(obj_curr_metadata_name == BBS_3MF_VERSION1)) {\n            is_bbl_3mf = true;",
+      "new": "if ((obj_curr_metadata_name == BBS_3MF_VERSION)||(obj_curr_metadata_name == BBS_3MF_VERSION1)) {\n            is_bbl_3mf = false;",
+      "line": 5888,
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfUUID",
+      "description": "Disabling the part marker bypasses UUID normalization, so the marked graph loses its first-object mesh. The marker-free control remains a valid graph using wrapper123."
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <sstream>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/catch_all.hpp>
@@ -225,6 +226,28 @@ std::vector<PositiveExtrusion> read_positive_extrusions(const std::string &gcode
         }
         if (line.cmd_is("T1")) {
             current_tool = 1;
+            return;
+        }
+        // BBL multi-extruder output selects a filament with M1020 S<filament_id> H<nozzle_id>;
+        // S is the material/component identity used by this fixture, while H is physical-nozzle
+        // context and must not be used to classify the deposited material.
+        if (line.cmd_is("M1020")) {
+            std::istringstream command(line.raw());
+            std::string opcode, token;
+            int selected_tool = -1;
+            command >> opcode;
+            while (command >> token) {
+                if (!token.empty() && token.front() == ';')
+                    break;
+                if (token.size() <= 1 || token.front() != 'S')
+                    continue;
+                std::istringstream id_stream(token.substr(1));
+                char trailing = '\0';
+                int id = -1;
+                if ((id_stream >> id) && id >= 0 && !(id_stream >> trailing))
+                    selected_tool = id;
+            }
+            current_tool = selected_tool;
             return;
         }
         if (current_tool < 0 || !line.extruding(self) || (!line.has_x() && !line.has_y()))
@@ -682,5 +705,360 @@ TEST_CASE("Print::validate warns when a gradient mixed filament is used without 
         const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{{{ "extruder", "1" }}};
         init_print(std::vector<TriangleMesh>{cube(20)}, print, model, config, &overrides);
         CHECK(count_opt(print, "enable_mixed_color_sublayer") == 0);
+    }
+}
+
+namespace mixed_bbl_label_contracts {
+
+using namespace mixed_gradient_gcode_contracts;
+
+struct LabelProtocolEvidence {
+    bool   valid = true;
+    size_t bbl_commands = 0;
+    size_t bbl_payloads = 0;
+    size_t bbl_end_commands = 0;
+    size_t marlin_starts = 0;
+    size_t marlin_ends = 0;
+    size_t bbl_pairs = 0;
+    size_t bbl_end_pairs = 0;
+    bool   bbl_ids_match = false;
+    bool   bbl_payloads_bit0 = true;
+    bool   marlin_ids_match = false;
+};
+
+bool parse_nonnegative_id(const std::string &text, long long &id)
+{
+    std::istringstream input(text);
+    char trailing = '\0';
+    if (!(input >> id) || id < 0 || (input >> trailing))
+        return false;
+    return true;
+}
+
+bool parse_bbl_bit0_payload(const std::string &text)
+{
+    std::istringstream command(text);
+    std::string opcode;
+    std::string payload;
+    std::string trailing;
+    if (!(command >> opcode >> payload) || opcode != "M624" || payload != "AQAAAAAAAAA=")
+        return false;
+    return !(command >> trailing);
+}
+
+LabelProtocolEvidence parse_label_protocol(const std::string &gcode)
+{
+    LabelProtocolEvidence result;
+    std::vector<std::string> lines;
+    std::istringstream input(gcode);
+    std::string line;
+    while (std::getline(input, line))
+        lines.push_back(line);
+
+    constexpr const char *bbl_start_prefix = "; start printing object, unique label id: ";
+    constexpr const char *bbl_end_prefix   = "; stop printing object, unique label id: ";
+    bool bbl_open = false;
+    long long bbl_open_id = -1;
+    bool marlin_open = false;
+    std::vector<long long> marlin_start_ids;
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string &current = lines[i];
+        if (current.rfind(bbl_start_prefix, 0) == 0) {
+            long long id = -1;
+            if (bbl_open || !parse_nonnegative_id(current.substr(std::char_traits<char>::length(bbl_start_prefix)), id)) {
+                result.valid = false;
+            } else {
+                bbl_open = true;
+                bbl_open_id = id;
+                ++result.bbl_pairs;
+            }
+            const bool valid_payload = i + 1 < lines.size() && parse_bbl_bit0_payload(lines[i + 1]);
+            if (!valid_payload) {
+                result.valid = false;
+                result.bbl_payloads_bit0 = false;
+            } else {
+                ++result.bbl_commands;
+                ++result.bbl_payloads;
+                ++i;
+            }
+            continue;
+        }
+        if (current.rfind(bbl_end_prefix, 0) == 0) {
+            long long id = -1;
+            if (!bbl_open || !parse_nonnegative_id(current.substr(std::char_traits<char>::length(bbl_end_prefix)), id) || id != bbl_open_id)
+                result.valid = false;
+            else {
+                bbl_open = false;
+                ++result.bbl_end_pairs;
+            }
+            if (i + 1 >= lines.size() || lines[i + 1] != "M625") {
+                result.valid = false;
+            } else {
+                ++result.bbl_end_commands;
+                ++i;
+            }
+            continue;
+        }
+        if (current.rfind("M624 ", 0) == 0 || current == "M625") {
+            // A protocol command without the exact adjacent object marker is not a valid boundary.
+            result.valid = false;
+            continue;
+        }
+        if (current.rfind("M486 S", 0) == 0) {
+            const std::string payload = current.substr(6);
+            if (payload == "-1") {
+                ++result.marlin_ends;
+                if (!marlin_open)
+                    result.valid = false;
+                else
+                    marlin_open = false;
+            } else {
+                long long id = -1;
+                if (!parse_nonnegative_id(payload, id) || marlin_open) {
+                    result.valid = false;
+                } else {
+                    marlin_open = true;
+                    marlin_start_ids.push_back(id);
+                    ++result.marlin_starts;
+                }
+            }
+        }
+    }
+
+    if (bbl_open || marlin_open || result.bbl_pairs != result.bbl_end_pairs || result.marlin_starts != result.marlin_ends)
+        result.valid = false;
+    if (result.bbl_payloads != result.bbl_commands || !result.bbl_payloads_bit0)
+        result.valid = false;
+    result.bbl_ids_match = result.bbl_pairs == result.bbl_end_pairs;
+    result.marlin_ids_match = result.marlin_starts == result.marlin_ends;
+    // M486 S-1 carries no object id; the ordered state machine above pairs it with the preceding
+    // start. This one-instance fixture must nevertheless keep one public instance id throughout.
+    for (size_t i = 1; result.marlin_ids_match && i < marlin_start_ids.size(); ++i)
+        result.marlin_ids_match = marlin_start_ids[i] == marlin_start_ids.front();
+    return result;
+}
+
+struct MixedLabelExport {
+    LabelProtocolEvidence labels;
+    size_t                 mixed_groups = 0;
+    size_t                 mixed_extra_boundaries = 0;
+    double                 positive_e = 0.;
+    double                 positive_xy = 0.;
+    std::vector<double>    layer_xy;
+};
+
+double positive_xy_at_z(const std::vector<PositiveExtrusion> &samples, double target_z)
+{
+    double result = 0.;
+    for (const PositiveExtrusion &sample : samples)
+        if (std::abs(sample.z - target_z) <= 0.002)
+            result += sample.xy;
+    return result;
+}
+
+MixedLabelExport export_mixed_labels(bool bbl, bool split_sublayers)
+{
+    DynamicPrintConfig config = mixed_config(split_sublayers);
+    config.set_deserialize_strict({
+        {"gcode_flavor",                 "marlin2"},
+        {"exclude_object",               true},
+        {"gcode_label_objects",          false},
+        {"layer_height",                 "0.2"},
+        {"initial_layer_print_height",   "0.2"},
+        {"wall_loops",                   "1"},
+        {"top_shell_layers",             "0"},
+        {"bottom_shell_layers",          "0"},
+        {"sparse_infill_density",        "0%"},
+        {"skirt_loops",                  "0"},
+        {"brim_type",                    "no_brim"},
+        {"layer_change_gcode",           "G92 E0\n"},
+        {"filament_flow_ratio",          "1,1,1"},
+        {"filament_mixed_gradient",      split_sublayers ? "0,0,1" : "0,0,0"},
+        {"filament_mixed_gradient_range",";;0.8,0.2"},
+        {"filament_mixed_gradient_per_part", "0,0,0"},
+    });
+
+    Model model;
+    Print print;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *short_volume = object->add_volume(make_cube(8., 8., 1.2), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh tall_mesh = make_cube(8., 8., 1.6);
+    tall_mesh.translate(10.f, 0.f, 0.f);
+    ModelVolume *tall_volume = object->add_volume(std::move(tall_mesh), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(short_volume != nullptr);
+    REQUIRE(tall_volume != nullptr);
+    short_volume->config.set("extruder", 3);
+    tall_volume->config.set("extruder", 3);
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.is_BBL_printer() = bbl;
+
+    // The label encoder's bit position is derived from the public print instance inventory.
+    // Keep this fixture to one object instance so bit 0 has an unambiguous meaning in M624.
+    REQUIRE(print.num_object_instances() == 1);
+
+    const StringObjectException validation = print.validate();
+    INFO("validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *print_object = print.objects().front();
+    REQUIRE(print_object != nullptr);
+    REQUIRE(print_object->instances().size() == 1);
+    REQUIRE(print_object->instances().front().model_instance != nullptr);
+    REQUIRE(print_object->layers().size() == 8);
+
+    MixedLabelExport result;
+    result.labels = parse_label_protocol(output);
+    REQUIRE(result.labels.valid);
+    const auto samples = read_positive_extrusions(output, print.config());
+    REQUIRE_FALSE(samples.empty());
+    for (const PositiveExtrusion &sample : samples) {
+        REQUIRE(std::isfinite(sample.e));
+        REQUIRE(std::isfinite(sample.xy));
+        REQUIRE(sample.e > 0.);
+        REQUIRE(sample.xy > 0.01);
+        result.positive_e += sample.e;
+        result.positive_xy += sample.xy;
+    }
+    bool all_motion_finite = true;
+    size_t motion_lines = 0;
+    GCodeReader motion_reader;
+    motion_reader.apply_config(print.config());
+    motion_reader.parse_buffer(output, [&all_motion_finite, &motion_lines](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!(line.cmd_is("G0") || line.cmd_is("G1")))
+            return;
+        if (!line.has_x() && !line.has_y() && !line.has_z() && !line.has_e() && !line.has_f())
+            return;
+        ++motion_lines;
+        all_motion_finite = all_motion_finite && std::isfinite(line.new_X(self)) && std::isfinite(line.new_Y(self))
+            && std::isfinite(line.new_Z(self)) && std::isfinite(line.new_E(self)) && std::isfinite(line.new_F(self));
+    });
+    REQUIRE(all_motion_finite);
+    REQUIRE(motion_lines > 0);
+    REQUIRE(result.positive_e > 0.);
+    REQUIRE(result.positive_xy > 0.);
+
+    const ToolOrdering &ordering = print.tool_ordering();
+    for (const LayerTools &layer_tools : ordering.layer_tools()) {
+        for (const LayerTools::MixedSubLayerGroup &group : layer_tools.mixed_sub_layer_groups) {
+            REQUIRE(group.mixed_slot_0based == 2);
+            REQUIRE(group.components_0based == std::vector<unsigned int>{0, 1});
+            REQUIRE(group.sub_heights.size() == 2);
+            CHECK_THAT(group.sub_heights[0] + group.sub_heights[1], Catch::Matchers::WithinAbs(group.layer_height, 1e-7));
+            ++result.mixed_groups;
+            result.mixed_extra_boundaries += group.components_0based.size() - 1;
+        }
+    }
+    result.layer_xy.resize(print_object->layers().size(), 0.);
+    for (size_t layer_idx = 0; layer_idx < print_object->layers().size(); ++layer_idx) {
+        const Layer *layer = print_object->layers()[layer_idx];
+        REQUIRE(layer != nullptr);
+        if (!split_sublayers) {
+            result.layer_xy[layer_idx] = positive_xy_at_z(samples, layer->print_z);
+            continue;
+        }
+        if (layer_idx == 0) {
+            result.layer_xy[layer_idx] = positive_xy_at_z(samples, layer->print_z);
+            continue;
+        }
+        REQUIRE(layer_idx < ordering.layer_tools().size());
+        const LayerTools::MixedSubLayerGroup *group = nullptr;
+        for (const LayerTools::MixedSubLayerGroup &candidate : ordering.layer_tools()[layer_idx].mixed_sub_layer_groups)
+            if (candidate.mixed_slot_0based == 2) {
+                REQUIRE(group == nullptr);
+                group = &candidate;
+            }
+        REQUIRE(group != nullptr);
+        const double lower_z = layer->print_z - group->layer_height + group->sub_heights.front();
+        result.layer_xy[layer_idx] = positive_xy_at_z(samples, lower_z) + positive_xy_at_z(samples, layer->print_z);
+    }
+    if (split_sublayers) {
+        REQUIRE(result.mixed_groups == 7);
+        REQUIRE(result.mixed_extra_boundaries == 7);
+        const auto short_bbox = short_volume->mesh().bounding_box();
+        const auto tall_bbox = tall_volume->mesh().bounding_box();
+        REQUIRE(short_bbox.defined);
+        REQUIRE(tall_bbox.defined);
+        const double instance_shift_x = unscale<double>(print_object->instances().front().shift.x());
+        const double center_offset_x = unscale<double>(print_object->center_offset().x());
+        const XBounds short_bounds{short_bbox.min.x() + instance_shift_x - center_offset_x,
+                                   short_bbox.max.x() + instance_shift_x - center_offset_x};
+        const XBounds tall_bounds{tall_bbox.min.x() + instance_shift_x - center_offset_x,
+                                  tall_bbox.max.x() + instance_shift_x - center_offset_x};
+        check_volume_run(samples, *print_object, short_bounds, 5, result.mixed_groups, false);
+        check_volume_run(samples, *print_object, tall_bounds, result.mixed_groups, result.mixed_groups, false);
+    } else {
+        CHECK(result.mixed_groups == 0);
+        CHECK(result.mixed_extra_boundaries == 0);
+    }
+    return result;
+}
+
+} // namespace mixed_bbl_label_contracts
+
+TEST_CASE("BBL mixed sublayers pair object exclusion labels with their boundaries",
+          "[GCode][MixedFilament][MixedBBLLabels]")
+{
+    using namespace mixed_bbl_label_contracts;
+
+    // Every row constructs and processes its own model. The exporter stores pending object labels
+    // in GCodeWriter, so toggling BBL or sublayer mode on a processed Print would not be an A/B test.
+    const MixedLabelExport bbl = export_mixed_labels(true, true);
+    const MixedLabelExport marlin_split = export_mixed_labels(false, true);
+    const MixedLabelExport marlin_whole = export_mixed_labels(false, false);
+
+    INFO("BBL pairs=" << bbl.labels.bbl_pairs
+         << " Marlin split=" << marlin_split.labels.marlin_starts
+         << " Marlin whole=" << marlin_whole.labels.marlin_starts
+         << " mixed extra=" << bbl.mixed_extra_boundaries);
+    REQUIRE(bbl.labels.bbl_pairs > 0);
+    REQUIRE(bbl.labels.bbl_pairs == bbl.labels.bbl_end_pairs);
+    REQUIRE(bbl.labels.bbl_ids_match);
+    REQUIRE(bbl.labels.bbl_payloads == bbl.labels.bbl_pairs);
+    REQUIRE(bbl.labels.bbl_payloads_bit0);
+    CHECK(bbl.labels.bbl_commands == bbl.labels.bbl_pairs);
+    CHECK(bbl.labels.bbl_end_commands == bbl.labels.bbl_pairs);
+    CHECK(bbl.labels.marlin_starts == 0);
+    CHECK(bbl.labels.marlin_ends == 0);
+
+    REQUIRE(marlin_split.labels.marlin_starts > 0);
+    REQUIRE(marlin_split.labels.marlin_starts == marlin_split.labels.marlin_ends);
+    REQUIRE(marlin_split.labels.marlin_ids_match);
+    CHECK(marlin_split.labels.bbl_commands == 0);
+    CHECK(marlin_split.labels.bbl_end_commands == 0);
+
+    REQUIRE(marlin_whole.labels.marlin_starts > 0);
+    REQUIRE(marlin_whole.labels.marlin_starts == marlin_whole.labels.marlin_ends);
+    REQUIRE(marlin_whole.labels.marlin_ids_match);
+    CHECK(marlin_whole.labels.bbl_commands == 0);
+    CHECK(marlin_whole.labels.bbl_end_commands == 0);
+
+    // The same fresh mixed print uses one ordinary boundary per layer in whole-layer mode. The
+    // public ToolOrdering metadata independently predicts one extra boundary per two-component
+    // mixed sublayer; this difference isolates mixed-sublayer labels from header/ordinary markers.
+    CHECK(bbl.labels.bbl_pairs == marlin_split.labels.marlin_starts);
+    CHECK(marlin_split.labels.marlin_starts == marlin_whole.labels.marlin_starts + bbl.mixed_extra_boundaries);
+
+    REQUIRE(bbl.positive_e > 0.);
+    REQUIRE(bbl.positive_xy > 0.);
+    REQUIRE(marlin_split.positive_e > 0.);
+    REQUIRE(marlin_split.positive_xy > 0.);
+    REQUIRE(marlin_whole.positive_e > 0.);
+    REQUIRE(marlin_whole.positive_xy > 0.);
+    CHECK_THAT(bbl.positive_e, Catch::Matchers::WithinAbs(marlin_split.positive_e, 1e-6));
+    CHECK_THAT(bbl.positive_xy, Catch::Matchers::WithinAbs(marlin_split.positive_xy, 1e-6));
+    CHECK_THAT(bbl.positive_e, Catch::Matchers::WithinRel(marlin_whole.positive_e, 1e-3));
+    REQUIRE(bbl.layer_xy.size() == marlin_split.layer_xy.size());
+    REQUIRE(marlin_whole.layer_xy.size() == bbl.layer_xy.size());
+    for (size_t layer_idx = 0; layer_idx < bbl.layer_xy.size(); ++layer_idx) {
+        CHECK_THAT(bbl.layer_xy[layer_idx], Catch::Matchers::WithinAbs(marlin_split.layer_xy[layer_idx], 1e-6));
+        const double expected_xy = layer_idx == 0 ? marlin_whole.layer_xy[layer_idx] : 2. * marlin_whole.layer_xy[layer_idx];
+        CHECK_THAT(bbl.layer_xy[layer_idx], Catch::Matchers::WithinRel(expected_xy, 1e-3));
     }
 }

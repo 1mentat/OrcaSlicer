@@ -260,6 +260,14 @@ an explicit 0.8 mm support layer grid. `belt_tree_landing.json` challenges the
 two-neighbour merge termination; branch reachability and mutation kills require
 native validation.
 
+`[Bbs3mfUUID]` restores marked and marker-free split component graphs, checking
+named object/volume identities, analytic mesh volumes, and world placements.
+`bbs_restore_graph.json` challenges the wrapper, child, and marker remapping.
+
+`[MixedBBLLabels]` checks ordered BBL/Marlin object boundaries across mixed
+sublayers, the encoded single-instance BBL label, and conserved deposition.
+`mixed_bbl_labels.json` challenges each BBL boundary and its dedicated end flush.
+
 `[AdaptivePressureAdvanceRamps]` checks emitted pressure-advance values against a
 linear calibration model for overhang events with an immediate feed update,
 including retained values when duplicate commands are omitted. A disabled
