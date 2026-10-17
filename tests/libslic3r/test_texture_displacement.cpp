@@ -3,6 +3,7 @@
 #endif
 
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <admesh/stl.h>
 #include <memory>
 #include <vector>
 #include <cstdint>
@@ -2413,4 +2414,208 @@ TEST_CASE("Texture displacement edge smoothing preserves a lower layer's neutral
             expected = (x == 3 && y == 3) ? 2.f : 1.5f;
         CHECK_THAT(out.vertices[i].z(), WithinAbs(expected, 1e-4f));
     }
+}
+
+TEST_CASE("Small colored regions follow their strongest shared boundary", "[TextureDisplacement][TextureColorRegions]")
+{
+    // The central right triangle has area 6 and edge lengths 5, 3 and 4.  Its
+    // color-1 neighbor shares only the length-5 edge; its two color-2 neighbors
+    // share lengths 3 and 4, so their combined boundary length 7 must win.
+    indexed_triangle_set mesh;
+    mesh.vertices = {{0.f, 0.f, 0.f}, {4.f, 0.f, 0.f}, {0.f, 3.f, 0.f},
+                     {4.f, 4.f, 0.f}, {-5.f, 1.f, 0.f}, {2.f, -4.f, 0.f}};
+    mesh.indices  = {{0, 1, 2}, {1, 3, 2}, {2, 4, 0}, {0, 5, 1}};
+    const auto triangle_area = [&mesh](size_t i) {
+        const stl_triangle_vertex_indices &t = mesh.indices[i];
+        return 0.5f * (mesh.vertices[size_t(t[1])] - mesh.vertices[size_t(t[0])])
+                            .cross(mesh.vertices[size_t(t[2])] - mesh.vertices[size_t(t[0])])
+                            .norm();
+    };
+    CHECK_THAT(triangle_area(0), WithinAbs(6.f, 1e-6f));
+    CHECK(triangle_area(1) > 7.f);
+    CHECK(triangle_area(2) > 7.f);
+    CHECK(triangle_area(3) > 7.f);
+    CHECK_THAT((mesh.vertices[1] - mesh.vertices[2]).norm(), WithinAbs(5.f, 1e-6f));
+    CHECK_THAT((mesh.vertices[2] - mesh.vertices[0]).norm(), WithinAbs(3.f, 1e-6f));
+    CHECK_THAT((mesh.vertices[0] - mesh.vertices[1]).norm(), WithinAbs(4.f, 1e-6f));
+
+    const std::vector<int> seed = {0, 1, 2, 2};
+    SECTION("zero threshold is disabled")
+    {
+        std::vector<int> colors = seed;
+        merge_small_color_regions(mesh, colors, 0.f);
+        CHECK(colors == seed);
+    }
+    SECTION("the strict area boundary preserves an equal-area component")
+    {
+        std::vector<int> colors = seed;
+        merge_small_color_regions(mesh, colors, 6.f);
+        CHECK(colors == seed);
+    }
+    SECTION("the summed shared boundary chooses color two")
+    {
+        std::vector<int> colors = seed;
+        merge_small_color_regions(mesh, colors, 7.f);
+        const std::vector<int> expected = {2, 1, 2, 2};
+        CHECK(colors == expected);
+    }
+    SECTION("unpainted neighbors block a merge")
+    {
+        std::vector<int> colors = {0, -1, -1, -1};
+        merge_small_color_regions(mesh, colors, 7.f);
+        const std::vector<int> expected = {0, -1, -1, -1};
+        CHECK(colors == expected);
+    }
+    SECTION("an unpainted center stays outside colored components")
+    {
+        std::vector<int> colors = {-1, 1, 2, 2};
+        merge_small_color_regions(mesh, colors, 7.f);
+        const std::vector<int> expected = {-1, 1, 2, 2};
+        CHECK(colors == expected);
+    }
+    SECTION("connected faces contribute their combined area")
+    {
+        // The center and its left neighbor form one area-13.5 component.
+        std::vector<int> colors = {0, 1, 0, 2};
+        merge_small_color_regions(mesh, colors, 7.f);
+        const std::vector<int> expected = {0, 1, 0, 2};
+        CHECK(colors == expected);
+    }
+}
+
+static DecodedHeightTexture make_texture_projection_contract_texture()
+{
+    DecodedHeightTexture texture;
+    texture.width = 2;
+    texture.height = 2;
+    texture.pixels = {0, 85, 170, 255};
+    texture.rgb = {
+        255, 0,   0, // red
+        0,   255, 0, // green
+        0,   0,   255, // blue
+        255, 255, 255, // white
+    };
+    return texture;
+}
+
+TEST_CASE("Cylindrical and spherical projection sample literal colour texels", "[TextureDisplacement][TextureProjectionColor]")
+{
+    const DecodedHeightTexture texture = make_texture_projection_contract_texture();
+    const Vec3f patch_center(10.f, 20.f, 30.f);
+    constexpr float pi = 3.14159265358979323846f;
+    constexpr float half_pi = 1.57079632679489661923f;
+
+    auto expect_sample = [&](const TextureDisplacementLayer &layer,
+                             const Vec3f &position,
+                             const Vec3f &patch_axis,
+                             const std::array<float, 3> &expected_rgb,
+                             float expected_height) {
+        Vec3f colour(-1.f, -1.f, -1.f);
+        REQUIRE(sample_layer_color(texture, layer, position, Vec3f::UnitZ(), colour,
+                                            patch_center, patch_axis));
+        CHECK_THAT(colour.x(), WithinAbs(expected_rgb[0], 1e-6f));
+        CHECK_THAT(colour.y(), WithinAbs(expected_rgb[1], 1e-6f));
+        CHECK_THAT(colour.z(), WithinAbs(expected_rgb[2], 1e-6f));
+        CHECK_THAT(sample_layer_height(texture, layer, position, Vec3f::UnitZ(),
+                                               patch_center, patch_axis),
+                   WithinAbs(expected_height, 1e-6f));
+    };
+
+    TextureDisplacementLayer cylindrical;
+    cylindrical.projection_method = TextureProjectionMethod::Cylindrical;
+    cylindrical.tile_enabled = false;
+    cylindrical.tiling_scale = pi;
+    cylindrical.rotation_deg = 0.f;
+    cylindrical.offset = Vec2f::Zero();
+
+    // With an axis through patch_center, the selected positions land at UV (0,0), (.5,0),
+    // and (.5,.5), which are literal texel corners in this 2x2 fixture.
+    expect_sample(cylindrical, patch_center + Vec3f(0.f, 1.f, 0.f),
+                  Vec3f::UnitZ(), {1.f, 0.f, 0.f}, 0.f);
+    expect_sample(cylindrical, patch_center + Vec3f(1.f, 0.f, 0.f),
+                  Vec3f(0.f, 0.f, 5.f), {0.f, 1.f, 0.f}, 85.f / 255.f);
+    expect_sample(cylindrical, patch_center + Vec3f(1.f, 0.f, half_pi),
+                  Vec3f::Zero(), {1.f, 1.f, 1.f}, 1.f);
+
+    TextureDisplacementLayer spherical = cylindrical;
+    spherical.projection_method = TextureProjectionMethod::Spherical;
+    expect_sample(spherical, patch_center, Vec3f::UnitX(), {1.f, 0.f, 0.f}, 0.f);
+    expect_sample(spherical, patch_center + Vec3f(1.f, 0.f, 0.f),
+                  Vec3f::UnitX(), {1.f, 0.f, 0.f}, 0.f);
+    expect_sample(spherical, patch_center + Vec3f(0.f, 1.f, 0.f),
+                  Vec3f::UnitX(), {0.f, 1.f, 0.f}, 85.f / 255.f);
+    expect_sample(spherical, patch_center + Vec3f(0.f, 0.f, 1.f),
+                  Vec3f::UnitX(), {0.f, 0.f, 1.f}, 170.f / 255.f);
+
+    // The south pole is outside the single non-tiled placement. The color API must report no
+    // colour and preserve its caller-owned output, while the height API returns its neutral zero.
+    Vec3f colour_sentinel(0.25f, 0.5f, 0.75f);
+    CHECK_FALSE(sample_layer_color(texture, spherical,
+                                           patch_center + Vec3f(0.f, 0.f, -1.f),
+                                           Vec3f::UnitZ(), colour_sentinel, patch_center,
+                                           Vec3f::UnitX()));
+    CHECK_THAT(colour_sentinel.x(), WithinAbs(0.25f, 1e-6f));
+    CHECK_THAT(colour_sentinel.y(), WithinAbs(0.5f, 1e-6f));
+    CHECK_THAT(colour_sentinel.z(), WithinAbs(0.75f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, spherical,
+                                           patch_center + Vec3f(0.f, 0.f, -1.f),
+                                           Vec3f::UnitZ(), patch_center,
+                                           Vec3f::UnitX()),
+               WithinAbs(0.f, 1e-6f));
+}
+
+TEST_CASE("Projective colour projection enforces depth and untiled bounds", "[TextureDisplacement][TextureProjectionColor]")
+{
+    const DecodedHeightTexture texture = make_texture_projection_contract_texture();
+    TextureDisplacementLayer layer;
+    layer.projection_method = TextureProjectionMethod::ViewProjected;
+    layer.view_project_projective = true;
+    layer.tile_enabled = false;
+    // These ordinary placement fields must not affect a projective matrix's already-normalized UV.
+    layer.tiling_scale = 0.125f;
+    layer.rotation_deg = 37.f;
+    layer.offset = Vec2f(0.31f, -0.27f);
+    // w=z+1; the origin maps to the white texel at UV (.5,.5), z=1 has w=2 and maps to
+    // the green texel at UV (.5,0), y=2 maps outside at v=1.5, and z=-2 is behind.
+    layer.view_project_matrix = {0.f, 0.f, 0.5f, 0.5f,
+                                 0.f, 0.5f, -0.5f, 0.5f,
+                                 0.f, 0.f, 1.f, 1.f};
+
+    Vec3f inside(-1.f, -1.f, -1.f);
+    REQUIRE(sample_layer_color(texture, layer, Vec3f::Zero(), Vec3f::UnitZ(), inside));
+    CHECK_THAT(inside.x(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(inside.y(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(inside.z(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, layer, Vec3f::Zero(), Vec3f::UnitZ()),
+               WithinAbs(1.f, 1e-6f));
+
+    Vec3f perspective_inside(-1.f, -1.f, -1.f);
+    REQUIRE(sample_layer_color(texture, layer, Vec3f(0.f, 0.f, 1.f),
+                                       Vec3f::UnitZ(), perspective_inside));
+    CHECK_THAT(perspective_inside.x(), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(perspective_inside.y(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(perspective_inside.z(), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, layer, Vec3f(0.f, 0.f, 1.f),
+                                           Vec3f::UnitZ()),
+               WithinAbs(85.f / 255.f, 1e-6f));
+
+    Vec3f behind_sentinel(0.2f, 0.4f, 0.6f);
+    CHECK_FALSE(sample_layer_color(texture, layer, Vec3f(0.f, 0.f, -2.f),
+                                           Vec3f::UnitZ(), behind_sentinel));
+    CHECK_THAT(behind_sentinel.x(), WithinAbs(0.2f, 1e-6f));
+    CHECK_THAT(behind_sentinel.y(), WithinAbs(0.4f, 1e-6f));
+    CHECK_THAT(behind_sentinel.z(), WithinAbs(0.6f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, layer, Vec3f(0.f, 0.f, -2.f),
+                                           Vec3f::UnitZ()),
+               WithinAbs(0.f, 1e-6f));
+
+    Vec3f outside_sentinel(0.7f, 0.8f, 0.9f);
+    CHECK_FALSE(sample_layer_color(texture, layer, Vec3f(0.f, 2.f, 0.f),
+                                           Vec3f::UnitZ(), outside_sentinel));
+    CHECK_THAT(outside_sentinel.x(), WithinAbs(0.7f, 1e-6f));
+    CHECK_THAT(outside_sentinel.y(), WithinAbs(0.8f, 1e-6f));
+    CHECK_THAT(outside_sentinel.z(), WithinAbs(0.9f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, layer, Vec3f(0.f, 2.f, 0.f),
+                                           Vec3f::UnitZ()),
+               WithinAbs(0.f, 1e-6f));
 }

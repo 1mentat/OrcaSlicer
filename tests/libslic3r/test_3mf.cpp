@@ -4238,6 +4238,65 @@ TEST_CASE("BBS project archives sidecar thumbnail files under declared names", "
     CHECK(payload == "sidecar-pick");
 }
 
+TEST_CASE("BBS exporter recursively archives model auxiliary files", "[3MF][Bbs3mfMetadata][BbsAuxiliaryExport]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    ScopedTemporaryDir backup("orca_bbs_auxiliary_export");
+    Model model = make_cube_model();
+    model.set_backup_path(backup.string());
+    ScopeGuard detach_backup([&model] { model.set_backup_path("detach"); });
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.config = config;
+    plate.plate_index = 0;
+    plate.objects_and_instances = {{0, 0}};
+
+    // This is the public model-owned auxiliary root passed to the exporter.
+    const std::filesystem::path auxiliary_root = model.get_auxiliary_file_temp_path();
+    const std::filesystem::path nested = auxiliary_root / "docs" / "nested";
+    REQUIRE(std::filesystem::create_directories(nested));
+    {
+        std::ofstream root_file(auxiliary_root / "contract.txt", std::ios::binary);
+        root_file << "aux-root-contract";
+        REQUIRE(root_file.good());
+        std::ofstream nested_file(nested / "contract.txt", std::ios::binary);
+        nested_file << "aux-nested-contract";
+        REQUIRE(nested_file.good());
+    }
+
+    // A sibling of Auxiliaries is a negative control for the recursive root.
+    {
+        std::ofstream outside_file(std::filesystem::path(backup.string()) / "outside.txt", std::ios::binary);
+        outside_file << "must-not-archive";
+        REQUIRE(outside_file.good());
+    }
+
+    StoreParams params;
+    params.path = archive.string();
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    std::string payload;
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Auxiliaries/contract.txt"));
+    CHECK(payload == "aux-root-contract");
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Auxiliaries/docs/nested/contract.txt"));
+    CHECK(payload == "aux-nested-contract");
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Auxiliaries/outside.txt"));
+
+    ScopedTemporaryFile without_auxiliary(".3mf");
+    params.path = without_auxiliary.string();
+    params.strategy = params.strategy | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(params));
+    REQUIRE(read_3mf_entry(without_auxiliary.string(), payload, "3D/3dmodel.model"));
+    CHECK_FALSE(payload.empty());
+    CHECK_FALSE(read_3mf_entry(without_auxiliary.string(), payload, "Auxiliaries/contract.txt"));
+    CHECK_FALSE(read_3mf_entry(without_auxiliary.string(), payload, "Auxiliaries/docs/nested/contract.txt"));
+}
+
 TEST_CASE("BBS project persists plate bounding-box JSON", "[3mf][Bbs3mfMetadata][BBox]")
 {
     PlateBBoxData bbox;

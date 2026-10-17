@@ -269,6 +269,18 @@ filament restrictions, diagnostic reset, and exclusion of custom extrusion from
 object bounds. These groups avoid slicing and export; their mutants are in
 `print_shared_printable_area.json` and `gcp_build_volume.json`.
 
+`[TextureColorRegions]` checks connected region area, the strict merge threshold,
+summed shared boundary lengths, and unpainted borders on a four-triangle mesh.
+Its bounded mutations are in `texture_region_merge.json`.
+`[TextureProjectionColor]` checks cylindrical, spherical, and projective color
+and height sampling against literal texels, including normalized axes, perspective
+division, rejected depth, and untiled bounds. Its mutations are in
+`texture_projection_color.json`.
+
+`[BbsAuxiliaryExport]` checks root and nested model auxiliary payloads, archive
+path mapping, root containment, and the `SkipAuxiliary` disabled control.
+Its mutations are in `bbs_auxiliary_export.json`.
+
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
 placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`
 checks non-sequential backup IDs, geometry preservation, and missing-part

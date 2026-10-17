@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Public color and height projection contracts using a literal 2x2 texel grid.",
+  "mutants": [
+    {
+      "id": "texture-projection-cylindrical-zero-axis-fallback",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "    up       = (up.norm() > 1e-8f) ? Vec3f(up.normalized()) : Vec3f::UnitZ();",
+      "new": "    up       = (up.norm() > 1e-8f) ? Vec3f(up.normalized()) : Vec3f::UnitX();",
+      "description": "A zero cylindrical patch axis must use the documented UnitZ fallback; a finite but different fallback changes the literal texel mapping.",
+      "test_filter": "TextureProjectionColor"
+    },
+    {
+      "id": "texture-projection-spherical-center-fallback",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "    if (radius < 1e-8f)\n        return Vec2f::Zero();",
+      "new": "    if (radius < 1e-8f)\n        return Vec2f(0.5f, 0.5f);",
+      "description": "The spherical patch center has no direction and must map to the neutral zero planar coordinate, not an arbitrary texel center.",
+      "test_filter": "TextureProjectionColor"
+    },
+    {
+      "id": "texture-projection-color-projective-depth-guard",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "            if (!project_uv_projective(layer.view_project_matrix, position, uv))\n                return false;\n            if (!layer.tile_enabled && (uv.x() < 0.f || uv.x() >= 1.f || uv.y() < 0.f || uv.y() >= 1.f))\n                return false;",
+      "new": "            if (!project_uv_projective(layer.view_project_matrix, position, uv))\n                return true;\n            if (!layer.tile_enabled && (uv.x() < 0.f || uv.x() >= 1.f || uv.y() < 0.f || uv.y() >= 1.f))\n                return false;",
+      "description": "Projective color sampling must reject negative homogeneous depth. Falsely reporting success while preserving the caller output must fail the return-value assertion.",
+      "test_filter": "TextureProjectionColor"
+    },
+    {
+      "id": "texture-projection-color-untiled-upper-bound",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "            if (!layer.tile_enabled && (uv.x() < 0.f || uv.x() >= 1.f || uv.y() < 0.f || uv.y() >= 1.f))\n                return false;",
+      "new": "            if (!layer.tile_enabled && (uv.x() < 0.f || uv.x() >= 1.f || uv.y() < 0.f))\n                return false;",
+      "description": "An untiled projective color placement must reject UV coordinates at or beyond the upper edge instead of returning a successful black sample.",
+      "test_filter": "TextureProjectionColor"
+    }
+  ]
+}
