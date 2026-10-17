@@ -5447,7 +5447,7 @@ void check_geometry(const ModelObject &actual, const ModelObject &expected)
 {
     REQUIRE(actual.volumes.size() == expected.volumes.size());
     REQUIRE(actual.instances.size() == expected.instances.size());
-    CHECK_THAT(actual.raw_mesh().volume(), Catch::Matchers::WithinRel(expected.raw_mesh().volume(), 1e-5));
+    CHECK_THAT(actual.raw_mesh().volume(), Catch::Matchers::WithinRel(expected.raw_mesh().volume(), 1e-5f));
     const BoundingBoxf3 &actual_box = actual.bounding_box_exact();
     const BoundingBoxf3 &expected_box = expected.bounding_box_exact();
     for (int axis = 0; axis < 3; ++axis) {
