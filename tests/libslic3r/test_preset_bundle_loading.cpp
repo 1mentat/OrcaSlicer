@@ -10390,3 +10390,78 @@ TEST_CASE("Calibration printer selection follows filament compatibility profiles
 }
 
 } // namespace preset_bundle_calibration_contracts
+namespace preset_installed_filament_contracts {
+
+TEST_CASE("Installed filament discovery persists compatible vendor defaults", "[PresetBundle][PresetInstalledFilaments]")
+{
+    PresetBundle bundle;
+    VendorProfile &vendor = bundle.vendors["Acme"];
+    vendor.id = vendor.name = "Acme";
+    VendorProfile::PrinterModel model;
+    model.id = model.name = "Acme Model";
+    model.variants.emplace_back("0.4");
+    model.default_materials = {"Default PLA"};
+    vendor.models.emplace_back(std::move(model));
+
+    Preset &printer = add_inmemory_preset(bundle.printers, "Acme Printer");
+    printer.is_system = true;
+    printer.is_visible = true;
+    printer.vendor = &vendor;
+    printer.config.option<ConfigOptionString>("printer_model", true)->value = "Acme Model";
+    printer.config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+    printer.config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4};
+    REQUIRE(printer.printer_technology() == ptFFF);
+
+    Preset &default_filament_setup = add_inmemory_preset(bundle.filaments, "Default PLA");
+    default_filament_setup.is_system = true;
+    default_filament_setup.is_visible = false;
+    default_filament_setup.vendor = &vendor;
+
+    Preset &installed_filament_setup = add_inmemory_preset(bundle.filaments, "Installed PLA");
+    installed_filament_setup.is_system = true;
+    installed_filament_setup.is_visible = false;
+    installed_filament_setup.vendor = &vendor;
+    installed_filament_setup.config.option<ConfigOptionStrings>("compatible_printers", true)->values = {"Acme Printer"};
+
+    SECTION("missing installed section seeds model defaults")
+    {
+        AppConfig app_config;
+        REQUIRE_FALSE(app_config.has_section(AppConfig::SECTION_FILAMENTS));
+
+        bundle.load_installed_filaments(app_config);
+
+        const Preset *default_filament = bundle.filaments.find_preset("Default PLA", false, true);
+        const Preset *installed_filament = bundle.filaments.find_preset("Installed PLA", false, true);
+        REQUIRE(default_filament != nullptr);
+        REQUIRE(installed_filament != nullptr);
+        REQUIRE(app_config.has_section(AppConfig::SECTION_FILAMENTS));
+        const auto &installed = app_config.get_section(AppConfig::SECTION_FILAMENTS);
+        REQUIRE(installed.count("Default PLA") == 1);
+        CHECK(installed.at("Default PLA") == "true");
+        CHECK(installed.count("Installed PLA") == 0);
+        CHECK(default_filament->is_visible);
+        CHECK_FALSE(installed_filament->is_visible);
+    }
+
+    SECTION("compatible installed section suppresses model defaults")
+    {
+        AppConfig app_config;
+        app_config.set_section(AppConfig::SECTION_FILAMENTS, {{"Installed PLA", "true"}});
+        REQUIRE(app_config.has_section(AppConfig::SECTION_FILAMENTS));
+        REQUIRE(app_config.get_section(AppConfig::SECTION_FILAMENTS).count("Installed PLA") == 1);
+
+        bundle.load_installed_filaments(app_config);
+
+        const Preset *default_filament = bundle.filaments.find_preset("Default PLA", false, true);
+        const Preset *installed_filament = bundle.filaments.find_preset("Installed PLA", false, true);
+        REQUIRE(default_filament != nullptr);
+        REQUIRE(installed_filament != nullptr);
+        const auto &installed = app_config.get_section(AppConfig::SECTION_FILAMENTS);
+        CHECK(installed.count("Default PLA") == 0);
+        CHECK(installed.at("Installed PLA") == "true");
+        CHECK_FALSE(default_filament->is_visible);
+        CHECK(installed_filament->is_visible);
+    }
+}
+
+} // namespace preset_installed_filament_contracts

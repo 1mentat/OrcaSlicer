@@ -44,12 +44,28 @@ _AXIS_ADD = re.compile(
     r"\s*\+\s*axis\.name\s*,\s*(?P<type>co[A-Za-z0-9_]+)\s*\)"
 )
 _ENUM_PUSH = re.compile(
-    r"enum_values\s*\.\s*(?:push_back|emplace_back)\(\s*\"([^\"]*)\"\s*\)"
+    r"enum_values\s*\.\s*(?:push_back|emplace_back)\(\s*"
+    r"(?:L\(\s*)?\"([^\"]*)\"(?:\s*\))?\s*\)"
 )
 _ENUM_ASSIGN = re.compile(r"enum_values\s*=\s*\{(?P<body>[^}]*)\}", re.DOTALL)
 _ENUM_ALIAS = re.compile(r"enum_values\s*=\s*([A-Za-z_]\w*)->enum_values")
+_ENUM_APPEND = re.compile(r"append\s*\(\s*def->enum_values\s*,\s*([A-Za-z_]\w*)->enum_values\s*\)")
+_NULLABLE_ASSIGN = re.compile(r"\bdef->nullable\s*=\s*true\b")
+# A direct registration's body currently extends to the next direct add.  A
+# local registration lambda in that interval belongs to its own generated
+# options, so stop metadata collection at the lambda boundary.  This is a
+# deliberately narrow lexical guard, not a C++ parser.
+_REGISTRATION_LAMBDA = re.compile(
+    r"(?ms)^\s*(?:auto|const\s+auto)\s+[A-Za-z_]\w*\s*=\s*"
+    r"\[[^\]]*\]\s*\([^;]*?\)\s*\{"
+)
 _QUOTED = re.compile(r'\"([^\"]*)\"')
 _NUMBER_ASSIGN = re.compile(r"def->(?:min|max)\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
+_CONFIG_TYPE_ENUM = re.compile(r"\benum\s+ConfigOptionType\s*\{(?P<body>.*?)\};", re.DOTALL)
+_CONFIG_TYPE_ENTRY = re.compile(
+    r"(?m)^\s*(co[A-Za-z0-9_]*)\s*(?:=\s*([^,\n]+))?\s*,?\s*$"
+)
+_CONFIG_TYPE_TOKEN = re.compile(r"\b(co[A-Za-z0-9_]+|0[xX][0-9A-Fa-f]+|\d+)\b|([+-])")
 _DIMENSIONS = {
     # Schema round-trips are registry-wide serialization evidence and remain
     # separate from pipeline behavior claims.
@@ -155,10 +171,49 @@ def _registration(key: str, option_type: str, line: int, *, origin: str,
         "enum_values": values,
         "enum_value_count": len(values),
         "range_declared": sorted(ranges),
-        "nullable": nullable,
+        "nullable": nullable or bool(_NULLABLE_ASSIGN.search(body)),
         "default_declared": ("set_default_value" in body
                               if default_declared is None else default_declared),
     }
+
+
+def _config_option_type_ids(path: Path) -> dict[str, int]:
+    """Read the small ConfigOptionType enum without evaluating C++ source."""
+    if not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
+        raise InventoryError(f"invalid ConfigOptionType header: {path}")
+    text = _strip_cpp_comments(path.read_text(encoding="utf-8"))
+    match = _CONFIG_TYPE_ENUM.search(text)
+    if not match:
+        raise InventoryError(f"cannot locate ConfigOptionType enum in {path}")
+    values: dict[str, int] = {}
+    next_value = 0
+    for entry in _CONFIG_TYPE_ENTRY.finditer(match.group("body")):
+        name, expression = entry.group(1), entry.group(2)
+        if expression is None:
+            value = next_value
+        else:
+            tokens = _CONFIG_TYPE_TOKEN.findall(expression)
+            flattened = [(name_token or sign) for name_token, sign in tokens]
+            if not flattened or "".join(flattened) != re.sub(r"\s+", "", expression):
+                raise InventoryError(f"unsupported ConfigOptionType expression for {name}")
+            value = 0
+            sign = 1
+            for token in flattened:
+                if token == "+":
+                    sign = 1
+                elif token == "-":
+                    sign = -1
+                else:
+                    operand = values.get(token)
+                    if operand is None:
+                        operand = int(token, 0)
+                    value += sign * operand
+                    sign = 1
+        values[name] = value
+        next_value = value + 1
+    if not values:
+        raise InventoryError(f"ConfigOptionType enum is empty in {path}")
+    return values
 
 
 def _filament_override_keys(source: str) -> list[str]:
@@ -179,12 +234,15 @@ def parse_print_config(source_path: Path) -> dict[str, Any]:
     for index, match in enumerate(direct_matches):
         body_end = direct_matches[index + 1].start() if index + 1 < len(direct_matches) else len(segment)
         body = segment[match.start():body_end]
+        lambda_boundary = _REGISTRATION_LAMBDA.search(body)
+        if lambda_boundary:
+            body = body[:lambda_boundary.start()]
         event = _registration(
             match.group(1), match.group(2), _line_number(source, segment_offset + match.start()),
             origin="direct", body=body,
         )
         inherited: list[str] = []
-        for alias in _ENUM_ALIAS.findall(body):
+        for alias in (*_ENUM_ALIAS.findall(body), *_ENUM_APPEND.findall(body)):
             inherited.extend(enum_aliases.get(alias, []))
         event["enum_values"] = list(dict.fromkeys(event["enum_values"] + inherited))
         event["enum_value_count"] = len(event["enum_values"])
@@ -405,6 +463,75 @@ def build_report(*, root: Path, source_path: Path, evidence_path: Path) -> dict[
     }
 
 
+def _runtime_metadata(option: Any) -> dict[str, Any] | None:
+    """Return validated registry metadata, or None for a key-only registry."""
+    if not isinstance(option, dict):
+        return None
+    required = ("type_id", "nullable", "has_default", "enum_values", "canonical_enum_values")
+    if any(field not in option for field in required):
+        return None
+    type_id = option["type_id"]
+    nullable = option["nullable"]
+    has_default = option["has_default"]
+    values = option["enum_values"]
+    canonical_values = option["canonical_enum_values"]
+    if (isinstance(type_id, bool) or not isinstance(type_id, int) or
+            not isinstance(nullable, bool) or not isinstance(has_default, bool) or
+            not isinstance(values, list) or any(not isinstance(value, str) for value in values) or
+            not isinstance(canonical_values, list) or
+            any(not isinstance(value, str) for value in canonical_values)):
+        raise ValueError("invalid runtime metadata fields")
+    if len(set(values)) != len(values) or len(set(canonical_values)) != len(canonical_values):
+        raise ValueError("duplicate runtime enum values")
+    return {
+        "type_id": type_id,
+        "nullable": nullable,
+        "has_default": has_default,
+        "enum_values": list(values),
+        "canonical_enum_values": list(canonical_values),
+    }
+
+
+def apply_runtime_registry(report: dict[str, Any], audit: dict[str, Any]) -> None:
+    """Attach trusted runtime metadata without overwriting source-parser fields."""
+    report["runtime_registry_keyset_verified"] = bool(audit["matches"])
+    metadata_by_key = audit.get("metadata_by_key", {})
+    complete = bool(audit.get("metadata_schema_valid")) and bool(audit["matches"])
+    report["runtime_registry_metadata_reconciled"] = complete
+    report["runtime_registry_verified"] = complete
+    report["metadata_source"] = "validated_runtime_registry" if complete else "static_source_parser"
+    report["metadata_complete"] = complete
+    report["metadata_warnings"] = [] if complete else [
+        "Static enum and nullable fields are incomplete for generated or runtime-populated options.",
+        "Use a validated runtime registry for effective metadata; source keys remain authoritative.",
+    ]
+    mismatches: list[dict[str, Any]] = []
+    if not complete:
+        # A mismatched or untyped registry is diagnostic only. Do not expose
+        # values from it as effective metadata.
+        report["metadata_mismatches"] = mismatches
+        return
+    for option in report["options"]:
+        key = option["key"]
+        metadata = metadata_by_key.get(key)
+        if metadata is None:
+            continue
+        option["runtime_metadata"] = metadata
+        option["effective_enum_values"] = list(metadata["enum_values"])
+        option["effective_canonical_enum_values"] = list(metadata["canonical_enum_values"])
+        option["effective_nullable"] = metadata["nullable"]
+        option["effective_default_declared"] = metadata["has_default"]
+        for field, static_value, runtime_value in (
+            ("enum_values", option["enum_values"], metadata["enum_values"]),
+            ("nullable", option["nullable"], metadata["nullable"]),
+            ("default_declared", option["default_declared"], metadata["has_default"]),
+        ):
+            if static_value != runtime_value:
+                mismatches.append({"key": key, "field": field,
+                                   "static": static_value, "runtime": runtime_value})
+    report["metadata_mismatches"] = mismatches
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".")
@@ -413,13 +540,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", default="build/evidence/settings-inventory.json")
     parser.add_argument("--runtime-registry",
                         help="JSON from slicer_settings_inventory; verify the static key set against the compiled registry")
+    parser.add_argument("--type-header", default="src/libslic3r/Config.hpp",
+                        help="ConfigOptionType header used to validate registry type_id values")
     parser.add_argument("--fail-on-uncovered", action="store_true",
                         help="return 1 when any setting lacks complete evidence")
     return parser
 
 
-def audit_runtime_registry(report: dict[str, Any], path: Path) -> dict[str, Any]:
+def audit_runtime_registry(report: dict[str, Any], path: Path,
+                           *, type_header: Path | None = None) -> dict[str, Any]:
     """Compare the independently compiled key set with the source parser."""
+    if not path.is_file():
+        raise InventoryError(f"runtime registry is not a regular file: {path}")
+    if path.stat().st_size > 64 * 1024 * 1024:
+        raise InventoryError(f"runtime registry is unexpectedly large: {path}")
     raw = path.read_bytes()
     try:
         registry = json.loads(raw)
@@ -428,8 +562,29 @@ def audit_runtime_registry(report: dict[str, Any], path: Path) -> dict[str, Any]
         if (registry.get("source") != "PrintConfigDef::options" or
                 registry.get("schema_version") != 1 or
                 registry.get("settings_count") != len(keys) or
-                any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys)):
+                any(not isinstance(key, str) or not key for key in keys) or len(set(keys)) != len(keys)):
             raise ValueError("invalid or duplicate registry keys")
+        metadata_by_key: dict[str, dict[str, Any]] = {}
+        metadata_schema_valid = type_header is not None
+        type_ids: dict[str, int] = {}
+        if type_header is not None:
+            type_ids = _config_option_type_ids(type_header)
+        report_options = {option["key"]: option for option in report["options"]}
+        for option in options:
+            metadata = _runtime_metadata(option)
+            if metadata is None:
+                metadata_schema_valid = False
+            else:
+                source_option = report_options.get(option["key"])
+                if source_option is None or source_option.get("type") not in type_ids:
+                    metadata_schema_valid = False
+                elif metadata["type_id"] != type_ids[source_option["type"]]:
+                    raise ValueError(
+                        f"type_id mismatch for {option['key']}: "
+                        f"registry={metadata['type_id']} "
+                        f"source={source_option['type']}:{type_ids[source_option['type']]}"
+                    )
+                metadata_by_key[option["key"]] = metadata
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise InventoryError(f"invalid runtime registry {path}: {exc}") from exc
     parsed_keys = {option["key"] for option in report["options"]}
@@ -441,6 +596,14 @@ def audit_runtime_registry(report: dict[str, Any], path: Path) -> dict[str, Any]
         "settings_count": len(keys),
         "missing_from_source_inventory": sorted(actual_keys - parsed_keys),
         "absent_from_runtime_registry": sorted(parsed_keys - actual_keys),
+        "metadata_schema_valid": metadata_schema_valid,
+        "type_id_verified": metadata_schema_valid,
+        "type_domain_source": str(type_header) if type_header is not None else None,
+        "type_domain_sha256": (
+            hashlib.sha256(type_header.read_bytes()).hexdigest()
+            if type_header is not None else None
+        ),
+        "metadata_by_key": metadata_by_key,
     }
 
 
@@ -456,12 +619,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = build_report(root=root, source_path=source, evidence_path=evidence_path)
         report["runtime_registry_verified"] = False
+        report["runtime_registry_keyset_verified"] = False
+        report["runtime_registry_metadata_reconciled"] = False
+        report["metadata_source"] = "static_source_parser"
+        report["metadata_complete"] = False
+        report["metadata_warnings"] = [
+            "Static enum and nullable fields are incomplete for generated or runtime-populated options.",
+            "Use a validated runtime registry for effective metadata; source keys remain authoritative.",
+        ]
+        report["metadata_mismatches"] = []
         if args.runtime_registry:
             runtime_arg = Path(args.runtime_registry)
             runtime_path = (root / runtime_arg if not runtime_arg.is_absolute() else runtime_arg).resolve()
-            audit = audit_runtime_registry(report, runtime_path)
-            report["runtime_registry"] = audit
-            report["runtime_registry_verified"] = audit["matches"]
+            type_arg = Path(args.type_header)
+            type_path = (root / type_arg if not type_arg.is_absolute() else type_arg).resolve()
+            audit = audit_runtime_registry(report, runtime_path, type_header=type_path)
+            report["runtime_registry"] = {key: value for key, value in audit.items()
+                                           if key != "metadata_by_key"}
+            apply_runtime_registry(report, audit)
             if not audit["matches"]:
                 report["status"] = "runtime_registry_mismatch"
         if args.fail_on_uncovered and report["counts"].get("uncovered", 0) + report["counts"].get("declared_partial", 0):

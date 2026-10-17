@@ -624,3 +624,45 @@ TEST_CASE("How fast a corner is taken does not depend on how much is extruded th
                      Catch::Matchers::WithinRel(marlin, 0.02));
     }
 }
+TEST_CASE("VG1 classic jerk planning slows an E-axis reversal at a virtual junction",
+          "[GCodeTiming][GCodeTimingVirtualJerk]")
+{
+    const auto virtual_time = [](double previous_feedrate, double current_feedrate, double current_e) {
+        FullPrintConfig config = make_junction_config(gcfMarlinLegacy, 1000.0, 0.0);
+        // Keep XYZ out of the way and make the E-axis reversal the only limited transition.
+        config.machine_max_jerk_e.values = { 10.0, 10.0 };
+
+        std::ostringstream gcode;
+        gcode << std::fixed << std::setprecision(4)
+              << "M83\nG90\n"
+              << "VG1 Z0.2 F1200\n"
+              << "VG1 X20 Y60 F6000\n"
+              << "VG1 X60 Y60 E4 F" << previous_feedrate << "\n"
+              << "VG1 X99.7818 Y64.1806 E" << current_e << " F" << current_feedrate << "\n";
+
+        GCodeProcessor processor;
+        const std::string text = gcode.str();
+        run_processor(processor, config, text.c_str());
+        return double(processor.get_time(PrintEstimatedStatistics::ETimeMode::Normal));
+    };
+
+    const auto compare_order = [&](double previous_feedrate, double current_feedrate) {
+        const double same_direction = virtual_time(previous_feedrate, current_feedrate, 4.0);
+        const double reversal      = virtual_time(previous_feedrate, current_feedrate, -4.0);
+        INFO("previous=" << previous_feedrate << " current=" << current_feedrate);
+        REQUIRE(std::isfinite(same_direction));
+        REQUIRE(std::isfinite(reversal));
+        REQUIRE(same_direction > 0.0);
+        REQUIRE(reversal > same_direction);
+        return reversal - same_direction;
+    };
+
+    // These orderings enter both sides of prev_speed_larger while keeping the
+    // same 40 mm XY geometry and E magnitude in each pair.
+    const double slower_previous_penalty = compare_order(9000.0, 12000.0);
+    const double faster_previous_penalty = compare_order(12000.0, 9000.0);
+    // The slower-previous case has the larger E jerk transition (20 vs 15 mm/s
+    // after the planner's nominal-speed normalization), so its time penalty is
+    // independently expected to be larger.
+    CHECK(slower_previous_penalty > faster_previous_penalty + 0.001);
+}

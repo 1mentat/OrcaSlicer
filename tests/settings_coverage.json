@@ -3441,6 +3441,44 @@
         "fixture_only"
       ],
       "reason": "The direct WipeTower estimate contract deserializes and checks both registered values, type1 and type2, through DynamicPrintConfig and FullPrintConfig resolution and compares finite positive footprint results. This is direct estimate/config evidence only; the fixture does not claim public FFF prime-tower emission or the full interaction matrix with wall type, flush volumes, and printer model."
+    },
+    "counterbore_hole_bridging": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[CounterboreHoleBridging]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The public counterbore fixture deserializes all three registered modes (none, partiallybridge, sacrificiallayer) under both classic and Arachne wall generators. On the ceiling layer, independent clipped annulus and bore areas require the bore to stay open for none, partial mode to remove annulus fill without changing the bore, and sacrificial mode to add positive bore fill; finite positive annulus and total-area controls reject empty-output masking. Full numeric geometry ranges and unrelated region interactions are not claimed."
+    },
+    "combine_brims": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The public two-cube fixture exercises combine_brims=false and true at a close 5 mm gap, requiring two versus one brim groups, and includes a far 60 mm no-merge control. The oracle counts generated brim groups after Print::process; it does not claim the full distance threshold or every skirt/brim interaction."
+    },
+    "brim_ears_outer_only": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public concave-hole fixture exercises brim_ears_outer_only=false and true with brim ears enabled, a fixed 125 degree angle, and zero detection-length override. Both runs require positive ears and independently classify whether the first-layer brim enters the model hole, so the setting\u2019s hole-exclusion behavior is observed. Other brim types and the complete geometry interaction matrix remain unclaimed."
+    },
+    "brim_ears_max_angle": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The square-corner fixture checks the 89, 90, and 91 degree threshold neighborhood: 89 and 90 produce no ears while 91 produces positive ears. This is a focused threshold crossing only; it does not claim the registered 0..180 numeric domain or non-square angle behavior."
     }
   }
 }

@@ -5524,4 +5524,78 @@ TEST_CASE("BBS 3MF plate selection loads only the requested plate objects",
     }
 }
 
+TEST_CASE("BBS restore probe reports a staged archive and origin", "[3MF][Bbs3mfRecovery]")
+{
+    ScopedTemporaryDir backup("orca_bbs_restore_probe");
+    const boost::filesystem::path archive = backup.path() / ".3mf";
+    const boost::filesystem::path origin_file = backup.path() / "origin.txt";
+    {
+        boost::nowide::ofstream output(archive.string(), std::ios::binary);
+        REQUIRE(output.good());
+        output << "staged-archive-placeholder";
+    }
+    {
+        boost::nowide::ofstream output(origin_file.string(), std::ios::binary);
+        REQUIRE(output.good());
+        output << "/source/project.3mf";
+    }
+
+    std::string path = backup.string();
+    std::string origin = "stale-origin";
+    REQUIRE(has_restore_data(path, origin));
+    CHECK(boost::filesystem::path(path).generic_string() == archive.generic_string());
+    CHECK(origin == "/source/project.3mf");
+
+    const boost::filesystem::path missing_path = backup.path() / "missing-backup";
+    std::string missing = missing_path.string();
+    origin = "unchanged-origin";
+    CHECK_FALSE(has_restore_data(missing, origin));
+    CHECK(boost::filesystem::path(missing).generic_string() == missing_path.generic_string());
+    CHECK(origin == "unchanged-origin");
+}
+
+TEST_CASE("BBS restore probe rejects empty and locked paths", "[3MF][Bbs3mfRecovery]")
+{
+    ScopedTemporaryDir backup("orca_bbs_restore_lock");
+    const boost::filesystem::path archive = backup.path() / ".3mf";
+    const boost::filesystem::path lock = backup.path() / "lock.txt";
+    {
+        boost::nowide::ofstream output(archive.string(), std::ios::binary);
+        REQUIRE(output.good());
+        output << "staged-archive-placeholder";
+    }
+
+    const unsigned current_pid = get_current_pid();
+    const std::string current_process_name = get_process_name(static_cast<int>(current_pid));
+    REQUIRE_FALSE(current_process_name.empty());
+    {
+        boost::nowide::ofstream output(lock.string(), std::ios::binary);
+        REQUIRE(output.good());
+        output << current_pid;
+    }
+
+    std::string locked = backup.string();
+    std::string origin = "old-origin";
+    CHECK_FALSE(has_restore_data(locked, origin));
+    CHECK(boost::filesystem::path(locked).generic_string() == backup.path().generic_string());
+    CHECK(origin == "<lock>");
+
+    {
+        boost::nowide::ofstream output(lock.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << "not-a-process-id";
+    }
+    std::string malformed = backup.string();
+    origin = "malformed-lock-origin";
+    CHECK_FALSE(has_restore_data(malformed, origin));
+    CHECK(boost::filesystem::path(malformed).generic_string() == backup.path().generic_string());
+    CHECK(origin == "malformed-lock-origin");
+
+    std::string empty;
+    origin = "old-origin";
+    CHECK_FALSE(has_restore_data(empty, origin));
+    CHECK(empty.empty());
+    CHECK(origin == "<lock>");
+}
+
 } // namespace bbs_selective_plate_contracts

@@ -108,5 +108,177 @@ class SettingsInventoryTests(unittest.TestCase):
         self.assertIn("pipeline_oracle", option["reason"])
 
 
+class SettingsMetadataTests(unittest.TestCase):
+    def test_source_parser_does_not_cross_registration_lambda(self):
+        source = """
+void PrintConfigDef::init_common_params() {
+    this->add("tilt", coFloat);
+    auto add_generated = [this](const char *key) {
+        auto def = this->add(key, coEnum);
+        def->enum_values = {"generated"};
+    };
+    auto top = def = this->add("top", coInt);
+    def->enum_values.push_back("0");
+    def = this->add("bottom", coInt);
+    def->enum_values.push_back("-1");
+    append(def->enum_values, top->enum_values);
+    def->nullable = true;
+    this->add("localized", coEnums);
+    def->enum_values.push_back(L("Standard"));
+}
+void PrintConfigDef::handle_legacy(
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "PrintConfig.cpp"
+            path.write_text(source, encoding="utf-8")
+            options = {
+                item["key"]: item
+                for item in settings_inventory.parse_print_config(path)["options"]
+            }
+        self.assertEqual(options["tilt"]["enum_values"], [])
+        self.assertEqual(options["localized"]["enum_values"], ["Standard"])
+        self.assertEqual(options["bottom"]["enum_values"], ["-1", "0"])
+        self.assertTrue(options["bottom"]["nullable"])
+
+    def test_real_source_captures_literal_metadata_and_direct_nullable(self):
+        source = ROOT / "src/libslic3r/PrintConfig.cpp"
+        options = {
+            item["key"]: item
+            for item in settings_inventory.parse_print_config(source)["options"]
+        }
+        self.assertEqual(options["belt_frame_tilt_angle"]["enum_values"], [])
+        self.assertEqual(
+            options["nozzle_volume_type"]["enum_values"],
+            ["Standard", "High Flow", "Hybrid", "TPU High Flow", "E3D High Flow", "Extra High Flow"],
+        )
+        self.assertEqual(
+            options["support_interface_bottom_layers"]["enum_values"],
+            ["-1", "0", "1", "2", "3"],
+        )
+        self.assertTrue(options["bridge_acceleration"]["nullable"])
+        # MaterialType::all() is runtime-owned and must remain explicitly incomplete.
+        self.assertEqual(options["filament_type"]["enum_values"], [])
+
+    def test_key_only_registry_is_not_broadly_verified(self):
+        report = {"options": [{"key": "shared", "enum_values": [], "nullable": False,
+                                "default_declared": True}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            path.write_text(json.dumps({
+                "schema_version": 1,
+                "source": "PrintConfigDef::options",
+                "settings_count": 1,
+                "options": [{"key": "shared"}],
+            }), encoding="utf-8")
+            audit = settings_inventory.audit_runtime_registry(report, path)
+        settings_inventory.apply_runtime_registry(report, audit)
+        self.assertTrue(report["runtime_registry_keyset_verified"])
+        self.assertFalse(report["runtime_registry_metadata_reconciled"])
+        self.assertFalse(report["runtime_registry_verified"])
+        self.assertFalse(report["metadata_complete"])
+
+    def test_validated_registry_supplies_effective_metadata_and_records_differences(self):
+        report = {"options": [{"key": "shared", "type": "coFloat", "enum_values": ["wrong"],
+                                "nullable": False, "default_declared": True}]}
+        registry = {
+            "schema_version": 1,
+            "source": "PrintConfigDef::options",
+            "settings_count": 1,
+            "options": [{
+                "key": "shared", "type_id": 1, "nullable": True, "has_default": False,
+                "enum_values": ["right"], "canonical_enum_values": ["right"],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            type_header = Path(directory) / "Config.hpp"
+            type_header.write_text("enum ConfigOptionType {\n coFloat = 1,\n coBool = 8\n};\n",
+                                   encoding="utf-8")
+            path.write_text(json.dumps(registry), encoding="utf-8")
+            audit = settings_inventory.audit_runtime_registry(report, path,
+                                                                  type_header=type_header)
+        settings_inventory.apply_runtime_registry(report, audit)
+        self.assertTrue(report["runtime_registry_verified"])
+        option = report["options"][0]
+        self.assertEqual(option["enum_values"], ["wrong"])
+        self.assertEqual(option["effective_enum_values"], ["right"])
+        self.assertEqual(option["effective_canonical_enum_values"], ["right"])
+        self.assertTrue(option["effective_nullable"])
+        self.assertFalse(option["effective_default_declared"])
+        self.assertEqual({item["field"] for item in report["metadata_mismatches"]},
+                         {"enum_values", "nullable", "default_declared"})
+
+    def test_malformed_metadata_is_rejected(self):
+        report = {"options": [{"key": "shared", "type": "coFloat"}]}
+        registry = {
+            "schema_version": 1,
+            "source": "PrintConfigDef::options",
+            "settings_count": 1,
+            "options": [{
+                "key": "shared", "type_id": 1, "nullable": False, "has_default": True,
+                "enum_values": ["ok", 7], "canonical_enum_values": [],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            type_header = Path(directory) / "Config.hpp"
+            type_header.write_text("enum ConfigOptionType {\n coFloat = 1\n};\n",
+                                   encoding="utf-8")
+            path.write_text(json.dumps(registry), encoding="utf-8")
+            with self.assertRaises(settings_inventory.InventoryError):
+                settings_inventory.audit_runtime_registry(report, path,
+                                                              type_header=type_header)
+
+    def test_keyset_mismatch_never_exposes_effective_metadata(self):
+        report = {"options": [{"key": "shared", "type": "coFloat",
+                                "enum_values": [], "nullable": False,
+                                "default_declared": True}]}
+        registry = {
+            "schema_version": 1,
+            "source": "PrintConfigDef::options",
+            "settings_count": 2,
+            "options": [{
+                "key": "shared", "type_id": 1, "nullable": False, "has_default": True,
+                "enum_values": [], "canonical_enum_values": [],
+            }, {
+                "key": "extra", "type_id": 1, "nullable": False, "has_default": True,
+                "enum_values": ["untrusted"], "canonical_enum_values": ["untrusted"],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            type_header = Path(directory) / "Config.hpp"
+            type_header.write_text("enum ConfigOptionType {\n coFloat = 1\n};\n",
+                                   encoding="utf-8")
+            path.write_text(json.dumps(registry), encoding="utf-8")
+            audit = settings_inventory.audit_runtime_registry(report, path,
+                                                                  type_header=type_header)
+        settings_inventory.apply_runtime_registry(report, audit)
+        self.assertFalse(report["runtime_registry_verified"])
+        self.assertFalse(report["metadata_complete"])
+        self.assertNotIn("effective_enum_values", report["options"][0])
+
+    def test_wrong_type_id_fails_against_config_option_type_domain(self):
+        report = {"options": [{"key": "shared", "type": "coFloat"}]}
+        registry = {
+            "schema_version": 1,
+            "source": "PrintConfigDef::options",
+            "settings_count": 1,
+            "options": [{
+                "key": "shared", "type_id": 8, "nullable": False, "has_default": True,
+                "enum_values": [], "canonical_enum_values": [],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            type_header = Path(directory) / "Config.hpp"
+            type_header.write_text("enum ConfigOptionType {\n coFloat = 1,\n coBool = 8\n};\n",
+                                   encoding="utf-8")
+            path.write_text(json.dumps(registry), encoding="utf-8")
+            with self.assertRaises(settings_inventory.InventoryError):
+                settings_inventory.audit_runtime_registry(report, path,
+                                                              type_header=type_header)
+
+
 if __name__ == "__main__":
     unittest.main()

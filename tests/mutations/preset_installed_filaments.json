@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Behavioral mutation checks for PresetInstalledFilaments public contracts.",
+  "mutants": [
+    {
+      "id": "installed_filament_default_gate_inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "                if (!add_default_materials)\n                    continue;",
+      "new": "                if (add_default_materials)\n                    continue;",
+      "test_filter": "PresetInstalledFilaments",
+      "description": "Invert the public fallback gate. The no-installed-section row must add the model default, while the compatible-installed row must suppress it; both persisted AppConfig and final visibility expose the wrong branch."
+    },
+    {
+      "id": "installed_filament_default_persisted_empty",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "            config.set(AppConfig::SECTION_FILAMENTS, filament->name, \"true\");",
+      "new": "            config.set(AppConfig::SECTION_FILAMENTS, filament->name, \"\");",
+      "test_filter": "PresetInstalledFilaments",
+      "description": "Persist discovered default materials as an empty AppConfig value. AppConfig keeps the key present, but Preset::set_visible_from_appconfig treats only nonempty values as installed; the test checks both the canonical saved value and resulting visibility."
+    }
+  ]
+}
