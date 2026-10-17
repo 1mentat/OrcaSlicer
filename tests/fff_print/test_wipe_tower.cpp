@@ -2766,6 +2766,7 @@ TEST_CASE("Toolchange ordering preserves configured first and later layer sequen
             { "gcode_flavor",                     "marlin" },
             { "use_relative_e_distances",         true },
             { "layer_change_gcode",               "G92 E0\n" },
+            { "bridge_line_width",                0.0 },
             { "wall_loops",                       2 },
             { "top_shell_layers",                 0 },
             { "bottom_shell_layers",              0 },

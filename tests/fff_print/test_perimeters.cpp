@@ -770,15 +770,22 @@ TEST_CASE("Counterbore bridging modes keep the bore open or fill a sacrificial l
     for (const CounterboreFillSnapshot &snapshot : snapshots) {
         REQUIRE(std::isfinite(snapshot.annulus));
         REQUIRE(std::isfinite(snapshot.bore));
-        REQUIRE(snapshot.annulus >= 0.);
+        // Every mode must retain a real annulus; this prevents a delete-all
+        // partial-fill mutant from satisfying only the negative delta check.
+        REQUIRE(snapshot.annulus > area_tolerance);
         REQUIRE(snapshot.bore >= 0.);
     }
     REQUIRE(snapshots[0].annulus + snapshots[0].bore > 0.);
     CHECK(snapshots[0].bore <= area_tolerance);
 
+    // Partial bridging is a mask over unsupported annulus material. The
+    // production path keeps only its bridgeable/anchor mask and removes the
+    // remainder from the normal fill surface; it does not fill the central
+    // bore. Therefore the annulus and total cavity fill must decrease while
+    // the bore remains unchanged.
     const double partial_annulus_delta = snapshots[1].annulus - snapshots[0].annulus;
     INFO("partial annulus delta=" << partial_annulus_delta << ", tolerance=" << area_tolerance);
-    CHECK(partial_annulus_delta > area_tolerance);
+    CHECK(partial_annulus_delta < -area_tolerance);
 
     const double partial_bore_delta = snapshots[1].bore - snapshots[0].bore;
     INFO("partial bore delta=" << partial_bore_delta << ", tolerance=" << area_tolerance);
@@ -788,9 +795,12 @@ TEST_CASE("Counterbore bridging modes keep the bore open or fill a sacrificial l
     INFO("full bore delta=" << full_bore_delta << ", tolerance=" << area_tolerance);
     CHECK(full_bore_delta > area_tolerance);
 
+    const double none_total = snapshots[0].annulus + snapshots[0].bore;
     const double partial_total = snapshots[1].annulus + snapshots[1].bore;
     const double full_total = snapshots[2].annulus + snapshots[2].bore;
-    INFO("partial total=" << partial_total << ", full total=" << full_total << ", tolerance=" << area_tolerance);
+    INFO("none total=" << none_total << ", partial total=" << partial_total
+         << ", full total=" << full_total << ", tolerance=" << area_tolerance);
+    CHECK(partial_total < none_total - area_tolerance);
     CHECK(full_total > partial_total + area_tolerance);
 }
 

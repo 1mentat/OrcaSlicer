@@ -4811,6 +4811,52 @@ struct Fixture
         second->add_instance()->set_offset(Vec3d(30., 0., 0.));
         config.set_key_value("layer_height", new ConfigOptionFloat(.21));
     }
+    boost::filesystem::path restore_root() const
+    {
+        boost::filesystem::path root = archive;
+        root.replace_extension();
+        return root;
+    }
+
+    boost::filesystem::path backup_part_path(const ModelObject &object) const
+    {
+        return restore_root() / "3D" / "Objects" /
+               (object.name + "_" + std::to_string(source.get_object_backup_id(object)) + ".model");
+    }
+
+    void materialize_backup_parts()
+    {
+        // SaveStrategy::Backup intentionally leaves SplitModel object parts outside the .3mf.
+        // Export the object XML through the ordinary SplitModel path, then package each
+        // part as the standalone ZIP expected at Restore's external fallback path.
+        ScopedTemporaryFile embedded(".3mf");
+        PlateData plate;
+        plate.config                = config;
+        plate.plate_index           = 0;
+        plate.objects_and_instances = {{0, 0}, {1, 0}};
+        StoreParams params;
+        params.path            = embedded.string();
+        params.model           = &source;
+        params.config          = &config;
+        params.plate_data_list = {&plate};
+        params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel;
+        REQUIRE(store_bbs_3mf(params));
+
+        const boost::filesystem::path root = restore_root();
+        size_t part_count = 0;
+        for (const auto &[name, data] : entries(embedded.string())) {
+            if (!is_part(name))
+                continue;
+            const boost::filesystem::path destination = root / name;
+            boost::filesystem::create_directories(destination.parent_path());
+            Zipper zip(destination.string());
+            zip.add_entry(name, data.data(), data.size());
+            zip.finalize();
+            ++part_count;
+        }
+        REQUIRE(part_count == source.objects.size());
+    }
+
     void store(SaveStrategy extra = SaveStrategy::Default)
     {
         PlateData plate;
@@ -4824,6 +4870,8 @@ struct Fixture
         params.plate_data_list = {&plate};
         params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel | extra;
         REQUIRE(store_bbs_3mf(params));
+        if (extra & SaveStrategy::Backup)
+            materialize_backup_parts();
     }
     bool load(LoadedSplit& result, LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
     {
@@ -4906,18 +4954,16 @@ TEST_CASE("Split model Restore rejects a missing referenced object part",
     Fixture f;
     f.store(SaveStrategy::Backup);
     {
-        // Prove the intact backup-mode archive is a valid Restore input before
-        // removing a referenced part for the negative case.
         LoadedSplit intact;
         REQUIRE(f.load(intact, LoadStrategy::Restore));
         REQUIRE(intact.model.objects.size() == f.source.objects.size());
+        // Restore assigns the archive stem as the model backup path. Detach before the
+        // positive control dies so Model::~Model() cannot remove the staged part directory.
+        intact.model.set_backup_path("detach");
     }
-    rewrite(f.archive.string(), [](std::vector<Entry> &all) {
-        const auto found = std::find_if(all.begin(), all.end(),
-            [](const Entry &entry) { return is_part(entry.first); });
-        REQUIRE(found != all.end());
-        all.erase(found);
-    });
+    const auto missing_part = f.backup_part_path(*f.source.objects.front());
+    REQUIRE(boost::filesystem::exists(missing_part));
+    REQUIRE(boost::filesystem::remove(missing_part));
 
     LoadedSplit loaded;
     CHECK_FALSE(f.load(loaded, LoadStrategy::Restore));
