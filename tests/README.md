@@ -425,14 +425,21 @@ Each option is reported as `declared_covered`, `declared_partial`, or
 the report does not assert that the native tests passed. `declared_covered`
 requires a setting-type-specific value
 dimension (all enum values, boolean values, numeric boundaries, or
-representative values) plus a pipeline oracle. A source mention,
+representative values) plus a pipeline oracle. Nullable settings also require
+`nullable_behavior`: setting-specific evidence for nil and explicit values
+through the resolved pipeline. Nil does not necessarily mean inheritance;
+the oracle must establish that setting's behavior. A source mention,
 `full_print_config()` construction, or serialization round-trip does not
 count. `--fail-on-uncovered` is available when a future evidence map is ready
 to enforce a complete settings gate.
 
 The native registry audit compares every compiled `PrintConfigDef` key with
-the static inventory and fails on omitted or spurious settings. Omitting
-`--runtime-registry` produces a static report with an unverified registry.
+the static inventory and fails on omitted or spurious settings. Complete
+metadata reconciliation also validates type IDs and exposes effective nullable
+and enum metadata without replacing the source-parser fields. Required evidence
+and counts use the effective nullable metadata. A key-only registry does not
+verify metadata. Omitting `--runtime-registry` produces a static report with an
+unverified registry.
 
 The `[InputShaping]` export cases exercise all registered shaper choices as
 serialization inputs. Exact RepRapFirmware type tokens are checked only for

@@ -107,6 +107,36 @@ class SettingsInventoryTests(unittest.TestCase):
         self.assertEqual(option["status"], "declared_partial")
         self.assertIn("pipeline_oracle", option["reason"])
 
+    def test_nullable_settings_require_behavior_evidence_beyond_schema_and_values(self):
+        cases = {
+            "enable_overhang_speed": ["boolean_values", "pipeline_oracle", "schema_roundtrip"],
+            "filament_retract_when_changing_layer": [
+                "boolean_values", "pipeline_oracle", "nullable_behavior"],
+            "filament_retraction_length": [
+                "representative_values", "pipeline_oracle", "nullable_behavior"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            evidence.write_text(json.dumps({"entries": {
+                key: {"test": "tests/fff_print/test_wipe.cpp", "tag": "[Wipe]",
+                      "dimensions": dimensions, "reason": "Synthetic dimension claim."}
+                for key, dimensions in cases.items()
+            }}), encoding="utf-8")
+            report = settings_inventory.build_report(
+                root=ROOT, source_path=ROOT / "src/libslic3r/PrintConfig.cpp",
+                evidence_path=evidence)
+        options = {item["key"]: item for item in report["options"]}
+        missing_nil = options["enable_overhang_speed"]
+        self.assertEqual(missing_nil["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: nullable_behavior.", missing_nil["reason"])
+        self.assertEqual(options["filament_retract_when_changing_layer"]["status"], "declared_covered")
+        numeric = options["filament_retraction_length"]
+        self.assertEqual(numeric["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: boundary_values.", numeric["reason"])
+        self.assertEqual(report["counts"]["declared_covered"], 1)
+        self.assertEqual(report["counts"]["declared_partial"], 2)
+        self.assertEqual(sum(report["counts"].values()), report["option_count"])
+
 
 class SettingsMetadataTests(unittest.TestCase):
     def test_source_parser_does_not_cross_registration_lambda(self):
@@ -179,7 +209,12 @@ void PrintConfigDef::handle_legacy(
 
     def test_validated_registry_supplies_effective_metadata_and_records_differences(self):
         report = {"options": [{"key": "shared", "type": "coFloat", "enum_values": ["wrong"],
-                                "nullable": False, "default_declared": True}]}
+                                "nullable": False, "default_declared": True,
+                                "evidence_dimensions": ["boundary_values", "pipeline_oracle"],
+                                "evidence": {"test": "fixture.cpp", "tag": "[Fixture]"},
+                                "evidence_reason": "Numeric boundary behavior is exercised."}]}
+        settings_inventory._refresh_evidence_status(report)
+        self.assertEqual(report["counts"], {"declared_covered": 1})
         registry = {
             "schema_version": 1,
             "source": "PrintConfigDef::options",
@@ -207,6 +242,20 @@ void PrintConfigDef::handle_legacy(
         self.assertFalse(option["effective_default_declared"])
         self.assertEqual({item["field"] for item in report["metadata_mismatches"]},
                          {"enum_values", "nullable", "default_declared"})
+        self.assertEqual(option["status"], "declared_partial")
+        self.assertEqual(report["counts"], {"declared_partial": 1})
+        self.assertEqual(report["counts_by_type"], {"coFloat": {"declared_partial": 1}})
+        self.assertIn("nullable_behavior", option["required_dimensions"])
+        # Reconciliation must not duplicate missing-dimension explanations.
+        settings_inventory.apply_runtime_registry(report, audit)
+        self.assertEqual(option["reason"].count("Missing required dimensions:"), 1)
+
+        audit["metadata_by_key"]["shared"]["nullable"] = False
+        settings_inventory.apply_runtime_registry(report, audit)
+        self.assertEqual(option["status"], "declared_covered")
+        self.assertEqual(report["counts"], {"declared_covered": 1})
+        self.assertNotIn("nullable_behavior", option["required_dimensions"])
+        self.assertEqual(option["reason"], option["evidence_reason"])
 
     def test_malformed_metadata_is_rejected(self):
         report = {"options": [{"key": "shared", "type": "coFloat"}]}

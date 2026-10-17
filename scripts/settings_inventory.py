@@ -74,6 +74,9 @@ _DIMENSIONS = {
     "boolean_values",
     "boundary_values",
     "representative_values",
+    # Nil may inherit, disable, or have another setting-specific meaning.
+    # Serialization alone does not establish its resolved pipeline behavior.
+    "nullable_behavior",
     "pipeline_oracle",
     "interaction_matrix",
     "fixture_only",
@@ -354,17 +357,44 @@ def parse_print_config(source_path: Path) -> dict[str, Any]:
     }
 
 
-def _required_dimensions(option_type: str) -> list[str]:
+def _required_dimensions(option_type: str, *, nullable: bool = False) -> list[str]:
     if option_type in {"coEnum", "coEnums"}:
-        return ["enum_values", "pipeline_oracle"]
-    if option_type in {"coBool", "coBools"}:
-        return ["boolean_values", "pipeline_oracle"]
-    if option_type in {
+        dimensions = ["enum_values", "pipeline_oracle"]
+    elif option_type in {"coBool", "coBools"}:
+        dimensions = ["boolean_values", "pipeline_oracle"]
+    elif option_type in {
         "coInt", "coInts", "coFloat", "coFloats", "coPercent", "coPercents",
         "coFloatOrPercent", "coFloatsOrPercents",
     }:
-        return ["boundary_values", "pipeline_oracle"]
-    return ["representative_values", "pipeline_oracle"]
+        dimensions = ["boundary_values", "pipeline_oracle"]
+    else:
+        dimensions = ["representative_values", "pipeline_oracle"]
+    if nullable:
+        dimensions.append("nullable_behavior")
+    return dimensions
+
+
+def _refresh_evidence_status(report: dict[str, Any]) -> None:
+    """Reclassify declarations after source or validated runtime metadata."""
+    counts: Counter[str] = Counter()
+    by_type: dict[str, Counter[str]] = defaultdict(Counter)
+    for option in report["options"]:
+        required = _required_dimensions(
+            option["type"], nullable=option.get("effective_nullable", option["nullable"]))
+        option["required_dimensions"] = required
+        missing = [value for value in required if value not in option["evidence_dimensions"]]
+        if "evidence" in option:
+            option["status"] = "declared_partial" if missing else "declared_covered"
+            option["reason"] = option["evidence_reason"]
+            if missing:
+                option["reason"] += " Missing required dimensions: " + ", ".join(missing) + "."
+        else:
+            option["status"] = "uncovered"
+        counts[option["status"]] += 1
+        by_type[option["type"]][option["status"]] += 1
+    report["counts"] = dict(sorted(counts.items()))
+    report["counts_by_type"] = {
+        key: dict(sorted(value.items())) for key, value in sorted(by_type.items())}
 
 
 def _load_evidence(path: Path, root: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
@@ -416,35 +446,19 @@ def build_report(*, root: Path, source_path: Path, evidence_path: Path) -> dict[
     entries: list[dict[str, Any]] = []
     for option in inventory["options"]:
         key = option["key"]
-        required = _required_dimensions(option["type"])
         claim = evidence.get(key)
         dimensions = claim["dimensions"] if claim else []
-        missing = [value for value in required if value not in dimensions]
-        if claim and not missing:
-            status = "declared_covered"
-            reason = claim["reason"]
-        elif claim:
-            status = "declared_partial"
-            reason = claim["reason"] + " Missing required dimensions: " + ", ".join(missing) + "."
-        else:
-            status = "uncovered"
-            reason = default_reason
         entry = dict(option)
         entry.update({
-            "required_dimensions": required,
             "evidence_dimensions": dimensions,
-            "status": status,
-            "reason": reason,
+            "reason": default_reason,
         })
         if claim:
             entry["evidence"] = {key: claim[key] for key in ("test", "tag")}
+            entry["evidence_reason"] = claim["reason"]
         entries.append(entry)
 
-    counts = Counter(item["status"] for item in entries)
-    by_type: dict[str, Counter[str]] = defaultdict(Counter)
-    for item in entries:
-        by_type[item["type"]][item["status"]] += 1
-    return {
+    report = {
         "schema_version": 1,
         "status": "declarations_ready" if not inventory["duplicates"] else "declarations_ready_with_duplicate_registrations",
         "coverage_claims": "declared_only",
@@ -457,10 +471,10 @@ def build_report(*, root: Path, source_path: Path, evidence_path: Path) -> dict[
         "registration_count": inventory["registration_count"],
         "option_count": inventory["option_count"],
         "duplicate_registrations": inventory["duplicates"],
-        "counts": dict(sorted(counts.items())),
-        "counts_by_type": {key: dict(sorted(value.items())) for key, value in sorted(by_type.items())},
         "options": entries,
     }
+    _refresh_evidence_status(report)
+    return report
 
 
 def _runtime_metadata(option: Any) -> dict[str, Any] | None:
@@ -530,6 +544,7 @@ def apply_runtime_registry(report: dict[str, Any], audit: dict[str, Any]) -> Non
                 mismatches.append({"key": key, "field": field,
                                    "static": static_value, "runtime": runtime_value})
     report["metadata_mismatches"] = mismatches
+    _refresh_evidence_status(report)
 
 
 def _parser() -> argparse.ArgumentParser:

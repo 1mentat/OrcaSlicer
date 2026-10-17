@@ -3479,6 +3479,86 @@
         "pipeline_oracle"
       ],
       "reason": "The square-corner fixture checks the 89, 90, and 91 degree threshold neighborhood: 89 and 90 produce no ears while 91 produces positive ears. This is a focused threshold crossing only; it does not claim the registered 0..180 numeric domain or non-square angle behavior."
+    },
+    "filament_retraction_length": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentRetractionOverrides]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Nil inherits the machine retraction length of 0.8 mm; explicit 0.35 and 1.25 mm overrides are checked against every parsed retraction length while preserving deposition. Full numeric boundaries and multiple-filament combinations are not claimed."
+    },
+    "filament_retraction_speed": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentRetractionOverrides]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Nil inherits 30 mm/s; explicit 13 and 47 mm/s overrides are checked through emitted retraction feedrates with stable deposition. Full numeric boundaries and multiple-filament combinations are not claimed."
+    },
+    "filament_deretraction_speed": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentRetractionOverrides]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Nil inherits 7 mm/s, explicit zero falls back to the 30 mm/s retraction speed, and explicit 13 and 51 mm/s values are checked through emitted unretraction feedrates with stable deposition. Full numeric boundaries and multiple-filament combinations are not claimed."
+    },
+    "filament_retract_when_changing_layer": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentRetractionOverrides]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Nil inherits both machine boolean states, and explicit false and true override the opposite machine state; parsed layer-change retractions are zero or match all ten layer markers while preserving deposition. Multiple-filament combinations are not claimed."
+    },
+    "filament_retraction_minimum_travel": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentRetractionOverrides]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Nil and explicit zero preserve nonempty retractions from the machine zero threshold; an explicit 1000 mm threshold reduces the parsed retraction count while preserving deposition. The exact travel threshold boundary and multiple-filament combinations are not claimed."
+    },
+    "filament_z_hop": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentRetractionOverrides]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Nil inherits the machine 0.4 mm lift, explicit zero removes lifts, and explicit 0.8 mm sets the parsed positive lift deltas while preserving deposition. Full numeric boundaries, other lift types, and multiple-filament combinations are not claimed."
+    },
+    "filament_retract_lift_above": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentRetractionOverrides]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Nil inherits the machine zero bound and explicit zero retains positive lift events; explicit 2 mm suppresses them on the short fixture while preserving deposition. The exact height threshold boundary and multiple-filament combinations are not claimed."
+    },
+    "filament_retract_lift_below": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentRetractionOverrides]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Nil inherits the machine zero bound and explicit zero retains positive lift events; explicit 0.1 mm suppresses them on the short fixture while preserving deposition. The exact height threshold boundary and multiple-filament combinations are not claimed."
     }
   }
 }
