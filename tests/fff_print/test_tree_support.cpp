@@ -522,7 +522,8 @@ namespace belt_tree_landing_contracts {
 struct GCodeEvidence {
     size_t support_e_lines = 0;
     size_t support_extrusion_moves = 0;
-    size_t support_xyz_moves = 0;
+    size_t support_z_moves = 0;
+    size_t positive_z_travels = 0;
     size_t support_e_only_moves = 0;
     size_t quantized_stationary_moves = 0;
     size_t invalid_support_moves = 0;
@@ -576,6 +577,9 @@ static GCodeEvidence parse_support_gcode(const std::string &gcode, const Dynamic
         const bool support_role = active_role == "Support" || active_role == "Support interface" ||
                                   active_role == "Support transition";
         const bool motion = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+        if (motion && line.dist_Z(state) > EPSILON &&
+            (!line.has_e() || line.dist_E(state) <= 0.0))
+            ++result.positive_z_travels;
         if (!support_role || !motion || !line.has_e())
             return;
 
@@ -611,7 +615,7 @@ static GCodeEvidence parse_support_gcode(const std::string &gcode, const Dynamic
         result.positive_e_mm += de;
         result.spatial_distance_mm += distance;
         if (std::abs(dz) > EPSILON)
-            ++result.support_xyz_moves;
+            ++result.support_z_moves;
     });
     return result;
 }
@@ -641,6 +645,7 @@ static DynamicPrintConfig belt_tree_config(int wall_count, double floor_offset)
         { "belt_printer_infinite_y",        1 },
         { "belt_slice_rotation",            "x" },
         { "belt_slice_rotation_angle",      45 },
+        { "belt_frame_tilt_decouple",        false },
         { "gcode_remap_x",                  "rev_x" },
         { "gcode_remap_y",                  "pos_z" },
         { "gcode_remap_z",                  "pos_y" },
@@ -779,8 +784,8 @@ static Evidence observe(int wall_count, double floor_offset)
         });
     }
 
-    // Exported support moves are the physical contract. Measure XYZ distance because the
-    // belt remap can put source-Y motion on machine Z; XY-only checks miss that motion.
+    // Exported support moves are the physical contract. Measure full XYZ distance;
+    // the canonical belt transform keeps machine Z fixed during each planar layer.
     result.gcode = parse_support_gcode(Slic3r::Test::gcode(print), config);
     result.finite = result.finite && result.gcode.finite;
     return result;
@@ -808,7 +813,8 @@ TEST_CASE("Belt tree support floor offset shifts public support landing",
              << " print_z=" << evidence.first_bad_print_z
              << " point_count=" << evidence.first_bad_point_count << " role=" << evidence.first_bad_role
              << " support_extrusion_moves=" << evidence.gcode.support_extrusion_moves
-             << " support_xyz_moves=" << evidence.gcode.support_xyz_moves
+             << " support_z_moves=" << evidence.gcode.support_z_moves
+             << " positive_z_travels=" << evidence.gcode.positive_z_travels
              << " support_e_only_moves=" << evidence.gcode.support_e_only_moves
              << " quantized_stationary_moves=" << evidence.gcode.quantized_stationary_moves
              << " support_e_lines=" << evidence.gcode.support_e_lines
@@ -826,7 +832,11 @@ TEST_CASE("Belt tree support floor offset shifts public support landing",
         CHECK(evidence.lowest_plane_gap_mm < 0.8 + EPSILON);
         REQUIRE(evidence.gcode.finite);
         REQUIRE(evidence.gcode.support_extrusion_moves > 0);
-        REQUIRE(evidence.gcode.support_xyz_moves > 0);
+        // Inverse X/45 rotation, Y/Z swap, then the 45-degree machine shear
+        // give machine Z = sqrt(2) * slicing Z. It is constant within each
+        // support layer; advancing the belt occurs between layers (z_hop=0).
+        CHECK(evidence.gcode.support_z_moves == 0);
+        REQUIRE(evidence.gcode.positive_z_travels > 0);
         REQUIRE(evidence.gcode.invalid_support_moves == 0);
         REQUIRE(std::isfinite(evidence.gcode.positive_e_mm));
         REQUIRE(std::isfinite(evidence.gcode.spatial_distance_mm));
