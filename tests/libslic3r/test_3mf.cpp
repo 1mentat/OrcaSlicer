@@ -5599,3 +5599,77 @@ TEST_CASE("BBS restore probe rejects empty and locked paths", "[3MF][Bbs3mfRecov
 }
 
 } // namespace bbs_selective_plate_contracts
+namespace bbs_thumbnail_downsample_contracts {
+
+using namespace Slic3r;
+
+TEST_CASE("BBS plate thumbnails downsample every source block into the small preview", "[3MF][Bbs3mfThumbnailDownsample]")
+{
+    const auto [width, height] = GENERATE(table<int, int>({{256, 256}, {384, 256}}));
+    CAPTURE(width, height);
+    REQUIRE(width % PLATE_THUMBNAIL_SMALL_WIDTH == 0);
+    REQUIRE(height % PLATE_THUMBNAIL_SMALL_HEIGHT == 0);
+    const int sw = width / PLATE_THUMBNAIL_SMALL_WIDTH;
+    const int sh = height / PLATE_THUMBNAIL_SMALL_HEIGHT;
+    REQUIRE(sw > 0);
+    REQUIRE(sh > 0);
+
+    ThumbnailData thumbnail;
+    thumbnail.set(width, height);
+    for (int y = 0; y < thumbnail.height; ++y) {
+        for (int x = 0; x < thumbnail.width; ++x) {
+            const int block_x = x / sw;
+            const int block_y = y / sh;
+            const unsigned char base = static_cast<unsigned char>(20 + 13 * ((block_x + 3 * block_y) % 12));
+            const unsigned char delta = static_cast<unsigned char>((x % sw) * 7 + (y % sh) * 11);
+            const size_t pixel = 4 * (static_cast<size_t>(y) * thumbnail.width + x);
+            thumbnail.pixels[pixel + 0] = static_cast<unsigned char>(base + delta);
+            thumbnail.pixels[pixel + 1] = static_cast<unsigned char>(base + 3 + delta);
+            thumbnail.pixels[pixel + 2] = static_cast<unsigned char>(base + 6 + delta);
+            thumbnail.pixels[pixel + 3] = static_cast<unsigned char>(170 + delta);
+        }
+    }
+
+    std::vector<unsigned char> expected(4u * PLATE_THUMBNAIL_SMALL_WIDTH * PLATE_THUMBNAIL_SMALL_HEIGHT);
+    for (int output_y = 0; output_y < PLATE_THUMBNAIL_SMALL_HEIGHT; ++output_y) {
+        for (int output_x = 0; output_x < PLATE_THUMBNAIL_SMALL_WIDTH; ++output_x) {
+            std::array<int, 4> sums{};
+            for (int dy = 0; dy < sh; ++dy) {
+                for (int dx = 0; dx < sw; ++dx) {
+                    const size_t source = 4 * (static_cast<size_t>(output_y * sh + dy) * thumbnail.width +
+                                                output_x * sw + dx);
+                    for (int channel = 0; channel < 4; ++channel)
+                        sums[channel] += thumbnail.pixels[source + channel];
+                }
+            }
+            const size_t output = 4 * (static_cast<size_t>(output_y) * PLATE_THUMBNAIL_SMALL_WIDTH + output_x);
+            for (int channel = 0; channel < 4; ++channel)
+                expected[output + channel] = static_cast<unsigned char>(sums[channel] / (sw * sh));
+        }
+    }
+
+    ScopedTemporaryFile archive(".3mf");
+    bbs_3mf_metadata_contracts::store_followup(
+        archive.string(),
+        [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &params, ScopedTemporaryDir &) {
+            plate.plate_thumbnail = thumbnail;
+            params.thumbnail_data = {&thumbnail};
+        });
+
+    const std::string small = bbs_3mf_metadata_contracts::png_entry(
+        archive.string(), "Metadata/plate_1_small.png",
+        PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT);
+    REQUIRE(small.size() == expected.size());
+    size_t mismatch = std::string::npos;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        if (static_cast<unsigned char>(small[i]) != expected[i]) {
+            mismatch = i;
+            break;
+        }
+    }
+    INFO("first RGBA mismatch byte " << mismatch << " of " << expected.size()
+         << " for source " << width << "x" << height << " (sw=" << sw << ", sh=" << sh << ")");
+    REQUIRE(mismatch == std::string::npos);
+}
+
+} // namespace bbs_thumbnail_downsample_contracts

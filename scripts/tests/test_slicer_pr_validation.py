@@ -448,6 +448,392 @@ class MinimumTestIntegrationTests(unittest.TestCase):
         self.assertEqual(slicer_pr_validation.main(common + ["--minimum-tests", "0"]), 2)
 
 
+class IdentityManifestTests(unittest.TestCase):
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+
+    def _repo_fixture(self, root):
+        root.mkdir(parents=True, exist_ok=True)
+        repo = root / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "test@example.invalid")
+        self._git(repo, "config", "user.name", "test")
+        (repo / "tests").mkdir()
+        (repo / "tests/identity.cpp").write_text(
+            'TEST_CASE("Original A", "[Identity]") {}\n'
+            'TEST_CASE("Original B", "[Identity]") {}\n', encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "base")
+        base = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        with (repo / "tests/identity.cpp").open("a", encoding="utf-8") as stream:
+            stream.write('TEST_CASE("New C", "[Identity]") {}\n')
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "harness")
+        harness_ref = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        self._git(repo, "checkout", "-q", "-b", "head", base)
+        (repo / "tests/identity.cpp").write_text(
+            'TEST_CASE("Original B", "[Identity]") {}\n', encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "old head")
+        head = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        return repo, base, harness_ref, head
+
+    @staticmethod
+    def _case(declaration):
+        return {
+            "runtime_identity": declaration["name"] + "::" + declaration["name"],
+            "source": declaration,
+        }
+
+    def _manifest(self, repo, base, harness_ref, head):
+        base_declarations = slicer_pr_validation._git_test_declarations(repo, base)
+        ref_declarations = slicer_pr_validation._git_test_declarations(repo, harness_ref)
+        original_a = next(x for x in base_declarations.values() if x["name"] == "Original A")
+        new_c = next(x for x in ref_declarations.values() if x["name"] == "New C")
+        return {
+            "schema_version": 2,
+            "harness_base_sha": base,
+            "harness_ref_sha": harness_ref,
+            "required_harness_cases": [self._case(new_c)],
+            "exception_groups": {"none": [], "legacy": [self._case(original_a)]},
+            "heads": [{"number": 1, "head_oid": head, "exception_group": "legacy",
+                       "required_head_cases": []}],
+        }
+
+    def test_exact_head_manifest_validates_absent_base_case_and_required_new_case(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness_ref, head = self._repo_fixture(Path(temp))
+            manifest = self._manifest(repo, base, harness_ref, head)
+            records = [{"number": 1, "headRefOid": head}]
+            policy = slicer_pr_validation._validate_identity_manifest(
+                repo, manifest, harness_base=base, harness_ref=harness_ref,
+                snapshot_records=records, selected_records=records)
+            self.assertEqual(policy["required_harness_runtime_ids"], ["New C::New C"])
+            self.assertEqual(
+                list(policy["heads"][1]["exception_cases"]), ["Original A::Original A"])
+
+    def test_manifest_rejects_new_case_as_exception_and_present_case_as_exception(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness_ref, head = self._repo_fixture(Path(temp))
+            manifest = self._manifest(repo, base, harness_ref, head)
+            new_c = manifest["required_harness_cases"][0]
+            manifest["exception_groups"]["bad"] = [new_c]
+            manifest["heads"][0]["exception_group"] = "bad"
+            with self.assertRaises(slicer_pr_validation.ValidationError):
+                slicer_pr_validation._validate_identity_manifest(
+                    repo, manifest, harness_base=base, harness_ref=harness_ref,
+                    snapshot_records=[{"number": 1, "headRefOid": head}],
+                    selected_records=[{"number": 1, "headRefOid": head}])
+
+            manifest = self._manifest(repo, base, harness_ref, base)
+            with self.assertRaises(slicer_pr_validation.ValidationError):
+                slicer_pr_validation._validate_identity_manifest(
+                    repo, manifest, harness_base=base, harness_ref=harness_ref,
+                    snapshot_records=[{"number": 1, "headRefOid": base}],
+                    selected_records=[{"number": 1, "headRefOid": base}])
+
+    def test_scenario_runtime_prefix_and_escaped_names_are_fail_closed(self):
+        scenario = {
+            "runtime_identity": "suite::Scenario: Scenario name",
+            "source": {"path": "tests/scenario.cpp", "macro": "SCENARIO",
+                       "name": "Scenario name", "line": 9},
+        }
+        self.assertEqual(
+            slicer_pr_validation._manifest_case_runtime_name(scenario, label="scenario"),
+            "suite::Scenario: Scenario name")
+        invalid_prefix = dict(scenario, runtime_identity="suite::Scenario name")
+        with self.assertRaises(slicer_pr_validation.ValidationError):
+            slicer_pr_validation._manifest_case_runtime_name(
+                invalid_prefix, label="invalid_scenario")
+        escaped = {
+            "runtime_identity": r"literal \"1\"",
+            "source": {"path": "tests/escaped.cpp", "macro": "TEST_CASE",
+                       "name": r'literal \"1\"', "line": 4},
+        }
+        with self.assertRaisesRegex(slicer_pr_validation.ValidationError, r"escaped C\+\+ test name"):
+            slicer_pr_validation._manifest_case_runtime_name(escaped, label="escaped")
+
+    def test_required_case_relocation_by_name_is_not_novel(self):
+        relocated = {
+            "runtime_identity": "New C::New C",
+            "source": {"path": "tests/relocated.cpp", "macro": "TEST_CASE",
+                       "name": "New C", "line": 1},
+        }
+        declarations = {("tests/relocated.cpp", "TEST_CASE", "New C"):
+                        relocated["source"]}
+        with self.assertRaises(slicer_pr_validation.ValidationError):
+            slicer_pr_validation._validate_manifest_cases(
+                [relocated], label="required_harness_cases", expected_commit="ref",
+                declarations=declarations, forbidden_names={"New C"})
+
+    def test_exception_adjustment_keeps_new_cases_mandatory_and_skips_visible(self):
+        entry = {
+            "status": "test_skipped",
+            "junit_evidence": {"counts": {"tests": 2}},
+            "junit_case_statuses": {
+                "Original B::Original B": "passed",
+                "New C::New C": "skipped",
+            },
+        }
+        baseline = {
+            "Original A::Original A": "passed",
+            "Original B::Original B": "passed",
+            "New C::New C": "passed",
+        }
+        slicer_pr_validation._apply_minimum_test_gate(
+            entry, minimum_tests=2,
+            baseline_cases={name: status for name, status in baseline.items()
+                            if name != "Original A::Original A"})
+        self.assertEqual(entry["missing_baseline_testcases"], [])
+        self.assertEqual(entry["skipped_baseline_testcases"], ["New C::New C"])
+        self.assertEqual(entry["minimum_tests_required"], 2)
+        self.assertEqual(entry["status"], "test_skipped")
+
+    def test_duplicate_identity_is_explicitly_recorded_and_unusable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            junit = Path(temp) / "duplicate.xml"
+            junit.write_text(
+                "<testsuite tests='2' failures='0' errors='0' skipped='0'>"
+                "<testcase classname='suite' name='same'/>"
+                "<testcase classname='suite' name='same'/>"
+                "</testsuite>", encoding="utf-8")
+            evidence = slicer_pr_validation.read_junit_evidence(junit)
+        self.assertFalse(evidence["usable"])
+        self.assertEqual(evidence["duplicate_testcase_identities"], ["suite::same"])
+
+
+class IdentityManifestIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+
+    def _fixture(self, root, *, moved_exception=False):
+        root.mkdir(parents=True, exist_ok=True)
+        repo = root / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "test@example.invalid")
+        self._git(repo, "config", "user.name", "Test")
+        (repo / "tests").mkdir()
+        (repo / "tests/old.cpp").write_text(
+            'TEST_CASE("Original A", "[Identity]") {}\n'
+            'TEST_CASE("Original B", "[Identity]") {}\n', encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "base")
+        base = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        (repo / "tests/harness.cpp").write_text(
+            'TEST_CASE("Harness New", "[Identity]") {}\n', encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "harness")
+        harness_ref = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        self._git(repo, "checkout", "-q", "-b", "head", base)
+        (repo / "tests/old.cpp").write_text(
+            'TEST_CASE("Original B", "[Identity]") {}\n', encoding="utf-8")
+        (repo / "tests/pr.cpp").write_text(
+            'TEST_CASE("PR New", "[Identity]") {}\n', encoding="utf-8")
+        if moved_exception:
+            (repo / "tests/moved.cpp").write_text(
+                'TEST_CASE("Original A", "[Identity]") {}\n', encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "head")
+        head = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        return repo, base, harness_ref, head
+
+    @staticmethod
+    def _case(declaration):
+        return {
+            "runtime_identity": declaration["name"] + "::" + declaration["name"],
+            "source": declaration,
+        }
+
+    def _manifest(self, repo, base, harness_ref, head):
+        base_declarations = slicer_pr_validation._git_test_declarations(repo, base)
+        ref_declarations = slicer_pr_validation._git_test_declarations(repo, harness_ref)
+        head_declarations = slicer_pr_validation._git_test_declarations(repo, head)
+        pick = lambda declarations, name: next(
+            item for item in declarations.values() if item["name"] == name)
+        return {
+            "schema_version": 2,
+            "harness_base_sha": base,
+            "harness_ref_sha": harness_ref,
+            "required_harness_cases": [self._case(pick(ref_declarations, "Harness New"))],
+            "exception_groups": {
+                "none": [],
+                "legacy": [self._case(pick(base_declarations, "Original A"))],
+            },
+            "heads": [{
+                "number": 1, "head_oid": head, "exception_group": "legacy",
+                "required_head_cases": [self._case(pick(head_declarations, "PR New"))],
+            }],
+        }
+
+    def _args(self, repo, snapshot, output, manifest):
+        args = slicer_pr_validation._parser().parse_args([
+            "--root", str(repo), "--snapshot", str(snapshot),
+            "--harness-base", "base", "--harness-ref", "harness",
+            "--identity-manifest", str(manifest), "--deps-prefix", str(repo / "deps"),
+            "--output-dir", str(output), "--build-dir", "build", "--jobs", "1",
+            "--timeout", "1", "--minimum-tests", "3",
+        ])
+        args.targets = slicer_pr_validation.DEFAULT_TARGETS
+        args.uv = "uv"
+        return args
+
+    @staticmethod
+    def _snapshot(root, head):
+        path = root / "snapshot.json"
+        path.write_text(json.dumps([{
+            "number": 1, "headRefName": "head", "headRefOid": head,
+        }]), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _run_tree(*run_args, **run_kwargs):
+        name = run_args[2]
+        common = {
+            "junit_evidence": {"counts": {"tests": 3}},
+            "minimum_tests_required": 3,
+            "minimum_tests_observed": 3,
+            "minimum_tests_ok": True,
+            "missing_baseline_testcases": [],
+            "failed_test_names": [],
+            "junit_reference_usable": True,
+        }
+        cases = {
+            "Original A::Original A": "passed",
+            "Original B::Original B": "passed",
+            "Harness New::Harness New": "passed",
+        }
+        if name == "pr-1":
+            cases.pop("Original A::Original A")
+            cases["PR New::PR New"] = "passed"
+        return {**common, "name": name, "status": "pass",
+                "junit_case_statuses": cases}
+
+    def _write_manifest_and_args(self, root, *, moved_exception=False):
+        repo, base, harness_ref, head = self._fixture(root, moved_exception=moved_exception)
+        snapshot = self._snapshot(root, head)
+        manifest = root / "identity.json"
+        manifest.write_text(json.dumps(
+            self._manifest(repo, base, harness_ref, head)), encoding="utf-8")
+        args = self._args(repo, snapshot, root / "evidence", manifest)
+        args.harness_base = base
+        args.harness_ref = harness_ref
+        return repo, base, harness_ref, head, args
+
+    def test_run_validation_applies_exact_exception_floor_and_head_requirement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head, args = self._write_manifest_and_args(root)
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._run_tree):
+                result = slicer_pr_validation.run_validation(args)
+            self.assertEqual(result, 0)
+            report = json.loads((root / "evidence/report.json").read_text(encoding="utf-8"))
+            gate = report["heads"][0]["identity_gate"]
+            self.assertEqual(gate["exception_count"], 1)
+            self.assertEqual(gate["minimum_tests_adjusted"], 2)
+            self.assertEqual(gate["required_head_runtime_ids"], ["PR New::PR New"])
+            self.assertEqual(gate["overlay_identity"]["checked"], True)
+            self.assertEqual(report["identity_gate"]["all_snapshot_heads_validated"], True)
+
+    def test_overlay_rejects_exception_reintroduced_by_applied_harness(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head, args = self._write_manifest_and_args(root)
+            manifest = json.loads(Path(args.identity_manifest).read_text(encoding="utf-8"))
+            records = [{"number": 1, "headRefOid": head}]
+            policy = slicer_pr_validation._validate_identity_manifest(
+                repo, manifest, harness_base=base, harness_ref=harness_ref,
+                snapshot_records=records, selected_records=records)
+            self._git(repo, "checkout", harness_ref, "--", "tests/harness.cpp")
+            clean_overlay = slicer_pr_validation._validate_identity_overlay(
+                repo, policy["heads"][1], policy["required_harness_cases"])
+            self.assertTrue(clean_overlay["checked"])
+            (repo / "tests/old.cpp").write_text(
+                'TEST_CASE("Original A", "[Identity]") {}\n'
+                'TEST_CASE("Original B", "[Identity]") {}\n', encoding="utf-8")
+            with self.assertRaisesRegex(
+                    slicer_pr_validation.ValidationError,
+                    r"missing_required=\[\], present_exceptions=\['Original A'\]"):
+                slicer_pr_validation._validate_identity_overlay(
+                    repo, policy["heads"][1], policy["required_harness_cases"])
+
+    def test_run_validation_rejects_missing_required_harness_case(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head, args = self._write_manifest_and_args(root)
+
+            def missing_harness(*run_args, **run_kwargs):
+                entry = self._run_tree(*run_args, **run_kwargs)
+                if run_args[2] == "baseline":
+                    entry["junit_case_statuses"].pop("Harness New::Harness New")
+                return entry
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=missing_harness):
+                with self.assertRaises(slicer_pr_validation.ValidationError):
+                    slicer_pr_validation.run_validation(args)
+
+    def test_run_validation_rejects_missing_pr_added_case(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head, args = self._write_manifest_and_args(root)
+
+            def missing_pr_case(*run_args, **run_kwargs):
+                entry = self._run_tree(*run_args, **run_kwargs)
+                if run_args[2] == "pr-1":
+                    entry["junit_case_statuses"].pop("PR New::PR New")
+                return entry
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=missing_pr_case):
+                result = slicer_pr_validation.run_validation(args)
+            self.assertEqual(result, 2)
+            report = json.loads((root / "evidence/report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["heads"][0]["status"], "test_evidence_incomplete")
+            self.assertEqual(report["heads"][0]["missing_required_head_testcases"],
+                             ["PR New::PR New"])
+
+    def test_moved_exception_and_stale_manifest_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head, args = self._write_manifest_and_args(
+                root, moved_exception=True)
+            manifest = json.loads(Path(args.identity_manifest).read_text(encoding="utf-8"))
+            records = [{"number": 1, "headRefOid": head}]
+            with self.assertRaises(slicer_pr_validation.ValidationError):
+                slicer_pr_validation._validate_identity_manifest(
+                    repo, manifest, harness_base=base, harness_ref=harness_ref,
+                    snapshot_records=records, selected_records=records)
+
+            repo, base, harness_ref, head, args = self._write_manifest_and_args(root / "stale")
+            manifest = json.loads(Path(args.identity_manifest).read_text(encoding="utf-8"))
+            manifest["heads"][0]["head_oid"] = base
+            with self.assertRaises(slicer_pr_validation.ValidationError):
+                slicer_pr_validation._validate_identity_manifest(
+                    repo, manifest, harness_base=base, harness_ref=harness_ref,
+                    snapshot_records=[{"number": 1, "headRefOid": head}],
+                    selected_records=[{"number": 1, "headRefOid": head}])
+            manifest = json.loads(Path(args.identity_manifest).read_text(encoding="utf-8"))
+            manifest["required_harness_cases"][0]["source"]["line"] += 1
+            with self.assertRaises(slicer_pr_validation.ValidationError):
+                slicer_pr_validation._validate_identity_manifest(
+                    repo, manifest, harness_base=base, harness_ref=harness_ref,
+                    snapshot_records=[{"number": 1, "headRefOid": head}],
+                    selected_records=[{"number": 1, "headRefOid": head}])
+
+
 class JUnitEvidenceTests(unittest.TestCase):
     @staticmethod
     def _result(returncode=0, *, timed_out=False, output="100% tests passed, 0 tests failed out of 2"):

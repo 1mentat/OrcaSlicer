@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Public BBS archive thumbnail contracts check the complete area-averaged small preview for square and wide source images.",
+  "mutants": [
+    {
+      "id": "bbs-thumbnail-small-preview-gate-disabled-v2",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        if (generate_small_thumbnail && thumbnail_data.is_valid()) {",
+      "new": "        if (false) {",
+      "description": "Drop the generated 128x128 plate preview even when the source thumbnail is valid; the archive-entry requirement must fail.",
+      "test_filter": "Bbs3mfThumbnailDownsample"
+    },
+    {
+      "id": "bbs-thumbnail-block-average-red-halved-v2",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                    r = std::clamp(0, r / sw / sh, 255);",
+      "new": "                    r = std::clamp(0, r / sw / sh / 2, 255);",
+      "description": "Halve the already area-averaged red channel; the full-pixel comparison catches the safe in-range distortion without relying on clamp overflow.",
+      "test_filter": "Bbs3mfThumbnailDownsample"
+    },
+    {
+      "id": "bbs-thumbnail-wide-index-mapping-reverted-post-fix",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                    small_pixels[4 * (i / sh * PLATE_THUMBNAIL_SMALL_WIDTH + j / sw) + 0] = (unsigned char)r;",
+      "new": "                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 0] = (unsigned char)r;",
+      "description": "Revert the corrected red-channel destination mapping; the 384x256 row must fail while the square row alone remains insufficient.",
+      "test_filter": "Bbs3mfThumbnailDownsample"
+    }
+  ]
+}

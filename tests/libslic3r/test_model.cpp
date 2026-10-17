@@ -1069,6 +1069,42 @@ TEST_CASE("Object export statistics use printable volume determinants and names"
     CHECK(object->facets_count() == 12);
 }
 
+TEST_CASE("ModelObject mirror reflects each axis and restores cached bounds", "[Model][ModelMirror]")
+{
+    const auto [axis, reflected_min, reflected_max] = GENERATE(table<Axis, Vec3d, Vec3d>({
+        { X, Vec3d(-4., 0., 0.), Vec3d(0., 6., 8.) },
+        { Y, Vec3d(0., -6., 0.), Vec3d(4., 0., 8.) },
+        { Z, Vec3d(0., 0., -8.), Vec3d(4., 6., 0.) },
+    }));
+
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    object->add_volume(make_cube(4.f, 6.f, 8.f), ModelVolumeType::MODEL_PART, false);
+    object->add_volume(make_cube(2.f, 3.f, 5.f), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(object->volumes.size() == 2);
+    object->add_instance();
+
+    const BoundingBoxf3 before_approx = object->bounding_box_approx();
+    const BoundingBoxf3 before_exact = object->bounding_box_exact();
+    check_box(before_approx, Vec3d::Zero(), Vec3d(4., 6., 8.));
+    check_box(before_exact, Vec3d::Zero(), Vec3d(4., 6., 8.));
+
+    object->mirror(axis);
+
+    check_box(object->bounding_box_approx(), reflected_min, reflected_max);
+    check_box(object->bounding_box_exact(), reflected_min, reflected_max);
+    for (const ModelVolume *volume : object->volumes)
+        CHECK_THAT(volume->get_mirror(axis), Catch::Matchers::WithinAbs(-1., 1e-12));
+
+    object->mirror(axis);
+
+    check_box(object->bounding_box_approx(), Vec3d::Zero(), Vec3d(4., 6., 8.));
+    check_box(object->bounding_box_exact(), Vec3d::Zero(), Vec3d(4., 6., 8.));
+    for (const ModelVolume *volume : object->volumes)
+        CHECK_THAT(volume->get_mirror(axis), Catch::Matchers::WithinAbs(1., 1e-12));
+}
+
 } // namespace model_extended_contracts
 
 using namespace Slic3r;

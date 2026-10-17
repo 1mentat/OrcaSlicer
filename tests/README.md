@@ -201,6 +201,18 @@ source metadata, colors, decoded texture pixels, cancellation, and error types.
 geometry and transformation invariants, including integer-grid partitioning
 and translation far from the coordinate origin.
 
+`[Bbs3mfThumbnailDownsample]` compares every decoded preview pixel against an
+independent block average for square and wide source images. `[SubscribedBundleReload]`
+checks metadata and typed preset membership after disk reload, while
+`[VendorVariantValidation]` checks valid and mismatched nozzle variants with
+validation enabled and disabled. `[ModelMirror]` checks all three reflection
+axes, cached bounds, and restoration after a second reflection. Their bounded
+mutants are in `bbs3mf_thumbnail_downsample.json`, `preset_reload_variants.json`,
+and `model_mirror.json` under `tests/mutations/`.
+`[MixedGradient]` checks configured gradient ratios and independent five- and
+seven-layer volume runs, with per-part gradients enabled and disabled; its
+mutants are in `tests/mutations/mixed_gradient.json`.
+
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
 placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`
 checks non-sequential backup IDs, geometry preservation, and missing-part
@@ -494,6 +506,22 @@ testcase identity from the harness baseline must also appear in the reference
 and each head. Equal totals cannot hide a missing test replaced by another name.
 A requested reference with incomplete execution evidence makes the overall
 matrix incomplete, even if individual heads pass.
+
+For PRs based on older test suites, `--identity-manifest <path>` accepts an
+audited JSON manifest with `schema_version: 2`, exact `harness_base_sha` and
+`harness_ref_sha`, `required_harness_cases`, named `exception_groups`, and one
+`heads` entry per snapshot PR. Each head binds its `number`, `head_oid`,
+`exception_group`, and `required_head_cases`. Each case binds a JUnit
+`runtime_identity` to its source `path`, `macro`, `name`, and `line`.
+Only original base cases absent by name from both the exact head and its applied
+overlay may be exceptions. The head's baseline identity set and minimum count
+are reduced by those verified exceptions; the reference stays strict.
+New harness cases and every declared PR-added case remain mandatory. Moved
+tests, stale commits or source lines, missing PR additions, skips, and duplicate
+JUnit identities cannot be waived. The source check supports literal
+`TEST_CASE` and `SCENARIO` declarations; escaped names are rejected explicitly,
+and SCENARIO runtime names include Catch's `Scenario:` prefix. Without a
+manifest, the original strict identity and count checks remain in effect.
 
 Run all snapshot heads, or select reproducible PR numbers with repeated or
 comma-separated `--numbers` values:

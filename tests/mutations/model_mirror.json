@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public ModelObject axis-mirroring and cache refresh contract; strengthens existing lifecycle coverage.",
+  "mutants": [
+    {
+      "id": "model-object-mirror-volume-dispatch-removed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    for (ModelVolume *v : this->volumes) {\n        v->mirror(axis);\n    }",
+      "new": "    for (ModelVolume *v : this->volumes) {\n        (void)v;\n    }",
+      "description": "Skip forwarding the requested axis to each volume; the generated X/Y/Z reflected bounds and all volume mirror factors must fail.",
+      "test_filter": "ModelMirror"
+    },
+    {
+      "id": "model-object-mirror-cache-invalidation-removed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "void ModelObject::mirror(Axis axis)\n{\n    for (ModelVolume *v : this->volumes) {\n        v->mirror(axis);\n    }\n    this->invalidate_bounding_box();\n}",
+      "new": "void ModelObject::mirror(Axis axis)\n{\n    for (ModelVolume *v : this->volumes) {\n        v->mirror(axis);\n    }\n}",
+      "description": "Leave approximate and exact object bounds cached after changing volume transforms; the pre-populated reflected bounds must fail.",
+      "test_filter": "ModelMirror"
+    }
+  ]
+}

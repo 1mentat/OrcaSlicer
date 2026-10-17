@@ -121,6 +121,269 @@ def _git(repo: Path, *args: str, timeout: float = 120.0) -> CommandResult:
     return run_command(["git", *args], cwd=repo, timeout=timeout)
 
 
+_TEST_DECLARATION_RE = re.compile(
+    r"^\s*(TEST_CASE|SCENARIO)\s*\(\s*\"((?:\\.|[^\"\\])*)\"")
+_TEST_DECLARATION_GREP = r"^[[:space:]]*(TEST_CASE|SCENARIO)[[:space:]]*\("
+_IDENTITY_MANIFEST_VERSION = 2
+
+
+def _git_test_declarations(repo: Path, commit: str | None) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Read exact source declarations from a commit or the current overlay tree."""
+    command = ["grep", "-n", "-I", "-E", _TEST_DECLARATION_GREP]
+    if commit is not None:
+        command.append(commit)
+    command += ["--", "tests/*.cpp", "tests/**/*.cpp", "tests/*.cc", "tests/**/*.cc",
+                "tests/*.cxx", "tests/**/*.cxx"]
+    result = _git(repo, *command)
+    location = commit or "the current overlay tree"
+    if result.returncode not in {0, 1}:
+        raise ValidationError(f"cannot inspect test identities at {location}: {result.stderr.strip()}")
+    declarations: dict[tuple[str, str, str], dict[str, Any]] = {}
+    names: dict[str, tuple[str, str, str]] = {}
+    for line in result.stdout.splitlines():
+        if commit is None:
+            fields = line.split(":", 2)
+            if len(fields) != 3:
+                raise ValidationError(f"unparseable test identity output at {location}: {line!r}")
+            path, line_number, source_line = fields
+        else:
+            fields = line.split(":", 3)
+            if len(fields) != 4:
+                raise ValidationError(f"unparseable test identity output at {location}: {line!r}")
+            _, path, line_number, source_line = fields
+        match = _TEST_DECLARATION_RE.match(source_line)
+        if not match:
+            raise ValidationError(f"unparseable test declaration at {location}: {line!r}")
+        try:
+            line_number_int = int(line_number)
+        except ValueError as exc:
+            raise ValidationError(f"invalid test declaration line at {location}: {line!r}") from exc
+        key = (path, match.group(1), match.group(2))
+        if key in declarations:
+            raise ValidationError(f"duplicate source test declaration at {location}: {key!r}")
+        if match.group(2) in names:
+            raise ValidationError(
+                f"duplicate test name across source files at {location}: {match.group(2)!r}")
+        declarations[key] = {
+            "path": path, "macro": match.group(1), "name": match.group(2),
+            "line": line_number_int,
+        }
+        names[match.group(2)] = key
+    return declarations
+
+
+def _manifest_case_runtime_name(case: dict[str, Any], *, label: str) -> str:
+    if not isinstance(case, dict):
+        raise ValidationError(f"{label} must be an object")
+    runtime_identity = case.get("runtime_identity")
+    source = case.get("source")
+    if not isinstance(runtime_identity, str) or not runtime_identity:
+        raise ValidationError(f"{label} lacks runtime_identity")
+    if not isinstance(source, dict):
+        raise ValidationError(f"{label} lacks source declaration")
+    path = source.get("path")
+    macro = source.get("macro")
+    name = source.get("name")
+    line = source.get("line")
+    if (not isinstance(path, str) or not path.startswith("tests/") or ".." in Path(path).parts
+            or macro not in {"TEST_CASE", "SCENARIO"}
+            or not isinstance(name, str) or not name
+            or not isinstance(line, int) or line < 1):
+        raise ValidationError(f"{label} has an invalid source declaration")
+    if "\\" in name:
+        raise ValidationError(
+            f"{label} uses an escaped C++ test name; escaped source names are not supported by identity manifests")
+    runtime_name = f"Scenario: {name}" if macro == "SCENARIO" else name
+    if runtime_identity != runtime_name and not runtime_identity.endswith(f"::{runtime_name}"):
+        raise ValidationError(
+            f"{label} runtime_identity must identify the Catch name {runtime_name!r}")
+    return runtime_identity
+
+
+def _validate_manifest_cases(cases: Any, *, label: str, expected_commit: str,
+                             declarations: dict[tuple[str, str, str], dict[str, Any]],
+                             forbidden_declarations: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+                             forbidden_names: set[str] | None = None) -> dict[str, dict[str, Any]]:
+    if not isinstance(cases, list):
+        raise ValidationError(f"{label} must be a list")
+    result: dict[str, dict[str, Any]] = {}
+    forbidden = forbidden_declarations or {}
+    for index, case in enumerate(cases):
+        item_label = f"{label}[{index}]"
+        runtime_identity = _manifest_case_runtime_name(case, label=item_label)
+        if runtime_identity in result:
+            raise ValidationError(f"duplicate runtime identity in {label}: {runtime_identity}")
+        source = case["source"]
+        key = (source["path"], source["macro"], source["name"])
+        actual = declarations.get(key)
+        if actual is None:
+            raise ValidationError(f"{item_label} source declaration is absent from {expected_commit}")
+        if actual["line"] != source["line"]:
+            raise ValidationError(f"{item_label} source line is stale for {expected_commit}")
+        if key in forbidden or source["name"] in (forbidden_names or set()):
+            raise ValidationError(f"{item_label} is forbidden in the opposing source commit")
+        result[runtime_identity] = {"runtime_identity": runtime_identity, "source": dict(source)}
+    return result
+
+
+def _load_identity_manifest(path: Path) -> tuple[dict[str, Any], str]:
+    try:
+        raw = path.read_bytes()
+        manifest = json.loads(raw)
+    except OSError as exc:
+        raise ValidationError(f"cannot read identity manifest {path}: {exc}") from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValidationError(f"identity manifest is not valid JSON: {path}: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != _IDENTITY_MANIFEST_VERSION:
+        raise ValidationError("identity manifest has an unsupported schema_version")
+    return manifest, hashlib.sha256(raw).hexdigest()
+
+
+def _declaration_names(
+        declarations: dict[tuple[str, str, str], dict[str, Any]]) -> set[str]:
+    return {declaration["name"] for declaration in declarations.values()}
+
+
+def _validate_identity_manifest(repo: Path, manifest: dict[str, Any], *,
+                                harness_base: str, harness_ref: str,
+                                snapshot_records: Sequence[dict[str, Any]],
+                                selected_records: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    if manifest.get("harness_base_sha") != harness_base:
+        raise ValidationError("identity manifest harness_base_sha is stale")
+    if manifest.get("harness_ref_sha") != harness_ref:
+        raise ValidationError("identity manifest harness_ref_sha is stale")
+    base_declarations = _git_test_declarations(repo, harness_base)
+    ref_declarations = _git_test_declarations(repo, harness_ref)
+    base_names = _declaration_names(base_declarations)
+    ref_names = _declaration_names(ref_declarations)
+    required_cases = _validate_manifest_cases(
+        manifest.get("required_harness_cases"), label="required_harness_cases",
+        expected_commit=harness_ref, declarations=ref_declarations,
+        forbidden_declarations=base_declarations, forbidden_names=base_names)
+    required_ids = set(required_cases)
+    required_names = {case["source"]["name"] for case in required_cases.values()}
+    required_source_declarations = {
+        (case["source"]["path"], case["source"]["macro"], case["source"]["name"]): case
+        for case in required_cases.values()
+    }
+    groups = manifest.get("exception_groups")
+    if not isinstance(groups, dict) or not groups:
+        raise ValidationError("identity manifest exception_groups must be a non-empty object")
+    group_cases: dict[str, dict[str, dict[str, Any]]] = {}
+    for group_name, cases in groups.items():
+        if not isinstance(group_name, str) or not group_name:
+            raise ValidationError("identity manifest has an invalid exception group name")
+        group_cases[group_name] = _validate_manifest_cases(
+            cases, label=f"exception_groups.{group_name}",
+            expected_commit=harness_base, declarations=base_declarations,
+            forbidden_declarations=required_source_declarations,
+            forbidden_names=required_names)
+        overlap = required_ids.intersection(group_cases[group_name])
+        if overlap:
+            raise ValidationError(
+                "new harness identities cannot be exception identities: " + ", ".join(sorted(overlap)))
+    snapshot_by_number = {int(item["number"]): item for item in snapshot_records}
+    manifest_heads = manifest.get("heads")
+    if not isinstance(manifest_heads, list):
+        raise ValidationError("identity manifest heads must be a list")
+    by_number: dict[int, dict[str, Any]] = {}
+    for index, item in enumerate(manifest_heads):
+        if not isinstance(item, dict):
+            raise ValidationError(f"identity manifest heads[{index}] must be an object")
+        try:
+            number = int(item["number"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValidationError(f"identity manifest heads[{index}] has an invalid number") from exc
+        if number in by_number or number not in snapshot_by_number:
+            raise ValidationError(f"identity manifest head number is unknown or duplicated: {number}")
+        head_oid = item.get("head_oid")
+        if not isinstance(head_oid, str) or not _HEX40.fullmatch(head_oid):
+            raise ValidationError(f"identity manifest PR #{number} has an invalid head_oid")
+        if head_oid != str(snapshot_by_number[number]["headRefOid"]):
+            raise ValidationError(f"identity manifest PR #{number} head_oid is stale")
+        group_name = item.get("exception_group")
+        if group_name not in group_cases:
+            raise ValidationError(f"identity manifest PR #{number} references an unknown exception group")
+        head_declarations = _git_test_declarations(repo, head_oid)
+        head_names = _declaration_names(head_declarations)
+        required_head_cases = _validate_manifest_cases(
+            item.get("required_head_cases"), label=f"heads[{index}].required_head_cases",
+            expected_commit=head_oid, declarations=head_declarations,
+            forbidden_declarations=ref_declarations, forbidden_names=ref_names)
+        required_head_names = {case["source"]["name"] for case in required_head_cases.values()}
+        actual_head_additions = head_names - ref_names
+        if required_head_names != actual_head_additions:
+            missing = sorted(actual_head_additions - required_head_names)
+            stale = sorted(required_head_names - actual_head_additions)
+            raise ValidationError(
+                f"identity manifest PR #{number} head additions mismatch; missing={missing}, stale={stale}")
+        overlap = required_ids.intersection(required_head_cases)
+        if overlap:
+            raise ValidationError(
+                "PR additions cannot duplicate required harness identities: " + ", ".join(sorted(overlap)))
+        exception_overlap = set(group_cases[group_name]).intersection(required_head_cases)
+        if exception_overlap:
+            raise ValidationError(
+                "PR additions cannot be exception identities: " + ", ".join(sorted(exception_overlap)))
+        by_number[number] = {
+            "number": number, "head_oid": head_oid, "exception_group": group_name,
+            "exception_cases": group_cases[group_name],
+            "required_head_cases": required_head_cases,
+            "head_test_names": head_names,
+        }
+    if set(by_number) != set(snapshot_by_number):
+        missing = sorted(set(snapshot_by_number) - set(by_number))
+        stale = sorted(set(by_number) - set(snapshot_by_number))
+        raise ValidationError(f"identity manifest head set mismatch; missing={missing}, stale={stale}")
+    selected_numbers = {int(item["number"]) for item in selected_records}
+    policies: dict[int, dict[str, Any]] = {}
+    for number in sorted(selected_numbers):
+        policy = by_number[number]
+        for runtime_identity, case in policy["exception_cases"].items():
+            if case["source"]["name"] in policy["head_test_names"]:
+                raise ValidationError(
+                    f"identity exception {runtime_identity} is present by name in exact PR #{number} head")
+        policies[number] = policy
+    return {
+        "required_harness_cases": required_cases,
+        "required_harness_runtime_ids": sorted(required_ids),
+        "groups": group_cases,
+        "heads": policies,
+        "selected_heads_validated": sorted(selected_numbers),
+        "selected_head_count": len(selected_numbers),
+        "all_snapshot_heads_validated": selected_numbers == set(snapshot_by_number),
+    }
+
+
+
+def _validate_identity_overlay(worktree: Path, policy: dict[str, Any],
+                               required_harness_cases: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Recheck identity policy against the actual patched worktree before tests run."""
+    declarations = _git_test_declarations(worktree, None)
+    names = _declaration_names(declarations)
+    required_harness_names = {
+        case["source"]["name"] for case in required_harness_cases.values()
+    }
+    required_head_names = {
+        case["source"]["name"] for case in policy["required_head_cases"].values()
+    }
+    missing_required = sorted((required_harness_names | required_head_names) - names)
+    present_exceptions = sorted(
+        case["source"]["name"] for case in policy["exception_cases"].values()
+        if case["source"]["name"] in names)
+    if missing_required or present_exceptions:
+        raise ValidationError(
+            "identity overlay contradicts its exact-head policy: "
+            f"missing_required={missing_required}, present_exceptions={present_exceptions}")
+    return {
+        "checked": True,
+        "required_harness_runtime_count": len(required_harness_cases),
+        "required_head_runtime_count": len(policy["required_head_cases"]),
+        "exception_runtime_count": len(policy["exception_cases"]),
+        "overlay_test_name_count": len(names),
+    }
+
+
 def _write_log(path: Path, result: CommandResult) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(result.stdout + ("\n" if result.stdout and result.stderr else "") +
@@ -230,7 +493,7 @@ def _junit_timeout(case: ElementTree.Element) -> bool:
 def read_junit_evidence(junit: Path) -> dict[str, Any]:
     """Require complete, internally consistent testcase identities and totals."""
     evidence: dict[str, Any] = {
-        "usable": False, "errors": [], "counts": {
+        "usable": False, "errors": [], "duplicate_testcase_identities": [], "counts": {
             "tests": 0, "failures": 0, "errors": 0, "skipped": 0, "timeouts": 0}, "cases": {},
     }
     try:
@@ -254,6 +517,8 @@ def read_junit_evidence(junit: Path) -> dict[str, Any]:
             evidence["errors"].append("testcase lacks a name")
         if identity in evidence["cases"]:
             evidence["errors"].append(f"duplicate testcase identity: {identity}")
+            if identity not in evidence["duplicate_testcase_identities"]:
+                evidence["duplicate_testcase_identities"].append(identity)
         tags = {_xml_tag(child) for child in case}
         serialized = ElementTree.tostring(case, encoding="unicode")
         if tags.intersection({"failure", "error"}) and _junit_timeout(case):
@@ -347,22 +612,32 @@ def _missing_baseline_testcases(baseline_cases: dict[str, str],
 
 
 def _apply_minimum_test_gate(entry: dict[str, Any], *, minimum_tests: int,
-                             baseline_cases: dict[str, str] | None = None) -> dict[str, Any]:
-    """Apply count and optional baseline-identity gates to comparable test runs."""
+                             baseline_cases: dict[str, str] | None = None,
+                             required_cases: dict[str, str] | None = None) -> dict[str, Any]:
+    """Apply count plus optional baseline/head identity gates to a run."""
     counts = (entry.get("junit_evidence") or {}).get("counts") or {}
     observed = counts.get("tests")
     current_cases = entry.get("junit_case_statuses") or {}
     missing = (_missing_baseline_testcases(baseline_cases, current_cases)
                if baseline_cases is not None else [])
+    skipped = (sorted(name for name, status in baseline_cases.items()
+                      if status == "passed" and current_cases.get(name) == "skipped")
+               if baseline_cases is not None else [])
+    missing_required = (sorted(name for name, status in required_cases.items()
+                               if status == "passed" and current_cases.get(name) != "passed")
+                        if required_cases is not None else [])
     entry["minimum_tests_required"] = minimum_tests
     entry["minimum_tests_observed"] = observed
     entry["minimum_tests_ok"] = isinstance(observed, int) and observed >= minimum_tests
     entry["missing_baseline_testcases"] = missing
+    entry["skipped_baseline_testcases"] = skipped
+    if required_cases is not None:
+        entry["missing_required_head_testcases"] = missing_required
     # Preserve stronger configure/build/timeout/error statuses.  The gate only
     # changes an otherwise comparable test result, so it cannot hide an
     # existing infrastructure failure.
     if (entry.get("status") in {"pass", "test_failed"}
-            and (not entry["minimum_tests_ok"] or missing)):
+            and (not entry["minimum_tests_ok"] or missing or missing_required)):
         entry["status"] = "test_evidence_incomplete"
     entry["junit_reference_usable"] = entry.get("status") in {"pass", "test_failed"}
     return entry
@@ -790,7 +1065,8 @@ def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
     if any(status in {"patch_conflict", "invalid_ref", "reset_failed",
                       "tree_resolution_failed", "infrastructure_error", "cleanup_failed",
                       "test_error", "test_evidence_incomplete", "test_timeout",
-                      "test_skipped", "no_tests", "configure_timeout", "build_timeout"}
+                      "test_skipped", "no_tests", "identity_manifest_invalid",
+                      "configure_timeout", "build_timeout"}
            for status in statuses):
         return "infrastructure_error", 2
     if any(status in {"tracked_source_index_changed", "tracked_source_index_resolution_failed"}
@@ -808,7 +1084,8 @@ def run_validation(args: argparse.Namespace) -> int:
     output.mkdir(parents=True, exist_ok=True)
     numbers = parse_numbers(args.numbers)
     snapshot_bytes = snapshot_path.read_bytes()
-    records = select_snapshot(load_snapshot(snapshot_path, content=snapshot_bytes), numbers)
+    snapshot_records = load_snapshot(snapshot_path, content=snapshot_bytes)
+    records = select_snapshot(snapshot_records, numbers)
 
     original_head, original_head_result = resolve_commit(repo, "HEAD")
     if original_head is None:
@@ -820,6 +1097,16 @@ def run_validation(args: argparse.Namespace) -> int:
         raise ValidationError(f"invalid --harness-base {args.harness_base}: {harness_base_result.stderr.strip()}")
     if harness_ref is None:
         raise ValidationError(f"invalid --harness-ref {args.harness_ref}: {harness_ref_result.stderr.strip()}")
+
+    identity_manifest = None
+    identity_manifest_sha = None
+    identity_policy = None
+    if args.identity_manifest:
+        identity_manifest_path = Path(args.identity_manifest).expanduser().resolve()
+        identity_manifest, identity_manifest_sha = _load_identity_manifest(identity_manifest_path)
+        identity_policy = _validate_identity_manifest(
+            repo, identity_manifest, harness_base=harness_base, harness_ref=harness_ref,
+            snapshot_records=snapshot_records, selected_records=records)
 
     full_diff_paths, paths_result = _git_diff_paths(repo, harness_base, harness_ref)
     if paths_result.returncode != 0:
@@ -880,6 +1167,9 @@ def run_validation(args: argparse.Namespace) -> int:
             "cmake_args": list(args.cmake_arg), "patch_scope": args.patch_scope,
             "patch_include": list(args.patch_include),
             "reference_baseline": args.reference_baseline,
+            "identity_manifest": (str(Path(args.identity_manifest).expanduser().resolve())
+                                   if args.identity_manifest else None),
+            "identity_manifest_sha256": identity_manifest_sha,
         },
         "baseline": {},
         "reference": {},
@@ -922,6 +1212,28 @@ def run_validation(args: argparse.Namespace) -> int:
         }
         baseline["baseline_passed_testcase_count"] = len(baseline_passed_cases)
         baseline["baseline_passed_testcase_ids"] = sorted(baseline_passed_cases)
+        if identity_policy is not None and baseline["status"] == "pass":
+            required_ids = identity_policy["required_harness_runtime_ids"]
+            missing_required = [name for name in required_ids if name not in baseline_passed_cases]
+            exception_ids = sorted({
+                runtime_identity
+                for policy in identity_policy["heads"].values()
+                for runtime_identity in policy["exception_cases"]
+            })
+            missing_exceptions = [name for name in exception_ids if name not in baseline_passed_cases]
+            if missing_required or missing_exceptions:
+                raise ValidationError(
+                    "identity manifest runtime IDs are stale in harness-ref JUnit: "
+                    f"missing_required={missing_required}, missing_exceptions={missing_exceptions}")
+            report["identity_gate"] = {
+                "status": "validated",
+                "required_harness_runtime_count": len(required_ids),
+                "exception_runtime_count": len(exception_ids),
+                "baseline_runtime_count": len(baseline_passed_cases),
+                "head_policy_count": len(identity_policy["heads"]),
+                "selected_head_count": identity_policy["selected_head_count"],
+                "all_snapshot_heads_validated": identity_policy["all_snapshot_heads_validated"],
+            }
         baseline_prod_hash, baseline_prod_result = _tracked_source_index_hash(worktree)
         baseline["tracked_source_index_hash_before_overlay"] = baseline_prod_hash
         baseline["tracked_source_index_hash_after_overlay"] = baseline_prod_hash
@@ -1043,6 +1355,24 @@ def run_validation(args: argparse.Namespace) -> int:
                         report["heads"].append(entry)
                         return_code = 2
                         continue
+                overlay_identity = None
+                if identity_policy is not None:
+                    policy = identity_policy["heads"][number]
+                    try:
+                        overlay_identity = _validate_identity_overlay(
+                            worktree, policy, identity_policy["required_harness_cases"])
+                    except ValidationError as exc:
+                        entry["status"] = "identity_manifest_invalid"
+                        entry["identity_gate"] = {
+                            "applied": False,
+                            "validation_error": str(exc),
+                            "exception_group": policy["exception_group"],
+                        }
+                        entry["harness_patch_applied"] = bool(patch)
+                        report["heads"].append(entry)
+                        return_code = 2
+                        _write_json(output / "report.json", report)
+                        continue
                 production_after, production_after_result = _tracked_source_index_hash(worktree)
                 entry["tracked_source_index_hash_after_overlay"] = production_after
                 entry["tracked_source_index_resolution_after"] = production_after_result.json()
@@ -1064,9 +1394,39 @@ def run_validation(args: argparse.Namespace) -> int:
                 run = _run_tree(worktree, output, f"pr-{number}", args, configure_args, build_args,
                                 commit_sha=resolved, tree_sha=tree)
                 entry.update(run)
+                gate_minimum_tests = args.minimum_tests
+                gate_baseline_cases = baseline_passed_cases
+                required_head_case_statuses = {}
+                if identity_policy is not None:
+                    policy = identity_policy["heads"][number]
+                    exception_ids = set(policy["exception_cases"])
+                    gate_baseline_cases = {
+                        name: status for name, status in baseline_passed_cases.items()
+                        if name not in exception_ids
+                    }
+                    raw_adjusted_minimum = args.minimum_tests - len(exception_ids)
+                    gate_minimum_tests = max(1, raw_adjusted_minimum)
+                    entry["identity_gate"] = {
+                        "applied": True,
+                        "exception_group": policy["exception_group"],
+                        "exception_runtime_ids": sorted(exception_ids),
+                        "exception_count": len(exception_ids),
+                        "minimum_tests_requested": args.minimum_tests,
+                        "minimum_tests_adjustment": -len(exception_ids),
+                        "minimum_tests_adjusted": gate_minimum_tests,
+                        "required_baseline_identity_count": len(gate_baseline_cases),
+                        "required_harness_runtime_count": len(identity_policy["required_harness_runtime_ids"]),
+                        "required_head_runtime_ids": sorted(policy["required_head_cases"]),
+                        "overlay_identity": overlay_identity,
+                    }
+                    required_head_case_statuses = {
+                        runtime_identity: "passed"
+                        for runtime_identity in policy["required_head_cases"]
+                    }
                 _apply_minimum_test_gate(
-                    entry, minimum_tests=args.minimum_tests,
-                    baseline_cases=baseline_passed_cases)
+                    entry, minimum_tests=gate_minimum_tests,
+                    baseline_cases=gate_baseline_cases,
+                    required_cases=required_head_case_statuses)
                 entry["harness_patch_applied"] = bool(patch)
                 entry["failure_classification"] = classify_failure_names(
                     report.get("reference"), entry)
@@ -1167,6 +1527,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-baseline", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="run harness-base plus the selected overlay as a failure reference (default: enabled)")
+    parser.add_argument("--identity-manifest",
+                        help="optional exact-head testcase identity manifest; disabled by default")
     return parser
 
 

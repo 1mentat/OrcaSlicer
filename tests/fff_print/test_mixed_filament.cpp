@@ -1,9 +1,15 @@
 #include <algorithm>
+#include <cmath>
+#include <map>
+#include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/catch_all.hpp>
 #include "libslic3r/PrintConfig.hpp"
 #include <string>
 #include <cstddef>
+#include <utility>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ObjectID.hpp"
 #include <vector>
 #include "libslic3r/Config.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -59,6 +65,124 @@ void count_mixed(ToolOrdering &to, size_t &groups, size_t &resolutions)
 }
 
 } // namespace
+
+TEST_CASE("Mixed filament gradients record independent object and volume runs", "[MixedFilament][MixedGradient]")
+{
+    const bool per_part = GENERATE(false, true);
+    constexpr double layer_height = 0.2;
+    constexpr double short_height = 1.2;
+    constexpr double tall_height  = 1.6;
+    const size_t short_run = static_cast<size_t>(std::llround(short_height / layer_height)) - 1;
+    const size_t tall_run  = static_cast<size_t>(std::llround(tall_height / layer_height)) - 1;
+
+    DynamicPrintConfig config = mixed_config(true);
+    config.set_deserialize_strict({
+        {"layer_height",                    "0.2"},
+        {"initial_layer_print_height",      "0.2"},
+        {"wall_loops",                     "1"},
+        {"top_shell_layers",               "0"},
+        {"bottom_shell_layers",             "0"},
+        {"sparse_infill_density",          "0%"},
+        {"skirt_loops",                    "0"},
+        {"brim_type",                      "no_brim"},
+        {"layer_change_gcode",             "G92 E0\n"},
+        {"filament_mixed_gradient",         "0,0,1"},
+        {"filament_mixed_gradient_range",   ";;0.8,0.2"},
+        {"filament_mixed_gradient_per_part", per_part ? "0,0,1" : "0,0,0"},
+    });
+
+    Model model;
+    Print print;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    object->name = "mixed-gradient.stl";
+    ModelVolume *short_volume = object->add_volume(make_cube(8., 8., short_height), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh tall_mesh = make_cube(8., 8., tall_height);
+    tall_mesh.translate(10.f, 0.f, 0.f);
+    ModelVolume *tall_volume = object->add_volume(std::move(tall_mesh), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(short_volume != nullptr);
+    REQUIRE(tall_volume != nullptr);
+    short_volume->config.set("extruder", 3);
+    tall_volume->config.set("extruder", 3);
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+
+    const StringObjectException validation = print.validate();
+    INFO("validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *print_object = print.objects().front();
+    REQUIRE(print_object != nullptr);
+    const ToolOrdering &ordering_const = print.tool_ordering();
+    ToolOrdering &ordering = const_cast<ToolOrdering &>(ordering_const);
+    REQUIRE(ordering.layer_tools().size() == tall_run + 1);
+
+    std::vector<const LayerTools::MixedSubLayerGroup *> groups;
+    for (const LayerTools &layer_tools : ordering.layer_tools())
+        for (const LayerTools::MixedSubLayerGroup &group : layer_tools.mixed_sub_layer_groups)
+            if (group.mixed_slot_0based == 2)
+                groups.push_back(&group);
+
+    // Both physical components are sorted in the public metadata. The gradient range is
+    // independently selected here; each sampled layer uses its half-step in the 7-layer run.
+    REQUIRE(groups.size() == tall_run);
+    std::map<ObjectID, std::vector<LayerTools::MixedSubLayerGroup::VolumeGradient>> volume_gradients;
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const auto &group = *groups[i];
+        REQUIRE(group.is_gradient);
+        CHECK(group.components_0based == std::vector<unsigned int>{0, 1});
+        CHECK(group.gradient_first_sorted_idx == 0);
+        REQUIRE(group.sub_heights.size() == 2);
+        CHECK_THAT(group.layer_height, Catch::Matchers::WithinAbs(layer_height, 1e-7));
+        CHECK_THAT(group.sub_heights[0] + group.sub_heights[1], Catch::Matchers::WithinAbs(layer_height, 1e-7));
+
+        const double t = (2. * static_cast<double>(i) + 1.) / (2. * static_cast<double>(tall_run));
+        const double first_ratio = 0.8 + (0.2 - 0.8) * t;
+        CHECK_THAT(group.sub_heights[0], Catch::Matchers::WithinAbs(first_ratio * layer_height, 1e-6));
+        CHECK_THAT(group.sub_heights[1], Catch::Matchers::WithinAbs((1. - first_ratio) * layer_height, 1e-6));
+
+        REQUIRE(group.per_object_gradient.size() == 1);
+        const auto object_it = group.per_object_gradient.find(print_object);
+        REQUIRE(object_it != group.per_object_gradient.end());
+        CHECK(object_it->second.total_layers == tall_run);
+        CHECK(object_it->second.current_idx == i);
+        CHECK_THAT(object_it->second.gradient_start, Catch::Matchers::WithinAbs(0.8, 1e-7));
+        CHECK_THAT(object_it->second.gradient_end, Catch::Matchers::WithinAbs(0.2, 1e-7));
+
+        for (const auto &[key, gradient] : group.per_volume_gradient) {
+            REQUIRE(key.obj == print_object);
+            volume_gradients[key.volume_id].push_back(gradient);
+            CHECK_THAT(gradient.gradient_start, Catch::Matchers::WithinAbs(0.8, 1e-7));
+            CHECK_THAT(gradient.gradient_end, Catch::Matchers::WithinAbs(0.2, 1e-7));
+        }
+    }
+    if (!per_part) {
+        // With per-part gradient disabled, both model-part regions remain one object run and
+        // no volume-tagged metadata is published.
+        CHECK(volume_gradients.empty());
+    } else {
+        // The two model parts have intentionally different heights. Their independent runs start
+        // after the bed layer and therefore have 5 and 7 entries, respectively.
+        REQUIRE(volume_gradients.size() == 2);
+        const auto check_volume_run = [&](ObjectID volume_id, size_t expected_layers) {
+            const auto it = volume_gradients.find(volume_id);
+            REQUIRE(it != volume_gradients.end());
+            REQUIRE(it->second.size() == expected_layers);
+            for (size_t i = 0; i < it->second.size(); ++i) {
+                CHECK(it->second[i].total_layers == expected_layers);
+                CHECK(it->second[i].current_idx == i);
+                CHECK_THAT(it->second[i].gradient_start, Catch::Matchers::WithinAbs(0.8, 1e-7));
+                CHECK_THAT(it->second[i].gradient_end, Catch::Matchers::WithinAbs(0.2, 1e-7));
+            }
+        };
+        check_volume_run(short_volume->id(), short_run);
+        check_volume_run(tall_volume->id(), tall_run);
+    }
+}
 
 TEST_CASE("enable_mixed_color_sublayer reaches the Print config", "[MixedFilament]")
 {

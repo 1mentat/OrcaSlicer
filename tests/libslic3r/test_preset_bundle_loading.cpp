@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include "libslic3r_version.h"
 #include <boost/nowide/fstream.hpp>
 #include <boost/format.hpp>
@@ -5897,6 +5898,69 @@ bool any_filename_contains(const fs::path &root, const std::string &needle)
 
 } // namespace
 
+TEST_CASE("Vendor validation checks nozzle diameters while preserving loadable profiles",
+          "[PresetBundle][VendorVariantValidation]")
+{
+    auto [variant, diameters, matches] = GENERATE(table<std::string, std::vector<double>, bool>({
+        { "0.4",     { 0.4 },      true },
+        { "0.8HF",   { 0.8 },      true },
+        { "0.4+0.6", { 0.4, 0.6 }, true },
+        { "0.4",     { 0.6 },      false },
+        { "0.4+0.6", { 0.4 },      false },
+        { "HF",      { 0.4 },      false },
+    }));
+    CAPTURE(variant, diameters, matches);
+    ScopedTemporaryDir temp("vendor-variant-validation");
+    ScopedDataDir data(temp.path() / "data");
+    const fs::path root = temp.path() / "profiles";
+    const fs::path machine_directory = root / "VariantVendor" / "machine";
+    fs::create_directories(machine_directory);
+    const auto write = [](const fs::path &path, const nlohmann::json &document) {
+        std::ofstream output(path.string());
+        REQUIRE(output.good());
+        output << document.dump();
+        REQUIRE(output.good());
+    };
+    write(root / "VariantVendor.json", {
+        { "version", "1.0.0" }, { "name", "VariantVendor" },
+        { "machine_model_list", {{{ "name", "Variant Machine" }, { "sub_path", "machine/model.json" }}} },
+        { "machine_list", {{{ "name", "Variant Printer" }, { "sub_path", "machine/printer.json" }}} },
+    });
+    write(machine_directory / "model.json", {
+        { "type", "machine_model" }, { "name", "Variant Machine" }, { "nozzle_diameter", variant },
+    });
+    nlohmann::json nozzle_values = nlohmann::json::array();
+    for (double diameter : diameters)
+        nozzle_values.push_back(std::to_string(diameter));
+    write(machine_directory / "printer.json", {
+        { "type", "machine" }, { "name", "Variant Printer" }, { "from", "system" },
+        { "instantiation", "true" }, { "printer_model", "Variant Machine" },
+        { "printer_variant", variant }, { "nozzle_diameter", nozzle_values },
+    });
+
+    for (bool validation_mode : { false, true }) {
+        DYNAMIC_SECTION("validation mode " << validation_mode) {
+            PresetBundle bundle;
+            bundle.set_is_validation_mode(validation_mode);
+            const auto loaded = bundle.load_vendor_configs_from_json(
+                root.string(), "VariantVendor", PresetBundle::LoadSystem,
+                ForwardCompatibilitySubstitutionRule::Disable, nullptr, false);
+            REQUIRE(loaded.second == 1);
+            const Preset *printer = bundle.printers.find_preset("Variant Printer", false);
+            REQUIRE(printer != nullptr);
+            CHECK(printer->is_system);
+            CHECK(printer->config.opt_string("printer_variant") == variant);
+            const auto *nozzles = printer->config.option<ConfigOptionFloats>("nozzle_diameter");
+            REQUIRE(nozzles != nullptr);
+            REQUIRE(nozzles->values.size() == diameters.size());
+            for (size_t i = 0; i < diameters.size(); ++i)
+                CHECK_THAT(nozzles->values[i], Catch::Matchers::WithinAbs(diameters[i], 1e-9));
+            const int expected_errors = validation_mode && !matches ? 1 : 0;
+            CHECK(bundle.error_count() == expected_errors);
+        }
+    }
+}
+
 TEST_CASE("Config import confines zip entries, preset names and bundle ids to the preset directory", "[Preset][Bundle][Regression]")
 {
     ScopedTemporaryDir temp_dir;
@@ -7689,6 +7753,74 @@ TEST_CASE("local bundle metadata and preset identity survive user loading", "[Pr
     CHECK(loaded->bundle_id == "local-id");
     CHECK_THAT(loaded->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
     CHECK(substitutions.empty());
+}
+
+TEST_CASE("Subscribed bundle reload rebuilds typed preset membership from disk",
+          "[PresetBundle][SubscribedBundleReload]")
+{
+    const bool read_only = GENERATE(false, true);
+    CAPTURE(read_only);
+    ScopedTemporaryDir temp("subscribed-reload");
+    ScopedDataDir data(temp.path() / "data");
+    const fs::path directory = temp.path() / "data" / PRESET_USER_DIR / "default" /
+                               PRESET_SUBSCRIBED_DIR / "remote-reload";
+    fs::create_directories(directory);
+    const std::string prefix = "_subscribed/remote-reload/";
+    BundleMetadata metadata = subscribed_metadata("remote-reload");
+    // Cached membership from the last session is stale; files are authoritative on reload.
+    metadata.print_presets = { "Stale Process" };
+    metadata.filament_presets = { "Stale Filament" };
+    metadata.printer_presets = { "Stale Printer" };
+    const fs::path metadata_file = directory / PRESET_BUNDLE_METADATA;
+    REQUIRE(metadata.save_to_json(metadata_file.string()));
+    const std::string metadata_before = read_text(metadata_file);
+
+    PresetBundle writer;
+    write_json_preset(directory / PRESET_PRINT_NAME / "Reload Process.json",
+                      print_config(writer, "Reload Process", 0.24), "Reload Process");
+    DynamicPrintConfig material = filament_config(writer, "Reload PLA", prefix + "Reload Printer");
+    material.option<ConfigOptionFloats>("filament_density", true)->values = { 1.27 };
+    write_json_preset(directory / PRESET_FILAMENT_NAME / "Reload PLA.json", material, "Reload PLA");
+    DynamicPrintConfig machine = printer_config(writer, "Reload Printer");
+    machine.option<ConfigOptionFloats>("nozzle_diameter", true)->values = { 0.4 };
+    write_json_preset(directory / PRESET_PRINTER_NAME / "Reload Printer.json", machine, "Reload Printer");
+
+    PresetBundle loaded;
+    REQUIRE(loaded.load_user_presets("default", ForwardCompatibilitySubstitutionRule::Disable,
+                                    read_only).empty());
+    const Preset *process = loaded.prints.find_preset(prefix + "Reload Process", false);
+    const Preset *filament = loaded.filaments.find_preset(prefix + "Reload PLA", false);
+    const Preset *printer = loaded.printers.find_preset(prefix + "Reload Printer", false);
+    REQUIRE(process != nullptr);
+    REQUIRE(filament != nullptr);
+    REQUIRE(printer != nullptr);
+    for (const Preset *preset : { process, filament, printer }) {
+        CHECK(preset->is_from_bundle());
+        CHECK(preset->bundle_id == "remote-reload");
+    }
+    CHECK_THAT(process->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    REQUIRE(filament->config.option<ConfigOptionFloats>("filament_density") != nullptr);
+    REQUIRE(filament->config.option<ConfigOptionFloats>("filament_density")->values.size() == 1);
+    CHECK_THAT(filament->config.option<ConfigOptionFloats>("filament_density")->values.front(),
+               Catch::Matchers::WithinAbs(1.27, 1e-9));
+    CHECK(printer->config.opt_string("printer_model") == "Workflow Printer");
+
+    REQUIRE(loaded.bundles.m_bundles.size() == 1);
+    const auto found = loaded.bundles.m_bundles.find("remote-reload");
+    REQUIRE(found != loaded.bundles.m_bundles.end());
+    const BundleMetadata &reloaded = found->second;
+    CHECK(reloaded.is_subscribed);
+    CHECK(reloaded.bundle_type == BundleType::Subscribed);
+    CHECK_FALSE(reloaded.update_available);
+    CHECK(reloaded.name == metadata.name);
+    CHECK(reloaded.version == metadata.version);
+    CHECK(reloaded.updated_time == metadata.updated_time);
+    CHECK(fs::equivalent(reloaded.path, metadata_file));
+    CHECK(reloaded.print_presets == std::vector<std::string>{ prefix + "Reload Process" });
+    CHECK(reloaded.filament_presets == std::vector<std::string>{ prefix + "Reload PLA" });
+    CHECK(reloaded.printer_presets == std::vector<std::string>{ prefix + "Reload Printer" });
+    if (read_only)
+        CHECK(read_text(metadata_file) == metadata_before);
 }
 
 TEST_CASE("subscribed bundle update writes metadata and prunes obsolete presets", "[PresetBundle][PresetBundleWorkflowsExtended]")
