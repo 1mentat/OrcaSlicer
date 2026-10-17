@@ -1,3 +1,4 @@
+#include "libslic3r/CustomGCode.hpp"
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include <cstdlib>
@@ -871,6 +872,217 @@ TEST_CASE("Custom layer placeholders expose layer index and height", "[GCode][GC
     REQUIRE(executable_command_count(out.text, config, "M117", "CHANGED-") == layers);
     CHECK(out.text.find("M117 IDX-0-Z-0.2") != std::string::npos);
 }
+
+struct BedTemperatureFamily {
+    const char *name;
+    const char *initial_key;
+    const char *ordinary_key;
+    int          nominal_initial;
+    int          nominal_ordinary;
+    int          maximum_initial;
+    int          maximum_ordinary;
+};
+
+const std::array<BedTemperatureFamily, 6> &bed_temperature_families()
+{
+    static const std::array<BedTemperatureFamily, 6> families = {{
+        {"Cool Plate",         "cool_plate_temp_initial_layer",         "cool_plate_temp",         61, 51, 120, 300},
+        {"Engineering Plate",  "eng_plate_temp_initial_layer",          "eng_plate_temp",          62, 52, 300, 300},
+        {"High Temp Plate",    "hot_plate_temp_initial_layer",           "hot_plate_temp",          63, 53, 300, 300},
+        {"Textured PEI Plate", "textured_plate_temp_initial_layer",      "textured_plate_temp",     64, 54, 300, 300},
+        {"Textured Cool Plate","textured_cool_plate_temp_initial_layer", "textured_cool_plate_temp",65, 55, 120, 300},
+        {"Supertack Plate",    "supertack_plate_temp_initial_layer",     "supertack_plate_temp",    66, 56, 120, 120},
+    }};
+    return families;
+}
+
+struct ParsedBedCommand {
+    double temperature;
+    size_t layer;
+    bool   wait;
+};
+
+std::vector<ParsedBedCommand> parse_bed_commands(const std::string &text, const DynamicPrintConfig &config)
+{
+    std::vector<ParsedBedCommand> commands;
+    size_t layer_markers = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            ++layer_markers;
+        const bool wait = line.cmd_is("M190");
+        if (!wait && !line.cmd_is("M140"))
+            return;
+        float temperature = -1.f;
+        REQUIRE(line.has_value('S', temperature));
+        commands.push_back({temperature, layer_markers, wait});
+    });
+    return commands;
+}
+
+TEST_CASE("Every selected bed family emits its initial and later bed temperatures", "[GCode][GCodeExportWorkflows][BedTemperaturePipeline]")
+{
+    const auto &families = bed_temperature_families();
+    const size_t family_index = GENERATE(size_t(0), size_t(1), size_t(2), size_t(3), size_t(4), size_t(5));
+    const bool multiple_beds = GENERATE(false, true);
+    const BedTemperatureFamily &bed = families[family_index];
+    INFO("bed " << bed.name << ", support_multi_bed_types " << multiple_beds);
+
+    DynamicPrintConfig config = base_config();
+    for (const BedTemperatureFamily &family : families) {
+        // Keep the multi-bed validation control valid for every selected family.
+        config.set_deserialize_strict(family.initial_key, 70);
+        config.set_deserialize_strict(family.ordinary_key, 50);
+    }
+    config.set_deserialize_strict({
+        {"curr_bed_type", bed.name},
+        {"support_multi_bed_types", multiple_beds},
+        {"bed_temperature_formula", "by_first_filament"},
+        {"machine_start_gcode", ""},
+        {"nozzle_temperature_initial_layer", 208},
+        {"nozzle_temperature", 202},
+    });
+    config.set_deserialize_strict(bed.initial_key, bed.nominal_initial);
+    config.set_deserialize_strict(bed.ordinary_key, bed.nominal_ordinary);
+
+    const auto exported = fresh_custom_mesh_export(config, make_cube(5., 5., 0.4));
+    const auto commands = parse_bed_commands(exported.text, config);
+    REQUIRE(commands.size() == 2);
+    CHECK(commands[0].wait);
+    CHECK(commands[0].layer == 0);
+    CHECK_THAT(commands[0].temperature, Catch::Matchers::WithinAbs(bed.nominal_initial, 1e-4));
+    CHECK_FALSE(commands[1].wait);
+    CHECK(commands[1].layer == 2);
+    CHECK_THAT(commands[1].temperature, Catch::Matchers::WithinAbs(bed.nominal_ordinary, 1e-4));
+}
+
+TEST_CASE("Bed heaters emit configured zero and maximum temperature targets", "[GCode][GCodeExportWorkflows][BedTemperaturePipeline]")
+{
+    const auto &families = bed_temperature_families();
+    const size_t family_index = GENERATE(size_t(0), size_t(1), size_t(2), size_t(3), size_t(4), size_t(5));
+    const bool initial_zero = GENERATE(false, true);
+    const BedTemperatureFamily &bed = families[family_index];
+    // Zero means heater off. High Temp initial temperature has no declared minimum.
+    const int expected_initial = initial_zero ? 0 : bed.maximum_initial;
+    const int expected_ordinary = initial_zero ? bed.maximum_ordinary : 0;
+    INFO("bed " << bed.name << ", initial " << expected_initial << ", ordinary " << expected_ordinary);
+
+    DynamicPrintConfig config = base_config();
+    for (const BedTemperatureFamily &family : families) {
+        config.set_deserialize_strict(family.initial_key, 70);
+        config.set_deserialize_strict(family.ordinary_key, 50);
+    }
+    config.set_deserialize_strict({
+        {"curr_bed_type", bed.name},
+        {"support_multi_bed_types", initial_zero},
+        {"bed_temperature_formula", "by_first_filament"},
+        {"machine_start_gcode", ""},
+        {"nozzle_temperature_initial_layer", 208},
+        {"nozzle_temperature", 202},
+    });
+    config.set_deserialize_strict(bed.initial_key, expected_initial);
+    config.set_deserialize_strict(bed.ordinary_key, expected_ordinary);
+
+    const auto exported = fresh_custom_mesh_export(config, make_cube(5., 5., 0.4));
+    const auto commands = parse_bed_commands(exported.text, config);
+    REQUIRE(commands.size() == 2);
+    CHECK(commands[0].wait);
+    CHECK(commands[0].layer == 0);
+    CHECK_THAT(commands[0].temperature, Catch::Matchers::WithinAbs(expected_initial, 1e-4));
+    CHECK_FALSE(commands[1].wait);
+    CHECK(commands[1].layer == 2);
+    CHECK_THAT(commands[1].temperature, Catch::Matchers::WithinAbs(expected_ordinary, 1e-4));
+}
+
+
+
+TEST_CASE("Scheduled G-code follows print mode and preserves expansion semantics",
+          "[GCode][GCodeExportWorkflows][ScheduledLayerGCode]")
+{
+    const bool sequential = GENERATE(false, true);
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"print_sequence", sequential ? "by object" : "by layer"},
+        {"use_relative_e_distances", true},
+        {"nozzle_temperature_initial_layer", 211},
+        {"nozzle_temperature", 205},
+        {"machine_pause_gcode", "M117 PAUSE-[nozzle_temperature_initial_layer]\n"},
+        {"template_custom_gcode", "M117 TEMPLATE-[nozzle_temperature]\n"},
+        {"enable_prime_tower", false},
+        {"enable_support", false},
+    });
+    INFO("sequential printing " << sequential);
+
+    const auto export_events = [&](bool scheduled) {
+        Print print;
+        Model model;
+        Test::init_print({make_cube(5., 5., 0.8)}, print, model, config);
+        if (scheduled) {
+            CustomGCode::Info events;
+            events.mode = CustomGCode::SingleExtruder;
+            events.gcodes = {
+                {0.2, CustomGCode::PausePrint, 1, "", "M117 UNUSED-PAUSE-ITEM\n"},
+                {0.4, CustomGCode::Template, 1, "", "M117 UNUSED-TEMPLATE-ITEM\n"},
+                {0.8, CustomGCode::Custom, 1, "", "M117 RAW-[nozzle_temperature]\n"},
+            };
+            model.plates_custom_gcodes[model.curr_plate_index] = events;
+            CustomGCode::Info other_plate;
+            other_plate.mode = CustomGCode::SingleExtruder;
+            other_plate.gcodes = {{0.6, CustomGCode::Custom, 1, "", "M117 OTHER-PLATE\n"}};
+            model.plates_custom_gcodes[model.curr_plate_index + 1] = other_plate;
+            // The public helper applied the model before these events existed.
+            print.apply(model, config);
+            REQUIRE(print.model().get_curr_plate_custom_gcodes() == events);
+        }
+        require_valid(print);
+        return export_print(print);
+    };
+
+    const ExportedPrint baseline = export_events(false);
+    const ExportedPrint scheduled = export_events(true);
+    require_same_material(motion_evidence(baseline.text, config), motion_evidence(scheduled.text, config));
+    REQUIRE(executable_command_count(baseline.text, config, "M117", "") == 0);
+
+    struct Event {
+        std::string command;
+        size_t layer;
+        size_t prior_layer_extrusions;
+    };
+    std::vector<Event> events;
+    std::array<size_t, 5> layer_extrusions{};
+    size_t layer = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(scheduled.text, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            ++layer;
+        REQUIRE(layer < layer_extrusions.size());
+        if (line.cmd_is("M117"))
+            events.push_back({line.raw(), layer, layer_extrusions[layer]});
+        if (line.extruding(self) && line.dist_XY(self) > EPSILON)
+            ++layer_extrusions[layer];
+    });
+    REQUIRE(layer == 4);
+    for (size_t i = 1; i <= layer; ++i)
+        REQUIRE(layer_extrusions[i] > 0);
+
+    if (sequential) {
+        CHECK(events.empty());
+    } else {
+        REQUIRE(events.size() == 3);
+        const std::array<size_t, 3> expected_layers = {1, 2, 4};
+        const std::array<const char *, 3> expected_commands = {
+            "M117 PAUSE-211", "M117 TEMPLATE-205", "M117 RAW-[nozzle_temperature]",
+        };
+        for (size_t i = 0; i < events.size(); ++i) {
+            CHECK_THAT(events[i].command, Catch::Matchers::ContainsSubstring(expected_commands[i]));
+            CHECK(events[i].layer == expected_layers[i]);
+            CHECK(events[i].prior_layer_extrusions == 0);
+        }
+    }
+}
+
 
 TEST_CASE("Bed temperature formula emits the configured first-layer command", "[GCode][GCodeExportWorkflows]")
 {

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Public G-code bed-family selection with nominal, heater-off, and declared maximum targets; native validation pending.",
+  "mutants": [
+    {
+      "id": "bed-temperature-initial-uses-ordinary-array",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "bed_temp = get_bed_temperature(first_printing_extruder_id, true, print.config().curr_bed_type);",
+      "new": "bed_temp = get_bed_temperature(first_printing_extruder_id, false, print.config().curr_bed_type);",
+      "test_filter": "BedTemperaturePipeline",
+      "description": "Swap the selected family ordinary-layer array into the initial M190 lookup. Distinct nominal and boundary initial values catch the ordinary lookup."
+    },
+    {
+      "id": "bed-temperature-ordinary-uses-initial-array",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "bed_temp = get_bed_temperature(first_extruder_id, false, m_config.curr_bed_type);",
+      "new": "bed_temp = get_bed_temperature(first_extruder_id, true, m_config.curr_bed_type);",
+      "test_filter": "BedTemperaturePipeline",
+      "description": "Swap the selected family initial-layer array into the layer-2 M140 lookup. Distinct nominal and boundary ordinary values catch the initial lookup."
+    },
+    {
+      "id": "bed-temperature-current-family-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "bed_temp = get_bed_temperature(first_printing_extruder_id, true, print.config().curr_bed_type);",
+      "new": "bed_temp = get_bed_temperature(first_printing_extruder_id, true, btPC);",
+      "test_filter": "BedTemperaturePipeline",
+      "description": "Hard-code Cool Plate for initial lookup. The five non-Cool families have distinct outputs and the Cool row is a deliberate control."
+    }
+  ]
+}

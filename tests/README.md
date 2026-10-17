@@ -231,6 +231,23 @@ the object's deposition segments remain unchanged. Its mutations are in
 limits, equality, and disabled-limit controls. Its mutations are in
 `print_travel_validation.json`.
 
+`[BedTemperaturePipeline]` checks all six bed families through initial and
+second-layer heater commands, including heater-off and declared maximum targets.
+`[ScheduledLayerGCode]` checks pause/template expansion, literal custom commands,
+layer placement, current-plate selection, and sequential-print suppression while
+preserving deposition. Their mutations are in `bed_temperature_pipeline.json`
+and `scheduled_layer_gcode.json`.
+
+`[Bbs3mfExportGaps]` checks parsed layer-filament sequences and ranges, four decoded
+thumbnail channels, and invalid thumbnail-list cardinalities. Its mutations are
+in `bbs_export_metadata.json`.
+
+`[AdaptivePressureAdvanceRamps]` checks emitted pressure-advance values against a
+linear calibration model for overhang events with an immediate feed update,
+including retained values when duplicate commands are omitted. A disabled
+control checks that pressure advance remains off. Its mutation in
+`adaptive_pa_pipeline.json` replaces interpolation with a configured constant.
+
 `[PrintValidationInteractions]` checks belt/raft/draft-shield constraints,
 sequential-print feature gates, and the full ooze-prevention/single-extruder
 multi-material truth table, including valid controls and blocking-error keys.

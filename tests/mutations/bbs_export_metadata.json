@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "BBS 3MF slice-info layer-filament serialization and four-channel thumbnail cardinality contracts; native validation pending.",
+  "mutants": [
+    {
+      "id": "bbs-layer-filament-list-guard-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!plate_data->layer_filaments.empty()) {",
+      "new": "if (plate_data->layer_filaments.empty()) {",
+      "description": "Skip populated layer-filament XML and enter the branch for the empty control.",
+      "test_filter": "Bbs3mfExportGaps"
+    },
+    {
+      "id": "bbs-layer-filament-range-separator-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (i != (ranges.size() - 1)) value_stream << \",\";",
+      "new": "if (i == (ranges.size() - 1)) value_stream << \",\";",
+      "description": "Corrupt the comma separator between multiple inclusive layer ranges.",
+      "test_filter": "Bbs3mfExportGaps"
+    },
+    {
+      "id": "bbs-thumbnail-count-boundary-inclusive",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if ((thumbnail_data.size() > 0)&&(thumbnail_data.size() > plate_data_list.size())) {",
+      "new": "if ((thumbnail_data.size() > 0)&&(thumbnail_data.size() >= plate_data_list.size())) {",
+      "description": "Reject the valid one-thumbnail/one-plate boundary.",
+      "test_filter": "Bbs3mfExportGaps"
+    },
+    {
+      "id": "bbs-thumbnail-top-pick-equality-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (top_thumbnail_data.size() != pick_thumbnail_data.size()) {",
+      "new": "if (top_thumbnail_data.size() == pick_thumbnail_data.size()) {",
+      "description": "Reject the valid equal top/pick channel cardinality row.",
+      "test_filter": "Bbs3mfExportGaps"
+    }
+  ]
+}

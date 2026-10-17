@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Public scheduled pause/template/raw G-code output; native execution pending.",
+  "mutants": [
+    {
+      "id": "scheduled-pause-uses-template-setting",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "gcode += gcodegen.placeholder_parser_process(\"machine_pause_gcode\", config.machine_pause_gcode, current_extruder_id) + \"\\n\";",
+      "new": "gcode += gcodegen.placeholder_parser_process(\"machine_pause_gcode\", config.template_custom_gcode, current_extruder_id) + \"\\n\";",
+      "test_filter": "ScheduledLayerGCode",
+      "description": "The scheduled pause must emit its configured 211-degree marker, not the template marker."
+    },
+    {
+      "id": "scheduled-template-bypasses-expansion",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "gcode += gcodegen.placeholder_parser_process(\"template_custom_gcode\", config.template_custom_gcode, current_extruder_id);",
+      "new": "gcode += config.template_custom_gcode.value;",
+      "test_filter": "ScheduledLayerGCode",
+      "description": "A template must expand the configured ordinary nozzle temperature into its emitted command."
+    },
+    {
+      "id": "scheduled-raw-code-discarded",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "gcode += custom_gcode->extra;",
+      "new": "gcode += std::string();",
+      "test_filter": "ScheduledLayerGCode",
+      "description": "The raw scheduled command must survive unchanged at layer four."
+    }
+  ]
+}

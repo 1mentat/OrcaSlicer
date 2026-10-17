@@ -3959,6 +3959,118 @@ void check_rgba_pixels(const std::string &actual, const std::array<unsigned char
     }));
 }
 
+namespace bbs_export_gap_contracts {
+
+std::vector<std::pair<std::string, std::string>> read_layer_filament_lists(const std::string &xml)
+{
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::vector<std::pair<std::string, std::string>> records;
+    const auto lists = tree.get_child_optional("config.plate.layer_filament_lists");
+    if (!lists)
+        return records;
+    for (const auto &node : *lists) {
+        if (node.first != "layer_filament_list")
+            continue;
+        const auto &attributes = node.second.get_child("<xmlattr>");
+        records.emplace_back(attributes.get<std::string>("filament_list"),
+                             attributes.get<std::string>("layer_ranges"));
+    }
+    return records;
+}
+
+bool store_bbs_with_thumbnails(const std::string &path,
+                               ThumbnailData &thumbnail,
+                               const std::array<size_t, 4> &counts)
+{
+    ScopedTemporaryDir backup("orca_bbs_thumbnail_count_store");
+    Model model = make_cube_model();
+    model.set_backup_path(backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.config = config;
+    plate.plate_index = 0;
+    plate.objects_and_instances = {{0, 0}};
+
+    StoreParams params;
+    params.path = path;
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.thumbnail_data.assign(counts[0], &thumbnail);
+    params.no_light_thumbnail_data.assign(counts[1], &thumbnail);
+    params.top_thumbnail_data.assign(counts[2], &thumbnail);
+    params.pick_thumbnail_data.assign(counts[3], &thumbnail);
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    return store_bbs_3mf(params);
+}
+
+} // namespace bbs_export_gap_contracts
+
+TEST_CASE("BBS slice metadata preserves multiple layer filament ranges", "[3MF][Bbs3mfExportGaps][LayerFilaments]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.is_sliced_valid = true;
+        plate.layer_filaments[std::vector<unsigned int>{1, 3}] = {{0, 5}, {10, 20}};
+        plate.layer_filaments[std::vector<unsigned int>{2}] = {{5, 10}, {20, 30}};
+    });
+
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
+    const auto records = bbs_export_gap_contracts::read_layer_filament_lists(slice_info);
+    REQUIRE(records.size() == 2);
+    CHECK(std::find(records.begin(), records.end(), std::make_pair(std::string("1 3"), std::string("0 5,10 20"))) != records.end());
+    CHECK(std::find(records.begin(), records.end(), std::make_pair(std::string("2"), std::string("5 10,20 30"))) != records.end());
+
+    ScopedTemporaryFile empty_archive(".3mf");
+    store_followup(empty_archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.is_sliced_valid = true;
+    });
+    std::string empty_slice_info;
+    REQUIRE(read_3mf_entry(empty_archive.string(), empty_slice_info, "Metadata/slice_info.config"));
+    CHECK(bbs_export_gap_contracts::read_layer_filament_lists(empty_slice_info).empty());
+}
+
+TEST_CASE("BBS thumbnail lists obey per-channel plate cardinality", "[3MF][Bbs3mfExportGaps][ThumbnailValidation]")
+{
+    ThumbnailData thumbnail;
+    thumbnail.set(2, 2);
+    const std::array<unsigned char, 16> expected = {
+        0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0xff,
+        0x70, 0x80, 0x90, 0xff, 0xa0, 0xb0, 0xc0, 0xff};
+    std::copy(expected.begin(), expected.end(), thumbnail.pixels.begin());
+
+    const std::array<const char *, 4> entries = {
+        "Metadata/plate_1.png", "Metadata/plate_no_light_1.png",
+        "Metadata/top_1.png", "Metadata/pick_1.png"};
+    const std::array<std::array<size_t, 4>, 6> invalid_counts = {{
+        {{2, 0, 0, 0}},
+        {{0, 2, 0, 0}},
+        {{0, 0, 2, 2}},
+        {{0, 0, 1, 2}},
+        {{0, 0, 0, 1}},
+        {{0, 0, 1, 0}},
+    }};
+
+    const std::array<size_t, 4> valid_counts = {{1, 1, 1, 1}};
+    ScopedTemporaryFile valid_archive(".3mf");
+    REQUIRE(bbs_export_gap_contracts::store_bbs_with_thumbnails(valid_archive.string(), thumbnail, valid_counts));
+    for (const char *entry : entries) {
+        const std::string decoded = png_entry(valid_archive.string(), entry, 2, 2);
+        check_rgba_pixels(decoded, expected);
+    }
+
+    for (const auto &counts : invalid_counts) {
+        INFO("thumbnail counts plate=" << counts[0] << " no_light=" << counts[1]
+             << " top=" << counts[2] << " pick=" << counts[3]);
+        ScopedTemporaryFile rejected_archive(".3mf");
+        CHECK_FALSE(bbs_export_gap_contracts::store_bbs_with_thumbnails(
+            rejected_archive.string(), thumbnail, counts));
+    }
+}
+
 TEST_CASE("BBS project preserves plate scheduling metadata", "[3mf][Bbs3mfMetadata][PlateMetadata]")
 {
     ScopedTemporaryFile archive(".3mf");

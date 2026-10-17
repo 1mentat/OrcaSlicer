@@ -2271,6 +2271,138 @@ TEST_CASE("Fixed ironing angle controls inherited solid direction and layer alte
     CHECK(relative_has_135);
 }
 
+
+struct AdaptivePASample
+{
+    double mm3_per_mm = 0.;
+    double feed = 0.;
+    double actual_pa = std::numeric_limits<double>::quiet_NaN();
+};
+
+DynamicPrintConfig adaptive_pa_output_config(bool enabled)
+{
+    DynamicPrintConfig config = overhang_config();
+    config.set_deserialize_strict({
+        {"gcode_flavor", "klipper"},
+        {"gcode_comments", true},
+        {"enable_arc_fitting", false},
+        {"enable_pressure_advance", enabled},
+        {"adaptive_pressure_advance", enabled},
+        {"adaptive_pressure_advance_overhangs", enabled},
+        {"adaptive_pressure_advance_bridges", 0.0},
+        {"pressure_advance", 0.03},
+        {"wipe", false},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_support", false},
+        {"enable_prime_tower", false},
+    });
+    // Equal acceleration rows make the two-knot flow model a literal linear
+    // function while still producing materially different emitted PA values.
+    config.option<ConfigOptionStrings>("adaptive_pressure_advance_model")->values = {
+        "0.020,1,1000\n0.800,500,1000\n0.020,1,100000\n0.800,500,100000"
+    };
+    return config;
+}
+
+std::vector<AdaptivePASample> adaptive_pa_eligible_samples(const std::string &output, const DynamicPrintConfig &config)
+{
+    std::vector<AdaptivePASample> samples;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool eligible = false;
+    bool first_original_line_seen = false;
+    double mm3_per_mm = 0.;
+    double eligible_feed = 0.;
+    double active_pa = std::numeric_limits<double>::quiet_NaN();
+    reader.parse_buffer(output, [&samples, &eligible, &first_original_line_seen, &mm3_per_mm, &eligible_feed, &active_pa](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        const size_t flow_marker = comment.find("MM3MM:");
+        const size_t accel_marker = comment.find(" ACCEL:", flow_marker);
+        const size_t overhang_marker = comment.find(" OV:", accel_marker);
+        const bool pa_event = comment.find("PA_CHANGE:") != std::string_view::npos &&
+                              flow_marker != std::string_view::npos &&
+                              accel_marker != std::string_view::npos &&
+                              overhang_marker != std::string_view::npos;
+        if (pa_event) {
+            // A new event before the previous eligible event reaches extrusion
+            // ends that candidate; only the explicitly eligible subset counts.
+            eligible = std::stoi(std::string(comment.substr(overhang_marker + 4))) == 1;
+            first_original_line_seen = false;
+            mm3_per_mm = std::stod(std::string(comment.substr(flow_marker + 6, accel_marker - flow_marker - 6)));
+            eligible_feed = 0.;
+        }
+
+        if (line.cmd_is("SET_PRESSURE_ADVANCE")) {
+            const std::string raw = line.raw();
+            const size_t pa_marker = raw.find("ADVANCE=");
+            REQUIRE(pa_marker != std::string::npos);
+            const size_t pa_end = raw.find(';', pa_marker);
+            active_pa = std::stod(raw.substr(pa_marker + 8, pa_end == std::string::npos ? std::string::npos : pa_end - pa_marker - 8));
+            return;
+        }
+
+        const std::string raw = line.raw();
+        const bool generated_comment = raw.rfind("; APA", 0) == 0;
+        if (!eligible || generated_comment || comment.find("PA_CHANGE:") != std::string_view::npos)
+            return;
+
+        if (!first_original_line_seen) {
+            // The production lookahead sets current and next feed to this value
+            // when it is the first original line after the PA tag.
+            first_original_line_seen = true;
+            if (raw.rfind("G1 F", 0) != 0) {
+                eligible = false;
+                return;
+            }
+            eligible_feed = line.f() / 60.;
+        }
+
+        if (line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > EPSILON) {
+            samples.push_back({mm3_per_mm, eligible_feed, active_pa});
+            eligible = false;
+        }
+    });
+    return samples;
+}
+
+double expected_two_knot_pa(const AdaptivePASample &sample)
+{
+    const double flow = std::clamp(sample.mm3_per_mm * sample.feed, 1., 500.);
+    const double unrounded = 0.020 + (0.800 - 0.020) * (flow - 1.) / (500. - 1.);
+    return std::round(unrounded * 1000.) / 1000.;
+}
+
+TEST_CASE("Adaptive pressure advance emits calibrated values on overhangs",
+          "[SettingsFamilyVariance][AdaptivePressureAdvanceRamps]")
+{
+    const DynamicPrintConfig enabled = adaptive_pa_output_config(true);
+    const std::string enabled_gcode = export_mesh(caged_overhang_mesh(), enabled);
+    const std::vector<AdaptivePASample> samples = adaptive_pa_eligible_samples(enabled_gcode, enabled);
+    REQUIRE(samples.size() > 1);
+
+    double minimum_pa = std::numeric_limits<double>::max();
+    double maximum_pa = std::numeric_limits<double>::lowest();
+    for (const AdaptivePASample &sample : samples) {
+        REQUIRE(std::isfinite(sample.mm3_per_mm));
+        REQUIRE(std::isfinite(sample.feed));
+        REQUIRE(std::isfinite(sample.actual_pa));
+        REQUIRE(sample.mm3_per_mm > 0.);
+        REQUIRE(sample.feed > 0.);
+        REQUIRE(sample.actual_pa > 0.);
+        CHECK_THAT(sample.actual_pa, Catch::Matchers::WithinAbs(expected_two_knot_pa(sample), 0.0011));
+        minimum_pa = std::min(minimum_pa, sample.actual_pa);
+        maximum_pa = std::max(maximum_pa, sample.actual_pa);
+    }
+    CHECK(maximum_pa - minimum_pa > 0.005);
+
+    const DynamicPrintConfig disabled = adaptive_pa_output_config(false);
+    const std::string disabled_gcode = export_mesh(caged_overhang_mesh(), disabled);
+    CHECK(adaptive_pa_eligible_samples(disabled_gcode, disabled).empty());
+    CHECK(disabled_gcode.find("SET_PRESSURE_ADVANCE ADVANCE=") == std::string::npos);
+}
+
 } // namespace settings_family_contracts
 
 namespace reslice_settings_contracts {
