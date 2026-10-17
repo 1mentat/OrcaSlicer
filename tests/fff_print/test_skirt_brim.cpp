@@ -185,7 +185,7 @@ TEST_CASE("Per-object skirt is generated per instance", "[SkirtBrim][SkirtType]"
             CHECK(volume > 0.);
             total_instances += group.instances.size();
 
-            std::vector<Point> skirt_points;
+            Points skirt_points;
             group.skirt.collect_points(skirt_points);
             REQUIRE(!skirt_points.empty());
             coord_t min_x = skirt_points.front().x();
