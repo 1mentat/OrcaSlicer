@@ -10409,6 +10409,107 @@ TEST_CASE("Full FFF configuration records selected system filament changes", "[P
     CHECK(std::find(changed_keys.begin(), changed_keys.end(), "inherits") == changed_keys.end());
 }
 
+TEST_CASE("Removing selected cloud printer and filament restores configured defaults", "[PresetBundle][PresetCloudRemoval]")
+{
+    BundleFixture fx;
+    ScopedDataDir data(fx.temp.path());
+
+    Preset &fallback_printer = add_printer(
+        fx, "Fallback Printer", PresetBundle::ORCA_DEFAULT_PRINTER_MODEL, "0.4", true);
+    const std::string fallback_printer_name = fallback_printer.name;
+    fallback_printer.config.option<ConfigOptionStrings>("default_filament_profile", true)->values = {"Fallback PLA"};
+    Preset &fallback_filament = add_filament(fx, "Fallback PLA", "fallback-id", "PLA", true);
+    const std::string fallback_filament_name = fallback_filament.name;
+
+    auto persist_user = [](PresetCollection &collection, Preset &preset, const std::string &user_id,
+                           const std::string &setting_id) {
+        preset.user_id = user_id;
+        preset.setting_id = setting_id;
+        preset.file = collection.path_for_preset(preset);
+        const fs::path file = preset.file;
+        REQUIRE(preset.save(nullptr));
+        return file;
+    };
+
+    Preset &removed_printer = add_printer(fx, "Alice Printer", "Alice Model", "0.4");
+    const fs::path removed_printer_file = persist_user(fx.bundle.printers, removed_printer, "alice", "printer-cloud-id");
+    Preset &removed_filament = add_filament(fx, "Alice PLA", "alice-id", "PLA");
+    const fs::path removed_filament_file = persist_user(fx.bundle.filaments, removed_filament, "alice", "filament-cloud-id");
+
+    REQUIRE(fx.bundle.printers.select_preset_by_name("Alice Printer", true));
+    REQUIRE(fx.bundle.filaments.select_preset_by_name("Alice PLA", true));
+    fx.bundle.filament_presets = {"Alice PLA", "Stale Missing Filament"};
+
+    AppConfig app;
+    app.set("preset_folder", "alice");
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+    fx.bundle.remove_users_preset(app, &cloud);
+
+    CHECK(fx.bundle.printers.find_preset("Alice Printer", false) == nullptr);
+    CHECK_FALSE(fs::exists(removed_printer_file));
+    CHECK(fx.bundle.filaments.find_preset("Alice PLA", false) == nullptr);
+    CHECK_FALSE(fs::exists(removed_filament_file));
+    CHECK(fx.bundle.printers.get_selected_preset_name() == fallback_printer_name);
+    CHECK(fx.bundle.filaments.get_selected_preset_name() == fallback_filament_name);
+    CHECK(fx.bundle.filament_presets == std::vector<std::string>{fallback_filament_name, fallback_filament_name});
+}
+
+TEST_CASE("Removing cloud presets preserves live metadata and clears a dirty setting id", "[PresetBundle][PresetCloudRemoval]")
+{
+    BundleFixture fx;
+    ScopedDataDir data(fx.temp.path());
+
+    auto persist_user_print = [&](const std::string &name, const std::string &setting_id,
+                                  const std::string &sync_info, bool dirty) {
+        Preset &preset = preset_extended_contracts::load_local_preset(fx.bundle.prints, name);
+        preset.user_id = "alice";
+        preset.setting_id = setting_id;
+        preset.sync_info = sync_info;
+        preset.is_dirty = dirty;
+        preset.file = fx.bundle.prints.path_for_preset(preset);
+        const fs::path file = preset.file;
+        REQUIRE(preset.save(nullptr));
+        return file;
+    };
+
+    const fs::path listed_file = persist_user_print("Cloud Listed", "listed-id", "", false);
+    const fs::path syncing_file = persist_user_print("Syncing", "sync-id", "update", false);
+    const fs::path no_id_file = persist_user_print("No Setting Id", "", "", false);
+    const fs::path dirty_file = persist_user_print("Dirty", "dirty-id", "", true);
+    const fs::path removed_file = persist_user_print("Deleted", "deleted-id", "", false);
+
+    REQUIRE(fx.bundle.prints.select_preset_by_name("Cloud Listed", true));
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+    cloud.emplace("Cloud Listed", std::map<std::string, std::string>{{"setting_id", "listed-id"}});
+    AppConfig app;
+    app.set("preset_folder", "alice");
+    fx.bundle.remove_users_preset(app, &cloud);
+
+    const Preset *listed = fx.bundle.prints.find_preset("Cloud Listed", false);
+    REQUIRE(listed != nullptr);
+    CHECK(listed->setting_id == "listed-id");
+    CHECK(fs::exists(listed_file));
+    CHECK(fx.bundle.prints.get_selected_preset_name() == "Cloud Listed");
+
+    const Preset *syncing = fx.bundle.prints.find_preset("Syncing", false);
+    REQUIRE(syncing != nullptr);
+    CHECK(syncing->sync_info == "update");
+    CHECK(fs::exists(syncing_file));
+
+    const Preset *no_id = fx.bundle.prints.find_preset("No Setting Id", false);
+    REQUIRE(no_id != nullptr);
+    CHECK(no_id->setting_id.empty());
+    CHECK(fs::exists(no_id_file));
+
+    const Preset *dirty_preset = fx.bundle.prints.find_preset("Dirty", false);
+    REQUIRE(dirty_preset != nullptr);
+    CHECK(dirty_preset->setting_id.empty());
+    CHECK(fs::exists(dirty_file));
+
+    CHECK(fx.bundle.prints.find_preset("Deleted", false) == nullptr);
+    CHECK_FALSE(fs::exists(removed_file));
+}
+
 } // namespace preset_bundle_contracts
 
 namespace {

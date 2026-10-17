@@ -190,6 +190,10 @@ establish a complete print-pipeline sweep or full numeric-domain coverage.
 later-layer outer-wall move on a six-layer fixture, with a disabled-threshold
 control and conserved material. Its mutations are in `small_perimeter_speed.json`.
 
+`[PresetCloudRemoval]` checks configured printer and filament fallbacks after
+cloud deletion, missing filament-slot repair, and retention of listed, syncing,
+unsaved and dirty presets. Its mutations are in `preset_cloud_removal.json`.
+
 `[PresetBundleImport]` imports an actual ZIP bundle with process, filament, and
 printer profiles, then checks metadata, canonical identities, typed settings,
 and persisted per-type files. Its mutations are in `preset_bundle_import.json`.
