@@ -1958,7 +1958,8 @@ TEST_CASE("Model speed and material state feed public process heuristics", "[Mod
     // Each row makes one of the six explicit global speed keys the independently
     // known maximum, so every aggregation branch is observable.
     CHECK_THAT(Model::findMaxSpeed(object), Catch::Matchers::WithinAbs(global_maximum, 1e-9));
-    object->config.set_deserialize_strict({
+    DynamicPrintConfig object_config;
+    object_config.set_deserialize_strict({
         { "inner_wall_speed", "31" },
         { "outer_wall_speed", "32" },
         { "sparse_infill_speed", "33" },
@@ -1968,6 +1969,7 @@ TEST_CASE("Model speed and material state feed public process heuristics", "[Mod
         { "small_perimeter_speed", "20" },
         { "small_support_perimeter_speed", "25" },
     });
+    object->config.assign_config(object_config);
     object->config.set_key_value(maximum_key, new ConfigOptionFloatsNullable{ object_maximum });
     CHECK_THAT(Model::findMaxSpeed(object), Catch::Matchers::WithinAbs(object_maximum, 1e-9));
 
