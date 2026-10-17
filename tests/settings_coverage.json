@@ -1114,14 +1114,15 @@
       "reason": "A 10 mm cube is validated against 9, 10, and 20 mm build heights with 100% and 95% vertical shrinkage, preserving the error object identity. These tests call Print::validate; a complete sliced-output matrix is not claimed."
     },
     "curr_bed_type": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
       "dimensions": [
         "representative_values",
         "interaction_matrix",
-        "enum_values"
+        "enum_values",
+        "pipeline_oracle"
       ],
-      "reason": "The accepted validation matrix enumerates all six registered bed families and pairs each with both multi-bed-support states and 0/60 C temperatures, identifying incompatible filament state. This adds enum-domain evidence; a complete sliced-output matrix is not claimed."
+      "reason": "The BedTemperaturePipeline case enumerates all six registered bed families and parses one selected-family M190 at layer 0 plus one selected-family M140 at layer 2 for both support_multi_bed_types controls; this adds sliced-output evidence while retaining the existing validation and enum claims."
     },
     "support_multi_bed_types": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1133,58 +1134,64 @@
       "reason": "The validation gate is disabled and enabled across all six concrete bed families with zero and 60 C filament temperatures. These tests call Print::validate; a complete sliced-output matrix is not claimed."
     },
     "cool_plate_temp": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
       "dimensions": [
         "boundary_values",
-        "interaction_matrix"
+        "interaction_matrix",
+        "pipeline_oracle"
       ],
-      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The BedTemperaturePipeline cases select this registered ordinary-layer key through each matching bed family and independently parse its M140 value at layer 2 at nominal, zero, and registered maximum rows; validation claims remain separate."
     },
     "eng_plate_temp": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
       "dimensions": [
         "boundary_values",
-        "interaction_matrix"
+        "interaction_matrix",
+        "pipeline_oracle"
       ],
-      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The BedTemperaturePipeline cases select this registered ordinary-layer key through each matching bed family and independently parse its M140 value at layer 2 at nominal, zero, and registered maximum rows; validation claims remain separate."
     },
     "hot_plate_temp": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
       "dimensions": [
         "boundary_values",
-        "interaction_matrix"
+        "interaction_matrix",
+        "pipeline_oracle"
       ],
-      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The BedTemperaturePipeline cases select this registered ordinary-layer key through each matching bed family and independently parse its M140 value at layer 2 at nominal, zero, and registered maximum rows; validation claims remain separate."
     },
     "textured_plate_temp": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
       "dimensions": [
         "boundary_values",
-        "interaction_matrix"
+        "interaction_matrix",
+        "pipeline_oracle"
       ],
-      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The BedTemperaturePipeline cases select this registered ordinary-layer key through each matching bed family and independently parse its M140 value at layer 2 at nominal, zero, and registered maximum rows; validation claims remain separate."
     },
     "textured_cool_plate_temp": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
       "dimensions": [
         "boundary_values",
-        "interaction_matrix"
+        "interaction_matrix",
+        "pipeline_oracle"
       ],
-      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The BedTemperaturePipeline cases select this registered ordinary-layer key through each matching bed family and independently parse its M140 value at layer 2 at nominal, zero, and registered maximum rows; validation claims remain separate."
     },
     "supertack_plate_temp": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
       "dimensions": [
         "boundary_values",
-        "interaction_matrix"
+        "interaction_matrix",
+        "pipeline_oracle"
       ],
-      "reason": "Zero unsupported and 60 C supported filament temperatures are checked with the corresponding concrete bed type and both multi-bed-support switch states. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The BedTemperaturePipeline cases select this registered ordinary-layer key through each matching bed family and independently parse its M140 value at layer 2 at nominal, zero, and registered maximum rows; validation claims remain separate."
     },
     "default_jerk": {
       "test": "tests/fff_print/test_print.cpp",
@@ -3645,12 +3652,13 @@
       "reason": "The accepted Air filtration capability gates directed exhaust fan phases case varies the capability and all three activation gates. The five rows require the row-specific directed P3 PWM sequences; capability-disabled output to contain no directed phase, and the ordinary XY path and deposited filament to remain WithinRel of the all-enabled reference. This establishes both capability boolean values and the emitted-G-code oracle; interactions with cooling-filter and auxiliary-fan options remain unclaimed."
     },
     "wipe_tower_no_sparse_layers": {
-      "test": "tests/libslic3r/test_wipe_tower.cpp",
-      "tag": "[NoSparseLayers]",
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerSparsePipeline]",
       "dimensions": [
-        "boolean_values"
+        "boolean_values",
+        "pipeline_oracle"
       ],
-      "reason": "The accepted Sparse layers are skipped only when nothing else needs a tower on every layer case toggles wipe_tower_no_sparse_layers false/true and checks the public sparse-layer predicate, then checks the time-lapse and wrapping-detection gates cannot incorrectly skip. The accepted Wipe tower sparse config gates distinguish skip and combine modes case also deserializes the registered key through FullPrintConfig and checks the public predicates. This establishes the registered boolean values only; the accepted FFF tower cases configure sparse=true or sparse=false without a paired emitted-output comparison, so a pipeline oracle is not claimed."
+      "reason": "The WipeTowerSparsePipeline case toggles false/true on separate public Print runs, requires positive tower deposition in both, preserves the exact object segment multiset and material, and requires the true row to reduce sparse tower paths."
     },
     "support_interface_loop_pattern": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -3687,6 +3695,87 @@
         "pipeline_oracle"
       ],
       "reason": "The accepted Z anti-aliasing keeps the infill rotation template's step case enables zaa_enabled with a cube, explicit +45-degree template, zaa_min_z, and layer height. It requires more than ten valid layers, no missing angle records, every angle transition to be a bounded multiple of 45 degrees, and at least one 45-degree step. This is representative enabled-state pipeline evidence only; the accepted identity does not independently exercise the disabled boolean state, so boolean_values is intentionally not claimed."
+    },
+    "cool_plate_temp_initial_layer": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The BedTemperaturePipeline matrix reaches the registered minimum 0 and maximum for this first-layer key. At zero, production omits the initial M190; with the ordinary key at its maximum it still emits the later M140. At the maximum row it emits the selected layer-0 M190. This is conditional on the exact native case passing."
+    },
+    "eng_plate_temp_initial_layer": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The BedTemperaturePipeline matrix reaches the registered minimum 0 and maximum for this first-layer key. At zero, production omits the initial M190; with the ordinary key at its maximum it still emits the later M140. At the maximum row it emits the selected layer-0 M190. This is conditional on the exact native case passing."
+    },
+    "textured_plate_temp_initial_layer": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The BedTemperaturePipeline matrix reaches the registered minimum 0 and maximum for this first-layer key. At zero, production omits the initial M190; with the ordinary key at its maximum it still emits the later M140. At the maximum row it emits the selected layer-0 M190. This is conditional on the exact native case passing."
+    },
+    "textured_cool_plate_temp_initial_layer": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The BedTemperaturePipeline matrix reaches the registered minimum 0 and maximum for this first-layer key. At zero, production omits the initial M190; with the ordinary key at its maximum it still emits the later M140. At the maximum row it emits the selected layer-0 M190. This is conditional on the exact native case passing."
+    },
+    "supertack_plate_temp_initial_layer": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperaturePipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The BedTemperaturePipeline matrix reaches the registered minimum 0 and maximum for this first-layer key. At zero, production omits the initial M190; with the ordinary key at its maximum it still emits the later M140. At the maximum row it emits the selected layer-0 M190. This is conditional on the exact native case passing."
+    },
+    "machine_pause_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ScheduledLayerGCode]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "ScheduledLayerGCode uses a nonempty placeholder value and parses the expanded M117 PAUSE command in by-layer mode while requiring no scheduled command in by-object mode; material and layer extrusion controls are retained. This is representative string coverage, not the full language domain, and is conditional on the exact native case passing."
+    },
+    "template_custom_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ScheduledLayerGCode]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "ScheduledLayerGCode uses a nonempty placeholder value and parses the expanded M117 TEMPLATE command in by-layer mode while requiring no scheduled command in by-object mode; material and layer extrusion controls are retained. This is representative string coverage, not the full language domain, and is conditional on the exact native case passing."
+    },
+    "tree_support_auto_brim": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportInteractions]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "TreeSupportInteractions runs explicit false and true on the same public overhang fixture, requires finite positive support output, and independently compares first-layer area; this is complete boolean-value evidence conditional on the exact native case passing."
+    },
+    "tree_support_wall_count": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportInteractions]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "TreeSupportInteractions runs the registered full integer domain 0, 1, and 2. It requires finite positive output, one-wall closed-loop output, and a larger two-wall closed-loop witness; this is complete boundary/domain evidence conditional on the exact native case passing."
     }
   }
 }
