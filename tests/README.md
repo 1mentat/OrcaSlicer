@@ -469,6 +469,10 @@ encoded PNG and raw RGB/RGBA conversion, material mapping, patterned tiled UVs,
 color swatches, cancellation, and truncated raw buffers. PNG decoding is exercised
 through the encoded-image route used by model importers.
 
+`[TextureToColorExtended]` checks three-way vertex-color boundaries across cyclic
+face orderings, preserves oriented area, and verifies the adaptive palette limit
+on a closed mesh. Its mutations are in `texture_to_color_extended.json`.
+
 `[TextureToColorPublic]` checks textured tetrahedron conversion and cancellation
 output clearing. `[TextureToColorRepair]` checks independent boundary limits,
 face orientation, degenerate-face removal, topology, volume, and cancellation

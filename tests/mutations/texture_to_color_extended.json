@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Mutations for public vertex-color boundary splitting and adaptive color clustering.",
+  "mutants": [
+    {
+      "id": "texture-to-color-public-three-way-widest-branch",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "if (widest == 0) {",
+      "new": "if (widest == 1) {",
+      "description": "The three-way vertex-color split must select the interior midpoint associated with the longest opposite edge.",
+      "test_filter": "TextureToColorExtended"
+    },
+    {
+      "id": "texture-to-color-public-three-way-isolated-palette",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "emit(m12, v[2], m20, c[2]);",
+      "new": "emit(m12, v[2], m20, c[0]);",
+      "description": "The face adjacent to the second edge retains the third vertex-color cluster rather than the first cluster.",
+      "test_filter": "TextureToColorExtended"
+    },
+    {
+      "id": "texture-to-color-public-adaptive-route",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "const bool adaptive_cluster = settings.target_colors_num == 0;",
+      "new": "const bool adaptive_cluster = settings.target_colors_num != 0;",
+      "description": "A zero target color count must take the adaptive clustering route and honor its maximum cluster count.",
+      "test_filter": "TextureToColorExtended"
+    }
+  ]
+}
