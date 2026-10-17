@@ -249,6 +249,11 @@ Its mutations in `bbs_import_colors.json` challenge slot allocation and reuse.
 starting/finishing flow in sequential vase exports against controls and the
 equivalent layer-by-layer output. Its mutations are in `spiral_sequential.json`.
 
+`[VendorJson]` checks printer model metadata loaded from JSON, including FFF/SLA
+technology, deduplicated nozzle and material lists, bed assets, empty lists, and
+error accounting for a malformed material list. Its mutations are in
+`vendor_json_metadata.json`; these metadata tests do not imply settings pipeline coverage.
+
 `[AdaptivePressureAdvanceRamps]` checks emitted pressure-advance values against a
 linear calibration model for overhang events with an immediate feed update,
 including retained values when duplicate commands are omitted. A disabled

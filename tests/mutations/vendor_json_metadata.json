@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "vendor-json-sla-technology-defaulted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "model.technology = ptSLA;",
+      "new": "model.technology = ptFFF;",
+      "test_filter": "VendorJson",
+      "description": "The SLA fixture is loaded as FFF instead of ptSLA."
+    },
+    {
+      "id": "vendor-json-default-materials-dedup-omitted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "Slic3r::sort_remove_duplicates(model.default_materials);",
+      "new": "std::sort(model.default_materials.begin(), model.default_materials.end());",
+      "test_filter": "VendorJson",
+      "description": "The FFF fixture retains duplicate default materials and fails its normalized public vector oracle."
+    },
+    {
+      "id": "vendor-json-bed-texture-assignment-dropped",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "model.bed_texture = it.value();",
+      "new": "model.bed_texture.clear();",
+      "test_filter": "VendorJson",
+      "description": "Both valid printer metadata fixtures lose their public bed texture."
+    }
+  ],
+  "description": "JSON vendor model loading mutations for technology, default material normalization, and bed assets."
+}

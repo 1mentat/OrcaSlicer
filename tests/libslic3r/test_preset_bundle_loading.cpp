@@ -11070,3 +11070,141 @@ TEST_CASE("Installed filament discovery persists compatible vendor defaults", "[
 }
 
 } // namespace preset_installed_filament_contracts
+
+namespace preset_bundle_workflow_contracts {
+
+namespace {
+
+void write_vendor_model_tree(const boost::filesystem::path &root, const std::string &vendor,
+                             const std::string &model_name, const std::string &model_json)
+{
+    const boost::filesystem::path vendor_dir = root / vendor;
+    fs::create_directories(vendor_dir / "machine");
+    const nlohmann::json index_document = {
+        {"version", "1.2.3"},
+        {"name", vendor},
+        {"machine_model_list", {{{"name", model_name}, {"sub_path", "machine/model.json"}}}},
+    };
+    std::ofstream index((root / (vendor + ".json")).string());
+    REQUIRE(index.good());
+    index << index_document.dump();
+    index.flush();
+    REQUIRE(index.good());
+
+    std::ofstream model_file((vendor_dir / "machine" / "model.json").string());
+    REQUIRE(model_file.good());
+    model_file << model_json;
+    model_file.flush();
+    REQUIRE(model_file.good());
+}
+
+const VendorProfile::PrinterModel &only_model(const PresetBundle &bundle, const std::string &vendor)
+{
+    const auto vendor_it = bundle.vendors.find(vendor);
+    REQUIRE(vendor_it != bundle.vendors.end());
+    REQUIRE(vendor_it->second.models.size() == 1);
+    return vendor_it->second.models.front();
+}
+
+size_t load_json_vendor(PresetBundle &bundle, const boost::filesystem::path &root, const std::string &vendor)
+{
+    return bundle.load_vendor_configs_from_json(
+        root.string(), vendor, PresetBundle::LoadSystem,
+        ForwardCompatibilitySubstitutionRule::EnableSilent, nullptr, false).second;
+}
+
+} // namespace
+
+TEST_CASE("JSON vendor printer metadata preserves machine fields and normalizes lists",
+          "[PresetBundle][VendorJson]")
+{
+    ScopedTemporaryDir dir;
+    ScopedDataDir data(dir.path() / "json-vendor-data");
+    PresetBundle bundle;
+    const std::string vendor = "MetaVendor";
+    write_vendor_model_tree(boost::filesystem::path(data_dir()), vendor, "Meta FFF",
+        R"({"type":"machine_model","name":"Meta FFF","model_id":"FFF-42",
+"nozzle_diameter":"0.4;0.6;0.4","machine_tech":"FFF","family":"CoreXY",
+"bed_model":"plate.stl","bed_texture":"plate.png","image_bed_type":"textured",
+"bottom_texture_end_name":"END","use_double_extruder_default_texture":"true",
+"bottom_texture_rect":"1,2,3,4","bottom_texture_rect_longer":"5,6,7,8",
+"middle_texture_rect":"9,10,11,12","hotend_model":"Acme Hotend",
+"default_materials":";Vendor PETG;Vendor PLA;Vendor PETG",
+"not_support_bed_type":"Cool; ;Textured;Cool"})");
+
+    REQUIRE(load_json_vendor(bundle, boost::filesystem::path(data_dir()), vendor) == 0);
+    REQUIRE(bundle.error_count() == 0);
+    const VendorProfile::PrinterModel &model = only_model(bundle, vendor);
+    const VendorProfile &profile = bundle.vendors.at(vendor);
+    CHECK(profile.name == vendor);
+    CHECK(profile.config_version.to_string() == "1.2.3");
+    CHECK(model.id == "Meta FFF");
+    CHECK(model.model_id == "FFF-42");
+    CHECK(model.technology == ptFFF);
+    CHECK(model.family == "CoreXY");
+    REQUIRE(model.variants.size() == 2);
+    CHECK(model.variants[0].name == "0.4");
+    CHECK(model.variants[1].name == "0.6");
+    CHECK(model.bed_model == "plate.stl");
+    CHECK(model.bed_texture == "plate.png");
+    CHECK(model.image_bed_type == "textured");
+    CHECK(model.bottom_texture_end_name == "END");
+    CHECK(model.use_double_extruder_default_texture == "true");
+    CHECK(model.bottom_texture_rect == "1,2,3,4");
+    CHECK(model.bottom_texture_rect_longer == "5,6,7,8");
+    CHECK(model.middle_texture_rect == "9,10,11,12");
+    CHECK(model.hotend_model == "Acme Hotend");
+    const std::vector<std::string> expected_default_materials{"Vendor PETG", "Vendor PLA"};
+    const std::vector<std::string> expected_unsupported_beds{"Cool", "Textured"};
+    CHECK(model.default_materials == expected_default_materials);
+    CHECK(model.not_support_bed_types == expected_unsupported_beds);
+}
+
+TEST_CASE("JSON vendor printer metadata preserves SLA technology and empty lists",
+          "[PresetBundle][VendorJson]")
+{
+    ScopedTemporaryDir dir;
+    ScopedDataDir data(dir.path() / "json-vendor-data");
+    PresetBundle bundle;
+    const std::string vendor = "ResinVendor";
+    write_vendor_model_tree(boost::filesystem::path(data_dir()), vendor, "Resin One",
+        R"({"type":"machine_model","name":"Resin One","model_id":"SLA-1",
+"nozzle_diameter":"0.25","machine_tech":"SLA","family":"Resin",
+"bed_model":"resin_plate.stl","bed_texture":"resin_plate.png",
+"default_materials":"","not_support_bed_type":";;"})");
+
+    REQUIRE(load_json_vendor(bundle, boost::filesystem::path(data_dir()), vendor) == 0);
+    REQUIRE(bundle.error_count() == 0);
+    const VendorProfile::PrinterModel &model = only_model(bundle, vendor);
+    CHECK(model.technology == ptSLA);
+    CHECK(model.family == "Resin");
+    CHECK(model.model_id == "SLA-1");
+    REQUIRE(model.variants.size() == 1);
+    CHECK(model.variants.front().name == "0.25");
+    CHECK(model.default_materials.empty());
+    CHECK(model.not_support_bed_types.empty());
+    CHECK(model.bed_model == "resin_plate.stl");
+    CHECK(model.bed_texture == "resin_plate.png");
+}
+
+TEST_CASE("JSON vendor printer metadata counts malformed default material lists",
+          "[PresetBundle][VendorJson]")
+{
+    ScopedTemporaryDir dir;
+    ScopedDataDir data(dir.path() / "json-vendor-data");
+    PresetBundle bundle;
+    const std::string vendor = "BrokenMetadataVendor";
+    // The JSON value is valid, but its C-style list has an unterminated quoted item.
+    write_vendor_model_tree(boost::filesystem::path(data_dir()), vendor, "Broken Defaults",
+        R"({"type":"machine_model","name":"Broken Defaults","model_id":"BROKEN-1",
+"nozzle_diameter":"0.4","machine_tech":"FFF",
+"default_materials":"\"unterminated"})");
+
+    REQUIRE(load_json_vendor(bundle, boost::filesystem::path(data_dir()), vendor) == 0);
+    REQUIRE(bundle.error_count() == 1);
+    const VendorProfile::PrinterModel &model = only_model(bundle, vendor);
+    REQUIRE(model.variants.size() == 1);
+    CHECK(model.default_materials.empty());
+}
+
+} // namespace preset_bundle_workflow_contracts
