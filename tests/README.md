@@ -354,6 +354,11 @@ objects in the rod's clearance band, plus the disabled-setting control. It
 checks the reported height and selected object without slicing; its mutations
 are in `compacted_tower_clearance.json`.
 
+`[StaticEnumDefaults]` checks that static and dynamic default configurations retain
+named enum lists before and after public deserialization. Its mutation is in
+`static_enum_defaults.json`; default-name assertions precede parsing so missing
+metadata produces an assertion failure instead of a crash.
+
 `[ConfigContracts]` checks typed values, grouped serialization, ownership,
 nullable options, equality and difference reports, and environment export with
 restoration. `[ConfigGroupOrder]` requires strict lexicographic ordering for

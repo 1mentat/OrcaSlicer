@@ -1080,8 +1080,10 @@ protected:
                 m_keys.emplace_back(kvp.first);
                 const ConfigOptionDef *def = defs->get(kvp.first);
                 assert(def != nullptr);
-                if (def->default_value)
-                    opt->set(def->default_value.get());
+                if (def->default_value) {
+                    ConfigOptionUniquePtr default_option(def->create_default_option());
+                    opt->set(default_option.get());
+                }
             }
         }
 
