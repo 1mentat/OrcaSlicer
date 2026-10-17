@@ -1418,14 +1418,22 @@ void priv::set_face_type(FaceTypeMap            &face_type_map,
     for (EI ei : mesh.edges()) {
         if (!ecm[ei]) continue;
         HI hi = mesh.halfedge(ei);
+        // A constrained edge may expose its border halfedge, which has no face.
+        // Classify the incident face using the opposite orientation instead.
         FI fi = mesh.face(hi);
-        bool is_inside = is_face_inside(hi, mesh, shape_mesh, vertex_shape_map, shape2index);        
+        if (!fi.is_valid()) {
+            HI opposite = mesh.opposite(hi);
+            if (!opposite.is_valid()) continue;
+            hi = opposite;
+            fi = mesh.face(hi);
+        }
+        if (!fi.is_valid()) continue;
+
+        bool is_inside = is_face_inside(hi, mesh, shape_mesh, vertex_shape_map, shape2index);
         face_type_map[fi] = is_inside ? FaceType::inside : FaceType::outside;
         HI hi_op = mesh.opposite(hi);
-        assert(hi_op.is_valid());
         if (!hi_op.is_valid()) continue;
         FI fi_op = mesh.face(hi_op);
-        assert(fi_op.is_valid());
         if (!fi_op.is_valid()) continue;
         face_type_map[fi_op] = (!is_inside) ? FaceType::inside : FaceType::outside;
     }

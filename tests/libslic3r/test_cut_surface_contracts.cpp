@@ -6,6 +6,7 @@
 #include <cmath>
 #include <string>
 #include <catch2/catch_all.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <array>
@@ -590,7 +591,11 @@ TEST_CASE("Surface cuts preserve disconnected components in one source mesh", "[
 
 TEST_CASE("Surface cuts preserve multiple projected holes", "[CutSurface][CutSurfaceExtended][CutSurfaceTopology]")
 {
-    ExPolygon shape(rectangle(0, 0, 10, 10));
+    const double inset = GENERATE(0., 1.);
+    CAPTURE(inset);
+    // Zero inset retains the regression where the projection and cube share
+    // their outer boundary; the inset row controls for an interior projection.
+    ExPolygon shape(rectangle(inset, inset, 10. - inset, 10. - inset));
     shape.holes.emplace_back(rectangle(2, 2, 4, 4));
     shape.holes.back().reverse();
     shape.holes.emplace_back(rectangle(6, 6, 8, 8));
@@ -602,7 +607,8 @@ TEST_CASE("Surface cuts preserve multiple projected holes", "[CutSurface][CutSur
     REQUIRE(cut.contours.size() >= 3);
     check_contours(cut);
     check_mesh_indices(cut);
-    CHECK_THAT(projected_area(cut), WithinAbs(92.0, 1e-4));
+    const double side = 10. - 2. * inset;
+    CHECK_THAT(projected_area(cut), WithinAbs(side * side - 2. * 2. * 2., 1e-4));
 }
 
 } // namespace cut_surface_extended_contracts
