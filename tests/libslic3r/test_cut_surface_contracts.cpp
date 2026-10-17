@@ -5,6 +5,7 @@
 #include <boost/nowide/fstream.hpp>
 #include <cmath>
 #include <string>
+#include <sstream>
 #include <catch2/catch_all.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -604,7 +605,27 @@ TEST_CASE("Surface cuts preserve multiple projected holes", "[CutSurface][CutSur
     const SurfaceCut cut = cut_surface({shape}, {its_make_cube(10., 10., 10.)}, cube_projection(), .5f);
     REQUIRE_FALSE(cut.vertices.empty());
     REQUIRE_FALSE(cut.indices.empty());
-    REQUIRE(cut.contours.size() >= 3);
+    CAPTURE(cut.vertices.size(), cut.indices.size(), cut.contours.size(), projected_area(cut));
+    std::ostringstream contour_geometry;
+    for (const SurfaceCut::Contour &contour : cut.contours) {
+        Vec3f low = cut.vertices.front();
+        Vec3f high = low;
+        for (std::size_t i = 0; i < contour.size(); ++i) {
+            REQUIRE(contour[i] < cut.vertices.size());
+            const Vec3f &point = cut.vertices[contour[i]];
+            if (i == 0) {
+                low = point;
+                high = point;
+            } else {
+                low = low.cwiseMin(point);
+                high = high.cwiseMax(point);
+            }
+        }
+        contour_geometry << contour.size() << " points, bounds [" << low.transpose()
+                         << "] to [" << high.transpose() << "]; ";
+    }
+    INFO(contour_geometry.str());
+    CHECK(cut.contours.size() >= 3);
     check_contours(cut);
     check_mesh_indices(cut);
     const double side = 10. - 2. * inset;

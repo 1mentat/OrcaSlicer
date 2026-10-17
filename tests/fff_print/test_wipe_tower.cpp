@@ -3555,3 +3555,327 @@ TEST_CASE("Custom G-code events follow print mode and layer assignment", "[WipeT
 }
 
 } // namespace toolordering_custom_gcode_contracts
+
+namespace wipe_tower_prime_public_contracts {
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+struct PrimeRun
+{
+    std::vector<WipeTower::ToolChangeResult> results;
+    std::vector<float> used_filament;
+    std::string gcode;
+    int toolchanges = 0;
+};
+
+static std::size_t count_token(const std::string &text, const std::string &token)
+{
+    std::size_t count = 0;
+    std::size_t pos = 0;
+    while ((pos = text.find(token, pos)) != std::string::npos) {
+        ++count;
+        pos += token.size();
+    }
+    return count;
+}
+
+static std::string section_between(const std::string &text,
+                                   const std::string &begin,
+                                   const std::string &end)
+{
+    const std::size_t begin_pos = text.find(begin);
+    if (begin_pos == std::string::npos)
+        return {};
+    const std::size_t content_pos = begin_pos + begin.size();
+    const std::size_t end_pos = text.find(end, content_pos);
+    if (end_pos == std::string::npos)
+        return {};
+    return text.substr(content_pos, end_pos - content_pos);
+}
+
+static bool has_extrusion_motion(const std::string &text)
+{
+    bool found = false;
+    GCodeReader reader;
+    reader.parse_buffer(text, [&found](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("G1") || !line.has_e())
+            return;
+        const float e = line.e();
+        if (std::isfinite(double(e)) && e > 0.f)
+            found = true;
+    });
+    return found;
+}
+
+static bool has_positive_wait(const std::string &text, float expected_seconds)
+{
+    bool found = false;
+    GCodeReader reader;
+    reader.parse_buffer(text, [expected_seconds, &found](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        float seconds = 0.f;
+        if (!line.cmd_is("G4") || !line.has_value('S', seconds))
+            return;
+        if (std::isfinite(double(seconds)) && seconds > 0.f &&
+            std::abs(seconds - expected_seconds) < 0.01f)
+            found = true;
+    });
+    return found;
+}
+
+static DynamicPrintConfig prime_dynamic(unsigned int filament_count,
+                                        bool semm,
+                                        bool mk4_mmu,
+                                        bool high_current,
+                                        bool circular_bed = false)
+{
+    const std::string n = filament_count == 3 ? "0,0,0" : "0,0";
+    const std::string cooling_moves = semm ? (filament_count == 3 ? "2,2,2" : "2,2") : n;
+    const std::string temperatures = filament_count == 3 ? "200,205,210" : "200,205";
+    const std::string printable_area = circular_bed
+        ? "110x0,77.781x77.781,0x110,-77.781x77.781,-110x0,-77.781x-77.781,0x-110,77.781x-77.781"
+        : "0x0,220x0,220x220,0x220";
+    DynamicPrintConfig config = multifilament_config(filament_count, {
+        {"single_extruder_multi_material", semm},
+        {"enable_prime_tower", true},
+        {"purge_in_prime_tower", true},
+        {"prime_tower_width", 35},
+        {"prime_tower_brim_width", 0},
+        {"wipe_tower_x", 20},
+        {"wipe_tower_y", 20},
+        {"wipe_tower_wall_type", "rectangle"},
+        {"prime_tower_skip_points", false},
+        {"wipe_tower_no_sparse_layers", false},
+        {"wipe_tower_extra_flow", 100},
+        {"wipe_tower_extra_spacing", 100},
+        {"wipe_tower_bridging", 10},
+        {"wipe_tower_max_purge_speed", 90},
+        {"enable_arc_fitting", false},
+        {"gcode_flavor", "marlin"},
+        {"printable_area", printable_area},
+        {"filament_soluble", n},
+        {"filament_is_support", n},
+        {"filament_minimal_purge_on_wipe_tower", n},
+        {"filament_cooling_moves", cooling_moves},
+        {"filament_cooling_initial_speed", filament_count == 3 ? "2,2,2" : "2,2"},
+        {"filament_cooling_final_speed", filament_count == 3 ? "6,6,6" : "6,6"},
+        {"filament_ramming_parameters", "100 100 30 30 30 30"},
+        {"filament_diameter", filament_count == 3 ? "1.75,1.75,1.75" : "1.75,1.75"},
+        {"nozzle_diameter", filament_count == 3 ? "0.4,0.4,0.4" : "0.4,0.4"},
+        {"nozzle_temperature", temperatures},
+        {"nozzle_temperature_initial_layer", temperatures},
+        {"nozzle_temperature_range_high", filament_count == 3 ? "220,225,230" : "220,225"},
+        {"cooling_tube_length", 40},
+        {"cooling_tube_retraction", 10},
+        {"parking_pos_retraction", semm ? 4 : 0},
+        {"extra_loading_move", semm ? 8 : 0},
+        {"filament_loading_speed", filament_count == 3 ? "12,12,12" : "12,12"},
+        {"filament_loading_speed_start", filament_count == 3 ? "12,12,12" : "12,12"},
+        {"filament_unloading_speed", filament_count == 3 ? "35,35,35" : "35,35"},
+        {"filament_unloading_speed_start", filament_count == 3 ? "55,55,55" : "55,55"},
+        {"filament_toolchange_delay", filament_count == 3 ? "1,1,1" : "1,1"},
+        {"filament_stamping_distance", filament_count == 3 ? "0,0,0" : "0,0"},
+        {"filament_stamping_loading_speed", filament_count == 3 ? "20,20,20" : "20,20"},
+        {"enable_filament_ramming", semm},
+        {"high_current_on_filament_swap", high_current},
+        {"printer_notes", mk4_mmu ? "PRINTER_MODEL_MK4 MMU" : ""},
+    });
+    return config;
+}
+
+static PrimeRun run_prime(const DynamicPrintConfig &dynamic,
+                          const std::vector<unsigned int> &tools)
+{
+    FullPrintConfig full;
+    full.apply(dynamic);
+    std::vector<std::vector<float>> wipe_volumes(tools.size(), std::vector<float>(tools.size(), 0.f));
+    for (std::size_t from = 0; from < tools.size(); ++from)
+        for (std::size_t to = 0; to < tools.size(); ++to)
+            if (from != to)
+                wipe_volumes[from][to] = 40.f + float(10 * from + to);
+
+    WipeTower2 tower(full, static_cast<const PrintRegionConfig &>(full), 0, Vec3d::Zero(), wipe_volumes, tools.front());
+    for (unsigned int tool : tools)
+        tower.set_extruder(tool, full);
+
+    PrimeRun run;
+    run.results = tower.prime(0.2f, tools, false);
+    run.used_filament = tower.get_used_filament();
+    run.toolchanges = tower.get_number_of_toolchanges();
+    for (const auto &result : run.results)
+        run.gcode += result.gcode;
+    return run;
+}
+
+static double positive_result_length(const WipeTower::ToolChangeResult &result)
+{
+    double length = 0.;
+    for (std::size_t j = 1; j < result.extrusions.size(); ++j)
+        if (result.extrusions[j].width > 0.f)
+            length += double((result.extrusions[j].pos - result.extrusions[j - 1].pos).norm());
+    return length;
+}
+
+static void require_prime_contract(const PrimeRun &run,
+                                   const std::vector<unsigned int> &tools)
+{
+    REQUIRE(run.results.size() == tools.size());
+    CHECK(run.toolchanges == int(tools.size()));
+    REQUIRE_FALSE(run.gcode.empty());
+    REQUIRE(run.gcode.find("; CP PRIMING START") != std::string::npos);
+    REQUIRE(run.gcode.find("; CP PRIMING END") != std::string::npos);
+    CHECK(count_token(run.gcode, "; CP PRIMING START") == 1);
+    CHECK(count_token(run.gcode, "; CP PRIMING END") == 1);
+
+    double total_length = 0.;
+    for (std::size_t i = 0; i < run.results.size(); ++i) {
+        const auto &result = run.results[i];
+        REQUIRE(result.priming);
+        CHECK_FALSE(result.is_tool_change);
+        CHECK(result.initial_tool == int(i == 0 ? tools.front() : tools[i - 1]));
+        CHECK(result.new_tool == int(tools[i]));
+        CHECK(std::isfinite(double(result.print_z)));
+        CHECK(std::isfinite(double(result.layer_height)));
+        CHECK(result.layer_height > 0.f);
+        CHECK(std::isfinite(double(result.elapsed_time)));
+        CHECK(result.elapsed_time > 0.f);
+        CHECK(std::isfinite(double(result.start_pos.x())));
+        CHECK(std::isfinite(double(result.start_pos.y())));
+        CHECK(std::isfinite(double(result.end_pos.x())));
+        CHECK(std::isfinite(double(result.end_pos.y())));
+
+        const double result_length = positive_result_length(result);
+        REQUIRE(result_length > 0.);
+        total_length += result_length;
+        bool has_positive_extrusion = false;
+        for (const auto &extrusion : result.extrusions) {
+            CHECK(std::isfinite(double(extrusion.pos.x())));
+            CHECK(std::isfinite(double(extrusion.pos.y())));
+            CHECK(std::isfinite(double(extrusion.width)));
+            if (extrusion.width > 0.f) {
+                has_positive_extrusion = true;
+                CHECK(extrusion.tool == tools[i]);
+            }
+        }
+        CHECK(has_positive_extrusion);
+    }
+    CHECK(total_length > 0.);
+
+    REQUIRE(run.used_filament.size() >= tools.size());
+    for (unsigned int tool : tools) {
+        CHECK(std::isfinite(double(run.used_filament[tool])));
+        CHECK(run.used_filament[tool] > 0.f);
+    }
+}
+
+static void require_circular_bed_coordinates(const PrimeRun &run)
+{
+    bool finite = true;
+    bool inside = true;
+    std::size_t coordinate_moves = 0;
+    GCodeReader reader;
+    reader.parse_buffer(run.gcode, [&finite, &inside, &coordinate_moves](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) ||
+            (!line.has_x() && !line.has_y()))
+            return;
+        const float x = line.new_X(self);
+        const float y = line.new_Y(self);
+        if (!std::isfinite(double(x)) || !std::isfinite(double(y))) {
+            finite = false;
+            return;
+        }
+        ++coordinate_moves;
+        if (double(x) * double(x) + double(y) * double(y) > 110.0 * 110.0 + 1.0)
+            inside = false;
+    });
+    REQUIRE(coordinate_moves > 0);
+    CHECK(finite);
+    CHECK(inside);
+}
+
+TEST_CASE("Circular bed priming keeps emitted paths inside the configured radius",
+          "[WipeTower][WipeTowerPrimePublic]")
+{
+    const PrimeRun run = run_prime(prime_dynamic(2, false, false, false, true), {0, 1});
+    require_prime_contract(run, {0, 1});
+    require_circular_bed_coordinates(run);
+}
+
+TEST_CASE("Public priming emits one finite result for each requested tool",
+          "[WipeTower][WipeTowerPrimePublic]")
+{
+    const PrimeRun run = run_prime(prime_dynamic(2, false, false, false), {0, 1});
+    require_prime_contract(run, {0, 1});
+    CHECK(run.gcode.find("; CP TOOLCHANGE LOAD") == std::string::npos);
+    CHECK(run.gcode.find("; CP TOOLCHANGE UNLOAD") != std::string::npos);
+    CHECK(run.gcode.find("; CP TOOLCHANGE WIPE") != std::string::npos);
+    CHECK(run.gcode.find("M591") == std::string::npos);
+    CHECK(run.gcode.find("M907") == std::string::npos);
+
+    // The final result must contain a real positive purge in its own WIPE section.
+    // This is the witness for the final-wipe-volume mutation; generic LOAD or
+    // earlier unload motion must not satisfy it.
+    const std::string final_wipe = section_between(run.results.back().gcode,
+                                                   "; CP TOOLCHANGE WIPE\n",
+                                                   "; CP TOOLCHANGE END\n");
+    REQUIRE_FALSE(final_wipe.empty());
+    CHECK(has_extrusion_motion(final_wipe));
+
+    // With the pinned 0.4 mm nozzle, 1.25 width ratio, 0.2 mm layer and
+    // configured 41 mm^3 pairwise volume, the requested WIPE path is about
+    // 410 mm before row-turn overhead. A zero-volume mutant still emits one
+    // mandatory row, but cannot meet this independent lower bound.
+    constexpr double requested_wipe_volume = 41.0;
+    constexpr double configured_line_area = 0.4 * 1.25 * 0.2;
+    CHECK(positive_result_length(run.results.back()) >
+          0.45 * requested_wipe_volume / configured_line_area);
+}
+
+TEST_CASE("Single extruder priming emits cooling and loading phases for each handoff",
+          "[WipeTower][WipeTowerPrimePublic]")
+{
+    const PrimeRun run = run_prime(prime_dynamic(2, true, false, false), {0, 1});
+    require_prime_contract(run, {0, 1});
+    CHECK(run.gcode.find("; CP TOOLCHANGE LOAD") != std::string::npos);
+    CHECK(run.gcode.find("; Cooling\n") != std::string::npos);
+    CHECK(run.gcode.find("; Cooling park\n") != std::string::npos);
+    CHECK(run.gcode.find("M591") == std::string::npos);
+
+    // A configured 1 s unload/cooling delay must be emitted inside the
+    // TOOLCHANGE section. The final planner flush emits G4 S0 and is not enough.
+    const std::string unload_section = section_between(run.gcode,
+                                                       "; CP TOOLCHANGE UNLOAD\n",
+                                                       "; CP TOOLCHANGE END\n");
+    REQUIRE_FALSE(unload_section.empty());
+    CHECK(unload_section.find("; Cooling\n") != std::string::npos);
+    CHECK(unload_section.find("; Cooling park\n") != std::string::npos);
+    CHECK(has_positive_wait(unload_section, 1.f));
+}
+
+TEST_CASE("MK4 MMU priming brackets unloads with monitoring and cooling commands",
+          "[WipeTower][WipeTowerPrimePublic]")
+{
+    const PrimeRun run = run_prime(prime_dynamic(3, true, true, true), {0, 1, 2});
+    require_prime_contract(run, {0, 1, 2});
+    CHECK(count_token(run.gcode, "M591 S0") == 2);
+    CHECK(count_token(run.gcode, "M591 R") == 3);
+
+    // Each unload must disable monitoring before the next monitoring restore.
+    // This pairs the commands by stage instead of accepting aggregate counts.
+    std::size_t monitor_cursor = 0;
+    for (int unload_index = 0; unload_index < 2; ++unload_index) {
+        const std::size_t disable = run.gcode.find("M591 S0", monitor_cursor);
+        REQUIRE(disable != std::string::npos);
+        const std::size_t restore = run.gcode.find("M591 R", disable);
+        REQUIRE(restore != std::string::npos);
+        CHECK(disable < restore);
+        monitor_cursor = restore + std::string("M591 R").size();
+    }
+    const std::string unload_section = section_between(run.gcode,
+                                                       "; CP TOOLCHANGE UNLOAD\n",
+                                                       "; CP TOOLCHANGE END\n");
+    REQUIRE_FALSE(unload_section.empty());
+    CHECK(has_positive_wait(unload_section, 1.5f));
+    CHECK(run.gcode.find("M907 E750") != std::string::npos);
+    CHECK(run.gcode.find("M907 E550") != std::string::npos);
+}
+} // namespace wipe_tower_prime_public_contracts

@@ -9880,6 +9880,30 @@ void set_two_extruder_project(BundleFixture& fx)
     fx.bundle.filament_presets                                                                 = {"PLA", "PETG"};
 }
 
+
+void set_variant_aware_printer(BundleFixture& fx)
+{
+    set_two_extruder_project(fx);
+    auto& printer = fx.bundle.printers.get_edited_preset().config;
+    printer.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values = {int(etDirectDrive), int(etDirectDrive)};
+    printer.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {int(nvtStandard), int(nvtHighFlow)};
+    printer.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"};
+    printer.option<ConfigOptionInts>("printer_extruder_id", true)->values = {1, 2};
+    printer.option<ConfigOptionStrings>("printer_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"};
+}
+
+void set_variant_aware_filament(Preset& preset, double standard_speed, double high_flow_speed)
+{
+    auto& config = preset.config;
+    config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"};
+    config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("filament_max_volumetric_speed", true)->values = {
+        standard_speed, high_flow_speed};
+}
+
 } // namespace
 
 TEST_CASE("secure full config removes host credentials while retaining slicing values", "[PresetBundle][PresetBundleContracts]")
@@ -10292,6 +10316,70 @@ TEST_CASE("AMS combo info clears stale output before resolving an empty tray lis
     fx.bundle.get_ams_cobox_infos(info);
     CHECK(info.empty());
     CHECK(info.ams_filament_presets.empty());
+}
+
+
+TEST_CASE("Full FFF configuration applies explicit filament volume maps", "[PresetBundle][PresetBundleContracts][PresetBundleFullFffMaps]")
+{
+    BundleFixture fx;
+    set_variant_aware_printer(fx);
+    add_filament(fx, "PLA", "PLA-ID", "PLA", false, true);
+    add_filament(fx, "PETG", "PETG-ID", "PETG");
+    Preset *pla = fx.bundle.filaments.find_preset("PLA", false, true);
+    Preset *petg = fx.bundle.filaments.find_preset("PETG", false, true);
+    REQUIRE(pla != nullptr);
+    REQUIRE(petg != nullptr);
+    set_variant_aware_filament(*pla, 12., 22.);
+    set_variant_aware_filament(*petg, 13., 23.);
+    REQUIRE(fx.bundle.filaments.select_preset_by_name("PLA", true));
+    fx.bundle.filament_presets = {"PLA", "PETG"};
+    fx.bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values = {
+        int(nvtHighFlow), int(nvtHighFlow)};
+
+    const DynamicPrintConfig out = fx.bundle.full_config(
+        true, std::vector<int>{1, 2}, std::vector<int>{int(nvtStandard), int(nvtHighFlow)});
+    CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values ==
+          std::vector<int>{int(nvtStandard), int(nvtHighFlow)});
+    CHECK(out.option<ConfigOptionStrings>("filament_settings_id")->values ==
+          std::vector<std::string>{"PLA", "PETG"});
+    CHECK(out.option<ConfigOptionStrings>("filament_ids")->values ==
+          std::vector<std::string>{"PLA-ID", "PETG-ID"});
+    check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {12., 23.});
+}
+
+TEST_CASE("Full FFF configuration records selected system filament changes", "[PresetBundle][PresetBundleContracts][PresetBundleFullFffProvenance]")
+{
+    BundleFixture fx;
+    add_filament(fx, "System PLA", "SYSTEM-PLA", "PLA", true, true);
+    Preset& user = add_filament(fx, "User PETG", "USER-PETG", "PETG");
+    user.config.option<ConfigOptionFloats>("filament_max_volumetric_speed", true)->values = {9.0};
+    fx.bundle.filament_presets = {"System PLA", "User PETG"};
+    REQUIRE(fx.bundle.filaments.select_preset_by_name("System PLA", true));
+    REQUIRE(fx.bundle.filaments.get_edited_preset().is_system);
+
+    // The selected system preset is copied into the public edited preset. Change that copy
+    // after selection so full_fff_config must compare it with the saved system profile.
+    auto& edited = fx.bundle.filaments.get_edited_preset();
+    edited.config.option<ConfigOptionFloats>("filament_max_volumetric_speed", true)->values = {31.5};
+    edited.inherits() = "ignored-parent-metadata";
+
+    const DynamicPrintConfig out = fx.bundle.full_config(false);
+    CHECK(out.option<ConfigOptionStrings>("filament_settings_id")->values ==
+          std::vector<std::string>{"System PLA", "User PETG"});
+    CHECK(out.option<ConfigOptionStrings>("filament_ids")->values ==
+          std::vector<std::string>{"SYSTEM-PLA", "USER-PETG"});
+    check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {31.5, 9.0});
+    const auto* different = out.option<ConfigOptionStrings>("different_settings_to_system");
+    REQUIRE(different != nullptr);
+    REQUIRE(different->values.size() == 4);
+    CHECK(different->values[0].empty());
+    CHECK_FALSE(different->values[1].empty());
+    CHECK(different->values[2].empty());
+    CHECK(different->values[3].empty());
+    std::vector<std::string> changed_keys;
+    REQUIRE(unescape_strings_cstyle(different->values[1], changed_keys));
+    CHECK(std::find(changed_keys.begin(), changed_keys.end(), "filament_max_volumetric_speed") != changed_keys.end());
+    CHECK(std::find(changed_keys.begin(), changed_keys.end(), "inherits") == changed_keys.end());
 }
 
 } // namespace preset_bundle_contracts

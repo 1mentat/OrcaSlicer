@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "description": "Vertical faces, coplanar slab ownership, reflected surfaces, and independent mesh projections.",
+  "mutants": [
+    {
+      "id": "trianglemesh-slicer-vertical-point-omitted",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "            if(vertical_points && fo==FaceOrientation::Vertical)",
+      "new": "            if(vertical_points && fo==FaceOrientation::Degenerate)",
+      "test_filter": "TriangleMeshSlicerContracts",
+      "test_case": "Slab slicing reports vertical face centers and normals",
+      "rationale": "Suppresses emission for valid vertical triangles while leaving the slab geometry path intact.",
+      "expected_failure": "vertical_points.size() == 2 and center/normal assertions fail; no crash or exception is expected.",
+      "anchor_occurrences": 1,
+      "description": "Suppresses emission for valid vertical triangles while leaving the slab geometry path intact."
+    },
+    {
+      "id": "trianglemesh-slicer-top-loop-uses-bottom-projection",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "        *out_top = make_slab_loops<true>(lines.first, num_edges, throw_on_cancel);",
+      "new": "        *out_top = make_slab_loops<false>(lines.first, num_edges, throw_on_cancel);",
+      "test_filter": "TriangleMeshSlicerContracts",
+      "test_case": "Slab slicing assigns coplanar faces to their documented surface",
+      "rationale": "Uses the bottom loop interpretation for top projection lines. The coplanar ownership case, selected by the common CTest label, detects the wrong polarity through its top/bottom occupancy and bounds; the pointer remains valid and this is not a crash-only oracle.",
+      "expected_failure": "The coplanar ownership case loses or misplaces the upward top polygon; ordinary geometry assertions fail.",
+      "anchor_occurrences": 1,
+      "description": "Uses the bottom loop interpretation for top projection lines. The coplanar ownership case, selected by the common CTest label, detects the wrong polarity through its top/bottom occupancy and bounds; the pointer remains valid and this is not a crash-only oracle."
+    },
+    {
+      "id": "trianglemesh-slicer-mirrored-sign-reversed",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "    const auto mirrored_sign = int64_t(trafo.matrix().block(0, 0, 3, 3).determinant() < 0 ? -1 : 1);",
+      "new": "    const auto mirrored_sign = int64_t(trafo.matrix().block(0, 0, 3, 3).determinant() < 0 ? 1 : -1);",
+      "test_filter": "TriangleMeshSlicerContracts",
+      "test_case": "Mirrored slab transforms preserve surface roles",
+      "rationale": "Reverses the determinant correction, causing a reflected upward/downward pair to swap surface roles while preserving bounded geometry.",
+      "expected_failure": "top/bottom occupancy or mirrored bounds fail ordinary assertions; no invalid memory access is introduced.",
+      "anchor_occurrences": 1,
+      "description": "Reverses the determinant correction, causing a reflected upward/downward pair to swap surface roles while preserving bounded geometry."
+    }
+  ]
+}

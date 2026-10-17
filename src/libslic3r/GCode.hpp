@@ -99,6 +99,9 @@ public:
     void update_path(const ExtrusionPaths &paths, bool reverse = false);
 };
 
+// Rotate and translate the linear motion in a wipe-tower nozzle-change fragment.
+std::string transform_gcode(const std::string &gcode, Vec2f pos, const Vec2f &translation, float angle);
+
 class WipeTowerIntegration {
 public:
     WipeTowerIntegration(

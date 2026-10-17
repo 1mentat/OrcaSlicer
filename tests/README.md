@@ -200,6 +200,19 @@ within one mesh, and multiple holes using contour validity and geometric area.
 core path lengths per unit area against a uniform-density control. Their
 mutations are in `cut_surface_topology.json` and `tpms_normal_y.json`.
 
+`[TransformGCode]` checks rotated, translated, partial-axis and repeated linear
+moves, including forced coordinate emission. `[WipeTowerPrimePublic]` checks
+tool sequencing, purge volume, circular-bed placement, cooling delays and
+filament monitoring through the public priming API. `[TriangleMeshSlicerContracts]`
+checks vertical face geometry, coplanar slab ownership, mirrored transforms and
+independent top/bottom projections. Their mutation manifests are
+`transform_gcode.json`, `wipetower_prime_public.json` and
+`trianglemesh_slicer_contracts.json`.
+
+`[PresetBundleFullFffMaps]` and `[PresetBundleFullFffProvenance]` check explicit
+filament-volume map overrides and selected system-profile changes, with
+mutations in `preset_bundle_full_fff.json`.
+
 `[SupportCache]` checks support-layer cache round trips through `Print`, including
 island coordinates, extrusion geometry, interface metadata, layer links, and
 malformed payload rejection. `[WipeTowerContact]` checks parsed feedrates,

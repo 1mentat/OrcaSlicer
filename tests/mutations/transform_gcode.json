@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "source-reviewed public transform_gcode coordinate and modal-word contracts.",
+  "mutants": [
+    {
+      "id": "transform-gcode-rotation-dropped",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                transformed_pos = Eigen::Rotation2Df(angle) * pos + translation;",
+      "new": "                transformed_pos = pos + translation;",
+      "description": "Drop the configured XY rotation; the asymmetric complete-motion case must fail its independently derived quarter-turn positions.",
+      "test_filter": "TransformGCode"
+    },
+    {
+      "id": "transform-gcode-modal-y-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            if (line.find(\"G1 \") == 0) {",
+      "new": "            if (line.find(\"G1 \") == 0 && line.find(\" X\") != std::string::npos) {",
+      "description": "Ignore G1 lines without an explicit X word; the Y-only second move must still be transformed using the carried X coordinate.",
+      "test_filter": "TransformGCode"
+    },
+    {
+      "id": "transform-gcode-never-skip-gate-removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                // Strip local XY words even when the transformed position is\n                // unchanged; retaining them would move back to local coordinates.\n                line = line_out.str();\n                if (transformed_pos != old_pos || never_skip) {\n                    std::ostringstream oss;",
+      "new": "                // Strip local XY words even when the transformed position is\n                // unchanged; retaining them would move back to local coordinates.\n                line = line_out.str();\n                if (transformed_pos != old_pos) {\n                    std::ostringstream oss;",
+      "description": "Remove the never-skip override; the repeated tagged move must still emit transformed X/Y coordinates and strip the marker.",
+      "test_filter": "TransformGCode"
+    },
+    {
+      "id": "transform-gcode-repeated-move-local-coordinates-reverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                // Strip local XY words even when the transformed position is\n                // unchanged; retaining them would move back to local coordinates.\n                line = line_out.str();\n                if (transformed_pos != old_pos || never_skip) {\n                    std::ostringstream oss;",
+      "new": "                if (transformed_pos != old_pos || never_skip) {\n                    line = line_out.str();\n                    std::ostringstream oss;",
+      "test_filter": "TransformGCode",
+      "description": "Restore the exact original repeated-move behavior. The untagged repeat must remain at translated position11,22 and preserve extrusion; raw local XY1,2 causes an ordinary coordinate assertion failure.",
+      "expected_oracle": "Normal coordinate assertion failure only; crashes are not counted."
+    }
+  ]
+}

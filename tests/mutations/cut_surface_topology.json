@@ -31,6 +31,15 @@
       "test_filter": "CutSurfaceTopology",
       "description": "Skip projected hole contours when converting an ExPolygon to the CGAL shape mesh. The two-hole case requires at least three valid contours and area 92.",
       "expected_oracle": "The multiple-hole contour validity/area assertions must fail; no malformed-input behavior is credited."
+    },
+    {
+      "id": "cut-surface-border-incident-face-dropped",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "        if (!fi.is_valid()) {\n            HI opposite = mesh.opposite(hi);\n            if (!opposite.is_valid()) continue;\n            hi = opposite;\n            fi = mesh.face(hi);\n        }",
+      "new": "        if (!fi.is_valid()) {\n            continue;\n        }",
+      "test_filter": "CutSurfaceTopology",
+      "description": "Skip a constrained boundary edge instead of classifying its real incident face. The coincident-boundary topology and area contract must retain the surface with both holes.",
+      "expected_oracle": "Ordinary output geometry assertion failure only; no crash credit."
     }
   ]
 }

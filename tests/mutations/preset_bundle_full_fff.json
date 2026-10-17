@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "compile-safe PresetBundle full_fff_config mutants; native execution is intentionally pending.",
+  "mutants": [
+    {
+      "id": "preset-full-fff-explicit-volume-map-ignored",
+      "anchor_line": 4777,
+      "old": "    if (filament_volume_maps_new.has_value()) {\n        filament_volume_maps = *filament_volume_maps_new;\n        out.option<ConfigOptionInts>(\"filament_volume_map\", true)->values = filament_volume_maps;\n    }",
+      "new": "    if (filament_volume_maps_new.has_value()) {\n        filament_volume_maps.assign(num_filaments, int(nvtStandard));\n        out.option<ConfigOptionInts>(\"filament_volume_map\", true)->values = filament_volume_maps;\n    }",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "expected_matches": 1,
+      "test_filter": "PresetBundleFullFffMaps",
+      "description": "explicit standard/high-flow map assertions fail because the passed map is ignored"
+    },
+    {
+      "id": "preset-full-fff-system-dirty-ignore-list-disabled",
+      "anchor_line": 4925,
+      "old": "                        if (ignore_settings_list.find(*iter) != ignore_settings_list.end()) {",
+      "new": "                        if (false) {",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "expected_matches": 1,
+      "test_filter": "PresetBundleFullFffProvenance",
+      "description": "provenance assertion fails because ignored inherits metadata leaks into different_settings_to_system"
+    }
+  ]
+}

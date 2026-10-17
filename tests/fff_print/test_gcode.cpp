@@ -7,6 +7,7 @@
 #include <memory>
 #include <limits>
 #include "libslic3r/GCode.hpp"
+#include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/calib.hpp"
 #include <catch2/catch_all.hpp>
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -5737,3 +5738,158 @@ TEST_CASE("Filament change route responds to endpoint configuration",
 }
 
 } // namespace gcode_travel_point_reachable_contracts
+
+namespace transform_gcode_contracts {
+
+struct TransformMotion
+{
+    Vec2f position;
+    std::string raw;
+    bool has_e = false;
+    bool has_f = false;
+    bool has_z = false;
+    bool has_i = false;
+    bool has_j = false;
+    float e = 0.f;
+    float f = 0.f;
+    float z = 0.f;
+    float i = 0.f;
+    float j = 0.f;
+};
+
+std::vector<TransformMotion> parse_transformed_g1(const std::string &gcode)
+{
+    std::vector<TransformMotion> result;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&result](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("G1"))
+            return;
+        TransformMotion move;
+        move.position = Vec2f(line.new_X(state), line.new_Y(state));
+        move.raw = line.raw();
+        move.has_e = line.has_e();
+        move.has_f = line.has_f();
+        move.has_z = line.has_z();
+        move.has_i = line.has_i();
+        move.has_j = line.has_j();
+        if (move.has_e)
+            move.e = line.e();
+        if (move.has_f)
+            move.f = line.f();
+        if (move.has_z)
+            move.z = line.z();
+        if (move.has_i)
+            move.i = line.i();
+        if (move.has_j)
+            move.j = line.j();
+        result.push_back(std::move(move));
+    });
+    return result;
+}
+
+TEST_CASE("G1 transformation rotates and translates coordinates while preserving motion words",
+          "[GCode][TransformGCode]")
+{
+    const std::string comment = "; preserve this comment X99 Y99\n";
+    const std::string input = comment
+        + "G1 X1.000 Y2.000 E1.500 F1200 Z0.200 I0.500 J-0.250\n"
+        + "G1 X3.000 Y4.000 E2.500 F900 Z0.300 I-0.500 J0.250\n";
+    const float quarter_turn = float(std::acos(-1.0) / 2.0);
+    const std::string output = transform_gcode(input, Vec2f(1.f, 2.f), Vec2f(10.f, 20.f), quarter_turn);
+    const auto motions = parse_transformed_g1(output);
+
+    REQUIRE(motions.size() == 2);
+    CHECK_THAT(motions[0].position.x(), Catch::Matchers::WithinAbs(8.f, 1e-4f));
+    CHECK_THAT(motions[0].position.y(), Catch::Matchers::WithinAbs(21.f, 1e-4f));
+    CHECK_THAT(motions[1].position.x(), Catch::Matchers::WithinAbs(6.f, 1e-4f));
+    CHECK_THAT(motions[1].position.y(), Catch::Matchers::WithinAbs(23.f, 1e-4f));
+    CHECK(output.find(comment) != std::string::npos);
+    REQUIRE(motions[0].has_e);
+    REQUIRE(motions[0].has_f);
+    REQUIRE(motions[0].has_z);
+    REQUIRE(motions[0].has_i);
+    REQUIRE(motions[0].has_j);
+    CHECK_THAT(motions[0].e, Catch::Matchers::WithinAbs(1.5f, 1e-4f));
+    CHECK_THAT(motions[0].f, Catch::Matchers::WithinAbs(1200.f, 1e-4f));
+    CHECK_THAT(motions[0].z, Catch::Matchers::WithinAbs(0.2f, 1e-4f));
+    CHECK_THAT(motions[0].i, Catch::Matchers::WithinAbs(0.5f, 1e-4f));
+    CHECK_THAT(motions[0].j, Catch::Matchers::WithinAbs(-0.25f, 1e-4f));
+    CHECK(output.find("E1.500") != std::string::npos);
+    CHECK(output.find("F1200") != std::string::npos);
+    CHECK(output.find("Z0.200") != std::string::npos);
+    CHECK(output.find("I0.500") != std::string::npos);
+    CHECK(output.find("J-0.250") != std::string::npos);
+}
+
+TEST_CASE("G1 transformation carries modal coordinates across partial XY words",
+          "[GCode][TransformGCode]")
+{
+    const std::string input = "G1 X1.000 E1.000 F600 Z0.200\nG1 Y3.000 E2.000\n";
+    const std::string output = transform_gcode(input, Vec2f(1.f, 2.f), Vec2f(10.f, -4.f), 0.f);
+    const auto motions = parse_transformed_g1(output);
+
+    REQUIRE(motions.size() == 2);
+    CHECK_THAT(motions[0].position.x(), Catch::Matchers::WithinAbs(11.f, 1e-4f));
+    CHECK_THAT(motions[0].position.y(), Catch::Matchers::WithinAbs(-2.f, 1e-4f));
+    CHECK_THAT(motions[1].position.x(), Catch::Matchers::WithinAbs(11.f, 1e-4f));
+    CHECK_THAT(motions[1].position.y(), Catch::Matchers::WithinAbs(-1.f, 1e-4f));
+    CHECK(motions[1].raw.find(" X") == std::string::npos);
+    REQUIRE(motions[0].has_e);
+    REQUIRE(motions[1].has_e);
+    CHECK_THAT(motions[0].e, Catch::Matchers::WithinAbs(1.f, 1e-4f));
+    CHECK_THAT(motions[1].e, Catch::Matchers::WithinAbs(2.f, 1e-4f));
+}
+
+TEST_CASE("G1 transformation leaves comments and arc commands with IJ words untouched",
+          "[GCode][TransformGCode]")
+{
+    const std::string arc = "G2 X4.000 Y5.000 I1.000 J0.000 E2.000 F700 ; arc stays local";
+    const std::string input = "; G1 X99 Y99\n" + arc + "\nG1 X4.000 Y5.000 E3.000\n";
+    const std::string output = transform_gcode(input, Vec2f(4.f, 5.f), Vec2f(10.f, -2.f), 0.f);
+    const auto motions = parse_transformed_g1(output);
+
+    REQUIRE(motions.size() == 1);
+    CHECK_THAT(motions.front().position.x(), Catch::Matchers::WithinAbs(14.f, 1e-4f));
+    CHECK_THAT(motions.front().position.y(), Catch::Matchers::WithinAbs(3.f, 1e-4f));
+    CHECK(output.find("; G1 X99 Y99\n") != std::string::npos);
+    CHECK(output.find(arc) != std::string::npos);
+}
+
+TEST_CASE("G1 never-skip markers force repeated transformed coordinates and are removed",
+          "[GCode][TransformGCode]")
+{
+    const std::string input = "G1 X1.000 Y2.000 E1.000\n"
+        + "G1 X1.000 Y2.000 E2.000 " + WipeTower::never_skip_tag() + "\n";
+    const std::string output = transform_gcode(input, Vec2f(1.f, 2.f), Vec2f(10.f, 20.f), 0.f);
+    const auto motions = parse_transformed_g1(output);
+
+    REQUIRE(motions.size() == 2);
+    CHECK_THAT(motions[0].position.x(), Catch::Matchers::WithinAbs(11.f, 1e-4f));
+    CHECK_THAT(motions[0].position.y(), Catch::Matchers::WithinAbs(22.f, 1e-4f));
+    CHECK_THAT(motions[1].position.x(), Catch::Matchers::WithinAbs(11.f, 1e-4f));
+    CHECK_THAT(motions[1].position.y(), Catch::Matchers::WithinAbs(22.f, 1e-4f));
+    CHECK(motions[1].raw.find(" X11.000") != std::string::npos);
+    CHECK(motions[1].raw.find(" Y22.000") != std::string::npos);
+    CHECK(output.find(WipeTower::never_skip_tag()) == std::string::npos);
+}
+
+TEST_CASE("G1 transformation preserves the position of repeated untagged moves",
+          "[GCode][TransformGCode]")
+{
+    const std::string input = "G1 X1.000 Y2.000 E1.000\n"
+                              "G1 X1.000 Y2.000 E2.000\n"
+                              "G1 E3.000\n";
+    const std::string output = transform_gcode(input, Vec2f(1.f, 2.f), Vec2f(10.f, 20.f), 0.f);
+    const auto motions = parse_transformed_g1(output);
+
+    REQUIRE(motions.size() == 3);
+    for (std::size_t index = 0; index < motions.size(); ++index) {
+        CAPTURE(index);
+        CHECK_THAT(motions[index].position.x(), Catch::Matchers::WithinAbs(11.f, 1e-4f));
+        CHECK_THAT(motions[index].position.y(), Catch::Matchers::WithinAbs(22.f, 1e-4f));
+        REQUIRE(motions[index].has_e);
+        CHECK_THAT(motions[index].e, Catch::Matchers::WithinAbs(float(index + 1), 1e-4f));
+    }
+}
+
+} // namespace transform_gcode_contracts
