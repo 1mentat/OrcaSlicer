@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "test_filter": "PrintValidationInteractions",
+  "description": "Public Print::validate interaction contracts for belt incompatibilities, sequential feature gates, and classic wipe-tower addressing.",
+  "mutants": [
+    {
+      "id": "print-validation-belt-raft-threshold-shifted",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (object->config().raft_layers > 0)",
+      "new": "if (object->config().raft_layers > 1)",
+      "test_filter": "PrintValidationInteractions",
+      "description": "A one-layer raft is incompatible with belt mode; raising the threshold would incorrectly accept the exact invalid interaction while the zero-raft control remains valid."
+    },
+    {
+      "id": "print-validation-sequential-wrapping-gate-inverted",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (m_config.enable_wrapping_detection) {\n            StringObjectException clumping_detection_setting_err;",
+      "new": "if (!m_config.enable_wrapping_detection) {\n            StringObjectException clumping_detection_setting_err;",
+      "test_filter": "PrintValidationInteractions",
+      "description": "Clumping detection is rejected only for multi-object by-object printing; the disabled control must remain valid and the enabled case must report enable_wrapping_detection."
+    },
+    {
+      "id": "print-validation-wipe-ooze-single-material-or-gate",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (m_config.ooze_prevention && m_config.single_extruder_multi_material)",
+      "new": "if (m_config.ooze_prevention || m_config.single_extruder_multi_material)",
+      "test_filter": "PrintValidationInteractions",
+      "description": "Ooze prevention is incompatible only with single-extruder multi-material wipe-tower mode; enabling ooze prevention alone must remain valid."
+    }
+  ]
+}

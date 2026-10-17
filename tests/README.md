@@ -218,6 +218,16 @@ independent top/bottom projections. Their mutation manifests are
 `transform_gcode.json`, `wipetower_prime_public.json` and
 `trianglemesh_slicer_contracts.json`.
 
+`[WipeTowerSparsePipeline]` compares ordinary and skipped sparse tower layers
+through public slicing and G-code export. Tower deposition must decrease while
+the object's deposition segments remain unchanged. Its mutations are in
+`wipe_tower_sparse_pipeline.json`.
+
+`[PrintValidationInteractions]` checks belt/raft/draft-shield constraints,
+sequential-print feature gates, and the full ooze-prevention/single-extruder
+multi-material truth table, including valid controls and blocking-error keys.
+Its mutations are in `print_validation_interactions.json`.
+
 `[PresetBundleFullFffMaps]` and `[PresetBundleFullFffProvenance]` check explicit
 filament-volume map overrides and selected system-profile changes, with
 mutations in `preset_bundle_full_fff.json`.
@@ -314,6 +324,9 @@ object bounds. These groups avoid slicing and export; their mutants are in
 `[TextureColorRegions]` checks connected region area, the strict merge threshold,
 summed shared boundary lengths, and unpainted borders on a four-triangle mesh.
 Its bounded mutations are in `texture_region_merge.json`.
+`[TextureColorDespeckle]` checks isolated color removal, the zero-pass control,
+strict ties, uncolored neighbors, and triangle-order independence through a
+public color bake. Its mutations are in `texture_despeckle.json`.
 `[TextureProjectionColor]` checks cylindrical, spherical, and projective color
 and height sampling against literal texels, including normalized axes, perspective
 division, rejected depth, and untiled bounds. Its mutations are in
@@ -383,6 +396,11 @@ exports use actual extrusion runs; its mutation is in
 `draft_shield_single_loop.json`. `[SupportInterfaceLoopPattern]` checks added
 contact paths with positive support-interface deposition in both setting
 states; its mutation is in `support_interface_loop_pattern.json`.
+
+`[TreeSupportInteractions]` compares automatic and explicit brim areas and
+zero/one/two support-wall settings through public slicing. It checks closed
+support loops with an explicit rectilinear base pattern; its mutations are in
+`tree_support_interactions.json`.
 
 `[MultimaterialWipe]` checks direct WipeTower2 purge matrices, wall geometry,
 ramming, cooling, stamping, loading, and delay commands. Independent cooling

@@ -1730,6 +1730,127 @@ TEST_CASE("Print validation gates junction-deviation warnings on firmware suppor
     CHECK(count == (flavor == "marlin2" && deviation > 0.02 ? 1 : 0));
 }
 
+namespace {
+
+struct BeltValidationCase {
+    int         raft_layers;
+    DraftShield draft_shield;
+    const char *expected_error;
+};
+
+TEST_CASE("Print validation rejects belt raft and draft shield combinations",
+          "[Print][ValidationContracts][PrintValidationInteractions]")
+{
+    const auto part = GENERATE(
+        BeltValidationCase{0, dsDisabled, ""},
+        BeltValidationCase{1, dsDisabled, "Raft is not compatible with belt printer mode."},
+        BeltValidationCase{0, dsEnabled, "Draft shield is not compatible with belt printer mode."});
+    CAPTURE(part.raft_layers, int(part.draft_shield));
+
+    auto config = validation_contract_config();
+    config.set_key_value("belt_printer", new ConfigOptionBool(true));
+    config.set_key_value("raft_layers", new ConfigOptionInt(part.raft_layers));
+    config.set_key_value("draft_shield", new ConfigOptionEnum<DraftShield>(part.draft_shield));
+
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    const StringObjectException error = print.validate();
+    CAPTURE(error.string, error.opt_key);
+    CHECK_FALSE(error.is_warning);
+    if (std::string(part.expected_error).empty()) {
+        CHECK(error.string.empty());
+        CHECK(error.opt_key.empty());
+    } else {
+        REQUIRE(error.string == part.expected_error);
+        CHECK(error.opt_key.empty());
+    }
+}
+
+struct SequentialValidationCase {
+    TimelapseType timelapse;
+    bool          wrapping_detection;
+    const char   *expected_error;
+    const char   *expected_opt_key;
+};
+
+TEST_CASE("Print validation rejects sequential feature combinations",
+          "[Print][ValidationContracts][PrintValidationInteractions]")
+{
+    const auto part = GENERATE(
+        SequentialValidationCase{tlTraditional, false, "", ""},
+        SequentialValidationCase{tlSmooth, false,
+            "Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.", ""},
+        SequentialValidationCase{tlTraditional, true,
+            "Clumping detection is not supported when \"by object\" sequence is enabled.",
+            "enable_wrapping_detection"});
+    CAPTURE(int(part.timelapse), part.wrapping_detection);
+
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({ { "print_sequence", "by object" } });
+    config.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(part.timelapse));
+    config.set_key_value("enable_wrapping_detection", new ConfigOptionBool(part.wrapping_detection));
+
+    Print print;
+    Model model;
+    build_cubes(model, print, config, /*n=*/2, /*overlap=*/false);
+    const StringObjectException error = print.validate();
+    CAPTURE(error.string, error.opt_key);
+    REQUIRE(error.string == part.expected_error);
+    CHECK(error.opt_key == part.expected_opt_key);
+    CHECK_FALSE(error.is_warning);
+}
+
+struct WipeTowerValidationCase {
+    bool          ooze_prevention;
+    bool          single_extruder_multi_material;
+    const char   *expected_error;
+};
+
+void build_two_filament_wipe_print(const DynamicPrintConfig &config, Model &model, Print &print)
+{
+    build_cubes(model, print, config, /*n=*/2, /*overlap=*/false);
+    model.objects[1]->config.set_key_value("extruder", new ConfigOptionInt(2));
+    print.apply(model, config);
+    REQUIRE(print.has_wipe_tower());
+}
+
+TEST_CASE("Print validation enforces wipe tower extrusion addressing interactions",
+          "[Print][ValidationContracts][PrintValidationInteractions]")
+{
+    const auto part = GENERATE(
+        WipeTowerValidationCase{false, false, ""},
+        WipeTowerValidationCase{false, true, ""},
+        WipeTowerValidationCase{true, false, ""},
+        WipeTowerValidationCase{true, true,
+            "Ooze prevention is only supported with the wipe tower when 'single_extruder_multi_material' is off."});
+    CAPTURE(part.ooze_prevention, part.single_extruder_multi_material);
+
+    const DynamicPrintConfig config = multifilament_config(2, {
+        { "enable_prime_tower",                 true },
+        { "belt_printer",                       false },
+        { "print_sequence",                     "by layer" },
+        { "timelapse_type",                     "0" },
+        { "enable_wrapping_detection",          false },
+        { "wipe_tower_type",                    "rectangle" },
+        { "use_relative_e_distances",           true },
+        { "layer_change_gcode",                 "G92 E0\n" },
+        { "ooze_prevention",                    part.ooze_prevention },
+        { "single_extruder_multi_material",     part.single_extruder_multi_material },
+    });
+    Model model;
+    Print print;
+    build_two_filament_wipe_print(config, model, print);
+
+    const StringObjectException error = print.validate();
+    CAPTURE(error.string, error.opt_key);
+    REQUIRE(error.string == part.expected_error);
+    CHECK(error.opt_key.empty());
+    CHECK_FALSE(error.is_warning);
+}
+
+} // namespace
+
 namespace print_workflow_contracts {
 namespace {
 

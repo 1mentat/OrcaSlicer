@@ -1032,6 +1032,153 @@ static indexed_triangle_set color_test_quad()
     return quad;
 }
 
+
+// This palette fixture keeps one triangle in a blue island within an 8x8 image and its three
+// edge-neighbours in red. The mesh is intentionally small but connected: no private
+// despeckle helper is called, so the assertions observe only the public bake output.
+static std::shared_ptr<std::vector<unsigned char>> make_despeckle_noise_png()
+{
+    static const unsigned char bytes[] = {
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08,
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x4b, 0x6d, 0x29, 0xdc, 0x00, 0x00, 0x00,
+        0x18, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x80,
+        0x15, 0x61, 0x17, 0x25, 0x4e, 0x02, 0x42, 0x93, 0x22, 0x41, 0xb1, 0xe5,
+        0x00, 0x21, 0x07, 0x3f, 0xc1, 0xb4, 0x44, 0xac, 0x47, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    };
+    return std::make_shared<std::vector<unsigned char>>(std::begin(bytes), std::end(bytes));
+}
+
+static std::shared_ptr<std::vector<unsigned char>> make_despeckle_tie_png()
+{
+    static const unsigned char bytes[] = {
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08,
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x4b, 0x6d, 0x29, 0xdc, 0x00, 0x00, 0x00,
+        0x17, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+        0x41, 0xe8, 0x80, 0x74, 0x09, 0x0c, 0x35, 0xa4, 0x48, 0x50, 0x08, 0x00,
+        0x88, 0xa2, 0x0c, 0xf4, 0xbb, 0x9e, 0xa1, 0x18, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    };
+    return std::make_shared<std::vector<unsigned char>>(std::begin(bytes), std::end(bytes));
+}
+
+static indexed_triangle_set make_despeckle_star()
+{
+    indexed_triangle_set mesh;
+    mesh.vertices = {
+        { 3.2f, 3.2f, 0.f }, // 0: central triangle
+        { 4.0f, 3.2f, 0.f },
+        { 3.2f, 4.0f, 0.f },
+        { 0.f, 0.f, 0.f },    // red neighbour
+        { 7.f, 7.f, 0.f },    // uncoloured neighbour in the tie image
+        { 0.f, 7.f, 0.f },    // uncoloured neighbour in the tie image
+    };
+    mesh.indices = {
+        { 0, 1, 2 }, // blue centre; its three edge neighbours are below
+        { 1, 0, 3 },
+        { 2, 1, 4 },
+        { 0, 2, 5 },
+    };
+    return mesh;
+}
+
+static std::vector<uint8_t> bake_despeckle_fixture(const indexed_triangle_set &mesh,
+                                                    const std::shared_ptr<std::vector<unsigned char>> &image,
+                                                    int passes)
+{
+    TextureDisplacementLayer layer;
+    layer.slot          = 0;
+    layer.image_data    = image;
+    layer.color_enabled = true;
+    layer.depth_mm      = 0.f; // isolate the per-face colour result from height displacement
+    layer.tiling_scale  = 8.f;
+    layer.tile_enabled  = false;
+    layer.projection_method = TextureProjectionMethod::Triplanar;
+
+    TriangleMesh     triangle_mesh(mesh);
+    TriangleSelector selector(triangle_mesh);
+    for (int face = 0; face < int(mesh.indices.size()); ++face)
+        selector.set_facet(face, EnforcerBlockerType::ENFORCER);
+    TextureDisplacementFacetsData facets;
+    facets[0] = selector.serialize();
+
+    TextureColorRequest request;
+    std::vector<uint8_t> colors;
+    request.out_triangle         = &colors;
+    request.despeckle_passes     = passes;
+    request.min_color_region_mm2 = 0.f; // keep this test about the majority filter, not area merging
+    request.quantize             = [](const Vec3f &rgb) {
+        if (rgb.z() > 0.15f && rgb.z() > rgb.x() + 0.02f)
+            return 1; // blue
+        if (rgb.x() > 0.15f && rgb.x() > rgb.z() + 0.02f)
+            return 0; // red
+        return -1; // the tie fixture's black texels are an uncoloured boundary
+    };
+
+    const indexed_triangle_set out =
+        build_texture_displacement(mesh, { layer }, facets, classic_options(), {}, &request);
+    REQUIRE(out.indices == mesh.indices);
+    REQUIRE(colors.size() == mesh.indices.size());
+    return colors;
+}
+
+TEST_CASE("Texture displacement removes an isolated colour speck from a connected bake",
+          "[TextureDisplacement][TextureColorDespeckle]")
+{
+    const indexed_triangle_set mesh = make_despeckle_star();
+    const auto                 image = make_despeckle_noise_png();
+
+    const std::vector<uint8_t> without_filter = bake_despeckle_fixture(mesh, image, 0);
+    const std::vector<uint8_t> with_filter    = bake_despeckle_fixture(mesh, image, 1);
+
+    // Color indices are +1 in the public request output: red=1, blue=2, uncoloured=0.
+    const std::vector<uint8_t> expected_without{ 2, 1, 1, 1 };
+    const std::vector<uint8_t> expected_with{ 1, 1, 1, 1 };
+    REQUIRE(without_filter == expected_without);
+    CHECK(with_filter == expected_with);
+}
+
+TEST_CASE("Texture displacement keeps tied colours and uncoloured boundaries stable",
+          "[TextureDisplacement][TextureColorDespeckle]")
+{
+    const std::vector<uint8_t> colors =
+        bake_despeckle_fixture(make_despeckle_star(), make_despeckle_tie_png(), 1);
+
+    // The centre sees one blue vote and one red vote; black/uncoloured neighbours do not vote.
+    const std::vector<uint8_t> expected{ 2, 1, 0, 0 };
+    REQUIRE(colors == expected);
+}
+
+TEST_CASE("Texture displacement colour despeckling is independent of triangle order",
+          "[TextureDisplacement][TextureColorDespeckle]")
+{
+    const indexed_triangle_set mesh = make_despeckle_star();
+    indexed_triangle_set       reordered = mesh;
+    reordered.indices = { mesh.indices[2], mesh.indices[1], mesh.indices[0], mesh.indices[3] };
+
+    const std::vector<uint8_t> original =
+        bake_despeckle_fixture(mesh, make_despeckle_tie_png(), 1);
+    const std::vector<uint8_t> shuffled =
+        bake_despeckle_fixture(reordered, make_despeckle_tie_png(), 1);
+
+    REQUIRE(original.size() == shuffled.size());
+    for (size_t i = 0; i < shuffled.size(); ++i) {
+        const auto &face = reordered.indices[i];
+        size_t      original_index = mesh.indices.size();
+        for (size_t j = 0; j < mesh.indices.size(); ++j) {
+            const auto &candidate = mesh.indices[j];
+            if (candidate[0] == face[0] && candidate[1] == face[1] && candidate[2] == face[2]) {
+                original_index = j;
+                break;
+            }
+        }
+        REQUIRE(original_index < mesh.indices.size());
+        CHECK(shuffled[i] == original[original_index]);
+    }
+}
+
 TEST_CASE("TextureDisplacement: colour is reported per triangle and only where painted", "[TextureDisplacement]")
 {
     const indexed_triangle_set quad = color_test_quad();

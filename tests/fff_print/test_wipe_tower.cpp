@@ -648,6 +648,199 @@ TowerMetrics process_tower(const DynamicPrintConfig &config)
 
 } // namespace
 
+using ObjectSegmentKey = std::array<long long, 9>;
+
+struct SparsePipelineRun {
+    std::size_t planned_layers = 0;
+    std::size_t sparse_layers = 0;
+    std::size_t transition_events = 0;
+    std::size_t same_tool_blocks = 0;
+    std::set<std::size_t> sparse_layer_indices;
+    std::set<std::size_t> transition_layer_indices;
+    std::size_t tower_extrusion_moves = 0;
+    double tower_extrusion = 0.;
+    std::string tower_gcode;
+    std::vector<ObjectSegmentKey> object_segments;
+};
+
+static long long quantize_object_value(float value)
+{
+    return std::llround(double(value) * 10000.);
+}
+
+// Tower markers are the public export boundary. Object deposition is compared as a sorted,
+// undirected segment multiset per tool and Z layer, so a tower-only option cannot fail the oracle
+// merely by changing an otherwise harmless traversal order.
+static std::vector<ObjectSegmentKey> object_segments(const std::string &gcode,
+                                                     const DynamicPrintConfig &config)
+{
+    const std::string &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start);
+    const std::string &end_tag   = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End);
+    std::vector<ObjectSegmentKey> result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool in_tower = false;
+    int current_tool = -1;
+    reader.parse_buffer(gcode, [&result, &in_tower, &current_tool, &start_tag, &end_tag](GCodeReader &self,
+                                                                                          const GCodeReader::GCodeLine &line) {
+        const std::string_view command = line.cmd();
+        if (command.size() >= 2 && command.front() == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
+            current_tool = std::stoi(std::string(command.substr(1)));
+        const std::string raw = line.raw();
+        if (raw.find(start_tag) != std::string::npos) {
+            in_tower = true;
+            return;
+        }
+        if (raw.find(end_tag) != std::string::npos) {
+            in_tower = false;
+            return;
+        }
+        if (in_tower || !line.extruding(self))
+            return;
+        const float x0 = self.x();
+        const float y0 = self.y();
+        const float z0 = self.z();
+        const float x1 = line.new_X(self);
+        const float y1 = line.new_Y(self);
+        const float z1 = line.new_Z(self);
+        if (std::hypot(double(x1 - x0), double(y1 - y0)) <= 1e-6)
+            return;
+        std::array<long long, 3> start = {quantize_object_value(x0), quantize_object_value(y0), quantize_object_value(z0)};
+        std::array<long long, 3> end = {quantize_object_value(x1), quantize_object_value(y1), quantize_object_value(z1)};
+        if (end < start)
+            std::swap(start, end);
+        result.push_back({static_cast<long long>(current_tool), quantize_object_value(z1), start[0], start[1], start[2],
+                           end[0], end[1], end[2], quantize_object_value(line.dist_E(self))});
+    });
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+// Bottom and top surfaces use filament 2. The middle layers use only filament 1, creating real
+// lower and upper transitions with a sparse same-tool gap between them.
+static DynamicPrintConfig sparse_pipeline_config(bool no_sparse_layers)
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "sparse_infill_filament_id",        1 },
+        { "internal_solid_filament_id",       1 },
+        { "top_surface_filament_id",          2 },
+        { "bottom_surface_filament_id",       2 },
+        { "outer_wall_filament_id",           1 },
+        { "inner_wall_filament_id",           1 },
+        { "enable_prime_tower",               true },
+        { "wipe_tower_x",                     50 },
+        { "wipe_tower_y",                     50 },
+        { "prime_tower_width",                35 },
+        { "wipe_tower_type",                  "type2" },
+        { "prime_volume",                     80 },
+        { "layer_height",                     0.2 },
+        { "initial_layer_print_height",        0.2 },
+        { "top_shell_layers",                 2 },
+        { "bottom_shell_layers",              2 },
+        { "top_shell_thickness",              0.0 },
+        { "bottom_shell_thickness",           0.0 },
+        { "top_surface_density",              "100%" },
+        { "bottom_surface_density",           "100%" },
+        { "sparse_infill_density",            "20%" },
+        { "wall_loops",                       1 },
+        { "skirt_loops",                      0 },
+        { "brim_type",                        "no_brim" },
+        { "raft_layers",                      0 },
+        { "timelapse_type",                   "0" }, // registered tlTraditional
+        { "enable_wrapping_detection",        false },
+        { "wipe_tower_no_sparse_layers",      no_sparse_layers },
+        { "wipe_tower_sparse_layers_combination", false },
+        { "use_relative_e_distances",         true },
+        { "layer_change_gcode",               "G92 E0\n" },
+    });
+    return config;
+}
+
+static SparsePipelineRun run_sparse_pipeline(bool no_sparse_layers)
+{
+    const DynamicPrintConfig config = sparse_pipeline_config(no_sparse_layers);
+    Print print;
+    Model model;
+    init_print({ cube(10, 10, 2) }, print, model, config);
+    // init_print's first normalization sees one role; reapply after regions know both filaments.
+    print.apply(model, config);
+    const auto validation = print.validate();
+    INFO("validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE(print.is_step_done(psWipeTower));
+
+    SparsePipelineRun result;
+    std::size_t layer_index = 0;
+    for (const auto &layer : print.wipe_tower_data().tool_changes) {
+        if (layer.empty()) {
+            ++layer_index;
+            continue;
+        }
+        ++result.planned_layers;
+        if (wipe_tower_layer_is_sparse(layer)) {
+            ++result.sparse_layers;
+            result.sparse_layer_indices.insert(layer_index);
+        }
+        for (const auto &change : layer) {
+            if (change.combined_away)
+                continue;
+            if (change.initial_tool == change.new_tool)
+                ++result.same_tool_blocks;
+            else {
+                ++result.transition_events;
+                result.transition_layer_indices.insert(layer_index);
+            }
+        }
+        ++layer_index;
+    }
+    const std::string output = gcode(print);
+    result.tower_gcode = wipe_tower_regions(output);
+    result.object_segments = object_segments(output, config);
+
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(result.tower_gcode, [&result](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("G1") || !line.has_e() || (!line.has_x() && !line.has_y()))
+            return;
+        const float e = line.e();
+        if (std::isfinite(double(e)) && e > 0.f) {
+            ++result.tower_extrusion_moves;
+            result.tower_extrusion += double(e);
+        }
+    });
+    return result;
+}
+
+TEST_CASE("Skipping sparse wipe-tower layers preserves object output and reduces tower paths",
+          "[WipeTower][WipeTowerSparsePipeline]")
+{
+    const SparsePipelineRun ordinary = run_sparse_pipeline(false);
+    const SparsePipelineRun compacted = run_sparse_pipeline(true);
+
+    REQUIRE(ordinary.planned_layers == compacted.planned_layers);
+    REQUIRE(ordinary.sparse_layers == compacted.sparse_layers);
+    REQUIRE(ordinary.sparse_layers > 0);
+    REQUIRE(ordinary.transition_events > 0);
+    REQUIRE(ordinary.transition_layer_indices.size() >= 2);
+    REQUIRE(ordinary.same_tool_blocks > 0);
+    const auto first_transition = *ordinary.transition_layer_indices.begin();
+    const auto last_transition = *ordinary.transition_layer_indices.rbegin();
+    CHECK(std::any_of(ordinary.sparse_layer_indices.begin(), ordinary.sparse_layer_indices.end(),
+                      [first_transition, last_transition](std::size_t index) {
+                          return first_transition < index && index < last_transition;
+                      }));
+    REQUIRE(ordinary.tower_extrusion_moves > 0);
+    REQUIRE(compacted.tower_extrusion_moves > 0);
+    CHECK(compacted.tower_extrusion_moves < ordinary.tower_extrusion_moves);
+    CHECK(compacted.tower_extrusion < ordinary.tower_extrusion);
+    CHECK_FALSE(ordinary.tower_gcode.empty());
+    CHECK_FALSE(compacted.tower_gcode.empty());
+    REQUIRE(ordinary.object_segments.size() == compacted.object_segments.size());
+    REQUIRE_FALSE(ordinary.object_segments.empty());
+    CHECK(compacted.object_segments == ordinary.object_segments);
+}
+
 TEST_CASE("A real two-filament print emits coherent wipe-tower transitions", "[WipeTower][WipeTowerVariance]")
 {
     const TowerMetrics metrics = process_tower(tower_config());

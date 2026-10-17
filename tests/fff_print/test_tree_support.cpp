@@ -18,6 +18,9 @@
 #include "libslic3r/TriangleMesh.hpp"
 
 #include "test_helpers.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Polyline.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Print.hpp"
@@ -367,4 +370,144 @@ TEST_CASE("Tree support toolpaths do not depend on the MST tie order", "[TreeSup
         { "tree_support_branch_angle",    40 },
         { "support_line_width",           0.4 },
     });
+}
+namespace tree_support_interactions_contracts {
+
+struct TreeSupportInteractionEvidence {
+    size_t nonempty_layers = 0;
+    size_t path_count = 0;
+    size_t closed_nonfirst_loop_count = 0;
+    size_t first_layer_path_count = 0;
+    double first_layer_area_mm2 = 0.0;
+    double first_layer_length_mm = 0.0;
+    double total_length_mm = 0.0;
+    bool finite = true;
+};
+
+static bool is_closed_loop(const ExtrusionLoop &loop)
+{
+    if (loop.paths.empty())
+        return false;
+    for (const ExtrusionPath &path : loop.paths)
+        if (path.polyline.points.size() < 2)
+            return false;
+    for (size_t i = 1; i < loop.paths.size(); ++i)
+        if (loop.paths[i - 1].last_point3() != loop.paths[i].first_point3())
+            return false;
+    return loop.paths.back().last_point3() == loop.paths.front().first_point3();
+}
+
+static size_t closed_loop_count(const ExtrusionEntity &entity)
+{
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+        size_t count = 0;
+        for (const ExtrusionEntity *child : collection->entities)
+            if (child != nullptr)
+                count += closed_loop_count(*child);
+        return count;
+    }
+    if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
+        if (is_closed_loop(*loop))
+            return 1;
+    }
+    return 0;
+}
+
+static double support_area_mm2(const ExPolygons &polygons)
+{
+    double area = 0.0;
+    for (const ExPolygon &polygon : polygons)
+        area += std::abs(polygon.area());
+    return unscale<double>(unscale<double>(area));
+}
+
+static TreeSupportInteractionEvidence observe_tree_support(const TriangleMesh &mesh, bool auto_brim, int wall_count)
+{
+    Print print;
+    slice_with_tree_support(mesh, print, "tree_slim", 30, 0, 0, {
+        { "printable_area",                "-100x-100,200x-100,200x200,-100x200" },
+        { "initial_layer_print_height",    0.2 },
+        { "tree_support_auto_brim",        auto_brim },
+        { "tree_support_brim_width",       16.0 },
+        { "tree_support_wall_count",       wall_count },
+        { "support_base_pattern",          "rectilinear" },
+        { "support_critical_regions_only",  false },
+        { "support_remove_small_overhang",  0 },
+        { "support_interface_top_layers",  0 },
+        { "support_interface_bottom_layers", 0 },
+        { "support_threshold_angle",        30 },
+        { "support_line_width",              0.4 },
+        { "line_width",                      0.4 },
+        { "nozzle_diameter",                 "0.4" },
+        { "raft_layers",                     0 },
+    });
+    REQUIRE(print.objects().size() == 1);
+
+    TreeSupportInteractionEvidence result;
+    const PrintObject &object = *print.objects().front();
+    for (const SupportLayer *layer : object.support_layers()) {
+        size_t layer_path_count = 0;
+        double layer_length_mm = 0.0;
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            ++layer_path_count;
+            const double length_mm = unscale<double>(path.length());
+            result.finite = result.finite && std::isfinite(length_mm) && length_mm > 0.0;
+            layer_length_mm += length_mm;
+        });
+        if (layer_path_count == 0)
+            continue;
+
+        ++result.nonempty_layers;
+        result.path_count += layer_path_count;
+        result.total_length_mm += layer_length_mm;
+        if (result.first_layer_path_count == 0) {
+            result.first_layer_path_count = layer_path_count;
+            result.first_layer_area_mm2 = support_area_mm2(layer->support_islands);
+            result.first_layer_length_mm = layer_length_mm;
+        } else {
+            for (const ExtrusionEntity *entity : layer->support_fills.entities)
+                if (entity != nullptr)
+                    result.closed_nonfirst_loop_count += closed_loop_count(*entity);
+        }
+    }
+    result.finite = result.finite && std::isfinite(result.first_layer_area_mm2) &&
+        std::isfinite(result.first_layer_length_mm) && std::isfinite(result.total_length_mm);
+    return result;
+}
+
+static TriangleMesh interaction_fixture()
+{
+    return scaled_z(TestMesh::overhang, 1.0f, 0.5f);
+}
+
+} // namespace tree_support_interactions_contracts
+
+TEST_CASE("Tree support auto brim and wall loops change public support geometry",
+          "[TreeSupport][TreeSupportInteractions]")
+{
+    using namespace tree_support_interactions_contracts;
+    const TriangleMesh mesh = interaction_fixture();
+    const TreeSupportInteractionEvidence auto_brim = observe_tree_support(mesh, true, 0);
+    const TreeSupportInteractionEvidence explicit_brim = observe_tree_support(mesh, false, 0);
+    const TreeSupportInteractionEvidence one_wall = observe_tree_support(mesh, true, 1);
+    const TreeSupportInteractionEvidence two_walls = observe_tree_support(mesh, true, 2);
+
+    for (const TreeSupportInteractionEvidence &evidence : { auto_brim, explicit_brim, one_wall, two_walls }) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.nonempty_layers > 0);
+        REQUIRE(evidence.first_layer_path_count > 0);
+        REQUIRE(evidence.first_layer_area_mm2 > 0.0);
+        REQUIRE(evidence.first_layer_length_mm > 0.0);
+        REQUIRE(evidence.path_count > 0);
+        REQUIRE(evidence.total_length_mm > 0.0);
+    }
+
+    // Auto-brim is bounded by MAX_BRANCH_RADIUS_FIRST_LAYER (12 mm), while the explicit
+    // 16 mm setting is applied directly by draw_circles() on the first support layer.
+    REQUIRE(explicit_brim.first_layer_area_mm2 > auto_brim.first_layer_area_mm2 * 1.01);
+    // wall_count=2 reaches the second _make_loops() offset and therefore emits more support
+    // loops than the explicit one-wall mode on this same public fixture. The zero/auto row is
+    // retained as a finite positive control; zero explicitly permits infill-only output.
+    REQUIRE(one_wall.closed_nonfirst_loop_count > 0);
+    REQUIRE(two_walls.closed_nonfirst_loop_count > one_wall.closed_nonfirst_loop_count);
 }
