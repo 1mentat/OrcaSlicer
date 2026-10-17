@@ -3120,3 +3120,104 @@ TEST_CASE("Belt supports reach the belt under a leading overhang", "[Print][belt
         CHECK(lowest->print_z - floor_under_lowest > -0.2 - EPSILON);
     }
 }
+
+TEST_CASE("Compacted prime tower clearance aggregates pre-slice offenders", "[Print][WipeTower][CompactedTower]")
+{
+    const int rod_band_offenders = GENERATE(0, 1, 2);
+    const bool check_enabled     = GENERATE(false, true);
+    INFO("rod-band offenders: " << rod_band_offenders);
+    INFO("no sparse clearance check: " << check_enabled);
+
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "enable_prime_tower",                 true  },
+        { "wipe_tower_no_sparse_layers",        check_enabled },
+        { "wipe_tower_sparse_layers_combination", false },
+        { "timelapse_type",                     0     },
+        { "enable_wrapping_detection",           false },
+        { "belt_printer",                       false },
+        { "spiral_mode",                        false },
+        { "z_hop",                              0.0   },
+        { "print_sequence",                     "by layer" },
+        { "printable_area",                     "0x0,500x0,500x500,0x500" },
+        { "wipe_tower_wall_type",               "rectangle" },
+        { "prime_tower_width",                  35.0  },
+        { "prime_volume",                       45.0  },
+        { "prime_tower_brim_width",             0.0   },
+        { "wipe_tower_x",                       0.0   },
+        { "wipe_tower_y",                       0.0   },
+        { "wipe_tower_rotation_angle",          0.0   },
+        { "extruder_clearance_dist_to_rod",     40.0  },
+        { "extruder_clearance_height_to_rod",   25.0  },
+        { "extruder_clearance_height_to_lid",   120.0 },
+        { "extruder_clearance_radius",          40.0  },
+        { "nozzle_height",                      5.0   },
+        { "layer_height",                       0.2   },
+        { "initial_layer_print_height",         0.2   },
+    });
+
+    Model model;
+    ObjectID first_object_id;
+    // The 30 mm parts exceed the 25 mm rod limit but fit below the 120 mm lid.
+    // Their X positions clear the 35 mm tower and 40 mm head radius; only Y
+    // determines whether each part enters the rod's band across the bed.
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        if (i == 0)
+            first_object_id = object->id();
+        object->add_volume(make_cube(10.0, 10.0, 30.0));
+        object->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(i + 1));
+        ModelInstance *instance = object->add_instance();
+        const bool in_rod_band = i < rod_band_offenders;
+        instance->set_offset(Vec3d(200.0 + i * 100.0, in_rod_band ? 0.0 : 300.0, 0.0));
+        object->ensure_on_bed();
+    }
+
+    Print print;
+    print.apply(model, config);
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.extruders().size() == 2);
+    REQUIRE(print.has_wipe_tower());
+    REQUIRE(print.wipe_tower_data(2).width > 0.0f);
+    REQUIRE(print.wipe_tower_data(2).depth > 0.0f);
+    const ModelInstance *first_instance = nullptr;
+    for (const PrintObject *object : print.objects()) {
+        REQUIRE(unscaled<double>(object->max_z()) > 25.0);
+        REQUIRE(unscaled<double>(object->max_z()) < 120.0);
+        REQUIRE(object->model_object()->instances.size() == 1);
+        if (object->model_object()->id() == first_object_id)
+            first_instance = object->model_object()->instances.front();
+    }
+    REQUIRE(first_instance != nullptr);
+
+    Polygons collision_polygons;
+    std::vector<std::pair<Polygon, float>> height_polygons;
+    const StringObjectException error = Print::compacted_wipe_tower_clearance_valid(
+        print, &collision_polygons, &height_polygons);
+    const int expected_offenders = check_enabled ? rod_band_offenders : 0;
+
+    if (expected_offenders == 0) {
+        CHECK(error.string.empty());
+        CHECK(error.object == nullptr);
+        CHECK(collision_polygons.empty());
+        CHECK(height_polygons.empty());
+        return;
+    }
+
+    REQUIRE_FALSE(error.string.empty());
+    REQUIRE(height_polygons.size() == size_t(expected_offenders));
+    CHECK(collision_polygons.size() > height_polygons.size());
+    if (expected_offenders == 1)
+        CHECK(error.object == first_instance);
+    else
+        CHECK(error.object == nullptr);
+
+    for (const auto &entry : height_polygons) {
+        CHECK_THAT(entry.second, Catch::Matchers::WithinAbs(25.0, 1e-6));
+        REQUIRE(entry.first.points.size() >= 3);
+        CHECK(std::abs(entry.first.area()) > 0);
+    }
+    for (const Polygon &polygon : collision_polygons) {
+        REQUIRE(polygon.points.size() >= 3);
+        CHECK(std::abs(polygon.area()) > 0);
+    }
+}

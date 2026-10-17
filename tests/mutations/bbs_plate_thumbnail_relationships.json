@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Selected-plate thumbnail relationship targets and their generated full-size and small PNG members.",
+  "mutants": [
+    {
+      "id": "bbs-selected-plate-relationship-branch-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "            if (export_plate_idx < 0) {",
+      "new": "            if (export_plate_idx >= 0) {",
+      "description": "A selected plate must use the selected-plate relationship branch instead of the default plate-one fallback.",
+      "test_filter": "BbsPlateRelationships"
+    },
+    {
+      "id": "bbs-selected-plate-full-target-zero-based",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                std::string thumbnail_file_str = (boost::format(\"Metadata/plate_%1%.png\") % (export_plate_idx + 1)).str();\n                stream << \" <Relationship Target=\\\"/\" << xml_escape(thumbnail_file_str)\n                    << \"\\\" Id=\\\"rel-2\\\" Type=\\\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail\\\"/>\\n\";",
+      "new": "                std::string thumbnail_file_str = (boost::format(\"Metadata/plate_%1%.png\") % export_plate_idx).str();\n                stream << \" <Relationship Target=\\\"/\" << xml_escape(thumbnail_file_str)\n                    << \"\\\" Id=\\\"rel-2\\\" Type=\\\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail\\\"/>\\n\";",
+      "description": "The selected plate index is zero-based internally but archive plate names are one-based; rel-2 must target plate_2 for export_plate_idx 1.",
+      "test_filter": "BbsPlateRelationships"
+    },
+    {
+      "id": "bbs-selected-plate-small-target-off-by-one",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                thumbnail_file_str = (boost::format(\"Metadata/plate_%1%_small.png\") % (export_plate_idx + 1)).str();",
+      "new": "                thumbnail_file_str = (boost::format(\"Metadata/plate_%1%_small.png\") % (export_plate_idx + 2)).str();",
+      "description": "The cover-thumbnail-small relationship must point to the selected plate's generated small member, not the next nonexistent plate.",
+      "test_filter": "BbsPlateRelationships"
+    }
+  ]
+}

@@ -280,6 +280,9 @@ division, rejected depth, and untiled bounds. Its mutations are in
 `[BbsAuxiliaryExport]` checks root and nested model auxiliary payloads, archive
 path mapping, root containment, and the `SkipAuxiliary` disabled control.
 Its mutations are in `bbs_auxiliary_export.json`.
+`[BbsPlateRelationships]` checks selected-plate thumbnail relationships and
+decodes the referenced full-size and small PNG members. Its mutations are in
+`bbs_plate_thumbnail_relationships.json`.
 
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
 placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`
@@ -327,6 +330,10 @@ G-code. These direct-consumer checks do not establish complete Print pipeline
 coverage; joint variations and numeric-domain gaps remain explicit in the
 settings map. `[WipeTowerBroad]` covers tower estimators, sparse-layer folding,
 role-specific filament selection, and object/support wiping eligibility.
+`[CompactedTower]` checks pre-slice collision diagnostics for zero, one, and two
+objects in the rod's clearance band, plus the disabled-setting control. It
+checks the reported height and selected object without slicing; its mutations
+are in `compacted_tower_clearance.json`.
 
 `[ConfigContracts]` checks typed values, grouped serialization, ownership,
 nullable options, equality and difference reports, and environment export with

@@ -53,6 +53,8 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/xml_parser.hpp>
 #include <algorithm>
 #include <functional>
 
@@ -5870,3 +5872,92 @@ TEST_CASE("BBS 3MF preserves source-volume provenance and path policy",
 }
 
 } // namespace bbs_source_metadata_contracts
+
+namespace bbs_3mf_metadata_contracts {
+
+using namespace Slic3r;
+
+TEST_CASE("BBS selected plate relationships target its generated thumbnails", "[3MF][Bbs3mfMetadata][BbsPlateRelationships]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    ScopedTemporaryDir backup("orca_bbs_plate_relationships");
+    Model model = archive_variant_contracts::make_cube_model();
+    model.add_object(*model.objects.front());
+    REQUIRE(model.objects.size() == 2);
+    REQUIRE(model.objects.back()->instances.size() == 1);
+    model.set_backup_path(backup.string());
+    ScopeGuard detach_backup([&model] { model.set_backup_path("detach"); });
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate0;
+    PlateData plate1;
+    plate0.config = config;
+    plate1.config = config;
+    plate0.plate_index = 0;
+    plate1.plate_index = 1;
+    plate0.objects_and_instances = {{0, 0}};
+    plate1.objects_and_instances = {{1, 0}};
+    PlateDataPtrs plates{&plate0, &plate1};
+
+    ThumbnailData thumbnail0;
+    ThumbnailData thumbnail1;
+    thumbnail0.set(PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT);
+    thumbnail1.set(PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT);
+    std::fill(thumbnail0.pixels.begin(), thumbnail0.pixels.end(), 0x11);
+    std::fill(thumbnail1.pixels.begin(), thumbnail1.pixels.end(), 0x22);
+    REQUIRE(thumbnail0.is_valid());
+    REQUIRE(thumbnail1.is_valid());
+
+    StoreParams params;
+    params.path = archive.string();
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.thumbnail_data = {&thumbnail0, &thumbnail1};
+    params.export_plate_idx = 1;
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    std::string relationships;
+    REQUIRE(read_3mf_entry(archive.string(), relationships, "_rels/.rels"));
+    std::stringstream relationship_stream(relationships);
+    boost::property_tree::ptree relationship_tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(relationship_stream, relationship_tree));
+    const auto &relationship_root = relationship_tree.get_child("Relationships");
+    const auto has_relationship = [&](const std::string &type, const std::string &target) {
+        return std::any_of(relationship_root.begin(), relationship_root.end(),
+                           [&](const boost::property_tree::ptree::value_type &child) {
+                               if (child.first != "Relationship")
+                                   return false;
+                               const auto &attributes = child.second.get_child("<xmlattr>");
+                               return attributes.get<std::string>("Type") == type &&
+                                      attributes.get<std::string>("Target") == target;
+                           });
+    };
+    const std::string thumbnail_type = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail";
+    const std::string middle_type = "http://schemas.bambulab.com/package/2021/cover-thumbnail-middle";
+    const std::string small_type = "http://schemas.bambulab.com/package/2021/cover-thumbnail-small";
+    CHECK(has_relationship(thumbnail_type, "/Metadata/plate_2.png"));
+    CHECK(has_relationship(middle_type, "/Metadata/plate_2.png"));
+    CHECK(has_relationship(small_type, "/Metadata/plate_2_small.png"));
+    CHECK_FALSE(has_relationship(thumbnail_type, "/Metadata/plate_1.png"));
+    CHECK_FALSE(has_relationship(middle_type, "/Metadata/plate_1.png"));
+    CHECK_FALSE(has_relationship(small_type, "/Metadata/plate_1_small.png"));
+
+    const auto check_thumbnail = [&](const std::string &entry, unsigned char expected_channel) {
+        const std::string decoded = png_entry(archive.string(), entry,
+                                               PLATE_THUMBNAIL_SMALL_WIDTH,
+                                               PLATE_THUMBNAIL_SMALL_HEIGHT);
+        REQUIRE(decoded.size() == size_t(PLATE_THUMBNAIL_SMALL_WIDTH) * PLATE_THUMBNAIL_SMALL_HEIGHT * 4);
+        CHECK(std::all_of(decoded.begin(), decoded.end(), [&](char value) {
+            return static_cast<unsigned char>(value) == expected_channel;
+        }));
+    };
+
+    check_thumbnail("Metadata/plate_1.png", 0x11);
+    check_thumbnail("Metadata/plate_1_small.png", 0x11);
+    check_thumbnail("Metadata/plate_2.png", 0x22);
+    check_thumbnail("Metadata/plate_2_small.png", 0x22);
+}
+
+} // namespace bbs_3mf_metadata_contracts
