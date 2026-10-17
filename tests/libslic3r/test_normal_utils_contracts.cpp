@@ -17,7 +17,7 @@ using Catch::Matchers::WithinAbs;
 
 namespace {
 
-constexpr float PI = 3.14159265358979323846f;
+constexpr float kPi = 3.14159265358979323846f;
 
 void check_vec(const Vec3f &actual, const Vec3f &expected, float tolerance = 1e-5f)
 {
@@ -74,9 +74,9 @@ TEST_CASE("Triangle normals preserve orientation, angles, and rigid-scale invari
     REQUIRE(triangle_normals.size() == 1);
     check_vec(triangle_normals.front(), expected_normal);
 
-    CHECK_THAT(NormalUtils::indice_angle(0, indices, base.vertices), WithinAbs(PI / 2.f, 1e-5f));
-    CHECK_THAT(NormalUtils::indice_angle(1, indices, base.vertices), WithinAbs(PI / 4.f, 1e-5f));
-    CHECK_THAT(NormalUtils::indice_angle(2, indices, base.vertices), WithinAbs(PI / 4.f, 1e-5f));
+    CHECK_THAT(NormalUtils::indice_angle(0, indices, base.vertices), WithinAbs(kPi / 2.f, 1e-5f));
+    CHECK_THAT(NormalUtils::indice_angle(1, indices, base.vertices), WithinAbs(kPi / 4.f, 1e-5f));
+    CHECK_THAT(NormalUtils::indice_angle(2, indices, base.vertices), WithinAbs(kPi / 4.f, 1e-5f));
 
     indexed_triangle_set transformed = base;
     for (stl_vertex &vertex : transformed.vertices)
@@ -93,9 +93,9 @@ TEST_CASE("Angle-weighted normals honor noncontiguous face indices", "[NormalUti
 
     // This is an explicit index-map regression: local index 2 names global
     // vertex 0, whose actual angle on the YZ face is 60 degrees.
-    CHECK_THAT(NormalUtils::indice_angle(0, second_face, fan.vertices), WithinAbs(PI / 3.f, 1e-5f));
-    CHECK_THAT(NormalUtils::indice_angle(1, second_face, fan.vertices), WithinAbs(PI / 3.f, 1e-5f));
-    CHECK_THAT(NormalUtils::indice_angle(2, second_face, fan.vertices), WithinAbs(PI / 3.f, 1e-5f));
+    CHECK_THAT(NormalUtils::indice_angle(0, second_face, fan.vertices), WithinAbs(kPi / 3.f, 1e-5f));
+    CHECK_THAT(NormalUtils::indice_angle(1, second_face, fan.vertices), WithinAbs(kPi / 3.f, 1e-5f));
+    CHECK_THAT(NormalUtils::indice_angle(2, second_face, fan.vertices), WithinAbs(kPi / 3.f, 1e-5f));
 
     const NormalUtils::Normals average = NormalUtils::create_normals(fan, NormalUtils::VertexNormalType::AverageNeighbor);
     const NormalUtils::Normals angle = NormalUtils::create_normals(fan, NormalUtils::VertexNormalType::AngleWeighted);
