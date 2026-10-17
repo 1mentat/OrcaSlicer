@@ -452,3 +452,127 @@ TEST_CASE("Translating a bent polyline far from the origin preserves its partiti
         }
     }
 }
+
+namespace {
+Point3 p3(double x, double y, double z)
+{
+    return Point3::new_scale(x, y, z);
+}
+
+void check_point3(const Point3& actual, double x, double y, double z)
+{
+    CHECK_THAT(unscaled(actual.x()), WithinAbs(x, 0.002));
+    CHECK_THAT(unscaled(actual.y()), WithinAbs(y, 0.002));
+    CHECK_THAT(unscaled(actual.z()), WithinAbs(z, 0.002));
+}
+
+Polyline3 fitted_polyline3()
+{
+    Polyline3 path{Points3{p3(0., 0., 1.), p3(2., 0., 2.), p3(4., 0., 4.), p3(6., 0., 7.)}};
+    path.fitting_result.push_back({0, path.points.size() - 1, EMovePathType::Linear_move, ArcSegment()});
+    return path;
+}
+} // namespace
+
+TEST_CASE("Polyline3 clipping preserves nonzero Z and terminal distance", "[Polyline3][PolylineOperations][Polyline3Operations]")
+{
+    const Polyline3 source{Points3{p3(0., 0., 1.), p3(10., 0., 3.), p3(20., 0., 9.)}};
+    const Points3 original_points = source.points;
+    const double clip_distance = 2.5;
+    Polyline3 clipped = source;
+
+    clipped.clip_end(scaled(clip_distance));
+
+    const double last_segment = std::sqrt(10. * 10. + 6. * 6.);
+    const double fraction = (last_segment - clip_distance) / last_segment;
+    check_point3(clipped.last_point(), 10. + 10. * fraction, 0., 3. + 6. * fraction);
+    CHECK_THAT(unscaled(source.length() - clipped.length()), WithinAbs(clip_distance, 0.002));
+    CHECK(clipped.points.size() == 3);
+    CHECK(source.points == original_points);
+}
+
+TEST_CASE("Polyline3 length splitting conserves a three dimensional endpoint", "[Polyline3][PolylineOperations][Polyline3Operations]")
+{
+    const Polyline3 source{Points3{p3(0., 0., 1.), p3(3., 4., 13.)}};
+    const Points3 original_points = source.points;
+    Polyline3 before, after;
+
+    REQUIRE(source.split_at_length(scaled(5.), &before, &after));
+
+    const double fraction = 5. / 13.;
+    check_point3(before.last_point(), 3. * fraction, 4. * fraction, 1. + 12. * fraction);
+    CHECK(before.last_point() == after.first_point());
+    CHECK_THAT(unscaled(before.length()), WithinAbs(5., 0.002));
+    CHECK_THAT(unscaled(after.length()), WithinAbs(8., 0.002));
+    CHECK_THAT(unscaled(before.length() + after.length()), WithinAbs(unscaled(source.length()), 0.002));
+    CHECK(source.points == original_points);
+}
+
+TEST_CASE("Polyline3 index splitting and reversal rebase linear fitting metadata", "[Polyline3][PolylineOperations][Polyline3Operations]")
+{
+    const Polyline3 source = fitted_polyline3();
+    Polyline3 before, after;
+    REQUIRE(source.split_at_index(2, &before, &after));
+
+    CHECK(before.points == Points3{p3(0., 0., 1.), p3(2., 0., 2.), p3(4., 0., 4.)});
+    CHECK(after.points == Points3{p3(4., 0., 4.), p3(6., 0., 7.)});
+    REQUIRE(before.fitting_result.size() == 1);
+    REQUIRE(after.fitting_result.size() == 1);
+    CHECK(before.fitting_result[0].path_type == EMovePathType::Linear_move);
+    CHECK(after.fitting_result[0].path_type == EMovePathType::Linear_move);
+    CHECK(before.fitting_result[0].start_point_index == 0);
+    CHECK(before.fitting_result[0].end_point_index == 2);
+    CHECK(after.fitting_result[0].start_point_index == 0);
+    CHECK(after.fitting_result[0].end_point_index == 1);
+    CHECK(before.last_point() == after.first_point());
+    CHECK(source.points == fitted_polyline3().points);
+
+    Polyline3 reversed = source;
+    // Unequal spans make the metadata ordering observable, even for linear moves.
+    reversed.fitting_result.clear();
+    reversed.fitting_result.push_back({0, 1, EMovePathType::Linear_move, ArcSegment()});
+    reversed.fitting_result.push_back({1, 3, EMovePathType::Linear_move, ArcSegment()});
+    reversed.reverse();
+    CHECK(reversed.first_point() == source.last_point());
+    CHECK(reversed.last_point() == source.first_point());
+    REQUIRE(reversed.fitting_result.size() == 2);
+    CHECK(reversed.fitting_result[0].start_point_index == 0);
+    CHECK(reversed.fitting_result[0].end_point_index == 2);
+    CHECK(reversed.fitting_result[1].start_point_index == 2);
+    CHECK(reversed.fitting_result[1].end_point_index == 3);
+    reversed.reverse();
+    CHECK(reversed.points == source.points);
+    CHECK(reversed.fitting_result[0].start_point_index == 0);
+    CHECK(reversed.fitting_result[0].end_point_index == 1);
+    CHECK(reversed.fitting_result[1].start_point_index == 1);
+    CHECK(reversed.fitting_result[1].end_point_index == 3);
+}
+
+TEST_CASE("Polyline3 appending fitted paths preserves source Z and fitting offsets", "[Polyline3][PolylineOperations][Polyline3Operations]")
+{
+    Polyline3 destination{Points3{p3(0., 0., 1.), p3(2., 0., 2.)}};
+    destination.fitting_result.push_back({0, 1, EMovePathType::Linear_move, ArcSegment()});
+    Polyline3 source{Points3{p3(2., 0., 2.), p3(4., 0., 4.), p3(6., 0., 7.)}};
+    source.fitting_result.push_back({0, 2, EMovePathType::Linear_move, ArcSegment()});
+    const auto source_points = source.points;
+    const auto source_fitting = source.fitting_result;
+    const size_t destination_size = destination.points.size();
+
+    destination.append(source);
+
+    CHECK(destination.points == Points3{p3(0., 0., 1.), p3(2., 0., 2.), p3(4., 0., 4.), p3(6., 0., 7.)});
+    REQUIRE(destination.fitting_result.size() == 2);
+    CHECK(destination.fitting_result[0].start_point_index == 0);
+    CHECK(destination.fitting_result[0].end_point_index == destination_size - 1);
+    CHECK(destination.fitting_result[1].start_point_index == destination_size - 1);
+    CHECK(destination.fitting_result[1].end_point_index == destination.points.size() - 1);
+    CHECK(destination.fitting_result[0].path_type == EMovePathType::Linear_move);
+    CHECK(destination.fitting_result[1].path_type == EMovePathType::Linear_move);
+    CHECK(source.points == source_points);
+    REQUIRE(source.fitting_result.size() == source_fitting.size());
+    for (size_t i = 0; i < source.fitting_result.size(); ++i) {
+        CHECK(source.fitting_result[i].start_point_index == source_fitting[i].start_point_index);
+        CHECK(source.fitting_result[i].end_point_index == source_fitting[i].end_point_index);
+        CHECK(source.fitting_result[i].path_type == source_fitting[i].path_type);
+    }
+}

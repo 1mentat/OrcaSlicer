@@ -1341,6 +1341,46 @@ TEST_CASE("A completed extruder with a later idle window emits cooling only", "[
     CHECK(processed.output.find("M633") == std::string::npos);
 }
 
+TEST_CASE("Preheating relocates a back-solved heat command from a skippable move interval",
+          "[GCodeProcessor][GCodeProcessorReachable][GcpPreheat][GCodeProcessorSkippable]")
+{
+    const std::string gcode =
+        "; MACHINE_START_GCODE_END\n"
+        "M83\nT0\nG1 X100 Y0 Z0.2 E1 F60\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "; CP_TOOLCHANGE_WIPE CT0 FL0\nT1\n"
+        "; SKIPPABLE_START\n; SKIPTYPE: timelapse\nG4 S30\n"
+        "G1 X101 Y0 E0.2 F6000\n; SKIPPABLE_END\n"
+        "G1 X125 Y0 E1 F60\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "; MACHINE_END_GCODE_START\n";
+
+    const auto processed = process_post(gcode, preheat_config(), true);
+    INFO("preheat/skippable output: " << processed.output);
+
+    const size_t skip_start = processed.output.find("; SKIPPABLE_START");
+    const size_t skip_end = processed.output.find("; SKIPPABLE_END");
+    const size_t heat = processed.output.find("M104 T1 S220 N0 ;Multi extruder pre heating");
+    const size_t map_start = processed.output.find("M632 S1 W");
+    const size_t map_end = processed.output.find("M633\n");
+    const size_t in_skip_move = processed.output.find("G1 X101 Y0 E0.2 F6000");
+    const size_t post_skip_move = processed.output.find("G1 X125 Y0 E1 F60");
+    REQUIRE(skip_start != std::string::npos);
+    REQUIRE(skip_end != std::string::npos);
+    REQUIRE(heat != std::string::npos);
+    REQUIRE(map_start != std::string::npos);
+    REQUIRE(map_end != std::string::npos);
+    REQUIRE(in_skip_move != std::string::npos);
+    REQUIRE(post_skip_move != std::string::npos);
+    CHECK(heat < skip_start);
+    CHECK(map_start < skip_start);
+    CHECK(map_end < skip_start);
+    CHECK(skip_start < in_skip_move);
+    CHECK(in_skip_move < skip_end);
+    CHECK(skip_end < post_skip_move);
+    REQUIRE(processed.result.moves.size() > 2);
+}
+
 namespace gcp_build_volume_contracts {
 
 namespace {

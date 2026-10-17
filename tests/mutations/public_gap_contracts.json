@@ -1,0 +1,289 @@
+{
+  "schema_version": 1,
+  "description": "Behavioral mutations for public geometry, model, migration, filament validation, tool ordering, wipe-tower and G-code contracts. Mutation results are recorded separately from this inventory.",
+  "mutants": [
+    {
+      "id": "polyline3-split-length-loses-interpolated-endpoint",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "            Polyline3 temp;\n            this->split_at_index(line_idx, p1, &temp);\n            p1->append(p);\n            this->split_at_index(line_idx + 1, &temp, p2);",
+      "new": "            Polyline3 temp;\n            this->split_at_index(line_idx, p1, &temp);\n            p1->append(this->first_point());\n            this->split_at_index(line_idx + 1, &temp, p2);",
+      "expected_matches": 1,
+      "test_filter": "Polyline3Operations",
+      "description": "The non-vertex length split must append the analytically interpolated 3D point to both pieces; the test checks the shared endpoint, both lengths, and source immutability."
+    },
+    {
+      "id": "polyline3-append-fitting-offset-dropped",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "            size_t old_size     = this->fitting_result.size();\n            size_t index_offset = this->fitting_result.back().end_point_index;",
+      "new": "            size_t old_size     = this->fitting_result.size();\n            size_t index_offset = 0;",
+      "expected_matches": 1,
+      "test_filter": "Polyline3Operations",
+      "description": "Appended source fitting records must start at the destination/source shared vertex index; the test requires the source linear record to be rebased from 0..2 to 1..3."
+    },
+    {
+      "id": "polyline3-reverse-fitting-record-order-dropped",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "            fitting_result[i].end_point_index   = MultiPoint3::size() - 1 - fitting_result[i].end_point_index;\n            if (fitting_result[i].is_arc_move())\n                fitting_result[i].reverse_arc_path();\n        }\n        std::reverse(this->fitting_result.begin(), this->fitting_result.end());",
+      "new": "            fitting_result[i].end_point_index   = MultiPoint3::size() - 1 - fitting_result[i].end_point_index;\n            if (fitting_result[i].is_arc_move())\n                fitting_result[i].reverse_arc_path();\n        }\n        /* keep fitting records in their original order */",
+      "expected_matches": 1,
+      "test_filter": "Polyline3Operations",
+      "description": "Reversing a fitted path must reverse metadata record order after rebasing indices; the test checks the reversed record range and a second reversal restores the original metadata."
+    },
+    {
+      "id": "polyline3-clip-distance-halved-before-interpolation",
+      "path": "src/libslic3r/Polyline.cpp",
+      "old": "        Vec3d last_point = this->last_point().cast<double>();\n        this->points.pop_back();\n        remove_after_index--;\n        if (this->points.empty()) {\n            this->fitting_result.clear();\n            return;\n        }\n        Vec3d  v    = this->last_point().cast<double>() - last_point;\n        double lsqr = v.squaredNorm();\n        if (lsqr > distance * distance) {\n            this->points.emplace_back((last_point + v * (distance / sqrt(lsqr))).cast<coord_t>());",
+      "new": "        Vec3d last_point = this->last_point().cast<double>();\n        this->points.pop_back();\n        remove_after_index--;\n        if (this->points.empty()) {\n            this->fitting_result.clear();\n            return;\n        }\n        Vec3d  v    = this->last_point().cast<double>() - last_point;\n        double lsqr = v.squaredNorm();\n        if (lsqr > distance * distance) {\n            this->points.emplace_back((last_point + v * (0.5 * distance / sqrt(lsqr))).cast<coord_t>());",
+      "expected_matches": 1,
+      "test_filter": "Polyline3Operations",
+      "description": "Clipping must remove the requested terminal 3D distance, including the Z component; the test checks the analytic endpoint and measured length delta."
+    },
+    {
+      "id": "multipoint-epsilon-boundary-inclusive",
+      "path": "src/libslic3r/MultiPoint.cpp",
+      "old": "    return dist2_min < eps2 ? idx_min : -1;",
+      "new": "    return dist2_min <= eps2 ? idx_min : -1;",
+      "expected_matches": 1,
+      "test_filter": "MultiPointGap",
+      "description": "The public tolerance lookup must reject an exact-distance boundary; the candidate checks strict-boundary behavior."
+    },
+    {
+      "id": "multipoint-duplicate-neighbor-inverted",
+      "path": "src/libslic3r/MultiPoint.cpp",
+      "old": "        if (points[i-1] == points[i])",
+      "new": "        if (points[i-1] != points[i])",
+      "expected_matches": 1,
+      "test_filter": "MultiPointGap",
+      "description": "Adjacent equal points are the only points removed by the public duplicate cleanup contract."
+    },
+    {
+      "id": "multipoint-nearest-intersection-direction",
+      "path": "src/libslic3r/MultiPoint.cpp",
+      "old": "                if (d < dmin) {",
+      "new": "                if (d > dmin) {",
+      "expected_matches": 1,
+      "test_filter": "MultiPointGap",
+      "description": "first_intersection must select the hit nearest to line.a; the diagonal crosses both U arms and the reversed query checks the opposite nearest hit."
+    },
+    {
+      "id": "multipoint-distance-uses-minimum",
+      "path": "src/libslic3r/MultiPoint.cpp",
+      "old": "            double distance = squaredDistanceToLineSegment(b, A[i], A[i + 1]);\n            min_distance = std::min(min_distance, std::sqrt(distance));",
+      "new": "            double distance = squaredDistanceToLineSegment(b, A[i], A[i + 1]);\n            min_distance = std::max(min_distance, std::sqrt(distance));",
+      "expected_matches": 1,
+      "test_filter": "MultiPointGap",
+      "description": "minimumDistanceBetweenLinesDefinedByPoints must preserve the first traversal minimum of 4; every candidate from the second traversal is strictly farther in the asymmetric fixture."
+    },
+    {
+      "id": "multipoint-concave-tolerance-inclusive",
+      "path": "src/libslic3r/MultiPoint.cpp",
+      "old": "            while (k >= 2 && pts[i].ccw(hull[k - 2], hull[k - 1]) <= 0 && -pts[i].ccw(hull[k - 2], hull[k - 1]) / (pts[i] - hull[k - 1]).norm() < tolerence)",
+      "new": "            while (k >= 2 && pts[i].ccw(hull[k - 2], hull[k - 1]) <= 0 && -pts[i].ccw(hull[k - 2], hull[k - 1]) / (pts[i] - hull[k - 1]).norm() <= tolerence)",
+      "expected_matches": 1,
+      "test_filter": "MultiPointGap",
+      "description": "The concave hull tolerance boundary is strict; the corrected integer-valued ratio 8 retains the inward point at equality, while 8.1 removes it."
+    },
+    {
+      "id": "model-reusable-volume-clear-omitted",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "        model_object->volumes.clear();",
+      "new": "        model_object->volumes.shrink_to_fit();",
+      "expected_matches": 1,
+      "test_filter": "ModelReusableLifecycle",
+      "description": "Retain the ModelObject volume-owner vector during reusable collection. The public ownership-transfer case must observe an empty volume vector without double-deleting either the correct implementation or this retained-owner mutant."
+    },
+    {
+      "id": "model-reusable-object-clear-omitted",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    // we never own these objects\n    this->objects.clear();",
+      "new": "    // we never own these objects\n    this->objects.shrink_to_fit();",
+      "expected_matches": 1,
+      "test_filter": "ModelReusableLifecycle",
+      "description": "Retain the Model owner vector after collecting reusable objects. The public case requires model.objects.empty() while its ScopeGuard restores exact ownership safely under this mutation."
+    },
+    {
+      "id": "model-repaired-reversed-error-omitted",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    const RepairedMeshErrors& stats = get_object_stl_stats().repaired_errors;\n\n    return  stats.degenerate_facets + stats.edges_fixed     + stats.facets_removed +\n            stats.facets_reversed + stats.backwards_edges;",
+      "new": "    const RepairedMeshErrors& stats = get_object_stl_stats().repaired_errors;\n\n    return  stats.degenerate_facets + stats.edges_fixed     + stats.facets_removed +\n            0 + stats.backwards_edges;",
+      "expected_matches": 1,
+      "test_filter": "ModelRepairedErrors",
+      "description": "Drop reversed-facet diagnostics from the public aggregate. The fixture assigns a nonzero reversed count and requires the aggregate total 17."
+    },
+    {
+      "id": "model-archive-update-cancel-inverted",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "        if (cb_cancel)\n            throw Slic3r::RuntimeError(_L(\"Canceled\"));\n    }\n\n    //BBS\n    for (auto& plate_gcodes : model.plates_custom_gcodes)",
+      "new": "        if (!cb_cancel)\n            throw Slic3r::RuntimeError(_L(\"Canceled\"));\n    }\n\n    //BBS\n    for (auto& plate_gcodes : model.plates_custom_gcodes)",
+      "expected_matches": 1,
+      "test_filter": "ModelImportCancellation",
+      "description": "Invert cancellation handling after the UPDATE_GCODE callback. The public two-stage matrix requires the selected stage to be observed and terminal; an inverted guard either stops before the requested stage or continues past it."
+    },
+    {
+      "id": "model-auto-brim-low-width-or-guard",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    if (brim_width < 5 && brim_width < 1.5 * thermalLength)",
+      "new": "    if (brim_width < 5 || brim_width < 1.5 * thermalLength)",
+      "expected_matches": 1,
+      "test_filter": "ModelAutoBrim",
+      "description": "Broaden the small-brim suppression guard. The explicit 2x2x100 fixture requires the narrow-adhesion row to suppress its sub-5mm result and the wide-adhesion row to retain the strict 1.5*sqrt(8) cap."
+    },
+    {
+      "id": "variant-float-percent-chooses-largest",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                            target_value = src_values[idx].value < target_value.value ? src_values[idx] : target_value;",
+      "new": "                            target_value = src_values[idx].value > target_value.value ? src_values[idx] : target_value;",
+      "test_filter": "ConfigGapContracts",
+      "expected_matches": 1,
+      "description": "result[1] value remains 35 percent"
+    },
+    {
+      "id": "variant-bool-uses-last-explicit",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                            target_value = src_values[idx];\n                            break;",
+      "new": "                            target_value = src_values[idx];\n                            continue;",
+      "test_filter": "ConfigGapContracts",
+      "expected_matches": 1,
+      "description": "result[1] remains false"
+    },
+    {
+      "id": "variant-bool-missing-destination-defaults-false",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                dst_values.resize(dst_variant_count, ConfigOptionBoolsNullable::nil_value());",
+      "new": "                dst_values.resize(dst_variant_count, false);",
+      "test_filter": "ConfigGapContracts",
+      "expected_matches": 1,
+      "description": "unmatched destination column remains nil"
+    },
+    {
+      "id": "extruder-difference-only-compares-first-pair",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                for (int index = 1; index < size; index++)",
+      "new": "                for (int index = 1; index < std::min(size, 2); index++)",
+      "test_filter": "ConfigGapContracts",
+      "expected_matches": 1,
+      "description": "third extruder nozzle-volume difference is detected"
+    },
+    {
+      "id": "filament-support-gfs01-mapped-as-pla",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                else if (filament_id->get_at(id) == \"GFS01\")",
+      "new": "                else if (filament_id->get_at(id) == \"GFS00\")",
+      "test_filter": "ConfigGapContracts",
+      "expected_matches": 1,
+      "description": "GFS01 is displayed as Sup.PA"
+    },
+    {
+      "id": "bbs-legacy-custom-gcode-root-fallback",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!has_plate_info) {",
+      "new": "if (has_plate_info) {",
+      "description": "Suppress the legacy root-level custom-G-code fallback so entries without plate_info are not assigned to public plate 1.",
+      "test_filter": "LegacyCustomGcode"
+    },
+    {
+      "id": "bbs-legacy-custom-gcode-toolchange-type",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "gcode == \"tool_change\" ? CustomGCode::ToolChange : CustomGCode::Custom;",
+      "new": "gcode == \"tool_change\" ? CustomGCode::ColorChange : CustomGCode::Custom;",
+      "description": "Map the legacy tool_change token to the wrong public event type.",
+      "test_filter": "LegacyCustomGcode"
+    },
+    {
+      "id": "bbs-legacy-custom-gcode-pause-message",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "extra = type == CustomGCode::PausePrint ? color :\n                                type == CustomGCode::Custom ? gcode : \"\";",
+      "new": "extra = type == CustomGCode::PausePrint ? std::string() :\n                                type == CustomGCode::Custom ? gcode : \"\";",
+      "description": "Drop the legacy pause message copied from the layer color field.",
+      "test_filter": "LegacyCustomGcode"
+    },
+    {
+      "id": "wipe-tower-solid-finish-new-soluble-branch-dropped-v4",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "return m_filpar[tch.new_tool].is_soluble\n                                           || m_filpar[tch.old_tool].is_soluble;",
+      "new": "return m_filpar[tch.old_tool].is_soluble;",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerSolidInfill",
+      "description": "Row 1 looks ahead to 0 -> 1, where only the new tool 1 is soluble; dropping the new-tool disjunct makes row 1 match the all-insoluble control and fail its finite grid geometry/material inequalities."
+    },
+    {
+      "id": "wipe-tower-solid-finish-old-soluble-branch-dropped-v4",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "return m_filpar[tch.new_tool].is_soluble\n                                           || m_filpar[tch.old_tool].is_soluble;",
+      "new": "return m_filpar[tch.new_tool].is_soluble;",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerSolidInfill",
+      "description": "Row 2 looks ahead to 1 -> 0, where only the old tool 1 is soluble; dropping the old-tool disjunct makes row 2 match the all-insoluble control and fail its finite grid geometry/material inequalities."
+    },
+    {
+      "id": "preheat-heating-in-skip-not-relocated",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            --heating_move_iter;\n            heating_move_iter = adjust_iter(heating_move_iter, move_iter_lower, move_iter_upper, false);\n            add_M104_lines(heating_move_iter->gcode_id, extruder_id, target_temp, block.next_filament_id, true, block.next_filament_id, block.next_nozzle_id, TimeProcessor::InsertLineType::PreHeating, \"Multi extruder pre heating\");",
+      "new": "            --heating_move_iter;\n            /* mutation: do not skip back over the SKIPPABLE range */\n            add_M104_lines(heating_move_iter->gcode_id, extruder_id, target_temp, block.next_filament_id, true, block.next_filament_id, block.next_nozzle_id, TimeProcessor::InsertLineType::PreHeating, \"Multi extruder pre heating\");",
+      "description": "Suppress the backward skip-range adjustment for a reachable heating insertion. The corrected fixture selects the in-skip move before adjust_iter; without relocation the public M104/M632/M633 insertion falls inside SKIPPABLE_START/END.",
+      "test_filter": "GCodeProcessorSkippable"
+    },
+    {
+      "id": "preheat-skippable-close-marker-dropped",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            if (skippable)\n                buffer.emplace_back(\"M633\\n\");",
+      "new": "            if (false && skippable)\n                buffer.emplace_back(\"M633\\n\");",
+      "description": "Drop the public M633 close marker while preserving the skippable branch and its variable use. The corrected fixture requires the complete M632/M104/M633 transition before the source skip interval.",
+      "test_filter": "GCodeProcessorSkippable"
+    },
+    {
+      "id": "toolordering_dedicated_filament_partition_gate_inverted",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "        if (lt.wipe_tower_partitions > 0) {\n            if (std::find(lt.extruders.begin(), lt.extruders.end(), wipe_extruder) == lt.extruders.end()) {",
+      "new": "        if (lt.wipe_tower_partitions == 0) {\n            if (std::find(lt.extruders.begin(), lt.extruders.end(), wipe_extruder) == lt.extruders.end()) {",
+      "expected_matches": 1,
+      "test_filter": "ToolOrderingGap",
+      "description": "The dedicated-filament row requires the configured third filament on active wipe-tower layers while the ordinary row remains free of it; inverting the partition gate removes the required active-layer witness and cannot be hidden by model material output."
+    },
+    {
+      "id": "toolordering_dedicated_filament_zero_gate_inverted",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "    if (m_print_config_ptr->wipe_tower_filament == 0)\n        return false;",
+      "new": "    if (m_print_config_ptr->wipe_tower_filament == 0)\n        return false;\n    if (m_print_config_ptr->wipe_tower_filament > 0)\n        return false;",
+      "expected_matches": 1,
+      "test_filter": "ToolOrderingGap",
+      "description": "The safe disabled-insertion mutant preserves the zero-filament control guard but rejects every configured positive ID; the dedicated row then lacks filament 2 on active tower layers while no invalid index is ever constructed."
+    },
+    {
+      "id": "toolordering_soluble_first_layer_prime_gate_disabled",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "                if (print_config && print_config->enable_prime_tower) {\n                    for (size_t i = 0; i<lt.extruders.size(); ++i)",
+      "new": "                if (print_config && false) {\n                    for (size_t i = 0; i<lt.extruders.size(); ++i)",
+      "expected_matches": 1,
+      "test_filter": "ToolOrderingGap",
+      "description": "With the same two-material geometry, enabling prime-tower soluble preference changes the explicit first-layer order from filament 0 first to filament 1 first; disabling this gate leaves the soluble row indistinguishable from the ordinary control."
+    },
+    {
+      "id": "toolordering_soluble_first_layer_swap_suppressed",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "                            std::swap(lt.extruders[i], lt.extruders.front());",
+      "new": "                            std::swap(lt.extruders.front(), lt.extruders.front());",
+      "expected_matches": 1,
+      "test_filter": "ToolOrderingGap",
+      "description": "The soluble first-layer row explicitly requires filament 1 before filament 0; suppressing the source swap preserves both tools but fails that independent order oracle."
+    },
+    {
+      "id": "print-multifilament-support-filament-ignored",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                    obj_used_extruder_ids.insert((unsigned int) print_object->config().support_filament - 1);//0-based extruder id",
+      "new": "                    obj_used_extruder_ids.insert(0);//0-based extruder id",
+      "test_filter": "PrintMultiFilamentValidation",
+      "expected_matches": 1,
+      "description": "Route an explicitly selected support filament back to the object's extruder. The support-filament=2 case must then lose the incompatible second material and fail its exact blocking/warning oracle, while the support-filament=1 control remains compatible."
+    },
+    {
+      "id": "print-multifilament-one-sided-range-fallback-omitted",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "        if (range_low == 0 || range_high == 0) {",
+      "new": "        if (range_low == 0 && range_high == 0) {",
+      "test_filter": "PrintMultiFilamentValidation",
+      "expected_matches": 1,
+      "description": "Require both recommended range bounds to be missing before material defaults are resolved. The PLA row with an explicit low bound and missing high bound must remain a valid HighLowMixed result; the mutant returns InvalidTemperatureRange."
+    }
+  ]
+}

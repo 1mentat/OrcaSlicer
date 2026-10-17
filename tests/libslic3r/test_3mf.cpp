@@ -4627,6 +4627,54 @@ TEST_CASE("BBS project uses a safe default for an unknown custom-gcode mode", "[
     CHECK(loaded_model.plates_custom_gcodes.at(0).mode == CustomGCode::Mode::MultiExtruder);
 }
 
+TEST_CASE("Legacy custom-gcode entries without plate metadata map through the public project importer",
+          "[3mf][Bbs3mfMetadata][LegacyCustomGcode]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+
+    // Older projects placed layers directly below custom_gcodes_per_layer and encoded the
+    // semantic type in the legacy gcode attribute.  Keep all four mappings in one archive so
+    // this checks the public compatibility route, including the root-to-plate-1 fallback.
+    const std::string xml = "<custom_gcodes_per_layer>"
+        "<layer top_z=\"0.6\" extruder=\"1\" color=\"#112233\" gcode=\"M600\"/>"
+        "<layer top_z=\"1.2\" extruder=\"2\" color=\"#223344\" gcode=\"M601\"/>"
+        "<layer top_z=\"1.8\" extruder=\"3\" color=\"#334455\" gcode=\"tool_change\"/>"
+        "<layer top_z=\"2.4\" extruder=\"4\" color=\"#445566\" gcode=\"M117\"/>"
+        "</custom_gcodes_per_layer>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; },
+                                 {{"Metadata/custom_gcode_per_layer.xml", xml}}));
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    const auto &info = loaded_model.plates_custom_gcodes.at(0);
+    REQUIRE(info.gcodes.size() == 4);
+
+    CHECK(info.gcodes[0].type == CustomGCode::ColorChange);
+    CHECK_THAT(info.gcodes[0].print_z, WithinAbs(0.6, 1e-9));
+    CHECK(info.gcodes[0].extruder == 1);
+    CHECK(info.gcodes[0].color == "#112233");
+    CHECK(info.gcodes[0].extra.empty());
+
+    CHECK(info.gcodes[1].type == CustomGCode::PausePrint);
+    CHECK_THAT(info.gcodes[1].print_z, WithinAbs(1.2, 1e-9));
+    CHECK(info.gcodes[1].extruder == 2);
+    CHECK(info.gcodes[1].color == "#223344");
+    CHECK(info.gcodes[1].extra == "#223344");
+
+    CHECK(info.gcodes[2].type == CustomGCode::ToolChange);
+    CHECK_THAT(info.gcodes[2].print_z, WithinAbs(1.8, 1e-9));
+    CHECK(info.gcodes[2].extruder == 3);
+    CHECK(info.gcodes[2].extra.empty());
+
+    CHECK(info.gcodes[3].type == CustomGCode::Custom);
+    CHECK_THAT(info.gcodes[3].print_z, WithinAbs(2.4, 1e-9));
+    CHECK(info.gcodes[3].extruder == 4);
+    CHECK(info.gcodes[3].extra == "M117");
+}
+
 TEST_CASE("BBS project clears the plate pointer collection", "[3mf][Bbs3mfMetadata][Ownership]")
 {
     std::set<std::pair<int, int>> objects{{0, 0}};

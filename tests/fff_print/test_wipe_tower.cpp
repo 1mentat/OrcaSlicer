@@ -2157,6 +2157,129 @@ TEST_CASE("WipeTower2 extra spacing changes later-layer purge depth",
     require_finite(wide);
     CHECK(wide.depth > nominal.depth);
 }
+namespace wipe_tower_solid_finish_contracts {
+namespace {
+
+struct GridTrace {
+    bool saw_grid = false;
+    std::size_t extrusion_moves = 0;
+    std::size_t invalid_motion = 0;
+    double path_length = 0.;
+    double extrusion_delta = 0.;
+};
+
+static std::string layer_gcode(const std::vector<WipeTower::ToolChangeResult> &layer)
+{
+    std::string out;
+    for (const WipeTower::ToolChangeResult &change : layer)
+        out += change.gcode;
+    return out;
+}
+
+static GridTrace trace_empty_grid(const std::vector<WipeTower::ToolChangeResult> &layer,
+                                  const DynamicPrintConfig &config)
+{
+    GridTrace trace;
+    bool in_grid = false;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(layer_gcode(layer), [&trace, &in_grid](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("CP EMPTY GRID START") != std::string_view::npos) {
+            in_grid = true;
+            trace.saw_grid = true;
+            return;
+        }
+        if (comment.find("CP EMPTY GRID END") != std::string_view::npos) {
+            in_grid = false;
+            return;
+        }
+        if (!in_grid || !line.cmd_is("G1") || !line.has_e() || (!line.has_x() && !line.has_y()))
+            return;
+        const float distance = line.dist_XY(self);
+        const float extrusion = line.dist_E(self);
+        if (!std::isfinite(double(distance)) || !std::isfinite(double(extrusion))) {
+            ++trace.invalid_motion;
+            return;
+        }
+        if (!line.extruding(self) || distance <= 0.f || extrusion <= 0.f)
+            return;
+        ++trace.extrusion_moves;
+        trace.path_length += double(distance);
+        trace.extrusion_delta += double(extrusion);
+    });
+    return trace;
+}
+
+static void require_positive_grid(const GridTrace &trace)
+{
+    REQUIRE(trace.saw_grid);
+    REQUIRE(trace.invalid_motion == 0);
+    REQUIRE(trace.extrusion_moves > 0);
+    REQUIRE(trace.path_length > 0.);
+    REQUIRE(trace.extrusion_delta > 0.);
+    CHECK(std::isfinite(trace.path_length));
+    CHECK(std::isfinite(trace.extrusion_delta));
+}
+
+} // namespace
+
+TEST_CASE("Soluble toolchanges on the next layer produce denser wipe-tower finish infill",
+          "[WipeTower][WipeTowerSolidInfill][MultimaterialWipe]")
+{
+    // Row 1 looks ahead to 0 -> 1 (new tool soluble); row 2 looks ahead to
+    // 1 -> 0 (old tool soluble). The 120 mm3 purge on the later row is
+    // intentionally larger than row 2's 80 mm3 purge, so plan_tower() gives
+    // rows 1 and 2 positive free depth for the marked grid.
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f},
+        {0.4f, 0.2f, 1, 0, 80.f},
+        {0.6f, 0.2f, 0, 1, 80.f},
+        {0.8f, 0.2f, 1, 0, 120.f},
+    };
+    const DynamicPrintConfig soluble_config = tower_dynamic({
+        {"filament_soluble", "0,1"},
+        {"filament_is_support", "0,0"},
+        {"nozzle_diameter", "0.4"},
+        {"enable_filament_ramming", true},
+        {"use_relative_e_distances", true},
+    });
+    const DynamicPrintConfig control_config = tower_dynamic({
+        {"filament_soluble", "0,0"},
+        {"filament_is_support", "0,0"},
+        {"nozzle_diameter", "0.4"},
+        {"enable_filament_ramming", true},
+        {"use_relative_e_distances", true},
+    });
+    const DirectRun soluble = run_tower(soluble_config, plan);
+    const DirectRun control = run_tower(control_config, plan);
+    require_finite(soluble);
+    require_finite(control);
+    REQUIRE(soluble.layers.size() == plan.size());
+    REQUIRE(control.layers.size() == plan.size());
+
+    const GridTrace soluble_new_only = trace_empty_grid(soluble.layers[1], soluble_config);
+    const GridTrace soluble_old_only = trace_empty_grid(soluble.layers[2], soluble_config);
+    const GridTrace control_new_only = trace_empty_grid(control.layers[1], control_config);
+    const GridTrace control_old_only = trace_empty_grid(control.layers[2], control_config);
+    require_positive_grid(soluble_new_only);
+    require_positive_grid(soluble_old_only);
+    require_positive_grid(control_new_only);
+    require_positive_grid(control_old_only);
+
+    // Solid infill uses repeated long rows while the all-insoluble control uses
+    // the inverse-U and sparse zig-zag. These are emitted geometry/material
+    // properties for each independent soluble direction.
+    CHECK(soluble_new_only.path_length > control_new_only.path_length);
+    CHECK(soluble_new_only.extrusion_moves > control_new_only.extrusion_moves);
+    CHECK(soluble_new_only.extrusion_delta > control_new_only.extrusion_delta);
+    CHECK(soluble_old_only.path_length > control_old_only.path_length);
+    CHECK(soluble_old_only.extrusion_moves > control_old_only.extrusion_moves);
+    CHECK(soluble_old_only.extrusion_delta > control_old_only.extrusion_delta);
+}
+
+} // namespace wipe_tower_solid_finish_contracts
+
 } // namespace multimaterial_wipe_variance_contracts
 
 namespace legacy_wipe_toolordering_contracts {
@@ -4128,3 +4251,141 @@ TEST_CASE("MK4 MMU priming brackets unloads with monitoring and cooling commands
     CHECK(run.gcode.find("M907 E550") != std::string::npos);
 }
 } // namespace wipe_tower_prime_public_contracts
+
+
+namespace toolordering_active_gap_contracts {
+
+namespace {
+
+struct ToolOrderingGapEvidence {
+    std::vector<unsigned int> first_layer_extruders;
+    std::vector<unsigned int> all_extruders;
+    size_t object_layer_count = 0;
+    size_t tower_layer_count = 0;
+    size_t dedicated_tower_layer_count = 0;
+};
+
+static DynamicPrintConfig tool_ordering_gap_config(bool dedicated_wipe_filament, bool soluble_second_filament)
+{
+    return multifilament_config(3, {
+        { "enable_prime_tower",                 true },
+        { "wipe_tower_filament",                dedicated_wipe_filament ? 3 : 0 },
+        { "wipe_tower_type",                    "type2" },
+        { "wipe_tower_wall_type",               "rectangle" },
+        { "wipe_tower_x",                       50.0 },
+        { "wipe_tower_y",                       50.0 },
+        { "prime_tower_width",                  35.0 },
+        { "prime_volume",                       20.0 },
+        { "purge_in_prime_tower",               false },
+        { "single_extruder_multi_material",     false },
+        { "printable_area",                     "0x0,200x0,200x200,0x200" },
+        { "layer_height",                       0.2 },
+        { "initial_layer_print_height",         0.2 },
+        { "wall_loops",                         1 },
+        { "sparse_infill_density",              0 },
+        { "top_shell_layers",                   0 },
+        { "bottom_shell_layers",                0 },
+        { "skirt_loops",                        0 },
+        { "brim_width",                         0.0 },
+        { "raft_layers",                        0 },
+        { "spiral_mode",                        false },
+        { "belt_printer",                       false },
+        { "timelapse_type",                     0 },
+        { "enable_wrapping_detection",          false },
+        { "wipe_tower_no_sparse_layers",        false },
+        { "wipe_tower_sparse_layers_combination", false },
+        { "filament_soluble",                   soluble_second_filament ? "0,1,0" : "0,0,0" },
+        { "filament_is_support",                "0,0,0" },
+        { "use_relative_e_distances",           true },
+        { "layer_change_gcode",                 "G92 E0\n" },
+    });
+}
+
+static ToolOrderingGapEvidence run_tool_ordering_gap_case(bool dedicated_wipe_filament, bool soluble_second_filament, bool finalize_partitions)
+{
+    DynamicPrintConfig config = tool_ordering_gap_config(dedicated_wipe_filament, soluble_second_filament);
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {},
+        { { "outer_wall_filament_id", 2 }, { "inner_wall_filament_id", 2 },
+          { "sparse_infill_filament_id", 2 }, { "internal_solid_filament_id", 2 },
+          { "top_surface_filament_id", 2 }, { "bottom_surface_filament_id", 2 } }
+    };
+
+    TriangleMesh second = cube(8.0);
+    second.translate(12.0, 0.0, 0.0);
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{ cube(8.0), std::move(second) }, print, model, config, &overrides, false);
+    // Keep the explicit second apply: the first apply may normalize a prime tower before
+    // per-object material assignments are reflected in the print's used-filament set.
+    print.apply(model, config);
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.objects()[0] != nullptr);
+    REQUIRE(print.objects()[1] != nullptr);
+    REQUIRE(print.config().filament_diameter.values.size() == 3);
+    REQUIRE(print.has_wipe_tower());
+    const StringObjectException validation = print.validate();
+    INFO("Print validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE_FALSE(print.objects()[0]->layers().empty());
+    REQUIRE_FALSE(print.objects()[1]->layers().empty());
+
+    // Passing first_extruder explicitly selects the public overload that performs the
+    // soluble-first-layer preference; the optional sort then executes the public
+    // partition/insertion route for the dedicated tower filament.
+    ToolOrdering ordering(print, 0);
+    if (finalize_partitions)
+        ordering.sort_and_build_data(print, 0);
+    REQUIRE_FALSE(ordering.empty());
+
+    ToolOrderingGapEvidence evidence;
+    evidence.first_layer_extruders = ordering.front().extruders;
+    evidence.all_extruders = ordering.all_extruders();
+    for (const LayerTools &layer_tools : ordering) {
+        if (layer_tools.has_object)
+            ++evidence.object_layer_count;
+        if (layer_tools.has_wipe_tower && layer_tools.wipe_tower_partitions > 0) {
+            ++evidence.tower_layer_count;
+            if (layer_tools.has_extruder(2))
+                ++evidence.dedicated_tower_layer_count;
+        }
+    }
+    return evidence;
+}
+
+} // namespace
+
+TEST_CASE("A configured dedicated filament joins active wipe-tower layers",
+          "[WipeTower][ToolOrdering][ToolOrderingGap]")
+{
+    const auto dedicated = run_tool_ordering_gap_case(true, false, true);
+    const auto ordinary = run_tool_ordering_gap_case(false, false, true);
+
+    REQUIRE(dedicated.object_layer_count > 0);
+    REQUIRE(ordinary.object_layer_count > 0);
+    REQUIRE(dedicated.tower_layer_count > 0);
+    REQUIRE(ordinary.tower_layer_count > 0);
+    CHECK(dedicated.dedicated_tower_layer_count > 0);
+    CHECK(ordinary.dedicated_tower_layer_count == 0);
+    CHECK(std::find(dedicated.all_extruders.begin(), dedicated.all_extruders.end(), 0) != dedicated.all_extruders.end());
+    CHECK(std::find(dedicated.all_extruders.begin(), dedicated.all_extruders.end(), 1) != dedicated.all_extruders.end());
+    CHECK(std::find(dedicated.all_extruders.begin(), dedicated.all_extruders.end(), 2) != dedicated.all_extruders.end());
+    CHECK(std::find(ordinary.all_extruders.begin(), ordinary.all_extruders.end(), 2) == ordinary.all_extruders.end());
+}
+
+TEST_CASE("A soluble filament is preferred at the start of explicit first-layer ordering",
+          "[WipeTower][ToolOrdering][ToolOrderingGap]")
+{
+    const auto ordinary = run_tool_ordering_gap_case(false, false, false);
+    const auto soluble = run_tool_ordering_gap_case(false, true, false);
+
+    REQUIRE(ordinary.first_layer_extruders.size() == 2);
+    REQUIRE(soluble.first_layer_extruders.size() == 2);
+    CHECK(ordinary.first_layer_extruders.front() == 0);
+    CHECK(soluble.first_layer_extruders.front() == 1);
+    CHECK(ordinary.first_layer_extruders[1] == 1);
+    CHECK(soluble.first_layer_extruders[1] == 0);
+}
+
+} // namespace toolordering_active_gap_contracts

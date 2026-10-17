@@ -474,6 +474,13 @@ named enum lists before and after public deserialization. Its mutation is in
 `static_enum_defaults.json`; default-name assertions precede parsing so missing
 metadata produces an assertion failure instead of a crash.
 
+`public_gap_contracts.json` challenges public behavior across geometry, model
+ownership and import cancellation, nullable setting migration, filament
+temperature validation, tool ordering, wipe-tower finish paths, and G-code
+preheating. Geometry cases use analytic distances and preserved fitting metadata;
+pipeline cases verify the effective settings before checking output. Mutants
+target those assertions without treating crashes or build failures as kills.
+
 `[ConfigContracts]` checks typed values, grouped serialization, ownership,
 nullable options, equality and difference reports, and environment export with
 restoration. `[ConfigGroupOrder]` requires strict lexicographic ordering for

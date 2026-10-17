@@ -1984,3 +1984,183 @@ TEST_CASE("Model speed and material state feed public process heuristics", "[Mod
     CHECK_THAT(Model::getThermalLength(std::vector<ModelVolume *>{ nullptr, pla }),
                Catch::Matchers::WithinAbs(200., 1e-9));
 }
+
+
+TEST_CASE("Model reusable collection detaches volumes and preserves ownership metadata", "[Model][ModelReusableLifecycle]")
+{
+    Model model;
+    ModelMaterial *material = model.add_material("reusable-material");
+    ModelObject *object = model.add_object();
+    ModelVolume *part = object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *modifier = object->add_volume(make_cube(2., 2., 2.), ModelVolumeType::PARAMETER_MODIFIER, false);
+    object->add_instance();
+    const ObjectID part_id = part->id();
+    const ObjectID modifier_id = modifier->id();
+
+    REQUIRE(material->get_model() == &model);
+    REQUIRE(object->get_model() == &model);
+    REQUIRE(object->instances.front()->get_object() == object);
+    REQUIRE(part->get_object() == object);
+    REQUIRE(modifier->get_object() == object);
+
+    const ModelVolumePtrs original_volumes{ part, modifier };
+    const ModelObjectPtrs original_objects{ object };
+    // collect_reusable_objects transfers raw pointers without deleting them. Restore
+    // the exact original owners on every exit so retained-ownership mutants cannot
+    // create duplicate owners or double-delete the detached objects.
+    ScopeGuard restore_ownership([&]() {
+        object->volumes = original_volumes;
+        model.objects = original_objects;
+    });
+
+    std::vector<ObjectBase *> reusable;
+    model.collect_reusable_objects(reusable);
+
+    REQUIRE(model.objects.empty());
+    REQUIRE(reusable.size() == 3);
+    CHECK(reusable[0] == object);
+    CHECK(reusable[1] == part);
+    CHECK(reusable[2] == modifier);
+    CHECK(object->volumes.empty());
+    REQUIRE(object->volume_ids.size() == 2);
+    CHECK(object->volume_ids[0] == part_id);
+    CHECK(object->volume_ids[1] == modifier_id);
+}
+
+TEST_CASE("Model repaired mesh error counts aggregate each stored diagnostic", "[Model][ModelRepairedErrors]")
+{
+    const auto mesh_with_errors = [](const RepairedMeshErrors &errors) {
+        TriangleMesh source = make_cube(4., 4., 4.);
+        indexed_triangle_set its = source.its;
+        return TriangleMesh(std::move(its), errors);
+    };
+
+    RepairedMeshErrors first_errors;
+    first_errors.degenerate_facets = 1;
+    first_errors.edges_fixed = 2;
+    first_errors.facets_removed = 3;
+    first_errors.facets_reversed = 4;
+    first_errors.backwards_edges = 5;
+    RepairedMeshErrors second_errors;
+    second_errors.facets_reversed = 2;
+
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *first = object->add_volume(mesh_with_errors(first_errors), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *second = object->add_volume(mesh_with_errors(second_errors), ModelVolumeType::MODEL_PART, false);
+
+    CHECK(first->get_repaired_errors_count() == 15);
+    CHECK(second->get_repaired_errors_count() == 2);
+    CHECK(object->get_repaired_errors_count(0) == 15);
+    CHECK(object->get_repaired_errors_count(1) == 2);
+    CHECK(object->get_repaired_errors_count() == 17);
+}
+
+TEST_CASE("Model archive progress cancellation is honored at each post-load stage", "[Model][ModelImport][Archive][ModelImportCancellation]")
+{
+    const int cancelled_stage = GENERATE(IMPORT_STAGE_UPDATE_GCODE, IMPORT_STAGE_CHECK_MODE_GCODE);
+    CAPTURE(cancelled_stage);
+    ScopedSlic3rTemporaryDir backup("orca_model_import_post_load_cancel");
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string());
+    DynamicPrintConfig config = archive_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    En3mfType type = En3mfType::From_Other;
+    PlateDataPtrs plates;
+    std::vector<Preset *> presets;
+    Semver version;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset *preset : presets)
+            delete preset;
+    });
+    bool callback_called = false;
+    std::vector<int> progress_stages;
+    Import3mfProgressFn progress = [&](int stage, int, int, bool &cancel) {
+        progress_stages.push_back(stage);
+        cancel = stage == cancelled_stage;
+        if (cancel)
+            callback_called = true;
+    };
+
+    CHECK_THROWS_AS(Model::read_from_archive(archive.string(), &config, &substitutions, type,
+                                             LoadStrategy::LoadModel | LoadStrategy::LoadConfig,
+                                             &plates, &presets, &version, progress),
+                    Slic3r::RuntimeError);
+    CHECK(callback_called);
+    REQUIRE_FALSE(progress_stages.empty());
+    const auto requested_stage = std::find(progress_stages.begin(), progress_stages.end(), cancelled_stage);
+    REQUIRE(requested_stage != progress_stages.end());
+    // Cancellation is terminal: callbacks before the selected post-load stage are
+    // allowed, but no later stage may be observed. CHECK_MODE therefore proves that
+    // UPDATE ran first, while UPDATE remains a one-callback cancellation.
+    CHECK(requested_stage == progress_stages.end() - 1);
+    if (cancelled_stage == IMPORT_STAGE_CHECK_MODE_GCODE) {
+        const auto update_stage = std::find(progress_stages.begin(), progress_stages.end(), IMPORT_STAGE_UPDATE_GCODE);
+        REQUIRE(update_stage != progress_stages.end());
+        CHECK(update_stage < requested_stage);
+    }
+}
+
+TEST_CASE("Model unit heuristics distinguish cut groups and unrestricted conversion", "[Model][ModelUnitConversion]")
+{
+    Model only_small_cut;
+    ModelObject *small_cut_object = only_small_cut.add_object();
+    small_cut_object->add_volume(make_cube(1., 1., 1.), ModelVolumeType::MODEL_PART, false);
+    small_cut_object->cut_id = CutObjectBase(ObjectID(7001), 1, 0);
+    CHECK(only_small_cut.looks_like_imperial_units());
+
+    Model mixed_cut_group;
+    ModelObject *small_part = mixed_cut_group.add_object();
+    small_part->add_volume(make_cube(1., 1., 1.), ModelVolumeType::MODEL_PART, false);
+    small_part->cut_id = CutObjectBase(ObjectID(7002), 1, 0);
+    ModelObject *large_part = mixed_cut_group.add_object();
+    large_part->add_volume(make_cube(3., 3., 3.), ModelVolumeType::MODEL_PART, false);
+    large_part->cut_id = CutObjectBase(ObjectID(7002), 1, 0);
+    CHECK_FALSE(mixed_cut_group.looks_like_imperial_units());
+
+    Model imperial;
+    ModelObject *imperial_object = imperial.add_object();
+    ModelVolume *imperial_volume = imperial_object->add_volume(make_cube(3., 3., 3.), ModelVolumeType::MODEL_PART, false);
+    imperial.convert_from_imperial_units(false);
+    CHECK_THAT(imperial_volume->mesh().bounding_box().size().x(), Catch::Matchers::WithinAbs(76.2, 1e-4));
+    CHECK(imperial_volume->source.is_converted_from_inches);
+
+    Model metric;
+    ModelObject *metric_object = metric.add_object();
+    ModelVolume *metric_volume = metric_object->add_volume(make_cube(.3, .3, .3), ModelVolumeType::MODEL_PART, false);
+    metric.convert_from_meters(false);
+    CHECK_THAT(metric_volume->mesh().bounding_box().size().x(), Catch::Matchers::WithinAbs(300., 1e-3));
+    CHECK(metric_volume->source.is_converted_from_meters);
+}
+
+TEST_CASE("Model instance auto brim width follows speed, geometry, and adhesion", "[Model][ModelAutoBrim]")
+{
+    const GlobalSpeedMap saved_speed_map = Model::printSpeedMap;
+    const std::map<size_t, ExtruderParams> saved_extruder_params = Model::extruderParamsMap;
+    ScopeGuard restore_model_static_state([&]() {
+        Model::printSpeedMap = saved_speed_map;
+        Model::extruderParamsMap = saved_extruder_params;
+    });
+    Model::printSpeedMap = {};
+    Model::printSpeedMap.maxSpeed = 100.;
+    Model::printSpeedMap.perimeterSpeed = 100.;
+    Model::printSpeedMap.externalPerimeterSpeed = 100.;
+    Model::printSpeedMap.infillSpeed = 100.;
+    Model::printSpeedMap.solidInfillSpeed = 100.;
+    Model::printSpeedMap.topSolidInfillSpeed = 100.;
+    Model::printSpeedMap.supportSpeed = 100.;
+    Model::printSpeedMap.smallPerimeterSpeed = 100.;
+    Model::printSpeedMap.smallSupportPerimeterSpeed = 100.;
+    Model::extruderParamsMap.clear();
+
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(2., 2., 100.), ModelVolumeType::MODEL_PART, false);
+    ModelInstance *instance = object->add_instance();
+
+    const double narrow_brim = instance->get_auto_brim_width(0., 0.225);
+    const double wide_brim = instance->get_auto_brim_width(0., 1.);
+    CHECK_THAT(narrow_brim, Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(wide_brim, Catch::Matchers::WithinAbs(3. * std::sqrt(2.), 1e-9));
+}

@@ -1,5 +1,6 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -11,10 +12,14 @@
 #include <vector>
 
 #include "libslic3r/MultiPoint.hpp"
+#include "libslic3r/Line.hpp"
+#include "libslic3r/Polyline.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/libslic3r.h"
 
 using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
 
 namespace {
 
@@ -189,4 +194,106 @@ TEST_CASE("Visvalingam retains a high-area tail node", "[MultiPoint][Visvalingam
     check_exact(MultiPoint::visivalingam(input, 20.), expected);
     REQUIRE(expected.size() >= 3);
     CHECK(expected[expected.size() - 2] == input[input.size() - 2]);
+}
+
+TEST_CASE("MultiPoint tolerance lookup and duplicate cleanup preserve point identity", "[MultiPoint][MultiPointGap]")
+{
+    Polyline path{Point(0, 0), Point(100, 0), Point(100, 100)};
+    CHECK(path.find_point(Point(100, 0)) == 1);
+    CHECK(path.find_point(Point(101, 1), 2.0) == 1);
+    CHECK(path.find_point(Point(102, 0), 2.0) == -1);
+    CHECK(path.find_point(Point(103, 0), 2.0) == -1);
+    CHECK(path.has_boundary_point(Point(50, 0)));
+    // SCALED_EPSILON is 100 coordinate units; this offset is intentionally well outside it.
+    CHECK_FALSE(path.has_boundary_point(Point(50, 1000)));
+
+    Polyline duplicates{Point(0, 0), Point(10, 0), Point(10, 0), Point(10, 0), Point(20, 0)};
+    CHECK(duplicates.has_duplicate_points());
+    CHECK(duplicates.remove_duplicate_points());
+    const Points expected_deduplicated{Point(0, 0), Point(10, 0), Point(20, 0)};
+    CHECK(duplicates.points == expected_deduplicated);
+    CHECK_FALSE(duplicates.has_duplicate_points());
+    CHECK_FALSE(duplicates.remove_duplicate_points());
+}
+
+TEST_CASE("MultiPoint segment intersections return every hit and the nearest hit", "[MultiPoint][MultiPointGap]")
+{
+    // A vertical probe crosses both arms of a U, with its connecting side away from the probe.
+    const Polyline path{Point(0, 0), Point(200, 0), Point(200, 100), Point(0, 100)};
+    const Line probe(Point(50, -20), Point(50, 120));
+
+    Point first;
+    REQUIRE(path.intersection(probe, &first));
+    CHECK(first == Point(50, 0));
+
+    Point nearest;
+    REQUIRE(path.first_intersection(probe, &nearest));
+    CHECK(nearest == Point(50, 0));
+
+    const Line reversed_probe(Point(50, 120), Point(50, -20));
+    Point reverse_nearest;
+    REQUIRE(path.first_intersection(reversed_probe, &reverse_nearest));
+    CHECK(reverse_nearest == Point(50, 100));
+
+    Points hits;
+    REQUIRE(path.intersections(probe, &hits));
+    REQUIRE(hits.size() == 2);
+    CHECK(hits[0] == Point(50, 0));
+    CHECK(hits[1] == Point(50, 100));
+
+    const Line disjoint(Point(250, -20), Point(250, 120));
+    CHECK_FALSE(path.intersection(disjoint, &first));
+    CHECK_FALSE(path.first_intersection(disjoint, &nearest));
+    CHECK_FALSE(path.intersections(disjoint, &hits));
+    CHECK(hits.size() == 2);
+}
+
+TEST_CASE("MultiPoint line distance handles projections, endpoints, and degenerate segments", "[MultiPoint][MultiPointGap]")
+{
+    // The first traversal's nearest distance is 4; every second-traversal candidate is
+    // strictly farther, so a first-half minimum mutation cannot be masked.
+    const Points horizontal{Point(0, 0), Point(10, 0)};
+    const Points above{Point(5, 4), Point(5, 7)};
+    CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(horizontal, above),
+               WithinAbs(4.0, 1e-9));
+    CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(above, horizontal),
+               WithinAbs(4.0, 1e-9));
+
+    const Points point_segment{Point(0, 0), Point(0, 0)};
+    const Points remote_point{Point(3, 4), Point(3, 4)};
+    CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(point_segment, remote_point),
+               WithinAbs(5.0, 1e-9));
+
+    // For the concavity point (6,2), the source's boundary ratio is exactly
+    // 80 / sqrt(6^2 + 8^2) = 8.  The strict boundary keeps the point; a
+    // slightly larger tolerance removes it.
+    const Points concave{Point(0, 0), Point(10, 0), Point(10, 10), Point(6, 2), Point(0, 10)};
+    const Points retained = MultiPoint::concave_hull_2d(concave, 0.0);
+    CHECK(retained == concave);
+    const Points boundary = MultiPoint::concave_hull_2d(concave, 8.0);
+    CHECK(boundary == concave);
+    const Points smoothed = MultiPoint::concave_hull_2d(concave, 8.1);
+    const Points expected_smoothed{Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10)};
+    CHECK(smoothed == expected_smoothed);
+}
+
+TEST_CASE("MultiPoint3 keeps Z coordinates while matching, rotating, and deduplicating", "[MultiPoint][MultiPointGap]")
+{
+    Polyline3 path(Points3{Point3(0, 0, 5), Point3(10, 0, 7), Point3(10, 10, 9), Point3(10, 10, 9)});
+    CHECK(path.find_point(Point3(10, 0, 7)) == 1);
+    CHECK(path.find_point(Point3(10, 1, 7), 2.0) == 1);
+    CHECK(path.find_point(Point3(10, 1, 7), 1.0) == -1);
+    CHECK(path.remove_duplicate_points());
+    CHECK(path.points.size() == 3);
+    CHECK_FALSE(path.remove_duplicate_points());
+
+    const BoundingBox3 bounds = path.bounding_box();
+    CHECK(bounds.defined);
+    CHECK(bounds.min == Point3(0, 0, 5));
+    CHECK(bounds.max == Point3(10, 10, 9));
+
+    path.rotate(std::acos(-1.0) / 2.0, Point3(10, 0, 100));
+    CHECK(path.first_point() == Point3(10, -10, 5));
+    CHECK(path.points[1] == Point3(10, 0, 7));
+    CHECK(path.points[2] == Point3(0, 0, 9));
 }

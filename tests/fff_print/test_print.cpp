@@ -3460,3 +3460,178 @@ TEST_CASE("Belt supports reach the belt under a leading overhang", "[Print][belt
         CHECK(lowest->print_z - floor_under_lowest > -0.2 - EPSILON);
     }
 }
+
+TEST_CASE("Print compares filament temperatures with explicit and material ranges",
+          "[Print][PrintMultiFilamentValidation]")
+{
+    struct CompatibilityCase {
+        std::vector<std::string> filament_types;
+        std::vector<int>         temperatures;
+        std::vector<int>         range_lows;
+        std::vector<int>         range_highs;
+        FilamentCompatibilityType expected;
+    };
+    const auto part = GENERATE(from_range(std::vector<CompatibilityCase>{
+        { { "PLA", "PETG" }, { 225, 250 }, { 190, 220 }, { 240, 260 }, FilamentCompatibilityType::HighLowMixed },
+        { { "PLA", "PETG" }, { 225, 250 }, { 190, 220 }, {   0, 260 }, FilamentCompatibilityType::HighLowMixed },
+        { { "PLA", "PETG" }, { 225, 225 }, {   0, 220 }, { 240, 260 }, FilamentCompatibilityType::Compatible },
+        { { "PLA", "PETG" }, { 225, 250 }, { 240, 220 }, { 240, 260 }, FilamentCompatibilityType::InvalidTemperatureRange },
+    }));
+
+    CHECK(Print::check_multi_filaments_compatibility(
+              part.filament_types, part.temperatures, part.range_lows, part.range_highs) == part.expected);
+}
+
+TEST_CASE("Print validation includes support filament temperature compatibility",
+          "[Print][PrintMultiFilamentValidation]")
+{
+    struct SupportCase {
+        int  support_filament;
+        bool allow_mixed_temperatures;
+        bool warning;
+    };
+    const auto part = GENERATE(
+        SupportCase{ 1, false, false },
+        SupportCase{ 2, false, false },
+        SupportCase{ 2, true,  true });
+    CAPTURE(part.support_filament, part.allow_mixed_temperatures);
+
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "enable_support",                 true },
+        { "support_type",                   "normal(auto)" },
+        { "support_style",                  "default" },
+        { "support_on_build_plate_only",    false },
+        { "print_sequence",                 "by object" },
+        { "layer_height",                   0.2 },
+        { "initial_layer_print_height",     0.2 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+        { "nozzle_temperature",             "225,250" },
+        { "nozzle_temperature_range_low",   "190,220" },
+        { "nozzle_temperature_range_high",  "240,260" },
+        { "timelapse_type",                 "0" },
+        { "enable_wrapping_detection",      false },
+    });
+    config.set_key_value("filament_type", new ConfigOptionStrings({ "PLA", "PETG" }));
+
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{{
+        { "extruder",                  1 },
+        { "support_filament",          part.support_filament },
+        { "support_interface_filament", 1 },
+    }};
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{ mesh(TestMesh::overhang) }, print, model, config, &overrides);
+
+    // These checks prove the public configuration reached the validation path: one nozzle,
+    // by-object sequencing, support enabled, and a support-bearing object using the requested
+    // support extruder.  A set_deserialize_strict call alone is not this proof.
+    REQUIRE(print.config().nozzle_diameter.size() == 1);
+    REQUIRE(print.config().print_sequence == PrintSequence::ByObject);
+    REQUIRE(print.config().enable_support);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->has_support_material());
+    REQUIRE(print.objects().front()->config().support_filament == part.support_filament);
+    REQUIRE(print.objects().front()->config().support_interface_filament == 1);
+    REQUIRE(print.object_extruders().size() == 1);
+    CHECK(print.object_extruders().front() == 0);
+    REQUIRE(print.extruders().size() == (part.support_filament == 1 ? 1u : 2u));
+
+    print.set_check_multi_filaments_compatibility(!part.allow_mixed_temperatures);
+    const StringObjectException direct = Print::check_multi_filament_valid(print);
+    CAPTURE(direct.string, direct.is_warning);
+    if (part.support_filament == 1) {
+        CHECK(direct.string.empty());
+        CHECK_FALSE(direct.is_warning);
+        return;
+    }
+
+    REQUIRE(direct.string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
+    CHECK(direct.is_warning == part.warning);
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    CAPTURE(validation.string, validation.is_warning);
+    if (part.allow_mixed_temperatures) {
+        CHECK(validation.string.empty());
+        const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
+            return entry.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
+        });
+        REQUIRE(warning != warnings.end());
+        CHECK(warning->is_warning);
+    } else {
+        REQUIRE_FALSE(validation.string.empty());
+        CHECK(validation.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP);
+        CHECK_FALSE(validation.is_warning);
+    }
+}
+
+TEST_CASE("Print validation enforces mixed filament temperature policy by sequence",
+          "[Print][PrintMultiFilamentValidation]")
+{
+    struct SequenceCase {
+        const char *range_lows;
+        const char *range_highs;
+        const char *temperatures;
+        bool        allow_mixed_temperatures;
+        bool        invalid_range;
+    };
+    const auto part = GENERATE(
+        SequenceCase{ "190,220", "240,260", "225,250", false, false },
+        SequenceCase{ "190,220", "240,260", "225,250", true,  false },
+        SequenceCase{ "240,220", "230,260", "225,250", false, true  });
+    CAPTURE(part.allow_mixed_temperatures, part.invalid_range);
+
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "print_sequence",                "by layer" },
+        { "enable_support",                false },
+        { "layer_height",                  0.2 },
+        { "initial_layer_print_height",    0.2 },
+        { "skirt_loops",                   0 },
+        { "brim_type",                     "no_brim" },
+        { "nozzle_temperature",            part.temperatures },
+        { "nozzle_temperature_range_low",  part.range_lows },
+        { "nozzle_temperature_range_high", part.range_highs },
+    });
+    config.set_key_value("filament_type", new ConfigOptionStrings({ "PLA", "PETG" }));
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        { { "extruder", 1 } }, { { "extruder", 2 } },
+    };
+
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{ cube(8.0), cube(8.0) }, print, model, config, &overrides);
+    REQUIRE(print.config().nozzle_diameter.size() == 1);
+    REQUIRE(print.config().print_sequence == PrintSequence::ByLayer);
+    REQUIRE_FALSE(print.config().enable_support);
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.object_extruders().size() == 2);
+    REQUIRE(print.extruders().size() == 2);
+
+    print.set_check_multi_filaments_compatibility(!part.allow_mixed_temperatures);
+    const StringObjectException direct = Print::check_multi_filament_valid(print);
+    CAPTURE(direct.string, direct.is_warning);
+    if (part.invalid_range) {
+        REQUIRE(direct.string.rfind("Invalid recommended nozzle temperature range.", 0) == 0);
+        CHECK_FALSE(direct.is_warning);
+    } else {
+        REQUIRE(direct.string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
+        CHECK(direct.is_warning == part.allow_mixed_temperatures);
+    }
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    CAPTURE(validation.string, validation.is_warning);
+    if (part.allow_mixed_temperatures && !part.invalid_range) {
+        CHECK(validation.string.empty());
+        const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
+            return entry.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
+        });
+        REQUIRE(warning != warnings.end());
+        CHECK(warning->is_warning);
+    } else {
+        REQUIRE_FALSE(validation.string.empty());
+        CHECK(validation.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP);
+        CHECK_FALSE(validation.is_warning);
+    }
+}
