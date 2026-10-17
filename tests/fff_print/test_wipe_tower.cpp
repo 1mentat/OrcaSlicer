@@ -12,6 +12,8 @@
 #include <limits>
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/Flow.hpp"
 #include "fff_print/test_helpers.hpp"
 #include <cmath>
 #include <set>
@@ -2733,3 +2735,146 @@ TEST_CASE("Tower interface pre-extrusion follows the configured length", "[WipeT
 }
 
 }
+
+namespace toolchange_ordering_contracts {
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+TEST_CASE("Toolchange ordering preserves configured first and later layer sequences", "[WipeTower][ToolChangeOrdering][ToolOrderingVariance]")
+{
+    auto [ordering_name, cyclic_first_layer] = GENERATE(table<std::string, bool>({
+        { "default", false },
+        { "default", true  },
+        { "cyclic",  false },
+        { "cyclic",  true  },
+    }));
+    DYNAMIC_SECTION(ordering_name << " first_layer=" << (cyclic_first_layer ? "enabled" : "disabled")) {
+        const bool cyclic = ordering_name == "cyclic";
+        const bool expect_cyclic_first = cyclic && cyclic_first_layer;
+        const ToolChangeOrderingType expected_ordering = cyclic ? ToolChangeOrderingType::Cyclic : ToolChangeOrderingType::Default;
+        const std::vector<unsigned int> expected_first = expect_cyclic_first ? std::vector<unsigned int>{ 1, 0 } : std::vector<unsigned int>{ 0, 1 };
+        const std::vector<unsigned int> expected_default_odd{ 1, 0 };
+        const std::vector<unsigned int> expected_default_even{ 0, 1 };
+        const std::vector<unsigned int> expected_cyclic_later{ 1, 0 };
+
+        DynamicPrintConfig config = multifilament_config(2, {
+            { "layer_height",                     0.4 },
+            { "initial_layer_print_height",       0.2 },
+            { "wall_loops",                       2 },
+            { "top_shell_layers",                 0 },
+            { "bottom_shell_layers",              0 },
+            { "sparse_infill_density",            0 },
+            { "skirt_loops",                      0 },
+            { "brim_type",                        "no_brim" },
+            { "enable_prime_tower",               false },
+            { "wipe_tower_filament",              0 },
+            // Asymmetric but finite flush costs make the default later-layer choice non-tied.
+            { "flush_volumes_matrix",              "0,100,280,0" },
+            { "wipe_tower_type",                  "type1" },
+            { "print_sequence",                   "by layer" },
+            { "toolchange_ordering",              ordering_name },
+            { "toolchange_cyclic_order",          "2,1" },
+            { "toolchange_cyclic_first_layer",    cyclic_first_layer },
+            { "first_layer_print_sequence",       "" },
+            { "other_layers_print_sequence",      "0" },
+            { "other_layers_print_sequence_nums", 0 },
+        });
+        const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides = {
+            {},
+            {
+                { "outer_wall_filament_id",     2 },
+                { "inner_wall_filament_id",     2 },
+                { "sparse_infill_filament_id",  2 },
+                { "internal_solid_filament_id", 2 },
+                { "top_surface_filament_id",   2 },
+                { "bottom_surface_filament_id", 2 },
+            },
+        };
+
+        // The height is deliberately large enough to observe at least three successive rows; the
+        // assertion still uses the processed layer count rather than assuming an exact rounded count.
+        TriangleMesh large = make_cube(24., 24., 2.4);
+        TriangleMesh small = make_cube(12., 12., 2.4);
+        small.translate(40., 0., 0.);
+        Print print;
+        Model model;
+        init_print(std::vector<TriangleMesh>{ std::move(large), std::move(small) }, print, model, config, &overrides, false);
+
+        const auto validation = print.validate();
+        INFO("Print validation: " << validation.string << " [" << validation.opt_key << "]");
+        REQUIRE(validation.string.empty());
+
+        const PrintConfig &applied = print.config();
+        CHECK(applied.toolchange_ordering == expected_ordering);
+        CHECK(applied.toolchange_cyclic_order.value == "2,1");
+        CHECK(applied.toolchange_cyclic_first_layer.value == cyclic_first_layer);
+        CHECK(applied.wipe_tower_type == WipeTowerType::Type1);
+        CHECK_FALSE(applied.enable_prime_tower);
+        CHECK(applied.wipe_tower_filament.value == 0);
+        CHECK(applied.first_layer_print_sequence.values.empty());
+        CHECK(applied.other_layers_print_sequence.values == std::vector<int>{ 0 });
+        CHECK(applied.other_layers_print_sequence_nums.value == 0);
+        CHECK(applied.print_sequence == PrintSequence::ByLayer);
+        CHECK(print.objects().size() == 2);
+
+        // process() is required before layer-region and tool-ordering state is populated.
+        print.process();
+
+        size_t object_index = 0;
+        size_t observed_layer_count = 0;
+        for (const PrintObject *object : print.objects()) {
+            const unsigned int expected_filament = static_cast<unsigned int>(object_index + 1);
+            size_t positive_layers = 0;
+            size_t layer_index = 0;
+            for (const Layer *layer : object->layers()) {
+                INFO("object=" << object_index << " layer=" << layer_index);
+                REQUIRE(layer->has_extrusions());
+                bool saw_expected_filament = false;
+                double volume = 0.;
+                for (const LayerRegion *region : layer->regions()) {
+                    if (!region->has_extrusions())
+                        continue;
+                    volume += region->perimeters.total_volume();
+                    volume += region->fills.total_volume();
+                    const unsigned int wall_filament = region->region().extruder(FlowRole::frExternalPerimeter);
+                    if (wall_filament == expected_filament)
+                        saw_expected_filament = true;
+                }
+                REQUIRE(std::isfinite(volume));
+                CHECK(volume > 0.);
+                CHECK(saw_expected_filament);
+                ++positive_layers;
+                ++layer_index;
+            }
+            REQUIRE(positive_layers >= 2);
+            if (object_index == 0)
+                observed_layer_count = positive_layers;
+            else
+                CHECK(positive_layers == observed_layer_count);
+            ++object_index;
+        }
+        REQUIRE(observed_layer_count >= 3);
+
+        const ToolOrdering &ordering = print.tool_ordering();
+        std::vector<std::vector<unsigned int>> sequences;
+        for (const LayerTools &layer_tools : ordering) {
+            REQUIRE(layer_tools.extruders.size() == 2);
+            CHECK(layer_tools.has_extruder(0));
+            CHECK(layer_tools.has_extruder(1));
+            sequences.push_back(layer_tools.extruders);
+        }
+        REQUIRE(sequences.size() == observed_layer_count);
+        CHECK(sequences.front() == expected_first);
+        for (size_t layer_index = 1; layer_index < sequences.size(); ++layer_index) {
+            if (cyclic)
+                CHECK(sequences[layer_index] == expected_cyclic_later);
+            else if (layer_index % 2 == 1)
+                CHECK(sequences[layer_index] == expected_default_odd);
+            else
+                CHECK(sequences[layer_index] == expected_default_even);
+        }
+    }
+}
+
+} // namespace toolchange_ordering_contracts

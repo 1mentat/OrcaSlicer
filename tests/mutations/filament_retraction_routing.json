@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Nullable filament override routing through the public print pipeline.",
+  "mutants": [
+    {
+      "id": "filament-nullable-override-lookup-disabled",
+      "path": "src/libslic3r/PrintApply.cpp",
+      "old": "        const ConfigOption *opt_new_filament = std::binary_search(extruder_retract_keys.begin(), extruder_retract_keys.end(), opt_key) ? new_full_config.option(filament_prefix + opt_key) : nullptr;",
+      "new": "        const ConfigOption *opt_new_filament = nullptr;",
+      "description": "Disable nullable filament overrides without enabling unrelated settings in the override path. Explicit values must reach G-code; nil values must still inherit machine settings.",
+      "test_filter": "FilamentRetractionOverrides"
+    }
+  ]
+}

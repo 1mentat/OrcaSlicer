@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public first-layer cyclic opt-in and later-layer custom ordering with default alternating-order controls.",
+  "mutants": [
+    {
+      "id": "toolchange-cyclic-first-layer-gate-removed",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "            if (cyclic_first_layer)\n                apply_cyclic_order(ordered);",
+      "new": "            apply_cyclic_order(ordered);",
+      "test_filter": "ToolChangeOrdering",
+      "description": "Remove the first-layer opt-in gate; the cyclic true row must remain 2,1 while the false row must remain adhesion-optimized 1,2."
+    },
+    {
+      "id": "toolchange-cyclic-later-layer-application-removed",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "            std::vector<unsigned int> ordered = layer_filaments[size_t(layer_idx)];\n            apply_cyclic_order(ordered);",
+      "new": "            std::vector<unsigned int> ordered = layer_filaments[size_t(layer_idx)];\n            std::sort(ordered.begin(), ordered.end());",
+      "test_filter": "ToolChangeOrdering",
+      "description": "Replace the later-layer cyclic application with ascending order. Both first-layer flag rows require the explicit later-layer 2,1 sequence, so this must change the public later-layer order."
+    }
+  ]
+}

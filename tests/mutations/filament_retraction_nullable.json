@@ -11,14 +11,6 @@
       "test_filter": "FilamentRetractionOverrides"
     },
     {
-      "id": "filament-nullable-printapply-route-skipped",
-      "path": "src/libslic3r/PrintApply.cpp",
-      "old": "        const ConfigOption *opt_new_filament = std::binary_search(extruder_retract_keys.begin(), extruder_retract_keys.end(), opt_key) ? new_full_config.option(filament_prefix + opt_key) : nullptr;",
-      "new": "        const ConfigOption *opt_new_filament = !std::binary_search(extruder_retract_keys.begin(), extruder_retract_keys.end(), opt_key) ? new_full_config.option(filament_prefix + opt_key) : nullptr;",
-      "description": "Invert the PrintApply filament-key route. Explicit nullable filament overrides must be processed, and unrelated machine keys must retain their ordinary path.",
-      "test_filter": "FilamentRetractionOverrides"
-    },
-    {
       "id": "filament-nullable-bool-false-override-skipped",
       "path": "src/libslic3r/PrintConfig.cpp",
       "old": "    opt_copy->apply_override(opt_new_filament, f_map_indices);",
