@@ -323,6 +323,11 @@ survivor; that process-layer gate is unclaimed. `[PresetBundleContracts]` checks
 complete per-nozzle purge matrices, selected profiles, inheritance, and the
 ownership of embedded preset files.
 
+`[GCodeFanPipeline]` exports small prints in both sequence modes. It checks the
+first-layer fan-off transition, the configured cooling range, and the kickstart
+pulse followed by its target speed while conserving extrusion and path length.
+Its mutations are in `gcode_fan_pipeline.json`.
+
 `[MultimaterialWipe]` checks direct WipeTower2 purge matrices, wall geometry,
 ramming, cooling, stamping, loading, and delay commands. Independent cooling
 variants change one setting at a time, with feedrates read from executable

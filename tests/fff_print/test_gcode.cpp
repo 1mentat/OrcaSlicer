@@ -4120,6 +4120,130 @@ TEST_CASE("GCode relative and absolute extrusion modes preserve exported materia
 
 namespace {
 
+std::vector<int> parse_public_fan_pwm(const std::string &text, const DynamicPrintConfig &config)
+{
+    std::vector<int> fan_pwm;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&fan_pwm](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("M106"))
+            return;
+        if (line.has('P')) {
+            float channel = 0.0f;
+            REQUIRE(line.has_value('P', channel));
+            REQUIRE(std::isfinite(channel));
+            CHECK_THAT(channel, Catch::Matchers::WithinAbs(1.0f, 1e-6f));
+        }
+        float pwm = 0.0f;
+        REQUIRE(line.has_value('S', pwm));
+        REQUIRE(std::isfinite(pwm));
+        REQUIRE(pwm >= 0.0f);
+        REQUIRE(pwm <= 255.0f);
+        CHECK_THAT(pwm, Catch::Matchers::WithinAbs(std::round(pwm), 1e-6f));
+        fan_pwm.emplace_back(static_cast<int>(std::lround(pwm)));
+    });
+    return fan_pwm;
+}
+
+std::string export_public_fan_fixture(const DynamicPrintConfig &config)
+{
+    Model model;
+    Print print;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(make_cube(10.0, 10.0, 0.6));
+    TriangleMesh second = make_cube(10.0, 10.0, 0.6);
+    second.translate(30.0, 0.0, 0.0);
+    meshes.emplace_back(std::move(second));
+    init_print(std::move(meshes), print, model, config, nullptr, false);
+    require_valid(print);
+    const std::string output = Test::gcode(print);
+    const size_t layer_markers = count_substring(output, ";LAYER_CHANGE");
+    REQUIRE(layer_markers >= 2);
+    REQUIRE(layer_markers <= 6);
+    return output;
+}
+
+} // namespace
+
+TEST_CASE("Fan kickstart preserves extrusion across print sequences", "[GCode][GCodeFanPipeline]")
+{
+    const char *sequence = GENERATE("by layer", "by object");
+    DynamicPrintConfig zero = base_config();
+    zero.set_deserialize_strict({
+        {"print_sequence", sequence},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+        {"nozzle_height", 2.5},
+        {"extruder_clearance_radius", 40.0},
+        {"belt_printer", false},
+        {"spiral_mode", false},
+        {"cooling_filter_enabled", false},
+        {"support_cooling_filter", false},
+        {"support_air_filtration", false},
+        {"auxiliary_fan", false},
+        {"additional_cooling_fan_speed", 0},
+        {"enable_support", false},
+        {"enable_prime_tower", false},
+        {"enable_overhang_bridge_fan", false},
+        {"overhang_fan_threshold", "95%"},
+        {"overhang_fan_speed", 0},
+        {"internal_bridge_fan_speed", -1},
+        {"support_material_interface_fan_speed", -1},
+        {"ironing_fan_speed", -1},
+        {"fan_min_speed", 30},
+        {"fan_max_speed", 60},
+        {"fan_cooling_layer_time", 1000.0},
+        {"slow_down_for_layer_cooling", false},
+        {"slow_down_layer_time", 0.0},
+        {"slow_down_min_speed", 1.0},
+        {"close_fan_the_first_x_layers", 0},
+        {"full_fan_speed_layer", 0},
+        {"initial_layer_fan_speed", 0},
+        {"fan_speedup_time", 0.0},
+        {"fan_speedup_overhangs", false},
+        {"fan_kickstart", 0.0},
+        {"part_cooling_fan_min_pwm", 0},
+    });
+    DynamicPrintConfig kickstart = zero;
+    kickstart.set_deserialize_strict({{"fan_kickstart", 0.5}});
+
+    const std::string zero_gcode = export_public_fan_fixture(zero);
+    const std::string kick_gcode = export_public_fan_fixture(kickstart);
+    const std::vector<int> zero_fan = parse_public_fan_pwm(zero_gcode, zero);
+    const std::vector<int> kick_fan = parse_public_fan_pwm(kick_gcode, kickstart);
+    const Motion zero_motion = motion(zero_gcode, zero);
+    const Motion kick_motion = motion(kick_gcode, kickstart);
+    REQUIRE(zero_motion.extrusion_moves > 0);
+    REQUIRE(kick_motion.extrusion_moves > 0);
+    REQUIRE(std::isfinite(zero_motion.filament));
+    REQUIRE(std::isfinite(kick_motion.filament));
+    REQUIRE(std::isfinite(zero_motion.xy_path));
+    REQUIRE(std::isfinite(kick_motion.xy_path));
+    CHECK_THAT(kick_motion.filament, Catch::Matchers::WithinRel(zero_motion.filament, 1e-4));
+    CHECK_THAT(kick_motion.xy_path, Catch::Matchers::WithinRel(zero_motion.xy_path, 1e-4));
+
+    // The configured 30–60% target maps to PWM 76–153, allowing integer rounding.
+    const auto is_target = [](int pwm) { return pwm >= 76 && pwm <= 153; };
+    for (const std::vector<int> *fan : {&zero_fan, &kick_fan}) {
+        const auto target = std::find_if(fan->begin(), fan->end(), is_target);
+        REQUIRE(target != fan->end());
+        CHECK(std::find(fan->begin(), target, 0) != target);
+    }
+    CHECK(std::all_of(zero_fan.begin(), zero_fan.end(), [&](int pwm) {
+        return pwm == 0 || is_target(pwm);
+    }));
+    CHECK(std::all_of(kick_fan.begin(), kick_fan.end(), [&](int pwm) {
+        return pwm == 0 || pwm == 255 || is_target(pwm);
+    }));
+    const auto pulse = std::find(kick_fan.begin(), kick_fan.end(), 255);
+    REQUIRE(pulse != kick_fan.end());
+    CHECK(std::find(kick_fan.begin(), pulse, 0) != pulse);
+    CHECK(std::find_if(kick_fan.begin(), kick_fan.end(), [](int pwm) { return pwm > 0; }) == pulse);
+    CHECK(std::find_if(pulse + 1, kick_fan.end(), is_target) != kick_fan.end());
+}
+
+
+namespace {
+
 Exported export_prime_tower(const DynamicPrintConfig& config)
 {
     Print print;
