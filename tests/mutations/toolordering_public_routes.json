@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Private source-reviewed mutants for the public FFF ToolOrdering filament-to-extruder/nozzle routes.",
+  "mutants": [
+    {
+      "id": "toolordering-public-nonbbl-identity-map-corrupted",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "            ret[i] = (int)i;",
+      "new": "            ret[i] = 0;",
+      "description": "The public non-BBL multi-extruder route must preserve the documented filament-index to extruder-index identity map; collapsing every entry to the master extruder changes the second filament assignment while retaining the first.",
+      "test_filter": "ToolOrderingPublicRoutes"
+    },
+    {
+      "id": "toolordering-public-nozzle-map-size-guard-inverted",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "        if (print_config.filament_volume_map.values.size() == filament_nums &&\n            print_config.filament_nozzle_map.values.size() == filament_nums)",
+      "new": "        if (print_config.filament_volume_map.values.size() != filament_nums &&\n            print_config.filament_nozzle_map.values.size() == filament_nums)",
+      "description": "The fully-manual public route must accept producer-sized volume/nozzle maps and return their physical nozzle assignment; rejecting the correctly sized volume map yields an empty result before the oracle.",
+      "test_filter": "ToolOrderingPublicRoutes"
+    }
+  ]
+}

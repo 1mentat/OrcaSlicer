@@ -3342,6 +3342,78 @@
         "interaction_matrix"
       ],
       "reason": "The public WipeTower2 gap-wall helper compares both skip-points values for rectangle, rib, and cone walls. Rectangle and rib permit gap walls only when enabled; cone walls reject them in both rows. Print output is not exercised by this direct contract."
+    },
+    "gcode_remap_x": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeRemap]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "For this output axis, public exports exercise all nine registered positive, negative and reverse axis mappings. More than twenty positive-extrusion endpoints and unchanged cardinality are required; every XYZ endpoint matches an independent identity-export transform within 0.002 mm. The other two output axes remain at identity."
+    },
+    "gcode_remap_y": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeRemap]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "For this output axis, public exports exercise all nine registered positive, negative and reverse axis mappings. More than twenty positive-extrusion endpoints and unchanged cardinality are required; every XYZ endpoint matches an independent identity-export transform within 0.002 mm. The other two output axes remain at identity."
+    },
+    "gcode_remap_z": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeRemap]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "For this output axis, public exports exercise all nine registered positive, negative and reverse axis mappings. More than twenty positive-extrusion endpoints and unchanged cardinality are required; every XYZ endpoint matches an independent identity-export transform within 0.002 mm. The other two output axes remain at identity."
+    },
+    "print_order": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[PrintOrder]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public exports exercise all four registered intra-layer orders. Every layer visits each fixture instance exactly once, as_obj_list follows object-list order, and BestOf never exceeds either Default or Snake under an independently measured closed travel-cycle cost."
+    },
+    "bed_temperature_formula": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[BedTemperatureFormula]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public two-filament exports exercise both registered formulas with positive extrusion from both filaments. Parsed bed commands must select the first filament or the highest initial/ordinary temperature, with explicit wait behavior and layer placement."
+    },
+    "slow_down_for_layer_cooling": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[SlowDownSettings]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Four small-box exports isolate the enabled/disabled gate from the layer-time threshold and minimum speed. With other settings fixed, enabling slowdown lowers positive-extrusion feed rates while retaining move count, XY deposition length and filament length; zero threshold is a no-slowdown control."
+    },
+    "slow_down_layer_time": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[SlowDownSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With slowdown enabled and minimum speed fixed, exports compare zero and 1000-second thresholds. Zero matches the disabled control; the high threshold drives extrusion to the configured speed floor while preserving deposition. Full numeric bounds are not exercised."
+    },
+    "slow_down_min_speed": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[SlowDownSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With slowdown enabled and a fixed 1000-second threshold, exports compare 1 and 5 mm/s minimum speeds. Parsed modal positive-extrusion feeds reach the independently derived 60 and 300 mm/min floors, with unchanged move count and deposited path/material. Full numeric bounds are not exercised."
     }
   }
 }
