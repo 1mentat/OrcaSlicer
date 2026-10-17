@@ -532,6 +532,12 @@ namespace {
 
 TestResult process_continuous_rising_outer_wall(bool detect_layer_from_tags)
 {
+    // TYPE: is the compatible/Marlin role dialect. The process-global BBL flag
+    // otherwise selects FEATURE: and leaves these role comments as erNone.
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+
     // Keep the seam detector active through the rising external extrusion. The
     // following inner-wall move ends the continuous outer path, allowing the
     // two tracking modes to select different seam origins.

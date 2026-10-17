@@ -2502,6 +2502,7 @@ struct DepositionSummary {
         Vec2d start;
         Vec2d end;
         double z = 0.;
+        bool outer_wall = false;
     };
 
     std::size_t moves = 0;
@@ -2532,7 +2533,7 @@ struct WipeBeforeExternalEvidence {
 };
 
 void record_deposition(DepositionSummary &summary, GCodeReader &reader,
-                       const GCodeReader::GCodeLine &line)
+                       const GCodeReader::GCodeLine &line, bool outer_wall)
 {
     if (!line.extruding(reader) || line.dist_XY(reader) <= EPSILON ||
         line.dist_E(reader) <= EPSILON)
@@ -2563,7 +2564,7 @@ void record_deposition(DepositionSummary &summary, GCodeReader &reader,
         summary.finite = false;
         return;
     }
-    summary.segments.push_back({Vec2d(start_x, start_y), Vec2d(end_x, end_y), z});
+    summary.segments.push_back({Vec2d(start_x, start_y), Vec2d(end_x, end_y), z, outer_wall});
 }
 
 WipeBeforeExternalEvidence parse_wipe_before_external(const std::string &gcode,
@@ -2575,9 +2576,13 @@ WipeBeforeExternalEvidence parse_wipe_before_external(const std::string &gcode,
     const std::string layer_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change);
     GCodeReader reader;
     reader.apply_config(config);
-    reader.parse_buffer(gcode, [&evidence, &layer_tag](GCodeReader &self,
+    bool outer_wall = false;
+    reader.parse_buffer(gcode, [&evidence, &layer_tag, &outer_wall](GCodeReader &self,
                                                         const GCodeReader::GCodeLine &line) {
         const std::string_view comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            outer_wall = comment.find("Outer wall") != std::string_view::npos ||
+                         comment.find("External perimeter") != std::string_view::npos;
         std::string_view trimmed_comment = comment;
         while (!trimmed_comment.empty() &&
                (trimmed_comment.back() == '\n' || trimmed_comment.back() == '\r'))
@@ -2600,7 +2605,7 @@ WipeBeforeExternalEvidence parse_wipe_before_external(const std::string &gcode,
             evidence.markers.push_back(marker);
         }
 
-        record_deposition(evidence.deposition, self, line);
+        record_deposition(evidence.deposition, self, line, outer_wall);
     });
     return evidence;
 }
@@ -2746,6 +2751,7 @@ TEST_CASE("Wipe before external loop enters the outer seam from an interior poin
     require_same_deposition(enabled.deposition, disabled.deposition);
 
     for (const PreExternalWipeMarker &marker : enabled.markers) {
+        CAPTURE(marker.start.x(), marker.start.y(), marker.end.x(), marker.end.y(), marker.z);
         REQUIRE(marker.finite);
         REQUIRE(marker.xy > 0.05);
         REQUIRE(marker.xy <= kWipeBeforeExternalMaxTravel);
@@ -2756,8 +2762,21 @@ TEST_CASE("Wipe before external loop enters the outer seam from an interior poin
         REQUIRE(point_in_fixture_cube(marker.end));
         REQUIRE(point_near_previous_material(enabled.deposition, marker.start, marker.z,
                                              marker.prior_segment_count));
-        REQUIRE(point_near_previous_material(enabled.deposition, midpoint, marker.z,
-                                             marker.prior_segment_count));
+        // The unretraction point touches the inner wall. The following move
+        // approaches the still-unprinted outer wall, so its midpoint need not
+        // remain within the inner wall's nozzle-radius neighborhood.
+        const auto depth_inside_cube = [](const Vec2d &point) {
+            return std::min({point.x() - kWipeBeforeExternalCubeMin,
+                             point.y() - kWipeBeforeExternalCubeMin,
+                             kWipeBeforeExternalCubeMax - point.x(),
+                             kWipeBeforeExternalCubeMax - point.y()});
+        };
+        CHECK(depth_inside_cube(marker.start) > depth_inside_cube(marker.end) + 0.05);
+        REQUIRE(marker.prior_segment_count < enabled.deposition.segments.size());
+        const auto &outer_start = enabled.deposition.segments[marker.prior_segment_count];
+        REQUIRE(outer_start.outer_wall);
+        CHECK_THAT(outer_start.z, Catch::Matchers::WithinAbs(marker.z, kWipeBeforeExternalCubePadding));
+        CHECK((outer_start.start - marker.end).norm() <= kWipeBeforeExternalCubePadding);
     }
 }
 

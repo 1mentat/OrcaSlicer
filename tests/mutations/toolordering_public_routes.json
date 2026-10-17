@@ -15,7 +15,7 @@
       "path": "src/libslic3r/GCode/ToolOrdering.cpp",
       "old": "        if (print_config.filament_volume_map.values.size() == filament_nums &&\n            print_config.filament_nozzle_map.values.size() == filament_nums)",
       "new": "        if (print_config.filament_volume_map.values.size() != filament_nums &&\n            print_config.filament_nozzle_map.values.size() == filament_nums)",
-      "description": "The fully-manual public route must accept producer-sized volume/nozzle maps and return their physical nozzle assignment; rejecting the correctly sized volume map yields an empty result before the oracle.",
+      "description": "The fully-manual public route must accept producer-sized volume/nozzle maps and preserve distinct/shared logical nozzle groups while resolving them to available matching physical nozzles; rejecting the correctly sized volume map yields an empty result before the oracle.",
       "test_filter": "ToolOrderingPublicRoutes"
     }
   ]

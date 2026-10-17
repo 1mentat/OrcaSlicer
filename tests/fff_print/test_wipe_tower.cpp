@@ -2410,7 +2410,7 @@ TEST_CASE("Legacy direct tower preserves changing tool and purge records", "[Wip
 
 namespace toolordering_public_routes_contracts {
 
-TEST_CASE("Public ToolOrdering preserves non-BBL and physical-nozzle assignments", "[WipeTower][ToolOrderingPublicRoutes]")
+TEST_CASE("Public ToolOrdering preserves extruder and logical nozzle-group assignments", "[WipeTower][ToolOrderingPublicRoutes]")
 {
     SECTION("non-BBL multi-extruder maps each used filament to its matching extruder")
     {
@@ -2439,36 +2439,45 @@ TEST_CASE("Public ToolOrdering preserves non-BBL and physical-nozzle assignments
         CHECK(result.get_extruder_id(1) == 1);
     }
 
-    SECTION("fully-manual multi-nozzle mapping preserves each requested physical nozzle")
+    SECTION("fully-manual multi-nozzle mapping preserves distinct and shared logical groups")
     {
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4};
         config.option<ConfigOptionIntsNullable>("extruder_max_nozzle_count", true)->values = {3};
         config.option<ConfigOptionStrings>("extruder_nozzle_stats", true)->values = {"Standard#3"};
-        config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75, 1.75};
-        config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#FF0000", "#00FF00"};
-        config.option<ConfigOptionInts>("filament_map", true)->values = {1, 1};
+        config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75, 1.75, 1.75};
+        config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#FF0000", "#00FF00", "#0000FF"};
+        config.option<ConfigOptionInts>("filament_map", true)->values = {1, 1, 1};
         config.option<ConfigOptionInts>("filament_volume_map", true)->values = {
-            static_cast<int>(nvtStandard), static_cast<int>(nvtStandard)};
-        config.option<ConfigOptionInts>("filament_nozzle_map", true)->values = {0, 2};
+            static_cast<int>(nvtStandard), static_cast<int>(nvtStandard), static_cast<int>(nvtStandard)};
+        // Input ids are logical equivalence classes: filaments 1 and 2 share id 2,
+        // while filament 0 requests a distinct class. The resolver assigns those
+        // classes to available matching physical nozzles in canonical order.
+        config.option<ConfigOptionInts>("filament_nozzle_map", true)->values = {0, 2, 2};
 
         Model model;
         model.add_object("cube", "", make_cube(4, 4, 0.8))->add_instance();
         Print print;
         print.apply(model, config);
-        REQUIRE(print.config().filament_colour.values.size() == 2);
-        REQUIRE(print.config().filament_nozzle_map.values == std::vector<int>{0, 2});
+        REQUIRE(print.config().filament_colour.values.size() == 3);
+        REQUIRE(print.config().extruder_nozzle_stats.values == std::vector<std::string>{"Standard#3"});
+        REQUIRE(print.config().filament_nozzle_map.values == std::vector<int>{0, 2, 2});
         REQUIRE(print.config().extruder_max_nozzle_count.values == std::vector<int>{3});
 
         const auto result = ToolOrdering::get_recommended_filament_maps(
-            {{0, 1}}, &print, FilamentMapMode::fmmNozzleManual, {}, {});
-        REQUIRE(result.get_used_filaments() == std::vector<unsigned int>{0, 1});
-        CHECK(result.get_extruder_map(false) == std::vector<int>{1, 1});
-        CHECK(result.get_nozzle_map() == std::vector<int>{0, 2});
-        CHECK(result.get_nozzle_id(0) == 0);
-        CHECK(result.get_nozzle_id(1) == 2);
+            {{0, 1, 2}}, &print, FilamentMapMode::fmmNozzleManual, {}, {});
+        REQUIRE(result.get_used_filaments() == std::vector<unsigned int>{0, 1, 2});
+        CHECK(result.get_extruder_map(false) == std::vector<int>{1, 1, 1});
+        const auto nozzle_map = result.get_nozzle_map();
+        REQUIRE(nozzle_map.size() == 3);
+        CHECK(nozzle_map[0] != nozzle_map[1]);
+        CHECK(nozzle_map[1] == nozzle_map[2]);
+        CHECK(result.get_nozzle_id(0) != result.get_nozzle_id(1));
+        CHECK(result.get_nozzle_id(1) == result.get_nozzle_id(2));
         CHECK(result.get_extruder_id(0) == 0);
         CHECK(result.get_extruder_id(1) == 0);
+        CHECK(result.get_extruder_id(2) == 0);
+        CHECK(result.get_volume_map() == std::vector<int>{static_cast<int>(nvtStandard), static_cast<int>(nvtStandard), static_cast<int>(nvtStandard)});
     }
 }
 
