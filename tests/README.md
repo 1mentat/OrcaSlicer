@@ -224,6 +224,18 @@ and `[GCodeProcessorArcR]` check unknown-axis origin resets and radius-form arc
 geometry through the public parser; their mutants are in
 `tests/mutations/gcode_processor_g92_arc.json`.
 
+`[WrappingDetectionGCode]` checks clumping-hook gates, zero-based layer metadata,
+and deposition height recovery after a hook moves Z. `[CalibrationInputShapingGCode]`
+checks per-layer frequency and damping ramps through Marlin 2, RepRapFirmware,
+and Klipper exports, including independent X/Y ranges and a disabled control.
+Their mutants are in `wrapping_detection_gcode.json` and
+`calibration_input_shaping_gcode.json` under `tests/mutations/`.
+`[Bbs3mfSourceMetadata]` checks source paths, source-volume IDs, offsets, and
+unit-conversion flags after archive reload; its mutants are in
+`tests/mutations/bbs_source_metadata.json`. `[PhysicalPrinterDeletion]` checks
+sole and shared preset membership, saved settings, file removal, and selection
+clearing, with mutants in `tests/mutations/physical_printer_deletion.json`.
+
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
 placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`
 checks non-sequential backup IDs, geometry preservation, and missing-part

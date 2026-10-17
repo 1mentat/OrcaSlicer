@@ -4742,14 +4742,15 @@ void PhysicalPrinterCollection::save_printer(PhysicalPrinter& edited_printer, co
     // initialize it with the edited config.
     auto it = this->find_printer_internal(name);
     if (it != m_printers.end() && it->name == name) {
-        // Printer with the same name found.
-        // Overwriting an existing preset.
-        it->config = std::move(edited_printer.config);
-        it->name = edited_printer.name;
-        it->preset_names = edited_printer.preset_names;
-        // sort printers and get new it
-        std::sort(m_printers.begin(), m_printers.end());
-        it = this->find_printer_internal(edited_printer.name);
+        // Membership updates may save the collection element itself.
+        if (&*it != &edited_printer) {
+            it->config = std::move(edited_printer.config);
+            it->name = edited_printer.name;
+            it->preset_names = edited_printer.preset_names;
+            // sort printers and get new it
+            std::sort(m_printers.begin(), m_printers.end());
+            it = this->find_printer_internal(edited_printer.name);
+        }
     }
     else {
         // Creating a new printer.

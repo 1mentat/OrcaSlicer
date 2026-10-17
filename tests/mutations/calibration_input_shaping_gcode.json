@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "calibration-input-shaping-freq-y-end-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "gcode += writer().set_input_shaping('Y', 0.f, this->interpolate_value_across_layers(print.calib_params().freqStartY, print.calib_params().freqEndY), \"\");",
+      "new": "gcode += writer().set_input_shaping('Y', 0.f, this->interpolate_value_across_layers(print.calib_params().freqStartY, print.calib_params().freqStartY), \"\");",
+      "description": "Ignore the configured Y frequency endpoint. The asymmetric frequency row independently checks each later-layer Y command, so this should be an assertion kill rather than a crash.",
+      "test_filter": "CalibrationInputShapingGCode"
+    },
+    {
+      "id": "calibration-input-shaping-freq-axis-branch-inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (print.calib_params().freqStartX == print.calib_params().freqStartY && print.calib_params().freqEndX == print.calib_params().freqEndY) {",
+      "new": "if (print.calib_params().freqStartX != print.calib_params().freqStartY && print.calib_params().freqEndX != print.calib_params().freqEndY) {",
+      "description": "Invert the equal-X/Y-range branch. Symmetric rows should emit one A command and asymmetric rows should emit separate X/Y commands; both generated rows exercise the branch contract.",
+      "test_filter": "CalibrationInputShapingGCode"
+    },
+    {
+      "id": "calibration-input-shaping-damp-y-axis-duplicated-x",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "gcode += writer().set_input_shaping('Y', 0.f, print.calib_params().freqStartY, print.calib_params().shaper_type);",
+      "new": "gcode += writer().set_input_shaping('X', 0.f, print.calib_params().freqStartY, print.calib_params().shaper_type);",
+      "description": "Route the initial Y damping-calibration frequency through X. Marlin and Klipper rows require distinct X/Y axis commands; RRF still contributes the independent frequency value.",
+      "test_filter": "CalibrationInputShapingGCode"
+    }
+  ]
+}

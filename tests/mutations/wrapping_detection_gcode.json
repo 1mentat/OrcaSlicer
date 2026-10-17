@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public clumping-detection hook gating, layer metadata and deposition recovery.",
+  "mutants": [
+    {
+      "id": "wrapping-gcode-enabled-hook-suppressed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (print.config().enable_wrapping_detection && !print.config().wrapping_detection_gcode.value.empty()) {",
+      "new": "if (false && print.config().enable_wrapping_detection && !print.config().wrapping_detection_gcode.value.empty()) {",
+      "description": "Suppress a configured clumping-detection script while preserving normal slicing. Enabled exports must contain one hook with actual metadata per layer.",
+      "test_filter": "WrappingDetectionGCode"
+    },
+    {
+      "id": "wrapping-gcode-maximum-height-inflated",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    auto insert_wrapping_detection_gcode = [this, &print, &print_z, &most_used_extruder]() -> std::string {\n        std::string wrapping_gcode;\n        if (print.config().enable_wrapping_detection && !print.config().wrapping_detection_gcode.value.empty()) {\n            DynamicConfig config;\n            config.set_key_value(\"layer_num\", new ConfigOptionInt(m_layer_index));\n            config.set_key_value(\"layer_z\", new ConfigOptionFloat(print_z));\n            config.set_key_value(\"max_layer_z\", new ConfigOptionFloat(m_max_layer_z));",
+      "new": "    auto insert_wrapping_detection_gcode = [this, &print, &print_z, &most_used_extruder]() -> std::string {\n        std::string wrapping_gcode;\n        if (print.config().enable_wrapping_detection && !print.config().wrapping_detection_gcode.value.empty()) {\n            DynamicConfig config;\n            config.set_key_value(\"layer_num\", new ConfigOptionInt(m_layer_index));\n            config.set_key_value(\"layer_z\", new ConfigOptionFloat(print_z));\n            config.set_key_value(\"max_layer_z\", new ConfigOptionFloat(m_max_layer_z + 1.));",
+      "description": "Pass an inflated maximum layer height to the custom hook. The independent six-layer sequence must retain its actual maximum Z.",
+      "test_filter": "WrappingDetectionGCode"
+    }
+  ]
+}

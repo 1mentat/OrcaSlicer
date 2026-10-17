@@ -7,6 +7,7 @@
 #include <memory>
 #include <limits>
 #include "libslic3r/GCode.hpp"
+#include "libslic3r/calib.hpp"
 #include <catch2/catch_all.hpp>
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Config.hpp"
@@ -31,6 +32,7 @@
 #include <cstddef>
 #include <fstream>
 #include <initializer_list>
+#include <iomanip>
 #include <optional>
 #include <utility>
 #include <catch2/catch_test_macros.hpp>
@@ -1879,6 +1881,266 @@ TEST_CASE("Marlin 2 input shaping routes axes and honors endpoints and gates",
 
 } // namespace input_shaping_followup
 
+namespace calibration_gcode_followup {
+
+namespace {
+
+constexpr size_t kMaxOutputBytes = 4 * 1024 * 1024;
+constexpr size_t kCalibrationLayerCount = 6;
+constexpr double kDampingStart = 0.125;
+constexpr double kFrequencyStartX = 40.0;
+constexpr double kFrequencyEndX = 80.0;
+constexpr double kFrequencyStartY = 55.0;
+constexpr double kFrequencyEndY = 95.0;
+
+struct CalibrationCommand {
+    size_t      layer = 0;
+    std::string line;
+};
+
+std::vector<CalibrationCommand> parse_calibration_commands(const std::string &gcode)
+{
+    std::vector<CalibrationCommand> commands;
+    size_t current_layer = std::numeric_limits<size_t>::max();
+    size_t line_start = 0;
+    while (line_start <= gcode.size()) {
+        const size_t line_end = gcode.find('\n', line_start);
+        const size_t length = line_end == std::string::npos ? gcode.size() - line_start : line_end - line_start;
+        const std::string line = gcode.substr(line_start, length);
+        const size_t first = line.find_first_not_of(" \t\r");
+        if (first != std::string::npos && line.compare(first, 13, ";LAYER_CHANGE") == 0) {
+            current_layer = current_layer == std::numeric_limits<size_t>::max() ? 0 : current_layer + 1;
+        } else if (current_layer != std::numeric_limits<size_t>::max() && first != std::string::npos) {
+            const std::string command = line.substr(first);
+            const bool is_marlin_or_rrf = command.compare(0, 4, "M593") == 0 &&
+                (command.size() == 4 || std::isspace(static_cast<unsigned char>(command[4])));
+            const bool is_klipper = command.compare(0, 16, "SET_INPUT_SHAPER") == 0 &&
+                (command.size() == 16 || std::isspace(static_cast<unsigned char>(command[16])));
+            if (is_marlin_or_rrf || is_klipper)
+                commands.push_back({current_layer, command});
+        }
+        if (line_end == std::string::npos)
+            break;
+        line_start = line_end + 1;
+    }
+    return commands;
+}
+
+bool has_command_token(const std::string &line, const std::string &expected)
+{
+    std::istringstream stream(line);
+    std::string token;
+    while (stream >> token)
+        if (token == expected)
+            return true;
+    return false;
+}
+
+std::string fixed_value(double value, int precision)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(precision) << value;
+    return stream.str();
+}
+
+double expected_ramp(size_t layer_index, size_t layer_count, double start, double end)
+{
+    // This is the public calibration contract: the first two zero-based layer
+    // indices retain the start value, then the remaining layers interpolate
+    // across the complete configured range.
+    if (layer_index <= 1)
+        return start;
+    return start + (static_cast<double>(layer_index) / static_cast<double>(layer_count - 1)) * (end - start);
+}
+
+void require_shaper_command(const CalibrationCommand &command, const char *flavor,
+                            char axis, double frequency, bool include_frequency,
+                            double damping, bool include_damping, const char *type)
+{
+    const std::string line = command.line;
+    const bool klipper = std::string(flavor) == "klipper";
+    const bool reprap = std::string(flavor) == "reprapfirmware";
+    const std::string prefix = klipper ? "SET_INPUT_SHAPER" : "M593";
+    REQUIRE(line.rfind(prefix, 0) == 0);
+
+    if (klipper) {
+        if (type != nullptr && type[0] != '\0')
+            CHECK(has_command_token(line, std::string("SHAPER_TYPE=") + type));
+        const std::string axis_name = axis == 'A' ? "" : std::string(1, axis);
+        if (include_frequency) {
+            if (axis == 'A') {
+                CHECK(has_command_token(line, "SHAPER_FREQ_X=" + fixed_value(frequency, 2)));
+                CHECK(has_command_token(line, "SHAPER_FREQ_Y=" + fixed_value(frequency, 2)));
+            } else {
+                CHECK(has_command_token(line, "SHAPER_FREQ_" + axis_name + "=" + fixed_value(frequency, 2)));
+            }
+        }
+        if (include_damping) {
+            if (axis == 'A') {
+                CHECK(has_command_token(line, "DAMPING_RATIO_X=" + fixed_value(damping, 3)));
+                CHECK(has_command_token(line, "DAMPING_RATIO_Y=" + fixed_value(damping, 3)));
+            } else {
+                CHECK(has_command_token(line, "DAMPING_RATIO_" + axis_name + "=" + fixed_value(damping, 3)));
+            }
+        }
+        return;
+    }
+
+    if (reprap) {
+        // RRF does not encode an axis in M593.  Each calibration call is a
+        // separate command, so the independently calculated F/S value is the
+        // axis-specific witness.
+        if (type != nullptr && type[0] != '\0')
+            CHECK(has_command_token(line, std::string("P\"") + type + "\""));
+    } else if (axis != 'A') {
+        CHECK(has_command_token(line, std::string(1, axis)));
+    }
+    if (include_frequency)
+        CHECK(has_command_token(line, "F" + fixed_value(frequency, 2)));
+    if (include_damping) {
+        const std::string damping_token = (reprap ? "S" : "D") + fixed_value(damping, 3);
+        CHECK(has_command_token(line, damping_token));
+    }
+}
+
+ExportedPrint export_calibration(const char *flavor, const Calib_Params &params)
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"gcode_flavor", flavor},
+        {"input_shaping_emit", false},
+        {"input_shaping_type", "Default"},
+        {"input_shaping_freq_x", 0.0},
+        {"input_shaping_freq_y", 0.0},
+        {"input_shaping_damp_x", 0.0},
+        {"input_shaping_damp_y", 0.0},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"enable_support", false},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+    });
+
+    Print print;
+    Model model;
+    Test::init_print({make_cube(8.0, 8.0, 1.2)}, print, model, config);
+    require_valid(print);
+    print.set_calib_params(params);
+    return export_print(print);
+}
+
+void require_six_layers(const ExportedPrint &exported, const DynamicPrintConfig &config)
+{
+    REQUIRE(count_text(exported.text, ";LAYER_CHANGE") == kCalibrationLayerCount);
+    REQUIRE(exported.text.size() < kMaxOutputBytes);
+    REQUIRE(motion_evidence(exported.text, config).extrusion_moves > 0);
+}
+
+} // namespace
+
+TEST_CASE("Calibration input shaping frequency ramps emit independent XY commands and disabled control",
+          "[GCode][Calibration][InputShaping][CalibrationInputShapingGCode][GCodeExportWorkflows]")
+{
+    const char *flavor = GENERATE("marlin2", "reprapfirmware", "klipper");
+    const bool asymmetric = GENERATE(false, true);
+    INFO("gcode_flavor=" << flavor << ", asymmetric=" << asymmetric);
+
+    Calib_Params params;
+    params.mode = CalibMode::Calib_Input_shaping_freq;
+    params.start = kDampingStart;
+    params.freqStartX = kFrequencyStartX;
+    params.freqEndX = kFrequencyEndX;
+    params.freqStartY = asymmetric ? kFrequencyStartY : kFrequencyStartX;
+    params.freqEndY = asymmetric ? kFrequencyEndY : kFrequencyEndX;
+    params.shaper_type = "ZV";
+
+    const ExportedPrint exported = export_calibration(flavor, params);
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({{"gcode_flavor", flavor}, {"input_shaping_emit", false}});
+    require_six_layers(exported, config);
+    const std::vector<CalibrationCommand> commands = parse_calibration_commands(exported.text);
+    const size_t expected_commands = asymmetric ? 2 * kCalibrationLayerCount - 1 : kCalibrationLayerCount;
+    REQUIRE(commands.size() == expected_commands);
+
+    size_t cursor = 0;
+    for (size_t layer = 0; layer < kCalibrationLayerCount; ++layer) {
+        INFO("layer=" << layer);
+        if (layer == 1) {
+            REQUIRE(commands[cursor].layer == layer);
+            require_shaper_command(commands[cursor++], flavor, 'A', 0.0, false,
+                                    params.start, true, params.shaper_type.c_str());
+        } else if (asymmetric) {
+            REQUIRE(commands[cursor].layer == layer);
+            require_shaper_command(commands[cursor++], flavor, 'X',
+                                    expected_ramp(layer, kCalibrationLayerCount, params.freqStartX, params.freqEndX), true,
+                                    0.0, false, "");
+            REQUIRE(commands[cursor].layer == layer);
+            require_shaper_command(commands[cursor++], flavor, 'Y',
+                                    expected_ramp(layer, kCalibrationLayerCount, params.freqStartY, params.freqEndY), true,
+                                    0.0, false, "");
+        } else {
+            REQUIRE(commands[cursor].layer == layer);
+            require_shaper_command(commands[cursor++], flavor, 'A',
+                                    expected_ramp(layer, kCalibrationLayerCount, params.freqStartX, params.freqEndX), true,
+                                    0.0, false, "");
+        }
+    }
+    REQUIRE(cursor == commands.size());
+
+    if (std::string(flavor) == "marlin2" && !asymmetric) {
+        Calib_Params disabled_params;
+        disabled_params.mode = CalibMode::Calib_None;
+        const ExportedPrint disabled = export_calibration("marlin2", disabled_params);
+        DynamicPrintConfig disabled_config = base_config();
+        disabled_config.set_deserialize_strict({{"gcode_flavor", "marlin2"}, {"input_shaping_emit", false}});
+        require_six_layers(disabled, disabled_config);
+        CHECK(parse_calibration_commands(disabled.text).empty());
+    }
+}
+
+TEST_CASE("Calibration input shaping damping ramps preserve XY frequency endpoints",
+          "[GCode][Calibration][InputShaping][CalibrationInputShapingGCode][GCodeExportWorkflows]")
+{
+    const char *flavor = GENERATE("marlin2", "reprapfirmware", "klipper");
+    INFO("gcode_flavor=" << flavor);
+
+    Calib_Params params;
+    params.mode = CalibMode::Calib_Input_shaping_damp;
+    params.start = 0.10;
+    params.end = 0.40;
+    params.freqStartX = 45.0;
+    params.freqStartY = 65.0;
+    params.shaper_type = "ZV";
+
+    const ExportedPrint exported = export_calibration(flavor, params);
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({{"gcode_flavor", flavor}, {"input_shaping_emit", false}});
+    require_six_layers(exported, config);
+    const std::vector<CalibrationCommand> commands = parse_calibration_commands(exported.text);
+    REQUIRE(commands.size() == kCalibrationLayerCount + 1);
+
+    size_t cursor = 0;
+    for (size_t layer = 0; layer < kCalibrationLayerCount; ++layer) {
+        INFO("layer=" << layer);
+        REQUIRE(commands[cursor].layer == layer);
+        if (layer == 1) {
+            require_shaper_command(commands[cursor++], flavor, 'X', params.freqStartX, true,
+                                   0.0, false, params.shaper_type.c_str());
+            REQUIRE(commands[cursor].layer == layer);
+            require_shaper_command(commands[cursor++], flavor, 'Y', params.freqStartY, true,
+                                   0.0, false, params.shaper_type.c_str());
+        } else {
+            require_shaper_command(commands[cursor++], flavor, 'A', 0.0, false,
+                                   expected_ramp(layer, kCalibrationLayerCount, params.start, params.end), true, "");
+        }
+    }
+    REQUIRE(cursor == commands.size());
+}
+
+} // namespace calibration_gcode_followup
+
 namespace small_area_flow_compensation_contracts {
 
 namespace {
@@ -3293,6 +3555,90 @@ TEST_CASE("GCode processor result reports output filament statistics for a real 
     CHECK(total_volume > 0.0);
     CHECK(out.result->print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time > 0.0f);
 }
+
+TEST_CASE("Clumping detection exports layer metadata and restores deposition height", "[GCode][WrappingDetectionGCode]")
+{
+    const std::string hook =
+        "M117 WRAP_META {layer_num} {layer_z} {max_layer_z} "
+        "{most_used_physical_extruder_id} {curr_physical_extruder_id}\n"
+        "G1 Z{layer_z + 0.7} F600\n";
+    struct Mode { bool enabled; bool has_hook; };
+    const std::array<Mode, 3> modes{{{false, true}, {true, true}, {true, false}}};
+    double baseline_filament = 0.;
+    double baseline_xy = 0.;
+    for (size_t mode_index = 0; mode_index < modes.size(); ++mode_index) {
+        const Mode mode = modes[mode_index];
+        INFO("enabled=" << mode.enabled << " has_hook=" << mode.has_hook);
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({
+            {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+            {"wall_loops", 1}, {"top_shell_layers", 0}, {"bottom_shell_layers", 0},
+            {"sparse_infill_density", "0%"}, {"enable_support", false},
+            {"print_sequence", "by layer"}, {"enable_prime_tower", false},
+            {"enable_wrapping_detection", mode.enabled},
+            {"wrapping_detection_gcode", mode.has_hook ? hook : std::string{}},
+            {"physical_extruder_map", "0"},
+        });
+        Print print;
+        Model model;
+        init_print({make_cube(8., 8., 1.2)}, print, model, config);
+        require_valid(print);
+        REQUIRE_FALSE(print.has_wipe_tower());
+        const std::string output = gcode(print);
+        REQUIRE(print.objects().size() == 1);
+        REQUIRE(print.objects().front()->layer_count() == 6);
+
+        size_t hook_count = 0;
+        std::istringstream lines(output);
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (line.rfind("M117 WRAP_META ", 0) != 0)
+                continue;
+            std::istringstream fields(line.substr(std::string("M117 WRAP_META ").size()));
+            int layer_number = -1, most_used = -1, current = -1;
+            double layer_z = -1., max_z = -1.;
+            REQUIRE(static_cast<bool>(fields >> layer_number >> layer_z >> max_z >> most_used >> current));
+            ++hook_count;
+            CHECK(layer_number == static_cast<int>(hook_count) - 1);
+            CHECK_THAT(layer_z, Catch::Matchers::WithinAbs(0.2 * hook_count, 1e-5));
+            CHECK_THAT(max_z, Catch::Matchers::WithinAbs(0.2 * hook_count, 1e-5));
+            CHECK(most_used == 0);
+            CHECK(current == 0);
+        }
+        const size_t expected_hooks = mode.enabled && mode.has_hook ? 6 : 0;
+        CHECK(hook_count == expected_hooks);
+
+        GCodeReader reader;
+        reader.apply_config(print.config());
+        std::set<int> deposition_layers;
+        double filament = 0., xy = 0.;
+        reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &move) {
+            if (!move.extruding(self) || move.dist_XY(self) <= 1e-6)
+                return;
+            const double z = move.new_Z(self);
+            REQUIRE(std::isfinite(z));
+            const int layer = static_cast<int>(std::llround(z / 0.2));
+            REQUIRE(layer >= 1);
+            REQUIRE(layer <= 6);
+            CHECK_THAT(z, Catch::Matchers::WithinAbs(0.2 * layer, 1e-4));
+            deposition_layers.insert(layer);
+            filament += move.dist_E(self);
+            xy += move.dist_XY(self);
+        });
+        const std::set<int> expected_layers{1, 2, 3, 4, 5, 6};
+        CHECK(deposition_layers == expected_layers);
+        REQUIRE(filament > 0.);
+        REQUIRE(xy > 0.);
+        if (mode_index == 0) {
+            baseline_filament = filament;
+            baseline_xy = xy;
+        } else {
+            CHECK_THAT(filament, Catch::Matchers::WithinRel(baseline_filament, 1e-5));
+            CHECK_THAT(xy, Catch::Matchers::WithinRel(baseline_xy, 1e-6));
+        }
+    }
+}
+
 
 TEST_CASE("GCode placeholder layer count remains finite for a small real export", "[GCode][GCodeBroad]")
 {

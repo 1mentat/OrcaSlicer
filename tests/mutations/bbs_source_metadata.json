@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "BBS source-volume provenance, path policy, and unsourced modifier control; native execution is pending.",
+  "mutants": [
+    {
+      "id": "bbs-source-fullpath-policy-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "std::string input_file = xml_escape(m_fullpath_sources ? volume->source.input_file : file_path.filename().string());",
+      "new": "std::string input_file = xml_escape(m_fullpath_sources ? file_path.filename().string() : volume->source.input_file);",
+      "description": "FullPathSources enabled must retain the configured source path while the default policy stores only its basename; both generated rows assert the public path contract.",
+      "test_filter": "Bbs3mfSourceMetadata"
+    },
+    {
+      "id": "bbs-source-offset-z-written-as-y",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "stream << prefix << SOURCE_OFFSET_Z_KEY  << \"\\\" \" << VALUE_ATTR << \"=\\\"\" << volume->source.mesh_offset(2) << \"\\\"/>\\n\";",
+      "new": "stream << prefix << SOURCE_OFFSET_Z_KEY  << \"\\\" \" << VALUE_ATTR << \"=\\\"\" << volume->source.mesh_offset(1) << \"\\\"/>\\n\";",
+      "description": "The source Z offset must survive archive serialization independently of the Y offset.",
+      "test_filter": "Bbs3mfSourceMetadata"
+    },
+    {
+      "id": "bbs-source-inches-marker-written-as-meters",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (volume->source.is_converted_from_inches)\n                                    stream << prefix << SOURCE_IN_INCHES << \"\\\" \" << VALUE_ATTR << \"=\\\"1\\\"/>\\n\";",
+      "new": "if (volume->source.is_converted_from_inches)\n                                    stream << prefix << SOURCE_IN_METERS << \"\\\" \" << VALUE_ATTR << \"=\\\"1\\\"/>\\n\";",
+      "description": "An imperial conversion marker must not be serialized as the metric conversion marker; the loaded flags are checked separately.",
+      "test_filter": "Bbs3mfSourceMetadata"
+    }
+  ]
+}
