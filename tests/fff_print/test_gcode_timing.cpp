@@ -666,3 +666,51 @@ TEST_CASE("VG1 classic jerk planning slows an E-axis reversal at a virtual junct
     // independently expected to be larger.
     CHECK(slower_previous_penalty > faster_previous_penalty + 0.001);
 }
+
+TEST_CASE("Shallow virtual turns are capped by centripetal acceleration",
+          "[GCodeTiming][GCodeTimingCentripetal]")
+{
+    // The incoming 160 mm move establishes a high-speed, nonzero XY direction. The outgoing
+    // 40 mm move is tested at angles inside and outside the processor's 28.96-degree window.
+    // All compared moves have the same XY length and feed command.
+    FullPrintConfig config = make_junction_config(gcfMarlinLegacy, 1000.0, 0.0);
+    const double turn = 20.0 * M_PI / 180.0;
+    const auto run = [&](double angle, double feedrate) {
+        const double dx = 40.0 * std::cos(angle);
+        const double dy = 40.0 * std::sin(angle);
+        std::ostringstream gcode;
+        gcode << std::fixed << std::setprecision(6)
+              << "M83\nG90\n"
+              << "VG1 Z0.2 F1200\n"
+              << "VG1 X0 Y0 F" << feedrate << "\n"
+              << "VG1 X160 Y0 F" << feedrate << "\n"
+              << "VG1 X" << 160.0 + dx << " Y" << dy << " E1 F" << feedrate << "\n";
+
+        GCodeProcessor processor;
+        const std::string text = gcode.str();
+        run_processor(processor, config, text.c_str());
+        return double(processor.get_time(PrintEstimatedStatistics::ETimeMode::Normal));
+    };
+
+    constexpr double high_feed = 30000.0;
+    constexpr double low_feed  = 12000.0;
+    const double high_straight = run(0.0, high_feed);
+    const double high_shallow  = run(turn, high_feed);
+    const double high_reverse  = run(-turn, high_feed);
+    const double high_outside  = run(40.0 * M_PI / 180.0, high_feed);
+    const double low_straight  = run(0.0, low_feed);
+    const double low_shallow   = run(turn, low_feed);
+
+    for (double time : {high_straight, high_shallow, high_reverse, high_outside, low_straight, low_shallow}) {
+        REQUIRE(std::isfinite(time));
+        REQUIRE(time > 0.0);
+    }
+
+    // At 500 mm/s, the 20-degree cap is about 339 mm/s for a 40 mm segment and 1000 mm/s^2
+    // acceleration, while the 40-degree route is outside the source gate. Equal signed angles
+    // and the outside/low-feed controls distinguish the cap from ordinary direction handling.
+    CHECK(high_shallow > high_straight + 0.01);
+    CHECK_THAT(high_shallow, Catch::Matchers::WithinAbs(high_reverse, 0.002));
+    CHECK_THAT(high_outside, Catch::Matchers::WithinAbs(high_straight, 0.002));
+    CHECK_THAT(low_shallow, Catch::Matchers::WithinAbs(low_straight, 0.002));
+}

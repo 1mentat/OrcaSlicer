@@ -323,6 +323,10 @@ survivor; that process-layer gate is unclaimed. `[PresetBundleContracts]` checks
 complete per-nozzle purge matrices, selected profiles, inheritance, and the
 ownership of embedded preset files.
 
+`[GCodeTimingCentripetal]` checks virtual-move timing at shallow turns, with
+straight, opposite-turn, wide-turn, and low-speed controls. Its mutations are
+in `gcode_timing_centripetal.json`.
+
 `[GCodeFanPipeline]` exports small prints in both sequence modes. It checks the
 first-layer fan-off transition, the configured cooling range, and the kickstart
 pulse followed by its target speed while conserving extrusion and path length.
