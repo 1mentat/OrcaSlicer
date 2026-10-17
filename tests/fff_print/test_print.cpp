@@ -2464,6 +2464,8 @@ TEST_CASE("Print process selects cached paths and completes cached object steps"
         {"brim_type", "no_brim"},
         {"raft_layers", 0},
         {"gcode_comments", true},
+        {"use_relative_e_distances", true},
+        {"before_layer_change_gcode", "G92 E0\n"},
     });
 
     Print source;

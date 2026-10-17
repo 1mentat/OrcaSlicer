@@ -7,7 +7,7 @@
       "path": "src/libslic3r/Model.cpp",
       "old": "    for (ModelVolume *v : this->volumes) {\n        v->mirror(axis);\n    }",
       "new": "    for (ModelVolume *v : this->volumes) {\n        (void)v;\n    }",
-      "description": "Skip forwarding the requested axis to each volume; the generated X/Y/Z reflected bounds and all volume mirror factors must fail.",
+      "description": "Skip forwarding the requested axis to each volume; the generated X/Y/Z reflected bounds and each volume's handedness must fail.",
       "test_filter": "ModelMirror"
     },
     {

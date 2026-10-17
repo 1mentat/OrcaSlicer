@@ -3467,6 +3467,8 @@ TEST_CASE("Custom G-code events follow print mode and layer assignment", "[WipeT
             { "brim_type",              "no_brim" },
             { "enable_prime_tower",        false },
             { "print_sequence",       "by layer" },
+            { "use_relative_e_distances",  true },
+            { "before_layer_change_gcode", "G92 E0\n" },
         });
 
         Print print;

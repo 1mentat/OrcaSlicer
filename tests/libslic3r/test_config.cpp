@@ -1687,6 +1687,39 @@ TEST_CASE("Default options of enum lists get their definition's keys map", "[Con
     CHECK(enum_lists > 0);
 }
 
+TEST_CASE("Static and dynamic print defaults retain named enum lists", "[Config][StaticEnumDefaults]")
+{
+    const auto check_named_enums = [](ConfigBase &config) {
+        REQUIRE(config.opt_serialize("z_hop_types") == "Slope Lift");
+        REQUIRE(config.opt_serialize("retract_lift_enforce") == "All Surfaces");
+
+        config.set_deserialize_strict("z_hop_types", "Normal Lift,Spiral Lift");
+        config.set_deserialize_strict("retract_lift_enforce", "Top and Bottom");
+
+        const auto *z_hop = config.option<ConfigOptionEnumsGeneric>("z_hop_types");
+        const auto *surfaces = config.option<ConfigOptionEnumsGeneric>("retract_lift_enforce");
+        REQUIRE(z_hop != nullptr);
+        REQUIRE(surfaces != nullptr);
+        const std::vector<int> expected_hops{zhtNormal, zhtSpiral};
+        const std::vector<int> expected_surfaces{rletTopAndBottom};
+        CHECK(z_hop->values == expected_hops);
+        CHECK(surfaces->values == expected_surfaces);
+        CHECK(config.opt_serialize("z_hop_types") == "Normal Lift,Spiral Lift");
+        CHECK(config.opt_serialize("retract_lift_enforce") == "Top and Bottom");
+    };
+
+    SECTION("Static G-code defaults")
+    {
+        GCodeConfig config;
+        check_named_enums(config);
+    }
+    SECTION("Dynamic copy of full print defaults")
+    {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        check_named_enums(config);
+    }
+}
+
 TEST_CASE("Every registered print option has a complete schema contract", "[Config][Schema]")
 {
     // `extruder` is an object-level override whose zero value means "inherit". It is

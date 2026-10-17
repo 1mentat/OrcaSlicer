@@ -1095,14 +1095,14 @@ TEST_CASE("ModelObject mirror reflects each axis and restores cached bounds", "[
     check_box(object->bounding_box_approx(), reflected_min, reflected_max);
     check_box(object->bounding_box_exact(), reflected_min, reflected_max);
     for (const ModelVolume *volume : object->volumes)
-        CHECK_THAT(volume->get_mirror(axis), Catch::Matchers::WithinAbs(-1., 1e-12));
+        CHECK(volume->is_left_handed());
 
     object->mirror(axis);
 
     check_box(object->bounding_box_approx(), Vec3d::Zero(), Vec3d(4., 6., 8.));
     check_box(object->bounding_box_exact(), Vec3d::Zero(), Vec3d(4., 6., 8.));
     for (const ModelVolume *volume : object->volumes)
-        CHECK_THAT(volume->get_mirror(axis), Catch::Matchers::WithinAbs(1., 1e-12));
+        CHECK_FALSE(volume->is_left_handed());
 }
 
 } // namespace model_extended_contracts

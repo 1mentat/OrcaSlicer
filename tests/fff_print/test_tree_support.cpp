@@ -201,6 +201,8 @@ static CriticalRegionEvidence observe(bool critical_only)
         { "raft_layers",                   0 },
         { "brim_width",                    0.0 },
         { "skirt_loops",                   0 },
+        { "use_relative_e_distances",      true },
+        { "before_layer_change_gcode",     "G92 E0\n" },
     });
 
     Print print;
