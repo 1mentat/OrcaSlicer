@@ -1362,6 +1362,226 @@ TEST_CASE("Bridge line width changes external bridge deposition", "[SettingsVari
     CHECK(std::abs(narrow.volume - wide.volume) > 0.001);
 }
 
+namespace sparse_infill_density_incremental_contracts {
+
+namespace {
+
+struct ExternalPerimeterGeometry
+{
+    size_t path_count = 0;
+    double total_length = 0.0;
+    double min_x = std::numeric_limits<double>::max();
+    double max_x = std::numeric_limits<double>::lowest();
+    double min_y = std::numeric_limits<double>::max();
+    double max_y = std::numeric_limits<double>::lowest();
+};
+
+struct SparseDensitySnapshot
+{
+    WallSnapshot walls;
+    InfillSnapshot infill;
+    std::vector<double> sparse_length_by_layer;
+    std::vector<ExternalPerimeterGeometry> external_by_layer;
+};
+
+TriangleMesh sparse_density_cube()
+{
+    TriangleMesh mesh = cube(12.0);
+    mesh.scale(Vec3f(1.0f, 1.0f, 0.8f / 12.0f));
+    return mesh;
+}
+
+DynamicPrintConfig sparse_density_config(const char *density)
+{
+    DynamicPrintConfig config = wall_infill_config();
+    config.set_deserialize_strict({
+        { "alternate_extra_wall", true },
+        { "sparse_infill_density", density },
+        { "sparse_infill_pattern", "rectilinear" },
+        { "wall_sequence", "inner wall/outer wall" },
+        { "minimum_sparse_infill_area", 0.0 },
+        { "nozzle_diameter", "0.4" },
+        { "outer_wall_line_width", 0.4 },
+        { "inner_wall_line_width", 0.4 },
+        { "sparse_infill_line_width", 0.4 },
+        { "infill_anchor", 0 },
+        { "infill_anchor_max", 0 },
+    });
+    return config;
+}
+
+void add_external_geometry(ExternalPerimeterGeometry &geometry,
+                           const ExtrusionPath &path)
+{
+    ++geometry.path_count;
+    geometry.total_length += unscale<double>(path.length());
+    REQUIRE(path.polyline.points.size() >= 2);
+    for (const Point3 &point : path.polyline.points) {
+        const double x = unscale<double>(point.x());
+        const double y = unscale<double>(point.y());
+        REQUIRE(std::isfinite(x));
+        REQUIRE(std::isfinite(y));
+        geometry.min_x = std::min(geometry.min_x, x);
+        geometry.max_x = std::max(geometry.max_x, x);
+        geometry.min_y = std::min(geometry.min_y, y);
+        geometry.max_y = std::max(geometry.max_y, y);
+    }
+}
+
+void require_external_geometry_equal(const ExternalPerimeterGeometry &actual,
+                                     const ExternalPerimeterGeometry &expected)
+{
+    REQUIRE(actual.path_count == expected.path_count);
+    REQUIRE(actual.path_count == 1);
+    CHECK_THAT(actual.total_length, Catch::Matchers::WithinAbs(expected.total_length, 1e-6));
+    CHECK_THAT(actual.min_x, Catch::Matchers::WithinAbs(expected.min_x, 1e-6));
+    CHECK_THAT(actual.max_x, Catch::Matchers::WithinAbs(expected.max_x, 1e-6));
+    CHECK_THAT(actual.min_y, Catch::Matchers::WithinAbs(expected.min_y, 1e-6));
+    CHECK_THAT(actual.max_y, Catch::Matchers::WithinAbs(expected.max_y, 1e-6));
+}
+
+SparseDensitySnapshot sparse_density_snapshot(const Print &print)
+{
+    SparseDensitySnapshot result{walls(print), infill(print), {}, {}};
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.layer_count() == 4);
+    result.sparse_length_by_layer.reserve(object.layers().size());
+    result.external_by_layer.reserve(object.layers().size());
+    for (const Layer *layer : object.layers()) {
+        double sparse_length = 0.0;
+        ExternalPerimeterGeometry external;
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->fills, [&sparse_length](const ExtrusionPath &path) {
+                if (path.role() == erInternalInfill)
+                    sparse_length += unscale<double>(path.length());
+            });
+            for_each_extrusion_path(region->perimeters, [&external](const ExtrusionPath &path) {
+                if (path.role() == erExternalPerimeter)
+                    add_external_geometry(external, path);
+            });
+        }
+        REQUIRE(external.path_count == 1);
+        REQUIRE(std::isfinite(external.total_length));
+        result.sparse_length_by_layer.push_back(sparse_length);
+        result.external_by_layer.push_back(external);
+    }
+    return result;
+}
+
+SparseDensitySnapshot fresh_sparse_density_snapshot(const char *density)
+{
+    DynamicPrintConfig config = sparse_density_config(density);
+    Print print;
+    Model model;
+    init_print({sparse_density_cube()}, print, model, config, nullptr, false);
+    process(print, model, config);
+    return sparse_density_snapshot(print);
+}
+
+void require_same_sparse_density_output(const SparseDensitySnapshot &actual,
+                                        const SparseDensitySnapshot &expected)
+{
+    REQUIRE(actual.walls.layer_roles == expected.walls.layer_roles);
+    REQUIRE(actual.walls.perimeter_items == expected.walls.perimeter_items);
+    REQUIRE(actual.walls.external_perimeter_indices == expected.walls.external_perimeter_indices);
+    REQUIRE(actual.infill.sparse_path_count == expected.infill.sparse_path_count);
+    REQUIRE(actual.infill.sparse_surface_count == expected.infill.sparse_surface_count);
+    REQUIRE(actual.infill.void_surface_count == expected.infill.void_surface_count);
+    REQUIRE(actual.infill.sparse_path_heights.size() == expected.infill.sparse_path_heights.size());
+    for (size_t index = 0; index < expected.infill.sparse_path_heights.size(); ++index)
+        CHECK_THAT(actual.infill.sparse_path_heights[index],
+                   Catch::Matchers::WithinAbs(expected.infill.sparse_path_heights[index], 1e-6));
+    REQUIRE(actual.sparse_length_by_layer.size() == expected.sparse_length_by_layer.size());
+    REQUIRE(actual.external_by_layer.size() == expected.external_by_layer.size());
+    for (size_t layer = 0; layer < expected.sparse_length_by_layer.size(); ++layer) {
+        CHECK_THAT(actual.sparse_length_by_layer[layer],
+                   Catch::Matchers::WithinAbs(expected.sparse_length_by_layer[layer], 1e-6));
+        require_external_geometry_equal(actual.external_by_layer[layer], expected.external_by_layer[layer]);
+    }
+}
+
+double total_sparse_length(const SparseDensitySnapshot &snapshot)
+{
+    return std::accumulate(snapshot.sparse_length_by_layer.begin(),
+                           snapshot.sparse_length_by_layer.end(), 0.0);
+}
+
+void require_zero_boundary_perimeter_delta(const SparseDensitySnapshot &normal,
+                                           const SparseDensitySnapshot &zero)
+{
+    REQUIRE(normal.walls.perimeter_items.size() == zero.walls.perimeter_items.size());
+    REQUIRE(normal.walls.layer_roles.size() == zero.walls.layer_roles.size());
+    REQUIRE(normal.external_by_layer.size() == zero.external_by_layer.size());
+    bool saw_odd_change = false;
+    for (size_t layer = 0; layer < normal.walls.perimeter_items.size(); ++layer) {
+        REQUIRE(std::count(normal.walls.layer_roles[layer].begin(),
+                           normal.walls.layer_roles[layer].end(), erExternalPerimeter) == 1);
+        REQUIRE(std::count(zero.walls.layer_roles[layer].begin(),
+                           zero.walls.layer_roles[layer].end(), erExternalPerimeter) == 1);
+        // Compare the external geometry by aggregate bounds/length.  The
+        // extra inner wall can change flattened role ordering, so its index
+        // is intentionally not used as a cross-density oracle.
+        require_external_geometry_equal(normal.external_by_layer[layer], zero.external_by_layer[layer]);
+        if (layer % 2 == 1) {
+            CHECK(normal.walls.perimeter_items[layer] > zero.walls.perimeter_items[layer]);
+            saw_odd_change = saw_odd_change ||
+                             normal.walls.perimeter_items[layer] != zero.walls.perimeter_items[layer];
+        } else {
+            CHECK(normal.walls.perimeter_items[layer] == zero.walls.perimeter_items[layer]);
+            CHECK(normal.walls.layer_roles[layer] == zero.walls.layer_roles[layer]);
+        }
+    }
+    REQUIRE(saw_odd_change);
+}
+
+} // namespace
+
+TEST_CASE("Sparse density transitions preserve fresh perimeters and infill",
+          "[SettingsVariance][SettingsReslice][SparseInfillDensity]")
+{
+    const DynamicPrintConfig density20 = sparse_density_config("20%");
+    const DynamicPrintConfig density0 = sparse_density_config("0%");
+    const DynamicPrintConfig density40 = sparse_density_config("40%");
+
+    // One mutable Print exercises 20->0->20->40. Three independent fresh
+    // snapshots are captured once and reused as immutable transition oracles.
+    Print incremental_print;
+    Model incremental_model;
+    init_print({sparse_density_cube()}, incremental_print, incremental_model, density20, nullptr, false);
+    process(incremental_print, incremental_model, density20);
+    const SparseDensitySnapshot baseline20 = sparse_density_snapshot(incremental_print);
+
+    const SparseDensitySnapshot fresh0 = fresh_sparse_density_snapshot("0%");
+    const SparseDensitySnapshot fresh20 = fresh_sparse_density_snapshot("20%");
+    const SparseDensitySnapshot fresh40 = fresh_sparse_density_snapshot("40%");
+    require_same_sparse_density_output(baseline20, fresh20);
+    REQUIRE(total_sparse_length(baseline20) > 1e-6);
+    REQUIRE(std::all_of(fresh0.infill.sparse_path_count.begin(),
+                        fresh0.infill.sparse_path_count.end(),
+                        [](size_t count) { return count == 0; }));
+    CHECK_THAT(total_sparse_length(fresh0), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE(total_sparse_length(fresh40) > 1e-6);
+
+    process(incremental_print, incremental_model, density0);
+    const SparseDensitySnapshot incremental0 = sparse_density_snapshot(incremental_print);
+    require_same_sparse_density_output(incremental0, fresh0);
+    require_zero_boundary_perimeter_delta(fresh20, fresh0);
+
+    process(incremental_print, incremental_model, density20);
+    const SparseDensitySnapshot incremental20 = sparse_density_snapshot(incremental_print);
+    require_same_sparse_density_output(incremental20, fresh20);
+    require_zero_boundary_perimeter_delta(incremental20, incremental0);
+
+    process(incremental_print, incremental_model, density40);
+    const SparseDensitySnapshot incremental40 = sparse_density_snapshot(incremental_print);
+    require_same_sparse_density_output(incremental40, fresh40);
+    REQUIRE(incremental40.walls.layer_roles == baseline20.walls.layer_roles);
+    REQUIRE(incremental40.walls.perimeter_items == baseline20.walls.perimeter_items);
+    REQUIRE(std::abs(total_sparse_length(incremental40) - total_sparse_length(baseline20)) > 1e-3);
+}
+
+} // namespace sparse_infill_density_incremental_contracts
+
 } // namespace wall_bridge_contracts
 
 namespace settings_family_contracts {

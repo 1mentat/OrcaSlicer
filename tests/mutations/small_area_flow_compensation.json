@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Small-area flow compensation behavior mutants.",
+  "mutants": [
+    {
+      "id": "small-area-flow-compensation-constructor-enable-inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (m_config.small_area_infill_flow_compensation.value && !m_config.small_area_infill_flow_compensation_model.empty())\n        m_small_area_infill_flow_compensator = make_unique<SmallAreaInfillFlowCompensator>(print.config());",
+      "new": "    if (!m_config.small_area_infill_flow_compensation.value && !m_config.small_area_infill_flow_compensation_model.empty())\n        m_small_area_infill_flow_compensator = make_unique<SmallAreaInfillFlowCompensator>(print.config());",
+      "description": "Inverting the constructor's registered enable condition leaves the disabled model row as a no-op through _needSAFC, but removes the compensator from the enabled row; its eligible E factor must then fail the independent model oracle.",
+      "test_filter": "SmallAreaFlowCompensation"
+    },
+    {
+      "id": "small-area-flow-compensation-role-filter-removed",
+      "path": "src/libslic3r/GCode/SmallAreaInfillFlowCompensator.cpp",
+      "old": "    if (flowModel &&\n        (role == ExtrusionRole::erSolidInfill || role == ExtrusionRole::erTopSolidInfill || role == ExtrusionRole::erBottomSurface)) {",
+      "new": "    if (flowModel) { // mutation: apply compensation to every extrusion role",
+      "description": "Removing the role filter makes the first-layer Outer wall eligible because the supported rectilinear bottom pattern makes _needSAFC true for that layer; the independent Outer wall E invariant must fail while Bottom surface remains a positive eligible witness.",
+      "test_filter": "SmallAreaFlowCompensation"
+    }
+  ]
+}

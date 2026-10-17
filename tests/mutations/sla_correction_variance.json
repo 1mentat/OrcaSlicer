@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "SLA correction variance behavior mutants.",
+  "mutants": [
+    {
+      "id": "sla-absolute-correction-zero-offset-gate",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "    if (clpr_offs != 0) for (size_t i = 0; i < po.m_slice_index.size(); ++i) {",
+      "new": "    if (clpr_offs == 0) for (size_t i = 0; i < po.m_slice_index.size(); ++i) {",
+      "description": "The positive absolute-correction row must enter the public model-slice offset loop; reversing the nonzero gate leaves its area at the neutral 10 mm square.",
+      "test_filter": "SLAAbsoluteCorrection"
+    },
+    {
+      "id": "sla-material-correction-x-factor-dropped",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "        corr.x() *= material_config().material_correction_x.value;",
+      "new": "        corr.x() *= 1.;",
+      "description": "The material x correction must multiply the neutral printer transform; the material row checks the public transformed-mesh x extent and slice area.",
+      "test_filter": "SLAMaterialCorrection"
+    },
+    {
+      "id": "sla-material-correction-y-factor-dropped",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "        corr.y() *= material_config().material_correction_y.value;",
+      "new": "        corr.y() *= 1.;",
+      "description": "The material y correction must multiply the neutral printer transform; the material row checks the public transformed-mesh y extent and combined area factor.",
+      "test_filter": "SLAMaterialCorrection"
+    },
+    {
+      "id": "sla-absolute-correction-first-slice-only",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "    if (clpr_offs != 0) for (size_t i = 0; i < po.m_slice_index.size(); ++i) {",
+      "new": "    if (clpr_offs != 0) for (size_t i = 0; i < std::min<size_t>(1, po.m_slice_index.size()); ++i) {",
+      "description": "Apply absolute correction only to the first model slice; the signed three-row oracle compares every aligned slice area, so later slices must retain the same ratio.",
+      "test_filter": "SLAAbsoluteCorrection"
+    }
+  ]
+}

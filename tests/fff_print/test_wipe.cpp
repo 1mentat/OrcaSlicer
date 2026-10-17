@@ -2475,5 +2475,293 @@ TEST_CASE("Reduce infill retraction skips contained sparse-infill travel", "[Wip
     CHECK_THAT(disabled.perimeter_filament, Catch::Matchers::WithinAbs(enabled.perimeter_filament, 0.01));
 }
 
+
+namespace wipe_before_external_contracts {
+namespace {
+
+constexpr std::size_t kWipeBeforeExternalMaxOutputBytes = 8u * 1024u * 1024u;
+constexpr std::size_t kWipeBeforeExternalMaxDepositionSegments = 250000;
+// The production search uses the configured nozzle diameter as its line-radius
+// bound. This fixture pins the nozzle to 0.4 mm; keep the oracle source-aligned
+// rather than treating the upcoming outer wall as already deposited material.
+constexpr double kWipeBeforeExternalMaterialPadding = 0.4;
+// init_print(..., arrange=false) preserves this cube's [0,10] XY frame. The
+// G-code writer prints XYZ with three decimal places, so 0.002 mm is a small
+// conservative coordinate/norm allowance for the endpoint and midpoint checks.
+constexpr double kWipeBeforeExternalCubeMin = 0.0;
+constexpr double kWipeBeforeExternalCubeMax = 10.0;
+constexpr double kWipeBeforeExternalGcodePrecision = 0.001;
+constexpr double kWipeBeforeExternalCubePadding = 2.0 * kWipeBeforeExternalGcodePrecision;
+constexpr double kWipeBeforeExternalMaxTravel =
+    kWipeBeforeExternalMaterialPadding + 2.0 * kWipeBeforeExternalGcodePrecision;
+constexpr std::string_view kWipeBeforeExternalMarker =
+    "move inwards before retraction/seam";
+
+struct DepositionSummary {
+    struct Segment {
+        Vec2d start;
+        Vec2d end;
+        double z = 0.;
+    };
+
+    std::size_t moves = 0;
+    double xy = 0.;
+    double e = 0.;
+    double min_x = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double min_y = std::numeric_limits<double>::infinity();
+    double max_y = -std::numeric_limits<double>::infinity();
+    bool finite = true;
+    std::vector<Segment> segments;
+};
+
+struct PreExternalWipeMarker {
+    Vec2d start;
+    Vec2d end;
+    double z = 0.;
+    double xy = 0.;
+    double e = 0.;
+    std::size_t prior_segment_count = 0;
+    bool finite = true;
+};
+
+struct WipeBeforeExternalEvidence {
+    std::vector<PreExternalWipeMarker> markers;
+    DepositionSummary deposition;
+    std::size_t layer_markers = 0;
+};
+
+void record_deposition(DepositionSummary &summary, GCodeReader &reader,
+                       const GCodeReader::GCodeLine &line)
+{
+    if (!line.extruding(reader) || line.dist_XY(reader) <= EPSILON ||
+        line.dist_E(reader) <= EPSILON)
+        return;
+
+    const double start_x = reader.x();
+    const double start_y = reader.y();
+    const double end_x = line.new_X(reader);
+    const double end_y = line.new_Y(reader);
+    const double z = line.new_Z(reader);
+    const double xy = line.dist_XY(reader);
+    const double e = line.dist_E(reader);
+    if (!std::isfinite(start_x) || !std::isfinite(start_y) ||
+        !std::isfinite(end_x) || !std::isfinite(end_y) ||
+        !std::isfinite(z) || !std::isfinite(xy) || !std::isfinite(e)) {
+        summary.finite = false;
+        return;
+    }
+
+    ++summary.moves;
+    summary.xy += xy;
+    summary.e += e;
+    summary.min_x = std::min(summary.min_x, std::min(start_x, end_x));
+    summary.max_x = std::max(summary.max_x, std::max(start_x, end_x));
+    summary.min_y = std::min(summary.min_y, std::min(start_y, end_y));
+    summary.max_y = std::max(summary.max_y, std::max(start_y, end_y));
+    if (summary.segments.size() >= kWipeBeforeExternalMaxDepositionSegments) {
+        summary.finite = false;
+        return;
+    }
+    summary.segments.push_back({Vec2d(start_x, start_y), Vec2d(end_x, end_y), z});
+}
+
+WipeBeforeExternalEvidence parse_wipe_before_external(const std::string &gcode,
+                                                       const DynamicPrintConfig &config)
+{
+    REQUIRE(gcode.size() <= kWipeBeforeExternalMaxOutputBytes);
+
+    WipeBeforeExternalEvidence evidence;
+    const std::string layer_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change);
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&evidence, &layer_tag](GCodeReader &self,
+                                                        const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        std::string_view trimmed_comment = comment;
+        while (!trimmed_comment.empty() &&
+               (trimmed_comment.back() == '\n' || trimmed_comment.back() == '\r'))
+            trimmed_comment.remove_suffix(1);
+        if (trimmed_comment == layer_tag)
+            ++evidence.layer_markers;
+
+        if (comment.find(kWipeBeforeExternalMarker) != std::string_view::npos &&
+            (line.cmd_is("G0") || line.cmd_is("G1"))) {
+            PreExternalWipeMarker marker;
+            marker.start = Vec2d(self.x(), self.y());
+            marker.end = Vec2d(line.new_X(self), line.new_Y(self));
+            marker.z = line.new_Z(self);
+            marker.xy = line.dist_XY(self);
+            marker.e = line.dist_E(self);
+            marker.prior_segment_count = evidence.deposition.segments.size();
+            marker.finite = std::isfinite(marker.start.x()) && std::isfinite(marker.start.y()) &&
+                std::isfinite(marker.end.x()) && std::isfinite(marker.end.y()) &&
+                std::isfinite(marker.z) && std::isfinite(marker.xy) && std::isfinite(marker.e);
+            evidence.markers.push_back(marker);
+        }
+
+        record_deposition(evidence.deposition, self, line);
+    });
+    return evidence;
+}
+
+std::string export_wipe_before_external(const DynamicPrintConfig &config)
+{
+    Model model;
+    Print print;
+    init_print(std::vector<TriangleMesh>{make_cube(10., 10., 0.4)}, print, model, config,
+               nullptr, false);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    REQUIRE(output.size() <= kWipeBeforeExternalMaxOutputBytes);
+    return output;
+}
+
+double point_to_segment(const Vec2d &point, const DepositionSummary::Segment &segment)
+{
+    const Vec2d delta = segment.end - segment.start;
+    const double length_squared = delta.squaredNorm();
+    if (length_squared <= 0.)
+        return (point - segment.start).norm();
+    const double projection = std::clamp((point - segment.start).dot(delta) / length_squared, 0., 1.);
+    return (point - (segment.start + projection * delta)).norm();
+}
+
+bool point_near_previous_material(const DepositionSummary &summary, const Vec2d &point,
+                                  const double z, const std::size_t prior_segment_count)
+{
+    if (summary.moves == 0 || !summary.finite || summary.segments.empty())
+        return false;
+    const std::size_t count = std::min(prior_segment_count, summary.segments.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const DepositionSummary::Segment &segment = summary.segments[i];
+        if (std::abs(segment.z - z) > 1e-4)
+            continue;
+        if (point_to_segment(point, segment) <= kWipeBeforeExternalMaterialPadding)
+            return true;
+    }
+    return false;
+}
+
+bool point_in_fixture_cube(const Vec2d &point)
+{
+    return std::isfinite(point.x()) && std::isfinite(point.y()) &&
+        point.x() >= kWipeBeforeExternalCubeMin - kWipeBeforeExternalCubePadding &&
+        point.x() <= kWipeBeforeExternalCubeMax + kWipeBeforeExternalCubePadding &&
+        point.y() >= kWipeBeforeExternalCubeMin - kWipeBeforeExternalCubePadding &&
+        point.y() <= kWipeBeforeExternalCubeMax + kWipeBeforeExternalCubePadding;
+}
+
+void require_same_deposition(const DepositionSummary &lhs, const DepositionSummary &rhs)
+{
+    REQUIRE(lhs.finite);
+    REQUIRE(rhs.finite);
+    REQUIRE(lhs.moves == rhs.moves);
+    CHECK_THAT(lhs.xy, Catch::Matchers::WithinAbs(rhs.xy, 0.01));
+    CHECK_THAT(lhs.e, Catch::Matchers::WithinAbs(rhs.e, 0.0001));
+    CHECK_THAT(lhs.min_x, Catch::Matchers::WithinAbs(rhs.min_x, 0.01));
+    CHECK_THAT(lhs.max_x, Catch::Matchers::WithinAbs(rhs.max_x, 0.01));
+    CHECK_THAT(lhs.min_y, Catch::Matchers::WithinAbs(rhs.min_y, 0.01));
+    CHECK_THAT(lhs.max_y, Catch::Matchers::WithinAbs(rhs.max_y, 0.01));
+}
+
+void require_positive_deposition(const DepositionSummary &summary)
+{
+    REQUIRE(summary.finite);
+    REQUIRE(summary.moves > 0);
+    REQUIRE(summary.xy > 0.);
+    REQUIRE(summary.e > 0.);
+}
+
+DynamicPrintConfig wipe_before_external_config(bool enabled, const char *wall_loops,
+                                                const char *inner_width = "0")
+{
+    DynamicPrintConfig config = wipe_config("classic", false, "50%", "0%", false,
+                                            wall_loops, "inner wall/outer wall");
+    config.set_deserialize_strict({
+        {"wipe", "0"},
+        {"wipe_distance", "0"},
+        {"wipe_before_external_loop", enabled ? "1" : "0"},
+        {"wall_loops", wall_loops},
+        {"inner_wall_line_width", inner_width},
+        {"outer_wall_line_width", "0.45"},
+        {"line_width", "0.45"},
+        // Keep the first-layer role widths active; a positive initial-layer
+        // width would override the 1.2mm wide-inner negative control.
+        {"initial_layer_line_width", "0"},
+        {"top_shell_layers", "0"},
+        {"bottom_shell_layers", "0"},
+        {"sparse_infill_density", "0%"},
+        {"retract_when_changing_layer", "0"},
+        {"retraction_minimum_travel", "0"},
+        {"retraction_length", "0.8"},
+        {"retraction_speed", "30"},
+        {"deretraction_speed", "30"},
+        {"retract_before_wipe", "0%"},
+        {"retract_after_wipe", "0%"},
+        {"z_hop", "0"},
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", "0"},
+        {"enable_arc_fitting", "0"},
+        {"gcode_comments", "1"},
+        {"layer_change_gcode", ""},
+    });
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("Wipe before external loop enters the outer seam from an interior point",
+          "[Wipe][WipeBeforeExternalLoop][Pipeline]")
+{
+    const DynamicPrintConfig enabled_config = wipe_before_external_config(true, "2");
+    const DynamicPrintConfig disabled_config = wipe_before_external_config(false, "2");
+    const DynamicPrintConfig one_wall_config = wipe_before_external_config(true, "1");
+    const DynamicPrintConfig wide_inner_config = wipe_before_external_config(true, "2", "1.2");
+
+    const WipeBeforeExternalEvidence enabled =
+        parse_wipe_before_external(export_wipe_before_external(enabled_config), enabled_config);
+    const WipeBeforeExternalEvidence disabled =
+        parse_wipe_before_external(export_wipe_before_external(disabled_config), disabled_config);
+    const WipeBeforeExternalEvidence one_wall =
+        parse_wipe_before_external(export_wipe_before_external(one_wall_config), one_wall_config);
+    const WipeBeforeExternalEvidence wide_inner =
+        parse_wipe_before_external(export_wipe_before_external(wide_inner_config), wide_inner_config);
+
+    REQUIRE(enabled.layer_markers >= 2);
+    CHECK(disabled.layer_markers == enabled.layer_markers);
+    CHECK(one_wall.layer_markers == enabled.layer_markers);
+    CHECK(wide_inner.layer_markers == enabled.layer_markers);
+    REQUIRE(enabled.markers.size() == enabled.layer_markers);
+    CHECK(disabled.markers.empty());
+    CHECK(one_wall.markers.empty());
+    CHECK(wide_inner.markers.empty());
+
+    require_positive_deposition(enabled.deposition);
+    require_positive_deposition(disabled.deposition);
+    require_positive_deposition(one_wall.deposition);
+    require_positive_deposition(wide_inner.deposition);
+    require_same_deposition(enabled.deposition, disabled.deposition);
+
+    for (const PreExternalWipeMarker &marker : enabled.markers) {
+        REQUIRE(marker.finite);
+        REQUIRE(marker.xy > 0.05);
+        REQUIRE(marker.xy <= kWipeBeforeExternalMaxTravel);
+        CHECK_THAT(marker.e, Catch::Matchers::WithinAbs(0., 0.00005));
+        const Vec2d midpoint = (marker.start + marker.end) * 0.5;
+        REQUIRE(point_in_fixture_cube(marker.start));
+        REQUIRE(point_in_fixture_cube(midpoint));
+        REQUIRE(point_in_fixture_cube(marker.end));
+        REQUIRE(point_near_previous_material(enabled.deposition, marker.start, marker.z,
+                                             marker.prior_segment_count));
+        REQUIRE(point_near_previous_material(enabled.deposition, midpoint, marker.z,
+                                             marker.prior_segment_count));
+    }
+}
+
+} // namespace wipe_before_external_contracts
+
 } // namespace
 } // namespace reduce_infill_retraction_contracts

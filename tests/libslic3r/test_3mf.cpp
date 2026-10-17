@@ -5404,3 +5404,124 @@ TEST_CASE("BBS project lifecycle preserves project identity beside embedded pres
 }
 
 } // namespace bbs_project_lifecycle_contracts
+
+namespace bbs_selective_plate_contracts {
+using namespace Slic3r;
+using namespace bbs_project_lifecycle_contracts;
+
+namespace {
+
+void make_selective_two_plate_model(Model &model, PlateData &plate0, PlateData &plate1)
+{
+    ModelObject *alpha = model.add_object("plate-alpha", "alpha.stl", make_cube(10., 11., 12.));
+    alpha->add_instance();
+
+    ModelObject *beta = model.add_object("plate-beta", "beta.stl", make_cube(6., 7., 8.));
+    beta->add_instance();
+
+    plate0.plate_index = 0;
+    plate0.plate_name = "alpha plate";
+    plate0.objects_and_instances = {{0, 0}};
+
+    plate1.plate_index = 1;
+    plate1.plate_name = "beta plate";
+    plate1.objects_and_instances = {{1, 0}};
+}
+
+bool load_selected_plate(const std::string &path, int plate_id, LoadedArchive &loaded)
+{
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &loaded.model, &loaded.plates,
+                        &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version, nullptr,
+                        LoadStrategy::LoadModel | LoadStrategy::LoadConfig, nullptr, plate_id);
+}
+
+const ModelObject *find_named_object(const Model &model, const std::string &name)
+{
+    const auto found = std::find_if(model.objects.begin(), model.objects.end(),
+                                    [&](const ModelObject *object) { return object->name == name; });
+    return found == model.objects.end() ? nullptr : *found;
+}
+
+void check_geometry(const ModelObject &actual, const ModelObject &expected)
+{
+    REQUIRE(actual.volumes.size() == expected.volumes.size());
+    REQUIRE(actual.instances.size() == expected.instances.size());
+    CHECK_THAT(actual.raw_mesh().volume(), WithinRel(expected.raw_mesh().volume(), 1e-5));
+    const BoundingBoxf3 &actual_box = actual.bounding_box_exact();
+    const BoundingBoxf3 &expected_box = expected.bounding_box_exact();
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK_THAT(actual_box.min[axis], WithinAbs(expected_box.min[axis], 1e-5));
+        CHECK_THAT(actual_box.max[axis], WithinAbs(expected_box.max[axis], 1e-5));
+    }
+}
+
+void check_loaded_id(const ModelObject &actual, const ModelObject &expected,
+                     const std::pair<int, int> &archive_mapping)
+{
+    REQUIRE(actual.instances.size() == 1);
+    REQUIRE(expected.instances.size() == 1);
+    CHECK(archive_mapping.first == 0);
+    CHECK(archive_mapping.second == static_cast<int>(expected.instances.front()->id().id));
+    CHECK(actual.instances.front()->loaded_id == static_cast<size_t>(archive_mapping.second));
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF plate selection loads only the requested plate objects",
+          "[3MF][Bbs3mfSelectivePlate]")
+{
+    ScopedTemporaryDir source_backup("orca_bbs_selective_plate_store");
+    ScopedTemporaryFile archive{".3mf"};
+    Model source;
+    source.set_backup_path(source_backup.string());
+    PlateData plate0;
+    PlateData plate1;
+    make_selective_two_plate_model(source, plate0, plate1);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    store_archive(archive.string(), source, config, {&plate0, &plate1});
+
+    const std::array<int, 3> selectors{{0, 1, 2}};
+    for (const int plate_id : selectors) {
+        INFO("plate_id " << plate_id);
+        LoadedArchive loaded;
+        REQUIRE(load_selected_plate(archive.string(), plate_id, loaded));
+        REQUIRE(loaded.plates.size() == 2);
+        CHECK(loaded.plates[0]->plate_name == "alpha plate");
+        CHECK(loaded.plates[1]->plate_name == "beta plate");
+        REQUIRE(loaded.plates[0]->obj_inst_map.size() == 1);
+        REQUIRE(loaded.plates[1]->obj_inst_map.size() == 1);
+        const auto alpha_mapping = loaded.plates[0]->obj_inst_map.begin();
+        const auto beta_mapping = loaded.plates[1]->obj_inst_map.begin();
+        CHECK(alpha_mapping->first != beta_mapping->first);
+
+        if (plate_id == 0) {
+            REQUIRE(loaded.model.objects.size() == 2);
+            const ModelObject *alpha = find_named_object(loaded.model, "plate-alpha");
+            const ModelObject *beta = find_named_object(loaded.model, "plate-beta");
+            REQUIRE(alpha != nullptr);
+            REQUIRE(beta != nullptr);
+            check_geometry(*alpha, *source.objects[0]);
+            check_geometry(*beta, *source.objects[1]);
+            check_loaded_id(*alpha, *source.objects[0], alpha_mapping->second);
+            check_loaded_id(*beta, *source.objects[1], beta_mapping->second);
+        } else if (plate_id == 1) {
+            REQUIRE(loaded.model.objects.size() == 1);
+            const ModelObject *alpha = find_named_object(loaded.model, "plate-alpha");
+            REQUIRE(alpha != nullptr);
+            CHECK(find_named_object(loaded.model, "plate-beta") == nullptr);
+            check_geometry(*alpha, *source.objects[0]);
+            check_loaded_id(*alpha, *source.objects[0], alpha_mapping->second);
+        } else {
+            REQUIRE(loaded.model.objects.size() == 1);
+            const ModelObject *beta = find_named_object(loaded.model, "plate-beta");
+            REQUIRE(beta != nullptr);
+            CHECK(find_named_object(loaded.model, "plate-alpha") == nullptr);
+            check_geometry(*beta, *source.objects[1]);
+            check_loaded_id(*beta, *source.objects[1], beta_mapping->second);
+        }
+    }
+}
+
+} // namespace bbs_selective_plate_contracts

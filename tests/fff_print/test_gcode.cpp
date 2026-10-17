@@ -1636,6 +1636,261 @@ TEST_CASE("Marlin 2 input shaping routes axes and honors endpoints and gates",
 
 } // namespace input_shaping_followup
 
+namespace small_area_flow_compensation_contracts {
+
+namespace {
+
+constexpr std::size_t kSmallAreaMaxOutputBytes = 4u * 1024u * 1024u;
+constexpr std::size_t kSmallAreaMaxLines = 100000u;
+constexpr double      kSmallAreaModelEnd = 100.0;
+constexpr double      kSmallAreaQuantization = 2e-4;
+
+struct SmallAreaSegment
+{
+    double      xy = 0.0;
+    double      e  = 0.0;
+    double      x  = 0.0;
+    double      y  = 0.0;
+    double      z  = 0.0;
+    std::size_t layer = 0;
+};
+
+struct SmallAreaRoleEvidence
+{
+    std::vector<SmallAreaSegment> segments;
+    double xy = 0.0;
+    double e  = 0.0;
+};
+
+struct SmallAreaEvidence
+{
+    std::map<std::string, SmallAreaRoleEvidence> roles;
+    std::size_t lines = 0;
+    std::size_t layer_markers = 0;
+    std::size_t moves = 0;
+    double      xy = 0.0;
+    double      e  = 0.0;
+    bool        finite = true;
+    bool        eligible_arc = false;
+};
+
+std::string_view trim_small_area_comment(std::string_view value)
+{
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+        value.remove_prefix(1);
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+        value.remove_suffix(1);
+    return value;
+}
+
+bool small_area_eligible_role(const std::string &role)
+{
+    return role == "Bottom surface" || role == "Top surface" ||
+           role == "Internal solid infill" || role == "Solid infill";
+}
+
+bool small_area_is_layer_marker(std::string_view comment)
+{
+    comment = trim_small_area_comment(comment);
+    return comment == "LAYER_CHANGE" || comment == "CHANGE_LAYER";
+}
+
+SmallAreaEvidence parse_small_area_motion(const std::string &text, const DynamicPrintConfig &config)
+{
+    REQUIRE(text.size() <= kSmallAreaMaxOutputBytes);
+    REQUIRE(static_cast<std::size_t>(std::count(text.begin(), text.end(), '\n')) <= kSmallAreaMaxLines);
+
+    SmallAreaEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string active_role;
+    std::size_t layer = 0;
+    reader.parse_buffer(text, [&evidence, &active_role, &layer](GCodeReader &self,
+                                                                  const GCodeReader::GCodeLine &line) {
+        ++evidence.lines;
+        const std::string_view comment = trim_small_area_comment(line.comment());
+        if (small_area_is_layer_marker(comment)) {
+            ++evidence.layer_markers;
+            ++layer;
+        }
+        if (comment.rfind("TYPE:", 0) == 0)
+            active_role.assign(trim_small_area_comment(comment.substr(5)));
+        else if (comment.rfind("FEATURE:", 0) == 0)
+            active_role.assign(trim_small_area_comment(comment.substr(8)));
+
+        if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")))
+            return;
+
+        const double xy = line.dist_XY(self);
+        const double e  = std::abs(line.dist_E(self));
+        const double x  = line.new_X(self);
+        const double y  = line.new_Y(self);
+        const double z  = line.new_Z(self);
+        if (!std::isfinite(xy) || !std::isfinite(e) || !std::isfinite(x) ||
+            !std::isfinite(y) || !std::isfinite(z)) {
+            evidence.finite = false;
+            return;
+        }
+        if (!line.extruding(self) || xy <= EPSILON)
+            return;
+
+        const std::string role = active_role.empty() ? "<unknown>" : active_role;
+        if (small_area_eligible_role(role) && (line.cmd_is("G2") || line.cmd_is("G3")))
+            evidence.eligible_arc = true;
+        SmallAreaRoleEvidence &role_evidence = evidence.roles[role];
+        role_evidence.segments.push_back({xy, e, x, y, z, layer});
+        role_evidence.xy += xy;
+        role_evidence.e += e;
+        ++evidence.moves;
+        evidence.xy += xy;
+        evidence.e += e;
+    });
+
+    REQUIRE(evidence.finite);
+    REQUIRE_FALSE(evidence.eligible_arc);
+    REQUIRE(evidence.lines <= kSmallAreaMaxLines);
+    REQUIRE(evidence.layer_markers == 2);
+    REQUIRE(evidence.moves > 0);
+    return evidence;
+}
+
+void require_same_small_area_geometry(const SmallAreaEvidence &expected,
+                                      const SmallAreaEvidence &observed)
+{
+    REQUIRE(expected.moves == observed.moves);
+    CHECK_THAT(observed.xy, Catch::Matchers::WithinAbs(expected.xy, kSmallAreaQuantization));
+    CHECK_THAT(observed.e, Catch::Matchers::WithinAbs(expected.e, kSmallAreaQuantization));
+    REQUIRE(expected.roles.size() == observed.roles.size());
+    for (const auto &entry : expected.roles) {
+        const auto found = observed.roles.find(entry.first);
+        REQUIRE(found != observed.roles.end());
+        REQUIRE(entry.second.segments.size() == found->second.segments.size());
+        CHECK_THAT(found->second.xy, Catch::Matchers::WithinAbs(entry.second.xy, kSmallAreaQuantization));
+        CHECK_THAT(found->second.e, Catch::Matchers::WithinAbs(entry.second.e, kSmallAreaQuantization));
+        for (std::size_t index = 0; index < entry.second.segments.size(); ++index) {
+            const SmallAreaSegment &expected_segment = entry.second.segments[index];
+            const SmallAreaSegment &observed_segment = found->second.segments[index];
+            REQUIRE(expected_segment.layer == observed_segment.layer);
+            CHECK_THAT(observed_segment.xy,
+                       Catch::Matchers::WithinAbs(expected_segment.xy, kSmallAreaQuantization));
+            CHECK_THAT(observed_segment.x,
+                       Catch::Matchers::WithinAbs(expected_segment.x, kSmallAreaQuantization));
+            CHECK_THAT(observed_segment.y,
+                       Catch::Matchers::WithinAbs(expected_segment.y, kSmallAreaQuantization));
+            CHECK_THAT(observed_segment.z,
+                       Catch::Matchers::WithinAbs(expected_segment.z, kSmallAreaQuantization));
+        }
+    }
+}
+
+DynamicPrintConfig small_area_config(bool enabled, bool with_model)
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        { "use_relative_e_distances", true },
+        { "minimum_sparse_infill_area", 0.0 },
+        { "enable_arc_fitting", false },
+        { "top_surface_density", "100%" },
+        { "bottom_surface_density", "100%" },
+        // Rectilinear is in GCode::_needSAFC's supported first-layer pattern
+        // list.  That makes the first-layer Bottom-surface and Outer-wall
+        // paths both reach modify_flow; the role filter then protects the
+        // latter while the bottom path supplies a positive eligible witness.
+        { "bottom_surface_pattern", "rectilinear" },
+        { "top_surface_pattern", "rectilinear" },
+        { "internal_solid_infill_pattern", "rectilinear" },
+        { "small_area_infill_flow_compensation", enabled },
+    });
+    if (with_model) {
+        config.set_key_value("small_area_infill_flow_compensation_model",
+                             new ConfigOptionStrings({"0,0.5", "100,1.0"}));
+    } else {
+        config.set_key_value("small_area_infill_flow_compensation_model",
+                             new ConfigOptionStrings());
+    }
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("Small-area flow compensation changes only eligible solid export paths",
+          "[GCode][SmallAreaFlowCompensation][GCodeExportWorkflows]")
+{
+    const TriangleMesh fixture = make_cube(10.0, 10.0, 0.4);
+
+    const DynamicPrintConfig control_config = small_area_config(false, false);
+    const DynamicPrintConfig disabled_with_model = small_area_config(false, true);
+    const DynamicPrintConfig enabled_config = small_area_config(true, true);
+
+    const ExportedPrint control = fresh_custom_mesh_export(control_config, fixture);
+    const ExportedPrint disabled = fresh_custom_mesh_export(disabled_with_model, fixture);
+    const ExportedPrint enabled = fresh_custom_mesh_export(enabled_config, fixture);
+
+    const SmallAreaEvidence control_evidence = parse_small_area_motion(control.text, control_config);
+    const SmallAreaEvidence disabled_evidence = parse_small_area_motion(disabled.text, disabled_with_model);
+    const SmallAreaEvidence enabled_evidence = parse_small_area_motion(enabled.text, enabled_config);
+
+    // The disabled model row is a public no-op control: it must retain every
+    // role's segment count, layer, endpoint, XY length, and E output.
+    require_same_small_area_geometry(control_evidence, disabled_evidence);
+    REQUIRE(control_evidence.roles.size() == enabled_evidence.roles.size());
+
+    const auto outer = control_evidence.roles.find("Outer wall");
+    const auto bottom = control_evidence.roles.find("Bottom surface");
+    const auto top = control_evidence.roles.find("Top surface");
+    REQUIRE(outer != control_evidence.roles.end());
+    REQUIRE(bottom != control_evidence.roles.end());
+    REQUIRE(top != control_evidence.roles.end());
+    REQUIRE_FALSE(outer->second.segments.empty());
+    REQUIRE_FALSE(bottom->second.segments.empty());
+    REQUIRE_FALSE(top->second.segments.empty());
+    REQUIRE(control_evidence.layer_markers == 2);
+    const std::size_t bottom_layer = bottom->second.segments.front().layer;
+    REQUIRE(bottom_layer == 1);
+    const bool has_second_layer_top = std::any_of(
+        top->second.segments.begin(), top->second.segments.end(),
+        [](const SmallAreaSegment &segment) { return segment.layer == 2; });
+    REQUIRE(has_second_layer_top);
+    const bool has_first_layer_outer = std::any_of(
+        outer->second.segments.begin(), outer->second.segments.end(),
+        [bottom_layer](const SmallAreaSegment &segment) { return segment.layer == bottom_layer; });
+    REQUIRE(has_first_layer_outer);
+
+    std::size_t eligible_segments = 0;
+    for (const auto &entry : control_evidence.roles) {
+        const auto enabled_role = enabled_evidence.roles.find(entry.first);
+        REQUIRE(enabled_role != enabled_evidence.roles.end());
+        REQUIRE(entry.second.segments.size() == enabled_role->second.segments.size());
+        CHECK_THAT(enabled_role->second.xy,
+                   Catch::Matchers::WithinAbs(entry.second.xy, kSmallAreaQuantization));
+        for (std::size_t index = 0; index < entry.second.segments.size(); ++index) {
+            const SmallAreaSegment &baseline = entry.second.segments[index];
+            const SmallAreaSegment &variant = enabled_role->second.segments[index];
+            REQUIRE(baseline.layer == variant.layer);
+            CHECK_THAT(variant.xy, Catch::Matchers::WithinAbs(baseline.xy, kSmallAreaQuantization));
+            CHECK_THAT(variant.x, Catch::Matchers::WithinAbs(baseline.x, kSmallAreaQuantization));
+            CHECK_THAT(variant.y, Catch::Matchers::WithinAbs(baseline.y, kSmallAreaQuantization));
+            CHECK_THAT(variant.z, Catch::Matchers::WithinAbs(baseline.z, kSmallAreaQuantization));
+
+            if (!small_area_eligible_role(entry.first)) {
+                CHECK_THAT(variant.e, Catch::Matchers::WithinAbs(baseline.e, kSmallAreaQuantization));
+                continue;
+            }
+
+            ++eligible_segments;
+            REQUIRE(baseline.xy > EPSILON);
+            REQUIRE(baseline.xy < kSmallAreaModelEnd);
+            const double expected_factor = 0.5 + 0.5 * baseline.xy / kSmallAreaModelEnd;
+            const double expected_e = baseline.e * expected_factor;
+            CHECK_THAT(variant.e, Catch::Matchers::WithinAbs(expected_e, kSmallAreaQuantization));
+            CHECK(variant.e < baseline.e);
+        }
+    }
+    REQUIRE(eligible_segments > 0);
+}
+
+} // namespace small_area_flow_compensation_contracts
+
 } // namespace gcode_print_variance_contracts
 
 namespace settings_speed_accel_contracts {

@@ -1,3 +1,4 @@
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Point.hpp"
 #include <initializer_list>
@@ -1896,5 +1897,125 @@ TEST_CASE("Support ironing spacing changes ironing density",
 }
 
 } // namespace support_ironing_settings_candidate
+
+namespace independent_support_layer_height_contracts {
+
+struct SupportHeightEvidence {
+    std::size_t support_layers = 0;
+    std::size_t interface_paths = 0;
+    double interface_length = 0.0;
+    double support_island_area = 0.0;
+    double top_interface_z = -std::numeric_limits<double>::infinity();
+    bool finite = true;
+};
+
+static SupportHeightEvidence inspect_support_height(const PrintObject &object)
+{
+    constexpr std::size_t max_support_layers = 250000;
+    constexpr std::size_t max_interface_paths = 250000;
+
+    SupportHeightEvidence out;
+    out.support_layers = object.support_layers().size();
+    if (out.support_layers > max_support_layers) {
+        out.finite = false;
+        return out;
+    }
+
+    for (const SupportLayer *layer : object.support_layers()) {
+        double layer_length = 0.0;
+        bool has_interface = false;
+        for (const ExPolygon &island : layer->support_islands)
+            out.support_island_area += std::max(0.0, island.area());
+
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            if (path.role() != erSupportMaterialInterface)
+                return;
+            has_interface = true;
+            ++out.interface_paths;
+            if (out.interface_paths > max_interface_paths) {
+                out.finite = false;
+                return;
+            }
+            for (std::size_t i = 1; i < path.polyline.points.size(); ++i) {
+                const Point3 &a = path.polyline.points[i - 1];
+                const Point3 &b = path.polyline.points[i];
+                const double dx = unscale<double>(static_cast<double>(b.x()) - static_cast<double>(a.x()));
+                const double dy = unscale<double>(static_cast<double>(b.y()) - static_cast<double>(a.y()));
+                const double length = std::hypot(dx, dy);
+                out.finite = out.finite && std::isfinite(dx) && std::isfinite(dy) && std::isfinite(length);
+                if (std::isfinite(length))
+                    layer_length += length;
+            }
+        });
+        if (has_interface) {
+            out.top_interface_z = std::max(out.top_interface_z, static_cast<double>(layer->print_z));
+            out.interface_length += layer_length;
+        }
+        out.finite = out.finite && std::isfinite(static_cast<double>(layer->print_z)) &&
+            std::isfinite(static_cast<double>(layer->height));
+    }
+    return out;
+}
+
+static SupportHeightEvidence process_support_height(bool independent)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"support_type", "normal(auto)"},
+        {"support_style", "default"},
+        {"support_angle", 0.0},
+        {"thick_bridges", 0},
+        {"bridge_no_support", 0},
+        {"initial_layer_print_height", 0.2},
+        {"support_top_z_distance", 0.3},
+        {"support_bottom_z_distance", 0.2},
+        {"independent_support_layer_height", independent},
+        {"enable_prime_tower", 0},
+        {"z_hop", 0.0}
+    });
+
+    Print print;
+    Model model;
+    init_print({capital_fixture()}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE(print.objects().size() == 1);
+    print.process();
+    return inspect_support_height(*print.objects().front());
+}
+
+TEST_CASE("Independent support layer height preserves a non-grid top Z gap",
+          "[IndependentSupportLayerHeight][SupportSettingsVariance][SupportMaterial]")
+{
+    const SupportHeightEvidence independent = process_support_height(true);
+    const SupportHeightEvidence synchronized = process_support_height(false);
+    constexpr double cap_bottom_z = 6.0;
+    constexpr double requested_gap = 0.3;
+    constexpr double normalized_gap = 0.4; // 0.3 rounds to two 0.2mm object layers when independent=false.
+
+    for (const SupportHeightEvidence &evidence : {independent, synchronized}) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.support_layers > 0);
+        REQUIRE(evidence.interface_paths > 0);
+        REQUIRE(std::isfinite(evidence.interface_length));
+        REQUIRE(evidence.interface_length > 0.0);
+        REQUIRE(std::isfinite(evidence.support_island_area));
+        REQUIRE(evidence.support_island_area > 0.0);
+        REQUIRE(std::isfinite(evidence.top_interface_z));
+    }
+
+    // capital_fixture() has a cap underside at z=6.0 and the object grid is pinned to 0.2mm.
+    // The independent branch subtracts the requested 0.3mm directly; the synchronized branch
+    // first rounds it to 0.4mm and selects an object-grid layer.
+    CHECK_THAT(independent.top_interface_z,
+               Catch::Matchers::WithinAbs(cap_bottom_z - requested_gap, 1e-5));
+    CHECK_THAT(synchronized.top_interface_z,
+               Catch::Matchers::WithinAbs(cap_bottom_z - normalized_gap, 1e-5));
+    CHECK_THAT(independent.top_interface_z - synchronized.top_interface_z,
+               Catch::Matchers::WithinAbs(normalized_gap - requested_gap, 1e-5));
+}
+
+} // namespace independent_support_layer_height_contracts
 
 } // namespace support_settings_variance_contracts

@@ -901,3 +901,154 @@ TEST_CASE("SLA pad brim size expands the pad footprint",
         CHECK(runs[i].footprint_y > runs[i - 1].footprint_y + minimum_growth);
     }
 }
+
+namespace sla_correction_variance_contracts {
+
+struct Run {
+    std::vector<std::size_t> model_indices;
+    std::vector<float>       model_levels;
+    std::vector<double>      model_areas;
+    double                   bbox_x = 0.;
+    double                   bbox_y = 0.;
+    double                   bbox_z = 0.;
+};
+
+DynamicPrintConfig correction_config()
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    // Keep all other transform and printer corrections neutral so each test
+    // observes one source setting family through the public pipeline.
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.0, 1.0}));
+    config.set_key_value("relative_correction_x", new ConfigOptionFloat(1.0));
+    config.set_key_value("relative_correction_y", new ConfigOptionFloat(1.0));
+    config.set_key_value("relative_correction_z", new ConfigOptionFloat(1.0));
+    config.set_key_value("material_correction", new ConfigOptionFloats({1.0, 1.0, 1.0}));
+    config.set_key_value("material_correction_x", new ConfigOptionFloat(1.0));
+    config.set_key_value("material_correction_y", new ConfigOptionFloat(1.0));
+    config.set_key_value("material_correction_z", new ConfigOptionFloat(1.0));
+    config.set_key_value("absolute_correction", new ConfigOptionFloat(0.0));
+    config.set_key_value("elefant_foot_compensation", new ConfigOptionFloat(0.0));
+    return config;
+}
+
+Run process_cube(DynamicPrintConfig config)
+{
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    const auto validation = fixture.print.validate();
+    INFO("SLA correction validation: " << validation.string);
+    REQUIRE(validation.string.empty());
+
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposObjectSlice));
+
+    const auto &slice_index = object->get_slice_index();
+    REQUIRE_FALSE(slice_index.empty());
+    Run result;
+    for (const SLAPrintObject::SliceRecord &record : slice_index) {
+        const ExPolygons &model_slice = record.get_slice(soModel);
+        if (model_slice.empty())
+            continue;
+        REQUIRE(model_slice.size() == 1);
+        const double area = std::abs(model_slice.front().area()) /
+                            (scaled<double>(1.0) * scaled<double>(1.0));
+        REQUIRE(std::isfinite(area));
+        REQUIRE(std::isfinite(record.slice_level()));
+        REQUIRE(area > 0.);
+        result.model_indices.push_back(record.get_slice_idx(soModel));
+        result.model_levels.push_back(record.slice_level());
+        result.model_areas.push_back(area);
+    }
+    REQUIRE(result.model_areas.size() >= 2);
+    REQUIRE(result.model_levels.size() == result.model_areas.size());
+
+    const auto size = object->transformed_mesh().bounding_box().size();
+    result.bbox_x = size.x();
+    result.bbox_y = size.y();
+    result.bbox_z = size.z();
+    CHECK(std::isfinite(result.bbox_x));
+    CHECK(std::isfinite(result.bbox_y));
+    CHECK(std::isfinite(result.bbox_z));
+    CHECK(result.bbox_x > 0.);
+    CHECK(result.bbox_y > 0.);
+    CHECK(result.bbox_z > 0.);
+    return result;
+}
+
+} // namespace sla_correction_variance_contracts
+
+TEST_CASE("SLA absolute correction erodes and expands every model slice",
+          "[SLAFeatures][SLAAbsoluteCorrection]")
+{
+    const std::vector<double> values{-0.5, 0.0, 0.5};
+    std::vector<sla_correction_variance_contracts::Run> runs;
+    runs.reserve(values.size());
+    for (const double value : values) {
+        INFO("absolute_correction=" << value);
+        DynamicPrintConfig config = sla_correction_variance_contracts::correction_config();
+        config.set_key_value("absolute_correction", new ConfigOptionFloat(value));
+        runs.emplace_back(sla_correction_variance_contracts::process_cube(std::move(config)));
+    }
+
+    REQUIRE(runs.size() == values.size());
+    REQUIRE(runs[1].model_areas.size() > 0);
+    for (const auto &run : runs) {
+        REQUIRE(run.model_areas.size() == runs[1].model_areas.size());
+        REQUIRE(run.model_levels.size() == runs[1].model_levels.size());
+        REQUIRE(run.model_indices.size() == runs[1].model_indices.size());
+    }
+    for (std::size_t i = 0; i < runs[1].model_areas.size(); ++i) {
+        CHECK_THAT(runs[1].model_areas[i], Catch::Matchers::WithinAbs(100.0, 0.02));
+        CHECK(runs[0].model_indices[i] == runs[1].model_indices[i]);
+        CHECK(runs[2].model_indices[i] == runs[1].model_indices[i]);
+        CHECK_THAT(runs[0].model_levels[i], Catch::Matchers::WithinAbs(runs[1].model_levels[i], 1e-6));
+        CHECK_THAT(runs[2].model_levels[i], Catch::Matchers::WithinAbs(runs[1].model_levels[i], 1e-6));
+        // apply_printer_corrections offsets the 10 mm square by the configured
+        // signed distance on each side: -0.5 -> 81/100 and +0.5 -> 121/100.
+        // A 1% tolerance covers scaled integer conversion while retaining a
+        // clear gate mutation signal on every aligned model slice.
+        CHECK_THAT(runs[0].model_areas[i] / runs[1].model_areas[i],
+                   Catch::Matchers::WithinRel(0.81, 0.01));
+        CHECK_THAT(runs[2].model_areas[i] / runs[1].model_areas[i],
+                   Catch::Matchers::WithinRel(1.21, 0.01));
+    }
+    for (const auto &run : runs) {
+        CHECK_THAT(run.bbox_x, Catch::Matchers::WithinAbs(runs[1].bbox_x, 1e-6));
+        CHECK_THAT(run.bbox_y, Catch::Matchers::WithinAbs(runs[1].bbox_y, 1e-6));
+        CHECK_THAT(run.bbox_z, Catch::Matchers::WithinAbs(runs[1].bbox_z, 1e-6));
+    }
+}
+
+TEST_CASE("SLA material correction scales transformed slice geometry",
+          "[SLAFeatures][SLAMaterialCorrection]")
+{
+    DynamicPrintConfig base_config = sla_correction_variance_contracts::correction_config();
+    DynamicPrintConfig material_config = base_config;
+    // The array has three values deliberately: SLAPrint::relative_correction()
+    // enters the material branch only when material_correction has >= 2 values.
+    material_config.set_key_value("material_correction", new ConfigOptionFloats({1.0, 1.0, 1.0}));
+    material_config.set_key_value("material_correction_x", new ConfigOptionFloat(1.5));
+    material_config.set_key_value("material_correction_y", new ConfigOptionFloat(0.8));
+    material_config.set_key_value("material_correction_z", new ConfigOptionFloat(1.0));
+
+    const auto base = sla_correction_variance_contracts::process_cube(std::move(base_config));
+    const auto material = sla_correction_variance_contracts::process_cube(std::move(material_config));
+
+    REQUIRE(base.model_areas.size() > 0);
+    REQUIRE(material.model_areas.size() == base.model_areas.size());
+    REQUIRE(material.model_levels.size() == base.model_levels.size());
+    REQUIRE(material.model_indices.size() == base.model_indices.size());
+    for (std::size_t i = 0; i < base.model_areas.size(); ++i) {
+        CHECK_THAT(base.model_areas[i], Catch::Matchers::WithinAbs(100.0, 0.02));
+        CHECK(material.model_indices[i] == base.model_indices[i]);
+        CHECK_THAT(material.model_levels[i], Catch::Matchers::WithinAbs(base.model_levels[i], 1e-6));
+        CHECK_THAT(material.model_areas[i] / base.model_areas[i],
+                   Catch::Matchers::WithinRel(1.2, 0.01));
+    }
+    CHECK_THAT(material.bbox_x, Catch::Matchers::WithinRel(base.bbox_x * 1.5, 1e-5));
+    CHECK_THAT(material.bbox_y, Catch::Matchers::WithinRel(base.bbox_y * 0.8, 1e-5));
+    CHECK_THAT(material.bbox_z, Catch::Matchers::WithinRel(base.bbox_z, 1e-5));
+}

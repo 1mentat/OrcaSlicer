@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "BBS 3MF selective plate loading behavior mutants.",
+  "mutants": [
+    {
+      "id": "bbs-selective-plate-object-filter-bypassed",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                if (it == current_plate_data->obj_inst_map.end()) {\n                    //not in current plate, skip\n                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << \":\" << __LINE__ << boost::format(\", could not find object %1% in plate %2%, skip it\\n\")%object.first.second %plate_id;\n                    continue;\n                }",
+      "new": "                if (it == current_plate_data->obj_inst_map.end()) {\n                    //not in current plate, skip\n                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << \":\" << __LINE__ << boost::format(\", could not find object %1% in plate %2%, skip it\\n\")%object.first.second %plate_id;\n                    ;\n                }",
+      "description": "Selected plate loading must skip an object absent from the selected plate; otherwise the excluded object remains in the model.",
+      "test_filter": "Bbs3mfSelectivePlate"
+    },
+    {
+      "id": "bbs-selective-plate-cleanup-upper-bound-exclusive",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        if ((plate_id > 0) && (plate_id <= m_plater_data.size())) {\n            //remove the no need objects",
+      "new": "        if ((plate_id > 0) && (plate_id < m_plater_data.size())) {\n            //remove the no need objects",
+      "description": "The highest valid plate selector must also remove skipped zero-volume objects after selective assembly.",
+      "test_filter": "Bbs3mfSelectivePlate"
+    },
+    {
+      "id": "bbs-selective-plate-selector-map-shifted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        if ((plate_id > 0) && (plate_id <= m_plater_data.size())) {\n            std::map<int, PlateData*>::iterator it =m_plater_data.find(plate_id);\n            if (it != m_plater_data.end()) {\n                current_plate_data = it->second;\n            }\n        }",
+      "new": "        if ((plate_id > 0) && (plate_id <= m_plater_data.size())) {\n            std::map<int, PlateData*>::iterator it =m_plater_data.find(plate_id + 1);\n            if (it != m_plater_data.end()) {\n                current_plate_data = it->second;\n            }\n        }",
+      "description": "The public 1-based plate selector must resolve the matching metadata plate rather than the next plate.",
+      "test_filter": "Bbs3mfSelectivePlate"
+    }
+  ]
+}

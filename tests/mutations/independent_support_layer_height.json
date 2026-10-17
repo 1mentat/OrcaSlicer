@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Independent support layer height behavior mutants.",
+  "mutants": [
+    {
+      "id": "support-layer-height-branch-swapped-v2",
+      "path": "src/libslic3r/Support/SupportMaterial.cpp",
+      "old": "if (print_config.independent_support_layer_height)",
+      "new": "if (!print_config.independent_support_layer_height)",
+      "description": "Use the synchronized object grid for the independent-height row; its non-grid 5.7 mm contact Z must be preserved.",
+      "test_filter": "IndependentSupportLayerHeight"
+    },
+    {
+      "id": "support-top-gap-doubled-v3",
+      "path": "src/libslic3r/Support/SupportMaterial.cpp",
+      "old": "layer.bottom_z() - slicing_params.gap_support_object",
+      "new": "layer.bottom_z() - 2. * slicing_params.gap_support_object",
+      "description": "Double the independent support top gap. The contact remains below the model but no longer preserves the requested 0.3 mm separation.",
+      "test_filter": "IndependentSupportLayerHeight"
+    }
+  ]
+}
