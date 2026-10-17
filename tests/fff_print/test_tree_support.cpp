@@ -19,7 +19,6 @@
 
 #include "test_helpers.hpp"
 #include "libslic3r/ExPolygon.hpp"
-#include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
