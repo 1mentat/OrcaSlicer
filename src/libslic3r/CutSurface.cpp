@@ -1,6 +1,7 @@
 #include "CutSurface.hpp"
 #include "libslic3r/Emboss.hpp"
 #include <vector>
+#include <CGAL/Polygon_2_algorithms.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Surface_mesh/Surface_mesh.h>
 #include "libslic3r/Point.hpp"
@@ -24,6 +25,7 @@
 #include "libslic3r/AABBTreeIndirect.hpp"
 #include <cstdlib>
 #include "libslic3r/libslic3r.h"
+#include <boost/iterator/transform_iterator.hpp>
 #include <boost/property_map/property_map.hpp>
 #include <CGAL/Polygon_mesh_processing/self_intersections.h>
 #include <CGAL/AABB_face_graph_triangle_primitive.h>
@@ -296,7 +298,8 @@ CutAOIs cut_from_model(CutMesh                &cgal_model,
                        const ExPolygons       &shapes,
                        /*const*/ CutMesh      &cgal_shape,
                        float                   projection_ratio,
-                       const ExPolygonsIndices &s2i);
+                       const ExPolygonsIndices &s2i,
+                       const Project          &projection);
 
 using Loop  = std::vector<VI>;
 using Loops = std::vector<Loop>;
@@ -610,7 +613,7 @@ SurfaceCut Slic3r::cut_surface(const ExPolygons &shapes,
     // cut shape from each cgal model
     for (priv::CutMesh &cgal_model : cgal_models) { 
         priv::CutAOIs cutAOIs = priv::cut_from_model(
-            cgal_model, shapes, cgal_shape, projection_ratio, s2i);
+            cgal_model, shapes, cgal_shape, projection_ratio, s2i, projection);
 #ifdef DEBUG_OUTPUT_DIR
         size_t index = &cgal_model - &cgal_models.front();
         priv::store(cutAOIs, cgal_model, DEBUG_OUTPUT_DIR + "model_AOIs/" + std::to_string(index) + "/"); // only debug
@@ -1237,7 +1240,9 @@ void set_face_type(FaceTypeMap            &face_type_map,
                    const VertexShapeMap   &vertex_shape_map,
                    const EdgeBoolMap          &ecm,
                    const CutMesh          &shape_mesh,
-                   const ExPolygonsIndices &shape2index);
+                   const ExPolygonsIndices &shape2index,
+                   const ExPolygons       &shapes,
+                   const Project          &projection);
 
 /// <summary>
 /// Change FaceType from not_constrained to inside
@@ -1408,12 +1413,40 @@ bool priv::is_face_inside(HI                      hi,
     return false;
 }
 
+namespace priv {
+
+// Preserve fractional projection coordinates when classifying a face centroid.
+static CGAL::Bounded_side projected_polygon_side(const Polygon &polygon, const EpicKernel::Point_2 &query)
+{
+    if (polygon.points.size() < 3) return CGAL::ON_UNBOUNDED_SIDE;
+    const auto point_2 = [](const Point &point) {
+        return EpicKernel::Point_2(static_cast<double>(point.x()), static_cast<double>(point.y()));
+    };
+    return CGAL::bounded_side_2(
+        boost::make_transform_iterator(polygon.points.begin(), point_2),
+        boost::make_transform_iterator(polygon.points.end(), point_2), query, EpicKernel());
+}
+
+static bool projected_expolygon_contains(const ExPolygon &shape, const Vec2d &projected)
+{
+    const EpicKernel::Point_2 query(projected.x(), projected.y());
+    // Match ExPolygon::contains(point, true), including both outer and hole boundaries.
+    if (projected_polygon_side(shape.contour, query) == CGAL::ON_UNBOUNDED_SIDE) return false;
+    for (const Polygon &hole : shape.holes)
+        if (projected_polygon_side(hole, query) == CGAL::ON_BOUNDED_SIDE) return false;
+    return true;
+}
+
+} // namespace priv
+
 void priv::set_face_type(FaceTypeMap            &face_type_map,
                          const CutMesh          &mesh,
                          const VertexShapeMap   &vertex_shape_map,
                          const EdgeBoolMap      &ecm,
                          const CutMesh          &shape_mesh,
-                         const ExPolygonsIndices &shape2index)
+                         const ExPolygonsIndices &shape2index,
+                         const ExPolygons       &shapes,
+                         const Project          &projection)
 {
     for (EI ei : mesh.edges()) {
         if (!ecm[ei]) continue;
@@ -1429,12 +1462,50 @@ void priv::set_face_type(FaceTypeMap            &face_type_map,
         }
         if (!fi.is_valid()) continue;
 
-        bool is_inside = is_face_inside(hi, mesh, shape_mesh, vertex_shape_map, shape2index);
-        face_type_map[fi] = is_inside ? FaceType::inside : FaceType::outside;
         HI hi_op = mesh.opposite(hi);
-        if (!hi_op.is_valid()) continue;
+        // A valid opposite halfedge can still be a border halfedge whose
+        // face descriptor is invalid. Treat that as a model-boundary edge.
+        const bool has_opposite_face = hi_op.is_valid() && mesh.face(hi_op).is_valid();
+        bool is_inside;
+        if (has_opposite_face) {
+            // Interior constrained edges have both faces; metadata from the
+            // projected shape gives an orientation-aware classification.
+            is_inside = is_face_inside(hi, mesh, shape_mesh, vertex_shape_map, shape2index);
+        } else {
+            // A model-boundary edge has no opposite face for the metadata rule
+            // to compare. Classify its only incident face by its projected
+            // centroid. Projection coordinates are already in Point's scaled
+            // units (ProjectZ::unproject and OrthoProject::unproject); do not
+            // apply Point::new_scale here.
+            Vec3d centroid = Vec3d::Zero();
+            size_t vertex_count = 0;
+            HI face_hi = hi;
+            do {
+                centroid += to_vec3d(mesh.point(mesh.target(face_hi)));
+                ++vertex_count;
+                face_hi = mesh.next(face_hi);
+            } while (face_hi != hi);
+            assert(vertex_count > 0);
+            if (vertex_count == 0) continue;
+            centroid /= static_cast<double>(vertex_count);
+            const std::optional<Vec2d> projected = projection.unproject(centroid);
+            if (!projected.has_value()) {
+                // Preserve the metadata path for projections that cannot
+                // unproject this boundary point.
+                is_inside = is_face_inside(hi, mesh, shape_mesh, vertex_shape_map, shape2index);
+            } else {
+                is_inside = false;
+                for (const ExPolygon &shape : shapes) {
+                    if (projected_expolygon_contains(shape, *projected)) {
+                        is_inside = true;
+                        break;
+                    }
+                }
+            }
+        }
+        face_type_map[fi] = is_inside ? FaceType::inside : FaceType::outside;
+        if (!has_opposite_face) continue;
         FI fi_op = mesh.face(hi_op);
-        if (!fi_op.is_valid()) continue;
         face_type_map[fi_op] = (!is_inside) ? FaceType::inside : FaceType::outside;
     }
 }
@@ -1443,7 +1514,8 @@ priv::CutAOIs priv::cut_from_model(CutMesh                &cgal_model,
                                    const ExPolygons       &shapes,
                                    CutMesh                &cgal_shape,
                                    float                   projection_ratio,
-                                   const ExPolygonsIndices &s2i)
+                                   const ExPolygonsIndices &s2i,
+                                   const Project          &projection)
 {
     // pointer to edge or face shape_map
     VertexShapeMap vert_shape_map = cgal_model.add_property_map<VI, const IntersectingElement*>(vert_shape_map_name, nullptr).first;
@@ -1468,7 +1540,7 @@ priv::CutAOIs priv::cut_from_model(CutMesh                &cgal_model,
     FaceTypeMap face_type_map = cgal_model.add_property_map<FI, FaceType>(face_type_map_name, FaceType::not_constrained).first;
 
     // Select inside and outside face in model
-    set_face_type(face_type_map, cgal_model, vert_shape_map, ecm, cgal_shape, s2i);
+    set_face_type(face_type_map, cgal_model, vert_shape_map, ecm, cgal_shape, s2i, shapes, projection);
 #ifdef DEBUG_OUTPUT_DIR
     store(cgal_model, face_type_map, DEBUG_OUTPUT_DIR + "constrained/"); // only debug
 #endif // DEBUG_OUTPUT_DIR

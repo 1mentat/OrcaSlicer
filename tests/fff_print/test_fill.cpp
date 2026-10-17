@@ -1160,6 +1160,83 @@ static SparseInfillShape sparse_infill_shape(const Print &print)
     return shape;
 }
 
+TEST_CASE("Z contouring gates fill-direction alternation", "[Fill][ZContouringSettings]")
+{
+    struct Observation {
+        std::vector<int> angles;
+        SparseInfillShape sparse;
+        std::vector<double> slice_offsets;
+    };
+
+    auto observe = [](bool zaa_enabled, bool dont_alternate, double min_z) {
+        Print print;
+        Slic3r::Test::init_and_process_print({make_cube(8., 8., 1.2)}, print,
+                                            {{"sparse_infill_pattern", "line"},
+                                             {"sparse_infill_density", "40%"},
+                                             // An empty template leaves the public layer alternation visible.
+                                             {"sparse_infill_rotate_template", ""},
+                                             {"infill_direction", 0},
+                                             {"wall_loops", 0},
+                                             {"top_shell_layers", 0},
+                                             {"bottom_shell_layers", 0},
+                                             {"top_shell_thickness", 0},
+                                             {"bottom_shell_thickness", 0},
+                                             {"initial_layer_print_height", 0.2},
+                                             {"zaa_enabled", zaa_enabled},
+                                             {"zaa_dont_alternate_fill_direction", dont_alternate},
+                                             {"zaa_min_z", min_z},
+                                             // There are no perimeters in this fixture; keep this gate explicit.
+                                             {"zaa_minimize_perimeter_height", 0},
+                                             {"layer_height", 0.2}});
+
+        Observation result;
+        result.angles = angles_per_layer(print, sparse_role);
+        result.sparse = sparse_infill_shape(print);
+        for (const Layer *layer : print.objects().front()->layers())
+            result.slice_offsets.push_back(layer->slice_z - layer->bottom_z());
+        return result;
+    };
+
+    auto distinct_angles = [](const std::vector<int> &angles) {
+        std::vector<int> distinct = angles;
+        std::sort(distinct.begin(), distinct.end());
+        distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+        return distinct.size();
+    };
+
+    const Observation disabled_alternating = observe(false, false, 0.05);
+    const Observation disabled_flagged    = observe(false, true, 0.05);
+    const Observation enabled_alternating = observe(true, false, 0.05);
+    const Observation enabled_fixed       = observe(true, true, 0.05);
+
+    for (const Observation &observation : {disabled_alternating, disabled_flagged, enabled_alternating, enabled_fixed}) {
+        REQUIRE(observation.angles.size() >= 4);
+        REQUIRE(std::count(observation.angles.begin(), observation.angles.end(), -1) == 0);
+        REQUIRE(observation.sparse.path_count > 0);
+        CHECK(observation.sparse.point_count > observation.sparse.path_count);
+        CHECK(observation.sparse.length > 0.);
+        CHECK(std::isfinite(observation.sparse.length));
+    }
+
+    // The secondary flag is gated by zaa_enabled: it is inert in both disabled rows.
+    CHECK(disabled_alternating.angles == disabled_flagged.angles);
+    // Without an explicit rotation template, enabled Z contouring either alternates the line
+    // direction or deliberately holds it, which is visible over the multi-layer fixture.
+    CHECK(distinct_angles(enabled_alternating.angles) > 1);
+    CHECK(distinct_angles(enabled_fixed.angles) == 1);
+    CHECK(enabled_alternating.angles != enabled_fixed.angles);
+
+    // zaa_min_z is an observable slice-plane offset on the later layers.
+    const Observation low_min_z  = observe(true, true, 0.02);
+    const Observation high_min_z = observe(true, true, 0.08);
+    REQUIRE(low_min_z.slice_offsets.size() >= 4);
+    REQUIRE(high_min_z.slice_offsets.size() == low_min_z.slice_offsets.size());
+    CHECK_THAT(low_min_z.slice_offsets[1], Catch::Matchers::WithinAbs(0.02, 0.002));
+    CHECK_THAT(high_min_z.slice_offsets[1], Catch::Matchers::WithinAbs(0.08, 0.002));
+    CHECK(high_min_z.slice_offsets[1] - low_min_z.slice_offsets[1] > 0.04);
+    CHECK(low_min_z.angles == high_min_z.angles);
+}
+
 TEST_CASE("Lightning infill slices the same model the same way twice", "[Fill][Regression]")
 {
     // Slicing twice in one process catches a generator that carries state from one slice to the

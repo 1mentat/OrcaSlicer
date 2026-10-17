@@ -198,7 +198,14 @@ and persisted per-type files. Its mutations are in `preset_bundle_import.json`.
 within one mesh, and multiple holes using contour validity and geometric area.
 `[TpmsAdaptiveNormalY]` checks density invariance along Y and compares shell and
 core path lengths per unit area against a uniform-density control. Their
-mutations are in `cut_surface_topology.json` and `tpms_normal_y.json`.
+mutations are in `cut_surface_topology.json`, `cut_surface_boundary.json` and
+`tpms_normal_y.json`. The surface-boundary regression includes an outer contour
+coincident with the model boundary, with two holes whose area must remain removed.
+
+`[ZContouringSettings]` checks all four combinations of Z contouring and its
+infill-direction flag through emitted sparse paths. It also checks two minimum-Z
+values against the resulting slice planes. It does not claim perimeter-height
+minimization coverage. Its mutations are in `z_contouring_settings.json`.
 
 `[TransformGCode]` checks rotated, translated, partial-axis and repeated linear
 moves, including forced coordinate emission. `[WipeTowerPrimePublic]` checks

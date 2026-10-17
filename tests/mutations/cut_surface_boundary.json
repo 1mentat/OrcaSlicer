@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "description": "Open-boundary surface cut classification regression reversion; assertion kill required.",
+  "test_filter": "CutSurfaceTopology",
+  "mutants": [
+    {
+      "id": "cut-surface-boundary-fractional-open-face-classification-reverted",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "kind": "exact_reversion",
+      "old": "        HI hi_op = mesh.opposite(hi);\n        // A valid opposite halfedge can still be a border halfedge whose\n        // face descriptor is invalid. Treat that as a model-boundary edge.\n        const bool has_opposite_face = hi_op.is_valid() && mesh.face(hi_op).is_valid();\n        bool is_inside;\n        if (has_opposite_face) {\n            // Interior constrained edges have both faces; metadata from the\n            // projected shape gives an orientation-aware classification.\n            is_inside = is_face_inside(hi, mesh, shape_mesh, vertex_shape_map, shape2index);\n        } else {\n            // A model-boundary edge has no opposite face for the metadata rule\n            // to compare. Classify its only incident face by its projected\n            // centroid. Projection coordinates are already in Point's scaled\n            // units (ProjectZ::unproject and OrthoProject::unproject); do not\n            // apply Point::new_scale here.\n            Vec3d centroid = Vec3d::Zero();\n            size_t vertex_count = 0;\n            HI face_hi = hi;\n            do {\n                centroid += to_vec3d(mesh.point(mesh.target(face_hi)));\n                ++vertex_count;\n                face_hi = mesh.next(face_hi);\n            } while (face_hi != hi);\n            assert(vertex_count > 0);\n            if (vertex_count == 0) continue;\n            centroid /= static_cast<double>(vertex_count);\n            const std::optional<Vec2d> projected = projection.unproject(centroid);\n            if (!projected.has_value()) {\n                // Preserve the metadata path for projections that cannot\n                // unproject this boundary point.\n                is_inside = is_face_inside(hi, mesh, shape_mesh, vertex_shape_map, shape2index);\n            } else {\n                is_inside = false;\n                for (const ExPolygon &shape : shapes) {\n                    if (projected_expolygon_contains(shape, *projected)) {\n                        is_inside = true;\n                        break;\n                    }\n                }\n            }\n        }\n        face_type_map[fi] = is_inside ? FaceType::inside : FaceType::outside;\n        if (!has_opposite_face) continue;\n        FI fi_op = mesh.face(hi_op);\n        face_type_map[fi_op] = (!is_inside) ? FaceType::inside : FaceType::outside;",
+      "new": "        bool is_inside = is_face_inside(hi, mesh, shape_mesh, vertex_shape_map, shape2index);\n        face_type_map[fi] = is_inside ? FaceType::inside : FaceType::outside;\n        HI hi_op = mesh.opposite(hi);\n        if (!hi_op.is_valid()) continue;\n        FI fi_op = mesh.face(hi_op);\n        if (!fi_op.is_valid()) continue;\n        face_type_map[fi_op] = (!is_inside) ? FaceType::inside : FaceType::outside;",
+      "description": "Restore the previous metadata classification on open constrained edges, retaining the invalid-face crash guard. The coincident outer-boundary case must preserve both holes and the projected area.",
+      "test_filter": "CutSurfaceTopology",
+      "expected_oracle": "ordinary Catch assertion failure in the zero-inset generated row; crashes, setup errors, and missing tests are not kills",
+      "source_anchor": "priv::set_face_type: constrained-edge face classification block"
+    }
+  ]
+}

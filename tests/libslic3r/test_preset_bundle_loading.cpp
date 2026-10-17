@@ -9885,13 +9885,24 @@ void set_variant_aware_printer(BundleFixture& fx)
 {
     set_two_extruder_project(fx);
     auto& printer = fx.bundle.printers.get_edited_preset().config;
+    // Both logical extruders are hybrid: each exposes one Standard and one High Flow
+    // physical nozzle, and the inventory describes four canonical slots in total.
+    printer.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.4};
     printer.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values = {int(etDirectDrive), int(etDirectDrive)};
-    printer.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {int(nvtStandard), int(nvtHighFlow)};
+    printer.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {int(nvtHybrid), int(nvtHybrid)};
+    printer.option<ConfigOptionStrings>("extruder_nozzle_stats", true)->values = {
+        "Standard#1|High Flow#1", "Standard#1|High Flow#1"};
     printer.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {
-        "Direct Drive Standard", "Direct Drive High Flow"};
-    printer.option<ConfigOptionInts>("printer_extruder_id", true)->values = {1, 2};
+        "Direct Drive Standard,Direct Drive High Flow", "Direct Drive Standard,Direct Drive High Flow"};
+    printer.option<ConfigOptionInts>("printer_extruder_id", true)->values = {1, 1, 2, 2};
     printer.option<ConfigOptionStrings>("printer_extruder_variant", true)->values = {
-        "Direct Drive Standard", "Direct Drive High Flow"};
+        "Direct Drive Standard", "Direct Drive High Flow", "Direct Drive Standard", "Direct Drive High Flow"};
+
+    // full_fff_config applies project_config after the printer preset. Keep the project-side
+    // nozzle type hybrid as well, otherwise the project default silently collapses both extruders
+    // back to Standard before variant expansion.
+    fx.bundle.project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {
+        int(nvtHybrid), int(nvtHybrid)};
 }
 
 void set_variant_aware_filament(Preset& preset, double standard_speed, double high_flow_speed)
@@ -9899,7 +9910,9 @@ void set_variant_aware_filament(Preset& preset, double standard_speed, double hi
     auto& config = preset.config;
     config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
         "Direct Drive Standard", "Direct Drive High Flow"};
-    config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75, 1.75};
+    // One physical diameter describes the filament; the two variant slots are selected by
+    // filament_extruder_variant and must not be mistaken for two diameters.
+    config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75};
     config.option<ConfigOptionFloats>("filament_max_volumetric_speed", true)->values = {
         standard_speed, high_flow_speed};
 }
@@ -10321,6 +10334,15 @@ TEST_CASE("AMS combo info clears stale output before resolving an empty tray lis
 
 TEST_CASE("Full FFF configuration applies explicit filament volume maps", "[PresetBundle][PresetBundleContracts][PresetBundleFullFffMaps]")
 {
+    const auto [first_volume, second_volume, first_speed, second_speed] = GENERATE(
+        table<NozzleVolumeType, NozzleVolumeType, double, double>({
+            {nvtStandard, nvtStandard, 12., 13.},
+            {nvtStandard, nvtHighFlow, 12., 23.},
+            {nvtHighFlow, nvtStandard, 22., 13.},
+            {nvtHighFlow, nvtHighFlow, 22., 23.},
+        }));
+    CAPTURE(first_volume, second_volume);
+
     BundleFixture fx;
     set_variant_aware_printer(fx);
     add_filament(fx, "PLA", "PLA-ID", "PLA", false, true);
@@ -10337,14 +10359,19 @@ TEST_CASE("Full FFF configuration applies explicit filament volume maps", "[Pres
         int(nvtHighFlow), int(nvtHighFlow)};
 
     const DynamicPrintConfig out = fx.bundle.full_config(
-        true, std::vector<int>{1, 2}, std::vector<int>{int(nvtStandard), int(nvtHighFlow)});
+        true, std::vector<int>{1, 2}, std::vector<int>{int(first_volume), int(second_volume)});
     CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values ==
-          std::vector<int>{int(nvtStandard), int(nvtHighFlow)});
+          std::vector<int>{int(first_volume), int(second_volume)});
+    CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{
+              first_volume == nvtStandard ? "Direct Drive Standard" : "Direct Drive High Flow",
+              second_volume == nvtStandard ? "Direct Drive Standard" : "Direct Drive High Flow"});
     CHECK(out.option<ConfigOptionStrings>("filament_settings_id")->values ==
           std::vector<std::string>{"PLA", "PETG"});
     CHECK(out.option<ConfigOptionStrings>("filament_ids")->values ==
           std::vector<std::string>{"PLA-ID", "PETG-ID"});
-    check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {12., 23.});
+    check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values,
+                        {first_speed, second_speed});
 }
 
 TEST_CASE("Full FFF configuration records selected system filament changes", "[PresetBundle][PresetBundleContracts][PresetBundleFullFffProvenance]")

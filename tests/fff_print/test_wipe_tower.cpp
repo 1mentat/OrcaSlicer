@@ -3814,9 +3814,11 @@ TEST_CASE("Public priming emits one finite result for each requested tool",
     // The final result must contain a real positive purge in its own WIPE section.
     // This is the witness for the final-wipe-volume mutation; generic LOAD or
     // earlier unload motion must not satisfy it.
+    // prime() terminates the final result with CP PRIMING END; it does not emit
+    // the per-toolchange END marker used by tool_change().
     const std::string final_wipe = section_between(run.results.back().gcode,
                                                    "; CP TOOLCHANGE WIPE\n",
-                                                   "; CP TOOLCHANGE END\n");
+                                                   "; CP PRIMING END\n");
     REQUIRE_FALSE(final_wipe.empty());
     CHECK(has_extrusion_motion(final_wipe));
 
@@ -3844,7 +3846,7 @@ TEST_CASE("Single extruder priming emits cooling and loading phases for each han
     // TOOLCHANGE section. The final planner flush emits G4 S0 and is not enough.
     const std::string unload_section = section_between(run.gcode,
                                                        "; CP TOOLCHANGE UNLOAD\n",
-                                                       "; CP TOOLCHANGE END\n");
+                                                       "; CP PRIMING END\n");
     REQUIRE_FALSE(unload_section.empty());
     CHECK(unload_section.find("; Cooling\n") != std::string::npos);
     CHECK(unload_section.find("; Cooling park\n") != std::string::npos);
@@ -3872,7 +3874,7 @@ TEST_CASE("MK4 MMU priming brackets unloads with monitoring and cooling commands
     }
     const std::string unload_section = section_between(run.gcode,
                                                        "; CP TOOLCHANGE UNLOAD\n",
-                                                       "; CP TOOLCHANGE END\n");
+                                                       "; CP PRIMING END\n");
     REQUIRE_FALSE(unload_section.empty());
     CHECK(has_positive_wait(unload_section, 1.5f));
     CHECK(run.gcode.find("M907 E750") != std::string::npos);
