@@ -11141,7 +11141,7 @@ TEST_CASE("JSON vendor printer metadata preserves machine fields and normalizes 
     const VendorProfile &profile = bundle.vendors.at(vendor);
     CHECK(profile.name == vendor);
     const auto expected_version = Semver::parse("1.2.3");
-    REQUIRE(expected_version);
+    REQUIRE(static_cast<bool>(expected_version));
     CHECK(profile.config_version == *expected_version);
     CHECK(model.id == "Meta FFF");
     CHECK(model.model_id == "FFF-42");
