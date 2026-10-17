@@ -1367,6 +1367,11 @@ TEST_CASE("Arachne fuzzy skin modes preserve their mode-specific perimeter contr
             max_interior_distance = std::max(max_interior_distance, distance);
         }
     }
+    if (std::string(mode) != "displacement") {
+        // Check the positive width adjustment before requiring interior samples,
+        // so a missing width adjustment is reported even if no safe sample remains.
+        CHECK(maximum_width(actual) > control_max_width + 0.01);
+    }
     REQUIRE(interior_samples > 0);
 
     if (std::string(mode) == "displacement") {
@@ -1380,12 +1385,6 @@ TEST_CASE("Arachne fuzzy skin modes preserve their mode-specific perimeter contr
         }
         return;
     }
-
-    // min_extrusion_width is positive and thickness is 0.02mm, so a generated
-    // sample has a positive width increase. Use a maximum-width witness so an
-    // untouched closed junction cannot hide the conversion result.
-
-    CHECK(maximum_width(actual) > control_max_width + 0.01);
 
     if (std::string(mode) == "extrusion") {
         // Extrusion mode leaves pa on p0-p1. Exclude the exact corner neighborhoods

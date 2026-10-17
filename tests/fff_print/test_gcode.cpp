@@ -1227,6 +1227,189 @@ TEST_CASE("Input shaping emission follows the configured firmware gate", "[GCode
 }
 
 
+namespace print_order_contracts {
+
+struct XY {
+    double x;
+    double y;
+};
+
+constexpr size_t kInstanceCount = 7;
+constexpr size_t kMaxOutputBytes = 4 * 1024 * 1024;
+
+struct OrderRun {
+    std::array<XY, kInstanceCount> centers{};
+    std::vector<std::vector<size_t>> layers;
+};
+
+std::array<XY, kInstanceCount> fixture_centers()
+{
+    // Three deliberately separated rows keep every 10 mm instance comfortably
+    // inside the default bed while exercising both ordering strategies.
+    return {{
+        {30., 171.}, {25., 20.}, {65., 109.}, {20., 109.},
+        {140., 172.}, {100., 109.}, {180., 109.},
+    }};
+}
+
+DynamicPrintConfig print_order_config(const char *serialized_mode)
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"print_order", serialized_mode},
+        {"print_sequence", "by layer"},
+        {"gcode_label_objects", true},
+        {"exclude_object", false},
+        {"enable_prime_tower", false},
+        {"wipe_tower_x", 0.0},
+        {"wipe_tower_y", 0.0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+    });
+    return config;
+}
+
+std::vector<std::vector<size_t>> parse_layer_object_copies(const std::string &gcode)
+{
+    std::vector<std::vector<size_t>> layers;
+    size_t current_layer = std::numeric_limits<size_t>::max();
+    size_t line_start = 0;
+    while (line_start <= gcode.size()) {
+        const size_t line_end = gcode.find('\n', line_start);
+        const size_t line_length = line_end == std::string::npos ? gcode.size() - line_start : line_end - line_start;
+        const std::string_view line(gcode.data() + line_start, line_length);
+        if (line.rfind(";LAYER_CHANGE", 0) == 0) {
+            layers.emplace_back();
+            current_layer = layers.size() - 1;
+        } else if (current_layer != std::numeric_limits<size_t>::max()) {
+            const size_t object_marker = line.find("; printing object ");
+            const size_t copy_marker = line.find(" copy ", object_marker);
+            if (object_marker != std::string_view::npos && copy_marker != std::string_view::npos) {
+                size_t value = 0;
+                bool have_digit = false;
+                bool valid = true;
+                for (size_t pos = copy_marker + 6; pos < line.size(); ++pos) {
+                    const unsigned char ch = static_cast<unsigned char>(line[pos]);
+                    if (ch < '0' || ch > '9')
+                        break;
+                    have_digit = true;
+                    const size_t digit = size_t(ch - '0');
+                    if (value > (std::numeric_limits<size_t>::max() - digit) / 10) {
+                        valid = false;
+                        break;
+                    }
+                    value = value * 10 + digit;
+                }
+                if (have_digit && valid)
+                    layers[current_layer].push_back(value);
+            }
+        }
+        if (line_end == std::string::npos)
+            break;
+        line_start = line_end + 1;
+    }
+    return layers;
+}
+
+OrderRun export_order_fixture(const char *serialized_mode)
+{
+    const auto centers = fixture_centers();
+    DynamicPrintConfig config = print_order_config(serialized_mode);
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "print-order-instance.stl";
+    object->add_volume(make_cube(10., 10., 0.8));
+    for (size_t index = 0; index < centers.size(); ++index) {
+        ModelInstance *instance = object->add_instance();
+        instance->set_offset(Vec3d(centers[index].x, centers[index].y, 0.));
+        instance->arrange_order = static_cast<int>(index + 1);
+    }
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    REQUIRE(print.config().opt_serialize("print_order") == serialized_mode);
+    require_valid(print);
+
+    OrderRun result;
+    result.centers = centers;
+    const std::string text = export_print(print).text;
+    REQUIRE(text.size() < kMaxOutputBytes);
+    result.layers = parse_layer_object_copies(text);
+    return result;
+}
+
+void require_registered_print_order_domain()
+{
+    const ConfigOptionDef *definition = print_config_def.get("print_order");
+    REQUIRE(definition != nullptr);
+    const std::set<std::string> registered(definition->enum_values.begin(), definition->enum_values.end());
+    const std::set<std::string> expected{"default", "as_obj_list", "best_of", "snake"};
+    REQUIRE(registered == expected);
+}
+
+double cycle_cost(const std::vector<size_t> &order, const std::array<XY, kInstanceCount> &centers)
+{
+    double total = 0.;
+    for (size_t index = 0; index < order.size(); ++index) {
+        const size_t next = (index + 1) % order.size();
+        const XY &from = centers[order[index]];
+        const XY &to = centers[order[next]];
+        total += std::hypot(from.x - to.x, from.y - to.y);
+    }
+    return total;
+}
+
+} // namespace print_order_contracts
+
+TEST_CASE("Print order modes preserve complete per-layer instance visits",
+          "[GCode][PrintOrder][GCodeExportWorkflows]")
+{
+    using namespace print_order_contracts;
+    require_registered_print_order_domain();
+    const std::array<const char *, 4> modes{{"default", "as_obj_list", "best_of", "snake"}};
+    std::array<OrderRun, 4> runs;
+
+    for (size_t mode_index = 0; mode_index < modes.size(); ++mode_index) {
+        INFO("print_order=" << modes[mode_index]);
+        runs[mode_index] = export_order_fixture(modes[mode_index]);
+        REQUIRE(runs[mode_index].layers.size() >= 2);
+        for (const std::vector<size_t> &layer_order : runs[mode_index].layers) {
+            REQUIRE(layer_order.size() == kInstanceCount);
+            std::vector<size_t> sorted = layer_order;
+            for (size_t id : sorted)
+                REQUIRE(id < kInstanceCount);
+            std::sort(sorted.begin(), sorted.end());
+            for (size_t expected = 0; expected < kInstanceCount; ++expected)
+                CHECK(sorted[expected] == expected);
+
+            if (mode_index == 1) {
+                // AsObjectList is the explicit predictable-order contract.
+                for (size_t expected = 0; expected < kInstanceCount; ++expected)
+                    CHECK(layer_order[expected] == expected);
+            }
+        }
+    }
+
+    REQUIRE(runs[0].layers.size() == runs[2].layers.size());
+    REQUIRE(runs[0].layers.size() == runs[3].layers.size());
+
+    const double default_first_cost = cycle_cost(runs[0].layers.front(), runs[0].centers);
+    const double snake_first_cost = cycle_cost(runs[3].layers.front(), runs[3].centers);
+    INFO("default first-layer cycle cost: " << default_first_cost);
+    INFO("snake first-layer cycle cost: " << snake_first_cost);
+    for (size_t layer_index = 0; layer_index < runs[2].layers.size(); ++layer_index) {
+        const double default_cost = cycle_cost(runs[0].layers[layer_index], runs[0].centers);
+        const double snake_cost = cycle_cost(runs[3].layers[layer_index], runs[3].centers);
+        const double best_cost = cycle_cost(runs[2].layers[layer_index], runs[2].centers);
+        const double shortest_candidate = std::min(default_cost, snake_cost);
+        // BestOf may equal Default; it must never exceed either public
+        // candidate's independently measured cycle cost.
+        CHECK(best_cost <= shortest_candidate + 1e-4);
+    }
+}
+
 } // namespace gcode_print_variance_contracts
 
 namespace settings_speed_accel_contracts {

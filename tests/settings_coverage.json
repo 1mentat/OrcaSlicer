@@ -99,9 +99,10 @@
       "test": "tests/fff_print/test_layer_height_variance.cpp",
       "tag": "[LayerHeightVariance]",
       "dimensions": [
-        "representative_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The focused Slicing contract tests use a nominal 0.2 mm height alongside 0.1 and 0.3 mm range overrides and check contiguous bounded layers, fixed-profile detection, smoothing, and editing. These are direct Slicing API contracts rather than a full Print pipeline matrix, so boundary and pipeline coverage remain unclaimed."
+      "reason": "Direct Slicing contracts check range overrides, contiguous bounded layers, fixed profiles, smoothing, and editing. Full Print exports of a 1.2 mm fixture at 0.1, 0.2, and 0.3 mm check exact layer counts, HEIGHT tags, and extrusion Z values. The minimum-height substitution mutation is caught by the layer-count oracle. Initial-layer height is coupled to nominal height; independent interactions and numeric boundaries remain unclaimed."
     },
     "initial_layer_print_height": {
       "test": "tests/fff_print/test_layer_height_variance.cpp",
@@ -410,6 +411,17 @@
         "pipeline_oracle"
       ],
       "reason": "A converted hole is sliced with twisted conversion disabled and enabled; the first-hole checksum must change."
+    },
+    "brim_flow_ratio": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[BrimFlowVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Ratios 0, 0.5, 1, and 2 cover both registered boundaries and scale parsed brim extrusion while preserving brim geometry and object extrusion. A separate first-layer ratio of 0.6 scales first-layer object extrusion while leaving brim and later-layer object extrusion unchanged. Other flow-ratio interactions are not claimed."
     },
     "brim_use_efc_outline": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
