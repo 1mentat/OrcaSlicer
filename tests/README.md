@@ -204,8 +204,10 @@ coincident with the model boundary, with two holes whose area must remain remove
 
 `[ZContouringSettings]` checks all four combinations of Z contouring and its
 infill-direction flag through emitted sparse paths. It also checks two minimum-Z
-values against the resulting slice planes. It does not claim perimeter-height
-minimization coverage. Its mutations are in `z_contouring_settings.json`.
+values against the resulting slice planes. `[ZContouringPerimeter]` compares
+perimeter Z correction across disabled, zero, moderate and maximum slope
+thresholds, using length-weighted geometry to tolerate path resampling. Their
+mutations are in `z_contouring_settings.json` and `z_contouring_perimeter.json`.
 
 `[TransformGCode]` checks rotated, translated, partial-axis and repeated linear
 moves, including forced coordinate emission. `[WipeTowerPrimePublic]` checks

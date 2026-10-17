@@ -15,6 +15,7 @@
 #include <iterator>
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Line.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -1236,6 +1237,137 @@ TEST_CASE("Z contouring gates fill-direction alternation", "[Fill][ZContouringSe
     CHECK(high_min_z.slice_offsets[1] - low_min_z.slice_offsets[1] > 0.04);
     CHECK(low_min_z.angles == high_min_z.angles);
 }
+
+namespace z_contouring_perimeter_contracts {
+
+struct PerimeterHeightEvidence {
+    size_t path_count = 0;
+    size_t contoured_path_count = 0;
+    double xy_length = 0.0;
+    double z_integral = 0.0;
+    double z_min = std::numeric_limits<double>::max();
+    double z_max = std::numeric_limits<double>::lowest();
+
+    double mean_z() const
+    {
+        return z_integral / xy_length;
+    }
+};
+
+PerimeterHeightEvidence perimeter_height_evidence(const Print &print)
+{
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->layers().size() >= 4);
+
+    PerimeterHeightEvidence result;
+    for (const Layer *layer : object->layers()) {
+        REQUIRE(layer != nullptr);
+        for (const LayerRegion *region : layer->regions()) {
+            REQUIRE(region != nullptr);
+            for_each_extrusion_path(region->perimeters, [&result](const ExtrusionPath &path) {
+                if (path.role() != erPerimeter && path.role() != erExternalPerimeter)
+                    return;
+                REQUIRE(path.polyline.points.size() >= 2);
+                ++result.path_count;
+                result.contoured_path_count += path.z_contoured ? 1 : 0;
+                for (size_t i = 1; i < path.polyline.points.size(); ++i) {
+                    const Point3 &a = path.polyline.points[i - 1];
+                    const Point3 &b = path.polyline.points[i];
+                    const double segment_length = unscale<double>((b - a).head<2>().cast<double>().norm());
+                    REQUIRE(std::isfinite(segment_length));
+                    if (segment_length <= 0.0)
+                        continue;
+                    const double za = unscale<double>(a.z());
+                    const double zb = unscale<double>(b.z());
+                    REQUIRE(std::isfinite(za));
+                    REQUIRE(std::isfinite(zb));
+                    result.xy_length += segment_length;
+                    // Integrate the linearly interpolated Z correction over physical XY length.
+                    result.z_integral += 0.5 * (za + zb) * segment_length;
+                    result.z_min = std::min(result.z_min, std::min(za, zb));
+                    result.z_max = std::max(result.z_max, std::max(za, zb));
+                }
+            });
+        }
+    }
+    REQUIRE(result.path_count > 0);
+    REQUIRE(result.xy_length > 0.0);
+    REQUIRE(std::isfinite(result.xy_length));
+    REQUIRE(std::isfinite(result.z_integral));
+    REQUIRE(std::isfinite(result.mean_z()));
+    REQUIRE(std::isfinite(result.z_min));
+    REQUIRE(std::isfinite(result.z_max));
+    return result;
+}
+
+PerimeterHeightEvidence run_perimeter_height_case(bool zaa_enabled, double threshold)
+{
+    Print print;
+    // Uniformly scaled slopy_cube keeps its 45-degree roof facets while reducing the run to
+    // 50 layers. ContourZ enters its threshold gate when threshold < facet slope: 35 degrees
+    // adjusts this roof, while 90 degrees is above it and leaves the baseline unchanged.
+    const TriangleMesh shape = Slic3r::Test::mesh(Slic3r::Test::TestMesh::slopy_cube, Vec3d(0., 0., 0.), 0.5);
+    Slic3r::Test::init_and_process_print({shape}, print, {
+        {"wall_generator", "classic"},
+        {"wall_loops", 2},
+        {"top_shell_layers", 2},
+        {"bottom_shell_layers", 2},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"initial_layer_print_height", 0.2},
+        {"layer_height", 0.2},
+        {"zaa_enabled", zaa_enabled},
+        {"zaa_min_z", 0.05},
+        {"zaa_minimize_perimeter_height", threshold},
+    });
+    return perimeter_height_evidence(print);
+}
+
+} // namespace z_contouring_perimeter_contracts
+
+TEST_CASE("Perimeter height minimization follows the configured slope threshold", "[Fill][ZContouringSettings][ZContouringPerimeter]")
+{
+    using namespace z_contouring_perimeter_contracts;
+
+    const PerimeterHeightEvidence disabled = run_perimeter_height_case(false, 90.0);
+    const PerimeterHeightEvidence zero_threshold = run_perimeter_height_case(true, 0.0);
+    const PerimeterHeightEvidence moderate_threshold = run_perimeter_height_case(true, 35.0);
+    const PerimeterHeightEvidence high_threshold = run_perimeter_height_case(true, 90.0);
+
+    // The disabled row is a real geometry control, rather than a config-only check.
+    CHECK(disabled.contoured_path_count == 0);
+    CHECK_THAT(disabled.mean_z(), Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(disabled.z_min, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(disabled.z_max, Catch::Matchers::WithinAbs(0.0, 1e-9));
+
+    // Every enabled row has finite positive perimeter geometry; a threshold may legitimately
+    // leave a path unmarked when its sampled correction is zero.
+    for (const PerimeterHeightEvidence &evidence : {zero_threshold, moderate_threshold, high_threshold}) {
+        REQUIRE(evidence.path_count > 0);
+        REQUIRE(evidence.xy_length > 0.0);
+        CHECK(std::isfinite(evidence.mean_z()));
+    }
+
+    // The threshold only changes Z correction. XY path topology and physical path length stay
+    // invariant; the integral is normalized by that length, so point resampling is immaterial.
+    CHECK(zero_threshold.path_count == moderate_threshold.path_count);
+    CHECK(moderate_threshold.path_count == high_threshold.path_count);
+    CHECK_THAT(zero_threshold.xy_length, Catch::Matchers::WithinAbs(moderate_threshold.xy_length, 0.01));
+    CHECK_THAT(moderate_threshold.xy_length, Catch::Matchers::WithinAbs(high_threshold.xy_length, 0.01));
+
+    // The 35-degree row activates the source correction on the 45-degree sloped perimeter;
+    // zero and 90 degrees leave that correction disabled. The roof contributes a real negative
+    // perimeter correction in the middle row, independently of path-point count.
+    CHECK(moderate_threshold.z_min < -0.001);
+    CHECK(moderate_threshold.mean_z() < zero_threshold.mean_z() - 0.001);
+    CHECK(moderate_threshold.mean_z() < high_threshold.mean_z() - 0.001);
+    CHECK_THAT(high_threshold.mean_z(), Catch::Matchers::WithinAbs(zero_threshold.mean_z(), 0.002));
+    CHECK_THAT(high_threshold.z_min, Catch::Matchers::WithinAbs(zero_threshold.z_min, 0.002));
+}
+
 
 TEST_CASE("Lightning infill slices the same model the same way twice", "[Fill][Regression]")
 {

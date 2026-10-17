@@ -1419,7 +1419,8 @@ namespace priv {
 static CGAL::Bounded_side projected_polygon_side(const Polygon &polygon, const EpicKernel::Point_2 &query)
 {
     if (polygon.points.size() < 3) return CGAL::ON_UNBOUNDED_SIDE;
-    const auto point_2 = [](const Point &point) {
+    // A function pointer keeps the transform iterator assignable in C++17.
+    const auto point_2 = +[](const Point &point) {
         return EpicKernel::Point_2(static_cast<double>(point.x()), static_cast<double>(point.y()));
     };
     return CGAL::bounded_side_2(

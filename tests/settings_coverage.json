@@ -3634,6 +3634,59 @@
         "pipeline_oracle"
       ],
       "reason": "The accepted small-perimeter pipeline case compares threshold 8 mm against threshold 0 disabling, under both absolute and percent speed rows, and checks later-layer outer-wall feeds plus unchanged extrusion/path/material invariants. This is representative threshold output evidence only; numeric boundary coverage and nullable semantics are not claimed."
+    },
+    "support_air_filtration": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[AirFiltration]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Air filtration capability gates directed exhaust fan phases case varies the capability and all three activation gates. The five rows require the row-specific directed P3 PWM sequences; capability-disabled output to contain no directed phase, and the ordinary XY path and deposited filament to remain WithinRel of the all-enabled reference. This establishes both capability boolean values and the emitted-G-code oracle; interactions with cooling-filter and auxiliary-fan options remain unclaimed."
+    },
+    "wipe_tower_no_sparse_layers": {
+      "test": "tests/libslic3r/test_wipe_tower.cpp",
+      "tag": "[NoSparseLayers]",
+      "dimensions": [
+        "boolean_values"
+      ],
+      "reason": "The accepted Sparse layers are skipped only when nothing else needs a tower on every layer case toggles wipe_tower_no_sparse_layers false/true and checks the public sparse-layer predicate, then checks the time-lapse and wrapping-detection gates cannot incorrectly skip. The accepted Wipe tower sparse config gates distinguish skip and combine modes case also deserializes the registered key through FullPrintConfig and checks the public predicates. This establishes the registered boolean values only; the accepted FFF tower cases configure sparse=true or sparse=false without a paired emitted-output comparison, so a pipeline oracle is not claimed."
+    },
+    "support_interface_loop_pattern": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportInterfaceLoopPattern]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Support interface loop pattern adds contact interface paths case processes the same public Print fixture with the key false and true. It requires identical nonempty interface-layer sets, positive finite interface length and volume in both outputs, and strictly more interface entities with loops. This is a public support-path oracle for both boolean values; pattern-spacing and loop-pattern interactions remain unclaimed."
+    },
+    "single_loop_draft_shield": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[DraftShieldSingleLoop]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Single-loop draft shields retain all first-layer loops and limit later layers case processes the same four-layer print with the key false and true. It requires three loops on the first layer in both outputs, three versus one on every later layer, six versus twelve emitted skirt-loop records, and equal non-skirt path and filament totals. This establishes both boolean values through emitted G-code geometry and material invariants; other draft-shield modes remain unclaimed."
+    },
+    "support_critical_regions_only": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[SupportCriticalRegionsOnly]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Critical tree support keeps cantilevers and removes ordinary overhangs case processes the same public tree-support fixture with the key false and true. The unfiltered result must contain both disjoint ordinary-overhang and cantilever windows; the filtered result must retain positive support points and cantilever segments while clearing the ordinary window. This establishes both boolean values and a topology/region oracle; other tree-support filters remain unclaimed."
+    },
+    "zaa_enabled": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[Fill]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Z anti-aliasing keeps the infill rotation template's step case enables zaa_enabled with a cube, explicit +45-degree template, zaa_min_z, and layer height. It requires more than ten valid layers, no missing angle records, every angle transition to be a bounded multiple of 45 degrees, and at least one 45-degree step. This is representative enabled-state pipeline evidence only; the accepted identity does not independently exercise the disabled boolean state, so boolean_values is intentionally not claimed."
     }
   }
 }
