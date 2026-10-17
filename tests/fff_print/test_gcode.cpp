@@ -1410,6 +1410,231 @@ TEST_CASE("Print order modes preserve complete per-layer instance visits",
     }
 }
 
+namespace input_shaping_followup {
+
+constexpr size_t kMaxOutputBytes = 4 * 1024 * 1024;
+
+using InputShapingTokens = std::vector<std::string>;
+
+std::vector<InputShapingTokens> parse_m593_commands(const std::string &gcode)
+{
+    std::vector<InputShapingTokens> result;
+    size_t line_start = 0;
+    while (line_start <= gcode.size()) {
+        const size_t line_end = gcode.find('\n', line_start);
+        const size_t length = line_end == std::string::npos ? gcode.size() - line_start : line_end - line_start;
+        const std::string line = gcode.substr(line_start, length);
+        const size_t first = line.find_first_not_of(" \t\r");
+        if (first != std::string::npos && line.compare(first, 4, "M593") == 0) {
+            const size_t comment = line.find(';', first);
+            const size_t command_end = comment == std::string::npos ? line.size() : comment;
+            const size_t after_command = first + 4;
+            const bool command_boundary = after_command == command_end;
+            const bool command_has_separator = !command_boundary &&
+                std::isspace(static_cast<unsigned char>(line[after_command]));
+            if (command_boundary || command_has_separator) {
+                std::istringstream stream(line.substr(first, command_end - first));
+                InputShapingTokens tokens;
+                std::string token;
+                while (stream >> token)
+                    tokens.push_back(token);
+                result.push_back(std::move(tokens));
+            }
+        }
+        if (line_end == std::string::npos)
+            break;
+        line_start = line_end + 1;
+    }
+    return result;
+}
+
+bool has_input_shaping_token(const InputShapingTokens &tokens, const std::string &token)
+{
+    return std::find(tokens.begin(), tokens.end(), token) != tokens.end();
+}
+
+bool has_input_shaping_parameter(const InputShapingTokens &tokens, char parameter)
+{
+    for (const std::string &token : tokens) {
+        if (token.size() > 1 && token.front() == parameter)
+            return true;
+    }
+    return false;
+}
+
+void require_bounded_material(const ExportedPrint &exported, const DynamicPrintConfig &config,
+                              const MotionEvidence &reference)
+{
+    REQUIRE(exported.text.size() < kMaxOutputBytes);
+    const MotionEvidence observed = motion_evidence(exported.text, config);
+    REQUIRE(observed.extrusion_moves > 0);
+    require_same_material(reference, observed);
+}
+
+void require_registered_input_shaper_domain()
+{
+    const ConfigOptionDef *definition = print_config_def.get("input_shaping_type");
+    REQUIRE(definition != nullptr);
+    const std::set<std::string> registered(definition->enum_values.begin(), definition->enum_values.end());
+    const std::set<std::string> expected{
+        "Default", "MZV", "ZV", "ZVD", "ZVDD", "ZVDDD", "EI", "EI2",
+        "2HUMP_EI", "EI3", "3HUMP_EI", "DAA", "Disable",
+    };
+    REQUIRE(registered == expected);
+    REQUIRE(definition->enum_values.size() == 13);
+}
+
+void configure_input_shaping(DynamicPrintConfig &config, const char *flavor, const char *type,
+                             bool emit, double freq_x, double freq_y, double damp_x, double damp_y)
+{
+    config.set_deserialize_strict({
+        {"gcode_flavor", flavor},
+        {"emit_machine_limits_to_gcode", true},
+        {"input_shaping_emit", emit},
+        {"input_shaping_type", type},
+        {"input_shaping_freq_x", freq_x},
+        {"input_shaping_freq_y", freq_y},
+        {"input_shaping_damp_x", damp_x},
+        {"input_shaping_damp_y", damp_y},
+    });
+}
+
+TEST_CASE("Registered input shaper types serialize through the RRF configuration route",
+          "[GCode][InputShaping][GCodeExportWorkflows]")
+{
+    require_registered_input_shaper_domain();
+
+    DynamicPrintConfig control_config = base_config();
+    configure_input_shaping(control_config, "reprapfirmware", "Default", false, 0., 0., 0., 0.);
+    const ExportedPrint control = fresh_custom_mesh_export(control_config, make_cube(10., 10., 0.4));
+    REQUIRE(control.text.size() < kMaxOutputBytes);
+    const MotionEvidence reference = motion_evidence(control.text, control_config);
+    REQUIRE(reference.extrusion_moves > 0);
+    REQUIRE(parse_m593_commands(control.text).empty());
+
+    const ConfigOptionDef *definition = print_config_def.get("input_shaping_type");
+    REQUIRE(definition != nullptr);
+    const std::set<std::string> documented_rrf_types{
+        "MZV", "ZVD", "ZVDD", "ZVDDD", "EI2", "EI3",
+    };
+    for (const std::string &type : definition->enum_values) {
+        INFO("input_shaping_type=" << type);
+        DynamicPrintConfig config = base_config();
+        configure_input_shaping(config, "reprapfirmware", type.c_str(), true, 45., 71., 0.125, 0.275);
+        REQUIRE(config.opt_serialize("input_shaping_type") == type);
+        const ExportedPrint exported = fresh_custom_mesh_export(config, make_cube(10., 10., 0.4));
+        require_bounded_material(exported, config, reference);
+
+        const std::vector<InputShapingTokens> commands = parse_m593_commands(exported.text);
+        REQUIRE(commands.size() == 1);
+        const InputShapingTokens &command = commands.front();
+        CHECK(has_input_shaping_token(command, "M593"));
+
+        // RRF type acceptance is deliberately not asserted here.  This loop
+        // records all registered serialization choices and shared X routing;
+        // firmware support for every registry spelling is a separate question.
+        if (type == "Disable") {
+            CHECK_FALSE(has_input_shaping_token(command, "F45.00"));
+            CHECK_FALSE(has_input_shaping_token(command, "S0.125"));
+            CHECK_FALSE(has_input_shaping_token(command, "F71.00"));
+            CHECK_FALSE(has_input_shaping_token(command, "S0.275"));
+        } else {
+            CHECK(has_input_shaping_token(command, "F45.00"));
+            CHECK(has_input_shaping_token(command, "S0.125"));
+            CHECK_FALSE(has_input_shaping_token(command, "F71.00"));
+            CHECK_FALSE(has_input_shaping_token(command, "S0.275"));
+        }
+        if (documented_rrf_types.count(type) > 0)
+            CHECK(has_input_shaping_token(command, "P\"" + type + "\""));
+        if (type == "Default")
+            CHECK_FALSE(has_input_shaping_token(command, "P\"Default\""));
+    }
+}
+
+TEST_CASE("Marlin 2 input shaping routes axes and honors endpoints and gates",
+          "[GCode][InputShaping][GCodeExportWorkflows]")
+{
+    DynamicPrintConfig control_config = base_config();
+    configure_input_shaping(control_config, "marlin2", "ZV", false, 45., 50., 0.125, 0.275);
+    const ExportedPrint control = fresh_custom_mesh_export(control_config, make_cube(10., 10., 0.4));
+    REQUIRE(control.text.size() < kMaxOutputBytes);
+    const MotionEvidence reference = motion_evidence(control.text, control_config);
+    REQUIRE(reference.extrusion_moves > 0);
+    REQUIRE(parse_m593_commands(control.text).empty());
+
+    DynamicPrintConfig representative = base_config();
+    configure_input_shaping(representative, "marlin2", "ZV", true, 45., 50., 0.125, 0.275);
+    const ExportedPrint representative_export = fresh_custom_mesh_export(representative, make_cube(10., 10., 0.4));
+    require_bounded_material(representative_export, representative, reference);
+    const std::vector<InputShapingTokens> representative_commands = parse_m593_commands(representative_export.text);
+    REQUIRE(representative_commands.size() == 2);
+    CHECK(has_input_shaping_token(representative_commands[0], "M593"));
+    CHECK(has_input_shaping_token(representative_commands[0], "X"));
+    CHECK(has_input_shaping_token(representative_commands[0], "F45.00"));
+    CHECK(has_input_shaping_token(representative_commands[0], "D0.125"));
+    CHECK(has_input_shaping_token(representative_commands[1], "M593"));
+    CHECK(has_input_shaping_token(representative_commands[1], "Y"));
+    CHECK(has_input_shaping_token(representative_commands[1], "F50.00"));
+    CHECK(has_input_shaping_token(representative_commands[1], "D0.275"));
+    CHECK_FALSE(has_input_shaping_token(representative_commands[0], "P\"ZV\""));
+    CHECK_FALSE(has_input_shaping_token(representative_commands[1], "P\"ZV\""));
+
+    struct EndpointRow {
+        double freq_x;
+        double damp_x;
+        double freq_y;
+        double damp_y;
+    };
+    const std::array<EndpointRow, 2> endpoints{{
+        {0., 0., 1000., 1.},
+        {1000., 1., 0., 0.},
+    }};
+    for (const EndpointRow &row : endpoints) {
+        INFO("endpoint X=" << row.freq_x << "/" << row.damp_x << " Y=" << row.freq_y << "/" << row.damp_y);
+        DynamicPrintConfig config = base_config();
+        configure_input_shaping(config, "marlin2", "ZV", true,
+                                row.freq_x, row.freq_y, row.damp_x, row.damp_y);
+        const ExportedPrint exported = fresh_custom_mesh_export(config, make_cube(10., 10., 0.4));
+        require_bounded_material(exported, config, reference);
+        const std::vector<InputShapingTokens> commands = parse_m593_commands(exported.text);
+        REQUIRE(commands.size() == 2);
+        REQUIRE(has_input_shaping_token(commands[0], "X"));
+        REQUIRE(has_input_shaping_token(commands[1], "Y"));
+        if (row.freq_x > 0.)
+            CHECK(has_input_shaping_token(commands[0], "F1000.00"));
+        else
+            CHECK_FALSE(has_input_shaping_parameter(commands[0], 'F'));
+        if (row.damp_x > 0.)
+            CHECK(has_input_shaping_token(commands[0], "D1.000"));
+        else
+            CHECK_FALSE(has_input_shaping_parameter(commands[0], 'D'));
+        if (row.freq_y > 0.)
+            CHECK(has_input_shaping_token(commands[1], "F1000.00"));
+        else
+            CHECK_FALSE(has_input_shaping_parameter(commands[1], 'F'));
+        if (row.damp_y > 0.)
+            CHECK(has_input_shaping_token(commands[1], "D1.000"));
+        else
+            CHECK_FALSE(has_input_shaping_parameter(commands[1], 'D'));
+    }
+
+    DynamicPrintConfig disabled = base_config();
+    configure_input_shaping(disabled, "marlin2", "Disable", true, 45., 50., 0.125, 0.275);
+    const ExportedPrint disabled_export = fresh_custom_mesh_export(disabled, make_cube(10., 10., 0.4));
+    require_bounded_material(disabled_export, disabled, reference);
+    const std::vector<InputShapingTokens> disabled_commands = parse_m593_commands(disabled_export.text);
+    REQUIRE(disabled_commands.size() == 1);
+    CHECK(has_input_shaping_token(disabled_commands[0], "M593"));
+    CHECK_FALSE(has_input_shaping_token(disabled_commands[0], "X"));
+    CHECK_FALSE(has_input_shaping_token(disabled_commands[0], "Y"));
+    CHECK_FALSE(has_input_shaping_token(disabled_commands[0], "Z"));
+    CHECK_FALSE(has_input_shaping_token(disabled_commands[0], "A"));
+    CHECK(has_input_shaping_token(disabled_commands[0], "F0.00"));
+    CHECK(has_input_shaping_token(disabled_commands[0], "D0.000"));
+}
+
+} // namespace input_shaping_followup
+
 } // namespace gcode_print_variance_contracts
 
 namespace settings_speed_accel_contracts {

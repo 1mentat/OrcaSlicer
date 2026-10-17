@@ -434,6 +434,21 @@ The native registry audit compares every compiled `PrintConfigDef` key with
 the static inventory and fails on omitted or spurious settings. Omitting
 `--runtime-registry` produces a static report with an unverified registry.
 
+The `[InputShaping]` export cases exercise all registered shaper choices as
+serialization inputs. Exact RepRapFirmware type tokens are checked only for
+the documented modern subset; this does not establish firmware acceptance of
+every registry choice. Marlin 2 cases cover independent X/Y values, inherited
+zero values, configured endpoints, and the disable command.
+
+One known compatibility gap remains: the current writer emits
+`M593 F0.00 S0.000` for RepRapFirmware `Disable`. In pinned firmware source
+[`a8bc59d`](https://github.com/Duet3D/RepRapFirmware/blob/a8bc59db51bb56fe8e3e9d45fea3d573d1f8d073/src/Movement/AxisShaper.cpp#L79),
+disabling requires selecting `P"none"`, and the frequency minimum is 4 Hz.
+The [firmware documentation](https://docs.duet3d.com/User_manual/Reference/Gcodes/M593)
+describes zero-frequency disabling only for older versions. The tests do not
+require the defective modern encoding or claim to validate firmware execution;
+version compatibility still needs a production fix and an executed regression.
+
 ## Exact-head PR validation
 
 `scripts/slicer_pr_validation.py` validates the exact head OIDs in the
