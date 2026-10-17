@@ -255,11 +255,13 @@ technology, deduplicated nozzle and material lists, bed assets, empty lists, and
 error accounting for a malformed material list. Its mutations are in
 `vendor_json_metadata.json`; these metadata tests do not imply settings pipeline coverage.
 
-`[BeltTreeLanding]` checks positive support extrusion and its distance from the
-belt floor, with lower/raised floor controls and one/two wall configurations on
-an explicit 0.8 mm support layer grid. `belt_tree_landing.json` challenges the
-two-neighbour merge termination and duplicate-point cleanup at support-path
-creation; branch reachability and mutation kills require native validation.
+`[BeltTreeLanding]` checks support geometry and exported support deposition on
+an explicit 0.8 mm layer grid, with lower/raised belt floor controls and one/two
+wall configurations. Finite zero-material paths left by sub-resolution
+simplification are counted separately from physical support geometry. Exported
+motion is measured in XYZ to include belt remapping. `belt_tree_landing.json`
+challenges two-neighbour merge termination; branch reachability and mutation
+kills require native validation.
 
 `[Bbs3mfUUID]` restores marked and marker-free split component graphs, checking
 named object/volume identities, analytic mesh volumes, and world placements.

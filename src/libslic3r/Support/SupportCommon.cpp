@@ -597,11 +597,7 @@ void tree_supports_generate_paths(
                 ExPolygons level2 = offset2_ex({expoly}, -1.5 * flow.scaled_width(), 0.5 * flow.scaled_width());
                 if (level2.size() > 0) {
                     regions_to_draw_inner_wall = level2;
-                    Polylines outer_wall = draw_perimeters(expoly, clip_length);
-                    // A clipped/offset tree contour may collapse consecutive points after
-                    // integer-grid rounding. Never publish a no-op ExtrusionPath.
-                    remove_same_neighbor(outer_wall);
-                    extrusion_entities_append_paths(eec->entities, std::move(outer_wall), ExtrusionRole::erSupportMaterial, flow.mm3_per_mm(), flow.width(), flow.height(),
+                    extrusion_entities_append_paths(eec->entities, draw_perimeters(expoly, clip_length), ExtrusionRole::erSupportMaterial, flow.mm3_per_mm(), flow.width(), flow.height(),
                             // Disable reversal of the path, always start with the anchor, always print CCW.
                             false);
                     expoly = level2.front();
@@ -706,14 +702,11 @@ void tree_supports_generate_paths(
             }
 
             ExtrusionEntitiesPtr &out = eec ? eec->entities : dst;
-            // The anchor points are rounded to coord_t and may coincide with a
-            // neighboring contour point. Drop only those exact duplicate runs.
-            remove_same_neighbor(polylines);
             extrusion_entities_append_paths(out, std::move(polylines), ExtrusionRole::erSupportMaterial, flow.mm3_per_mm(), flow.width(), flow.height(),
                                             // Disable reversal of the path, always start with the anchor, always print CCW.
                                             false);
         }
-        if (eec && !eec->entities.empty()) {
+        if (eec) {
             std::reverse(eec->entities.begin(), eec->entities.end());
             dst.emplace_back(eec.release());
         }

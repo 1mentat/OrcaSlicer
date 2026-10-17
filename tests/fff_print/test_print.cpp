@@ -1904,8 +1904,7 @@ struct WipeTowerValidationCase {
 
 void build_two_filament_wipe_print(const DynamicPrintConfig &config, Model &model, Print &print)
 {
-    // Assign both filaments before the first apply: normalizing an intermediate
-    // single-filament print disables its tower before the updated model is read.
+    // Assign both materials through the public per-object configuration.
     const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
         {},
         { { "outer_wall_filament_id", 2 }, { "inner_wall_filament_id", 2 },
@@ -1913,6 +1912,9 @@ void build_two_filament_wipe_print(const DynamicPrintConfig &config, Model &mode
           { "top_surface_filament_id", 2 }, { "bottom_surface_filament_id", 2 } },
     };
     init_print(std::vector<TriangleMesh>{ cube(20), cube(20) }, print, model, config, &overrides);
+    // The first apply normalizes the tower before the new regions expose both
+    // materials. Reapply after the regions exist, as in the slicing fixtures.
+    print.apply(model, config);
     REQUIRE(print.extruders(true).size() == 2);
     REQUIRE(print.has_wipe_tower());
 }
@@ -1938,6 +1940,9 @@ TEST_CASE("Print validation enforces wipe tower extrusion addressing interaction
         { "enable_wrapping_detection",          false },
         { "wipe_tower_type",                    "type2" },
         { "wipe_tower_wall_type",               "rectangle" },
+        { "printable_area",                     "0x0,200x0,200x200,0x200" },
+        { "wipe_tower_x",                       50.0 },
+        { "wipe_tower_y",                       50.0 },
         { "use_relative_e_distances",           relative_e },
         { "layer_change_gcode",                 "G92 E0\n" },
         { "ooze_prevention",                    part.ooze_prevention },

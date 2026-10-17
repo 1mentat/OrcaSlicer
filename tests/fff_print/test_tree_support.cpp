@@ -1,9 +1,12 @@
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <initializer_list>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include "libslic3r/Config.hpp"
@@ -26,6 +29,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/GCodeReader.hpp"
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -515,9 +519,22 @@ TEST_CASE("Tree support auto brim and wall loops change public support geometry"
 
 namespace belt_tree_landing_contracts {
 
+struct GCodeEvidence {
+    size_t support_e_lines = 0;
+    size_t support_extrusion_moves = 0;
+    size_t support_xyz_moves = 0;
+    size_t support_e_only_moves = 0;
+    size_t quantized_stationary_moves = 0;
+    size_t invalid_support_moves = 0;
+    double positive_e_mm = 0.0;
+    double spatial_distance_mm = 0.0;
+    bool finite = true;
+};
+
 struct Evidence {
     size_t point_count = 0;
     size_t nonempty_layers = 0;
+    size_t zero_material_paths = 0;
     double total_path_mm = 0.0;
     double total_extrusion_mm3 = 0.0;
     double lowest_print_z = std::numeric_limits<double>::max();
@@ -533,7 +550,71 @@ struct Evidence {
     size_t first_bad_point_count = 0;
     int first_bad_role = 0;
     bool first_bad_force_no_extrusion = false;
+    GCodeEvidence gcode;
 };
+
+static std::string_view trim_gcode_comment(std::string_view comment)
+{
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.front())))
+        comment.remove_prefix(1);
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.back())))
+        comment.remove_suffix(1);
+    return comment;
+}
+
+static GCodeEvidence parse_support_gcode(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    GCodeEvidence result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string active_role;
+    reader.parse_buffer(gcode, [&result, &active_role](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = trim_gcode_comment(line.comment());
+        if (comment.rfind("TYPE:", 0) == 0)
+            active_role.assign(comment.substr(5));
+
+        const bool support_role = active_role == "Support" || active_role == "Support interface" ||
+                                  active_role == "Support transition";
+        const bool motion = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+        if (!support_role || !motion || !line.has_e())
+            return;
+
+        ++result.support_e_lines;
+        const double de = line.dist_E(state);
+        const double dx = line.dist_X(state);
+        const double dy = line.dist_Y(state);
+        const double dz = line.dist_Z(state);
+        const double distance = std::hypot(std::hypot(dx, dy), dz);
+        const bool finite = std::isfinite(de) && std::isfinite(dx) && std::isfinite(dy) &&
+                            std::isfinite(dz) && std::isfinite(distance);
+        const bool has_spatial_axis = line.has_x() || line.has_y() || line.has_z();
+        result.finite = result.finite && finite;
+        if (!finite) {
+            ++result.invalid_support_moves;
+            return;
+        }
+        if (de <= 0.0)
+            return;
+        // E-only unretraction can occur while TYPE:Support remains active. Tiny source
+        // segments can also round to identical XYZ coordinates at export precision.
+        // Record both separately; neither witnesses spatial support deposition.
+        if (!has_spatial_axis) {
+            ++result.support_e_only_moves;
+            return;
+        }
+        if (distance <= EPSILON) {
+            ++result.quantized_stationary_moves;
+            return;
+        }
+
+        ++result.support_extrusion_moves;
+        result.positive_e_mm += de;
+        result.spatial_distance_mm += distance;
+        if (std::abs(dz) > EPSILON)
+            ++result.support_xyz_moves;
+    });
+    return result;
+}
 
 static TriangleMesh belt_tree_fixture()
 {
@@ -567,6 +648,9 @@ static DynamicPrintConfig belt_tree_config(int wall_count, double floor_offset)
         { "nozzle_diameter",               "1.0" },
         { "layer_height",                   0.8 },
         { "initial_layer_print_height",     0.8 },
+        { "resolution",                     0.01 },
+        { "enable_arc_fitting",             false },
+        { "seam_gap",                       0.0 },
         { "min_layer_height",              "0.1" },
         { "max_layer_height",              "0.8" },
         { "initial_layer_line_width",       1.0 },
@@ -601,7 +685,6 @@ static DynamicPrintConfig belt_tree_config(int wall_count, double floor_offset)
         { "tree_support_wall_count",        wall_count },
         { "tree_support_auto_brim",         false },
         { "tree_support_brim_width",        0.0 },
-        { "tree_support_with_infill",       false },
         { "max_bridge_length",              0.0 },
         { "bridge_no_support",              0 },
         { "thick_bridges",                  0 },
@@ -635,16 +718,22 @@ static Evidence observe(int wall_count, double floor_offset)
     REQUIRE(slicing.belt_floor_from_axis == 1);
     Evidence result;
     for (const SupportLayer *layer : object.support_layers()) {
-        if (layer->support_fills.empty())
-            continue;
-        ++result.nonempty_layers;
-        result.lowest_print_z = std::min(result.lowest_print_z, double(layer->print_z));
+        bool layer_has_physical_path = false;
         for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
             const double length_mm = unscale<double>(path.length());
             const double volume_mm3 = path.mm3_per_mm * length_mm;
-            const bool path_finite = std::isfinite(length_mm) && std::isfinite(volume_mm3) &&
+            const bool finite_values = std::isfinite(length_mm) && std::isfinite(volume_mm3) &&
+                std::isfinite(path.mm3_per_mm) && std::isfinite(double(path.width)) &&
+                std::isfinite(double(path.height));
+            const bool flow_metadata_valid = finite_values && path.mm3_per_mm > 0.0 &&
+                path.width > 0.0f && path.height > 0.0f && path.polyline.is_valid();
+            const bool nonnegative_length = finite_values && length_mm >= 0.0;
+            const bool physical_path = flow_metadata_valid && nonnegative_length &&
                 length_mm > 0.0 && volume_mm3 > 0.0;
-            if (!path_finite) {
+
+            // Record invalid metadata before classifying a zero-material path. This keeps
+            // negative/nonfinite regressions visible instead of silently filtering them.
+            if (!flow_metadata_valid || !nonnegative_length) {
                 if (result.invalid_paths == 0) {
                     result.first_bad_length_mm = length_mm;
                     result.first_bad_volume_mm3 = volume_mm3;
@@ -657,16 +746,29 @@ static Evidence observe(int wall_count, double floor_offset)
                     result.first_bad_force_no_extrusion = path.is_force_no_extrusion();
                 }
                 ++result.invalid_paths;
+                result.finite = false;
+                return;
             }
-            result.finite = result.finite && path_finite;
+
+            if (!physical_path) {
+                ++result.zero_material_paths;
+                return;
+            }
+
+            result.finite = result.finite && finite_values;
+            if (!layer_has_physical_path) {
+                layer_has_physical_path = true;
+                ++result.nonempty_layers;
+                result.lowest_print_z = std::min(result.lowest_print_z, double(layer->print_z));
+            }
             result.total_path_mm += length_mm;
             result.total_extrusion_mm3 += volume_mm3;
             result.point_count += path.polyline.points.size();
             for (const Point3 &point : path.polyline.points) {
                 const Point xy = point.to_point();
                 // For the explicit X/45 degree belt, the source plane equation is
-                // shear*Y + z_shift + configured floor offset.  This is an independent
-                // test-owned calculation; it does not invoke BeltFloorContext.
+                // shear*Y + z_shift + configured floor offset. This remains an
+                // independent test-owned calculation.
                 const double axis_position = unscale<double>(xy.y());
                 const double plane_z = slicing.belt_floor_shear_factor * axis_position +
                     slicing.belt_floor_z_shift + floor_offset;
@@ -676,6 +778,11 @@ static Evidence observe(int wall_count, double floor_offset)
             }
         });
     }
+
+    // Exported support moves are the physical contract. Measure XYZ distance because the
+    // belt remap can put source-Y motion on machine Z; XY-only checks miss that motion.
+    result.gcode = parse_support_gcode(Slic3r::Test::gcode(print), config);
+    result.finite = result.finite && result.gcode.finite;
     return result;
 }
 
@@ -693,13 +800,21 @@ TEST_CASE("Belt tree support floor offset shifts public support landing",
     size_t row = 0;
     for (const Evidence &evidence : { one_wall, two_walls, lower_floor, raised_floor }) {
         INFO("row=" << row << " invalid_paths=" << evidence.invalid_paths
+             << " zero_material_paths=" << evidence.zero_material_paths
              << " first_bad_length_mm=" << evidence.first_bad_length_mm
              << " first_bad_volume_mm3=" << evidence.first_bad_volume_mm3
              << " mm3_per_mm=" << evidence.first_bad_mm3_per_mm
              << " width=" << evidence.first_bad_width << " height=" << evidence.first_bad_height
              << " print_z=" << evidence.first_bad_print_z
              << " point_count=" << evidence.first_bad_point_count << " role=" << evidence.first_bad_role
-             << " force_no_extrusion=" << evidence.first_bad_force_no_extrusion);
+             << " support_extrusion_moves=" << evidence.gcode.support_extrusion_moves
+             << " support_xyz_moves=" << evidence.gcode.support_xyz_moves
+             << " support_e_only_moves=" << evidence.gcode.support_e_only_moves
+             << " quantized_stationary_moves=" << evidence.gcode.quantized_stationary_moves
+             << " support_e_lines=" << evidence.gcode.support_e_lines
+             << " invalid_support_moves=" << evidence.gcode.invalid_support_moves
+             << " positive_e_mm=" << evidence.gcode.positive_e_mm
+             << " spatial_distance_mm=" << evidence.gcode.spatial_distance_mm);
         REQUIRE(evidence.finite);
         REQUIRE(evidence.nonempty_layers > 0);
         REQUIRE(evidence.point_count > 2);
@@ -709,6 +824,14 @@ TEST_CASE("Belt tree support floor offset shifts public support landing",
         REQUIRE(std::isfinite(evidence.lowest_plane_gap_mm));
         REQUIRE(evidence.lowest_plane_gap_mm > -0.8);
         CHECK(evidence.lowest_plane_gap_mm < 0.8 + EPSILON);
+        REQUIRE(evidence.gcode.finite);
+        REQUIRE(evidence.gcode.support_extrusion_moves > 0);
+        REQUIRE(evidence.gcode.support_xyz_moves > 0);
+        REQUIRE(evidence.gcode.invalid_support_moves == 0);
+        REQUIRE(std::isfinite(evidence.gcode.positive_e_mm));
+        REQUIRE(std::isfinite(evidence.gcode.spatial_distance_mm));
+        REQUIRE(evidence.gcode.positive_e_mm > 0.0);
+        REQUIRE(evidence.gcode.spatial_distance_mm > EPSILON);
         ++row;
     }
     // Wall count changes the emitted support geometry.

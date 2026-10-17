@@ -29,24 +29,6 @@
       "expected_matches": 1,
       "test_filter": "BeltTreeLanding",
       "description": "Ignore the merged circle radius in the landing clearance. The large-nozzle floor controls challenge the altered termination boundary if the fixture reaches this branch."
-    },
-    {
-      "id": "tree-support-degenerate-outer-wall-retained",
-      "path": "src/libslic3r/Support/SupportCommon.cpp",
-      "old": "remove_same_neighbor(outer_wall);",
-      "new": "/* mutation: retain coincident support points */",
-      "expected_matches": 1,
-      "test_filter": "BeltTreeLanding",
-      "description": "Retain exact duplicate outer-wall points before publishing support paths. The strict positive-length/volume assertion detects a collapsed path if this append site produced the native regression; source attribution and a kill require execution."
-    },
-    {
-      "id": "tree-support-degenerate-anchor-path-retained",
-      "path": "src/libslic3r/Support/SupportCommon.cpp",
-      "old": "remove_same_neighbor(polylines);",
-      "new": "/* mutation: retain coincident support points */",
-      "expected_matches": 1,
-      "test_filter": "BeltTreeLanding",
-      "description": "Retain exact duplicate anchor-path points before publishing support paths. The strict positive-length/volume assertion detects a collapsed path if this append site produced the native regression; source attribution and a kill require execution."
     }
   ]
 }
