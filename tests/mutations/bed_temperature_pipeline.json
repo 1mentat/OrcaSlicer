@@ -25,6 +25,14 @@
       "new": "bed_temp = get_bed_temperature(first_printing_extruder_id, true, btPC);",
       "test_filter": "BedTemperaturePipeline",
       "description": "Hard-code Cool Plate for initial lookup. The five non-Cool families have distinct outputs and the Cool row is a deliberate control."
+    },
+    {
+      "id": "bed-temperature-zero-target-dropped",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "if (temperature == m_last_bed_temperature && (! wait || m_last_bed_temperature_reached))",
+      "new": "if (temperature == 0 || (temperature == m_last_bed_temperature && (! wait || m_last_bed_temperature_reached)))",
+      "test_filter": "BedTemperaturePipeline",
+      "description": "Suppress every zero target. Initial zero correctly emits no redundant heat command, but changing a heated bed to zero at layer 2 must still emit M140 S0 in every family."
     }
   ]
 }

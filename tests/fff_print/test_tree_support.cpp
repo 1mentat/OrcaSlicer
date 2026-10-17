@@ -463,7 +463,7 @@ static TreeSupportInteractionEvidence observe_tree_support(const TriangleMesh &m
         result.total_length_mm += layer_length_mm;
         if (result.first_layer_path_count == 0) {
             result.first_layer_path_count = layer_path_count;
-            result.first_layer_area_mm2 = support_area_mm2(layer->support_islands);
+            result.first_layer_area_mm2 = support_area_mm2(layer->base_areas);
             result.first_layer_length_mm = layer_length_mm;
         } else {
             for (const ExtrusionEntity *entity : layer->support_fills.entities)
@@ -523,6 +523,16 @@ struct Evidence {
     double lowest_print_z = std::numeric_limits<double>::max();
     double lowest_plane_gap_mm = std::numeric_limits<double>::max();
     bool finite = true;
+    size_t invalid_paths = 0;
+    double first_bad_length_mm = 0.0;
+    double first_bad_volume_mm3 = 0.0;
+    double first_bad_mm3_per_mm = 0.0;
+    double first_bad_width = 0.0;
+    double first_bad_height = 0.0;
+    double first_bad_print_z = 0.0;
+    size_t first_bad_point_count = 0;
+    int first_bad_role = 0;
+    bool first_bad_force_no_extrusion = false;
 };
 
 static TriangleMesh belt_tree_fixture()
@@ -632,8 +642,23 @@ static Evidence observe(int wall_count, double floor_offset)
         for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
             const double length_mm = unscale<double>(path.length());
             const double volume_mm3 = path.mm3_per_mm * length_mm;
-            result.finite = result.finite && std::isfinite(length_mm) && std::isfinite(volume_mm3) &&
+            const bool path_finite = std::isfinite(length_mm) && std::isfinite(volume_mm3) &&
                 length_mm > 0.0 && volume_mm3 > 0.0;
+            if (!path_finite) {
+                if (result.invalid_paths == 0) {
+                    result.first_bad_length_mm = length_mm;
+                    result.first_bad_volume_mm3 = volume_mm3;
+                    result.first_bad_mm3_per_mm = path.mm3_per_mm;
+                    result.first_bad_width = path.width;
+                    result.first_bad_height = path.height;
+                    result.first_bad_print_z = layer->print_z;
+                    result.first_bad_point_count = path.polyline.points.size();
+                    result.first_bad_role = static_cast<int>(path.role());
+                    result.first_bad_force_no_extrusion = path.is_force_no_extrusion();
+                }
+                ++result.invalid_paths;
+            }
+            result.finite = result.finite && path_finite;
             result.total_path_mm += length_mm;
             result.total_extrusion_mm3 += volume_mm3;
             result.point_count += path.polyline.points.size();
@@ -665,7 +690,16 @@ TEST_CASE("Belt tree support floor offset shifts public support landing",
     const Evidence lower_floor = observe(2, -5.0);
     const Evidence raised_floor = observe(2, 5.0);
 
+    size_t row = 0;
     for (const Evidence &evidence : { one_wall, two_walls, lower_floor, raised_floor }) {
+        INFO("row=" << row << " invalid_paths=" << evidence.invalid_paths
+             << " first_bad_length_mm=" << evidence.first_bad_length_mm
+             << " first_bad_volume_mm3=" << evidence.first_bad_volume_mm3
+             << " mm3_per_mm=" << evidence.first_bad_mm3_per_mm
+             << " width=" << evidence.first_bad_width << " height=" << evidence.first_bad_height
+             << " print_z=" << evidence.first_bad_print_z
+             << " point_count=" << evidence.first_bad_point_count << " role=" << evidence.first_bad_role
+             << " force_no_extrusion=" << evidence.first_bad_force_no_extrusion);
         REQUIRE(evidence.finite);
         REQUIRE(evidence.nonempty_layers > 0);
         REQUIRE(evidence.point_count > 2);
@@ -675,6 +709,7 @@ TEST_CASE("Belt tree support floor offset shifts public support landing",
         REQUIRE(std::isfinite(evidence.lowest_plane_gap_mm));
         REQUIRE(evidence.lowest_plane_gap_mm > -0.8);
         CHECK(evidence.lowest_plane_gap_mm < 0.8 + EPSILON);
+        ++row;
     }
     // Wall count changes the emitted support geometry.
     CHECK(std::abs(two_walls.total_path_mm - one_wall.total_path_mm) > 0.05);

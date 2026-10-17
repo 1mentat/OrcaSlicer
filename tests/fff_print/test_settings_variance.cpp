@@ -1845,6 +1845,18 @@ TriangleMesh severe_caged_overhang_mesh()
         });
 }
 
+TriangleMesh adaptive_pa_overhang_mesh()
+{
+    // Keep both shells disjoint so the exporter must encounter two independent
+    // overhang-role islands.  The different slope angles exercise different
+    // overhang speed sections, rather than duplicating one sample verbatim.
+    TriangleMesh mesh = caged_overhang_mesh();
+    TriangleMesh severe = severe_caged_overhang_mesh();
+    severe.translate(45.f, 0.f, 0.f);
+    mesh.merge(severe);
+    return mesh;
+}
+
 DynamicPrintConfig overhang_config()
 {
     DynamicPrintConfig config = family_config();
@@ -2290,6 +2302,12 @@ DynamicPrintConfig adaptive_pa_output_config(bool enabled)
         {"adaptive_pressure_advance", enabled},
         {"adaptive_pressure_advance_overhangs", enabled},
         {"adaptive_pressure_advance_bridges", 0.0},
+        // Keep distinct overhang bands separated enough for the strict PA-spread
+        // oracle: at this fixture's ~0.0754 mm3/mm, 50 mm/s is ~0.0059 PA.
+        {"overhang_1_4_speed", 190},
+        {"overhang_2_4_speed", 140},
+        {"overhang_3_4_speed", 90},
+        {"overhang_4_4_speed", 20},
         {"pressure_advance", 0.03},
         {"wipe", false},
         {"layer_change_gcode", "G92 E0\n"},
@@ -2378,13 +2396,14 @@ TEST_CASE("Adaptive pressure advance emits calibrated values on overhangs",
           "[SettingsFamilyVariance][AdaptivePressureAdvanceRamps]")
 {
     const DynamicPrintConfig enabled = adaptive_pa_output_config(true);
-    const std::string enabled_gcode = export_mesh(caged_overhang_mesh(), enabled);
+    const std::string enabled_gcode = export_mesh(adaptive_pa_overhang_mesh(), enabled);
     const std::vector<AdaptivePASample> samples = adaptive_pa_eligible_samples(enabled_gcode, enabled);
     REQUIRE(samples.size() > 1);
 
     double minimum_pa = std::numeric_limits<double>::max();
     double maximum_pa = std::numeric_limits<double>::lowest();
     for (const AdaptivePASample &sample : samples) {
+        CAPTURE(sample.mm3_per_mm, sample.feed, sample.actual_pa);
         REQUIRE(std::isfinite(sample.mm3_per_mm));
         REQUIRE(std::isfinite(sample.feed));
         REQUIRE(std::isfinite(sample.actual_pa));
@@ -2395,10 +2414,11 @@ TEST_CASE("Adaptive pressure advance emits calibrated values on overhangs",
         minimum_pa = std::min(minimum_pa, sample.actual_pa);
         maximum_pa = std::max(maximum_pa, sample.actual_pa);
     }
+    CAPTURE(minimum_pa, maximum_pa);
     CHECK(maximum_pa - minimum_pa > 0.005);
 
     const DynamicPrintConfig disabled = adaptive_pa_output_config(false);
-    const std::string disabled_gcode = export_mesh(caged_overhang_mesh(), disabled);
+    const std::string disabled_gcode = export_mesh(adaptive_pa_overhang_mesh(), disabled);
     CHECK(adaptive_pa_eligible_samples(disabled_gcode, disabled).empty());
     CHECK(disabled_gcode.find("SET_PRESSURE_ADVANCE ADVANCE=") == std::string::npos);
 }

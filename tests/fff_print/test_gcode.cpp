@@ -963,7 +963,8 @@ TEST_CASE("Bed heaters emit configured zero and maximum temperature targets", "[
     const size_t family_index = GENERATE(size_t(0), size_t(1), size_t(2), size_t(3), size_t(4), size_t(5));
     const bool initial_zero = GENERATE(false, true);
     const BedTemperatureFamily &bed = families[family_index];
-    // Zero means heater off. High Temp initial temperature has no declared minimum.
+    // An initial zero needs no heating command; a later zero turns the heated bed off.
+    // High Temp initial temperature has no declared minimum.
     const int expected_initial = initial_zero ? 0 : bed.maximum_initial;
     const int expected_ordinary = initial_zero ? bed.maximum_ordinary : 0;
     INFO("bed " << bed.name << ", initial " << expected_initial << ", ordinary " << expected_ordinary);
@@ -986,13 +987,15 @@ TEST_CASE("Bed heaters emit configured zero and maximum temperature targets", "[
 
     const auto exported = fresh_custom_mesh_export(config, make_cube(5., 5., 0.4));
     const auto commands = parse_bed_commands(exported.text, config);
-    REQUIRE(commands.size() == 2);
-    CHECK(commands[0].wait);
-    CHECK(commands[0].layer == 0);
-    CHECK_THAT(commands[0].temperature, Catch::Matchers::WithinAbs(expected_initial, 1e-4));
-    CHECK_FALSE(commands[1].wait);
-    CHECK(commands[1].layer == 2);
-    CHECK_THAT(commands[1].temperature, Catch::Matchers::WithinAbs(expected_ordinary, 1e-4));
+    REQUIRE(commands.size() == (initial_zero ? 1 : 2));
+    if (!initial_zero) {
+        CHECK(commands.front().wait);
+        CHECK(commands.front().layer == 0);
+        CHECK_THAT(commands.front().temperature, Catch::Matchers::WithinAbs(expected_initial, 1e-4));
+    }
+    CHECK_FALSE(commands.back().wait);
+    CHECK(commands.back().layer == 2);
+    CHECK_THAT(commands.back().temperature, Catch::Matchers::WithinAbs(expected_ordinary, 1e-4));
 }
 
 

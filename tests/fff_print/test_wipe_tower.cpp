@@ -668,34 +668,75 @@ static long long quantize_object_value(float value)
     return std::llround(double(value) * 10000.);
 }
 
-// Tower markers are the public export boundary. Object deposition is compared as a sorted,
-// undirected segment multiset per tool and Z layer, so a tower-only option cannot fail the oracle
-// merely by changing an otherwise harmless traversal order.
-static std::vector<ObjectSegmentKey> object_segments(const std::string &gcode,
-                                                     const DynamicPrintConfig &config)
+struct SparseGCodeEvidence {
+    std::string tower_gcode;
+    std::vector<ObjectSegmentKey> object_segments;
+    std::size_t tower_extrusion_moves = 0;
+    double tower_extrusion = 0.;
+    bool invalid_motion = false;
+    bool unknown_object_tool = false;
+};
+
+static bool is_wipe_tower_role_line(std::string_view raw)
+{
+    static const std::string type_tag = ";TYPE:" + ExtrusionEntity::role_to_string(erWipeTower);
+    static const std::string feature_tag = "; FEATURE: " + ExtrusionEntity::role_to_string(erWipeTower);
+    return raw.rfind(std::string_view(type_tag), 0) == 0 || raw.rfind(std::string_view(feature_tag), 0) == 0;
+}
+
+static bool is_any_role_line(std::string_view raw)
+{
+    return raw.rfind(";TYPE:", 0) == 0 || raw.rfind("; FEATURE:", 0) == 0;
+}
+
+// Parse the complete public stream once. WipeTower2's tool-change purge uses reserved markers,
+// while finish_layer() uses the Prime tower role without those markers. Keeping both the modal
+// role/marker state and the GCodeReader E/position state in this pass prevents finish-layer tower
+// paths from leaking into the object oracle or being counted by a second parser with stale E state.
+static SparseGCodeEvidence collect_sparse_gcode(const std::string &gcode,
+                                                 const DynamicPrintConfig &config,
+                                                 int initial_tool,
+                                                 std::size_t known_tool_count)
 {
     const std::string &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start);
     const std::string &end_tag   = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End);
-    std::vector<ObjectSegmentKey> result;
+    SparseGCodeEvidence evidence;
     GCodeReader reader;
     reader.apply_config(config);
     bool in_tower = false;
-    int current_tool = -1;
-    reader.parse_buffer(gcode, [&result, &in_tower, &current_tool, &start_tag, &end_tag](GCodeReader &self,
-                                                                                          const GCodeReader::GCodeLine &line) {
+    int current_tool = initial_tool;
+    reader.parse_buffer(gcode, [&evidence, &in_tower, &current_tool, &start_tag, &end_tag, known_tool_count](GCodeReader &self,
+                                                                                                               const GCodeReader::GCodeLine &line) {
         const std::string_view command = line.cmd();
-        if (command.size() >= 2 && command.front() == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
-            current_tool = std::stoi(std::string(command.substr(1)));
+        if (command.size() >= 2 && command.front() == 'T' && std::isdigit(static_cast<unsigned char>(command[1]))) {
+            try {
+                current_tool = std::stoi(std::string(command.substr(1)));
+            } catch (...) {
+                current_tool = -1;
+            }
+        }
         const std::string raw = line.raw();
-        if (raw.find(start_tag) != std::string::npos) {
+        const std::string_view raw_view(raw);
+        if (is_wipe_tower_role_line(raw_view))
             in_tower = true;
-            return;
-        }
-        if (raw.find(end_tag) != std::string::npos) {
+        else if (is_any_role_line(raw_view))
             in_tower = false;
+        if (raw_view.find(std::string_view(start_tag)) != std::string_view::npos)
+            in_tower = true;
+        const bool tower_line = in_tower;
+        if (tower_line) {
+            evidence.tower_gcode += raw;
+            evidence.tower_gcode.push_back('\n');
+        }
+        if (raw_view.find(std::string_view(end_tag)) != std::string_view::npos)
+            in_tower = false;
+
+        // This fixture disables arc fitting; endpoint pairs are exact geometry only for lines.
+        if (line.cmd_is("G2") || line.cmd_is("G3")) {
+            evidence.invalid_motion = true;
             return;
         }
-        if (in_tower || !line.extruding(self))
+        if (!line.cmd_is("G1") || !line.has_e() || (!line.has_x() && !line.has_y()))
             return;
         const float x0 = self.x();
         const float y0 = self.y();
@@ -703,17 +744,34 @@ static std::vector<ObjectSegmentKey> object_segments(const std::string &gcode,
         const float x1 = line.new_X(self);
         const float y1 = line.new_Y(self);
         const float z1 = line.new_Z(self);
-        if (std::hypot(double(x1 - x0), double(y1 - y0)) <= 1e-6)
+        const double dE = line.dist_E(self);
+        if (!std::isfinite(double(x0)) || !std::isfinite(double(y0)) || !std::isfinite(double(z0)) ||
+            !std::isfinite(double(x1)) || !std::isfinite(double(y1)) || !std::isfinite(double(z1)) ||
+            !std::isfinite(dE)) {
+            evidence.invalid_motion = true;
             return;
+        }
+        const double xy_length = std::hypot(double(x1 - x0), double(y1 - y0));
+        if (dE <= 0. || xy_length <= 1e-6)
+            return;
+        if (tower_line) {
+            ++evidence.tower_extrusion_moves;
+            evidence.tower_extrusion += dE;
+            return;
+        }
+        if (current_tool < 0 || static_cast<std::size_t>(current_tool) >= known_tool_count) {
+            evidence.unknown_object_tool = true;
+            return;
+        }
         std::array<long long, 3> start = {quantize_object_value(x0), quantize_object_value(y0), quantize_object_value(z0)};
         std::array<long long, 3> end = {quantize_object_value(x1), quantize_object_value(y1), quantize_object_value(z1)};
         if (end < start)
             std::swap(start, end);
-        result.push_back({static_cast<long long>(current_tool), quantize_object_value(z1), start[0], start[1], start[2],
-                           end[0], end[1], end[2], quantize_object_value(line.dist_E(self))});
+        evidence.object_segments.push_back({static_cast<long long>(current_tool), quantize_object_value(z1), start[0], start[1], start[2],
+                                             end[0], end[1], end[2], quantize_object_value(float(dE))});
     });
-    std::sort(result.begin(), result.end());
-    return result;
+    std::sort(evidence.object_segments.begin(), evidence.object_segments.end());
+    return evidence;
 }
 
 // Bottom and top surfaces use filament 2. The middle layers use only filament 1, creating real
@@ -750,6 +808,7 @@ static DynamicPrintConfig sparse_pipeline_config(bool no_sparse_layers)
         { "enable_wrapping_detection",        false },
         { "wipe_tower_no_sparse_layers",      no_sparse_layers },
         { "wipe_tower_sparse_layers_combination", false },
+        { "enable_arc_fitting",              false },
         { "use_relative_e_distances",         true },
         { "layer_change_gcode",               "G92 E0\n" },
     });
@@ -795,20 +854,15 @@ static SparsePipelineRun run_sparse_pipeline(bool no_sparse_layers)
         ++layer_index;
     }
     const std::string output = gcode(print);
-    result.tower_gcode = wipe_tower_regions(output);
-    result.object_segments = object_segments(output, config);
-
-    GCodeReader reader;
-    reader.apply_config(config);
-    reader.parse_buffer(result.tower_gcode, [&result](GCodeReader &, const GCodeReader::GCodeLine &line) {
-        if (!line.cmd_is("G1") || !line.has_e() || (!line.has_x() && !line.has_y()))
-            return;
-        const float e = line.e();
-        if (std::isfinite(double(e)) && e > 0.f) {
-            ++result.tower_extrusion_moves;
-            result.tower_extrusion += double(e);
-        }
-    });
+    const unsigned int first_extruder = print.tool_ordering().first_extruder();
+    const int initial_tool = first_extruder == static_cast<unsigned int>(-1) ? -1 : static_cast<int>(first_extruder);
+    const SparseGCodeEvidence evidence = collect_sparse_gcode(output, config, initial_tool, print.extruders().size());
+    REQUIRE_FALSE(evidence.invalid_motion);
+    REQUIRE_FALSE(evidence.unknown_object_tool);
+    result.tower_gcode = evidence.tower_gcode;
+    result.object_segments = evidence.object_segments;
+    result.tower_extrusion_moves = evidence.tower_extrusion_moves;
+    result.tower_extrusion = evidence.tower_extrusion;
     return result;
 }
 

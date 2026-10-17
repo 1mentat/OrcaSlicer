@@ -7309,12 +7309,13 @@ void PresetBundle::parse_vendor_json(VendorRead& read)
                         }
                     } else {
                         ++m_errors;
-                        BOOST_LOG_TRIVIAL(error)<< __FUNCTION__ << boost::format(": invalid nozzle_diameters %1% for Vendor %1%") % nozzle_diameters % vendor_name;
+                        BOOST_LOG_TRIVIAL(error)<< __FUNCTION__ << boost::format(": invalid nozzle_diameters %1% for Vendor %2%") % nozzle_diameters % vendor_name;
                     }
                 }
                 else if (boost::iequals(it.key(), BBL_JSON_KEY_PRINTER_TECH)) {
                     //get printer tech
-                    if (boost::algorithm::starts_with(it.value(), "SL"))
+                    const std::string printer_technology = it.value().get<std::string>();
+                    if (boost::algorithm::starts_with(printer_technology, "SL"))
                         model.technology = ptSLA;
                     else
                         model.technology = ptFFF;
@@ -7357,7 +7358,7 @@ void PresetBundle::parse_vendor_json(VendorRead& read)
                             model.default_materials.erase(model.default_materials.begin());
                     } else {
                         ++m_errors;
-                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": invalid default_materials %1% for Vendor %1%") % default_materials_field % vendor_name;
+                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": invalid default_materials %1% for Vendor %2%") % default_materials_field % vendor_name;
                     }
                 } else if (boost::iequals(it.key(), BBL_JSON_KEY_NOT_SUPPORT_BED_TYPE)) {
                     // get machine list
@@ -7369,7 +7370,7 @@ void PresetBundle::parse_vendor_json(VendorRead& read)
                             model.not_support_bed_types.erase(model.not_support_bed_types.begin());
                     } else {
                         BOOST_LOG_TRIVIAL(error) << __FUNCTION__
-                                                 << boost::format(": invalid not_support_bed_types %1% for Vendor %1%") % not_support_bed_type_field % vendor_name;
+                                                 << boost::format(": invalid not_support_bed_types %1% for Vendor %2%") % not_support_bed_type_field % vendor_name;
                     }
                 }
             }

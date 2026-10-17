@@ -24,6 +24,15 @@
       "new": "model.bed_texture.clear();",
       "test_filter": "VendorJson",
       "description": "Both valid printer metadata fixtures lose their public bed texture."
+    },
+    {
+      "id": "vendor-json-default-materials-error-counter-omitted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "                        ++m_errors;\n                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(\": invalid default_materials %1% for Vendor %2%\") % default_materials_field % vendor_name;",
+      "new": "                        /* mutation: omit malformed default_materials error count */\n                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(\": invalid default_materials %1% for Vendor %2%\") % default_materials_field % vendor_name;",
+      "expected_matches": 1,
+      "test_filter": "VendorJson",
+      "description": "The existing malformed default_materials public case must observe error_count()==1. Removing only this increment yields 0 while preserving the model/list outcome, so it is an ordinary assertion kill after the corrected baseline passes."
     }
   ],
   "description": "JSON vendor model loading mutations for technology, default material normalization, and bed assets."

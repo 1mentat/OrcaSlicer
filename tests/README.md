@@ -232,7 +232,8 @@ limits, equality, and disabled-limit controls. Its mutations are in
 `print_travel_validation.json`.
 
 `[BedTemperaturePipeline]` checks all six bed families through initial and
-second-layer heater commands, including heater-off and declared maximum targets.
+second-layer heater commands, including declared maximum targets, suppression
+of redundant initial zero targets, and explicit later heater-off commands.
 `[ScheduledLayerGCode]` checks pause/template expansion, literal custom commands,
 layer placement, current-plate selection, and sequential-print suppression while
 preserving deposition. Their mutations are in `bed_temperature_pipeline.json`

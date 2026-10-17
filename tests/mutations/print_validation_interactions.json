@@ -26,6 +26,14 @@
       "new": "if (m_config.ooze_prevention || m_config.single_extruder_multi_material)",
       "test_filter": "PrintValidationInteractions",
       "description": "Ooze prevention is incompatible only with single-extruder multi-material wipe-tower mode; enabling ooze prevention alone must remain valid."
+    },
+    {
+      "id": "print-validation-wipe-absolute-addressing-accepted",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (! m_config.use_relative_e_distances)\n                return { L(\"The Wipe Tower is currently only supported with the relative extruder addressing (use_relative_e_distances=1).\") };",
+      "new": "if (false)\n                return { L(\"The Wipe Tower is currently only supported with the relative extruder addressing (use_relative_e_distances=1).\") };",
+      "test_filter": "PrintValidationInteractions",
+      "description": "Accept absolute extrusion addressing despite a classic wipe tower. All four absolute-addressing rows must report the addressing error before the ooze/SEMM interaction; relative-addressing controls retain their original results."
     }
   ]
 }

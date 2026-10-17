@@ -1919,7 +1919,8 @@ TEST_CASE("Print validation enforces wipe tower extrusion addressing interaction
         WipeTowerValidationCase{true, false, ""},
         WipeTowerValidationCase{true, true,
             "Ooze prevention is only supported with the wipe tower when 'single_extruder_multi_material' is off."});
-    CAPTURE(part.ooze_prevention, part.single_extruder_multi_material);
+    const bool relative_e = GENERATE(false, true);
+    CAPTURE(part.ooze_prevention, part.single_extruder_multi_material, relative_e);
 
     const DynamicPrintConfig config = multifilament_config(2, {
         { "enable_prime_tower",                 true },
@@ -1927,8 +1928,9 @@ TEST_CASE("Print validation enforces wipe tower extrusion addressing interaction
         { "print_sequence",                     "by layer" },
         { "timelapse_type",                     "0" },
         { "enable_wrapping_detection",          false },
-        { "wipe_tower_type",                    "rectangle" },
-        { "use_relative_e_distances",           true },
+        { "wipe_tower_type",                    "type2" },
+        { "wipe_tower_wall_type",               "rectangle" },
+        { "use_relative_e_distances",           relative_e },
         { "layer_change_gcode",                 "G92 E0\n" },
         { "ooze_prevention",                    part.ooze_prevention },
         { "single_extruder_multi_material",     part.single_extruder_multi_material },
@@ -1939,7 +1941,9 @@ TEST_CASE("Print validation enforces wipe tower extrusion addressing interaction
 
     const StringObjectException error = print.validate();
     CAPTURE(error.string, error.opt_key);
-    REQUIRE(error.string == part.expected_error);
+    const std::string expected_error = relative_e ? part.expected_error :
+        "The Wipe Tower is currently only supported with the relative extruder addressing (use_relative_e_distances=1).";
+    REQUIRE(error.string == expected_error);
     CHECK(error.opt_key.empty());
     CHECK_FALSE(error.is_warning);
 }

@@ -213,12 +213,13 @@ struct Bucket {
 };
 
 std::vector<PositiveExtrusion> read_positive_extrusions(const std::string &gcode,
-                                                        const GCodeConfig &config)
+                                                        const GCodeConfig &config,
+                                                        int initial_tool)
 {
     GCodeReader reader;
     reader.apply_config(config);
     std::vector<PositiveExtrusion> result;
-    int current_tool = -1;
+    int current_tool = initial_tool;
     reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
         if (line.cmd_is("T0")) {
             current_tool = 0;
@@ -391,7 +392,9 @@ TEST_CASE("Mixed filament gradient scales emitted volume flow", "[MixedFilament]
                               tall_bbox.max.x() + instance_shift_x - center_offset_x};
     REQUIRE(tall_bounds.min_x - short_bounds.max_x > 1.0);
 
-    const auto samples = read_positive_extrusions(output, print.config());
+    const unsigned int initial_tool = print.tool_ordering().first_extruder();
+    REQUIRE(initial_tool != static_cast<unsigned int>(-1));
+    const auto samples = read_positive_extrusions(output, print.config(), static_cast<int>(initial_tool));
     REQUIRE(!samples.empty());
     constexpr size_t short_run = 5;
     constexpr size_t tall_run = 7;
@@ -916,7 +919,9 @@ MixedLabelExport export_mixed_labels(bool bbl, bool split_sublayers)
     MixedLabelExport result;
     result.labels = parse_label_protocol(output);
     REQUIRE(result.labels.valid);
-    const auto samples = read_positive_extrusions(output, print.config());
+    const unsigned int initial_tool = print.tool_ordering().first_extruder();
+    REQUIRE(initial_tool != static_cast<unsigned int>(-1));
+    const auto samples = read_positive_extrusions(output, print.config(), static_cast<int>(initial_tool));
     REQUIRE_FALSE(samples.empty());
     for (const PositiveExtrusion &sample : samples) {
         REQUIRE(std::isfinite(sample.e));

@@ -10475,10 +10475,13 @@ TEST_CASE("Removing cloud presets preserves live metadata and clears a dirty set
     const fs::path listed_file = persist_user_print("Cloud Listed", "listed-id", "", false);
     const fs::path syncing_file = persist_user_print("Syncing", "sync-id", "update", false);
     const fs::path no_id_file = persist_user_print("No Setting Id", "", "", false);
-    const fs::path dirty_file = persist_user_print("Dirty", "dirty-id", "", true);
+    const fs::path dirty_file = persist_user_print("Dirty", "dirty-id", "", false);
     const fs::path removed_file = persist_user_print("Deleted", "deleted-id", "", false);
 
     REQUIRE(fx.bundle.prints.select_preset_by_name("Cloud Listed", true));
+    Preset *dirty_before_remove = fx.bundle.prints.find_preset("Dirty", false, true);
+    REQUIRE(dirty_before_remove != nullptr);
+    dirty_before_remove->is_dirty = true;
     std::map<std::string, std::map<std::string, std::string>> cloud;
     cloud.emplace("Cloud Listed", std::map<std::string, std::string>{{"setting_id", "listed-id"}});
     AppConfig app;
@@ -11137,7 +11140,9 @@ TEST_CASE("JSON vendor printer metadata preserves machine fields and normalizes 
     const VendorProfile::PrinterModel &model = only_model(bundle, vendor);
     const VendorProfile &profile = bundle.vendors.at(vendor);
     CHECK(profile.name == vendor);
-    CHECK(profile.config_version.to_string() == "1.2.3");
+    const auto expected_version = Semver::parse("1.2.3");
+    REQUIRE(expected_version);
+    CHECK(profile.config_version == *expected_version);
     CHECK(model.id == "Meta FFF");
     CHECK(model.model_id == "FFF-42");
     CHECK(model.technology == ptFFF);
@@ -11205,6 +11210,53 @@ TEST_CASE("JSON vendor printer metadata counts malformed default material lists"
     const VendorProfile::PrinterModel &model = only_model(bundle, vendor);
     REQUIRE(model.variants.size() == 1);
     CHECK(model.default_materials.empty());
+}
+
+} // namespace preset_bundle_workflow_contracts
+
+namespace preset_bundle_workflow_contracts {
+
+TEST_CASE("JSON vendor malformed list fields preserve their distinct load outcomes",
+          "[PresetBundle][VendorJson]")
+{
+    const auto [vendor, model_name, model_json, expected_errors, expected_models] = GENERATE(
+        table<std::string, std::string, std::string, int, int>({
+            {
+                "BrokenNozzleVendor", "Broken Nozzle",
+                R"({"type":"machine_model","name":"Broken Nozzle","model_id":"BROKEN-NOZZLE",
+"nozzle_diameter":"\"unterminated","machine_tech":"FFF",
+"default_materials":"","not_support_bed_type":""})",
+                1, 0,
+            },
+            {
+                "BrokenBedListVendor", "Broken Bed List",
+                R"({"type":"machine_model","name":"Broken Bed List","model_id":"BROKEN-BED",
+"nozzle_diameter":"0.4","machine_tech":"FFF",
+"default_materials":"","not_support_bed_type":"\"unterminated"})",
+                0, 1,
+            },
+        }));
+    CAPTURE(vendor, model_name);
+
+    ScopedTemporaryDir dir("vendor-json-malformed-adjacent");
+    ScopedDataDir data(dir.path() / "json-vendor-data");
+    PresetBundle bundle;
+    write_vendor_model_tree(boost::filesystem::path(data_dir()), vendor, model_name, model_json);
+
+    // The public loader must return normally after the parser records a malformed field;
+    // a format-arity exception is the regression this case prevents.
+    REQUIRE(load_json_vendor(bundle, boost::filesystem::path(data_dir()), vendor) == 0);
+    CHECK(bundle.error_count() == expected_errors);
+
+    const VendorProfile &profile = bundle.vendors.at(vendor);
+    REQUIRE(static_cast<int>(profile.models.size()) == expected_models);
+    if (expected_models == 1) {
+        const VendorProfile::PrinterModel &model = profile.models.front();
+        REQUIRE(model.variants.size() == 1);
+        CHECK(model.variants.front().name == "0.4");
+        CHECK(model.default_materials.empty());
+        CHECK(model.not_support_bed_types.empty());
+    }
 }
 
 } // namespace preset_bundle_workflow_contracts
