@@ -1308,7 +1308,8 @@ PerimeterHeightEvidence run_perimeter_height_case(bool zaa_enabled, double thres
     // Uniformly scaled slopy_cube keeps its 45-degree roof facets while reducing the run to
     // 50 layers. ContourZ enters its threshold gate when threshold < facet slope: 35 degrees
     // adjusts this roof, while 90 degrees is above it and leaves the baseline unchanged.
-    const TriangleMesh shape = Slic3r::Test::mesh(Slic3r::Test::TestMesh::slopy_cube, Vec3d(0., 0., 0.), 0.5);
+    TriangleMesh shape = Slic3r::Test::mesh(Slic3r::Test::TestMesh::slopy_cube);
+    shape.scale(0.5f);
     Slic3r::Test::init_and_process_print({shape}, print, {
         {"wall_generator", "classic"},
         {"wall_loops", 2},
