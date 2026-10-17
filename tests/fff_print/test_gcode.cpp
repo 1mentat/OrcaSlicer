@@ -569,8 +569,8 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
     reader.apply_config(config);
     reader.parse_buffer(text, [&evidence, &retracted, &crossed_layer, &overhang_role_before_retraction,
                                &start_plane, &excursion_z_only, &excursion_diagonal,
-                               &excursion_max_diagonal_run, &diagonal_run, &active_role,
-                               plane_tolerance](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+                               &excursion_max_diagonal_run, &diagonal_run, &active_role](GCodeReader &self,
+                                   const GCodeReader::GCodeLine &line) {
         const std::string_view comment = zhop_trim_comment(line.comment());
         if (zhop_is_layer_marker(comment)) {
             if (retracted)
