@@ -179,7 +179,7 @@ TEST_CASE("Orienting a flat cuboid places its broad face on the bed", "[Orient]"
     CHECK_THAT(std::abs(its_volume(object->mesh().its)), Catch::Matchers::WithinRel(original_volume, 1e-6));
 }
 
-TEST_CASE("Cooling orientation leaves fanless and symmetric solids unchanged", "[Orient]")
+TEST_CASE("Cooling orientation leaves fanless and symmetric solids unchanged", "[Orient][FanDirection]")
 {
     const TriangleMesh source = make_cube(10., 10., 10.);
     TriangleMesh fanless = source;
@@ -195,9 +195,14 @@ TEST_CASE("Cooling orientation leaves fanless and symmetric solids unchanged", "
     orientation::orient_for_cooling(left, FanDirection::fdLeft);
     check_mesh_unchanged(source.its, left);
     check_finite_mesh(left);
+
+    TriangleMesh both = source;
+    orientation::orient_for_cooling(both, FanDirection::fdBoth);
+    check_mesh_unchanged(source.its, both);
+    check_finite_mesh(both);
 }
 
-TEST_CASE("Cooling orientation turns an asymmetric overhang toward the configured fan", "[Orient]")
+TEST_CASE("Cooling orientation turns an asymmetric overhang toward the configured fan", "[Orient][FanDirection]")
 {
     TriangleMesh source = make_cube(40., 30., 2.);
     source.rotate_x(0.5f);
@@ -205,7 +210,7 @@ TEST_CASE("Cooling orientation turns an asymmetric overhang toward the configure
     orientation::orient_for_cooling(fanless, FanDirection::fdUndefine);
     check_mesh_unchanged(source.its, fanless);
 
-    const auto fan = GENERATE(FanDirection::fdRight, FanDirection::fdLeft);
+    const auto fan = GENERATE(FanDirection::fdRight, FanDirection::fdLeft, FanDirection::fdBoth);
     const Vec3f fan_axis = fan == FanDirection::fdRight ? Vec3f(1.f, 0.f, 0.f) : Vec3f(-1.f, 0.f, 0.f);
     TriangleMesh cooled = source;
     orientation::orient_for_cooling(cooled, fan);
@@ -219,7 +224,13 @@ TEST_CASE("Cooling orientation turns an asymmetric overhang toward the configure
         // overhang band; its horizontal normal originally points along Y.
         if (normal.z() < -0.64f && normal.z() > -0.97f) {
             ++overhangs;
-            CHECK(cooled_normals[i].dot(fan_axis) > 0.45f);
+            if (fan == FanDirection::fdBoth) {
+                // Both fans may validly select either X-facing direction.
+                const float fan_alignment = std::abs(cooled_normals[i].dot(Vec3f(1.f, 0.f, 0.f)));
+                CHECK(fan_alignment > 0.45f);
+            } else {
+                CHECK(cooled_normals[i].dot(fan_axis) > 0.45f);
+            }
             CHECK_THAT(cooled_normals[i].z(), Catch::Matchers::WithinAbs(normal.z(), 1e-6));
         }
     }

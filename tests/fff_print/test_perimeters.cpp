@@ -15,6 +15,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include "libslic3r/PrintConfig.hpp"
 #include <cstddef>
@@ -24,6 +25,7 @@
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polyline.hpp"
+#include "libslic3r/Surface.hpp"
 #include <limits>
 #include <string>
 #include <utility>
@@ -655,6 +657,138 @@ TEST_CASE("Loops waiting for the infill are extruded after it", "[Perimeters]")
     CHECK(ceiling_roles(true)  == std::vector<std::string>{ "perimeter", "infill", "perimeter" });
     CHECK(ceiling_roles(false) == std::vector<std::string>{ "perimeter", "infill" });
 }
+
+namespace {
+
+struct CounterboreFillSnapshot {
+    double annulus = 0.;
+    double bore = 0.;
+};
+
+ExPolygon counterbore_rectangle(double x0, double y0, double x1, double y1, const Point &center_offset)
+{
+    // Layer polygons are centered by PrintObject before clipping; convert the
+    // model-space fixture bounds into that same coordinate frame.
+    return ExPolygon({ Point::new_scale(x0, y0) - center_offset, Point::new_scale(x1, y0) - center_offset,
+                       Point::new_scale(x1, y1) - center_offset, Point::new_scale(x0, y1) - center_offset });
+}
+
+double counterbore_area_in(const Layer &layer, const ExPolygon &clip)
+{
+    ExPolygons clipped_surfaces;
+    for (const LayerRegion *region : layer.regions()) {
+        for (const Surface &surface : region->fill_surfaces.surfaces) {
+            const ExPolygons clipped = intersection_ex(surface.expolygon, clip);
+            clipped_surfaces.insert(clipped_surfaces.end(), clipped.begin(), clipped.end());
+        }
+    }
+    double result = 0.;
+    for (const ExPolygon &expolygon : union_ex(clipped_surfaces))
+        result += expolygon.area();
+    return result;
+}
+
+CounterboreFillSnapshot counterbore_fill_snapshot(const Layer &layer, const Point &center_offset)
+{
+    const ExPolygon cavity = counterbore_rectangle(5., 5., 25., 25., center_offset);
+    const ExPolygon bore   = counterbore_rectangle(13., 13., 17., 17., center_offset);
+    const double bore_area = counterbore_area_in(layer, bore);
+    return { counterbore_area_in(layer, cavity) - bore_area, bore_area };
+}
+
+} // namespace
+
+TEST_CASE("Counterbore bridging modes keep the bore open or fill a sacrificial layer", "[Perimeters][CounterboreHoleBridging]")
+{
+    const char *wall_generator = GENERATE("classic", "arachne");
+    CAPTURE(wall_generator);
+
+    struct Mode {
+        const char *token;
+        CounterboreHoleBridgingOption value;
+    };
+    const std::array<Mode, 3> modes = {{
+        { "none",             chbNone },
+        { "partiallybridge",  chbBridges },
+        { "sacrificiallayer", chbFilled },
+    }};
+    std::array<CounterboreFillSnapshot, 3> snapshots;
+
+    for (size_t mode_idx = 0; mode_idx < modes.size(); ++mode_idx) {
+        const Mode &mode = modes[mode_idx];
+        CAPTURE(mode.token);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "wall_generator", wall_generator },
+            { "counterbore_hole_bridging", mode.token },
+            { "layer_height", 0.2 },
+            { "initial_layer_print_height", 0.2 },
+            { "nozzle_diameter", "0.4" },
+            { "wall_loops", 2 },
+            { "sparse_infill_density", "15%" },
+            { "top_shell_layers", 3 },
+            { "bottom_shell_layers", 3 },
+            { "enable_support", false },
+            { "brim_type", "no_brim" },
+            { "skirt_loops", 0 },
+        });
+
+        Print print;
+        Model model;
+        box_over_cavity(print, model, config);
+        const StringObjectException validation = print.validate();
+        INFO("counterbore mode=" << mode.token << ", wall_generator=" << wall_generator);
+        REQUIRE(validation.string.empty());
+
+        REQUIRE_FALSE(print.objects().empty());
+        const PrintObject &object = *print.objects().front();
+        REQUIRE(object.num_printing_regions() > 0);
+        const auto parsed_mode = object.printing_region(0).config().counterbore_hole_bridging.value;
+        REQUIRE(static_cast<int>(parsed_mode) == static_cast<int>(mode.value));
+        REQUIRE_NOTHROW(print.process());
+
+        const Layer *ceiling = nullptr;
+        for (const Layer *layer : object.layers()) {
+            if (std::abs(layer->print_z - cavity_ceiling_z) < EPSILON) {
+                ceiling = layer;
+                break;
+            }
+        }
+        REQUIRE(ceiling != nullptr);
+        snapshots[mode_idx] = counterbore_fill_snapshot(*ceiling, object.center_offset());
+    }
+
+    // Areas are scaled integer geometry. A half-mm square is a deliberately
+    // conservative tolerance for clipping/offset noise, far below the 4x4 bore.
+    const double area_tolerance = double(scale_(0.5)) * double(scale_(0.5));
+    for (const CounterboreFillSnapshot &snapshot : snapshots) {
+        REQUIRE(std::isfinite(snapshot.annulus));
+        REQUIRE(std::isfinite(snapshot.bore));
+        REQUIRE(snapshot.annulus >= 0.);
+        REQUIRE(snapshot.bore >= 0.);
+    }
+    REQUIRE(snapshots[0].annulus + snapshots[0].bore > 0.);
+    CHECK(snapshots[0].bore <= area_tolerance);
+
+    const double partial_annulus_delta = snapshots[1].annulus - snapshots[0].annulus;
+    INFO("partial annulus delta=" << partial_annulus_delta << ", tolerance=" << area_tolerance);
+    CHECK(partial_annulus_delta > area_tolerance);
+
+    const double partial_bore_delta = snapshots[1].bore - snapshots[0].bore;
+    INFO("partial bore delta=" << partial_bore_delta << ", tolerance=" << area_tolerance);
+    CHECK(std::abs(partial_bore_delta) <= area_tolerance);
+
+    const double full_bore_delta = snapshots[2].bore - snapshots[0].bore;
+    INFO("full bore delta=" << full_bore_delta << ", tolerance=" << area_tolerance);
+    CHECK(full_bore_delta > area_tolerance);
+
+    const double partial_total = snapshots[1].annulus + snapshots[1].bore;
+    const double full_total = snapshots[2].annulus + snapshots[2].bore;
+    INFO("partial total=" << partial_total << ", full total=" << full_total << ", tolerance=" << area_tolerance);
+    CHECK(full_total > partial_total + area_tolerance);
+}
+
+
 
 namespace {
 
