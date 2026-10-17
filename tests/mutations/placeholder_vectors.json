@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Typed placeholder vector assignments preserve untouched elements and reject invalid writes.",
+  "mutants": [
+    {
+      "id": "placeholder-vector-int-assignment-writes-first-element",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "static_cast<ConfigOptionInts*>(vec)->values[lhs.index] = rhs.as_i();",
+      "new": "static_cast<ConfigOptionInts*>(vec)->values[0] = rhs.as_i();",
+      "description": "Store an integer indexed assignment at element zero rather than the requested index. The typed assignment case requires 10,42,30.",
+      "test_filter": "PlaceholderParserVectors"
+    },
+    {
+      "id": "placeholder-vector-percent-assignment-writes-first-element",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "static_cast<ConfigOptionPercents*>(vec)->values[lhs.index] = rhs.as_d();",
+      "new": "static_cast<ConfigOptionPercents*>(vec)->values[0] = rhs.as_d();",
+      "description": "Store a writable public ConfigOptionPercents output assignment at element zero rather than the requested index. The public five-argument process case requires 10,42,30 and unchanged invalid-write states.",
+      "test_filter": "PlaceholderParserVectors"
+    },
+    {
+      "id": "placeholder-vector-copy-omitted",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "const_cast<ConfigOption*>(lhs.opt)->set(rhs.opt);",
+      "new": "/* vector copy intentionally omitted */",
+      "description": "Skip copying a compatible vector into the existing target. The existing-target copy row reads 3,4,5. This is an additional direct oracle, not a claim that all vector-copy behavior is untested.",
+      "test_filter": "PlaceholderParserVectors"
+    }
+  ]
+}

@@ -151,6 +151,10 @@ applying the same changed setting. It checks separate geometry and parsed
 G-code evidence, deposited material, feature feedrates, and acceleration
 states. Its speed/width/flow partitions have explicit companion settings so
 cooling or volumetric limits cannot silently mask the tested effect.
+`[ObjectSpeedNullable]` checks four object speed overrides through a
+nil, explicit, then nil transition on the same print. Fresh parent and explicit
+controls verify geometry, material, and feeds for standard and high-flow nozzle
+variants. Its mutations are in `object_speed_nullable.json`.
 `[FilamentFlowVariance]` and `[FilamentMaxVolumetricSpeed]` check deposited
 material and volumetric feedrate limits, including fresh/incremental agreement.
 `[LayerGeometrySettings]` checks initial height, independent shell thicknesses,
@@ -173,12 +177,22 @@ temperatures to distinguish first-filament and highest-temperature selection.
 `[ConfigBlock]` checks explicit inclusion and suppression of resolved settings.
 `[PlaceholderParserExpressions]` and `[PlaceholderParserConfig]` check nullable
 expressions, literal/regex alternatives, and selective configuration updates.
+`[PlaceholderParserVectors]` checks typed indexed writes, vector copying, and
+invalid writes to public output vectors without changing their contents.
+Its mutations are in `placeholder_vectors.json`.
 
 `[SettingsSpeedAccelVariance]` checks first-layer and role-specific feedrates,
 acceleration, and jerk against every eligible parsed move. Layer markers keep
 first-layer travel separate from later motion. Its direct firmware-writer
 checks are identified as writer evidence in the settings map; they do not
 establish a complete print-pipeline sweep or full numeric-domain coverage.
+`[SmallPerimeterSpeed]` checks absolute and percentage speeds against every
+later-layer outer-wall move on a six-layer fixture, with a disabled-threshold
+control and conserved material. Its mutations are in `small_perimeter_speed.json`.
+
+`[PresetBundleImport]` imports an actual ZIP bundle with process, filament, and
+printer profiles, then checks metadata, canonical identities, typed settings,
+and persisted per-type files. Its mutations are in `preset_bundle_import.json`.
 
 `[SupportCache]` checks support-layer cache round trips through `Print`, including
 island coordinates, extrusion geometry, interface metadata, layer links, and

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Preset bundle ZIP import preserves metadata and per-type file ownership.",
+  "mutants": [
+    {
+      "id": "bundle-import-base-directory-id-omitted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "                bundle_base_dir = user_folder / user_id / PRESET_LOCAL_DIR / metadata.id;",
+      "new": "                bundle_base_dir = user_folder / user_id / PRESET_LOCAL_DIR;",
+      "description": "Drop the bundle id from the local bundle directory; exact metadata and per-type file locations must reject the flattening.",
+      "test_filter": "PresetBundleImport"
+    },
+    {
+      "id": "bundle-import-local-type-marker-defaulted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "                    metadata.bundle_type = BundleType::Local;\n                    metadata.path = metadata_save_path.string();",
+      "new": "                    metadata.bundle_type = BundleType::Default;\n                    metadata.path = metadata_save_path.string();",
+      "description": "Mark a successfully imported bundle as Default rather than Local; the public bundle metadata registry oracle must reject the wrong lifecycle state.",
+      "test_filter": "PresetBundleImport"
+    }
+  ]
+}

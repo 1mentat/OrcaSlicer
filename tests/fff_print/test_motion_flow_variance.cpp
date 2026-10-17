@@ -1142,3 +1142,189 @@ TEST_CASE("Role flow gate compounds first-layer and role ratios",
     const NamedRoleFactors later_layer{ 1.0, 1.0, 1.0, 1.1, 0.7, 1.2, 1.4 };
     require_named_role_factors(baseline, changed, first_layer, later_layer);
 }
+
+
+namespace {
+
+struct ObjectSpeedTransition {
+    Evidence nil_initial;
+    Evidence explicit_value;
+    Evidence nil_final;
+};
+
+DynamicPrintConfig speed_fixture_settings(DynamicPrintConfig config)
+{
+    // Keep both single- and multi-filament fixtures on the same explicit,
+    // deterministic pipeline settings. In particular, do not rely on the
+    // multifilament helper's full-config defaults for cooling or acceleration.
+    config.set_deserialize_strict({
+        { "layer_height",                       0.2 },
+        { "initial_layer_print_height",         0.2 },
+        { "wall_loops",                           2 },
+        { "top_shell_layers",                     2 },
+        { "bottom_shell_layers",                  2 },
+        { "top_shell_thickness",                  0.0 },
+        { "bottom_shell_thickness",               0.0 },
+        { "sparse_infill_density",              "20%" },
+        { "gcode_comments",                      true },
+        { "layer_change_gcode",         "G92 E0\n" },
+        { "skirt_loops",                           0 },
+        { "brim_type",                     "no_brim" },
+        { "raft_layers",                          0 },
+        { "slow_down_for_layer_cooling",       false },
+        { "slow_down_layer_time",                0.0 },
+        { "slow_down_min_speed",                 1.0 },
+        { "fan_cooling_layer_time",              0.0 },
+        { "filament_max_volumetric_speed",     200.0 },
+        { "filament_adaptive_volumetric_speed", false },
+        { "default_acceleration",             "1200" },
+        { "initial_layer_acceleration",        "300" },
+        { "machine_max_acceleration_extruding", "20000,20000" },
+        { "machine_max_acceleration_retracting", "20000,20000" },
+        { "machine_max_acceleration_travel",    "20000,20000" },
+        { "emit_machine_limits_to_gcode",       true },
+        { "initial_layer_speed",                 5.0 },
+        { "initial_layer_infill_speed",          7.0 },
+        { "enable_overhang_speed",              false },
+        { "slowdown_for_curled_perimeters",     false },
+        { "small_perimeter_threshold",            0.0 },
+        { "small_support_perimeter_threshold",    0.0 },
+        { "single_extruder_multi_material",     false },
+        { "enable_prime_tower",                 false },
+    });
+    return config;
+}
+
+DynamicPrintConfig object_speed_config()
+{
+    DynamicPrintConfig config = speed_fixture_settings(matrix_config());
+    config.set_deserialize_strict({
+        { "outer_wall_speed",    60.0 },
+        { "inner_wall_speed",    70.0 },
+        { "sparse_infill_speed", 80.0 },
+        { "top_surface_speed",   90.0 },
+    });
+    config.set_key_value("outer_wall_speed",    new ConfigOptionFloatsNullable({ 60.0 }));
+    config.set_key_value("inner_wall_speed",    new ConfigOptionFloatsNullable({ 70.0 }));
+    config.set_key_value("sparse_infill_speed", new ConfigOptionFloatsNullable({ 80.0 }));
+    config.set_key_value("top_surface_speed",   new ConfigOptionFloatsNullable({ 90.0 }));
+    return config;
+}
+
+DynamicPrintConfig variant_object_speed_config()
+{
+    DynamicPrintConfig config = speed_fixture_settings(multifilament_config(2));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
+    config.set_key_value("extruder_printable_height", new ConfigOptionFloats({ 0.0, 0.0 }));
+    config.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ etDirectDrive, etDirectDrive }));
+    config.set_key_value("nozzle_volume_type", new ConfigOptionEnumsGeneric({ nvtStandard, nvtHighFlow }));
+    config.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive High Flow" }));
+    config.set_key_value("printer_extruder_id", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive High Flow" }));
+    config.set_key_value("print_extruder_id", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("print_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive High Flow" }));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive High Flow" }));
+    config.set_key_value("filament_self_index", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("filament_map", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+    config.set_key_value("outer_wall_filament_id", new ConfigOptionInt(2));
+    config.set_key_value("inner_wall_filament_id", new ConfigOptionInt(2));
+    config.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(2));
+    config.set_key_value("top_surface_filament_id", new ConfigOptionInt(2));
+    config.set_key_value("bottom_surface_filament_id", new ConfigOptionInt(2));
+    config.set_key_value("internal_solid_filament_id", new ConfigOptionInt(2));
+    config.set_key_value("outer_wall_speed",    new ConfigOptionFloatsNullable({ 60.0, 90.0 }));
+    config.set_key_value("inner_wall_speed",    new ConfigOptionFloatsNullable({ 70.0, 100.0 }));
+    config.set_key_value("sparse_infill_speed", new ConfigOptionFloatsNullable({ 80.0, 110.0 }));
+    config.set_key_value("top_surface_speed",   new ConfigOptionFloatsNullable({ 90.0, 120.0 }));
+    return config;
+}
+
+Evidence apply_object_speed_state(Print &print, Model &model, ModelObject &object,
+                                  const DynamicPrintConfig &config, const char *key,
+                                  const ConfigOptionFloatsNullable &override_value)
+{
+    // set_key_value replaces an existing model option and returns false in
+    // that case; the public behavior under test is the subsequent Print::apply.
+    object.config.set_key_value(key, new ConfigOptionFloatsNullable(override_value));
+    REQUIRE(object.config.option(key) != nullptr);
+    (void) print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO("validation.string: " + validation.string);
+    INFO("validation.opt_key: " + validation.opt_key);
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    Evidence evidence = evidence_for(print, output);
+    require_valid(evidence);
+    return evidence;
+}
+
+ObjectSpeedTransition apply_object_speed_nil_explicit_nil(const DynamicPrintConfig &config, const char *key,
+                                                          double explicit_value)
+{
+    Print print;
+    Model model;
+    init_print({ matrix_fixture() }, print, model, config);
+    REQUIRE_FALSE(model.objects.empty());
+    ModelObject *object = model.objects.front();
+    REQUIRE(object != nullptr);
+
+    ObjectSpeedTransition transition;
+    transition.nil_initial = apply_object_speed_state(
+        print, model, *object, config, key,
+        ConfigOptionFloatsNullable({ ConfigOptionFloatsNullable::nil_value() }));
+    transition.explicit_value = apply_object_speed_state(
+        print, model, *object, config, key,
+        ConfigOptionFloatsNullable({ explicit_value }));
+    transition.nil_final = apply_object_speed_state(
+        print, model, *object, config, key,
+        ConfigOptionFloatsNullable({ ConfigOptionFloatsNullable::nil_value() }));
+    return transition;
+}
+
+} // namespace
+
+TEST_CASE("Nullable object speed overrides restore inherited G-code feeds",
+          "[MotionFlowVariance][ObjectSpeedNullable]")
+{
+    struct SpeedCase { const char *key; size_t role; double explicit_value; };
+    const std::array<SpeedCase, 4> cases{{
+        { "outer_wall_speed", outer, 25.0 },
+        { "inner_wall_speed", inner, 35.0 },
+        { "sparse_infill_speed", sparse, 45.0 },
+        { "top_surface_speed", top, 55.0 },
+    }};
+    const std::array<DynamicPrintConfig, 2> fixtures{{
+        object_speed_config(), variant_object_speed_config()
+    }};
+
+    for (size_t fixture_index = 0; fixture_index < fixtures.size(); ++fixture_index) {
+        const DynamicPrintConfig &parent_config = fixtures[fixture_index];
+        const bool uses_variants = fixture_index == 1;
+        const Evidence parent = fresh_evidence(parent_config);
+        for (const SpeedCase &speed_case : cases) {
+            CAPTURE(fixture_index, speed_case.key);
+            REQUIRE(parent.roles[speed_case.role].later_layer_moves > 0);
+            REQUIRE(parent.roles[speed_case.role].later_layer_filament_length > 0.0);
+            REQUIRE(parent.roles[speed_case.role].feedrate > 0.0);
+
+            DynamicPrintConfig explicit_global = parent_config;
+            if (uses_variants)
+                explicit_global.set_key_value(speed_case.key,
+                    new ConfigOptionFloatsNullable({ speed_case.explicit_value, speed_case.explicit_value }));
+            else
+                explicit_global.set_key_value(speed_case.key,
+                    new ConfigOptionFloatsNullable({ speed_case.explicit_value }));
+            const Evidence expected_explicit = fresh_evidence(explicit_global);
+            REQUIRE(std::abs(expected_explicit.roles[speed_case.role].feedrate
+                             - parent.roles[speed_case.role].feedrate) > 1e-3);
+
+            const ObjectSpeedTransition transition = apply_object_speed_nil_explicit_nil(
+                parent_config, speed_case.key, speed_case.explicit_value);
+            compare_fresh_and_incremental(parent, transition.nil_initial);
+            compare_fresh_and_incremental(expected_explicit, transition.explicit_value);
+            compare_fresh_and_incremental(parent, transition.nil_final);
+        }
+    }
+}

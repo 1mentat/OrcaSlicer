@@ -7601,6 +7601,88 @@ TEST_CASE("JSON preset import installs a user profile under the scoped data dire
     CHECK(imported->file.find((temp.path() / "data").string()) == 0);
 }
 
+TEST_CASE("Preset bundle ZIP import preserves bundle identity and per-type files", "[PresetBundle][PresetBundleWorkflowsExtended][PresetBundleImport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-bundle-import");
+    ScopedDataDir      data(temp.path() / "data");
+    PresetBundle       source;
+
+    const std::string bundle_id = "bundle-import-id";
+    const fs::path incoming_dir = temp.path() / "incoming";
+    const fs::path process_file = incoming_dir / "Bundle Process.json";
+    const fs::path filament_file = incoming_dir / "Bundle PLA.json";
+    const fs::path printer_file = incoming_dir / "Bundle Printer.json";
+    write_json_preset(process_file, print_config(source, "Bundle Process", 0.29), "Bundle Process");
+    write_json_preset(filament_file, filament_config(source, "Bundle PLA", "Bundle Printer"), "Bundle PLA");
+    write_json_preset(printer_file, printer_config(source, "Bundle Printer"), "Bundle Printer");
+
+    const fs::path archive = incoming_dir / "workflow.orca_bundle";
+    write_zip(archive, {
+        {BUNDLE_STRUCTURE_JSON_NAME,
+         R"({"id":"bundle-import-id","name":"Imported Workflow","version":"1.2.3",)"
+         R"("description":"three-type import","author":"test"})"},
+        {"profiles/process/Bundle Process.json", read_text(process_file)},
+        {"profiles/filament/Bundle PLA.json", read_text(filament_file)},
+        {"profiles/printer/Bundle Printer.json", read_text(printer_file)},
+    });
+
+    PresetBundle bundle;
+    AppConfig    app_config;
+    std::vector<std::string> files{archive.string()};
+    const PresetsConfigSubstitutions substitutions = bundle.import_presets(
+        files, [](std::string const &) { return 1; },
+        ForwardCompatibilitySubstitutionRule::Disable, app_config);
+
+    CHECK(substitutions.empty());
+    REQUIRE(files.size() == 3);
+
+    const fs::path bundle_root = temp.path() / "data" / PRESET_USER_DIR / DEFAULT_USER_FOLDER_NAME /
+                                 PRESET_LOCAL_DIR / bundle_id;
+    const fs::path metadata_file = bundle_root / PRESET_BUNDLE_METADATA;
+    REQUIRE(fs::exists(metadata_file));
+    for (const auto &[type, name] : std::vector<std::pair<const char *, const char *>>{
+             {PRESET_PRINT_NAME, "Bundle Process.json"},
+             {PRESET_FILAMENT_NAME, "Bundle PLA.json"},
+             {PRESET_PRINTER_NAME, "Bundle Printer.json"}})
+        CHECK(fs::exists(bundle_root / type / name));
+
+    BundleMetadata stored;
+    REQUIRE(stored.load_from_json(metadata_file.string()));
+    CHECK(stored.id == bundle_id);
+    CHECK(stored.name == "Imported Workflow");
+    CHECK(stored.version == "1.2.3");
+    CHECK(stored.description == "three-type import");
+    CHECK(stored.author == "test");
+
+    REQUIRE(bundle.bundles.m_bundles.size() == 1);
+    const auto found = bundle.bundles.m_bundles.find(bundle_id);
+    REQUIRE(found != bundle.bundles.m_bundles.end());
+    const BundleMetadata &loaded = found->second;
+    CHECK(loaded.bundle_type == BundleType::Local);
+    CHECK_FALSE(loaded.is_subscribed);
+    CHECK_FALSE(loaded.update_available);
+    CHECK(fs::equivalent(fs::path(loaded.path), metadata_file));
+
+    const std::string prefix = "_local/" + bundle_id + "/";
+    const Preset *process = bundle.prints.find_preset(prefix + "Bundle Process", false);
+    const Preset *filament = bundle.filaments.find_preset(prefix + "Bundle PLA", false);
+    const Preset *printer = bundle.printers.find_preset(prefix + "Bundle Printer", false);
+    REQUIRE(process != nullptr);
+    REQUIRE(filament != nullptr);
+    REQUIRE(printer != nullptr);
+    for (const Preset *preset : {process, filament, printer}) {
+        CHECK(preset->is_from_bundle());
+        CHECK(preset->bundle_id == bundle_id);
+        CHECK(preset->is_external);
+    }
+    CHECK_THAT(process->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.29, 1e-9));
+    CHECK(filament->config.opt_string("filament_type", 0u) == "PLA");
+    CHECK(printer->config.opt_string("printer_model") == "Workflow Printer");
+    CHECK(fs::equivalent(fs::path(process->file), bundle_root / PRESET_PRINT_NAME / "Bundle Process.json"));
+    CHECK(fs::equivalent(fs::path(filament->file), bundle_root / PRESET_FILAMENT_NAME / "Bundle PLA.json"));
+    CHECK(fs::equivalent(fs::path(printer->file), bundle_root / PRESET_PRINTER_NAME / "Bundle Printer.json"));
+}
+
 TEST_CASE("JSON preset import rejects an unknown type without writing a profile", "[PresetBundle][PresetBundleWorkflowsExtended]")
 {
     ScopedTemporaryDir temp("preset-workflow-import-invalid");

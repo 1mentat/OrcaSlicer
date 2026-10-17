@@ -3297,6 +3297,138 @@ TEST_CASE("Initial layer print and solid-infill speeds reach their role feedrate
     require_all_first_role_feeds(motion, "Bottom surface", 43 * 60);
 }
 
+TEST_CASE("Small perimeter speed resolves absolute and percent feeds and honors threshold disabling",
+          "[GCode][SmallPerimeterSpeed]")
+{
+    struct SpeedRow {
+        const char *name;
+        const char *small_speed;
+        double      threshold;
+        double      expected_mm_s;
+    };
+    const std::array<SpeedRow, 3> rows{{
+        {"absolute", "15", 8.0, 15.0},
+        {"percent", "35%", 8.0, 17.5},
+        {"threshold-disabled", "15", 0.0, 50.0},
+    }};
+
+    DynamicPrintConfig shared = motion_config();
+    shared.set_deserialize_strict({
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"outer_wall_speed", 50.0},
+        {"initial_layer_speed", 50.0},
+        {"initial_layer_infill_speed", 50.0},
+        {"outer_wall_line_width", 0.5},
+        {"initial_layer_line_width", 0.5},
+        {"small_perimeter_speed", "15"},
+        {"small_perimeter_threshold", 0.0},
+        {"slow_down_for_layer_cooling", false},
+        {"slow_down_layers", 0},
+        {"slowdown_for_curled_perimeters", false},
+        {"enable_overhang_speed", false},
+        {"enable_overhang_bridge_fan", false},
+        {"resonance_avoidance", false},
+        {"slow_down_layer_time", 0.0},
+        {"slow_down_min_speed", 1.0},
+        {"fan_cooling_layer_time", 1000.0},
+        {"filament_max_volumetric_speed", "1000"},
+        {"filament_adaptive_volumetric_speed", false},
+        {"enable_arc_fitting", false},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"retraction_length", 0.8},
+        {"retraction_minimum_travel", 0.0},
+        {"z_hop", 0.0},
+    });
+
+    struct MaterialEvidence {
+        size_t extrusion_moves = 0;
+        double xy_path = 0.0;
+        double filament = 0.0;
+        bool   finite = true;
+    };
+    const auto read_material = [](const std::string &text, const DynamicPrintConfig &config) {
+        MaterialEvidence result;
+        GCodeReader reader;
+        reader.apply_config(config);
+        reader.parse_buffer(text, [&result](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) ||
+                !line.extruding(self))
+                return;
+            const double xy = line.dist_XY(self);
+            const double dE = line.dist_E(self);
+            if (!std::isfinite(xy) || !std::isfinite(dE)) {
+                result.finite = false;
+                return;
+            }
+            if (xy > EPSILON) {
+                ++result.extrusion_moves;
+                result.xy_path += xy;
+                result.filament += std::abs(dE);
+            }
+        });
+        return result;
+    };
+
+    const auto export_six_layer_cube = [](const DynamicPrintConfig &config) {
+        Model model;
+        Print print;
+        init_print({make_cube(12.0, 12.0, 1.2)}, print, model, config);
+        const auto validation = print.validate();
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        const std::string output = gcode(print);
+        REQUIRE_FALSE(output.empty());
+        size_t layer_changes = 0;
+        for (size_t pos = output.find(";LAYER_CHANGE"); pos != std::string::npos;
+             pos = output.find(";LAYER_CHANGE", pos + 1))
+            ++layer_changes;
+        REQUIRE(layer_changes == 6);
+        return output;
+    };
+
+    std::optional<MaterialEvidence> reference_material;
+    for (const SpeedRow &row : rows) {
+        CAPTURE(row.name);
+        DynamicPrintConfig config = shared;
+        config.set_deserialize_strict({
+            {"small_perimeter_speed", std::string(row.small_speed)},
+            {"small_perimeter_threshold", row.threshold},
+        });
+        const std::string output = export_six_layer_cube(config);
+        REQUIRE_FALSE(output.empty());
+
+        const MaterialEvidence material = read_material(output, config);
+        REQUIRE(material.finite);
+        REQUIRE(material.extrusion_moves > 0);
+        REQUIRE(material.xy_path > 0.0);
+        REQUIRE(material.filament > 0.0);
+        if (!reference_material.has_value()) {
+            reference_material = material;
+        } else {
+            CHECK(material.extrusion_moves == reference_material->extrusion_moves);
+            CHECK_THAT(material.xy_path, Catch::Matchers::WithinRel(reference_material->xy_path, 1e-6));
+            CHECK_THAT(material.filament, Catch::Matchers::WithinRel(reference_material->filament, 1e-6));
+        }
+
+        const auto feeds = gcode_print_variance_contracts::parse_outer_wall_feeds(output, config);
+        REQUIRE(feeds.finite);
+        REQUIRE(feeds.feeds.size() > 1);
+        size_t samples = 0;
+        for (size_t layer = 1; layer < feeds.feeds.size(); ++layer) {
+            INFO("row=" << row.name << " layer=" << layer);
+            REQUIRE_FALSE(feeds.feeds[layer].empty());
+            for (const double feed : feeds.feeds[layer]) {
+                CHECK_THAT(feed, Catch::Matchers::WithinAbs(row.expected_mm_s * 60.0, 0.25));
+                ++samples;
+            }
+        }
+        REQUIRE(samples > 0);
+    }
+}
+
 TEST_CASE("First-layer sparse infill keeps its separate infill speed", "[GCode][SettingsSpeedAccelVariance]")
 {
     DynamicPrintConfig config = motion_config();

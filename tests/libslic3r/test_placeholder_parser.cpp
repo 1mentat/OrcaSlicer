@@ -1,5 +1,6 @@
 #include <catch2/catch_all.hpp>
 #include <algorithm>
+#include <cstddef>
 #include <vector>
 #include <string>
 #include <memory>
@@ -8,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "libslic3r/PlaceholderParser.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -470,4 +472,77 @@ TEST_CASE("Placeholder parser reports and applies only changed configuration", "
     REQUIRE(parser.apply_config(changed));
     CHECK_FALSE(parser.apply_config(changed));
     CHECK(parser.config_diff(changed).empty());
+}
+
+
+TEST_CASE("Placeholder vector assignments update only the selected element",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+
+    // Each assignment targets a nonzero element and reads the complete vector
+    // back, so an assignment cannot silently update element zero or be ignored.
+    CHECK(parser.process("{local values=(10,20,30)}{values[1]=42}{values[0]},{values[1]},{values[2]}")
+          == "10,42,30");
+    CHECK(parser.process("{local values=(1.5,2.5,3.5)}{values[2]=4.75}{values[0]},{values[1]},{values[2]}")
+          == "1.5,2.5,4.75");
+    CHECK(parser.process("{local values=(\"alpha\",\"beta\",\"gamma\")}{values[1]=\"delta\"}{values[0]}|{values[1]}|{values[2]}")
+          == "alpha|delta|gamma");
+    CHECK(parser.process("{local values=(false,false,true)}{values[1]=true}{values[0]},{values[1]},{values[2]}")
+          == "false,true,true");
+}
+
+TEST_CASE("Placeholder parser copies vectors and rejects incompatible vector types",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    // Existing parser tests already cover related vector copies from config
+    // variables; this keeps an explicit existing-target copy oracle here.
+    CHECK(parser.process("{local source=(3,4,5)}{local target=(0,0,0)}{target=source}{target[0]},{target[1]},{target[2]}")
+          == "3,4,5");
+    CHECK_THROWS_WITH(
+        parser.process("{local source=(3,4)}{local target=(false,false)}{target=source}"),
+        Catch::Matchers::ContainsSubstring("Left hand side is a bool vector"));
+}
+
+TEST_CASE("Placeholder output vector writes preserve untouched elements and reject invalid assignments",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    const auto check_percent_values = [](const DynamicConfig &config, const std::vector<double> &expected) {
+        const auto *option = config.option<ConfigOptionPercents>("retract_before_wipe");
+        REQUIRE(option != nullptr);
+        REQUIRE(option->values.size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i)
+            CHECK_THAT(option->values[i], Catch::Matchers::WithinAbs(expected[i], 1e-9));
+    };
+
+    DynamicConfig outputs;
+    outputs.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
+    CHECK(parser.process("{retract_before_wipe[1] = 42}{retract_before_wipe[0]},{retract_before_wipe[1]},{retract_before_wipe[2]}",
+                         0, nullptr, &outputs, nullptr) == "10,42,30");
+    check_percent_values(outputs, { 10., 42., 30. });
+
+    DynamicConfig out_of_range;
+    out_of_range.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
+    CHECK_THROWS_WITH(
+        parser.process("{retract_before_wipe[3] = 42}", 0, nullptr, &out_of_range, nullptr),
+        Catch::Matchers::ContainsSubstring("Index out of range"));
+    check_percent_values(out_of_range, { 10., 20., 30. });
+
+    DynamicConfig empty;
+    empty.set_key_value("retract_before_wipe", new ConfigOptionPercents({}));
+    const auto *empty_option = empty.option<ConfigOptionPercents>("retract_before_wipe");
+    REQUIRE(empty_option != nullptr);
+    CHECK_THROWS_WITH(
+        parser.process("{retract_before_wipe[0] = 42}", 0, nullptr, &empty, nullptr),
+        Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
+    CHECK(empty_option->values.empty());
+
+    DynamicConfig nonnumeric;
+    nonnumeric.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
+    CHECK_THROWS_WITH(
+        parser.process("{retract_before_wipe[1] = true}", 0, nullptr, &nonnumeric, nullptr),
+        Catch::Matchers::ContainsSubstring("Right side is not a numeric expression"));
+    check_percent_values(nonnumeric, { 10., 20., 30. });
 }
