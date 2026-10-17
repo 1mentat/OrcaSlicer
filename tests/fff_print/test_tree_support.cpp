@@ -540,6 +540,7 @@ struct Evidence {
     double total_extrusion_mm3 = 0.0;
     double lowest_print_z = std::numeric_limits<double>::max();
     double lowest_plane_gap_mm = std::numeric_limits<double>::max();
+    double lowest_nominal_plane_gap_mm = std::numeric_limits<double>::max();
     bool finite = true;
     size_t invalid_paths = 0;
     double first_bad_length_mm = 0.0;
@@ -775,11 +776,13 @@ static Evidence observe(int wall_count, double floor_offset)
                 // shear*Y + z_shift + configured floor offset. This remains an
                 // independent test-owned calculation.
                 const double axis_position = unscale<double>(xy.y());
-                const double plane_z = slicing.belt_floor_shear_factor * axis_position +
-                    slicing.belt_floor_z_shift + floor_offset;
-                const double gap = double(layer->print_z) - plane_z;
-                result.finite = result.finite && std::isfinite(gap);
+                const double nominal_plane_z = slicing.belt_floor_shear_factor * axis_position +
+                    slicing.belt_floor_z_shift;
+                const double nominal_gap = double(layer->print_z) - nominal_plane_z;
+                const double gap = nominal_gap - floor_offset;
+                result.finite = result.finite && std::isfinite(gap) && std::isfinite(nominal_gap);
                 result.lowest_plane_gap_mm = std::min(result.lowest_plane_gap_mm, gap);
+                result.lowest_nominal_plane_gap_mm = std::min(result.lowest_nominal_plane_gap_mm, nominal_gap);
             }
         });
     }
@@ -846,7 +849,14 @@ TEST_CASE("Belt tree support floor offset shifts public support landing",
     }
     // Wall count changes the emitted support geometry.
     CHECK(std::abs(two_walls.total_path_mm - one_wall.total_path_mm) > 0.05);
-    // Lowering the belt floor is a real output control, not merely a configured value.
-    CHECK(lower_floor.lowest_print_z < two_walls.lowest_print_z - 1.0);
-    CHECK(raised_floor.lowest_print_z > two_walls.lowest_print_z + 1.0);
+    // Compare landing against a fixed plane: branch endpoints may move along the
+    // sloped floor, so their raw slicing Z need not change monotonically. Each
+    // landing has at most one 0.8 mm layer of discretization, hence 1.6 mm for
+    // the difference between two rows. The reference excludes the row's offset.
+    CAPTURE(two_walls.lowest_nominal_plane_gap_mm, lower_floor.lowest_nominal_plane_gap_mm,
+            raised_floor.lowest_nominal_plane_gap_mm);
+    CHECK_THAT(lower_floor.lowest_nominal_plane_gap_mm,
+               Catch::Matchers::WithinAbs(two_walls.lowest_nominal_plane_gap_mm - 5.0, 1.6 + EPSILON));
+    CHECK_THAT(raised_floor.lowest_nominal_plane_gap_mm,
+               Catch::Matchers::WithinAbs(two_walls.lowest_nominal_plane_gap_mm + 5.0, 1.6 + EPSILON));
 }

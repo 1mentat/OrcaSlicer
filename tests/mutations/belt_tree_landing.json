@@ -29,6 +29,15 @@
       "expected_matches": 1,
       "test_filter": "BeltTreeLanding",
       "description": "Ignore the merged circle radius in the landing clearance. The large-nozzle floor controls challenge the altered termination boundary if the fixture reaches this branch."
+    },
+    {
+      "id": "tree-belt-support-floor-offset-ignored",
+      "path": "src/libslic3r/Support/BeltFloorContext.cpp",
+      "old": "    m_floor_offset = pcfg.belt_support_floor_offset.value;",
+      "new": "    m_floor_offset = 0.0 * pcfg.belt_support_floor_offset.value;",
+      "expected_matches": 1,
+      "test_filter": "BeltTreeLanding",
+      "description": "Ignore the explicit support floor offset. Lower and raised fixtures must land near their configured oblique planes and shift signed height relative to the fixed nominal plane; unchanged geometry fails ordinary assertions."
     }
   ]
 }

@@ -260,8 +260,8 @@ an explicit 0.8 mm layer grid, with lower/raised belt floor controls and one/two
 wall configurations. Finite zero-material paths left by sub-resolution
 simplification are counted separately from physical support geometry. Exported
 motion is measured in XYZ to include belt remapping. `belt_tree_landing.json`
-challenges two-neighbour merge termination; branch reachability and mutation
-kills require native validation.
+challenges the floor-offset control and two-neighbour merge termination; branch
+reachability and mutation kills require native validation.
 
 `[Bbs3mfUUID]` restores marked and marker-free split component graphs, checking
 named object/volume identities, analytic mesh volumes, and world placements.
