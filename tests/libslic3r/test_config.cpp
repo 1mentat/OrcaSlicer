@@ -3722,3 +3722,62 @@ TEST_CASE("Scalar overrides reject incompatible types before changing state", "[
 }
 
 } // namespace config_residual_contracts
+
+TEST_CASE("Prime tower normalization preserves wrapping and smooth timelapse exceptions", "[PrintConfigBehavior][Config][NormalizeFdm2Variance]")
+{
+    auto make_config = [] {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set("enable_prime_tower", true);
+        config.set("independent_support_layer_height", true);
+        config.set("enable_wrapping_detection", false);
+        config.set_deserialize_strict("filament_is_mixed", "0");
+        config.set_deserialize_strict("timelapse_type", "0");
+        config.set_deserialize_strict("print_sequence", "by layer");
+        return config;
+    };
+
+    SECTION("wrapping detection keeps the tower but still disables independent support layers")
+    {
+        DynamicPrintConfig config = make_config();
+        config.set("enable_wrapping_detection", true);
+        const t_config_option_keys changed = config.normalize_fdm_2(1, 1);
+        REQUIRE(config.opt_bool("enable_prime_tower"));
+        REQUIRE_FALSE(config.opt_bool("independent_support_layer_height"));
+        CHECK(changed == t_config_option_keys{"independent_support_layer_height"});
+
+        const t_config_option_keys second = config.normalize_fdm_2(1, 1);
+        CHECK(second.empty());
+        CHECK(config.opt_bool("enable_prime_tower"));
+        CHECK_FALSE(config.opt_bool("independent_support_layer_height"));
+    }
+
+    SECTION("smooth timelapse keeps the tower but still disables independent support layers")
+    {
+        DynamicPrintConfig config = make_config();
+        config.set_deserialize_strict("timelapse_type", "1");
+        const t_config_option_keys changed = config.normalize_fdm_2(1, 1);
+        REQUIRE(config.opt_bool("enable_prime_tower"));
+        REQUIRE_FALSE(config.opt_bool("independent_support_layer_height"));
+        CHECK(changed == t_config_option_keys{"independent_support_layer_height"});
+
+        const t_config_option_keys second = config.normalize_fdm_2(1, 1);
+        CHECK(second.empty());
+        CHECK(config.opt_bool("enable_prime_tower"));
+        CHECK_FALSE(config.opt_bool("independent_support_layer_height"));
+    }
+
+    SECTION("multiple by-object objects disable the tower")
+    {
+        DynamicPrintConfig config = make_config();
+        config.set_deserialize_strict("print_sequence", "by object");
+        const t_config_option_keys changed = config.normalize_fdm_2(2, 2);
+        REQUIRE_FALSE(config.opt_bool("enable_prime_tower"));
+        CHECK(config.opt_bool("independent_support_layer_height"));
+        CHECK(changed == t_config_option_keys{"enable_prime_tower"});
+
+        const t_config_option_keys second = config.normalize_fdm_2(2, 2);
+        CHECK(second.empty());
+        CHECK_FALSE(config.opt_bool("enable_prime_tower"));
+        CHECK(config.opt_bool("independent_support_layer_height"));
+    }
+}

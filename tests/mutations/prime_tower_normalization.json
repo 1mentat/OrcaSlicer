@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Prime tower normalization exception gates and idempotence.",
+  "mutants": [
+    {
+      "id": "normalize-fdm-2-wrapping-gate-inverted",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "bool enable_wrapping = enable_wrapping_opt != nullptr && enable_wrapping_opt->value;",
+      "new": "bool enable_wrapping = enable_wrapping_opt != nullptr && !enable_wrapping_opt->value;",
+      "description": "Wrapping detection preserves a required prime tower during one-filament normalization.",
+      "test_filter": "NormalizeFdm2Variance"
+    },
+    {
+      "id": "normalize-fdm-2-smooth-timelapse-gate-inverted",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        ConfigOptionEnum<TimelapseType>* timelapse_opt = this->option<ConfigOptionEnum<TimelapseType>>(\"timelapse_type\");\n        bool is_smooth_timelapse = timelapse_opt != nullptr && timelapse_opt->value == TimelapseType::tlSmooth;\n\n        ConfigOptionBool *enable_wrapping_opt = this->option<ConfigOptionBool>(\"enable_wrapping_detection\");",
+      "new": "        ConfigOptionEnum<TimelapseType>* timelapse_opt = this->option<ConfigOptionEnum<TimelapseType>>(\"timelapse_type\");\n        bool is_smooth_timelapse = timelapse_opt != nullptr && timelapse_opt->value == TimelapseType::tlTraditional;\n\n        ConfigOptionBool *enable_wrapping_opt = this->option<ConfigOptionBool>(\"enable_wrapping_detection\");",
+      "description": "Smooth timelapse preserves a required prime tower during one-filament normalization.",
+      "test_filter": "NormalizeFdm2Variance"
+    }
+  ]
+}
