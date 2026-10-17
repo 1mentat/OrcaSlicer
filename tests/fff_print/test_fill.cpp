@@ -2293,6 +2293,55 @@ TEST_CASE("2D adaptive TPMS infill does not change along its axis", "[Fill]")
     CHECK(middle < 0.7 * core(uniform, false));
 }
 
+TEST_CASE("Adaptive TPMS normal Y is invariant along its axis", "[Fill][TpmsAdaptiveNormalY]")
+{
+    // A 30 x 90 x 30 mm gyroid fixture: normal_y sections are XZ slices and
+    // therefore keep density stable along Y while still grading across X.
+    auto slice = [](const std::string &adaptive, Print &print) {
+        Slic3r::Test::init_and_process_print({make_cube(30., 90., 30.)}, print,
+                                            {{"sparse_infill_pattern", "gyroid"},
+                                             {"sparse_infill_density", "25%"},
+                                             {"tpms_adaptive", adaptive},
+                                             {"tpms_interior_density", "5%"},
+                                             {"tpms_adaptive_gradient", "linear"},
+                                             {"wall_loops", 2},
+                                             {"top_shell_layers", 0},
+                                             {"bottom_shell_layers", 0},
+                                             {"layer_height", 0.4},
+                                             {"initial_layer_print_height", 0.4}});
+    };
+    Print uniform, adaptive;
+    slice("disabled", uniform);
+    slice("normal_y", adaptive);
+
+    auto strip = [](double x0, double y0, double x1, double y1) {
+        return Polygons{Polygon({Point::new_scale(x0, y0), Point::new_scale(x1, y0),
+                                 Point::new_scale(x1, y1), Point::new_scale(x0, y1)})};
+    };
+    // The section-normal axis is Y: the end and middle strips should have the
+    // same adaptive density, while the X shell remains denser than its core.
+    const double y_end    = sparse_infill_length(adaptive, 10., 20., strip(-5., -40., 5., -30.));
+    const double y_middle = sparse_infill_length(adaptive, 10., 20., strip(-5., -5., 5., 5.));
+    const double x_shell  = sparse_infill_length(adaptive, 10., 20., strip(-13., -5., -9., 5.));
+    const double x_core   = sparse_infill_length(adaptive, 10., 20., strip(-5., -5., 5., 5.));
+    const double uniform_x_core = sparse_infill_length(uniform, 10., 20., strip(-5., -5., 5., 5.));
+    for (const double length : {y_end, y_middle, x_shell, x_core, uniform_x_core})
+        REQUIRE(std::isfinite(length));
+    REQUIRE(y_end > 0.);
+    REQUIRE(y_middle > 0.);
+    REQUIRE(x_shell > 0.);
+    REQUIRE(x_core > 0.);
+    REQUIRE(uniform_x_core > 0.);
+    CHECK(y_middle > 0.8 * y_end);
+    CHECK(y_middle < 1.25 * y_end);
+    // Compare path length per square millimeter: the shell strip is 4 x 10 mm
+    // and the core strip is 10 x 10 mm. Both span the same layers.
+    const double shell_area = (13. - 9.) * (5. - (-5.));
+    const double core_area = (5. - (-5.)) * (5. - (-5.));
+    CHECK(x_shell / shell_area > 1.25 * (x_core / core_area));
+    CHECK(x_core < 0.7 * uniform_x_core);
+}
+
 TEST_CASE("Adaptive TPMS shells and blend keep the whole deep core of a tall object sparse", "[Fill]")
 {
     // Distance warp grades it partly along the height, like Lobes, as its warp is centered on the middle.

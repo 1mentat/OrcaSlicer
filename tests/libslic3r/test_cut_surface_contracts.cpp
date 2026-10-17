@@ -8,6 +8,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <libslic3r/BoundingBox.hpp>
@@ -212,6 +213,16 @@ void check_mesh_indices(const indexed_triangle_set &mesh)
         const Vec3f edge_a = mesh.vertices[face[1]] - mesh.vertices[face[0]];
         const Vec3f edge_b = mesh.vertices[face[2]] - mesh.vertices[face[0]];
         CHECK(edge_a.cross(edge_b).squaredNorm() > 1e-10f);
+    }
+}
+
+void check_contours(const SurfaceCut &cut)
+{
+    REQUIRE_FALSE(cut.contours.empty());
+    for (const SurfaceCut::Contour &contour : cut.contours) {
+        REQUIRE(contour.size() >= 3);
+        for (const SurfaceCut::Index index : contour)
+            CHECK(index < cut.vertices.size());
     }
 }
 
@@ -510,6 +521,88 @@ TEST_CASE("corefine_test rejects missing or malformed OFF inputs", "[CutSurface]
     }
     CHECK_FALSE(corefine_test(malformed.string(), malformed.string()));
     CHECK_FALSE(corefine_test("/path/that/does/not/exist.off", malformed.string()));
+}
+
+TEST_CASE("Surface cuts select the requested depth across stacked models", "[CutSurface][CutSurfaceExtended][CutSurfaceTopology]")
+{
+    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 9, 9))};
+    const indexed_triangle_set near_model = its_make_cube(10., 10., 10.);
+    const indexed_triangle_set far_model = shifted(its_make_cube(10., 10., 10.), Vec3f(0.f, 0.f, 20.f));
+    const Emboss::OrthoProject projection = cube_projection(50.f);
+
+    const SurfaceCut front = cut_surface(shapes, {near_model, far_model}, projection, 0.f);
+    const SurfaceCut back = cut_surface(shapes, {near_model, far_model}, projection, 1.f);
+    REQUIRE_FALSE(front.vertices.empty());
+    REQUIRE_FALSE(front.indices.empty());
+    REQUIRE_FALSE(back.vertices.empty());
+    REQUIRE_FALSE(back.indices.empty());
+    check_contours(front);
+    check_contours(back);
+    check_mesh_indices(front);
+    check_mesh_indices(back);
+
+    const auto z_bounds = [](const SurfaceCut &cut) {
+        std::array<float, 2> bounds{cut.vertices.front().z(), cut.vertices.front().z()};
+        for (const Vec3f &vertex : cut.vertices) {
+            bounds[0] = std::min(bounds[0], vertex.z());
+            bounds[1] = std::max(bounds[1], vertex.z());
+        }
+        return bounds;
+    };
+    const std::array<float, 2> front_z = z_bounds(front);
+    const std::array<float, 2> back_z = z_bounds(back);
+    CHECK(front_z[0] >= -1e-4f);
+    CHECK(front_z[1] <= 10.f + 1e-4f);
+    CHECK(back_z[0] >= 20.f - 1e-4f);
+    CHECK(back_z[1] <= 30.f + 1e-4f);
+}
+
+TEST_CASE("Surface cuts preserve disconnected components in one source mesh", "[CutSurface][CutSurfaceExtended][CutSurfaceTopology]")
+{
+    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 29, 9))};
+    indexed_triangle_set combined = its_make_cube(10., 10., 10.);
+    const indexed_triangle_set second = shifted(its_make_cube(10., 10., 10.), Vec3f(20.f, 0.f, 0.f));
+    const uint32_t offset = static_cast<uint32_t>(combined.vertices.size());
+    combined.vertices.insert(combined.vertices.end(), second.vertices.begin(), second.vertices.end());
+    for (const auto &face : second.indices)
+        combined.indices.emplace_back(face[0] + offset, face[1] + offset, face[2] + offset);
+
+    const SurfaceCut cut = cut_surface(shapes, {combined}, cube_projection(30.f), .5f);
+    REQUIRE_FALSE(cut.vertices.empty());
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(cut.contours.size() == 2);
+    check_contours(cut);
+    check_mesh_indices(cut);
+    CHECK_THAT(projected_area(cut), WithinAbs(2. * 9. * 8., 1e-4));
+    bool left = false;
+    bool right = false;
+    for (const Vec3f &vertex : cut.vertices) {
+        CHECK(vertex.z() >= 0.f);
+        CHECK(vertex.z() <= 10.f);
+        if (vertex.x() > 10.f)
+            CHECK(vertex.x() >= 20.f);
+        left = left || vertex.x() < 10.f;
+        right = right || vertex.x() > 20.f;
+    }
+    CHECK(left);
+    CHECK(right);
+}
+
+TEST_CASE("Surface cuts preserve multiple projected holes", "[CutSurface][CutSurfaceExtended][CutSurfaceTopology]")
+{
+    ExPolygon shape(rectangle(0, 0, 10, 10));
+    shape.holes.emplace_back(rectangle(2, 2, 4, 4));
+    shape.holes.back().reverse();
+    shape.holes.emplace_back(rectangle(6, 6, 8, 8));
+    shape.holes.back().reverse();
+
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(10., 10., 10.)}, cube_projection(), .5f);
+    REQUIRE_FALSE(cut.vertices.empty());
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(cut.contours.size() >= 3);
+    check_contours(cut);
+    check_mesh_indices(cut);
+    CHECK_THAT(projected_area(cut), WithinAbs(92.0, 1e-4));
 }
 
 } // namespace cut_surface_extended_contracts

@@ -3413,7 +3413,7 @@ TEST_CASE("Small perimeter speed resolves absolute and percent feeds and honors 
             CHECK_THAT(material.filament, Catch::Matchers::WithinRel(reference_material->filament, 1e-6));
         }
 
-        const auto feeds = gcode_print_variance_contracts::parse_outer_wall_feeds(output, config);
+        const auto feeds = gcode_print_variance_contracts::calibration_gcode_followup::parse_outer_wall_feeds(output, config);
         REQUIRE(feeds.finite);
         REQUIRE(feeds.feeds.size() > 1);
         size_t samples = 0;

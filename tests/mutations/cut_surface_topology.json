@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Projected surface depth, disconnected mesh components and multiple hole topology.",
+  "mutants": [
+    {
+      "id": "cut-surface-projection-ratio-ignored",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "float best_distance = projection_ratio * (end[max_i] - start[max_i]);",
+      "new": "float best_distance = 0.f;",
+      "anchor_line": 1768,
+      "test_filter": "CutSurfaceTopology",
+      "description": "Ignore the requested projection ratio when choosing the target depth. The stacked-model case requires front ratio 0 and back ratio 1 to select disjoint z ranges strictly inside the projection span.",
+      "expected_oracle": "The back-ratio z bounds must fail; execution errors, timeout, or crash are not an assertion kill."
+    },
+    {
+      "id": "cut-surface-inside-model-test-inverted",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "if (is_patch_inside_of_model(patch, tree, projection))",
+      "new": "if (!is_patch_inside_of_model(patch, tree, projection))",
+      "anchor_line": 3139,
+      "test_filter": "CutSurfaceTopology",
+      "description": "Invert full-inside model culling while comparing stacked source models. The depth-selection case must retain both valid model surfaces rather than erasing non-contained patches.",
+      "expected_oracle": "The positive front/back output and z-range checks must fail; crashes or infrastructure failures are not assertion kills."
+    },
+    {
+      "id": "cut-surface-omit-hole-contours",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "for (const Polygon &hole : shape.holes)\n            insert_contour(hole);",
+      "new": "for (const Polygon &hole : std::vector<Polygon>{})\n            insert_contour(hole);",
+      "anchor_line": 1090,
+      "test_filter": "CutSurfaceTopology",
+      "description": "Skip projected hole contours when converting an ExPolygon to the CGAL shape mesh. The two-hole case requires at least three valid contours and area 92.",
+      "expected_oracle": "The multiple-hole contour validity/area assertions must fail; no malformed-input behavior is credited."
+    }
+  ]
+}

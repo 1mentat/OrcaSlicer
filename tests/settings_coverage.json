@@ -2289,10 +2289,10 @@
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SettingsFamilyVariance]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "Rectilinear and concentric ironing are sliced on a cube and compared through erIroning path topology; this is a representative pair, not a claim over every registered pattern."
+      "reason": "Both registered ironing patterns, rectilinear and concentric, produce nonempty ironing paths on the same cube; the path topology changes between them. This covers the complete registered pattern domain."
     },
     "ironing_flow": {
       "test": "tests/fff_print/test_settings_variance.cpp",

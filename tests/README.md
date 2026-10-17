@@ -194,6 +194,12 @@ control and conserved material. Its mutations are in `small_perimeter_speed.json
 printer profiles, then checks metadata, canonical identities, typed settings,
 and persisted per-type files. Its mutations are in `preset_bundle_import.json`.
 
+`[CutSurfaceTopology]` checks projected depth selection, disconnected components
+within one mesh, and multiple holes using contour validity and geometric area.
+`[TpmsAdaptiveNormalY]` checks density invariance along Y and compares shell and
+core path lengths per unit area against a uniform-density control. Their
+mutations are in `cut_surface_topology.json` and `tpms_normal_y.json`.
+
 `[SupportCache]` checks support-layer cache round trips through `Print`, including
 island coordinates, extrusion geometry, interface metadata, layer links, and
 malformed payload rejection. `[WipeTowerContact]` checks parsed feedrates,
