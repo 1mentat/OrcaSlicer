@@ -2651,6 +2651,74 @@ TEST_CASE("Reloading cached first-layer groups replaces prior metadata", "[Print
     CHECK(print.get_object(0)->firstLayerObjGroups().size() == expected_groups);
 }
 
+
+TEST_CASE("Per-extruder printable regions expose shared and excluded bed geometry", "[Print][PrintSharedPrintableArea]")
+{
+    const auto rectangle = [](double min_x, double min_y, double max_x, double max_y) {
+        return Vec2ds{ Vec2d(min_x, min_y), Vec2d(max_x, min_y),
+                       Vec2d(max_x, max_y), Vec2d(min_x, max_y) };
+    };
+    const auto configure_areas = [&](size_t nozzle_count, const std::vector<Vec2ds> &areas) {
+        DynamicPrintConfig config = multifilament_config(static_cast<unsigned int>(nozzle_count));
+        if (nozzle_count > 1)
+            config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
+        config.set_key_value("printable_area", new ConfigOptionPoints({
+            Vec2d(0., 0.), Vec2d(100., 0.), Vec2d(100., 100.), Vec2d(0., 100.)
+        }));
+        config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(areas));
+        return config;
+    };
+    const auto require_bounds_and_area = [&](const Polygons &polygons,
+                                             double min_x, double min_y, double max_x, double max_y,
+                                             double expected_area) {
+        REQUIRE_FALSE(polygons.empty());
+        const BoundingBox bbox = get_extents(polygons);
+        REQUIRE(bbox.defined);
+        CHECK_THAT(unscaled<double>(bbox.min.x()), Catch::Matchers::WithinAbs(min_x, 1e-5));
+        CHECK_THAT(unscaled<double>(bbox.min.y()), Catch::Matchers::WithinAbs(min_y, 1e-5));
+        CHECK_THAT(unscaled<double>(bbox.max.x()), Catch::Matchers::WithinAbs(max_x, 1e-5));
+        CHECK_THAT(unscaled<double>(bbox.max.y()), Catch::Matchers::WithinAbs(max_y, 1e-5));
+        CHECK_THAT(polygon_area_mm2(polygons), Catch::Matchers::WithinAbs(expected_area, 1e-3));
+    };
+
+    SECTION("two nozzles intersect printable regions and expose their complements") {
+        const std::vector<Vec2ds> areas = { rectangle(0., 0., 80., 100.), rectangle(20., 0., 100., 100.) };
+        DynamicPrintConfig config = configure_areas(2, areas);
+        Print print;
+        Model model;
+        init_valid({ cube(5.) }, print, model, config);
+
+        const std::vector<Polygons> printable = print.get_extruder_printable_polygons();
+        REQUIRE(printable.size() == 2);
+        require_bounds_and_area(printable[0], 0., 0., 80., 100., 8000.);
+        require_bounds_and_area(printable[1], 20., 0., 100., 100., 8000.);
+
+        const std::vector<Polygons> unprintable = print.get_extruder_unprintable_polygons();
+        REQUIRE(unprintable.size() == 2);
+        require_bounds_and_area(unprintable[0], 80., 0., 100., 100., 2000.);
+        require_bounds_and_area(unprintable[1], 0., 0., 20., 100., 2000.);
+
+        require_bounds_and_area(print.get_extruder_shared_printable_polygon(), 20., 0., 80., 100., 6000.);
+    }
+
+    SECTION("single nozzle and degenerate areas fall back to the full printable bed") {
+        {
+            DynamicPrintConfig config = configure_areas(1, { rectangle(20., 0., 80., 100.) });
+            Print print;
+            Model model;
+            init_valid({ cube(5.) }, print, model, config);
+            require_bounds_and_area(print.get_extruder_shared_printable_polygon(), 0., 0., 100., 100., 10000.);
+        }
+        {
+            DynamicPrintConfig config = configure_areas(2, { Vec2ds{ Vec2d(0., 0.), Vec2d(20., 0.) } });
+            Print print;
+            Model model;
+            init_valid({ cube(5.) }, print, model, config);
+            require_bounds_and_area(print.get_extruder_shared_printable_polygon(), 0., 0., 100., 100., 10000.);
+        }
+    }
+}
+
 } // namespace print_workflow_contracts
 
 namespace support_cache_contracts {

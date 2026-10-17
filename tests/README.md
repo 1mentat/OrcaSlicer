@@ -262,6 +262,13 @@ automatic support filament selection on support-only layers containing both
 base and interface paths. It varies interface-body exclusion and verifies flush
 cost selection, with mutants in `tool_ordering_support_interface.json`.
 
+`[PrintSharedPrintableArea]` checks per-nozzle printable regions, their excluded
+complements, the shared intersection, and single-nozzle or degenerate-area
+fallbacks. `[GCodeProcessorBuildVolume]` checks plate and nozzle bounds, mapped
+filament restrictions, diagnostic reset, and exclusion of custom extrusion from
+object bounds. These groups avoid slicing and export; their mutants are in
+`print_shared_printable_area.json` and `gcp_build_volume.json`.
+
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
 placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`
 checks non-sequential backup IDs, geometry preservation, and missing-part

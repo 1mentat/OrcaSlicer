@@ -10,11 +10,15 @@
 #include <cmath>
 #include <utility>
 #include <vector>
+#include <set>
 #include <boost/nowide/fstream.hpp>
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 #include "test_utils.hpp"
@@ -1336,5 +1340,153 @@ TEST_CASE("A completed extruder with a later idle window emits cooling only", "[
     CHECK(processed.output.find("M632") == std::string::npos);
     CHECK(processed.output.find("M633") == std::string::npos);
 }
+
+namespace gcp_build_volume_contracts {
+
+namespace {
+
+void parse_build_volume_gcode(const std::string &gcode, const FullPrintConfig &config,
+                              GCodeProcessor &processor)
+{
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+
+    processor.apply_config(config);
+    processor.initialize("gcp-build-volume.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+}
+
+void require_extrusion_witness(const GCodeProcessorResult &result,
+                               const std::set<int> &expected_filaments,
+                               size_t minimum_count)
+{
+    size_t count = 0;
+    std::set<int> seen_filaments;
+    for (const GCodeProcessorResult::MoveVertex &move : result.moves) {
+        if (move.type != EMoveType::Extrude || move.extrusion_role == erCustom)
+            continue;
+        REQUIRE(std::isfinite(move.delta_extruder));
+        REQUIRE(move.delta_extruder > 0.f);
+        REQUIRE(move.object_label_id == 7);
+        CHECK_THAT(move.print_z, WithinAbs(5.f, 1e-6f));
+        ++count;
+        seen_filaments.insert(static_cast<int>(move.extruder_id));
+    }
+    REQUIRE(count >= minimum_count);
+    CHECK(seen_filaments == expected_filaments);
+}
+
+void require_custom_extrusion_witness(const GCodeProcessorResult &result)
+{
+    size_t count = 0;
+    for (const GCodeProcessorResult::MoveVertex &move : result.moves) {
+        if (move.type != EMoveType::Extrude || move.extrusion_role != erCustom)
+            continue;
+        REQUIRE(std::isfinite(move.delta_extruder));
+        REQUIRE(move.delta_extruder > 0.f);
+        REQUIRE(move.object_label_id == 7);
+        CHECK_THAT(move.print_z, WithinAbs(500.f, 1e-6f));
+        CHECK_THAT(move.position.z(), WithinAbs(500.f, 1e-3f));
+        ++count;
+    }
+    REQUIRE(count >= 1);
+}
+
+} // namespace
+
+TEST_CASE("The processor reports build-volume errors and clears them on recheck",
+          "[GCodeProcessor][GCodeProcessorBuildVolume]")
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    config.filament_diameter.values = {1.75};
+    config.filament_map.values = {1};
+
+    const std::string gcode =
+        "G21\nG90\nM83\nT0\n"
+        "; start printing object: 7\n; Z_HEIGHT:5\n;TYPE:Outer wall\n"
+        "G1 X120 Y10 Z5 E1 F600\nG1 X130 Y10 E1\n"
+        ";TYPE:Custom\n; Z_HEIGHT:500\nG1 X500 Y500 Z500 E1\n";
+    GCodeProcessor processor;
+    parse_build_volume_gcode(gcode, config, processor);
+    const GCodeProcessorResult &parsed = processor.get_result();
+    require_extrusion_witness(parsed, {0}, 2);
+    require_custom_extrusion_witness(parsed);
+
+    const Pointfs plate{{0., 0.}, {100., 0.}, {100., 100.}, {0., 100.}};
+    const bool invalid = processor.check_multi_extruder_gcode_valid(
+        1, plate, 4., Pointfs{}, std::vector<Polygons>(1), std::vector<double>{100.},
+        std::vector<int>{1}, std::vector<std::set<int>>(1));
+    REQUIRE_FALSE(invalid);
+    CHECK(parsed.gcode_check_result.error_code == (4 | 8));
+    REQUIRE(parsed.gcode_check_result.print_area_error_infos.count(0) == 1);
+    REQUIRE(parsed.gcode_check_result.print_height_error_infos.count(0) == 1);
+    const std::pair<int, int> expected_pair{0, 7};
+    REQUIRE(parsed.gcode_check_result.print_area_error_infos.at(0).size() == 1);
+    REQUIRE(parsed.gcode_check_result.print_height_error_infos.at(0).size() == 1);
+    CHECK(parsed.gcode_check_result.print_area_error_infos.at(0).front() == expected_pair);
+    CHECK(parsed.gcode_check_result.print_height_error_infos.at(0).front() == expected_pair);
+
+    const Pointfs generous_plate{{0., 0.}, {140., 0.}, {140., 100.}, {0., 100.}};
+    const bool valid = processor.check_multi_extruder_gcode_valid(
+        1, generous_plate, 100., Pointfs{}, std::vector<Polygons>(1), std::vector<double>{100.},
+        std::vector<int>{1}, std::vector<std::set<int>>(1));
+    REQUIRE(valid);
+    CHECK(parsed.gcode_check_result.error_code == 0);
+    CHECK(parsed.gcode_check_result.print_area_error_infos.empty());
+    CHECK(parsed.gcode_check_result.print_height_error_infos.empty());
+    CHECK(parsed.limit_filament_maps == std::vector<int>{0});
+}
+
+TEST_CASE("The processor maps multi-extruder area, height and material restrictions",
+          "[GCodeProcessor][GCodeProcessorBuildVolume]")
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    config.filament_diameter.values = {1.75, 1.75};
+    config.filament_map.values = {2, 1};
+
+    const std::string gcode =
+        "G21\nG90\nM83\nT0\n"
+        "; start printing object: 7\n; Z_HEIGHT:5\n;TYPE:Outer wall\n"
+        "G1 X10 Y10 Z5 E1 F600\nG1 X20 Y10 E1\nT1\n"
+        "G1 X30 Y10 E1\nG1 X40 Y10 E1\n"
+        ";TYPE:Custom\n; Z_HEIGHT:500\nG1 X500 Y500 Z500 E1\n";
+    GCodeProcessor processor;
+    parse_build_volume_gcode(gcode, config, processor);
+    const GCodeProcessorResult &parsed = processor.get_result();
+    require_extrusion_witness(parsed, {0, 1}, 4);
+    require_custom_extrusion_witness(parsed);
+
+    const Pointfs plate{{-100., -100.}, {100., -100.}, {100., 100.}, {-100., 100.}};
+    std::vector<Polygons> unprintable_areas(2);
+    unprintable_areas[1].emplace_back(Polygon::new_scale(
+        Pointfs{{8., 8.}, {22., 8.}, {22., 12.}, {8., 12.}}));
+    std::vector<std::set<int>> unprintable_filament_types(2);
+    unprintable_filament_types[0].insert(1);
+
+    const bool valid = processor.check_multi_extruder_gcode_valid(
+        2, plate, 100., Pointfs{}, unprintable_areas, std::vector<double>{100., 4.},
+        std::vector<int>{2, 1}, unprintable_filament_types);
+    REQUIRE_FALSE(valid);
+    CHECK(parsed.gcode_check_result.error_code == (1 | 2));
+    REQUIRE(parsed.gcode_check_result.print_area_error_infos.count(1) == 1);
+    REQUIRE(parsed.gcode_check_result.print_height_error_infos.count(1) == 1);
+    REQUIRE(parsed.gcode_check_result.print_area_error_infos.at(1).size() == 1);
+    REQUIRE(parsed.gcode_check_result.print_height_error_infos.at(1).size() == 1);
+    const std::pair<int, int> expected_pair{0, 7};
+    CHECK(parsed.gcode_check_result.print_area_error_infos.at(1).front() == expected_pair);
+    CHECK(parsed.gcode_check_result.print_height_error_infos.at(1).front() == expected_pair);
+    CHECK(parsed.gcode_check_result.print_area_error_infos.count(0) == 0);
+    CHECK(parsed.gcode_check_result.print_height_error_infos.count(0) == 0);
+    REQUIRE(parsed.limit_filament_maps.size() == 2);
+    CHECK(parsed.limit_filament_maps[0] == 2);
+    CHECK(parsed.limit_filament_maps[1] == 1);
+}
+
+} // namespace gcp_build_volume_contracts
+
 
 } // namespace gcode_processor_reachable_contracts
