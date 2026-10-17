@@ -235,6 +235,10 @@ unit-conversion flags after archive reload; its mutants are in
 `tests/mutations/bbs_source_metadata.json`. `[PhysicalPrinterDeletion]` checks
 sole and shared preset membership, saved settings, file removal, and selection
 clearing, with mutants in `tests/mutations/physical_printer_deletion.json`.
+`[FilamentRetractionApplyTransition]` reuses a print through explicit, inherited,
+and replacement filament values and checks its public applied retraction config.
+It complements exported-motion checks under `[FilamentRetractionOverrides]`;
+`filament_retraction_routing.json` tests the nullable override lookup itself.
 
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
 placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`

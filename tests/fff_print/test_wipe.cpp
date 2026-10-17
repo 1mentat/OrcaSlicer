@@ -15,6 +15,7 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include <map>
@@ -1547,6 +1548,34 @@ TEST_CASE("Nullable filament lower lift bound inherits and overrides the machine
         else
             REQUIRE_FALSE(stats.lift_zs.empty());
     }
+}
+
+TEST_CASE("Nullable filament overrides update applied retraction settings across inheritance changes",
+          "[Wipe][FilamentRetractionOverrides][FilamentRetractionApplyTransition][SettingsRetractionVariance][Pipeline]")
+{
+    Print print;
+    Model model;
+
+    const DynamicPrintConfig explicit_first =
+        filament_retraction_config("filament_retraction_length", "0.35", "retraction_length", "0.8");
+    init_print({short_cube()}, print, model, explicit_first);
+
+    REQUIRE(print.config().retraction_length.values.size() == 1);
+    CHECK_THAT(print.config().retraction_length.values.front(), Catch::Matchers::WithinAbs(0.35, 1e-6));
+
+    const DynamicPrintConfig inherited =
+        filament_retraction_config("filament_retraction_length", "nil", "retraction_length", "0.8");
+    const PrintBase::ApplyStatus to_inherited = print.apply(model, inherited);
+    REQUIRE(to_inherited != PrintBase::APPLY_STATUS_UNCHANGED);
+    REQUIRE(print.config().retraction_length.values.size() == 1);
+    CHECK_THAT(print.config().retraction_length.values.front(), Catch::Matchers::WithinAbs(0.8, 1e-6));
+
+    const DynamicPrintConfig explicit_second =
+        filament_retraction_config("filament_retraction_length", "1.25", "retraction_length", "0.8");
+    const PrintBase::ApplyStatus to_explicit = print.apply(model, explicit_second);
+    REQUIRE(to_explicit != PrintBase::APPLY_STATUS_UNCHANGED);
+    REQUIRE(print.config().retraction_length.values.size() == 1);
+    CHECK_THAT(print.config().retraction_length.values.front(), Catch::Matchers::WithinAbs(1.25, 1e-6));
 }
 
 
