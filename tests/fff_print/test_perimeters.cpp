@@ -724,6 +724,10 @@ TEST_CASE("Counterbore bridging modes keep the bore open or fill a sacrificial l
             { "layer_height", 0.2 },
             { "initial_layer_print_height", 0.2 },
             { "nozzle_diameter", "0.4" },
+            // Relative-E Marlin validation requires an exact uppercase reset.
+            { "gcode_flavor", "marlin" },
+            { "use_relative_e_distances", true },
+            { "layer_change_gcode", "G92 E0\n" },
             { "wall_loops", 2 },
             { "sparse_infill_density", "15%" },
             { "top_shell_layers", 3 },
@@ -738,6 +742,8 @@ TEST_CASE("Counterbore bridging modes keep the bore open or fill a sacrificial l
         box_over_cavity(print, model, config);
         const StringObjectException validation = print.validate();
         INFO("counterbore mode=" << mode.token << ", wall_generator=" << wall_generator);
+        INFO("counterbore validation=" << validation.string);
+        INFO("counterbore validation opt_key=" << validation.opt_key);
         REQUIRE(validation.string.empty());
 
         REQUIRE_FALSE(print.objects().empty());

@@ -2761,6 +2761,11 @@ TEST_CASE("Toolchange ordering preserves configured first and later layer sequen
         DynamicPrintConfig config = multifilament_config(2, {
             { "layer_height",                     0.4 },
             { "initial_layer_print_height",       0.2 },
+            { "skin_infill_line_width",           0.5 },
+            { "skeleton_infill_line_width",       0.5 },
+            { "gcode_flavor",                     "marlin" },
+            { "use_relative_e_distances",         true },
+            { "layer_change_gcode",               "G92 E0\n" },
             { "wall_loops",                       2 },
             { "top_shell_layers",                 0 },
             { "bottom_shell_layers",              0 },

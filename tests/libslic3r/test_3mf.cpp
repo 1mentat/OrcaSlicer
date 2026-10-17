@@ -4884,7 +4884,7 @@ TEST_CASE("Split model Restore remaps production object ids and preserves geomet
     // Non-sequential IDs make accidental sequential reconstruction observable.
     f.source.set_object_backup_id(*f.source.objects[0], 17);
     f.source.set_object_backup_id(*f.source.objects[1], 42);
-    f.store();
+    f.store(SaveStrategy::Backup);
 
     LoadedSplit loaded;
     REQUIRE(f.load(loaded, LoadStrategy::Restore));
@@ -4904,7 +4904,14 @@ TEST_CASE("Split model Restore rejects a missing referenced object part",
           "[3MF][SplitModelRestore]")
 {
     Fixture f;
-    f.store();
+    f.store(SaveStrategy::Backup);
+    {
+        // Prove the intact backup-mode archive is a valid Restore input before
+        // removing a referenced part for the negative case.
+        LoadedSplit intact;
+        REQUIRE(f.load(intact, LoadStrategy::Restore));
+        REQUIRE(intact.model.objects.size() == f.source.objects.size());
+    }
     rewrite(f.archive.string(), [](std::vector<Entry> &all) {
         const auto found = std::find_if(all.begin(), all.end(),
             [](const Entry &entry) { return is_part(entry.first); });

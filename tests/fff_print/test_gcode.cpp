@@ -1259,7 +1259,8 @@ DynamicPrintConfig print_order_config(const char *serialized_mode)
         {"print_order", serialized_mode},
         {"print_sequence", "by layer"},
         {"gcode_label_objects", true},
-        {"exclude_object", false},
+        // Export assigns distinct copy IDs while defining cancellable objects.
+        {"exclude_object", true},
         {"enable_prime_tower", false},
         {"wipe_tower_x", 0.0},
         {"wipe_tower_y", 0.0},
@@ -1316,8 +1317,8 @@ OrderRun export_order_fixture(const char *serialized_mode)
 {
     const auto centers = fixture_centers();
     DynamicPrintConfig config = print_order_config(serialized_mode);
-    Print print;
     Model model;
+    Print print;
     ModelObject *object = model.add_object();
     object->name = "print-order-instance.stl";
     object->add_volume(make_cube(10., 10., 0.8));

@@ -162,12 +162,16 @@ TEST_CASE("Per-object skirt is generated per instance", "[SkirtBrim][SkirtType]"
             { "skirt_height",   1 },
             { "skirt_distance", 3 },
             { "skirt_loops",    1 },
+            { "gcode_flavor",   "marlin" },
+            { "use_relative_e_distances", true },
+            { "layer_change_gcode", "G92 E0\n" },
             { "brim_type",      "no_brim" },
             { "print_sequence", "by layer" },
             { "draft_shield",   "disabled" },
             { "min_skirt_length", 0 },
         }, print, model);
         const auto validation = print.validate();
+        INFO("validation: " << validation.string << " [" << validation.opt_key << "]");
         REQUIRE(validation.string.empty());
         print.process();
 

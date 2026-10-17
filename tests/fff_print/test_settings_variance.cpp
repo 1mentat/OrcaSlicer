@@ -2002,7 +2002,8 @@ TEST_CASE("Fixed ironing angle controls inherited solid direction and layer alte
             {"sparse_infill_density", "100%"}, {"solid_infill_direction", 45.0},
             {"solid_infill_rotate_template", ""}, {"top_layer_direction", -1.0},
             {"ironing_type", "solid"}, {"ironing_pattern", "rectilinear"},
-            {"ironing_angle", 0.0}, {"ironing_angle_fixed", fixed},
+            // Fixed mode uses the configured absolute direction.
+            {"ironing_angle", fixed ? 90.0 : 0.0}, {"ironing_angle_fixed", fixed},
             {"ironing_flow", "10%"}, {"ironing_spacing", 0.2}, {"ironing_inset", 0.0},
         });
         return config;
