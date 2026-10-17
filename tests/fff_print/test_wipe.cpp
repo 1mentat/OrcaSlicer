@@ -1571,6 +1571,7 @@ struct TravelRoute {
     double path_mm = 0.;
     bool had_retraction = false;
     bool direct_crosses_wall = false;
+    bool direct_crosses_hole_wall = false;
     bool legs_clear = false;
 };
 
@@ -1714,8 +1715,80 @@ bool spans_endpoint_squares(const TravelRoute &route)
     return left_to_right || right_to_left;
 }
 
+// The stretched cube_with_hole has a model-space void x=105..115, y=70..90
+// after the fixture transform. AvoidCrossingPerimeters' active external
+// boundary is built from hole contours, but the emitted contour list also has
+// deeper perimeter walls. This independent analytic predicate therefore tests
+// the public void-avoidance contract rather than claiming every emitted wall
+// is avoided. Shrink the open rectangle by only one hundredth of a millimetre
+// for the writer/parser coordinate precision.
+constexpr double kHoleMinX = 105.;
+constexpr double kHoleMaxX = 115.;
+constexpr double kHoleMinY = 70.;
+constexpr double kHoleMaxY = 90.;
+constexpr double kHoleInteriorTolerance = 0.01;
+// A one-millimetre band around the void admits the emitted line-center offset
+// while excluding the barrier's outer contour. Both endpoints of a segment
+// must be in this band. The wall lookup also checks prior emission, layer, Z,
+// and a strict interior crossing.
+constexpr double kHoleWallBandMargin = 1.;
+
+bool hole_adjacent_barrier_wall(const Segment &wall)
+{
+    const auto inside_expanded_hole = [](const Vec2d &point) {
+        return point.x() >= kHoleMinX - kHoleWallBandMargin &&
+               point.x() <= kHoleMaxX + kHoleWallBandMargin &&
+               point.y() >= kHoleMinY - kHoleWallBandMargin &&
+               point.y() <= kHoleMaxY + kHoleWallBandMargin;
+    };
+    return central_barrier_wall(wall) && inside_expanded_hole(wall.start) &&
+           inside_expanded_hole(wall.end);
+}
+
+bool segment_enters_hole_void(const Vec2d &start, const Vec2d &end)
+{
+    const double min_x = kHoleMinX + kHoleInteriorTolerance;
+    const double max_x = kHoleMaxX - kHoleInteriorTolerance;
+    const double min_y = kHoleMinY + kHoleInteriorTolerance;
+    const double max_y = kHoleMaxY - kHoleInteriorTolerance;
+    double enter = 0.;
+    double leave = 1.;
+    const auto clip = [&](double p, double q) {
+        if (std::abs(p) <= 1e-12)
+            return q >= 0.;
+        const double t = q / p;
+        if (p < 0.) {
+            if (t > leave)
+                return false;
+            if (t > enter)
+                enter = t;
+        } else {
+            if (t < enter)
+                return false;
+            if (t < leave)
+                leave = t;
+        }
+        return true;
+    };
+    const double dx = end.x() - start.x();
+    const double dy = end.y() - start.y();
+    // Liang-Barsky clipping against the open, tolerance-shrunk rectangle.
+    if (!clip(-dx, start.x() - min_x) || !clip(dx, max_x - start.x()) ||
+        !clip(-dy, start.y() - min_y) || !clip(dy, max_y - start.y()))
+        return false;
+    return leave > enter + 1e-9 && leave > 1e-9 && enter < 1. - 1e-9;
+}
+
+bool route_enters_hole_void(const TravelRoute &route)
+{
+    for (size_t i = 1; i < route.points.size(); ++i)
+        if (segment_enters_hole_void(route.points[i - 1], route.points[i]))
+            return true;
+    return false;
+}
+
 bool wall_crosses_route(const TravelRoute &route, const std::vector<Segment> &walls,
-                        bool direct_segment)
+                        bool direct_segment, bool hole_wall_only = false)
 {
     if (route.points.size() < 2)
         return false;
@@ -1723,6 +1796,8 @@ bool wall_crosses_route(const TravelRoute &route, const std::vector<Segment> &wa
         // Leaving an endpoint object can require crossing its own outer wall.
         // This comparison checks clearance from the previously printed barrier.
         if (!central_barrier_wall(wall))
+            continue;
+        if (hole_wall_only && !hole_adjacent_barrier_wall(wall))
             continue;
         if (wall.layer_index != route.layer_index ||
             wall.emission_index >= route.start_emission_index ||
@@ -1865,6 +1940,7 @@ ParsedOutput parse_output(const std::string &gcode, const DynamicPrintConfig &co
     REQUIRE(output.central_barrier_walls > 0);
     for (TravelRoute &route : output.routes) {
         route.direct_crosses_wall = wall_crosses_route(route, output.walls, true);
+        route.direct_crosses_hole_wall = wall_crosses_route(route, output.walls, true, true);
         route.legs_clear = !wall_crosses_route(route, output.walls, false);
     }
     return output;
@@ -1896,7 +1972,10 @@ std::string route_diagnostics(const TravelRoute &route, const std::vector<Segmen
          << " emission=" << route.start_emission_index
          << " retracted=" << route.had_retraction
          << " direct_mm=" << route.direct_mm << " path_mm=" << route.path_mm
-         << " direct_crosses=" << route.direct_crosses_wall << " legs_clear=" << route.legs_clear
+         << " direct_crosses=" << route.direct_crosses_wall
+         << " direct_hole_wall=" << route.direct_crosses_hole_wall
+         << " legs_clear=" << route.legs_clear
+         << " hole_void_crossing=" << route_enters_hole_void(route)
          << " points=" << route.points.size();
     for (size_t i = 0; i < std::min<size_t>(route.points.size(), 32); ++i)
         text << " [" << i << ":" << route.points[i].x() << "," << route.points[i].y() << "]";
@@ -1921,7 +2000,7 @@ std::string route_diagnostics(const TravelRoute &route, const std::vector<Segmen
 
 } // namespace reduce_crossing_wall_contracts
 
-TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted wall", "[Wipe][ReduceCrossingWall][SettingsRetractionVariance][Pipeline]")
+TEST_CASE("Inter-object travel detours around a printed hole", "[Wipe][ReduceCrossingWall][SettingsRetractionVariance][Pipeline]")
 {
     using namespace reduce_crossing_wall_contracts;
     const ParsedOutput disabled = export_fixture(crossing_wall_config(false));
@@ -1945,7 +2024,12 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
     });
     size_t same_endpoint_pairs = 0;
     size_t same_endpoint_pairs_with_disabled_crossing = 0;
+    size_t same_endpoint_pairs_with_disabled_hole_wall = 0;
+    size_t same_endpoint_pairs_with_disabled_hole_void = 0;
+    // Retained only as a broad diagnostic: active external planning may still
+    // cross outer contours, so this is not the enabled success oracle.
     size_t fully_eligible_pairs = 0;
+    size_t hole_eligible_pairs = 0;
     std::ostringstream paired_routes;
     for (const TravelRoute &candidate : disabled.routes) {
         if (!candidate.had_retraction || !spans_endpoint_squares(candidate))
@@ -1960,14 +2044,24 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
                               << route_diagnostics(route, enabled.walls) << '\n';
             if (candidate.direct_crosses_wall)
                 ++same_endpoint_pairs_with_disabled_crossing;
+            if (candidate.direct_crosses_hole_wall)
+                ++same_endpoint_pairs_with_disabled_hole_wall;
+            if (candidate.direct_crosses_hole_wall && route_enters_hole_void(candidate))
+                ++same_endpoint_pairs_with_disabled_hole_void;
             if (candidate.direct_crosses_wall && route.direct_crosses_wall &&
                 route.path_mm > route.direct_mm + 0.05 && route.legs_clear)
                 ++fully_eligible_pairs;
+            if (candidate.direct_crosses_hole_wall && route_enters_hole_void(candidate) &&
+                route.had_retraction && route.path_mm > route.direct_mm + 0.05 &&
+                !route_enters_hole_void(route))
+                ++hole_eligible_pairs;
         }
     }
     CAPTURE(disabled.routes.size(), enabled.routes.size(), disabled_retracted, disabled_crossing,
             disabled_retracted_crossing, enabled_detoured, enabled_clear_detoured, same_endpoint_pairs,
-            same_endpoint_pairs_with_disabled_crossing, fully_eligible_pairs,
+            same_endpoint_pairs_with_disabled_crossing, same_endpoint_pairs_with_disabled_hole_wall,
+            same_endpoint_pairs_with_disabled_hole_void,
+            fully_eligible_pairs, hole_eligible_pairs,
             disabled.central_barrier_walls, disabled.non_barrier_walls,
             enabled.central_barrier_walls, enabled.non_barrier_walls);
     INFO(paired_routes.str());
@@ -1978,12 +2072,15 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
     // one whose enabled counterpart is detoured by AvoidCrossingPerimeters.
     for (const TravelRoute &candidate : disabled.routes) {
         if (!candidate.had_retraction || !candidate.direct_crosses_wall ||
-            !spans_endpoint_squares(candidate) || candidate.path_mm > candidate.direct_mm + 0.05)
+            !candidate.direct_crosses_hole_wall ||
+            !route_enters_hole_void(candidate) || !spans_endpoint_squares(candidate) ||
+            candidate.path_mm > candidate.direct_mm + 0.05)
             continue;
         const auto enabled_match = std::find_if(enabled.routes.begin(), enabled.routes.end(),
                                                 [&](const TravelRoute &route) {
             return same_endpoints(route, candidate) && spans_endpoint_squares(route) &&
-                   route.direct_crosses_wall && route.path_mm > route.direct_mm + 0.05 && route.legs_clear;
+                   route.had_retraction && route.path_mm > route.direct_mm + 0.05 &&
+                   !route_enters_hole_void(route);
         });
         if (enabled_match != enabled.routes.end()) {
             direct = &candidate;
@@ -1993,6 +2090,12 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
     }
     REQUIRE(direct != nullptr);
     REQUIRE(detour != nullptr);
+    REQUIRE(route_enters_hole_void(*direct));
+    CHECK_FALSE(route_enters_hole_void(*detour));
+    CHECK(direct->direct_crosses_wall);
+    CHECK(direct->direct_crosses_hole_wall);
+    CHECK(direct->had_retraction);
+    CHECK(detour->had_retraction);
     CHECK(direct->path_mm <= direct->direct_mm + 0.05);
 
     REQUIRE(disabled.motion.extrusion_moves > 0);
