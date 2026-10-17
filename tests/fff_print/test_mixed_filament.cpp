@@ -724,9 +724,11 @@ struct LabelProtocolEvidence {
     size_t marlin_ends = 0;
     size_t bbl_pairs = 0;
     size_t bbl_end_pairs = 0;
+    size_t marlin_definitions = 0;
     bool   bbl_ids_match = false;
     bool   bbl_payloads_bit0 = true;
     bool   marlin_ids_match = false;
+    bool   marlin_definition_ids_match = false;
 };
 
 bool parse_nonnegative_id(const std::string &text, long long &id)
@@ -760,10 +762,12 @@ LabelProtocolEvidence parse_label_protocol(const std::string &gcode)
 
     constexpr const char *bbl_start_prefix = "; start printing object, unique label id: ";
     constexpr const char *bbl_end_prefix   = "; stop printing object, unique label id: ";
+    constexpr const char *marlin_name_prefix = "M486 A";
     bool bbl_open = false;
     long long bbl_open_id = -1;
     bool marlin_open = false;
     std::vector<long long> marlin_start_ids;
+    std::vector<long long> marlin_definition_ids;
 
     for (size_t i = 0; i < lines.size(); ++i) {
         const std::string &current = lines[i];
@@ -808,24 +812,55 @@ LabelProtocolEvidence parse_label_protocol(const std::string &gcode)
             result.valid = false;
             continue;
         }
-        if (current.rfind("M486 S", 0) == 0) {
-            const std::string payload = current.substr(6);
-            if (payload == "-1") {
-                ++result.marlin_ends;
-                if (!marlin_open)
+
+        // Marlin's header definition is a distinct triplet, not a body boundary:
+        // M486 S<ID>, M486 A<name>, M486 S-1. Consume and validate it before the
+        // body state machine so the header pair cannot inflate body starts/ends.
+        if (current.rfind("M486 S", 0) == 0 && current != "M486 S-1") {
+            long long id = -1;
+            const bool valid_id = parse_nonnegative_id(current.substr(6), id);
+            const bool has_name = i + 1 < lines.size() && lines[i + 1].rfind(marlin_name_prefix, 0) == 0
+                && lines[i + 1].size() > std::char_traits<char>::length(marlin_name_prefix);
+            const bool has_close = i + 2 < lines.size() && lines[i + 2] == "M486 S-1";
+            if (valid_id && has_name && has_close) {
+                if (marlin_open)
                     result.valid = false;
-                else
-                    marlin_open = false;
-            } else {
-                long long id = -1;
-                if (!parse_nonnegative_id(payload, id) || marlin_open) {
-                    result.valid = false;
-                } else {
-                    marlin_open = true;
-                    marlin_start_ids.push_back(id);
-                    ++result.marlin_starts;
-                }
+                ++result.marlin_definitions;
+                marlin_definition_ids.push_back(id);
+                i += 2;
+                continue;
             }
+            // A following M486 A is definition syntax even when incomplete; reject it
+            // rather than silently reclassifying the start as a body boundary.
+            if (i + 1 < lines.size() && lines[i + 1].rfind(marlin_name_prefix, 0) == 0) {
+                result.valid = false;
+                ++i;
+                if (i + 1 < lines.size() && lines[i + 1] == "M486 S-1")
+                    ++i;
+                continue;
+            }
+
+            if (!valid_id || marlin_open) {
+                result.valid = false;
+            } else {
+                marlin_open = true;
+                marlin_start_ids.push_back(id);
+                ++result.marlin_starts;
+            }
+            continue;
+        }
+        if (current.rfind(marlin_name_prefix, 0) == 0) {
+            // A name line not consumed as the middle of an exact definition triplet is orphaned.
+            result.valid = false;
+            continue;
+        }
+        if (current == "M486 S-1") {
+            ++result.marlin_ends;
+            if (!marlin_open)
+                result.valid = false;
+            else
+                marlin_open = false;
+            continue;
         }
     }
 
@@ -835,10 +870,12 @@ LabelProtocolEvidence parse_label_protocol(const std::string &gcode)
         result.valid = false;
     result.bbl_ids_match = result.bbl_pairs == result.bbl_end_pairs;
     result.marlin_ids_match = result.marlin_starts == result.marlin_ends;
-    // M486 S-1 carries no object id; the ordered state machine above pairs it with the preceding
-    // start. This one-instance fixture must nevertheless keep one public instance id throughout.
+    // M486 S-1 carries no body object id; the ordered state machine above pairs it with the
+    // preceding start. This one-instance fixture must keep one public instance id throughout.
     for (size_t i = 1; result.marlin_ids_match && i < marlin_start_ids.size(); ++i)
         result.marlin_ids_match = marlin_start_ids[i] == marlin_start_ids.front();
+    result.marlin_definition_ids_match = result.marlin_definitions == 1 && !marlin_definition_ids.empty()
+        && !marlin_start_ids.empty() && marlin_definition_ids.front() == marlin_start_ids.front();
     return result;
 }
 
@@ -1013,6 +1050,11 @@ TEST_CASE("BBL mixed sublayers pair object exclusion labels with their boundarie
 {
     using namespace mixed_bbl_label_contracts;
 
+    const LabelProtocolEvidence incomplete_definition = parse_label_protocol("M486 S0\nM486 Afixture\n");
+    CHECK_FALSE(incomplete_definition.valid);
+    const LabelProtocolEvidence orphan_definition = parse_label_protocol("M486 Afixture\n");
+    CHECK_FALSE(orphan_definition.valid);
+
     // Every row constructs and processes its own model. The exporter stores pending object labels
     // in GCodeWriter, so toggling BBL or sublayer mode on a processed Print would not be an A/B test.
     const MixedLabelExport bbl = export_mixed_labels(true, true);
@@ -1030,24 +1072,30 @@ TEST_CASE("BBL mixed sublayers pair object exclusion labels with their boundarie
     REQUIRE(bbl.labels.bbl_payloads_bit0);
     CHECK(bbl.labels.bbl_commands == bbl.labels.bbl_pairs);
     CHECK(bbl.labels.bbl_end_commands == bbl.labels.bbl_pairs);
+    CHECK(bbl.labels.marlin_definitions == 0);
     CHECK(bbl.labels.marlin_starts == 0);
     CHECK(bbl.labels.marlin_ends == 0);
 
+    REQUIRE(marlin_split.labels.marlin_definitions == 1);
+    REQUIRE(marlin_split.labels.marlin_definition_ids_match);
     REQUIRE(marlin_split.labels.marlin_starts > 0);
     REQUIRE(marlin_split.labels.marlin_starts == marlin_split.labels.marlin_ends);
     REQUIRE(marlin_split.labels.marlin_ids_match);
     CHECK(marlin_split.labels.bbl_commands == 0);
     CHECK(marlin_split.labels.bbl_end_commands == 0);
 
+    REQUIRE(marlin_whole.labels.marlin_definitions == 1);
+    REQUIRE(marlin_whole.labels.marlin_definition_ids_match);
     REQUIRE(marlin_whole.labels.marlin_starts > 0);
     REQUIRE(marlin_whole.labels.marlin_starts == marlin_whole.labels.marlin_ends);
     REQUIRE(marlin_whole.labels.marlin_ids_match);
     CHECK(marlin_whole.labels.bbl_commands == 0);
     CHECK(marlin_whole.labels.bbl_end_commands == 0);
 
-    // The same fresh mixed print uses one ordinary boundary per layer in whole-layer mode. The
-    // public ToolOrdering metadata independently predicts one extra boundary per two-component
-    // mixed sublayer; this difference isolates mixed-sublayer labels from header/ordinary markers.
+    // Compare body boundaries only: Marlin's one header definition triplet has already been
+    // consumed separately by parse_label_protocol, while BBL intentionally has no such triplet.
+    // The public ToolOrdering metadata independently predicts one extra body boundary per
+    // two-component mixed sublayer; this keeps mixed cardinality strict.
     CHECK(bbl.labels.bbl_pairs == marlin_split.labels.marlin_starts);
     CHECK(marlin_split.labels.marlin_starts == marlin_whole.labels.marlin_starts + bbl.mixed_extra_boundaries);
 

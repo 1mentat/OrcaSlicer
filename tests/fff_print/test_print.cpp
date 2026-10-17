@@ -1904,9 +1904,16 @@ struct WipeTowerValidationCase {
 
 void build_two_filament_wipe_print(const DynamicPrintConfig &config, Model &model, Print &print)
 {
-    build_cubes(model, print, config, /*n=*/2, /*overlap=*/false);
-    model.objects[1]->config.set_key_value("extruder", new ConfigOptionInt(2));
-    print.apply(model, config);
+    // Assign both filaments before the first apply: normalizing an intermediate
+    // single-filament print disables its tower before the updated model is read.
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {},
+        { { "outer_wall_filament_id", 2 }, { "inner_wall_filament_id", 2 },
+          { "sparse_infill_filament_id", 2 }, { "internal_solid_filament_id", 2 },
+          { "top_surface_filament_id", 2 }, { "bottom_surface_filament_id", 2 } },
+    };
+    init_print(std::vector<TriangleMesh>{ cube(20), cube(20) }, print, model, config, &overrides);
+    REQUIRE(print.extruders(true).size() == 2);
     REQUIRE(print.has_wipe_tower());
 }
 
@@ -1925,6 +1932,7 @@ TEST_CASE("Print validation enforces wipe tower extrusion addressing interaction
     const DynamicPrintConfig config = multifilament_config(2, {
         { "enable_prime_tower",                 true },
         { "belt_printer",                       false },
+        { "spiral_mode",                        false },
         { "print_sequence",                     "by layer" },
         { "timelapse_type",                     "0" },
         { "enable_wrapping_detection",          false },

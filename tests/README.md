@@ -258,8 +258,8 @@ error accounting for a malformed material list. Its mutations are in
 `[BeltTreeLanding]` checks positive support extrusion and its distance from the
 belt floor, with lower/raised floor controls and one/two wall configurations on
 an explicit 0.8 mm support layer grid. `belt_tree_landing.json` challenges the
-two-neighbour merge termination; branch reachability and mutation kills require
-native validation.
+two-neighbour merge termination and duplicate-point cleanup at support-path
+creation; branch reachability and mutation kills require native validation.
 
 `[Bbs3mfUUID]` restores marked and marker-free split component graphs, checking
 named object/volume identities, analytic mesh volumes, and world placements.
@@ -267,6 +267,7 @@ named object/volume identities, analytic mesh volumes, and world placements.
 
 `[MixedBBLLabels]` checks ordered BBL/Marlin object boundaries across mixed
 sublayers, the encoded single-instance BBL label, and conserved deposition.
+Marlin object definitions are validated separately from body boundaries.
 `mixed_bbl_labels.json` challenges each BBL boundary and its dedicated end flush.
 
 `[AdaptivePressureAdvanceRamps]` checks emitted pressure-advance values against a

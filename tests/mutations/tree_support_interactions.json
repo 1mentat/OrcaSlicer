@@ -8,7 +8,7 @@
       "old": "                            double brim_width = !config.tree_support_auto_brim ? tree_brim_width : std::max(MIN_BRANCH_RADIUS_FIRST_LAYER, std::min(node.radius + node.dist_mm_to_top / (scale * branch_radius) * 0.5, MAX_BRANCH_RADIUS_FIRST_LAYER) - node.radius);",
       "new": "                            double brim_width = tree_brim_width;",
       "expected_matches": 1,
-      "description": "The public auto-brim row must produce a smaller first support-island area than the explicit 16 mm row. Replacing the auto branch with the explicit width removes the bounded first-layer calculation and should fail that geometry comparison.",
+      "description": "The public auto-brim row must produce a smaller first support-base area than the explicit 16 mm row. Replacing the auto branch with the explicit width removes the bounded first-layer calculation and should fail that geometry comparison.",
       "test_filter": "TreeSupportInteractions"
     },
     {
