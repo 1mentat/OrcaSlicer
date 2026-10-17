@@ -18,6 +18,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/Point.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/Print.hpp"
 
@@ -181,6 +185,229 @@ TEST_CASE("Mixed filament gradients record independent object and volume runs", 
         };
         check_volume_run(short_volume->id(), short_run);
         check_volume_run(tall_volume->id(), tall_run);
+    }
+}
+
+namespace mixed_gradient_gcode_contracts {
+
+enum class Mode { LinearPerObject, CurvedPerVolume, DisabledControl };
+
+struct PositiveExtrusion {
+    int    tool;
+    double x;
+    double z;
+    double e;
+    double xy;
+};
+
+struct XBounds {
+    double min_x;
+    double max_x;
+};
+
+struct Bucket {
+    double e = 0.;
+    double xy = 0.;
+    size_t lines = 0;
+};
+
+std::vector<PositiveExtrusion> read_positive_extrusions(const std::string &gcode,
+                                                        const GCodeConfig &config)
+{
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::vector<PositiveExtrusion> result;
+    int current_tool = -1;
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("T0")) {
+            current_tool = 0;
+            return;
+        }
+        if (line.cmd_is("T1")) {
+            current_tool = 1;
+            return;
+        }
+        if (current_tool < 0 || !line.extruding(self) || (!line.has_x() && !line.has_y()))
+            return;
+        const double xy = line.dist_XY(self);
+        const double e  = line.dist_E(self);
+        const double x  = line.new_X(self);
+        const double z  = line.new_Z(self);
+        if (!std::isfinite(x) || !std::isfinite(z) || !std::isfinite(e) || !std::isfinite(xy) || xy < 0.01)
+            return;
+        result.push_back({current_tool, x, z, e, xy});
+    });
+    return result;
+}
+
+Bucket bucket_at(const std::vector<PositiveExtrusion> &samples, const XBounds &bounds,
+                 double target_z, int tool)
+{
+    Bucket result;
+    constexpr double x_margin = 0.30;
+    constexpr double z_tolerance = 0.002;
+    for (const PositiveExtrusion &sample : samples) {
+        if (sample.tool != tool)
+            continue;
+        if (sample.x < bounds.min_x - x_margin || sample.x > bounds.max_x + x_margin)
+            continue;
+        if (std::abs(sample.z - target_z) > z_tolerance)
+            continue;
+        result.e += sample.e;
+        result.xy += sample.xy;
+        ++result.lines;
+    }
+    return result;
+}
+
+double expected_ratio(bool curved, size_t total_layers, size_t current_idx)
+{
+    REQUIRE(current_idx < total_layers);
+    const double t = (2. * static_cast<double>(current_idx) + 1.) /
+                     (2. * static_cast<double>(total_layers));
+    if (!curved)
+        return 0.8 + (0.2 - 0.8) * t;
+
+    // The fixture sets both tangents to zero at all three anchors. Each half
+    // is therefore a smoothstep between its explicitly configured ratios.
+    const double u = t <= 0.5 ? 2. * t : 2. * t - 1.;
+    const double smoothstep = u * u * (3. - 2. * u);
+    return t <= 0.5 ? 0.8 + 0.1 * smoothstep : 0.9 - 0.7 * smoothstep;
+}
+
+void check_volume_run(const std::vector<PositiveExtrusion> &samples, const PrintObject &print_object,
+                      const XBounds &bounds, size_t present_layers, size_t gradient_layers, bool curved)
+{
+    REQUIRE(print_object.layers().size() >= present_layers + 1);
+    constexpr double layer_height = 0.2;
+    for (size_t i = 0; i < present_layers; ++i) {
+        const Layer *layer = print_object.layers()[i + 1];
+        REQUIRE(layer != nullptr);
+        const double nominal_z = layer->print_z;
+        const double ratio = expected_ratio(curved, gradient_layers, i);
+        const double lower_z = nominal_z - layer_height + ratio * layer_height;
+        const Bucket first = bucket_at(samples, bounds, lower_z, 0);
+        const Bucket second = bucket_at(samples, bounds, nominal_z, 1);
+        INFO("run=" << i << " nominal_z=" << nominal_z << " lower_z=" << lower_z);
+        REQUIRE(first.lines > 0);
+        REQUIRE(second.lines > 0);
+        CHECK(first.xy > 0.1);
+        CHECK(second.xy > 0.1);
+        const double total_e = first.e + second.e;
+        REQUIRE(total_e > 0.);
+        CHECK_THAT(first.e / total_e, Catch::Matchers::WithinAbs(ratio, 0.04));
+        CHECK_THAT(second.e / total_e, Catch::Matchers::WithinAbs(1. - ratio, 0.04));
+    }
+}
+
+} // namespace mixed_gradient_gcode_contracts
+
+TEST_CASE("Mixed filament gradient scales emitted volume flow", "[MixedFilament][MixedGradientGCode]")
+{
+    using namespace mixed_gradient_gcode_contracts;
+    const Mode mode = GENERATE(Mode::LinearPerObject, Mode::CurvedPerVolume, Mode::DisabledControl);
+    const bool enabled = mode != Mode::DisabledControl;
+    const bool per_part = mode == Mode::CurvedPerVolume;
+    const bool curved = mode == Mode::CurvedPerVolume;
+
+    DynamicPrintConfig config = mixed_config(enabled);
+    config.set_deserialize_strict({
+        {"layer_height",                    "0.2"},
+        {"initial_layer_print_height",      "0.2"},
+        {"wall_loops",                     "1"},
+        {"top_shell_layers",               "0"},
+        {"bottom_shell_layers",            "0"},
+        {"sparse_infill_density",          "0%"},
+        {"skirt_loops",                    "0"},
+        {"brim_type",                      "no_brim"},
+        {"layer_change_gcode",             "G92 E0\n"},
+        {"filament_flow_ratio",            "1,1,1"},
+        {"filament_mixed_gradient",         enabled ? "0,0,1" : "0,0,0"},
+        {"filament_mixed_gradient_range",   ";;0.8,0.2"},
+        {"filament_mixed_gradient_curve",   curved ? ";;0,0.8,0,0|0.5,0.9,0,0|1,0.2,0,0" : ";;"},
+        {"filament_mixed_gradient_per_part", per_part ? "0,0,1" : "0,0,0"},
+    });
+
+    Model model;
+    Print print;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *short_volume = object->add_volume(make_cube(8., 8., 1.2), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh tall_mesh = make_cube(8., 8., 1.6);
+    tall_mesh.translate(10.f, 0.f, 0.f);
+    ModelVolume *tall_volume = object->add_volume(std::move(tall_mesh), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(short_volume != nullptr);
+    REQUIRE(tall_volume != nullptr);
+    short_volume->config.set("extruder", 3);
+    tall_volume->config.set("extruder", 3);
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO("validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
+
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE(!output.empty());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *print_object = print.objects().front();
+    REQUIRE(print_object != nullptr);
+    REQUIRE(print_object->instances().size() == 1);
+    REQUIRE(print_object->layers().size() == 8);
+
+    const auto short_bbox = short_volume->mesh().bounding_box();
+    const auto tall_bbox = tall_volume->mesh().bounding_box();
+    REQUIRE(short_bbox.defined);
+    REQUIRE(tall_bbox.defined);
+    const double instance_shift_x = unscale<double>(print_object->instances().front().shift.x());
+    const double center_offset_x = unscale<double>(print_object->center_offset().x());
+    const XBounds short_bounds{short_bbox.min.x() + instance_shift_x - center_offset_x,
+                               short_bbox.max.x() + instance_shift_x - center_offset_x};
+    const XBounds tall_bounds{tall_bbox.min.x() + instance_shift_x - center_offset_x,
+                              tall_bbox.max.x() + instance_shift_x - center_offset_x};
+    REQUIRE(tall_bounds.min_x - short_bounds.max_x > 1.0);
+
+    const auto samples = read_positive_extrusions(output, print.config());
+    REQUIRE(!samples.empty());
+    constexpr size_t short_run = 5;
+    constexpr size_t tall_run = 7;
+    if (!enabled) {
+        size_t fractional_events = 0;
+        size_t nominal_events = 0;
+        for (const PositiveExtrusion &sample : samples) {
+            const bool in_short = sample.x >= short_bounds.min_x - 0.30 && sample.x <= short_bounds.max_x + 0.30;
+            const bool in_tall = sample.x >= tall_bounds.min_x - 0.30 && sample.x <= tall_bounds.max_x + 0.30;
+            if (!in_short && !in_tall)
+                continue;
+            for (size_t i = 0; i < tall_run; ++i) {
+                const Layer *layer = print_object->layers()[i + 1];
+                REQUIRE(layer != nullptr);
+                const double nominal_z = layer->print_z;
+                const double fractional_z = nominal_z - 0.2 + expected_ratio(false, tall_run, i) * 0.2;
+                if (std::abs(sample.z - fractional_z) <= 0.002)
+                    ++fractional_events;
+                if (std::abs(sample.z - nominal_z) <= 0.002)
+                    ++nominal_events;
+            }
+        }
+        CHECK(fractional_events == 0);
+        CHECK(nominal_events > 0);
+    } else {
+        check_volume_run(samples, *print_object, short_bounds, short_run, per_part ? short_run : tall_run, curved);
+        check_volume_run(samples, *print_object, tall_bounds, tall_run, tall_run, curved);
+        if (per_part) {
+            // The short volume has no layers in the upper two tall-volume groups. A per-volume
+            // region filter must not accidentally emit that geometry at those sub-Z values.
+            size_t upper_short_events = 0;
+            for (const PositiveExtrusion &sample : samples) {
+                if (sample.x < short_bounds.min_x - 0.30 || sample.x > short_bounds.max_x + 0.30)
+                    continue;
+                if (sample.z > print_object->layers()[short_run]->print_z + 0.02)
+                    ++upper_short_events;
+            }
+            CHECK(upper_short_events == 0);
+        }
     }
 }
 

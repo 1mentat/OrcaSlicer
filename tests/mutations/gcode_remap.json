@@ -27,11 +27,11 @@
       "test_filter": "GCodeRemap"
     },
     {
-      "id": "gcode-remap-reverse-dropped",
+      "id": "gcode-remap-reverse-dropped-capture-safe",
       "path": "src/libslic3r/GCode/MachineKinematics.cpp",
-      "old": "return m_build_vol_max[axis] - pos[axis];",
-      "new": "return pos[axis];",
-      "description": "Drop build-volume reversal; the asymmetric maxima and printable height must distinguish rev_x/rev_y/rev_z from ordinary positive mappings.",
+      "old": "auto remap = [this, &pos](int r) -> double {\n        int axis = r % 3;\n        if (r < 3) return pos[axis];\n        if (r < 6) return -pos[axis];\n        return m_build_vol_max[axis] - pos[axis];\n    };",
+      "new": "auto remap = [&pos](int r) -> double {\n        int axis = r % 3;\n        if (r < 3) return pos[axis];\n        if (r < 6) return -pos[axis];\n        return pos[axis];\n    };",
+      "description": "Drop build-volume reversal and its now-unused lambda capture so the mutant can compile under -Werror. The asymmetric coordinate oracle must distinguish rev_x/rev_y/rev_z from ordinary positive mappings. The earlier narrow mutant failed compilation and is not an assertion kill.",
       "test_filter": "GCodeRemap"
     },
     {

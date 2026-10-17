@@ -2307,6 +2307,34 @@ std::vector<ExtrusionPath> cached_paths(const PrintObject &object)
     return result;
 }
 
+struct CachedPathSnapshot {
+    std::string geometry_key;
+    ExtrusionRole role;
+    double mm3_per_mm;
+    float width;
+    float height;
+};
+
+std::vector<CachedPathSnapshot> canonical_cached_paths(const PrintObject &object)
+{
+    std::vector<CachedPathSnapshot> result;
+    const std::vector<ExtrusionPath> paths = cached_paths(object);
+    result.reserve(paths.size());
+    for (const ExtrusionPath &path : paths) {
+        std::ostringstream key;
+        key << static_cast<int>(path.role()) << ':';
+        for (const Point3 &point : path.polyline.points)
+            key << point.x() << ',' << point.y() << ',' << point.z() << ';';
+        result.push_back({key.str(), path.role(), path.mm3_per_mm, path.width, path.height});
+    }
+    // Cache JSON traversal and regenerated extrusion collections are implementation details;
+    // compare a multiset-like sorted snapshot rather than traversal order.
+    std::sort(result.begin(), result.end(), [](const CachedPathSnapshot &lhs, const CachedPathSnapshot &rhs) {
+        return lhs.geometry_key < rhs.geometry_key;
+    });
+    return result;
+}
+
 void rewrite_cache(const std::string &directory, const std::function<void(Json &)> &edit)
 {
     size_t edited = 0;
@@ -2369,6 +2397,106 @@ TEST_CASE("Cached planar layers preserve extrusion coordinates and material flow
         CHECK_THAT(after[i].width, Catch::Matchers::WithinAbs(before[i].width, 1e-6));
         CHECK_THAT(after[i].height, Catch::Matchers::WithinAbs(0.2, 1e-6));
     }
+}
+
+TEST_CASE("Print process selects cached paths and completes cached object steps", "[Print][PrintCacheProcess]")
+{
+    constexpr double calibrated_flow = 0.12345;
+    const bool use_cache = GENERATE(false, true);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"enable_support", false},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"gcode_comments", true},
+    });
+
+    Print source;
+    Model model;
+    init_valid({make_cube(8.0, 8.0, 1.2)}, source, model, config);
+    REQUIRE(source.objects().size() == 1);
+    const PrintObject *source_object = source.objects().front();
+    REQUIRE(source_object->layer_count() == 0);
+    CHECK_FALSE(source_object->is_step_done(posSlice));
+    REQUIRE(source_object->instances().size() == 1);
+    const ModelInstance *source_instance = source_object->instances().front().model_instance;
+    REQUIRE(source_instance != nullptr);
+    const auto source_object_id = source_object->model_object()->id().id;
+    const auto source_instance_id = source_instance->id().id;
+    const auto source_loaded_id = source_instance->loaded_id;
+
+    source.process(nullptr, false);
+    REQUIRE(source.objects().front()->layer_count() == 6);
+    const std::vector<CachedPathSnapshot> original = canonical_cached_paths(*source.objects().front());
+    REQUIRE_FALSE(original.empty());
+    REQUIRE(std::any_of(original.begin(), original.end(), [](const CachedPathSnapshot &path) {
+        return std::isfinite(path.mm3_per_mm) && std::abs(path.mm3_per_mm - calibrated_flow) > 1e-6;
+    }));
+
+    ScopedTemporaryDir cache("orca-cache-process-select");
+    REQUIRE(source.export_cached_data(cache.string(), true) == 0);
+    size_t flow_edits = 0;
+    rewrite_cache(cache.string(), [&](Json &document) {
+        visit_cached_extrusions(document, [&](Json &extrusion) {
+            REQUIRE(extrusion.at("mm3_per_mm").is_number());
+            extrusion.at("mm3_per_mm") = calibrated_flow;
+            ++flow_edits;
+        });
+    });
+    REQUIRE(flow_edits > 0);
+
+    Print fresh;
+    fresh.apply(model, config);
+    require_valid(fresh);
+    fresh.set_status_silent();
+    REQUIRE(fresh.objects().size() == 1);
+    PrintObject *fresh_object = fresh.objects().front();
+    REQUIRE(fresh_object->layer_count() == 0);
+    const PrintObjectStep cache_steps[] = {
+        posSlice, posPerimeters, posPrepareInfill, posInfill, posIroning, posContouring,
+        posSupportMaterial, posDetectOverhangsForLift, posSimplifyPath, posSimplifyInfill,
+        posSimplifySupportPath,
+    };
+    for (const PrintObjectStep step : cache_steps)
+        CHECK_FALSE(fresh_object->is_step_done(step));
+    CHECK(fresh_object->model_object()->id().id == source_object_id);
+    REQUIRE(fresh_object->instances().size() == 1);
+    REQUIRE(fresh_object->instances().front().model_instance != nullptr);
+    CHECK(fresh_object->instances().front().model_instance->id().id == source_instance_id);
+    CHECK(fresh_object->instances().front().model_instance->loaded_id == source_loaded_id);
+
+    REQUIRE(fresh.load_cached_data(cache.string()) == 0);
+    REQUIRE(fresh_object->layer_count() == 6);
+    const std::vector<CachedPathSnapshot> loaded = canonical_cached_paths(*fresh_object);
+    REQUIRE(loaded.size() == original.size());
+    for (const CachedPathSnapshot &path : loaded) {
+        CHECK(std::isfinite(path.mm3_per_mm));
+        CHECK_THAT(path.mm3_per_mm, Catch::Matchers::WithinAbs(calibrated_flow, 1e-12));
+    }
+
+    fresh.process(nullptr, use_cache);
+    const std::vector<CachedPathSnapshot> processed = canonical_cached_paths(*fresh.objects().front());
+    REQUIRE(processed.size() == original.size());
+    for (size_t index = 0; index < original.size(); ++index) {
+        INFO("path index=" << index << " geometry=" << original[index].geometry_key);
+        CHECK(processed[index].geometry_key == original[index].geometry_key);
+        CHECK(processed[index].role == original[index].role);
+        CHECK_THAT(processed[index].width, Catch::Matchers::WithinAbs(original[index].width, 1e-6));
+        CHECK_THAT(processed[index].height, Catch::Matchers::WithinAbs(original[index].height, 1e-6));
+        const double expected_flow = use_cache ? calibrated_flow : original[index].mm3_per_mm;
+        CHECK(std::isfinite(processed[index].mm3_per_mm));
+        CHECK_THAT(processed[index].mm3_per_mm, Catch::Matchers::WithinAbs(expected_flow, use_cache ? 1e-12 : 1e-10));
+    }
+    for (const PrintObjectStep step : cache_steps)
+        CHECK(fresh.objects().front()->is_step_done(step));
 }
 
 TEST_CASE("Cached non-planar arcs preserve Z and fitting data", "[Print][PrintCacheRoundtrip]")

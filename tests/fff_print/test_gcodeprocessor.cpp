@@ -856,6 +856,54 @@ TEST_CASE("Repetier saved positions become the origin of the next move", "[GCode
     CHECK_THAT(extrusions.front()->feedrate, WithinAbs(10.0, 1e-4));
 }
 
+TEST_CASE("Unknown-axis G92 preserves XYZ origins while bare G92 resets them", "[GCodeProcessor][GCodeProcessorDeep][GCodeProcessorUnknownAxis]")
+{
+    const std::string prefix = "M83\nG90\nG1 X10 Y20 Z0.2 E1 F600\n";
+    const auto unknown_axis = process_buffer(prefix + "G92 A0 B0\nG1 X11 Y21 E2 F600\n");
+    const auto bare = process_buffer(prefix + "G92\nG1 X11 Y21 E2 F600\n");
+    const auto unknown_extrusions = moves_of(unknown_axis, EMoveType::Extrude);
+    const auto bare_extrusions = moves_of(bare, EMoveType::Extrude);
+    REQUIRE(unknown_extrusions.size() == 2);
+    REQUIRE(bare_extrusions.size() == 2);
+
+    CHECK_THAT(unknown_extrusions.front()->position.x(), WithinAbs(10.0, 1e-4));
+    CHECK_THAT(unknown_extrusions.front()->position.y(), WithinAbs(20.0, 1e-4));
+    CHECK_THAT(unknown_extrusions.back()->position.x(), WithinAbs(11.0, 1e-4));
+    CHECK_THAT(unknown_extrusions.back()->position.y(), WithinAbs(21.0, 1e-4));
+    CHECK_THAT(unknown_extrusions.back()->position.z(), WithinAbs(0.2, 1e-4));
+    CHECK_THAT(unknown_extrusions.back()->delta_extruder, WithinAbs(2.0, 1e-4));
+
+    // A bare G92 is the contrasting, documented reset-to-machine-position form.
+    CHECK_THAT(bare_extrusions.back()->position.x(), WithinAbs(21.0, 1e-4));
+    CHECK_THAT(bare_extrusions.back()->position.y(), WithinAbs(41.0, 1e-4));
+}
+
+TEST_CASE("R-form clockwise arcs preserve the declared radius and endpoint", "[GCodeProcessor][GCodeProcessorDeep][GCodeProcessorArcR]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\n"
+        "G1 X9 Y0 Z0.2 F600\n"
+        "G1 X10 Y0 E1 F600\n"
+        "G2 X0 Y10 R10 E1 F600\n");
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() > 2);
+
+    CHECK_THAT(extrusions.back()->position.x(), WithinAbs(0.0, 1e-3));
+    CHECK_THAT(extrusions.back()->position.y(), WithinAbs(10.0, 1e-3));
+    // The first extrusion ends at the arc start; all later ones are arc segments.
+    CHECK_THAT(extrusions.front()->position.x(), WithinAbs(10.0, 1e-4));
+    CHECK_THAT(extrusions.front()->position.y(), WithinAbs(0.0, 1e-4));
+    float arc_extrusion = 0.f;
+    for (size_t i = 1; i < extrusions.size(); ++i) {
+        CHECK(extrusions[i]->delta_extruder > 0.f);
+        arc_extrusion += extrusions[i]->delta_extruder;
+        const double radius = std::hypot(double(extrusions[i]->position.x()) - 10.0,
+                                         double(extrusions[i]->position.y()) - 10.0);
+        CHECK_THAT(radius, WithinAbs(10.0, 0.05));
+    }
+    CHECK_THAT(arc_extrusion, WithinAbs(1.0, 1e-3));
+}
+
 } // namespace gcode_processor_deep_contracts
 
 // Bambu firmware uses the " FEATURE: " style reserved tags, everything else the Slic3r-compatible

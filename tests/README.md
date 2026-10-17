@@ -212,6 +212,17 @@ and `model_mirror.json` under `tests/mutations/`.
 `[MixedGradient]` checks configured gradient ratios and independent five- and
 seven-layer volume runs, with per-part gradients enabled and disabled; its
 mutants are in `tests/mutations/mixed_gradient.json`.
+`[MixedGradientGCode]` checks emitted tool-specific flow shares and fractional
+layer heights for linear and explicitly curved gradients, plus a disabled
+control. Its bounded mutants are in `tests/mutations/mixed_gradient_gcode.json`.
+
+`[PrintCacheProcess]` loads calibrated path flow into a fresh print and checks
+that cache processing retains it while ordinary processing recomputes the
+original flow. It also checks geometry and completed object steps, with mutants
+in `tests/mutations/print_cache_process.json`. `[GCodeProcessorUnknownAxis]`
+and `[GCodeProcessorArcR]` check unknown-axis origin resets and radius-form arc
+geometry through the public parser; their mutants are in
+`tests/mutations/gcode_processor_g92_arc.json`.
 
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
 placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`
