@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "description": "Public cloud preset timestamp reconciliation preserves local configuration and persists refreshed metadata for stale, equal and unknown timestamps.",
+  "test_filter": "CloudTimestamp",
+  "mutants": [
+    {
+      "id": "preset-cloud-timestamp-equal-treated-as-newer",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        if ((cloud_update_time == 0) || (cloud_update_time <= iter->updated_time)) {",
+      "new": "        if ((cloud_update_time == 0) || (cloud_update_time < iter->updated_time)) {",
+      "test_filter": "CloudTimestamp",
+      "description": "Treat an equal cloud timestamp as a newer update; the equal-timestamp row must retain local configuration and the early-return result."
+    },
+    {
+      "id": "preset-cloud-timestamp-equal-marked-update",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "            if (cloud_update_time < iter->updated_time)\n                iter->sync_info = \"update\";",
+      "new": "            if (cloud_update_time <= iter->updated_time)\n                iter->sync_info = \"update\";",
+      "test_filter": "CloudTimestamp",
+      "description": "Mark an equal timestamp as stale; the equal row must clear an old hold marker while a strictly older cloud row records update."
+    },
+    {
+      "id": "preset-cloud-timestamp-omits-sidecar-reconciliation",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "            fs::path idx_file(iter->file);\n            idx_file.replace_extension(\".info\");\n            iter->save_info(idx_file.string());",
+      "new": "            fs::path idx_file(iter->file);\n            idx_file.replace_extension(\".info\");\n            (void)idx_file;",
+      "test_filter": "CloudTimestamp",
+      "description": "Omit persistence of the reconciled identity and timestamp metadata; the fresh sidecar read must observe the post-load values rather than the seeded local values."
+    }
+  ]
+}

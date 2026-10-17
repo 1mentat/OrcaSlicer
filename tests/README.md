@@ -255,6 +255,13 @@ and system material selection priority and tray metadata, with mutants in
 placement when the BBS importer loads a foreign multi-instance archive. Its
 mutants are in `bbs_foreign_multi_instance.json`.
 
+`[CloudTimestamp]` checks stale, equal, and unknown cloud timestamps against
+local configuration and persisted preset metadata, without slicing. Its mutants
+are in `preset_cloud_timestamp.json`. `[ToolOrderingSupportInterface]` checks
+automatic support filament selection on support-only layers containing both
+base and interface paths. It varies interface-body exclusion and verifies flush
+cost selection, with mutants in `tool_ordering_support_interface.json`.
+
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
 placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`
 checks non-sequential backup IDs, geometry preservation, and missing-part

@@ -2484,6 +2484,156 @@ TEST_CASE("Public ToolOrdering preserves extruder and logical nozzle-group assig
     }
 }
 
+namespace toolordering_support_interface_contracts {
+
+namespace {
+
+// Two separated overhangs keep the mixed-role witness independent of the
+// ordinary object layer grid: each cap starts at a grid height, while the
+// independent 0.1 mm contact gap puts its support contact at a non-grid Z.
+// Their footprints differ, so a lower cap interface and higher cap base can
+// coexist in the support slab without relying on a single-cap shortcut.
+static TriangleMesh support_interface_capital()
+{
+    TriangleMesh base = make_cube(16., 16., 1.2);
+
+    TriangleMesh lower_stem = make_cube(4., 4., 2.8);
+    lower_stem.translate(2., 2., 1.2); // z = 1.2 .. 4.0
+    TriangleMesh lower_cap = make_cube(10., 10., 1.2);
+    lower_cap.translate(0., 0., 4.0); // z = 4.0 .. 5.2
+
+    TriangleMesh upper_stem = make_cube(3., 3., 2.8);
+    upper_stem.translate(6.5, 6.5, 5.2); // z = 5.2 .. 8.0
+    TriangleMesh upper_cap = make_cube(14., 14., 1.2);
+    upper_cap.translate(1., 1., 8.0); // z = 8.0 .. 9.2
+
+    base.merge(lower_stem);
+    base.merge(lower_cap);
+    base.merge(upper_stem);
+    base.merge(upper_cap);
+    return base;
+}
+
+struct SupportInterfaceRun {
+    std::vector<std::vector<unsigned int>> support_only_sequences;
+    double support_volume = 0.;
+    size_t non_grid_mixed_rows = 0;
+};
+
+static SupportInterfaceRun run_support_interface_case(bool interface_not_for_body)
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "enable_support",                    true },
+        { "enable_prime_tower",                 false },
+        { "independent_support_layer_height",   true },
+        { "support_type",                      "normal(auto)" },
+        { "support_on_build_plate_only",       false },
+        { "support_interface_top_layers",      3 },
+        { "support_interface_bottom_layers",    0 },
+        { "support_top_z_distance",             0.1 },
+        { "support_bottom_z_distance",          0.0 },
+        { "support_base_pattern_spacing",       2.5 },
+        { "support_filament",                   0 },
+        { "support_interface_filament",         2 },
+        { "support_interface_not_for_body",    interface_not_for_body },
+        { "filament_is_support",                "0,1" },
+        { "filament_soluble",                   "0,0" },
+        // The interface filament is row 1.  Its distinct rows make the
+        // interface-tool choice observable without relying on a tie-break.
+        { "flush_volumes_matrix",               "0,100,100,0" },
+        { "layer_height",                       0.2 },
+        { "initial_layer_print_height",         0.2 },
+        { "wall_loops",                         1 },
+        { "sparse_infill_density",              0 },
+        { "top_shell_layers",                  0 },
+        { "bottom_shell_layers",               0 },
+        { "skirt_loops",                        0 },
+        { "brim_width",                         0.0 },
+        { "raft_layers",                        0 },
+        { "use_relative_e_distances",           true },
+        { "layer_change_gcode",                 "G92 E0\n" },
+    });
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(support_interface_capital());
+    init_print(std::move(meshes), print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO("Print validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    REQUIRE_FALSE(print.objects().empty());
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object != nullptr);
+    REQUIRE_FALSE(object->layers().empty());
+    REQUIRE_FALSE(object->support_layers().empty());
+
+    const ToolOrdering &ordering = print.tool_ordering();
+    SupportInterfaceRun out;
+    for (const SupportLayer *support_layer : object->support_layers()) {
+        bool has_base = false;
+        bool has_interface = false;
+        for (const ExtrusionEntity *entity : support_layer->support_fills.entities) {
+            REQUIRE(entity != nullptr);
+            if (entity->role() == erSupportMaterial || entity->role() == erSupportTransition)
+                has_base = true;
+            if (entity->role() == erSupportMaterialInterface)
+                has_interface = true;
+        }
+        if (!has_base || !has_interface)
+            continue;
+
+        const LayerTools &tools = ordering.tools_for_layer(support_layer->print_z);
+        REQUIRE(tools.has_support);
+        out.support_volume += support_layer->support_fills.total_volume();
+        if (tools.has_object)
+            continue;
+        REQUIRE_FALSE(tools.extruders.empty());
+        out.support_only_sequences.push_back(tools.extruders);
+        const double layer_units = support_layer->print_z / 0.2;
+        if (std::abs(layer_units - std::round(layer_units)) > 1e-4)
+            ++out.non_grid_mixed_rows;
+    }
+    REQUIRE(std::isfinite(out.support_volume));
+    REQUIRE(out.support_volume > 0.);
+    REQUIRE_FALSE(out.support_only_sequences.empty());
+    REQUIRE(out.non_grid_mixed_rows > 0);
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Support-only interface fallback honors body exclusion and flush costs",
+          "[WipeTower][ToolOrdering][ToolOrderingSupportInterface]")
+{
+    const SupportInterfaceRun body_allowed = run_support_interface_case(false);
+    const SupportInterfaceRun body_excluded = run_support_interface_case(true);
+
+    REQUIRE(body_allowed.support_only_sequences.size() == body_excluded.support_only_sequences.size());
+    REQUIRE(body_allowed.support_only_sequences.size() > 0);
+    CHECK_THAT(body_allowed.support_volume, Catch::Matchers::WithinAbs(body_excluded.support_volume, 1e-6));
+
+    // With no dedicated support filament, body-allowed support uses the lowest
+    // flush-volume destination from the interface row: the pinned matrix makes
+    // that the interface filament itself (tool 1 after zero-based reindexing).
+    for (const auto &sequence : body_allowed.support_only_sequences)
+        CHECK(sequence == std::vector<unsigned int>{1});
+
+    // Excluding the interface tool as the current body filament forces the
+    // support fallback to the other physical tool, then appends the interface
+    // tool for the interface role.  The later ordering pass may rotate these
+    // two tools, so the public contract here is membership rather than order.
+    for (const auto &sequence : body_excluded.support_only_sequences) {
+        REQUIRE(sequence.size() == 2);
+        CHECK(std::find(sequence.begin(), sequence.end(), 0u) != sequence.end());
+        CHECK(std::find(sequence.begin(), sequence.end(), 1u) != sequence.end());
+    }
+}
+
+} // namespace toolordering_support_interface_contracts
+
 } // namespace toolordering_public_routes_contracts
 
 namespace tower_contact_contracts {

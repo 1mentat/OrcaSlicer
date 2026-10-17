@@ -8907,6 +8907,54 @@ TEST_CASE("Preset JSON value extraction reports missing and malformed files with
     CHECK(values.at("name") == "One");
 }
 
+TEST_CASE("Cloud preset timestamp reconciliation preserves local state for stale or equal updates", "[Preset][PresetExtendedVariance][CloudTimestamp]")
+{
+    const long long cloud_time = GENERATE(4LL, 5LL, 0LL);
+    ScopedTemporaryDir dir("preset-cloud-timestamp");
+    PresetCollection collection = make_print_collection();
+    collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+
+    Preset &local = load_local_preset(collection, "Cloud");
+    local.file = collection.path_for_preset(local);
+    local.setting_id = "old-setting";
+    local.updated_time = 5;
+    local.sync_info = "hold";
+    local.config.opt<ConfigOptionFloat>("layer_height")->value = 0.21;
+    REQUIRE(local.save(nullptr));
+    const fs::path info_file = fs::path(local.file).replace_extension(".info");
+
+    std::map<std::string, std::string> values{
+        {BBL_JSON_KEY_TYPE, PRESET_IOT_PRINT_TYPE},
+        {BBL_JSON_KEY_VERSION, "1.0.0"},
+        {BBL_JSON_KEY_SETTING_ID, "cloud-setting"},
+        {BBL_JSON_KEY_USER_ID, "cloud-user"},
+        {ORCA_JSON_KEY_UPDATE_TIME, std::to_string(cloud_time)},
+        {"layer_height", "0.37"},
+    };
+    PresetsConfigSubstitutions substitutions;
+
+    CAPTURE(cloud_time);
+    CHECK_FALSE(collection.load_user_preset("Cloud", values, substitutions,
+                                             ForwardCompatibilitySubstitutionRule::Disable));
+    CHECK(fs::exists(info_file));
+
+    Preset *reacquired = collection.find_preset("Cloud", false, true);
+    REQUIRE(reacquired != nullptr);
+    CHECK(reacquired->setting_id == "cloud-setting");
+    CHECK(reacquired->updated_time == 5);
+    CHECK(reacquired->sync_info == (cloud_time == 5 ? "" : "update"));
+    CHECK_THAT(reacquired->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.21, 1e-9));
+
+    Preset persisted(Preset::TYPE_PRINT, "Persisted");
+    persisted.setting_id = "sentinel-setting";
+    persisted.updated_time = -1;
+    persisted.sync_info = "sentinel-sync";
+    persisted.load_info(info_file.string());
+    CHECK(persisted.setting_id == "cloud-setting");
+    CHECK(persisted.updated_time == 5);
+    CHECK(persisted.sync_info == (cloud_time == 5 ? "" : "update"));
+}
+
 } // namespace preset_extended_contracts
 
 namespace preset_bundle_ams_contracts {
