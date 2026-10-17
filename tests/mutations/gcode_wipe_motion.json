@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Wipe retraction emits negative-E XY motion and preserves deposited material.",
+  "mutants": [
+    {
+      "id": "gcode-wipe-negative-e-xy-motion-dropped",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                    double segment_length = line.length();\n                    double dE = length * (segment_length / wipe_dist);",
+      "new": "                    double dE = 0.0; /* mutation: preserve wipe comments/path but drop negative-E wipe motion */",
+      "test_filter": "GCodeWipeMotion",
+      "description": "Preserve the wipe start/end comments and XY path while removing the negative-E component of each wipe segment; the public GCodeReader oracle must retain zero disabled motion and lose the enabled negative-E XY witness."
+    }
+  ]
+}

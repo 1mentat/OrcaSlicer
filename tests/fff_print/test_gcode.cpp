@@ -311,6 +311,35 @@ void require_same_material(const MotionEvidence &lhs, const MotionEvidence &rhs)
     CHECK_THAT(rhs.filament, Catch::Matchers::WithinRel(lhs.filament, 1e-6));
 }
 
+struct NegativeXYMotionEvidence
+{
+    size_t negative_e_xy_moves = 0;
+    bool   finite = true;
+};
+
+NegativeXYMotionEvidence negative_xy_motion_evidence(const std::string &text,
+                                                     const DynamicPrintConfig &config)
+{
+    NegativeXYMotionEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&evidence](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) ||
+            !line.has_e())
+            return;
+
+        const double xy = line.dist_XY(self);
+        const double de = line.dist_E(self);
+        if (!std::isfinite(xy) || !std::isfinite(de)) {
+            evidence.finite = false;
+            return;
+        }
+        if (xy > EPSILON && de < -EPSILON)
+            ++evidence.negative_e_xy_moves;
+    });
+    return evidence;
+}
+
 void require_hook_order(const std::string &text, const DynamicPrintConfig &config, size_t layers)
 {
     std::vector<std::string> hooks;
@@ -1085,17 +1114,46 @@ TEST_CASE("Support-enabled overhang export preserves typed toolpaths", "[GCode][
     REQUIRE(motion_evidence(out.text, config).extrusion_moves > 0);
 }
 
-TEST_CASE("Wipe while retracting adds wipe travel without changing deposited material", "[GCode][GCodeExportWorkflows]")
+TEST_CASE("Wipe while retracting adds wipe travel without changing deposited material", "[GCode][GCodeExportWorkflows][GCodeWipeMotion]")
 {
     auto off = base_config();
-    off.set_deserialize_strict({{"wipe", false}, {"retraction_length", 1.2}});
+    off.set_deserialize_strict({
+        {"wipe", false},
+        {"wipe_distance", 2.0},
+        {"retraction_length", 1.2},
+        {"retraction_minimum_travel", 0.0},
+        {"retraction_speed", 30.0},
+        {"deretraction_speed", 30.0},
+        {"retract_when_changing_layer", false},
+        {"retract_before_wipe", "0%"},
+        {"retract_after_wipe", "0%"},
+        {"role_based_wipe_speed", false},
+        {"wipe_speed", 100.0},
+        {"wipe_on_loops", false},
+        {"wipe_before_external_loop", false},
+        {"wipe_inward", false},
+        {"wipe_inward_distance", "0%"},
+        {"use_firmware_retraction", false},
+        {"z_hop", 0.0},
+        {"enable_arc_fitting", false},
+        {"resolution", 0.0},
+        {"gcode_comments", true},
+    });
     auto on = off;
-    on.set_deserialize_strict({{"wipe", true}, {"wipe_distance", 2.0}});
+    on.set_deserialize_strict({{"wipe", true}});
     const auto a = fresh_export(off);
     const auto b = fresh_export(on);
-    REQUIRE(motion_evidence(a.text, off).extrusion_moves > 0);
-    require_same_material(motion_evidence(a.text, off), motion_evidence(b.text, on));
-    CHECK(count_text(b.text, "; wipe") > count_text(a.text, "; wipe"));
+    const MotionEvidence off_material = motion_evidence(a.text, off);
+    const MotionEvidence on_material = motion_evidence(b.text, on);
+    REQUIRE(off_material.extrusion_moves > 0);
+    require_same_material(off_material, on_material);
+
+    const NegativeXYMotionEvidence off_wipe = negative_xy_motion_evidence(a.text, off);
+    const NegativeXYMotionEvidence on_wipe = negative_xy_motion_evidence(b.text, on);
+    REQUIRE(off_wipe.finite);
+    REQUIRE(on_wipe.finite);
+    CHECK(off_wipe.negative_e_xy_moves == 0);
+    CHECK(on_wipe.negative_e_xy_moves > 0);
 }
 
 TEST_CASE("Firmware retraction changes emitted retraction commands", "[GCode][GCodeExportWorkflows]")

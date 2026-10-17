@@ -1644,12 +1644,12 @@
     },
     "wipe": {
       "test": "tests/fff_print/test_gcode.cpp",
-      "tag": "[GCodeExportWorkflows]",
+      "tag": "[GCodeWipeMotion]",
       "dimensions": [
         "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "Wipe off/on exports require additional wipe motion markers while preserving deposited path length, material, and extrusion move count."
+      "reason": "Wipe off/on exports require zero versus positive parsed negative-E XY moves while preserving deposited path length, material, and extrusion move count. Retraction, wipe distance, and linear-motion settings are explicit."
     },
     "retraction_minimum_travel": {
       "test": "tests/fff_print/test_gcode.cpp",

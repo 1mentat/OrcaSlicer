@@ -61,6 +61,9 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <gp_Pnt.hxx>
+#include <TopoDS_Shape.hxx>
+#include <cstddef>
 #include <cereal/archives/binary.hpp>
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
@@ -2370,6 +2373,107 @@ TEST_CASE("an Import solid written by OCCT 7.6 still loads", "[CadDocument][reci
     GProp_GProps props;
     BRepGProp::VolumeProperties(shape, props);
     CHECK_THAT(props.Mass(), WithinRel(expected, 1e-4));
+}
+
+TEST_CASE("CadDocument import features replay into independent bodies", "[CadDocument][CadDocumentImport]")
+{
+    using Catch::Matchers::WithinRel;
+
+    const TopoDS_Shape first_shape = BRepPrimAPI_MakeBox(gp_Pnt(0., 0., 0.), 4., 5., 6.).Shape();
+    const TopoDS_Shape second_shape = BRepPrimAPI_MakeBox(gp_Pnt(10., 0., 0.), 2., 3., 4.).Shape();
+    REQUIRE_FALSE(first_shape.IsNull());
+    REQUIRE_FALSE(second_shape.IsNull());
+
+    const auto analytic_volume = [](const TopoDS_Shape& shape) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape, props);
+        return std::abs(props.Mass());
+    };
+    const auto analytic_center = [](const TopoDS_Shape& shape) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape, props);
+        return props.CentreOfMass();
+    };
+    const auto require_valid_mesh = [](const TriangleMesh& mesh) {
+        REQUIRE_FALSE(mesh.empty());
+        REQUIRE_FALSE(mesh.its.vertices.empty());
+        REQUIRE_FALSE(mesh.its.indices.empty());
+        for (const Vec3f& vertex : mesh.its.vertices) {
+            REQUIRE(std::isfinite(double(vertex.x())));
+            REQUIRE(std::isfinite(double(vertex.y())));
+            REQUIRE(std::isfinite(double(vertex.z())));
+        }
+        const int vertex_count = int(mesh.its.vertices.size());
+        for (const auto& triangle : mesh.its.indices) {
+            REQUIRE(triangle[0] >= 0);
+            REQUIRE(triangle[1] >= 0);
+            REQUIRE(triangle[2] >= 0);
+            REQUIRE(triangle[0] < vertex_count);
+            REQUIRE(triangle[1] < vertex_count);
+            REQUIRE(triangle[2] < vertex_count);
+            REQUIRE(triangle[0] != triangle[1]);
+            REQUIRE(triangle[1] != triangle[2]);
+            REQUIRE(triangle[0] != triangle[2]);
+            const Vec3f edge_a = mesh.its.vertices[size_t(triangle[1])] -
+                                  mesh.its.vertices[size_t(triangle[0])];
+            const Vec3f edge_b = mesh.its.vertices[size_t(triangle[2])] -
+                                  mesh.its.vertices[size_t(triangle[0])];
+            const float twice_area = edge_a.cross(edge_b).norm();
+            REQUIRE(std::isfinite(double(twice_area)));
+            REQUIRE(twice_area > 1e-6f);
+        }
+    };
+
+    CadDocument doc;
+    CadFeature first;
+    first.type = CadFeatureType::Import;
+    first.name = "ImportedFirst";
+    first.imported_solid = first_shape;
+    doc.features.push_back(first);
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    REQUIRE(doc.display_body_meshes.size() == 1);
+    CHECK_THAT(analytic_volume(doc.bodies[0].shape), WithinRel(4. * 5. * 6., 1e-8));
+    require_valid_mesh(doc.display_body_meshes[0]);
+    require_valid_mesh(doc.display_mesh);
+
+    CadFeature second;
+    second.type = CadFeatureType::Import;
+    second.name = "ImportedSecond";
+    second.imported_solid = second_shape;
+    doc.features.push_back(second);
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 2);
+    REQUIRE(doc.display_body_meshes.size() == doc.bodies.size());
+    REQUIRE(doc.display_tri_face.size() == doc.display_mesh.its.indices.size());
+    REQUIRE(doc.display_tri_body.size() == doc.display_mesh.its.indices.size());
+    CHECK_THAT(analytic_volume(doc.bodies[0].shape), WithinRel(4. * 5. * 6., 1e-8));
+    CHECK_THAT(analytic_volume(doc.bodies[1].shape), WithinRel(2. * 3. * 4., 1e-8));
+    const gp_Pnt first_center = analytic_center(doc.bodies[0].shape);
+    const gp_Pnt second_center = analytic_center(doc.bodies[1].shape);
+    CHECK_THAT(first_center.X(), Catch::Matchers::WithinAbs(2.0, 1e-8));
+    CHECK_THAT(first_center.Y(), Catch::Matchers::WithinAbs(2.5, 1e-8));
+    CHECK_THAT(first_center.Z(), Catch::Matchers::WithinAbs(3.0, 1e-8));
+    CHECK_THAT(second_center.X(), Catch::Matchers::WithinAbs(11.0, 1e-8));
+    CHECK_THAT(second_center.Y(), Catch::Matchers::WithinAbs(1.5, 1e-8));
+    CHECK_THAT(second_center.Z(), Catch::Matchers::WithinAbs(2.0, 1e-8));
+    require_valid_mesh(doc.display_body_meshes[0]);
+    require_valid_mesh(doc.display_body_meshes[1]);
+    require_valid_mesh(doc.display_mesh);
+    size_t body_triangle_counts[2] = {0, 0};
+    for (const int body_index : doc.display_tri_body) {
+        REQUIRE(body_index >= 0);
+        REQUIRE(body_index < int(doc.bodies.size()));
+        ++body_triangle_counts[size_t(body_index)];
+    }
+    REQUIRE(body_triangle_counts[0] > 0);
+    REQUIRE(body_triangle_counts[1] > 0);
+    REQUIRE(body_triangle_counts[0] == doc.display_body_meshes[0].its.indices.size());
+    REQUIRE(body_triangle_counts[1] == doc.display_body_meshes[1].its.indices.size());
 }
 
 TEST_CASE("a v5 round trip is exact", "[CadDocument][recipe]")

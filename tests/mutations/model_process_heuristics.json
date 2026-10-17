@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Model speed overrides and one-based material slots determine public process heuristics.",
+  "mutants": [
+    {
+      "id": "model-extruder-params-one-based-alias-collapsed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "        extruderParamsMap.insert({ i + 1,{matName, bedTemp, endTemp} });",
+      "new": "        extruderParamsMap.insert({ i,{matName, bedTemp, endTemp} });",
+      "test_filter": "ModelProcessHeuristics",
+      "description": "Preserve the one-based extruder alias required by ModelVolume::extruder_id and material thermal-length lookup."
+    },
+    {
+      "id": "model-object-support-speed-override-ignored",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "        if (objectKey == \"support_speed\")",
+      "new": "        if (false && objectKey == \"support_speed\")",
+      "test_filter": "ModelProcessHeuristics",
+      "description": "Ignore the object's support-speed override; the explicit 36 mm/s object maximum must reject the global support speed."
+    }
+  ]
+}
