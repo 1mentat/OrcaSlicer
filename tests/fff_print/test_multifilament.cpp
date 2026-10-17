@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -10,6 +11,7 @@
 #include "test_utils.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -1083,5 +1085,72 @@ TEST_CASE("Each filament cools with the fan speeds of its extruder variant", "[M
         CHECK(fan_speeds(gcode, "M106 S") == std::set<int>{ fast_layers ? fan_max_speed : fan_min_speed });
         CHECK(fan_speeds(gcode, "M106 P2 S") == std::set<int>{ additional_fan_speed });
         CHECK(gcode.find("; start range high " + std::to_string(range_high) + "\n") != std::string::npos);
+    }
+}
+
+// Public Print::apply routing for machine-gated filament cut distances.
+static DynamicPrintConfig single_variant_two_extruder_retraction_config()
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "gcode_flavor",                   "marlin" },
+        { "single_extruder_multi_material", 0 },
+        { "nozzle_diameter",                "0.4,0.4" },
+        { "extruder_printable_height",      "0,0" },
+        { "enable_prime_tower",             0 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+    });
+    // Use typed vectors for every machine/print/filament variant list so this fixture does not
+    // depend on ConfigOptionStrings delimiter parsing.
+    config.set_key_value("printer_extruder_id", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("print_extruder_id", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("print_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("filament_self_index", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("filament_map", new ConfigOptionInts({ 2, 1 }));
+    config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+    config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values = { etDirectDrive, etDirectDrive };
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = { nvtStandard, nvtStandard };
+    return config;
+}
+
+static std::vector<double> cut_distance_override_values(LongRectrationLevel gate, const std::string &filament_value)
+{
+    DynamicPrintConfig config = single_variant_two_extruder_retraction_config();
+    config.set_deserialize_strict({
+        { "enable_long_retraction_when_cut", int(gate) },
+        { "retraction_distances_when_cut", "11,17" },
+        { "filament_retraction_distances_when_cut", filament_value },
+    });
+
+    Print print;
+    Model model;
+    init_print({ cube(5.) }, print, model, config);
+    REQUIRE(print.config().filament_map.values == std::vector<int>{ 2, 1 });
+    REQUIRE(print.config().filament_map_2.values == std::vector<int>{ 1, 0 });
+    REQUIRE(print.config().retraction_distances_when_cut.values.size() == 2);
+    return print.config().retraction_distances_when_cut.values;
+}
+
+TEST_CASE("Machine-gated filament cut distances follow the mapped machine slots",
+          "[MultiFilament][FilamentCutRetractionOverride][Pipeline]")
+{
+    auto [gate, filament_value, expect_explicit] = GENERATE(table<int, std::string, bool>({
+        { int(LongRectrationLevel::Disabled),       "nil,nil", false },
+        { int(LongRectrationLevel::Disabled),       "12,16",   false },
+        { int(LongRectrationLevel::EnableMachine),  "nil,nil", false },
+        { int(LongRectrationLevel::EnableMachine),  "12,16",   false },
+        { int(LongRectrationLevel::EnableFilament), "nil,nil", false },
+        { int(LongRectrationLevel::EnableFilament), "12,16",   true  },
+    }));
+    DYNAMIC_SECTION("gate " << gate << ", filament_values=" << filament_value) {
+        const std::vector<double> expected = expect_explicit ? std::vector<double>{ 12., 16. } :
+                                                                 std::vector<double>{ 17., 11. };
+        const std::vector<double> actual = cut_distance_override_values(static_cast<LongRectrationLevel>(gate), filament_value);
+        REQUIRE(actual.size() == expected.size());
+        for (size_t index = 0; index < expected.size(); ++index)
+            CHECK_THAT(actual[index], Catch::Matchers::WithinAbs(expected[index], 1e-9));
     }
 }

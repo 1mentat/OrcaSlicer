@@ -12,6 +12,7 @@
 #include <limits>
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Flow.hpp"
 #include "fff_print/test_helpers.hpp"
@@ -3295,3 +3296,110 @@ TEST_CASE("Tower contact temperature override and restore reach exported type-2 
 }
 
 } // namespace tower_contact_pipeline_contracts
+
+namespace toolordering_custom_gcode_contracts {
+
+TEST_CASE("Custom G-code events follow print mode and layer assignment", "[WipeTower][ToolOrdering][CustomGCodeAssignment]")
+{
+    auto run = [](bool two_objects, CustomGCode::Mode model_mode,
+                  const std::vector<CustomGCode::Type> &expected_types) {
+        DynamicPrintConfig config = multifilament_config(2, {
+            { "layer_height",                 0.2 },
+            { "initial_layer_print_height",    0.2 },
+            { "wall_loops",                   1 },
+            { "outer_wall_filament_id",        1 },
+            { "inner_wall_filament_id",        1 },
+            { "sparse_infill_density",        0 },
+            { "top_shell_layers",              0 },
+            { "bottom_shell_layers",           0 },
+            { "enable_support",            false },
+            { "skirt_loops",                   0 },
+            { "brim_type",              "no_brim" },
+            { "enable_prime_tower",        false },
+            { "print_sequence",       "by layer" },
+        });
+
+        Print print;
+        Model model;
+        if (two_objects) {
+            const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides = {
+                {},
+                {{ "outer_wall_filament_id", 2 }},
+            };
+            TriangleMesh second = make_cube(4., 4., 0.8);
+            second.translate(8., 0., 0.);
+            init_print(std::vector<TriangleMesh>{ make_cube(4., 4., 0.8), std::move(second) }, print, model, config, &overrides, false);
+        } else {
+            init_print({ make_cube(4., 4., 0.8) }, print, model, config);
+        }
+
+        CustomGCode::Info info;
+        info.mode = model_mode;
+        info.gcodes = {
+            { 0.21, CustomGCode::PausePrint, 1, "pause", "pause" },
+            { 0.41, CustomGCode::ColorChange, 2, "#00ff00", "color" },
+            { 0.79, CustomGCode::Custom, 1, "", "M117 done" },
+        };
+        model.plates_custom_gcodes[model.curr_plate_index] = info;
+
+        // init_print applied the model before the plate events existed. Reapply
+        // so Print's owned model copy receives the same custom-code data.
+        print.apply(model, config);
+        REQUIRE(print.config().print_sequence == PrintSequence::ByLayer);
+        REQUIRE(print.object_extruders().size() == (two_objects ? 2 : 1));
+        REQUIRE(print.model().get_curr_plate_custom_gcodes() == info);
+        const auto validation = print.validate();
+        INFO("Print validation: " << validation.string << " [" << validation.opt_key << "]");
+        REQUIRE(validation.string.empty());
+
+        print.process();
+        // Print::process uses a local ToolOrdering copy for this assignment.
+        // Reuse that production ordering state and invoke the same public method
+        // to make the assignment result directly inspectable here.
+        ToolOrdering ordering = print.tool_ordering();
+        ordering.assign_custom_gcodes(print);
+        size_t layer_index = 0;
+        for (const LayerTools &layer : ordering) {
+            REQUIRE(layer_index < expected_types.size());
+            CHECK_THAT(double(layer.print_z), Catch::Matchers::WithinAbs(0.2 + 0.2 * double(layer_index), 1e-6));
+            const CustomGCode::Item *event = layer.custom_gcode;
+            if (expected_types[layer_index] == CustomGCode::Unknown) {
+                CHECK(event == nullptr);
+                ++layer_index;
+                continue;
+            }
+            REQUIRE(event != nullptr);
+            CHECK(event->type == expected_types[layer_index]);
+            if (expected_types[layer_index] == CustomGCode::ColorChange) {
+                CHECK(event->extruder == 2);
+                CHECK(event->color == "#00ff00");
+            }
+            if (expected_types[layer_index] == CustomGCode::PausePrint)
+                CHECK(event->extra == "pause");
+            if (expected_types[layer_index] == CustomGCode::Custom)
+                CHECK(event->extra == "M117 done");
+            ++layer_index;
+        }
+        REQUIRE(layer_index == expected_types.size());
+    };
+
+    // Two filament slots are configured, but one object uses only slot 1: an active color change
+    // for filament 2 is ignored, while pause/custom events remain unconditional.
+    run(false, CustomGCode::MultiAsSingle,
+        { CustomGCode::PausePrint, CustomGCode::Unknown,
+          CustomGCode::Unknown, CustomGCode::Custom });
+
+    // Two objects print above the color-change layer with filament 2. The same
+    // event is therefore applied, while the third layer remains an empty control.
+    run(true, CustomGCode::MultiExtruder,
+        { CustomGCode::PausePrint, CustomGCode::ColorChange,
+          CustomGCode::Unknown, CustomGCode::Custom });
+
+    // A model-mode/print-mode mismatch is a negative control for color changes,
+    // while the mode-independent events remain assigned.
+    run(true, CustomGCode::MultiAsSingle,
+        { CustomGCode::PausePrint, CustomGCode::Unknown,
+          CustomGCode::Unknown, CustomGCode::Custom });
+}
+
+} // namespace toolordering_custom_gcode_contracts

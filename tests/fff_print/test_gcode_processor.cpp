@@ -717,6 +717,109 @@ TEST_CASE("Post process emits first and last M73 placeholders", "[GCodeProcessor
     CHECK(processed.output.find("M73 P100 R0") != std::string::npos);
 }
 
+namespace {
+
+std::vector<std::string> stop_progress_lines(const std::string &output)
+{
+    std::vector<std::string> result;
+    std::istringstream input(output);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind("M73 C", 0) == 0)
+            result.push_back(line);
+    }
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Post process exports remaining time across subminute stop transitions",
+          "[GCodeProcessor][GcpPost][M73][GcpPostStop]")
+{
+    const std::string stop_fixture =
+        ";_GP_FIRST_LINE_M73_PLACEHOLDER\n"
+        "M83\n"
+        "G1 X10 Y0 Z0.2 E0.5 F600\n"
+        "G4 S80\n"
+        "G1 X10.05 Y0 E0.01 F600\n"
+        "G1 X10.10 Y0 E0.01 F600\n"
+        "; PAUSE_PRINTING\n"
+        "G1 X20 Y0 E0.5 F600\n"
+        "G4 S80\n"
+        "G1 X20.05 Y0 E0.01 F600\n"
+        "G1 X20.10 Y0 E0.01 F600\n"
+        "; COLOR_CHANGE,T0,#112233\n"
+        "G1 X30 Y0 E0.5 F600\n"
+        ";_GP_LAST_LINE_M73_PLACEHOLDER\n";
+
+    FullPrintConfig enabled_config;
+    enabled_config.disable_m73.value = false;
+    const auto processed = process_post(stop_fixture, enabled_config);
+
+    const auto stop_lines = stop_progress_lines(processed.output);
+    REQUIRE_FALSE(stop_lines.empty());
+    CHECK(std::find(stop_lines.begin(), stop_lines.end(), "M73 C1") != stop_lines.end());
+    CHECK(std::find(stop_lines.begin(), stop_lines.end(), "M73 C0.00") != stop_lines.end());
+    CHECK(std::find(stop_lines.begin(), stop_lines.end(), "M73 C0") != stop_lines.end());
+    CHECK(processed.output.find("M73 P0 R") != std::string::npos);
+
+    size_t positive_extrusions = 0;
+    size_t pause_moves = 0;
+    size_t color_change_moves = 0;
+    for (const auto &move : processed.result.moves) {
+        if (move.type == EMoveType::Extrude && move.delta_extruder > 0.0f && move.feedrate > 0.0f)
+            ++positive_extrusions;
+        if (move.type == EMoveType::Pause_Print)
+            ++pause_moves;
+        if (move.type == EMoveType::Color_change)
+            ++color_change_moves;
+    }
+    REQUIRE(positive_extrusions >= 7);
+    REQUIRE(pause_moves == 1);
+    REQUIRE(color_change_moves == 1);
+
+    const size_t first_stop = processed.output.find("M73 C0.00\n");
+    const size_t first_short = processed.output.find("G1 X10.10 Y0 E0.01 F600");
+    const size_t first_marker = processed.output.find("; PAUSE_PRINTING");
+    const size_t final_stop = processed.output.find("M73 C0\n");
+    const size_t final_short = processed.output.find("G1 X20.10 Y0 E0.01 F600");
+    const size_t final_marker = processed.output.find("; COLOR_CHANGE,T0,#112233");
+    const size_t positive_stop = processed.output.find("M73 C1\n", first_marker);
+    REQUIRE(first_stop != std::string::npos);
+    REQUIRE(first_short != std::string::npos);
+    REQUIRE(first_marker != std::string::npos);
+    REQUIRE(final_stop != std::string::npos);
+    REQUIRE(final_short != std::string::npos);
+    REQUIRE(final_marker != std::string::npos);
+    REQUIRE(positive_stop != std::string::npos);
+    CHECK(first_short < first_stop);
+    CHECK(first_stop < first_marker);
+    CHECK(first_marker < positive_stop);
+    CHECK(positive_stop < final_marker);
+    CHECK(final_short < final_stop);
+    CHECK(final_stop < final_marker);
+
+    FullPrintConfig disabled_config = enabled_config;
+    disabled_config.disable_m73.value = true;
+    const auto disabled = process_post(stop_fixture, disabled_config);
+    CHECK(disabled.output.find("M73 ") == std::string::npos);
+
+    size_t disabled_positive_extrusions = 0;
+    size_t disabled_pause_moves = 0;
+    size_t disabled_color_change_moves = 0;
+    for (const auto &move : disabled.result.moves) {
+        if (move.type == EMoveType::Extrude && move.delta_extruder > 0.0f && move.feedrate > 0.0f)
+            ++disabled_positive_extrusions;
+        if (move.type == EMoveType::Pause_Print)
+            ++disabled_pause_moves;
+        if (move.type == EMoveType::Color_change)
+            ++disabled_color_change_moves;
+    }
+    REQUIRE(disabled_positive_extrusions == positive_extrusions);
+    REQUIRE(disabled_pause_moves == 1);
+    REQUIRE(disabled_color_change_moves == 1);
+}
+
 TEST_CASE("Post process expands estimated time and layer placeholders", "[GCodeProcessor][GcpPost][Placeholders]")
 {
     const auto processed = process_post(";_GP_ESTIMATED_PRINTING_TIME_PLACEHOLDER\n"

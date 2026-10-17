@@ -3559,6 +3559,62 @@
         "nullable_behavior"
       ],
       "reason": "Nil inherits the machine zero bound and explicit zero retains positive lift events; explicit 0.1 mm suppresses them on the short fixture while preserving deposition. The exact height threshold boundary and multiple-filament combinations are not claimed."
+    },
+    "reduce_crossing_wall": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[ReduceCrossingWall]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both boolean values are explicitly deserialized in the same public Print fixture. The false export requires a retracted direct route crossing the analytic central hole barrier; the true export requires a paired same-layer multi-point detour that avoids the hole void, while deposited move count, XY path, and filament remain invariant. The fixture requires positive crossing, detour, and retraction witnesses. Full numeric ranges and other interactions are not claimed; the listed mutation anchors are retained as unverified candidates."
+    },
+    "reduce_infill_retraction": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[ReduceInfillRetraction]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both boolean values are explicitly deserialized on the same public Print fixture. Contained internal-to-internal travel is required in both fresh exports and must show a retraction count decrease when enabled, while an external-perimeter-to-internal control still retracts in both. Positive extrusion, geometry, material, finite layer-Z, and paired controls are preserved. Full numeric ranges and other interactions are not claimed; the listed mutation anchors are retained as unverified candidates."
+    },
+    "enable_power_loss_recovery": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[PowerLossRecovery]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "All three canonical modes are applied to a two-layer Marlin2 export. Parsed M413 transitions distinguish inherited printer state, enable then final disable, and explicit disable; command positions are bounded by positive deposition and deposited material is conserved. Other firmware interactions are not claimed."
+    },
+    "gcode_skip_config_block": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[ConfigBlock]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Separate public exports explicitly set false and true. False preserves resolved setting comments; true omits the config delimiters and setting records while retaining header and executable block delimiters. This is a file-content contract, not a claim about firmware behavior."
+    },
+    "draft_shield": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Both canonical shield modes are crossed with both skirt types, both print sequences, and skirt heights 0/1/3. Disabled emits exactly the configured number of skirt deposition passes; enabled spans all 100 object layers, and unsupported per-object sequential combinations reject. The role oracle counts positive spatial extrusion, not comments alone."
+    },
+    "skirt_type": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtType]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "Both canonical skirt types are crossed with near and far instances. Public processed skirt groups have the expected ownership and positive volume; far combined skirts span both instances while per-object skirts remain individually bounded. Near per-object skirts merge into one group."
     }
   }
 }

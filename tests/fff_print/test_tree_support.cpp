@@ -1,10 +1,14 @@
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
+#include <utility>
+#include <vector>
 #include "libslic3r/Config.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/Model.hpp"
 #include <cstddef>
 #include "libslic3r/libslic3r.h"
 
@@ -14,8 +18,10 @@
 #include "libslic3r/TriangleMesh.hpp"
 
 #include "test_helpers.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -86,6 +92,158 @@ size_t support_point_count(const TriangleMesh &mesh, const char *style, int thre
     Slic3r::Print print;
     slice_with_tree_support(mesh, print, style, threshold_angle, build_plate_only);
     return support_points(print).size();
+}
+
+namespace tree_support_critical_regions_contracts {
+
+struct CriticalRegionEvidence {
+    size_t total_points = 0;
+    size_t ordinary_overhang_segments = 0;
+    size_t cantilever_segments = 0;
+};
+
+// The 1 mm shelf overhang is below TreeSupport's 3 mm cantilever threshold.  The separate
+// 28 mm cap is carried by a 6 mm stem, leaving an 11 mm side overhang and a source-defined
+// cantilever.  Both regions live in one ModelObject so the public object output can be compared
+// without relying on private TreeSupport state.
+static TriangleMesh critical_regions_fixture()
+{
+    TriangleMesh result = make_cube(20.0, 20.0, 4.0);
+
+    TriangleMesh ordinary_shelf = make_cube(22.0, 20.0, 0.8);
+    ordinary_shelf.translate(-1.0, 0.0, 3.6); // overlaps the base by 0.4 mm
+    result.merge(ordinary_shelf);
+
+    TriangleMesh stem = make_cube(6.0, 6.0, 8.0);
+    stem.translate(41.0, 7.0, 0.0); // centered under the cap: x=41..47
+    result.merge(stem);
+
+    TriangleMesh cantilever_cap = make_cube(28.0, 28.0, 0.8);
+    cantilever_cap.translate(30.0, -4.0, 7.6); // overlaps the stem by 0.4 mm
+    result.merge(cantilever_cap);
+    return result;
+}
+
+static bool segment_intersects_xy_window(const Point3 &a, const Point3 &b, const Point &center_offset,
+                                          double min_x, double max_x, double min_y, double max_y)
+{
+    const double ax = unscale<double>(a.x() + center_offset.x());
+    const double ay = unscale<double>(a.y() + center_offset.y());
+    const double bx = unscale<double>(b.x() + center_offset.x());
+    const double by = unscale<double>(b.y() + center_offset.y());
+    const double dx = bx - ax;
+    const double dy = by - ay;
+    double t_min = 0.0;
+    double t_max = 1.0;
+    const auto clip = [&t_min, &t_max](double p, double q) {
+        if (std::abs(p) <= 1e-12)
+            return q >= 0.0;
+        const double r = q / p;
+        if (p < 0.0) {
+            if (r > t_max) return false;
+            if (r > t_min) t_min = r;
+        } else {
+            if (r < t_min) return false;
+            if (r < t_max) t_max = r;
+        }
+        return true;
+    };
+    return clip(-dx, ax - min_x) && clip(dx, max_x - ax) &&
+           clip(-dy, ay - min_y) && clip(dy, max_y - ay);
+}
+
+static size_t support_segments_in_window(const Print &print, const Point &center_offset,
+                                         double min_x, double max_x, double min_y, double max_y)
+{
+    size_t count = 0;
+    for (const SupportLayer *layer : print.objects().front()->support_layers()) {
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            for (size_t i = 1; i < path.polyline.points.size(); ++i) {
+                if (segment_intersects_xy_window(path.polyline.points[i - 1], path.polyline.points[i], center_offset,
+                                                 min_x, max_x, min_y, max_y)) {
+                    ++count;
+                    break;
+                }
+            }
+        });
+    }
+    return count;
+}
+
+static CriticalRegionEvidence observe(bool critical_only)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_support",                1 },
+        { "support_type",                  "tree(auto)" },
+        { "support_style",                 "tree_slim" },
+        { "support_on_build_plate_only",   0 },
+        { "support_critical_regions_only", critical_only },
+        { "support_remove_small_overhang", 0 },
+        { "support_threshold_angle",       30 },
+        { "support_top_z_distance",        0.2 },
+        { "support_interface_top_layers",  0 },
+        { "support_interface_bottom_layers", 0 },
+        { "max_bridge_length",              0.0 },
+        { "bridge_no_support",              0 },
+        { "thick_bridges",                  0 },
+        { "tree_support_branch_distance",  5.0 },
+        { "tree_support_branch_diameter",  2.0 },
+        { "tree_support_branch_angle",     40.0 },
+        { "support_line_width",            0.4 },
+        { "line_width",                    0.42 },
+        { "outer_wall_line_width",         0.42 },
+        { "inner_wall_line_width",         0.42 },
+        { "wall_generator",                "classic" },
+        { "nozzle_diameter",               "0.4" },
+        { "layer_height",                  0.2 },
+        { "initial_layer_print_height",    0.2 },
+        { "raft_layers",                   0 },
+        { "brim_width",                    0.0 },
+        { "skirt_loops",                   0 },
+    });
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(critical_regions_fixture());
+    init_print(std::move(meshes), print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE(!print.objects().empty());
+    const PrintObject &object = *print.objects().front();
+    const Points points = support_points(print);
+    CriticalRegionEvidence result;
+    result.total_points = points.size();
+    const Point &center_offset = object.center_offset();
+    // The shelf's exposed one-millimetre band is x in (-1,0).  The cap's outer band
+    // x in (30,40.5) is disjoint from that shelf and is the independent 11 mm cantilever
+    // witness. Segment intersection also catches a path whose vertices straddle a window.
+    result.ordinary_overhang_segments = support_segments_in_window(print, center_offset, -1.1, -0.1, 2.0, 18.0);
+    result.cantilever_segments = support_segments_in_window(print, center_offset, 30.0, 40.5, -3.0, 23.0);
+    REQUIRE(result.total_points > 0);
+    return result;
+}
+
+} // namespace tree_support_critical_regions_contracts
+
+TEST_CASE("Critical tree support keeps cantilevers and removes ordinary overhangs",
+          "[TreeSupport][SupportCriticalRegionsOnly]")
+{
+    using namespace tree_support_critical_regions_contracts;
+    const CriticalRegionEvidence all_regions = observe(false);
+    const CriticalRegionEvidence critical_only = observe(true);
+
+    // Both regions must be reachable in the unfiltered public support output.
+    REQUIRE(all_regions.ordinary_overhang_segments > 0);
+    REQUIRE(all_regions.cantilever_segments > 0);
+    REQUIRE(critical_only.total_points > 0);
+    REQUIRE(critical_only.cantilever_segments > 0);
+    // support_critical_regions_only clears ordinary overhangs but retains source-classified
+    // cantilevers.  The windows are disjoint and derived from the fixture dimensions.
+    REQUIRE(critical_only.ordinary_overhang_segments == 0);
 }
 
 // Index of the first differing point, or the common length when they match. An index keeps a

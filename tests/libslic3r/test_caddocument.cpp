@@ -104,6 +104,85 @@ TEST_CASE("CadDocument legacy Rectangle sketch still works", "[CadDocument]")
     REQUIRE(doc.display_mesh.facets_count() > 0);
 }
 
+TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "[CadDocument][CadDocumentReplacement]")
+{
+    CadDocument doc;
+    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                      10.0, 10.0, 0.0, "BaseSketch");
+    const int extrude = doc.add_extrude(sketch, 5.0, false, BooleanMode::New, "BaseExtrude");
+    const auto valid_feature_index = [&doc](int index) {
+        return index >= 0 && index < static_cast<int>(doc.features.size());
+    };
+    REQUIRE(valid_feature_index(sketch));
+    REQUIRE(valid_feature_index(extrude));
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    REQUIRE(doc.display_mesh.facets_count() > 0);
+    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(500.0, 0.02));
+
+    // The editor payload deliberately carries a different name and link. The public replacement
+    // contract keeps the existing feature identity and sketch link while accepting solid parameters.
+    CadFeature edited;
+    edited.name      = "EditedPayload";
+    edited.type      = CadFeatureType::Sketch; // Deliberately mismatched payload; production preserves Extrude.
+    edited.sketch_ref = 9999;
+    edited.distance  = 8.0;
+    edited.mode      = BooleanMode::New;
+    REQUIRE(doc.replace_feature(extrude, edited));
+
+    REQUIRE(doc.features[extrude].name == "BaseExtrude");
+    REQUIRE(doc.features[extrude].type == CadFeatureType::Extrude);
+    REQUIRE(doc.features[extrude].sketch_ref == sketch);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    REQUIRE(doc.display_mesh.facets_count() > 0);
+    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(800.0, 0.02));
+}
+
+TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter sets", "[CadDocument][CadDocumentReplacement]")
+{
+    CadDocument doc;
+    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                      10.0, 10.0, 0.0, "Profile");
+    const int extrude = doc.add_extrude(sketch, 5.0, false, BooleanMode::New, "Solid");
+    const auto valid_feature_index = [&doc](int index) {
+        return index >= 0 && index < static_cast<int>(doc.features.size());
+    };
+    REQUIRE(valid_feature_index(sketch));
+    REQUIRE(valid_feature_index(extrude));
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    REQUIRE(doc.display_mesh.facets_count() > 0);
+    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(500.0, 0.02));
+
+    CadFeature edited;
+    edited.type      = CadFeatureType::Extrude;
+    edited.shape     = SketchShape::Rectangle;
+    edited.plane     = SketchPlane::XY();
+    edited.width     = 12.0;
+    edited.height    = 8.0;
+    edited.distance  = 4.0;
+    edited.symmetric = false;
+    edited.mode      = BooleanMode::New;
+    REQUIRE(doc.replace_sketch_extrude(sketch, extrude, edited));
+
+    REQUIRE(doc.features[sketch].name == "Profile");
+    REQUIRE(doc.features[sketch].type == CadFeatureType::Sketch);
+    REQUIRE(doc.features[extrude].name == "Solid");
+    REQUIRE(doc.features[extrude].type == CadFeatureType::Extrude);
+    REQUIRE_THAT(doc.features[sketch].width, Catch::Matchers::WithinAbs(12.0, 1e-9));
+    REQUIRE_THAT(doc.features[sketch].height, Catch::Matchers::WithinAbs(8.0, 1e-9));
+    REQUIRE_THAT(doc.features[extrude].distance, Catch::Matchers::WithinAbs(4.0, 1e-9));
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    REQUIRE(doc.display_mesh.facets_count() > 0);
+    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(384.0, 0.02));
+}
+
 TEST_CASE("CadDocument preview with profile on self-contained candidate", "[CadDocument]")
 {
     CadDocument doc;

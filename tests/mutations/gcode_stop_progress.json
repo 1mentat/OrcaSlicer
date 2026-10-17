@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Source mutations for remaining-time-to-stop progress, command ordering, and the disable-M73 gate.",
+  "mutants": [
+    {
+      "id": "stop-progress-zero-takes-positive-path",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (to_export_stop > 0) {",
+      "new": "if (to_export_stop >= 0) {",
+      "description": "Subminute remaining-stop values must enter the decimal/last-stop path; the fixture requires M73 C0.00 and a final M73 C0 line.",
+      "test_filter": "GcpPostStop"
+    },
+    {
+      "id": "stop-progress-next-stop-transition-inverted",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "is_last |= (next_it_stop != it_stop);",
+      "new": "is_last |= (next_it_stop == it_stop);",
+      "description": "A zero remaining time at a non-final stop is emitted as M73 C0.00 only when the next movement advances to a different stop.",
+      "test_filter": "GcpPostStop"
+    },
+    {
+      "id": "stop-progress-float-disable-guard-removed",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "auto format_line_M73_stop_float = [this, format_time_float](const std::string& mask, float time) {\n        if (this->m_disable_m73)\n            return std::string(\"\");\n        char line_M73[64];",
+      "new": "auto format_line_M73_stop_float = [format_time_float](const std::string& mask, float time) {\n        char line_M73[64];",
+      "description": "After the float stop formatter receives the same disable guard as the integer/main formatters, removing that guard must reintroduce M73 output in the disabled control.",
+      "test_filter": "GcpPostStop"
+    }
+  ]
+}

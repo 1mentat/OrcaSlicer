@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Private static candidate for the public support_critical_regions_only tree-support gate. The fixture keeps a 1 mm ordinary shelf overhang and a disjoint 11 mm cap overhang carried by a build-plate stem; public support-fill points are classified in model-space windows derived from those dimensions.",
+  "mutants": [
+    {
+      "id": "tree-critical-regions-gate-ignored",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "if (support_critical_regions_only && is_auto(stype)) {",
+      "new": "if (false) {",
+      "description": "Ignoring the public critical-regions gate retains the ordinary shelf overhang, so the enabled row must violate its zero ordinary-overhang witness.",
+      "test_filter": "SupportCriticalRegionsOnly"
+    },
+    {
+      "id": "tree-critical-cantilever-retention-omitted",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "append(layer->loverhangs, layer->cantilevers);",
+      "new": "layer->loverhangs = ExPolygons{};",
+      "description": "Dropping the retained cantilever set removes the disjoint cap witness, so the enabled row must violate its positive cantilever-support witness.",
+      "test_filter": "SupportCriticalRegionsOnly"
+    }
+  ]
+}

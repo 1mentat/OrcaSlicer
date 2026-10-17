@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public two-extruder single-variant Print::apply routing for machine-gated filament retraction distances when cut.",
+  "mutants": [
+    {
+      "id": "cut-distance-null-default-target",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "            opt_retraction_distance_default.values.push_back(ptr->nil_value());",
+      "new": "            opt_long_retraction_default.values.push_back(ptr->nil_value());",
+      "description": "Populate the wrong nullable option for the machine-gated distance fallback; the typed two-extruder single-variant reversed map must resolve nil filament values to [17,11].",
+      "test_filter": "FilamentCutRetractionOverride"
+    },
+    {
+      "id": "cut-distance-gate-inverted",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    if (opt_key == \"retraction_distances_when_cut\" && new_full_config.option<ConfigOptionInt>(\"enable_long_retraction_when_cut\")->value != LongRectrationLevel::EnableFilament) {",
+      "new": "    if (opt_key == \"retraction_distances_when_cut\" && new_full_config.option<ConfigOptionInt>(\"enable_long_retraction_when_cut\")->value == LongRectrationLevel::EnableFilament) {",
+      "description": "Invert the machine-versus-filament gate; explicit filament values must be ignored for Disabled/EnableMachine and preserved for EnableFilament, while nil inherits through the reversed map.",
+      "test_filter": "FilamentCutRetractionOverride"
+    }
+  ]
+}

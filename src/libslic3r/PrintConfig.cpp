@@ -12110,7 +12110,7 @@ void compute_filament_override_value(const std::string& opt_key, const ConfigOpt
     if (opt_key == "retraction_distances_when_cut" && new_full_config.option<ConfigOptionInt>("enable_long_retraction_when_cut")->value != LongRectrationLevel::EnableFilament) {
         auto ptr = dynamic_cast<const ConfigOptionFloatsNullable*>(opt_new_filament);
         for (size_t idx = 0; idx < ptr->values.size(); ++idx)
-            opt_long_retraction_default.values.push_back(ptr->nil_value());
+            opt_retraction_distance_default.values.push_back(ptr->nil_value());
         opt_new_filament = &opt_retraction_distance_default;
     }
 

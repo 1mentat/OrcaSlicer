@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Source mutations for ToolOrdering::assign_custom_gcodes custom-G-code mode/event assignment.",
+  "mutants": [
+    {
+      "id": "toolordering-custom-gcode-mode-mismatch-gate-inverted",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "\tbool \t\t\t\t\t\tignore_tool_and_color_changes = (mode == CustomGCode::MultiExtruder) != (model_mode == CustomGCode::MultiExtruder);",
+      "new": "\tbool \t\t\t\t\t\tignore_tool_and_color_changes = (mode == CustomGCode::MultiExtruder) == (model_mode == CustomGCode::MultiExtruder);",
+      "description": "The mode mismatch gate must suppress ColorChange and ToolChange events when the model mode and actual print mode disagree; the two-object mismatch row has an active filament-2 color event that exposes this gate.",
+      "test_filter": "CustomGCodeAssignment"
+    },
+    {
+      "id": "toolordering-custom-gcode-pause-custom-gate-inverted",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "\t\t\tbool pause_or_custom_gcode = ! color_change && ! tool_change;",
+      "new": "\t\t\tbool pause_or_custom_gcode = color_change || tool_change;",
+      "description": "Pause and Custom events are mode-independent and must remain assigned to their layer; replacing the non-color/non-tool classification with the color/tool classification drops those events in every positive row.",
+      "test_filter": "CustomGCodeAssignment"
+    }
+  ]
+}
