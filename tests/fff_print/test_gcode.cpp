@@ -932,8 +932,8 @@ TEST_CASE("Every selected bed family emits its initial and later bed temperature
     DynamicPrintConfig config = base_config();
     for (const BedTemperatureFamily &family : families) {
         // Keep the multi-bed validation control valid for every selected family.
-        config.set_deserialize_strict(family.initial_key, 70);
-        config.set_deserialize_strict(family.ordinary_key, 50);
+        config.set_deserialize_strict(family.initial_key, "70");
+        config.set_deserialize_strict(family.ordinary_key, "50");
     }
     config.set_deserialize_strict({
         {"curr_bed_type", bed.name},
@@ -943,8 +943,8 @@ TEST_CASE("Every selected bed family emits its initial and later bed temperature
         {"nozzle_temperature_initial_layer", 208},
         {"nozzle_temperature", 202},
     });
-    config.set_deserialize_strict(bed.initial_key, bed.nominal_initial);
-    config.set_deserialize_strict(bed.ordinary_key, bed.nominal_ordinary);
+    config.set_deserialize_strict(bed.initial_key, std::to_string(bed.nominal_initial));
+    config.set_deserialize_strict(bed.ordinary_key, std::to_string(bed.nominal_ordinary));
 
     const auto exported = fresh_custom_mesh_export(config, make_cube(5., 5., 0.4));
     const auto commands = parse_bed_commands(exported.text, config);
@@ -970,8 +970,8 @@ TEST_CASE("Bed heaters emit configured zero and maximum temperature targets", "[
 
     DynamicPrintConfig config = base_config();
     for (const BedTemperatureFamily &family : families) {
-        config.set_deserialize_strict(family.initial_key, 70);
-        config.set_deserialize_strict(family.ordinary_key, 50);
+        config.set_deserialize_strict(family.initial_key, "70");
+        config.set_deserialize_strict(family.ordinary_key, "50");
     }
     config.set_deserialize_strict({
         {"curr_bed_type", bed.name},
@@ -981,8 +981,8 @@ TEST_CASE("Bed heaters emit configured zero and maximum temperature targets", "[
         {"nozzle_temperature_initial_layer", 208},
         {"nozzle_temperature", 202},
     });
-    config.set_deserialize_strict(bed.initial_key, expected_initial);
-    config.set_deserialize_strict(bed.ordinary_key, expected_ordinary);
+    config.set_deserialize_strict(bed.initial_key, std::to_string(expected_initial));
+    config.set_deserialize_strict(bed.ordinary_key, std::to_string(expected_ordinary));
 
     const auto exported = fresh_custom_mesh_export(config, make_cube(5., 5., 0.4));
     const auto commands = parse_bed_commands(exported.text, config);
