@@ -2210,3 +2210,4 @@ TEST_CASE("Bridge suppression reduces bridge support while retaining cantilever 
     REQUIRE(with_bridge_support.cantilever_area_mm2 > 1.0);
     REQUIRE(without_bridge_support.cantilever_area_mm2 > 1.0);
     CHECK(with_bridge_support.bridge_area_mm2 > without_bridge_support.bridge_area_mm2 + 1.0);
+}
