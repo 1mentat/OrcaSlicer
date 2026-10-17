@@ -945,7 +945,8 @@ MixedLabelExport export_mixed_labels(bool bbl, bool split_sublayers)
     REQUIRE(result.positive_xy > 0.);
 
     const ToolOrdering &ordering = print.tool_ordering();
-    for (const LayerTools &layer_tools : ordering.layer_tools()) {
+    const size_t ordered_layer_count = static_cast<size_t>(ordering.end() - ordering.begin());
+    for (const LayerTools &layer_tools : ordering) {
         for (const LayerTools::MixedSubLayerGroup &group : layer_tools.mixed_sub_layer_groups) {
             REQUIRE(group.mixed_slot_0based == 2);
             REQUIRE(group.components_0based == std::vector<unsigned int>{0, 1});
@@ -967,9 +968,9 @@ MixedLabelExport export_mixed_labels(bool bbl, bool split_sublayers)
             result.layer_xy[layer_idx] = positive_xy_at_z(samples, layer->print_z);
             continue;
         }
-        REQUIRE(layer_idx < ordering.layer_tools().size());
+        REQUIRE(layer_idx < ordered_layer_count);
         const LayerTools::MixedSubLayerGroup *group = nullptr;
-        for (const LayerTools::MixedSubLayerGroup &candidate : ordering.layer_tools()[layer_idx].mixed_sub_layer_groups)
+        for (const LayerTools::MixedSubLayerGroup &candidate : ordering.begin()[layer_idx].mixed_sub_layer_groups)
             if (candidate.mixed_slot_0based == 2) {
                 REQUIRE(group == nullptr);
                 group = &candidate;

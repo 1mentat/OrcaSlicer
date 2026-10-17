@@ -761,7 +761,7 @@ static SparsePipelineRun run_sparse_pipeline(bool no_sparse_layers)
     const DynamicPrintConfig config = sparse_pipeline_config(no_sparse_layers);
     Print print;
     Model model;
-    init_print({ cube(10, 10, 2) }, print, model, config);
+    init_print({ make_cube(10., 10., 2.) }, print, model, config);
     // init_print's first normalization sees one role; reapply after regions know both filaments.
     print.apply(model, config);
     const auto validation = print.validate();
