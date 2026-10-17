@@ -1702,6 +1702,79 @@ TEST_CASE("Spiral settings preserve smooth geometry and flow transitions", "[GCo
           base_transition->flat_filament_length + 1e-4);
 }
 
+TEST_CASE("Sequential spiral vase preserves rising perimeter flow and by-layer geometry",
+          "[GCode][GCodeExportWorkflows][SpiralSequential]")
+{
+    const DynamicPrintConfig by_layer_config = spiral_settings_config(true, "1000%", 0.5, 0.5);
+    const SpiralSettingsEvidence by_layer = export_spiral_settings(by_layer_config);
+
+    DynamicPrintConfig by_object_config = by_layer_config;
+    by_object_config.set_deserialize_strict({{"print_sequence", "by object"}});
+    const SpiralSettingsEvidence by_object = export_spiral_settings(by_object_config);
+
+    DynamicPrintConfig no_smoothing_config = by_object_config;
+    no_smoothing_config.set_deserialize_strict({{"spiral_mode_max_xy_smoothing", "0%"}});
+    const SpiralSettingsEvidence no_smoothing = export_spiral_settings(no_smoothing_config);
+
+    DynamicPrintConfig flow_off_config = by_object_config;
+    flow_off_config.set_deserialize_strict({
+        {"spiral_starting_flow_ratio", 0.0},
+        {"spiral_finishing_flow_ratio", 0.0},
+    });
+    const SpiralSettingsEvidence flow_off = export_spiral_settings(flow_off_config);
+
+    REQUIRE(by_layer.layers.size() >= 3);
+    REQUIRE(by_object.layers.size() == by_layer.layers.size());
+    REQUIRE(no_smoothing.layers.size() == by_object.layers.size());
+    REQUIRE(no_smoothing.perimeter_extrusions > 0);
+    REQUIRE(no_smoothing.spiral_z_extrusions > 0);
+    REQUIRE(by_layer.spiral_z_extrusions > 0);
+    REQUIRE(by_object.perimeter_extrusions > 0);
+    REQUIRE(by_object.spiral_z_extrusions > 0);
+    REQUIRE(flow_off.spiral_z_extrusions > 0);
+    REQUIRE(flow_off.layers.size() == by_object.layers.size());
+    for (size_t layer_idx = 0; layer_idx < by_layer.layers.size(); ++layer_idx) {
+        const SpiralLayerEvidence &layer = by_layer.layers[layer_idx];
+        const SpiralLayerEvidence &sequential = by_object.layers[layer_idx];
+        CHECK(sequential.perimeter_extrusions == layer.perimeter_extrusions);
+        CHECK(sequential.spiral_z_extrusions == layer.spiral_z_extrusions);
+        CHECK_THAT(sequential.filament_length,
+                   Catch::Matchers::WithinAbs(layer.filament_length, 1e-4));
+        CHECK_THAT(sequential.xy_path_length,
+                   Catch::Matchers::WithinAbs(layer.xy_path_length, 1e-4));
+        CHECK_THAT(sequential.spiral_filament_length,
+                   Catch::Matchers::WithinAbs(layer.spiral_filament_length, 1e-4));
+        CHECK_THAT(sequential.spiral_xy_path_length,
+                   Catch::Matchers::WithinAbs(layer.spiral_xy_path_length, 1e-4));
+    }
+    CHECK(spiral_xy_geometry_equal(by_object, by_layer));
+
+    bool smoothing_changed = !spiral_xy_geometry_equal(by_object, no_smoothing);
+    for (size_t layer_idx = 0; layer_idx < by_object.layers.size() && !smoothing_changed; ++layer_idx)
+        smoothing_changed = std::abs(by_object.layers[layer_idx].spiral_xy_path_length -
+                                     no_smoothing.layers[layer_idx].spiral_xy_path_length) > 1e-3;
+    CHECK(smoothing_changed);
+
+    const size_t flow_first_layer = first_spiral_settings_layer(by_object);
+    const size_t no_flow_first_layer = first_spiral_settings_layer(flow_off);
+    REQUIRE(flow_first_layer < by_object.layers.size());
+    REQUIRE(no_flow_first_layer < flow_off.layers.size());
+    REQUIRE(by_object.layers[flow_first_layer].spiral_filament_length > 0.0);
+    REQUIRE(flow_off.layers[no_flow_first_layer].spiral_filament_length > 0.0);
+    CHECK(by_object.layers[flow_first_layer].filament_length >
+          flow_off.layers[no_flow_first_layer].filament_length + 1e-4);
+
+    const size_t flow_last_layer = last_spiral_settings_layer(by_object);
+    const size_t no_flow_last_layer = last_spiral_settings_layer(flow_off);
+    REQUIRE(flow_last_layer < by_object.layers.size());
+    REQUIRE(no_flow_last_layer < flow_off.layers.size());
+    const SpiralLayerEvidence *flow_transition = final_flat_transition(by_object, flow_last_layer);
+    const SpiralLayerEvidence *no_flow_transition = final_flat_transition(flow_off, no_flow_last_layer);
+    REQUIRE(flow_transition != nullptr);
+    REQUIRE(no_flow_transition != nullptr);
+    CHECK(flow_transition->flat_filament_length > no_flow_transition->flat_filament_length + 1e-4);
+}
+
 TEST_CASE("Arc fitting converts eligible perimeter motion to arcs", "[GCode][GCodeExportWorkflows]")
 {
     auto off = base_config();

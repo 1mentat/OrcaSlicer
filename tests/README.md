@@ -242,6 +242,13 @@ and `scheduled_layer_gcode.json`.
 thumbnail channels, and invalid thumbnail-list cardinalities. Its mutations are
 in `bbs_export_metadata.json`.
 
+`[ColorGroups]` checks object-specific extruder assignments from root and related
+3MF model color groups, including reuse of the same color across model files.
+Its mutations in `bbs_import_colors.json` challenge slot allocation and reuse.
+`[SpiralSequential]` checks rising perimeter motion, effective smoothing, and
+starting/finishing flow in sequential vase exports against controls and the
+equivalent layer-by-layer output. Its mutations are in `spiral_sequential.json`.
+
 `[AdaptivePressureAdvanceRamps]` checks emitted pressure-advance values against a
 linear calibration model for overhang events with an immediate feed update,
 including retained values when duplicate commands are omitted. A disabled

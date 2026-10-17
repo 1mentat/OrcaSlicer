@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "BBS color-group import mutations for object assignments and equal-color reuse across model files.",
+  "mutants": [
+    {
+      "id": "bbs-import-color-group-extruder-step",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "++extruder_id;",
+      "new": "extruder_id += 2;",
+      "test_filter": "ColorGroups",
+      "description": "Distinct red/blue groups no longer map to public extruder slots {1,2}."
+    },
+    {
+      "id": "bbs-import-color-group-reuse-ignored",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "color_group_id_to_extruder_id_map[group_iter->first] = color_iter->second;",
+      "new": "color_group_id_to_extruder_id_map[group_iter->first] = extruder_id;",
+      "test_filter": "ColorGroups",
+      "description": "The repeated red group 33 incorrectly receives the current blue slot instead of reusing slot 1."
+    }
+  ]
+}
