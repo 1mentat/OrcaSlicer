@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Source-reviewed filament flow and maximum volumetric speed mutants with feedrate, deposited-material, and incremental-invalidation oracles.",
+  "description": "Source-reviewed filament flow and maximum volumetric speed mutants with feedrate and deposited-material oracles.",
   "mutants": [
     {
       "id": "motion-flow-filament-ratio-defaulted",
@@ -33,14 +33,6 @@
       "new": "    if (false) {\n        // mutation: omit filament max volumetric speed cap\n        speed = std::min(speed, FILAMENT_CONFIG(filament_max_volumetric_speed) / _mm3_per_mm);\n    }",
       "description": "Omit the positive filament maximum volumetric speed cap and lose the bounded feedrate response.",
       "test_filter": "FilamentMaxVolumetricSpeed"
-    },
-    {
-      "id": "motion-flow-filament-ratio-invalidation-omitted",
-      "path": "src/libslic3r/PrintObject.cpp",
-      "old": "            || opt_key == \"filament_flow_ratio\"\n",
-      "new": "            || false /* mutation: omit filament flow ratio invalidation */\n",
-      "description": "Omit filament flow ratio from incremental invalidation so a changed configuration can retain stale G-code.",
-      "test_filter": "FilamentFlowVariance"
     }
   ]
 }

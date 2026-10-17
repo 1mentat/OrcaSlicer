@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed mutations for public G-code axis remapping and decoupled belt-frame geometry.",
+  "mutants": [
+    {
+      "id": "gcode-remap-gate-disabled",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "const bool remap = BeltTransformPipeline::axis_remap_enabled(print.config());",
+      "new": "const bool remap = false;",
+      "description": "Disable the belt-only remap gate; the public matrix must observe non-identity mappings on a belt export. This focused mutant does not itself exercise the non-belt no-op gate.",
+      "test_filter": "GCodeRemap"
+    },
+    {
+      "id": "gcode-remap-y-config-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "int ry = remap ? int(print.config().gcode_remap_y.value) : int(RemapAxis::PosY);",
+      "new": "int ry = int(RemapAxis::PosY);",
+      "description": "Ignore the public Y setting; the per-output-axis matrix must fail for the non-identity Y values requested by the matrix.",
+      "test_filter": "GCodeRemap"
+    },
+    {
+      "id": "gcode-remap-negation-dropped",
+      "path": "src/libslic3r/GCode/MachineKinematics.cpp",
+      "old": "if (r < 6) return -pos[axis];",
+      "new": "if (r < 6) return pos[axis];",
+      "description": "Drop the sign inversion for negated labels; the asymmetric coordinate oracle must distinguish neg_x/neg_y/neg_z from positive labels.",
+      "test_filter": "GCodeRemap"
+    },
+    {
+      "id": "gcode-remap-reverse-dropped",
+      "path": "src/libslic3r/GCode/MachineKinematics.cpp",
+      "old": "return m_build_vol_max[axis] - pos[axis];",
+      "new": "return pos[axis];",
+      "description": "Drop build-volume reversal; the asymmetric maxima and printable height must distinguish rev_x/rev_y/rev_z from ordinary positive mappings.",
+      "test_filter": "GCodeRemap"
+    },
+    {
+      "id": "gcode-frame-decouple-angle-ignored",
+      "path": "src/libslic3r/GCode/MachineFrameTransform.cpp",
+      "old": "const double angle_deg = config.belt_frame_tilt_decouple.value\n        ? config.belt_frame_tilt_angle.value\n        : config.belt_slice_rotation_angle.value;",
+      "new": "const double angle_deg = config.belt_slice_rotation_angle.value;",
+      "description": "Ignore the decoupled frame angle; the paired active frame export must use the configured 45 degree frame angle rather than the 30 degree slicing angle.",
+      "test_filter": "GCodeFrame"
+    }
+  ]
+}

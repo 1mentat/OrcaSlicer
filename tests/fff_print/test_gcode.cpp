@@ -2485,6 +2485,108 @@ DynamicPrintConfig tower_contract_config(const char* type)
                                    });
 }
 
+std::vector<Vec3d> remap_extrusion_endpoints(const std::string &text, const DynamicPrintConfig &config)
+{
+    std::vector<Vec3d> points;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&points](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self))
+            return;
+        points.emplace_back(line.new_X(self), line.new_Y(self), line.new_Z(self));
+    });
+    return points;
+}
+
+std::string export_remap_fixture(Print &print, Model &model, const DynamicPrintConfig &config)
+{
+    print.apply(model, config);
+    require_valid(print);
+    return Test::gcode(print);
+}
+
+struct ExpectedRemap
+{
+    int  source_axis;
+    int  sign;
+    bool reverse;
+};
+
+const ExpectedRemap &expected_remap(const int value)
+{
+    static constexpr std::array<ExpectedRemap, 9> values{{
+        {0, 1, false}, {1, 1, false}, {2, 1, false},
+        {0, -1, false}, {1, -1, false}, {2, -1, false},
+        {0, 1, true}, {1, 1, true}, {2, 1, true},
+    }};
+    return values.at(static_cast<size_t>(value));
+}
+
+double remap_component(const Vec3d &point, const int remap, const Vec3d &build_max)
+{
+    const std::array<double, 3> source{point.x(), point.y(), point.z()};
+    const ExpectedRemap &spec = expected_remap(remap);
+    const double value = static_cast<double>(spec.sign) * source[spec.source_axis];
+    return spec.reverse ? build_max[spec.source_axis] - source[spec.source_axis] : value;
+}
+
+Vec3d expected_remap_point(const Vec3d &point, const std::array<int, 3> &mapping,
+                           const Vec3d &build_max)
+{
+    return { remap_component(point, mapping[0], build_max),
+             remap_component(point, mapping[1], build_max),
+             remap_component(point, mapping[2], build_max) };
+}
+
+Vec3d frame_forward(const Vec3d &point, const double angle_deg)
+{
+    const double angle = angle_deg * PI / 180.0;
+    const double sin_a = std::sin(angle);
+    return { point.x(), point.y() / std::abs(sin_a),
+             point.z() + point.y() * std::cos(angle) / sin_a };
+}
+
+Vec3d frame_inverse(const Vec3d &point, const double angle_deg)
+{
+    const double angle = angle_deg * PI / 180.0;
+    const double sin_a = std::sin(angle);
+    const double logical_y = point.y() * std::abs(sin_a);
+    return { point.x(), logical_y,
+             point.z() - logical_y * std::cos(angle) / sin_a };
+}
+
+DynamicPrintConfig remap_public_config()
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"belt_printer", true},
+        {"belt_slice_rotation", "none"},
+        {"belt_slice_rotation_angle", 0.0},
+        {"belt_frame_tilt_decouple", false},
+        {"belt_frame_tilt_angle", 45.0},
+        {"printable_area", "0x0,240x0,240x180,0x180"},
+        {"printable_height", 310.0},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"sparse_infill_density", "0%"},
+        {"wall_loops", 1},
+        {"enable_arc_fitting", false},
+        {"gcode_remap_x", "pos_x"},
+        {"gcode_remap_y", "pos_y"},
+        {"gcode_remap_z", "pos_z"},
+    });
+    return config;
+}
+
+void init_remap_fixture(Print &print, Model &model, const DynamicPrintConfig &config)
+{
+    TriangleMesh body = make_cube(18.0, 13.0, 1.2);
+    body.translate(37.0, 53.0, 0.0);
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(std::move(body));
+    init_print(std::move(meshes), print, model, config, nullptr, false);
+}
+
 } // namespace
 
 TEST_CASE("GCode belt export emits brim geometry and layer markers", "[GCode][GCodeBroad]")
@@ -2597,6 +2699,99 @@ TEST_CASE("GCode belt path remains finite for a sloped test mesh", "[GCode][GCod
     CHECK(std::isfinite(m.xy_path));
     CHECK(std::isfinite(m.filament));
     CHECK(m.z_only_moves > 0);
+}
+
+TEST_CASE("Public G-code remap maps every registered enum value", "[GCode][GCodeRemap]")
+{
+    const std::array<const char *, 9> values{{
+        "pos_x", "pos_y", "pos_z", "neg_x", "neg_y", "neg_z", "rev_x", "rev_y", "rev_z",
+    }};
+    const std::array<const char *, 3> output_keys{{"gcode_remap_x", "gcode_remap_y", "gcode_remap_z"}};
+
+    const DynamicPrintConfig base = remap_public_config();
+    const std::array<const char *, 3> identity_values{{"pos_x", "pos_y", "pos_z"}};
+    for (size_t output_axis = 0; output_axis < output_keys.size(); ++output_axis) {
+        const ConfigOption *option = base.option(output_keys[output_axis]);
+        REQUIRE(option != nullptr);
+        CHECK(option->serialize() == identity_values[output_axis]);
+    }
+    Print print;
+    Model model;
+    init_remap_fixture(print, model, base);
+    const std::string identity_export = export_remap_fixture(print, model, base);
+    const std::vector<Vec3d> identity_points = remap_extrusion_endpoints(identity_export, base);
+    REQUIRE(identity_points.size() > 20);
+
+    const ConfigOptionPoints *bed_option = base.option<ConfigOptionPoints>("printable_area");
+    const ConfigOptionFloat *height_option = base.option<ConfigOptionFloat>("printable_height");
+    REQUIRE(bed_option != nullptr);
+    REQUIRE(height_option != nullptr);
+    const BoundingBoxf bed(bed_option->values);
+    const Vec3d build_max(bed.max.x(), bed.max.y(), height_option->value);
+    for (size_t output_axis = 0; output_axis < output_keys.size(); ++output_axis) {
+        for (size_t value_index = 0; value_index < values.size(); ++value_index) {
+            DynamicPrintConfig config = base;
+            config.set_deserialize_strict(output_keys[output_axis], values[value_index]);
+            const ConfigOption *selected = config.option(output_keys[output_axis]);
+            REQUIRE(selected != nullptr);
+            CHECK(selected->serialize() == values[value_index]);
+            INFO("output axis " << output_keys[output_axis] << " value " << values[value_index]);
+            const std::string exported = export_remap_fixture(print, model, config);
+            const std::vector<Vec3d> actual = remap_extrusion_endpoints(exported, config);
+            REQUIRE(actual.size() == identity_points.size());
+
+            std::array<int, 3> mapping{{0, 1, 2}};
+            mapping[output_axis] = static_cast<int>(value_index);
+            for (size_t point_index = 0; point_index < identity_points.size(); ++point_index) {
+                const Vec3d expected = expected_remap_point(identity_points[point_index], mapping, build_max);
+                REQUIRE_THAT(actual[point_index].x(), Catch::Matchers::WithinAbs(expected.x(), 0.002));
+                REQUIRE_THAT(actual[point_index].y(), Catch::Matchers::WithinAbs(expected.y(), 0.002));
+                REQUIRE_THAT(actual[point_index].z(), Catch::Matchers::WithinAbs(expected.z(), 0.002));
+            }
+        }
+    }
+}
+
+TEST_CASE("Public belt frame decoupling transforms a remapped export", "[GCode][GCodeRemap][GCodeFrame]")
+{
+    // Decoupling is a separate post-remap frame stage. Reuse one sliced print so this
+    // pair changes only the export-time machine-frame angle, not the sliced geometry.
+    const DynamicPrintConfig base = remap_public_config();
+    const DynamicPrintConfig coupled = [&] {
+        DynamicPrintConfig config = base;
+        config.set_deserialize_strict({
+            {"belt_slice_rotation", "x"},
+            {"belt_slice_rotation_angle", 30.0},
+            {"gcode_remap_x", "pos_x"},
+            {"gcode_remap_y", "pos_z"},
+            {"gcode_remap_z", "pos_y"},
+            {"belt_frame_tilt_decouple", false},
+            {"belt_frame_tilt_angle", 45.0},
+        });
+        return config;
+    }();
+    Print frame_print;
+    Model frame_model;
+    init_remap_fixture(frame_print, frame_model, coupled);
+    const std::vector<Vec3d> coupled_points = remap_extrusion_endpoints(
+        export_remap_fixture(frame_print, frame_model, coupled), coupled);
+    DynamicPrintConfig decoupled = coupled;
+    decoupled.set_deserialize_strict({{"belt_frame_tilt_decouple", true}});
+    const std::vector<Vec3d> decoupled_points = remap_extrusion_endpoints(
+        export_remap_fixture(frame_print, frame_model, decoupled), decoupled);
+    REQUIRE(coupled_points.size() > 20);
+    REQUIRE(decoupled_points.size() == coupled_points.size());
+
+    bool changed = false;
+    for (size_t point_index = 0; point_index < coupled_points.size(); ++point_index) {
+        const Vec3d expected = frame_forward(frame_inverse(coupled_points[point_index], 30.0), 45.0);
+        REQUIRE_THAT(decoupled_points[point_index].x(), Catch::Matchers::WithinAbs(expected.x(), 0.002));
+        REQUIRE_THAT(decoupled_points[point_index].y(), Catch::Matchers::WithinAbs(expected.y(), 0.002));
+        REQUIRE_THAT(decoupled_points[point_index].z(), Catch::Matchers::WithinAbs(expected.z(), 0.002));
+        if ((decoupled_points[point_index] - coupled_points[point_index]).norm() > 0.01)
+            changed = true;
+    }
+    REQUIRE(changed);
 }
 
 } // namespace gcode_broad_contracts
