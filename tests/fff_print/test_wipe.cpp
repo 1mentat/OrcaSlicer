@@ -19,6 +19,7 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include <map>
 #include <set>
+#include <sstream>
 #include <tuple>
 #include <string>
 #include <string_view>
@@ -1888,6 +1889,36 @@ bool same_endpoints(const TravelRoute &lhs, const TravelRoute &rhs)
            (lhs.points.back() - rhs.points.back()).norm() < 0.05;
 }
 
+std::string route_diagnostics(const TravelRoute &route, const std::vector<Segment> &walls)
+{
+    std::ostringstream text;
+    text << "layer=" << route.layer_index << " z=" << route.z
+         << " emission=" << route.start_emission_index
+         << " retracted=" << route.had_retraction
+         << " direct_mm=" << route.direct_mm << " path_mm=" << route.path_mm
+         << " direct_crosses=" << route.direct_crosses_wall << " legs_clear=" << route.legs_clear
+         << " points=" << route.points.size();
+    for (size_t i = 0; i < std::min<size_t>(route.points.size(), 32); ++i)
+        text << " [" << i << ":" << route.points[i].x() << "," << route.points[i].y() << "]";
+
+    size_t intersections = 0;
+    for (const Segment &wall : walls) {
+        if (!central_barrier_wall(wall) || wall.layer_index != route.layer_index ||
+            wall.emission_index >= route.start_emission_index || std::abs(wall.z - route.z) > 0.001)
+            continue;
+        for (size_t i = 1; i < route.points.size(); ++i) {
+            if (!proper_crossing(route.points[i - 1], route.points[i], wall.start, wall.end))
+                continue;
+            if (intersections++ < 16)
+                text << "\nleg " << i - 1 << "->" << i << " crosses wall emission=" << wall.emission_index
+                     << " [" << wall.start.x() << "," << wall.start.y() << "]->["
+                     << wall.end.x() << "," << wall.end.y() << "]";
+        }
+    }
+    text << "\nbarrier_intersections=" << intersections;
+    return text.str();
+}
+
 } // namespace reduce_crossing_wall_contracts
 
 TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted wall", "[Wipe][ReduceCrossingWall][SettingsRetractionVariance][Pipeline]")
@@ -1915,6 +1946,7 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
     size_t same_endpoint_pairs = 0;
     size_t same_endpoint_pairs_with_disabled_crossing = 0;
     size_t fully_eligible_pairs = 0;
+    std::ostringstream paired_routes;
     for (const TravelRoute &candidate : disabled.routes) {
         if (!candidate.had_retraction || !spans_endpoint_squares(candidate))
             continue;
@@ -1922,6 +1954,10 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
             if (!same_endpoints(route, candidate) || !spans_endpoint_squares(route))
                 continue;
             ++same_endpoint_pairs;
+            if (same_endpoint_pairs <= 4)
+                paired_routes << "\nPair " << same_endpoint_pairs << " disabled: "
+                              << route_diagnostics(candidate, disabled.walls) << "\nenabled: "
+                              << route_diagnostics(route, enabled.walls) << '\n';
             if (candidate.direct_crosses_wall)
                 ++same_endpoint_pairs_with_disabled_crossing;
             if (candidate.direct_crosses_wall && route.direct_crosses_wall &&
@@ -1934,6 +1970,7 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
             same_endpoint_pairs_with_disabled_crossing, fully_eligible_pairs,
             disabled.central_barrier_walls, disabled.non_barrier_walls,
             enabled.central_barrier_walls, enabled.non_barrier_walls);
+    INFO(paired_routes.str());
 
     const TravelRoute *direct = nullptr;
     const TravelRoute *detour = nullptr;
