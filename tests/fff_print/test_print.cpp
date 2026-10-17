@@ -2505,7 +2505,7 @@ TEST_CASE("Print process selects cached paths and completes cached object steps"
     require_valid(fresh);
     fresh.set_status_silent();
     REQUIRE(fresh.objects().size() == 1);
-    PrintObject *fresh_object = fresh.objects().front();
+    const PrintObject *fresh_object = fresh.objects().front();
     REQUIRE(fresh_object->layer_count() == 0);
     const PrintObjectStep cache_steps[] = {
         posSlice, posPerimeters, posPrepareInfill, posInfill, posIroning, posContouring,
