@@ -332,6 +332,16 @@ first-layer fan-off transition, the configured cooling range, and the kickstart
 pulse followed by its target speed while conserving extrusion and path length.
 Its mutations are in `gcode_fan_pipeline.json`.
 
+`[AirFiltration]` checks exhaust-fan commands before and after deposition, with
+independent capability, master-switch, and phase controls. Five four-layer
+exports preserve object material; its mutation is in `air_filtration.json`.
+`[DraftShieldSingleLoop]` checks three first-layer skirt loops and either three
+or one later-layer loop while preserving object deposition. Its two four-layer
+exports use actual extrusion runs; its mutation is in
+`draft_shield_single_loop.json`. `[SupportInterfaceLoopPattern]` checks closed
+contact topology with positive support-interface deposition in both setting
+states; its mutation is in `support_interface_loop_pattern.json`.
+
 `[MultimaterialWipe]` checks direct WipeTower2 purge matrices, wall geometry,
 ramming, cooling, stamping, loading, and delay commands. Independent cooling
 variants change one setting at a time, with feedrates read from executable

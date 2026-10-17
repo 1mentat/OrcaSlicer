@@ -496,8 +496,8 @@ TEST_CASE("Z hop changes travel height while preserving material paths", "[GCode
 
 ExportedPrint fresh_custom_mesh_export(const DynamicPrintConfig &config, TriangleMesh mesh)
 {
-    Print print;
     Model model;
+    Print print;
     Test::init_print({std::move(mesh)}, print, model, config);
     require_valid(print);
     return export_print(print);
@@ -2840,6 +2840,138 @@ TEST_CASE("Extrusion role hooks publish ordered role transitions and placeholder
 }
 
 
+
+struct ExhaustFanEvidence {
+    std::vector<int> p3_pwm;
+    std::vector<size_t> p3_ordinals;
+    std::optional<size_t> first_deposition_ordinal;
+    std::optional<size_t> last_deposition_ordinal;
+};
+
+ExhaustFanEvidence inspect_exhaust_fan_commands(const std::string &text,
+                                               const DynamicPrintConfig &config)
+{
+    ExhaustFanEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    size_t ordinal = 0;
+    reader.parse_buffer(text, [&evidence, &ordinal](GCodeReader &self,
+                                                  const GCodeReader::GCodeLine &line) {
+        const size_t event = ordinal++;
+        if (line.cmd_is("M106")) {
+            float fan = 0.0f;
+            float pwm = 0.0f;
+            if (line.has_value('P', fan) && std::isfinite(fan) && std::fabs(fan - 3.0f) <= 1e-6f) {
+                REQUIRE(line.has_value('S', pwm));
+                REQUIRE(std::isfinite(pwm));
+                REQUIRE(pwm >= 0.0f);
+                REQUIRE(pwm <= 255.0f);
+                REQUIRE(std::fabs(pwm - std::round(pwm)) <= 1e-4f);
+                evidence.p3_pwm.push_back(static_cast<int>(std::lround(pwm)));
+                evidence.p3_ordinals.push_back(event);
+            }
+        }
+
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        if (!evidence.first_deposition_ordinal.has_value())
+            evidence.first_deposition_ordinal = event;
+        evidence.last_deposition_ordinal = event;
+    });
+    return evidence;
+}
+
+DynamicPrintConfig air_filtration_config(bool capability, bool master, bool during, bool completion)
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"support_air_filtration", capability},
+        {"activate_air_filtration", master ? "1" : "0"},
+        {"activate_air_filtration_during_print", during ? "1" : "0"},
+        {"activate_air_filtration_on_completion", completion ? "1" : "0"},
+        {"during_print_exhaust_fan_speed", "35"},
+        {"complete_print_exhaust_fan_speed", "65"},
+        {"support_cooling_filter", false},
+        {"cooling_filter_enabled", false},
+        {"auxiliary_fan", false},
+        {"additional_cooling_fan_speed", 0},
+        {"enable_support", false},
+        {"enable_prime_tower", false},
+        {"enable_overhang_bridge_fan", false},
+        {"overhang_fan_threshold", "95%"},
+        {"overhang_fan_speed", 0},
+        {"internal_bridge_fan_speed", -1},
+        {"support_material_interface_fan_speed", -1},
+        {"ironing_fan_speed", -1},
+        {"fan_speedup_time", 0.0},
+        {"fan_kickstart", 0.0},
+        {"enable_arc_fitting", false},
+        {"use_relative_e_distances", true},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"filament_start_gcode", ""},
+        {"filament_end_gcode", ""},
+    });
+    return config;
+}
+
+void require_exhaust_fan_row(const ExhaustFanEvidence &commands,
+                            const MotionEvidence &material,
+                            const std::vector<int> &expected_pwm)
+{
+    REQUIRE(material.extrusion_moves > 0);
+    REQUIRE(std::isfinite(material.xy_path));
+    REQUIRE(std::isfinite(material.filament));
+    REQUIRE(material.xy_path > 0.0);
+    REQUIRE(material.filament > 0.0);
+    REQUIRE(commands.first_deposition_ordinal.has_value());
+    REQUIRE(commands.last_deposition_ordinal.has_value());
+    REQUIRE(commands.p3_pwm == expected_pwm);
+    REQUIRE(commands.p3_ordinals.size() == expected_pwm.size());
+    for (size_t i = 0; i < expected_pwm.size(); ++i) {
+        if (expected_pwm[i] == 89)
+            REQUIRE(commands.p3_ordinals[i] < *commands.first_deposition_ordinal);
+        if (expected_pwm[i] == 165)
+            REQUIRE(commands.p3_ordinals[i] > *commands.last_deposition_ordinal);
+    }
+}
+
+TEST_CASE("Air filtration capability gates directed exhaust fan phases", "[GCode][AirFiltration]")
+{
+    struct Row {
+        const char *name;
+        bool capability;
+        bool master;
+        bool during;
+        bool completion;
+        std::vector<int> expected_pwm;
+    };
+    const std::vector<Row> rows{
+        {"all enabled", true, true, true, true, {89, 165}},
+        {"capability disabled", false, true, true, true, {}},
+        {"master activation disabled", true, false, true, true, {}},
+        {"during phase disabled", true, true, false, true, {165}},
+        {"completion phase disabled", true, true, true, false, {89}},
+    };
+
+    const DynamicPrintConfig reference_config = air_filtration_config(true, true, true, true);
+    const ExportedPrint reference_output = fresh_custom_mesh_export(reference_config, make_cube(8.0, 8.0, 0.8));
+    const ExhaustFanEvidence reference_commands = inspect_exhaust_fan_commands(reference_output.text, reference_config);
+    const MotionEvidence reference_material = motion_evidence(reference_output.text, reference_config);
+    require_exhaust_fan_row(reference_commands, reference_material, rows.front().expected_pwm);
+
+    for (size_t i = 1; i < rows.size(); ++i) {
+        CAPTURE(rows[i].name);
+        const DynamicPrintConfig config = air_filtration_config(rows[i].capability, rows[i].master,
+                                                                rows[i].during, rows[i].completion);
+        const ExportedPrint output = fresh_custom_mesh_export(config, make_cube(8.0, 8.0, 0.8));
+        const ExhaustFanEvidence commands = inspect_exhaust_fan_commands(output.text, config);
+        const MotionEvidence material = motion_evidence(output.text, config);
+        require_exhaust_fan_row(commands, material, rows[i].expected_pwm);
+        CHECK_THAT(material.xy_path, Catch::Matchers::WithinRel(reference_material.xy_path, 1e-4));
+        CHECK_THAT(material.filament, Catch::Matchers::WithinRel(reference_material.filament, 1e-4));
+    }
+}
 
 } // namespace gcode_print_variance_contracts
 

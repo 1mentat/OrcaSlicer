@@ -1647,3 +1647,183 @@ TEST_CASE("Brim flow boundaries scale brim material independently of first layer
     require_material(base.first_layer_object, first_layer_changed.first_layer_object, 0.6);
     require_material(base.later_object, first_layer_changed.later_object, 1.0);
 }
+
+namespace draft_shield_single_loop_contracts {
+
+namespace {
+
+struct SkirtLoopEvidence {
+    std::vector<size_t> loops_per_layer;
+    std::vector<double> loop_xy_lengths;
+    size_t non_skirt_extrusion_moves = 0;
+    double non_skirt_xy_path = 0.0;
+    double non_skirt_filament = 0.0;
+    bool finite = true;
+};
+
+struct DraftShieldExport {
+    std::string gcode;
+    DynamicPrintConfig config;
+};
+
+SkirtLoopEvidence inspect_skirt_loops(const DraftShieldExport &exported)
+{
+    SkirtLoopEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(exported.config);
+    size_t layer = size_t(-1);
+    std::string current_role;
+    bool in_skirt_run = false;
+    bool travel_after_skirt = false;
+    size_t active_run = size_t(-1);
+    reader.parse_buffer(exported.gcode, [&evidence, &layer, &current_role, &in_skirt_run,
+                                &travel_after_skirt, &active_run](GCodeReader &self,
+                                                                  const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("LAYER_CHANGE") != std::string_view::npos ||
+            comment.find("CHANGE_LAYER") != std::string_view::npos) {
+            ++layer;
+            evidence.loops_per_layer.resize(layer + 1, 0);
+            current_role.clear();
+            in_skirt_run = false;
+            travel_after_skirt = false;
+            active_run = size_t(-1);
+        }
+
+        if (const std::string_view marker = brim_flow_variance::role_marker(comment); !marker.empty()) {
+            current_role = std::string(marker);
+            if (current_role != "Skirt") {
+                in_skirt_run = false;
+                travel_after_skirt = false;
+                active_run = size_t(-1);
+            }
+        }
+
+        const bool motion = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+        if (!motion)
+            return;
+        const double xy = line.dist_XY(self);
+        const double filament = std::abs(line.dist_E(self));
+        if (!std::isfinite(xy) || !std::isfinite(filament)) {
+            evidence.finite = false;
+            return;
+        }
+
+        if (current_role == "Skirt" && !line.extruding(self) && xy > EPSILON) {
+            travel_after_skirt = true;
+            return;
+        }
+        if (!line.extruding(self) || xy <= EPSILON)
+            return;
+
+        if (current_role == "Skirt") {
+            if (!in_skirt_run || travel_after_skirt) {
+                REQUIRE(layer != size_t(-1));
+                evidence.loops_per_layer[layer] += 1;
+                evidence.loop_xy_lengths.push_back(0.0);
+                active_run = evidence.loop_xy_lengths.size() - 1;
+                in_skirt_run = true;
+            }
+            travel_after_skirt = false;
+            REQUIRE(active_run != size_t(-1));
+            evidence.loop_xy_lengths[active_run] += xy;
+            return;
+        }
+
+        in_skirt_run = false;
+        travel_after_skirt = false;
+        active_run = size_t(-1);
+        ++evidence.non_skirt_extrusion_moves;
+        evidence.non_skirt_xy_path += xy;
+        evidence.non_skirt_filament += filament;
+    });
+    return evidence;
+}
+
+DraftShieldExport export_draft_shield_case(bool single_loop)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"skirt_loops", 3},
+        {"skirt_height", 0},
+        {"skirt_distance", 3.0},
+        {"min_skirt_length", 0.0},
+        {"skirt_type", "combined"},
+        {"draft_shield", "enabled"},
+        {"single_loop_draft_shield", single_loop},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+        {"enable_prime_tower", false},
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"enable_arc_fitting", false},
+        {"spiral_mode", false},
+        {"gcode_comments", true},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"file_start_gcode", ""},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"print_sequence", "by layer"},
+    });
+
+    Model model;
+    Print print;
+    const TriangleMesh mesh = make_cube(8.0, 8.0, 0.8);
+    Slic3r::Test::init_print({mesh}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    DraftShieldExport output;
+    output.config = config;
+    output.gcode = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.gcode.empty());
+    return output;
+}
+
+} // namespace
+
+TEST_CASE("Single-loop draft shields retain all first-layer loops and limit later layers",
+          "[DraftShieldSingleLoop][SkirtBrim]")
+{
+    const DraftShieldExport all_output = export_draft_shield_case(false);
+    const DraftShieldExport one_output = export_draft_shield_case(true);
+    const SkirtLoopEvidence all_evidence = inspect_skirt_loops(all_output);
+    const SkirtLoopEvidence one_evidence = inspect_skirt_loops(one_output);
+
+    REQUIRE(all_evidence.finite);
+    REQUIRE(one_evidence.finite);
+    REQUIRE(all_evidence.loops_per_layer.size() == 4);
+    REQUIRE(one_evidence.loops_per_layer.size() == 4);
+    REQUIRE(all_evidence.non_skirt_extrusion_moves > 0);
+    REQUIRE(one_evidence.non_skirt_extrusion_moves > 0);
+    REQUIRE(all_evidence.non_skirt_xy_path > 0.0);
+    REQUIRE(one_evidence.non_skirt_xy_path > 0.0);
+    REQUIRE(all_evidence.non_skirt_filament > 0.0);
+    REQUIRE(one_evidence.non_skirt_filament > 0.0);
+    CHECK_THAT(one_evidence.non_skirt_xy_path,
+               Catch::Matchers::WithinRel(all_evidence.non_skirt_xy_path, 1e-4));
+    CHECK_THAT(one_evidence.non_skirt_filament,
+               Catch::Matchers::WithinRel(all_evidence.non_skirt_filament, 1e-4));
+
+    CHECK(all_evidence.loops_per_layer.front() == 3);
+    CHECK(one_evidence.loops_per_layer.front() == 3);
+    for (size_t layer = 1; layer < all_evidence.loops_per_layer.size(); ++layer) {
+        CAPTURE(layer);
+        CHECK(all_evidence.loops_per_layer[layer] == 3);
+        CHECK(one_evidence.loops_per_layer[layer] == 1);
+    }
+    REQUIRE(all_evidence.loop_xy_lengths.size() == 12);
+    REQUIRE(one_evidence.loop_xy_lengths.size() == 6);
+    for (const double length : all_evidence.loop_xy_lengths)
+        REQUIRE(length > 1.0);
+    for (const double length : one_evidence.loop_xy_lengths)
+        REQUIRE(length > 1.0);
+}
+
+} // namespace draft_shield_single_loop_contracts

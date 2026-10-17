@@ -1282,6 +1282,105 @@ TEST_CASE("Every support interface pattern emits its defining geometry", "[Suppo
         CHECK(axial_angle_diff_deg(angle, odd_angle) < 15.0);
 }
 
+namespace support_interface_loop_pattern_contracts {
+
+struct LoopTopologyObservation
+{
+    std::set<size_t> interface_layers;
+    size_t interface_entities = 0;
+    size_t closed_interface_entities = 0;
+    double interface_length = 0.0;
+    double interface_volume = 0.0;
+    bool finite = true;
+};
+
+// Inspect entity-level topology. The production route stitches clipped pieces and emits
+// ExtrusionPath polylines; multiple points in one polyline are not multiple path segments.
+// Other public support collections may expose an ExtrusionMultiPath or ExtrusionLoop, so compare
+// each non-collection entity's aggregate endpoints rather than treating a child path as a loop.
+static void collect_interface_topology(const ExtrusionEntity &entity,
+                                      const size_t layer_id,
+                                      LoopTopologyObservation &out)
+{
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+        for (const ExtrusionEntity *child : collection->entities)
+            if (child != nullptr)
+                collect_interface_topology(*child, layer_id, out);
+        return;
+    }
+
+    if (entity.role() != erSupportMaterialInterface)
+        return;
+
+    ++out.interface_entities;
+    out.interface_layers.insert(layer_id);
+    const double length = entity.length();
+    const double volume = entity.total_volume();
+    out.interface_length += length;
+    out.interface_volume += volume;
+    if (!std::isfinite(length) || !std::isfinite(volume) || length <= 0.0 || volume <= 0.0) {
+        out.finite = false;
+        return;
+    }
+    if (entity.first_point3() == entity.last_point3())
+        ++out.closed_interface_entities;
+}
+
+static LoopTopologyObservation process_loop_fixture(const bool loop_pattern)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"support_type",                    "normal(auto)"},
+        {"support_style",                   "default"},
+        {"support_angle",                   0.0},
+        {"support_top_z_distance",          0.2},
+        {"support_interface_loop_pattern",  loop_pattern ? 1 : 0},
+        {"support_interface_pattern",       "rectilinear"},
+        {"support_object_xy_distance",      0.0},
+        {"support_interface_top_layers",    4},
+        {"support_interface_spacing",       0.0}
+    });
+
+    Model model;
+    Print print;
+    init_print({support_pattern_wall_capital()}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE_FALSE(print.objects().empty());
+    REQUIRE(print.objects().size() == 1);
+
+    LoopTopologyObservation out;
+    for (const SupportLayer *layer : print.objects().front()->support_layers()) {
+        for (const ExtrusionEntity *entity : layer->support_fills.entities)
+            if (entity != nullptr)
+                collect_interface_topology(*entity, layer->id(), out);
+    }
+    REQUIRE(out.interface_entities > 0);
+    REQUIRE(out.interface_length > 0.0);
+    REQUIRE(out.interface_volume > 0.0);
+    REQUIRE(out.finite);
+    return out;
+}
+
+} // namespace support_interface_loop_pattern_contracts
+
+TEST_CASE("Support interface loop pattern adds closed contact topology", "[SupportInterfaceLoopPattern][SupportMaterial]")
+{
+    const auto without_loops = support_interface_loop_pattern_contracts::process_loop_fixture(false);
+    const auto with_loops = support_interface_loop_pattern_contracts::process_loop_fixture(true);
+
+    REQUIRE_FALSE(without_loops.interface_layers.empty());
+    REQUIRE(without_loops.interface_layers == with_loops.interface_layers);
+    REQUIRE(without_loops.closed_interface_entities == 0);
+    REQUIRE(with_loops.closed_interface_entities > 0);
+    CHECK(without_loops.interface_length > 0.0);
+    CHECK(with_loops.interface_length > 0.0);
+    CHECK(without_loops.interface_volume > 0.0);
+    CHECK(with_loops.interface_volume > 0.0);
+}
+
 TEST_CASE("Spiral inset reaches support interface extrusion", "[SupportSettingsVariance][SupportMaterial]")
 {
     std::vector<double> lengths;

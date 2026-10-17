@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Public support-interface contact-loop topology with finite positive interface deposition and disabled/enabled controls.",
+  "mutants": [
+    {
+      "id": "support-interface-loop-pattern-gate-removed",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "    loop_interface_processor.n_contact_loops = config.support_interface_loop_pattern.value ? 1 : 0;",
+      "new": "    loop_interface_processor.n_contact_loops = config.support_interface_loop_pattern.value ? 0 : 0;",
+      "description": "The enabled public row must add at least one closed contact-interface entity while the disabled row retains positive open interface deposition on the same contact-layer set.",
+      "test_filter": "SupportInterfaceLoopPattern"
+    }
+  ]
+}
