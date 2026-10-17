@@ -10726,12 +10726,16 @@ TEST_CASE("Installed filament discovery persists compatible vendor defaults", "[
     installed_filament_setup.vendor = &vendor;
     installed_filament_setup.config.option<ConfigOptionStrings>("compatible_printers", true)->values = {"Acme Printer"};
 
+    AppConfig app_config;
+    app_config.set_variant("Acme", "Acme Model", "0.4", true);
+    app_config.set("presets", PRESET_PRINTER_NAME, "Acme Printer");
+
     SECTION("missing installed section seeds model defaults")
     {
-        AppConfig app_config;
         REQUIRE_FALSE(app_config.has_section(AppConfig::SECTION_FILAMENTS));
 
-        bundle.load_installed_filaments(app_config);
+        bundle.load_selections(app_config);
+        REQUIRE(bundle.printers.get_selected_preset_name() == "Acme Printer");
 
         const Preset *default_filament = bundle.filaments.find_preset("Default PLA", false, true);
         const Preset *installed_filament = bundle.filaments.find_preset("Installed PLA", false, true);
@@ -10748,12 +10752,12 @@ TEST_CASE("Installed filament discovery persists compatible vendor defaults", "[
 
     SECTION("compatible installed section suppresses model defaults")
     {
-        AppConfig app_config;
         app_config.set_section(AppConfig::SECTION_FILAMENTS, {{"Installed PLA", "true"}});
         REQUIRE(app_config.has_section(AppConfig::SECTION_FILAMENTS));
         REQUIRE(app_config.get_section(AppConfig::SECTION_FILAMENTS).count("Installed PLA") == 1);
 
-        bundle.load_installed_filaments(app_config);
+        bundle.load_selections(app_config);
+        REQUIRE(bundle.printers.get_selected_preset_name() == "Acme Printer");
 
         const Preset *default_filament = bundle.filaments.find_preset("Default PLA", false, true);
         const Preset *installed_filament = bundle.filaments.find_preset("Installed PLA", false, true);
