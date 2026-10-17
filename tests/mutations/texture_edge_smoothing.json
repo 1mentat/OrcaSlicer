@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Painted texture edge fading and preservation of the accumulated relief under Multiply and Divide.",
+  "mutants": [
+    {
+      "description": "Disable the patch-boundary distance pass; the positive amount .5 and amount 1 rows must lose their boundary/center height profile.",
+      "id": "texture-edge-smoothing-gate-disabled",
+      "new": "        if (false) {",
+      "old": "        if (layer->edge_smoothing && layer->edge_smoothing_amount > 0.f) {",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "test_filter": "TextureDisplacementEdgeSmoothing"
+    },
+    {
+      "description": "Invert the final neutral-element blend weight; fixed Add and Multiply/Divide profiles no longer have boundary 0/1 and center 2.",
+      "id": "texture-edge-smoothing-final-weight-inverted",
+      "new": "            displacement[vi]   = accumulated + (blended - accumulated) * (1.f - edge_w);",
+      "old": "            displacement[vi]   = accumulated + (blended - accumulated) * edge_w;",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "test_filter": "TextureDisplacementEdgeSmoothing"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public SLA support pillar connection routing and near/far Dynamic brace topology.",
+  "mutants": [
+    {
+      "description": "Route public Dynamic through ZigZag; the far-spacing Dynamic-vs-Cross volume equivalence and mode witness must fail.",
+      "id": "sla-pillar-connection-public-dynamic-mapped-to-zigzag",
+      "new": "        scfg.pillar_connection_mode = sla::PillarConnectionMode::zigzag; break;",
+      "old": "        scfg.pillar_connection_mode = sla::PillarConnectionMode::dynamic; break;",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "test_filter": "SupportPillarConnection"
+    },
+    {
+      "description": "Invert the second-bridge branch; explicit Cross loses its positive public volume witness and Dynamic far spacing diverges from Cross.",
+      "id": "sla-pillar-connection-cross-branch-inverted",
+      "new": "        if(!docrosses) {",
+      "old": "        if(docrosses) {",
+      "path": "src/libslic3r/SLA/SupportTreeBuildsteps.cpp",
+      "test_filter": "SupportPillarConnection"
+    }
+  ]
+}

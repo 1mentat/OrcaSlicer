@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Public type-2 tower contact temperature override and duplicate wait suppression.",
+  "mutants": [
+    {
+      "id": "tower_contact_interface_override_gate_inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "line": 1659,
+      "old": "if (gcodegen.config().enable_tower_interface_features && tcr.is_contact) {",
+      "new": "if (gcodegen.config().enable_tower_interface_features && !tcr.is_contact) {",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerContactPipeline",
+      "description": "The public contact path must pass the incoming tool's interface temperature to set_extruder. WipeTower2 independently emits the contact pre-extrusion, so the enabled row's numeric incoming wait/temperature, restore and model-deposition oracles distinguish this append-layer gate from the disabled control."
+    },
+    {
+      "id": "tower_contact_interface_wait_dedup_disabled",
+      "path": "src/libslic3r/GCode.cpp",
+      "line": 1804,
+      "old": "if (toolchange_temp_override > 0 && interface_temp > 0) {",
+      "new": "if (toolchange_temp_override > 0 && interface_temp <= 0) {",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerContactPipeline",
+      "description": "With tower waiting disabled, the custom incoming-tool M109 remains and append_tcr2 must remove the duplicate untagged contact M109; exactly one interface wait per positive pre-extrusion catches this semantic regression."
+    }
+  ]
+}

@@ -513,6 +513,249 @@ TriangleMesh support_fixture()
     return base;
 }
 
+struct ZHopMotionEvidence
+{
+    size_t retractions = 0;
+    size_t unretractions = 0;
+    size_t same_layer_excursions = 0;
+    size_t same_layer_z_only_lift_moves = 0;
+    size_t same_layer_diagonal_lift_moves = 0;
+    size_t same_layer_maximum_diagonal_run = 0;
+    size_t same_layer_overhang_spiral_excursions = 0;
+    bool   finite = true;
+};
+
+std::string_view zhop_trim_comment(std::string_view comment)
+{
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.front())))
+        comment.remove_prefix(1);
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.back())))
+        comment.remove_suffix(1);
+    return comment;
+}
+
+bool zhop_is_layer_marker(std::string_view comment)
+{
+    comment = zhop_trim_comment(comment);
+    return comment.rfind("LAYER_CHANGE", 0) == 0 || comment.rfind("CHANGE_LAYER", 0) == 0;
+}
+
+bool zhop_is_overhang_role(std::string_view role)
+{
+    return role.find("Overhang") != std::string_view::npos;
+}
+
+ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPrintConfig &config)
+{
+    constexpr size_t max_gcode_bytes = 4u * 1024u * 1024u;
+    constexpr size_t max_gcode_lines = 100000u;
+    constexpr double plane_tolerance = 5e-4;
+    REQUIRE(text.size() <= max_gcode_bytes);
+    REQUIRE(static_cast<size_t>(std::count(text.begin(), text.end(), '\n')) <= max_gcode_lines);
+
+    ZHopMotionEvidence evidence;
+    bool retracted = false;
+    bool crossed_layer = false;
+    bool overhang_role_before_retraction = false;
+    double start_plane = 0.0;
+    size_t excursion_z_only = 0;
+    size_t excursion_diagonal = 0;
+    size_t excursion_max_diagonal_run = 0;
+    size_t diagonal_run = 0;
+    std::string active_role;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&evidence, &retracted, &crossed_layer, &overhang_role_before_retraction,
+                               &start_plane, &excursion_z_only, &excursion_diagonal,
+                               &excursion_max_diagonal_run, &diagonal_run, &active_role,
+                               plane_tolerance](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = zhop_trim_comment(line.comment());
+        if (zhop_is_layer_marker(comment)) {
+            if (retracted)
+                crossed_layer = true;
+        }
+        if (comment.rfind("TYPE:", 0) == 0)
+            active_role.assign(zhop_trim_comment(comment.substr(5)));
+        else if (comment.rfind("FEATURE:", 0) == 0)
+            active_role.assign(zhop_trim_comment(comment.substr(8)));
+
+        const bool motion = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+        if (!motion)
+            return;
+
+        if (!std::isfinite(self.x()) || !std::isfinite(self.y()) || !std::isfinite(self.z()) ||
+            !std::isfinite(self.e()) || (line.has_x() && !std::isfinite(line.x())) ||
+            (line.has_y() && !std::isfinite(line.y())) || (line.has_z() && !std::isfinite(line.z())) ||
+            (line.has_e() && !std::isfinite(line.e()))) {
+            evidence.finite = false;
+            return;
+        }
+
+        if (line.has_e()) {
+            const double delta_e = line.dist_E(self);
+            if (!std::isfinite(delta_e)) {
+                evidence.finite = false;
+                return;
+            }
+            if (delta_e < -EPSILON) {
+                ++evidence.retractions;
+                if (!retracted) {
+                    retracted = true;
+                    crossed_layer = false;
+                    overhang_role_before_retraction = zhop_is_overhang_role(active_role);
+                    start_plane = self.z();
+                    excursion_z_only = 0;
+                    excursion_diagonal = 0;
+                    excursion_max_diagonal_run = 0;
+                    diagonal_run = 0;
+                }
+                return;
+            }
+            if (delta_e > EPSILON) {
+                if (retracted) {
+                    ++evidence.unretractions;
+                    const double end_plane = self.z();
+                    const bool same_layer = !crossed_layer && std::isfinite(start_plane) &&
+                                            std::isfinite(end_plane) &&
+                                            std::abs(end_plane - start_plane) <= plane_tolerance;
+                    if (same_layer) {
+                        ++evidence.same_layer_excursions;
+                        evidence.same_layer_z_only_lift_moves += excursion_z_only;
+                        evidence.same_layer_diagonal_lift_moves += excursion_diagonal;
+                        evidence.same_layer_maximum_diagonal_run =
+                            std::max(evidence.same_layer_maximum_diagonal_run, excursion_max_diagonal_run);
+                        if (overhang_role_before_retraction && excursion_max_diagonal_run >= 4)
+                            ++evidence.same_layer_overhang_spiral_excursions;
+                    }
+                    retracted = false;
+                    diagonal_run = 0;
+                }
+                return;
+            }
+        }
+
+        if (!retracted)
+            return;
+        const double xy = line.dist_XY(self);
+        const double dz = line.dist_Z(self);
+        if (!std::isfinite(xy) || !std::isfinite(dz)) {
+            evidence.finite = false;
+            return;
+        }
+        // Only upward Z motion is a lift.  Downward motion and a layer-marker
+        // transition are retained for the same-layer gate, but never counted as
+        // an upward hop witness.
+        if (dz <= EPSILON) {
+            diagonal_run = 0;
+            return;
+        }
+        if (xy <= EPSILON) {
+            ++excursion_z_only;
+            diagonal_run = 0;
+        } else {
+            ++excursion_diagonal;
+            ++diagonal_run;
+            excursion_max_diagonal_run = std::max(excursion_max_diagonal_run, diagonal_run);
+        }
+    });
+    REQUIRE(evidence.finite);
+    return evidence;
+}
+
+DynamicPrintConfig zhop_type_config(const ZHopType type)
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        { "z_hop",                    0.4 },
+        { "travel_slope",             3.0 },
+        { "retraction_minimum_travel", 0.0 },
+        { "retract_when_changing_layer", false },
+        { "retract_lift_above",       0.0 },
+        { "retract_lift_below",       0.0 },
+        { "retract_lift_enforce",     "All Surfaces" },
+        { "reduce_crossing_wall",     false },
+        { "use_firmware_retraction",  false },
+        { "wipe",                     false },
+        { "enable_arc_fitting",       false },
+        { "resolution",               0.0 },
+    });
+    config.set_key_value("z_hop_types", new ConfigOptionEnumsGeneric{type});
+    return config;
+}
+
+TEST_CASE("Public Z-hop modes preserve deposition while changing lift motion",
+          "[GCode][ZHopType][GCodePrintVariance]")
+{
+    DynamicPrintConfig no_hop = zhop_type_config(ZHopType::zhtNormal);
+    no_hop.set_deserialize_strict({ { "z_hop", 0.0 } });
+    const ExportedPrint no_hop_output = fresh_export(no_hop, true);
+    const MotionEvidence no_hop_material = motion_evidence(no_hop_output.text, no_hop);
+    REQUIRE(no_hop_material.extrusion_moves > 0);
+    const ZHopMotionEvidence no_hop_lift = zhop_motion_evidence(no_hop_output.text, no_hop);
+    REQUIRE(no_hop_lift.retractions > 0);
+    REQUIRE(no_hop_lift.same_layer_excursions > 0);
+    CHECK(no_hop_lift.same_layer_z_only_lift_moves == 0);
+    CHECK(no_hop_lift.same_layer_diagonal_lift_moves == 0);
+
+    const std::array<std::pair<ZHopType, const char *>, 3> explicit_modes{{
+        { ZHopType::zhtNormal, "normal" },
+        { ZHopType::zhtSlope,  "slope" },
+        { ZHopType::zhtSpiral, "spiral" },
+    }};
+    for (const auto &[type, name] : explicit_modes) {
+        INFO("explicit z-hop mode " << name);
+        const DynamicPrintConfig config = zhop_type_config(type);
+        const ExportedPrint output = fresh_export(config, true);
+        const MotionEvidence material = motion_evidence(output.text, config);
+        const ZHopMotionEvidence lift = zhop_motion_evidence(output.text, config);
+        REQUIRE(lift.retractions > 0);
+        REQUIRE(lift.unretractions > 0);
+        REQUIRE(lift.same_layer_excursions > 0);
+        REQUIRE(lift.same_layer_z_only_lift_moves + lift.same_layer_diagonal_lift_moves > 0);
+        require_same_material(no_hop_material, material);
+        if (type == ZHopType::zhtNormal) {
+            REQUIRE(lift.same_layer_z_only_lift_moves > 0);
+            CHECK(lift.same_layer_diagonal_lift_moves == 0);
+        } else if (type == ZHopType::zhtSlope) {
+            REQUIRE(lift.same_layer_diagonal_lift_moves > 0);
+            CHECK(lift.same_layer_maximum_diagonal_run == 1);
+        } else {
+            // The writer's spiral approximation has at least eight bounded segments;
+            // this avoids relying on the exact segment count while distinguishing it
+            // from the single diagonal slope move.
+            REQUIRE(lift.same_layer_maximum_diagonal_run >= 4);
+        }
+    }
+}
+
+TEST_CASE("Auto Z-hop uses spiral motion for an overhang travel on one layer",
+          "[GCode][ZHopType][GCodePrintVariance]")
+{
+    DynamicPrintConfig auto_config = zhop_type_config(ZHopType::zhtAuto);
+    auto_config.set_deserialize_strict({
+        { "enable_support",             true },
+        { "support_type",               "normal(auto)" },
+        { "support_on_build_plate_only", false },
+        { "support_base_pattern",       "rectilinear" },
+    });
+    const ExportedPrint auto_output = fresh_custom_mesh_export(auto_config, support_fixture());
+    const MotionEvidence auto_material = motion_evidence(auto_output.text, auto_config);
+    const ZHopMotionEvidence auto_lift = zhop_motion_evidence(auto_output.text, auto_config);
+    REQUIRE(auto_material.extrusion_moves > 0);
+    REQUIRE(auto_lift.retractions > 0);
+    REQUIRE(auto_lift.unretractions > 0);
+    REQUIRE(auto_lift.same_layer_excursions > 0);
+    REQUIRE(auto_lift.same_layer_overhang_spiral_excursions > 0);
+
+    DynamicPrintConfig auto_no_hop = auto_config;
+    auto_no_hop.set_deserialize_strict({ { "z_hop", 0.0 } });
+    const ExportedPrint no_hop_output = fresh_custom_mesh_export(auto_no_hop, support_fixture());
+    const MotionEvidence no_hop_material = motion_evidence(no_hop_output.text, auto_no_hop);
+    const ZHopMotionEvidence no_hop_lift = zhop_motion_evidence(no_hop_output.text, auto_no_hop);
+    require_same_material(no_hop_material, auto_material);
+    CHECK(no_hop_lift.same_layer_overhang_spiral_excursions == 0);
+}
+
 
 size_t temperature_commands(const std::string &text, const DynamicPrintConfig &config,
                             const std::string &command, float expected)

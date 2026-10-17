@@ -488,12 +488,12 @@
     },
     "support_interface_pattern": {
       "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "tag": "[SupportInterfacePattern]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "Emitted-fill contracts distinguish rectilinear from rectilinear_interlaced by layer orientation and rectilinear from spiralinset by finite interface extrusion, at least three interface layers, and aggregate interface length. The six-mode SupportInterfacePattern test adds public extrusion-path geometry oracles, but its native baseline and routing mutations are pending; complete enum pipeline coverage remains unclaimed until that validation passes. Numeric spacing and other interaction domains remain unclaimed."
+      "reason": "The public Print fixture deserializes all six registered values (auto, rectilinear, concentric, spiralinset, rectilinear_interlaced, and grid). Every row requires finite positive interface paths on at least three actual interface IDs; concentric, grid, spiralinset, and interlaced rows also have independent topology/orientation witnesses. Spacing, loop-pattern, and cross-setting interaction domains remain unclaimed."
     },
     "support_bottom_interface_spacing": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -3414,6 +3414,33 @@
         "pipeline_oracle"
       ],
       "reason": "With slowdown enabled and a fixed 1000-second threshold, exports compare 1 and 5 mm/s minimum speeds. Parsed modal positive-extrusion feeds reach the independently derived 60 and 300 mm/min floors, with unchanged move count and deposited path/material. Full numeric bounds are not exercised."
+    },
+    "toolchange_ordering": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[ToolChangeOrdering]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public Print/process fixture runs both registered values (default and cyclic), with both cyclic-first-layer controls. It validates the applied enum, two used extruders, positive processed layers, and the exact first/later layer sequences. This does not claim the full interaction matrix for cyclic order, first-layer policy, or flush-cost heuristics beyond the pinned fixture."
+    },
+    "fan_direction": {
+      "test": "tests/libslic3r/test_orient.cpp",
+      "tag": "[FanDirection]",
+      "dimensions": [
+        "enum_values",
+        "fixture_only"
+      ],
+      "reason": "The direct cooling-orientation component exercises all four registered values: fdUndefine, fdLeft, fdRight, and fdBoth. Symmetric solids preserve finite geometry; the asymmetric overhang requires the configured one-sided alignment or either X-facing alignment for fdBoth. This is complete direct-component evidence only; there is no public FFF Print pipeline oracle, so the required pipeline dimension remains intentionally unclaimed."
+    },
+    "wipe_tower_type": {
+      "test": "tests/libslic3r/test_wipe_tower_estimate.cpp",
+      "tag": "[WipeTowerEstimate]",
+      "dimensions": [
+        "enum_values",
+        "fixture_only"
+      ],
+      "reason": "The direct WipeTower estimate contract deserializes and checks both registered values, type1 and type2, through DynamicPrintConfig and FullPrintConfig resolution and compares finite positive footprint results. This is direct estimate/config evidence only; the fixture does not claim public FFF prime-tower emission or the full interaction matrix with wall type, flush volumes, and printer model."
     }
   }
 }

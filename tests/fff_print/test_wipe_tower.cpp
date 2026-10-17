@@ -16,6 +16,8 @@
 #include "libslic3r/Flow.hpp"
 #include "fff_print/test_helpers.hpp"
 #include <cmath>
+#include <cctype>
+#include <string_view>
 #include <set>
 #include <utility>
 #include <algorithm>
@@ -3108,3 +3110,188 @@ TEST_CASE("Toolchange ordering preserves configured first and later layer sequen
 }
 
 } // namespace toolchange_ordering_contracts
+
+namespace tower_contact_pipeline_contracts {
+
+namespace {
+
+struct PipelineTrace {
+    std::size_t tower_blocks = 0;
+    std::size_t tower_extrusions = 0;
+    std::size_t interface_waits = 0;
+    std::size_t targeted_interface_waits = 0;
+    std::size_t correctly_targeted_interface_waits = 0;
+    std::size_t interface_restores = 0;
+    std::size_t pre_extrusions = 0;
+    std::size_t model_extrusions = 0;
+    double model_xy_path = 0.;
+    double model_filament = 0.;
+    bool saw_incoming_tool_wait = false;
+};
+
+DynamicPrintConfig contact_pipeline_config(bool enabled)
+{
+    return multifilament_config(2, {
+        { "nozzle_diameter",                            "0.4,0.4" },
+        { "printer_extruder_id",                        "1,2" },
+        { "printer_extruder_variant",                   "Direct Drive Standard,Direct Drive Standard" },
+        { "extruder_printable_height",                  "0,0" },
+        { "nozzle_temperature_initial_layer",           "200,200" },
+        { "nozzle_temperature",                         "200,200" },
+        { "filament_tower_interface_print_temp",       "215,220" },
+        { "filament_tower_interface_pre_extrusion_dist", "2,2" },
+        { "filament_tower_interface_pre_extrusion_length", "3,3" },
+        // Keep the public tool-change template's incoming-tool wait as the one
+        // surviving M109.  append_tcr2 must remove the duplicate untagged wait
+        // emitted by the contact tower itself when this option is off.
+        { "change_filament_gcode",                         "T[next_extruder]\nM109 S[new_filament_temp] T[next_extruder]\n" },
+        { "enable_tower_interface_features",           enabled },
+        { "enable_tower_interface_cooldown_during_tower", false },
+        { "enable_filament_ramming",                   false },
+        { "enable_prime_tower",                         true },
+        { "wipe_tower_type",                            "type2" },
+        { "prime_tower_width",                          35 },
+        { "wipe_tower_x",                               50 },
+        { "wipe_tower_y",                               50 },
+        { "prime_volume",                               80 },
+        { "wipe_tower_no_sparse_layers",                true },
+        { "wipe_tower_sparse_layers_combination",       false },
+        { "wait_for_temp_on_wipe_tower",                false },
+        { "preheat_time",                               0 },
+        { "skirt_loops",                                0 },
+        { "brim_type",                                  "no_brim" },
+        { "layer_height",                               0.2 },
+        { "gcode_flavor",                               "marlin" },
+        { "use_relative_e_distances",                   true },
+        { "layer_change_gcode",                         "G92 E0\n" },
+    });
+}
+
+std::string export_contact_pipeline(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides = {
+        {{ "extruder", 1 }},
+        {{ "extruder", 2 }},
+    };
+    init_print(std::vector<TriangleMesh>{ make_cube(6., 6., 0.6), make_cube(6., 6., 0.6) },
+               print, model, config, &overrides);
+    const auto validation = print.validate();
+    INFO("Print validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    return gcode(print);
+}
+
+PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    PipelineTrace result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool in_tower = false;
+    bool before_wipe = false;
+    int current_tool = -1;
+    reader.parse_buffer(gcode, [&result, &in_tower, &before_wipe, &current_tool](GCodeReader &self,
+                                                                                  const GCodeReader::GCodeLine &line) {
+        const std::string raw = line.raw();
+        if (raw.find("CP TOOLCHANGE START") != std::string::npos) {
+            in_tower = true;
+            before_wipe = true;
+            ++result.tower_blocks;
+        }
+        if (raw.find("CP TOOLCHANGE WIPE") != std::string::npos)
+            before_wipe = false;
+
+        const std::string_view command = line.cmd();
+        if (command.size() >= 2 && command[0] == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
+            current_tool = std::stoi(std::string(command.substr(1)));
+
+        if (in_tower && line.cmd_is("M109")) {
+            float temperature = 0.f;
+            const bool has_temperature = line.has_value('S', temperature) && std::isfinite(temperature);
+            const bool is_interface_wait = has_temperature &&
+                                           (std::abs(temperature - 215.f) <= 1e-4f ||
+                                            std::abs(temperature - 220.f) <= 1e-4f);
+            if (is_interface_wait) {
+                ++result.interface_waits;
+                float target_tool_value = 0.f;
+                if (line.has_value('T', target_tool_value) && std::isfinite(target_tool_value)) {
+                    const int target_tool = int(std::lround(target_tool_value));
+                    if (std::abs(target_tool_value - float(target_tool)) <= 1e-4f) {
+                        ++result.targeted_interface_waits;
+                        const int expected_temperature = target_tool == 0 ? 215 : (target_tool == 1 ? 220 : -1);
+                        if (target_tool == current_tool && expected_temperature > 0 &&
+                            std::abs(temperature - float(expected_temperature)) <= 1e-4f)
+                            ++result.correctly_targeted_interface_waits;
+                        if (target_tool == 1)
+                            result.saw_incoming_tool_wait = true;
+                    }
+                }
+            }
+        }
+        if (in_tower && !before_wipe && line.cmd_is("M104")) {
+            float temperature = 0.f;
+            if (line.has_value('S', temperature) && std::isfinite(temperature) &&
+                std::abs(temperature - 200.f) <= 1e-4f)
+                ++result.interface_restores;
+        }
+
+        if (line.extruding(self) && line.dist_XY(self) > 0.f) {
+            if (in_tower) {
+                ++result.tower_extrusions;
+                if (before_wipe && line.dist_E(self) > 2.5f && line.dist_E(self) < 3.5f)
+                    ++result.pre_extrusions;
+            } else {
+                ++result.model_extrusions;
+                result.model_xy_path += line.dist_XY(self);
+                result.model_filament += line.dist_E(self);
+            }
+        }
+
+        if (raw.find("CP TOOLCHANGE END") != std::string::npos) {
+            in_tower = false;
+            before_wipe = false;
+        }
+    });
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Tower contact temperature override and restore reach exported type-2 tower", "[WipeTower][WipeTowerContact][WipeTowerContactPipeline]")
+{
+    const DynamicPrintConfig enabled_config = contact_pipeline_config(true);
+    const DynamicPrintConfig disabled_config = contact_pipeline_config(false);
+    const PipelineTrace enabled = trace_contact_pipeline(export_contact_pipeline(enabled_config), enabled_config);
+    const PipelineTrace disabled = trace_contact_pipeline(export_contact_pipeline(disabled_config), disabled_config);
+
+    REQUIRE(enabled.tower_blocks > 0);
+    REQUIRE(disabled.tower_blocks == enabled.tower_blocks);
+    REQUIRE(enabled.tower_extrusions > 0);
+    REQUIRE(disabled.tower_extrusions > 0);
+    REQUIRE(enabled.model_extrusions > 0);
+    REQUIRE(disabled.model_extrusions > 0);
+
+    CHECK(enabled.interface_waits > 0);
+    CHECK(enabled.saw_incoming_tool_wait);
+    CHECK(enabled.interface_restores > 0);
+    CHECK(enabled.pre_extrusions > 0);
+    // The custom template supplies one incoming-tool wait.  The type-2
+    // contact block contains a second, untagged interface wait; append_tcr2's
+    // deduplication pass must remove that duplicate.
+    CHECK(enabled.interface_waits == enabled.pre_extrusions);
+    CHECK(enabled.targeted_interface_waits == enabled.interface_waits);
+    CHECK(enabled.correctly_targeted_interface_waits == enabled.targeted_interface_waits);
+    CHECK(enabled.interface_restores == enabled.pre_extrusions);
+    CHECK(disabled.interface_waits == 0);
+    CHECK(disabled.targeted_interface_waits == 0);
+    CHECK(disabled.correctly_targeted_interface_waits == 0);
+    CHECK(disabled.interface_restores == 0);
+    CHECK(disabled.pre_extrusions == 0);
+
+    CHECK(enabled.model_extrusions == disabled.model_extrusions);
+    CHECK_THAT(enabled.model_xy_path, Catch::Matchers::WithinRel(disabled.model_xy_path, 1e-6));
+    CHECK_THAT(enabled.model_filament, Catch::Matchers::WithinRel(disabled.model_filament, 1e-6));
+}
+
+} // namespace tower_contact_pipeline_contracts

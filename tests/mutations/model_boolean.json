@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public ModelObject boolean replacement and rejection contracts.",
+  "mutants": [
+    {
+      "id": "model-boolean-multivolume-guard-removed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    if (this->volumes.size() != 1) {",
+      "new": "    if (this->volumes.empty()) {",
+      "description": "Allow the public wrapper to run with a multi-volume source instead of rejecting the unsupported input; the negative control must preserve both original volumes, IDs, and indexed geometry and return false.",
+      "test_filter": "ModelBoolean"
+    },
+    {
+      "id": "model-boolean-source-clear-removed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    this->clear_volumes();\n    int i = 1;",
+      "new": "    /* this->clear_volumes(); */\n    int i = 1;",
+      "description": "Leave the source volume in place when publishing boolean output; the positive analytic geometry test requires exactly one replacement volume and the expected result volume.",
+      "test_filter": "ModelBoolean"
+    }
+  ]
+}

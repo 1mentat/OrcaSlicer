@@ -2237,3 +2237,180 @@ TEST_CASE("A second bake beside a first comes out as fine as a single bake", "[T
     REQUIRE(single > 0);
     CHECK(second <= single * 5 / 4);
 }
+
+// A small planar mesh keeps the edge-distance contract visible at individual vertices: the painted
+// cells are the 4x4 square [1, 5] x [1, 5], while the one-cell outer ring remains untouched.
+static indexed_triangle_set make_texture_edge_grid()
+{
+    constexpr int side = 7;
+    indexed_triangle_set mesh;
+    mesh.vertices.reserve(side * side);
+    for (int y = 0; y < side; ++y)
+        for (int x = 0; x < side; ++x)
+            mesh.vertices.emplace_back(float(x), float(y), 0.f);
+
+    mesh.indices.reserve(2 * (side - 1) * (side - 1));
+    for (int y = 0; y < side - 1; ++y)
+        for (int x = 0; x < side - 1; ++x) {
+            const int a = y * side + x;
+            const int b = a + 1;
+            const int d = a + side;
+            const int c = d + 1;
+            mesh.indices.push_back({a, b, c});
+            mesh.indices.push_back({a, c, d});
+        }
+    return mesh;
+}
+
+static TriangleSelector::TriangleSplittingData paint_texture_edge_cells(const indexed_triangle_set &mesh)
+{
+    constexpr int side = 7;
+    REQUIRE(mesh.vertices.size() == size_t(side * side));
+    REQUIRE(mesh.indices.size() == size_t(2 * (side - 1) * (side - 1)));
+
+    const TriangleMesh tm(mesh);
+    TriangleSelector       selector(tm);
+    for (int y = 1; y < 5; ++y)
+        for (int x = 1; x < 5; ++x) {
+            const int face = 2 * (y * (side - 1) + x);
+            selector.set_facet(face, EnforcerBlockerType::ENFORCER);
+            selector.set_facet(face + 1, EnforcerBlockerType::ENFORCER);
+        }
+    return selector.serialize();
+}
+
+TEST_CASE("Texture displacement fades a painted patch by edge distance", "[TextureDisplacement][TextureDisplacementEdgeSmoothing]")
+{
+    const indexed_triangle_set mesh = make_texture_edge_grid();
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_texture_edge_cells(mesh);
+    REQUIRE_FALSE(facets[0].triangles_to_split.empty());
+
+    const auto settings = GENERATE(table<int, bool, float>({
+        {0, false, 0.f}, // disabled control
+        {1, true, 0.f},  // amount-zero control
+        {2, true, 0.5f},
+        {3, true, 1.f},
+    }));
+    const int   row            = std::get<0>(settings);
+    const bool  edge_smoothing = std::get<1>(settings);
+    const float amount         = std::get<2>(settings);
+    CAPTURE(row, edge_smoothing, amount);
+
+    // Fixed contract table, independent of patch_boundary_distance(): the disabled and
+    // amount-zero controls raise every painted grid vertex to 2; amount .5 leaves the
+    // boundary at 0, the non-center 3x3 interior at 1, and (3,3) at 2; amount 1
+    // leaves the complete flat grid unchanged.
+    std::array<float, 49> expected{};
+    if (row <= 1) {
+        for (int y = 1; y <= 5; ++y)
+            for (int x = 1; x <= 5; ++x)
+                expected[size_t(y * 7 + x)] = 2.f;
+    } else if (row == 2) {
+        for (int y = 2; y <= 4; ++y)
+            for (int x = 2; x <= 4; ++x)
+                expected[size_t(y * 7 + x)] = 1.f;
+        expected[3 * 7 + 3] = 2.f;
+    }
+
+    TextureDisplacementLayer layer;
+    layer.slot                  = 0;
+    layer.depth_mm              = 2.f;
+    layer.tiling_scale          = 1.f;
+    layer.rotation_deg          = 0.f;
+    layer.offset                = Vec2f::Zero();
+    layer.invert                = false;
+    layer.midlevel              = 0.f;
+    layer.smoothing             = 0.f;
+    layer.tile_enabled          = true;
+    layer.tile_method           = TextureTileMethod::Repeat;
+    layer.projection_method     = TextureProjectionMethod::Triplanar;
+    layer.image_data            = make_flat_gray_png(255);
+    layer.edge_smoothing        = edge_smoothing;
+    layer.edge_smoothing_amount = amount;
+    layer.blend_mode            = TextureBlendMode::Add;
+
+    TextureDisplacementOptions options = classic_options();
+    options.displace_border     = true;
+    options.smooth_enabled      = false;
+    options.smooth_strength     = 0.f;
+    options.smooth_iterations   = 0;
+    options.smooth_skip_border  = true;
+
+    const indexed_triangle_set out = build_texture_displacement(mesh, {layer}, facets, options);
+    REQUIRE(out.vertices.size() == mesh.vertices.size());
+    REQUIRE(out.indices == mesh.indices);
+    for (size_t i = 0; i < out.vertices.size(); ++i) {
+        REQUIRE(std::isfinite(out.vertices[i].x()));
+        REQUIRE(std::isfinite(out.vertices[i].y()));
+        REQUIRE(std::isfinite(out.vertices[i].z()));
+        CHECK_THAT(out.vertices[i].x(), WithinAbs(mesh.vertices[i].x(), 1e-6f));
+        CHECK_THAT(out.vertices[i].y(), WithinAbs(mesh.vertices[i].y(), 1e-6f));
+        CHECK_THAT(out.vertices[i].z(), WithinAbs(expected[i], 1e-4f));
+    }
+}
+
+TEST_CASE("Texture displacement edge smoothing preserves a lower layer's neutral value", "[TextureDisplacement][TextureDisplacementEdgeSmoothing]")
+{
+    const indexed_triangle_set mesh = make_texture_edge_grid();
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_whole_mesh(mesh);
+    facets[1] = paint_texture_edge_cells(mesh);
+    REQUIRE_FALSE(facets[1].triangles_to_split.empty());
+
+    const auto blend_case = GENERATE(table<TextureBlendMode, float>({
+        {TextureBlendMode::Multiply, 2.f},
+        {TextureBlendMode::Divide, 0.5f},
+    }));
+    const TextureBlendMode blend_mode = std::get<0>(blend_case);
+    const float partial_depth          = std::get<1>(blend_case);
+    CAPTURE(blend_mode, partial_depth);
+
+    TextureDisplacementLayer base;
+    base.slot                  = 0;
+    base.depth_mm              = 1.f;
+    base.tiling_scale          = 1.f;
+    base.rotation_deg          = 0.f;
+    base.offset                = Vec2f::Zero();
+    base.invert                = false;
+    base.midlevel              = 0.f;
+    base.smoothing             = 0.f;
+    base.tile_enabled          = true;
+    base.tile_method           = TextureTileMethod::Repeat;
+    base.projection_method     = TextureProjectionMethod::Triplanar;
+    base.image_data            = make_flat_gray_png(255);
+    base.blend_mode            = TextureBlendMode::Add;
+    base.edge_smoothing        = false;
+
+    TextureDisplacementLayer partial = base;
+    partial.slot                  = 1;
+    partial.depth_mm              = partial_depth;
+    partial.blend_mode            = blend_mode;
+    partial.edge_smoothing        = true;
+    partial.edge_smoothing_amount = 0.5f;
+
+    TextureDisplacementOptions options = classic_options();
+    options.displace_border    = true;
+    options.smooth_enabled     = false;
+    options.smooth_strength    = 0.f;
+    options.smooth_iterations  = 0;
+    options.smooth_skip_border = true;
+
+    const indexed_triangle_set out = build_texture_displacement(mesh, {base, partial}, facets, options);
+    REQUIRE(out.vertices.size() == mesh.vertices.size());
+    REQUIRE(out.indices == mesh.indices);
+    for (size_t i = 0; i < out.vertices.size(); ++i) {
+        const int x = int(i % 7), y = int(i / 7);
+        REQUIRE(std::isfinite(out.vertices[i].x()));
+        REQUIRE(std::isfinite(out.vertices[i].y()));
+        REQUIRE(std::isfinite(out.vertices[i].z()));
+        CHECK_THAT(out.vertices[i].x(), WithinAbs(mesh.vertices[i].x(), 1e-6f));
+        CHECK_THAT(out.vertices[i].y(), WithinAbs(mesh.vertices[i].y(), 1e-6f));
+        // Fixed neutral-element profile: outside and painted boundary stay at the
+        // accumulated base 1, the non-center 3x3 interior is 1.5, and the center is 2.
+        float expected = 1.f;
+        if (x >= 2 && x <= 4 && y >= 2 && y <= 4)
+            expected = (x == 3 && y == 3) ? 2.f : 1.5f;
+        CHECK_THAT(out.vertices[i].z(), WithinAbs(expected, 1e-4f));
+    }
+}

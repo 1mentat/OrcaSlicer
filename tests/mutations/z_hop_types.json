@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public Z-hop mode routing and same-layer lift geometry with unchanged deposition.",
+  "mutants": [
+    {
+      "id": "z-hop-slope-mapper-routes-normal",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        return LiftType::SlopeLift;",
+      "new": "        return LiftType::NormalLift;",
+      "test_filter": "ZHopType",
+      "description": "Map the public Slope Lift enum to a vertical normal lift; the slope row signed same-layer diagonal oracle should fail."
+    },
+    {
+      "id": "z-hop-writer-slope-branch-normalized",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "            else if (m_to_lift_type == LiftType::SlopeLift &&",
+      "new": "            else if (m_to_lift_type == LiftType::NormalLift &&",
+      "test_filter": "ZHopType",
+      "description": "Route the writer slope branch through the normal branch; the public slope same-layer geometry oracle should fail."
+    }
+  ]
+}

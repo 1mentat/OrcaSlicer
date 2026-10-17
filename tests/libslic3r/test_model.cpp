@@ -1768,3 +1768,108 @@ TEST_CASE("Model object lifecycle records source metadata, material copies, and 
 }
 
 } // namespace bbs_project_lifecycle_contracts
+
+TEST_CASE("ModelObject boolean replacement preserves analytic solid geometry", "[Model][ModelBoolean]")
+{
+    constexpr double body_edge = 10.;
+    constexpr double cutter_edge = 4.;
+    constexpr double cutter_height = 12.;
+    constexpr double overlap_height = 10.; // The cutter spans the body's full Z interval.
+    const std::string operation = GENERATE("A_NOT_B", "UNION");
+    CAPTURE(operation);
+
+    Model model;
+    ModelObject *body = model.add_object();
+    body->name = "body";
+    body->add_volume(make_cube(float(body_edge), float(body_edge), float(body_edge)), ModelVolumeType::MODEL_PART, false);
+    body->add_instance();
+
+    ModelObject *cutter = model.add_object();
+    cutter->add_volume(make_cube(float(cutter_edge), float(cutter_edge), float(cutter_height)), ModelVolumeType::MODEL_PART, false);
+    cutter->add_instance();
+    cutter->instances.front()->set_offset(Vec3d(3., 3., -1.));
+
+    REQUIRE(body->make_boolean(cutter, operation));
+    REQUIRE(body->volumes.size() == 1);
+    REQUIRE(body->volumes.front()->is_model_part());
+
+    const double body_volume = body_edge * body_edge * body_edge;
+    const double cutter_volume = cutter_edge * cutter_edge * cutter_height;
+    const double overlap_volume = cutter_edge * cutter_edge * overlap_height;
+    const double expected_volume = operation == "A_NOT_B" ? body_volume - overlap_volume
+                                                            : body_volume + cutter_volume - overlap_volume;
+    const TriangleMesh result_mesh = body->volumes.front()->mesh();
+    REQUIRE_FALSE(result_mesh.its.vertices.empty());
+    REQUIRE_FALSE(result_mesh.its.indices.empty());
+    for (const Vec3f &vertex : result_mesh.its.vertices)
+        REQUIRE(vertex.allFinite());
+    for (const Vec3i32 &face : result_mesh.its.indices) {
+        REQUIRE(face[0] >= 0);
+        REQUIRE(face[1] >= 0);
+        REQUIRE(face[2] >= 0);
+        REQUIRE(static_cast<size_t>(face[0]) < result_mesh.its.vertices.size());
+        REQUIRE(static_cast<size_t>(face[1]) < result_mesh.its.vertices.size());
+        REQUIRE(static_cast<size_t>(face[2]) < result_mesh.its.vertices.size());
+    }
+    const double actual_volume = std::abs(static_cast<double>(its_volume(result_mesh.its)));
+    CHECK_THAT(actual_volume, Catch::Matchers::WithinRel(expected_volume, 2e-3));
+
+    const TriangleMesh world_mesh = body->raw_mesh();
+    const BoundingBoxf3 bounds = world_mesh.bounding_box();
+    CHECK(bounds.min.allFinite());
+    CHECK(bounds.max.allFinite());
+    CHECK(bounds.min.x() <= 0.001f);
+    CHECK(bounds.min.y() <= 0.001f);
+    CHECK(bounds.max.x() >= 9.999f);
+    CHECK(bounds.max.y() >= 9.999f);
+}
+
+TEST_CASE("ModelObject boolean rejects a multi-volume source without mutation", "[Model][ModelBoolean]")
+{
+    Model model;
+    ModelObject *body = model.add_object();
+    body->add_volume(make_cube(10.f, 10.f, 10.f), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh second = make_cube(2.f, 2.f, 2.f);
+    second.translate(Vec3f(20.f, 0.f, 0.f));
+    body->add_volume(std::move(second), ModelVolumeType::MODEL_PART, false);
+    body->add_instance();
+
+    const ObjectID first_id = body->volumes[0]->id();
+    const ObjectID second_id = body->volumes[1]->id();
+    const indexed_triangle_set first_its = body->volumes[0]->mesh().its;
+    const indexed_triangle_set second_its = body->volumes[1]->mesh().its;
+    TriangleMesh before_world = body->raw_mesh();
+    const double source_volume = std::abs(static_cast<double>(its_volume(before_world.its)));
+
+    ModelObject *cutter = model.add_object();
+    cutter->add_volume(make_cube(4.f, 4.f, 12.f), ModelVolumeType::MODEL_PART, false);
+    cutter->add_instance();
+    cutter->instances.front()->set_offset(Vec3d(3., 3., -1.));
+
+    CHECK_FALSE(body->make_boolean(cutter, "A_NOT_B"));
+    REQUIRE(body->volumes.size() == 2);
+    CHECK(body->volumes[0]->id() == first_id);
+    CHECK(body->volumes[1]->id() == second_id);
+    const indexed_triangle_set &after_first = body->volumes[0]->mesh().its;
+    const indexed_triangle_set &after_second = body->volumes[1]->mesh().its;
+    REQUIRE(after_first.vertices.size() == first_its.vertices.size());
+    REQUIRE(after_first.indices.size() == first_its.indices.size());
+    REQUIRE(after_second.vertices.size() == second_its.vertices.size());
+    REQUIRE(after_second.indices.size() == second_its.indices.size());
+    for (size_t i = 0; i < first_its.vertices.size(); ++i)
+        for (int axis = 0; axis < 3; ++axis)
+            CHECK_THAT(static_cast<double>(after_first.vertices[i][axis]),
+                       Catch::Matchers::WithinAbs(static_cast<double>(first_its.vertices[i][axis]), 0.));
+    for (size_t i = 0; i < first_its.indices.size(); ++i)
+        for (int axis = 0; axis < 3; ++axis)
+            CHECK(after_first.indices[i][axis] == first_its.indices[i][axis]);
+    for (size_t i = 0; i < second_its.vertices.size(); ++i)
+        for (int axis = 0; axis < 3; ++axis)
+            CHECK_THAT(static_cast<double>(after_second.vertices[i][axis]),
+                       Catch::Matchers::WithinAbs(static_cast<double>(second_its.vertices[i][axis]), 0.));
+    for (size_t i = 0; i < second_its.indices.size(); ++i)
+        for (int axis = 0; axis < 3; ++axis)
+            CHECK(after_second.indices[i][axis] == second_its.indices[i][axis]);
+    TriangleMesh after_world = body->raw_mesh();
+    CHECK_THAT(std::abs(static_cast<double>(its_volume(after_world.its))), Catch::Matchers::WithinRel(source_volume, 1e-6));
+}

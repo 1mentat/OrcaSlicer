@@ -20,6 +20,7 @@
 #include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/libslic3r.h"
@@ -140,6 +141,99 @@ SlaRunSummary process_fixture(double layer_height)
     CHECK(stats.estimated_print_time > 0.0);
 
     return {slice_index.size(), stats.objects_used_material};
+}
+
+struct PillarConnectionRun
+{
+    double support_volume = 0.0;
+    double model_volume = 0.0;
+    std::size_t support_vertices = 0;
+    std::size_t support_faces = 0;
+    std::size_t separated_support_slices = 0;
+    double max_support_centroid_spacing_mm = 0.0;
+};
+
+DynamicPrintConfig pillar_connection_config(const SLAPillarConnectionMode mode)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_deserialize_strict({
+        { "supports_enable",                 true },
+        { "support_buildplate_only",         false },
+        { "support_object_elevation",        15.0 },
+        { "support_head_front_diameter",     1.0 },
+        { "support_head_penetration",        0.2 },
+        { "support_head_width",              1.0 },
+        { "support_pillar_diameter",         2.0 },
+        { "support_base_diameter",           4.0 },
+        { "support_base_height",             1.0 },
+        { "support_base_safety_distance",    0.5 },
+        { "support_critical_angle",          45.0 },
+        // Keep the two manually supplied heads out of one ground cluster: their 3 mm
+        // 3D separation must exceed this clustering limit, while interconnect() still
+        // accepts the pair through support_max_pillar_link_distance below.
+        { "support_max_bridge_length",       2.5 },
+        { "support_max_pillar_link_distance", 10.0 },
+        { "support_max_bridges_on_pillar",   8 },
+        { "support_pillar_widening_factor",  0.0 },
+    });
+    config.set_key_value("support_pillar_connection_mode",
+                         new ConfigOptionEnum<SLAPillarConnectionMode>(mode));
+    return config;
+}
+
+PillarConnectionRun process_pillar_connection(const SLAPillarConnectionMode mode,
+                                               const double                    spacing)
+{
+    DynamicPrintConfig config = pillar_connection_config(mode);
+    sla::SupportPoints points{
+        sla::SupportPoint(float(5.0 - spacing / 2.0), 5.f, 0.f, 0.5f, true),
+        sla::SupportPoint(float(5.0 + spacing / 2.0), 5.f, 0.f, 0.5f, false),
+    };
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    REQUIRE(fixture.print.validate().string.empty());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportTree));
+
+    TriangleMesh support = object->support_mesh();
+    REQUIRE_FALSE(support.empty());
+    const double support_volume = std::abs(static_cast<double>(support.volume()));
+    const double model_volume = std::abs(static_cast<double>(fixture.model.objects.front()->raw_mesh().volume()));
+    REQUIRE(std::isfinite(support_volume));
+    REQUIRE(std::isfinite(model_volume));
+    REQUIRE(support_volume > 0.0);
+    REQUIRE(model_volume > 0.0);
+
+    // A public slice-level witness that the two heads stayed separate.  Base polygons
+    // may overlap at the bottom, so search every support slice and use the largest
+    // separation between distinct positive-area ExPolygon centroids.
+    std::size_t separated_support_slices = 0;
+    double max_support_centroid_spacing_mm = 0.0;
+    for (const SLAPrintObject::SliceRecord &record : object->get_slice_index()) {
+        std::vector<Vec2d> centers;
+        for (const ExPolygon &expolygon : record.get_slice(soSupport)) {
+            if (expolygon.empty() || expolygon.area() <= 0.0)
+                continue;
+            const Point center = expolygon.contour.centroid();
+            centers.emplace_back(unscaled<double>(center.x()), unscaled<double>(center.y()));
+        }
+        double slice_spacing = 0.0;
+        for (std::size_t i = 0; i < centers.size(); ++i)
+            for (std::size_t j = i + 1; j < centers.size(); ++j)
+                slice_spacing = std::max(slice_spacing, (centers[i] - centers[j]).norm());
+        if (slice_spacing > 2.0) {
+            ++separated_support_slices;
+            max_support_centroid_spacing_mm = std::max(max_support_centroid_spacing_mm, slice_spacing);
+        }
+    }
+    REQUIRE(separated_support_slices > 0);
+    REQUIRE(max_support_centroid_spacing_mm > 2.0);
+    return {support_volume, model_volume, support.its.vertices.size(), support.its.indices.size(),
+            separated_support_slices, max_support_centroid_spacing_mm};
 }
 
 } // namespace
@@ -1051,4 +1145,42 @@ TEST_CASE("SLA material correction scales transformed slice geometry",
     CHECK_THAT(material.bbox_x, Catch::Matchers::WithinRel(base.bbox_x * 1.5, 1e-5));
     CHECK_THAT(material.bbox_y, Catch::Matchers::WithinRel(base.bbox_y * 0.8, 1e-5));
     CHECK_THAT(material.bbox_z, Catch::Matchers::WithinRel(base.bbox_z, 1e-5));
+}
+
+TEST_CASE("SLA pillar connection modes preserve intended near and far bridge topology",
+          "[SLAPrint][SLAPipeline][SupportPillarConnection]")
+{
+    constexpr double near_spacing = 3.0;
+    constexpr double far_spacing  = 5.0;
+
+    const PillarConnectionRun near_zigzag = process_pillar_connection(slapcmZigZag, near_spacing);
+    const PillarConnectionRun near_cross  = process_pillar_connection(slapcmCross, near_spacing);
+    const PillarConnectionRun near_dynamic = process_pillar_connection(slapcmDynamic, near_spacing);
+    const PillarConnectionRun far_zigzag  = process_pillar_connection(slapcmZigZag, far_spacing);
+    const PillarConnectionRun far_cross   = process_pillar_connection(slapcmCross, far_spacing);
+    const PillarConnectionRun far_dynamic = process_pillar_connection(slapcmDynamic, far_spacing);
+
+    for (const PillarConnectionRun &run : {near_zigzag, near_cross, near_dynamic,
+                                            far_zigzag, far_cross, far_dynamic}) {
+        CHECK_THAT(run.model_volume, Catch::Matchers::WithinRel(400.0, 1e-5));
+        CHECK(run.support_vertices > 0);
+        CHECK(run.support_faces > 0);
+        CHECK(run.separated_support_slices > 0);
+        CHECK(run.max_support_centroid_spacing_mm > 2.0);
+    }
+
+    // The explicit Cross mode adds the second, crossing stick.  This positive
+    // mesh-volume witness prevents the comparisons below from becoming a
+    // mode-label-only or nonempty-mesh test.
+    REQUIRE(near_cross.support_volume > near_zigzag.support_volume + 1e-6);
+    REQUIRE(far_cross.support_volume > far_zigzag.support_volume + 1e-6);
+
+    // The public SLAPrint mapping and the production dynamic threshold agree:
+    // spacing 3 <= 2 * base radius 2 is zig-zag, while spacing 5 > 4 is cross.
+    // max_bridge_length is only reduced enough to keep these points in separate
+    // ground clusters; interconnect uses max_pillar_link_distance for this pair.
+    CHECK_THAT(near_dynamic.support_volume,
+               Catch::Matchers::WithinRel(near_zigzag.support_volume, 1e-6));
+    CHECK_THAT(far_dynamic.support_volume,
+               Catch::Matchers::WithinRel(far_cross.support_volume, 1e-6));
 }
