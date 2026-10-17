@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "seam-scope-all-excludes-hole",
+      "old": "seam_scarf_type == SeamScarfType::All) &&",
+      "new": "(seam_scarf_type == SeamScarfType::All && !is_hole)) &&",
+      "description": "Make all mode exclude holes while retaining the mode read; positive rising hole-wall moves must disappear.",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "SeamScopeSettings"
+    },
+    {
+      "id": "seam-scope-contour-includes-hole",
+      "old": "seam_scarf_type == SeamScarfType::External && !is_hole",
+      "new": "seam_scarf_type == SeamScarfType::External",
+      "description": "Treat hole loops as eligible in contour-only mode; hole-wall rising moves must violate the inactive boundary control.",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "SeamScopeSettings"
+    },
+    {
+      "id": "seam-scope-inner-walls-disabled",
+      "old": "loop.role() == erPerimeter && m_config.seam_slope_inner_walls",
+      "new": "loop.role() == erPerimeter && (m_config.seam_slope_inner_walls && false)",
+      "description": "Disable inner-wall scarf activation while preserving the config read; enabled inner-wall role witnesses must fail.",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "SeamScopeSettings"
+    }
+  ]
+}

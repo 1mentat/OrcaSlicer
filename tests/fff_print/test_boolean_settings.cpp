@@ -1,3 +1,6 @@
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/generators/catch_generators.hpp>
+#include <utility>
 #include <catch2/catch_all.hpp>
 
 #include "catch2/catch_test_macros.hpp"
@@ -545,4 +548,145 @@ TEST_CASE("hole_to_polyhole_twisted rotates polygon hole geometry", "[SettingsBo
     twisted.set("hole_to_polyhole_twisted", true);
     const BooleanEvidence rotating_hole = process_fixture(twisted, circular_hole_fixture());
     CHECK(std::abs(fixed_hole.hole_checksum - rotating_hole.hole_checksum) > 0.01);
+}
+
+namespace internal_wall_reversal_contracts {
+
+struct LoopEvidence {
+    bool external;
+    double area_mm2;
+    double length_mm;
+    bool counter_clockwise;
+};
+
+using LayerLoops = std::vector<std::vector<LoopEvidence>>;
+
+LayerLoops observe(const char *generator, const char *direction, bool reverse, bool internal_only)
+{
+    DynamicPrintConfig config = boolean_config();
+    config.set_deserialize_strict({
+        {"wall_generator", generator},
+        {"wall_direction", direction},
+        {"wall_loops", 3},
+        {"outer_wall_line_width", 0.45},
+        {"inner_wall_line_width", 0.45},
+        {"initial_layer_line_width", 0.45},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"only_one_wall_top", false},
+        {"only_one_wall_first_layer", false},
+        {"spiral_mode", false},
+        {"enable_support", false},
+        {"raft_layers", 0},
+        {"fuzzy_skin", "none"},
+        {"detect_overhang_wall", true},
+        {"extra_perimeters_on_overhangs", false},
+        {"overhang_reverse_threshold", "0"},
+        {"overhang_reverse", reverse},
+        {"overhang_reverse_internal_only", internal_only},
+    });
+    REQUIRE(config.opt_serialize("wall_generator") == generator);
+    REQUIRE(config.opt_serialize("wall_direction") == direction);
+    REQUIRE(config.opt_bool("overhang_reverse") == reverse);
+    REQUIRE(config.opt_bool("overhang_reverse_internal_only") == internal_only);
+
+    Model model;
+    Print print;
+    init_print({make_cube(10., 10., 0.8)}, print, model, config);
+    REQUIRE(print.validate().string.empty());
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const auto &layers = print.objects().front()->layers();
+    REQUIRE(layers.size() == 4); // Explicit 0.2 mm initial and ordinary heights.
+
+    LayerLoops result;
+    const double one_mm = double(scale_(1.));
+    for (const Layer *layer : layers) {
+        std::vector<LoopEvidence> loops;
+        for (const LayerRegion *region : layer->regions()) {
+            // Own the flattened collection while observing its loop pointers.
+            const ExtrusionEntityCollection flat = region->perimeters.flatten();
+            for (const ExtrusionEntity *entity : flat.entities) {
+                REQUIRE(entity->is_loop());
+                const auto &loop = *static_cast<const ExtrusionLoop *>(entity);
+                REQUIRE_FALSE(loop.paths.empty());
+                const Polygon polygon = loop.polygon();
+                REQUIRE(polygon.points.size() >= 3);
+                const double signed_area = polygon.area() / (one_mm * one_mm);
+                REQUIRE(std::isfinite(signed_area));
+                REQUIRE(std::abs(signed_area) > 1.0);
+                const bool external = loop.paths.front().role() == erExternalPerimeter;
+                for (const ExtrusionPath &path : loop.paths) {
+                    REQUIRE(path.role() == (external ? erExternalPerimeter : erPerimeter));
+                }
+                const double length = loop.length() / one_mm;
+                REQUIRE(std::isfinite(length));
+                REQUIRE(length > 0.);
+                loops.push_back({external, std::abs(signed_area), length, signed_area > 0.});
+            }
+        }
+        REQUIRE(std::count_if(loops.begin(), loops.end(), [](const LoopEvidence &loop) {
+            return loop.external;
+        }) > 0);
+        REQUIRE(std::count_if(loops.begin(), loops.end(), [](const LoopEvidence &loop) {
+            return !loop.external;
+        }) > 0);
+        std::sort(loops.begin(), loops.end(), [](const LoopEvidence &a, const LoopEvidence &b) {
+            if (a.external != b.external)
+                return a.external < b.external;
+            return a.area_mm2 < b.area_mm2;
+        });
+        result.push_back(std::move(loops));
+    }
+    return result;
+}
+
+void require_geometry(const LayerLoops &expected, const LayerLoops &observed)
+{
+    REQUIRE(observed.size() == expected.size());
+    for (size_t layer = 0; layer < expected.size(); ++layer) {
+        REQUIRE(observed[layer].size() == expected[layer].size());
+        for (size_t i = 0; i < expected[layer].size(); ++i) {
+            CHECK(observed[layer][i].external == expected[layer][i].external);
+            CHECK_THAT(observed[layer][i].area_mm2,
+                       Catch::Matchers::WithinAbs(expected[layer][i].area_mm2, 1e-5));
+            CHECK_THAT(observed[layer][i].length_mm,
+                       Catch::Matchers::WithinAbs(expected[layer][i].length_mm, 1e-5));
+        }
+    }
+}
+
+} // namespace internal_wall_reversal_contracts
+
+TEST_CASE("Internal-only reversal preserves exterior winding on alternating layers",
+          "[BooleanSettings][OverhangInternalReversal][SettingsVariance]")
+{
+    using namespace internal_wall_reversal_contracts;
+    const char *generator = GENERATE("classic", "arachne");
+    const char *direction = GENERATE("ccw", "cw");
+    CAPTURE(generator, direction);
+    const LayerLoops disabled = observe(generator, direction, false, false);
+    const LayerLoops disabled_internal = observe(generator, direction, false, true);
+    const LayerLoops all_walls = observe(generator, direction, true, false);
+    const LayerLoops internal_walls = observe(generator, direction, true, true);
+    require_geometry(disabled, disabled_internal);
+    require_geometry(disabled, all_walls);
+    require_geometry(disabled, internal_walls);
+
+    // The documented zero threshold reverses every even printed layer,
+    // irrespective of overhang geometry. Inspect generated loop winding,
+    // independently of traversal order or the production reversal helper.
+    const bool configured_ccw = std::string(direction) == "ccw";
+    for (size_t layer = 0; layer < disabled.size(); ++layer) {
+        const bool even_printed_layer = (layer + 1) % 2 == 0;
+        for (size_t i = 0; i < disabled[layer].size(); ++i) {
+            CAPTURE(layer, i, disabled[layer][i].external);
+            CHECK(disabled[layer][i].counter_clockwise == configured_ccw);
+            CHECK(disabled_internal[layer][i].counter_clockwise == configured_ccw);
+            CHECK(all_walls[layer][i].counter_clockwise == (configured_ccw != even_printed_layer));
+            const bool reverse_internal = even_printed_layer && !disabled[layer][i].external;
+            CHECK(internal_walls[layer][i].counter_clockwise == (configured_ccw != reverse_internal));
+        }
+    }
 }

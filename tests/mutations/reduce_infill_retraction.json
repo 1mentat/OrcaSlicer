@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "reduce-infill-retraction-setting-gate-forced-on",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (!is_perimeter(role) && m_config.reduce_infill_retraction && m_layer != nullptr &&",
+      "new": "if (!is_perimeter(role) && true && m_layer != nullptr &&",
+      "description": "Ignore the public boolean gate; the disabled export must show a positive preceding retraction for the paired contained event.",
+      "test_filter": "ReduceInfillRetraction"
+    },
+    {
+      "id": "reduce-infill-retraction-containment-result-forced-false",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "m_retract_when_crossing_perimeters.travel_inside_internal_regions(*m_layer, travel)",
+      "new": "false",
+      "description": "Force the public internal-region result false; the enabled export must lose its unretracted paired contained-travel witness. The shared primary signal is recorded as a limitation.",
+      "test_filter": "ReduceInfillRetraction"
+    }
+  ]
+}

@@ -3073,6 +3073,132 @@
         "interaction_matrix"
       ],
       "reason": "Active values 0.8, 1.0, 1.2, and 1.4 scale gap-fill deposited material while preserving geometry and unrelated roles. Gate-disabled 0.7 leaves material unchanged; the enabled compound case checks first-layer 0.8 times gap-fill 1.4 and later-layer 1.4. Replacing the gap-fill multiplier with one fails both compound and representative material oracles. Numeric boundaries and exhaustive combinations remain unclaimed."
+    },
+    "seam_slope_conditional": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Disabled conditional mode emits a scarf. Enabled conditional mode on a square at the 180-degree threshold suppresses it and agrees with none mode. Forcing conditional acceptance fails the zero-distance and ordinary-move controls. This does not independently vary the angle threshold."
+    },
+    "seam_slope_min_length": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Lengths 0, 4 and 12 mm distinguish zero and increasing scarf distance. The 4-to-12 mm positive-E path delta stays inside independently derived geometric bounds. A forced full-loop length breaks both distance and path oracles. No full numeric-domain claim."
+    },
+    "seam_slope_start_height": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Start height 0 and 50% distinguish the minimum positive rising outer-wall flow while scarf distance, layer count and pre-export geometry remain stable. Ignoring the percent value makes the flows equal and fails the strict comparison. Absolute-height and full numeric domains remain unclaimed."
+    },
+    "seam_slope_steps": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "At fixed 12 mm scarf length, 1 versus 8 subdivisions increases positive outer-wall move count while scarf distance, pre-export geometry and layer counts remain unchanged. Forcing a single subdivision makes both counts 49 and fails. Four steps are also exercised as a held control; no full numeric-domain claim."
+    },
+    "seam_slope_type": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "None and external mode distinguish absent and positive outer-wall scarf ramps with unchanged pre-export geometry. The forced-none mutation fails. The registered all mode remains untested; no enum completeness claim."
+    },
+    "spiral_finishing_flow_ratio": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SpiralSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Finishing ratios 0 and 0.5 change filament in the appended flat transition while final rising-loop move count, filament and XY length remain unchanged. Suppressing finishing flow fails the flat-transition increase assertion. Numeric boundaries are unclaimed."
+    },
+    "spiral_mode_max_xy_smoothing": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SpiralSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With smoothing enabled, 0% is a geometry no-op and 1000% changes spiral endpoints or path length. Reversing the distance predicate breaks both witnesses. The full FloatOrPercent domain is unclaimed."
+    },
+    "spiral_mode_smooth": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SpiralSettings]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Smoothing off provides a positive spiral baseline; on at zero distance preserves geometry and on at 1000% changes endpoints or path length. Inverting smoothing breaks the effective geometry witness. Only these bounded smoothing-distance interactions are exercised."
+    },
+    "spiral_starting_flow_ratio": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SpiralSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Starting ratios 0 and 0.5 change filament deposited in the first rising spiral layer. Suppressing starting flow makes the values equal and fails the increase assertion. Both outputs require finite positive spiral geometry; numeric boundaries are unclaimed."
+    },
+    "support_flow_ratio": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportFlowRatio]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Base-support flow ratios 0.75, 1 and 1.25 scale parsed base-support extrusion with an analytic export/parser error bound. Interface-support and ordinary-object deposition, path lengths, moves and layers remain unchanged. Removing the base multiplier fails both representative ratios. Numeric boundaries and combined role-ratio interactions remain unclaimed."
+    },
+    "support_interface_flow_ratio": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportFlowRatio]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Interface-support ratios 0.75, 1 and 1.25 scale parsed interface extrusion with an analytic error bound. Base-support and ordinary-object deposition, geometry, moves and layers remain unchanged. Removing the interface multiplier fails both representative ratios. Numeric boundaries and combined role-ratio interactions remain unclaimed."
+    },
+    "support_ironing_flow": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportIroningSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Support ironing flow 10 and 25 percent changes deposited filament by the independently computed bead cross-section ratio. Positive geometry, moves, layers and interface width/height remain unchanged, with analytic quantization bounds. Ignoring the configured ironing-flow value fails the material-ratio assertion. Numeric boundaries remain unclaimed."
+    },
+    "support_ironing_pattern": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportIroningSettings]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both registered rectilinear and concentric patterns produce positive ironing. Their length-weighted orientations differ by more than a coordinate-export error bound, while underlying support geometry and ironing layers remain stable. Inverting pattern selection reverses the signed alignment gap and fails that oracle."
+    },
+    "support_ironing_spacing": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportIroningSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Spacing 0.08 versus 0.30 mm changes ironing move count, XY path length and extruded filament in the expected density order, with positive ironing and unchanged support geometry/layers. Swapping spacings reverses all three witnesses. Numeric boundaries remain unclaimed."
     }
   }
 }

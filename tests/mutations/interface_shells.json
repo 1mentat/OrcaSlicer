@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "interface-shells-public-gate-disabled",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "    bool interface_shells = ! spiral_mode && m_config.interface_shells.value;",
+      "new": "    bool interface_shells = false;",
+      "description": "Disable the public interface_shells gate; the overlapping two-material fixture must lose the hidden lower-material top surface witness.",
+      "test_filter": "InterfaceShells"
+    },
+    {
+      "id": "interface-shells-upper-region-comparison-removed",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "                        ExPolygons upper_slices = interface_shells ?\n                            diff_ex(layerm_slices_surfaces, upper_layer->m_regions[region_id]->slices.surfaces, ApplySafetyOffset::Yes) :\n                            diff_ex(layerm_slices_surfaces, upper_layer->lslices, ApplySafetyOffset::Yes);",
+      "new": "                        ExPolygons upper_slices = interface_shells ?\n                            diff_ex(layerm_slices_surfaces, upper_layer->lslices, ApplySafetyOffset::Yes) :\n                            diff_ex(layerm_slices_surfaces, upper_layer->lslices, ApplySafetyOffset::Yes);",
+      "description": "Use the collective upper footprint even when interface_shells is enabled; the lower-region top/internal role-area delta must disappear while the final exterior control remains unchanged.",
+      "test_filter": "InterfaceShells"
+    }
+  ]
+}

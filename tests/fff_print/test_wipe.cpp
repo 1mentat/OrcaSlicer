@@ -1,3 +1,7 @@
+#include <initializer_list>
+#include "libslic3r/Surface.hpp"
+#include "libslic3r/Line.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
@@ -1546,3 +1550,676 @@ TEST_CASE("Nullable filament lower lift bound inherits and overrides the machine
 
 
 } // namespace retraction_variance_contracts
+
+namespace reduce_crossing_wall_contracts {
+
+struct Segment {
+    size_t layer_index = 0;
+    size_t emission_index = 0;
+    double z = 0.;
+    Vec2d start;
+    Vec2d end;
+};
+
+struct TravelRoute {
+    size_t layer_index = 0;
+    size_t start_emission_index = 0;
+    double z = 0.;
+    std::vector<Vec2d> points;
+    double direct_mm = 0.;
+    double path_mm = 0.;
+    bool had_retraction = false;
+    bool direct_crosses_wall = false;
+    bool legs_clear = false;
+};
+
+struct MotionSummary {
+    size_t extrusion_moves = 0;
+    double xy_path_mm = 0.;
+    double filament_mm = 0.;
+};
+
+struct ParsedOutput {
+    std::vector<Segment> walls;
+    std::vector<TravelRoute> routes;
+    MotionSummary motion;
+};
+
+DynamicPrintConfig crossing_wall_config(bool enabled)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "nozzle_diameter",             "0.4" },
+        { "layer_height",                "0.2" },
+        { "initial_layer_print_height",  "0.2" },
+        { "line_width",                  "0.45" },
+        { "outer_wall_line_width",       "0" },
+        { "inner_wall_line_width",       "0" },
+        { "wall_generator",              "classic" },
+        { "wall_loops",                  "2" },
+        { "wall_sequence",               "inner wall/outer wall" },
+        { "top_shell_layers",            "0" },
+        { "bottom_shell_layers",         "0" },
+        { "sparse_infill_density",       "0%" },
+        { "skirt_loops",                 "0" },
+        { "brim_type",                   "no_brim" },
+        { "seam_position",               "aligned" },
+        { "seam_gap",                    "0" },
+        { "reduce_crossing_wall",        enabled ? "1" : "0" },
+        { "max_travel_detour_distance",  "1000" },
+        { "retraction_minimum_travel",   "0.5" },
+        { "retraction_length",           "0.8" },
+        { "retract_when_changing_layer", "0" },
+        { "use_firmware_retraction",     "0" },
+        { "wipe",                         "0" },
+        { "z_hop",                        "0" },
+        { "gcode_flavor",                 "marlin2" },
+        { "use_relative_e_distances",     "0" },
+        { "enable_arc_fitting",           "0" },
+        { "gcode_comments",               "1" },
+        { "layer_change_gcode",           "" },
+        { "machine_start_gcode",          "" },
+        { "machine_end_gcode",            "" },
+    });
+    return config;
+}
+
+TriangleMesh crossing_wall_fixture()
+{
+    TriangleMesh fixture = Test::mesh(Test::TestMesh::cube_with_hole);
+    fixture.scale(Vec3f(1.f, 1.f, 0.4f));
+    return fixture;
+}
+
+double cross_2d(const Vec2d &a, const Vec2d &b)
+{
+    return a.x() * b.y() - a.y() * b.x();
+}
+
+// Endpoint and tangent policy: only strict interior/interior crossings count. A route may
+// start or finish on a printed wall, and a tangent contact is not an obstacle crossing.
+bool proper_crossing(const Vec2d &a, const Vec2d &b, const Vec2d &c, const Vec2d &d)
+{
+    constexpr double parameter_margin = 0.02;
+    const Vec2d r = b - a;
+    const Vec2d s = d - c;
+    const double denominator = cross_2d(r, s);
+    if (std::abs(denominator) <= 1e-9)
+        return false;
+    const Vec2d offset = c - a;
+    const double t = cross_2d(offset, s) / denominator;
+    const double u = cross_2d(offset, r) / denominator;
+    return t > parameter_margin && t < 1. - parameter_margin &&
+           u > parameter_margin && u < 1. - parameter_margin;
+}
+
+bool wall_crosses_route(const TravelRoute &route, const std::vector<Segment> &walls,
+                        bool direct_segment)
+{
+    if (route.points.size() < 2)
+        return false;
+    for (const Segment &wall : walls) {
+        if (wall.layer_index != route.layer_index ||
+            wall.emission_index >= route.start_emission_index ||
+            std::abs(wall.z - route.z) > 0.001)
+            continue;
+        if (direct_segment) {
+            if (proper_crossing(route.points.front(), route.points.back(), wall.start, wall.end))
+                return true;
+        } else {
+            for (size_t i = 1; i < route.points.size(); ++i)
+                if (proper_crossing(route.points[i - 1], route.points[i], wall.start, wall.end))
+                    return true;
+        }
+    }
+    return false;
+}
+
+void update_role(const GCodeReader::GCodeLine &line, ExtrusionRole &role)
+{
+    const std::string_view comment = line.comment();
+    const std::string &role_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+    if (comment.rfind(role_tag, 0) == 0)
+        role = ExtrusionEntity::string_to_role(comment.substr(role_tag.size()));
+    else if (comment.rfind("TYPE:", 0) == 0)
+        role = ExtrusionEntity::string_to_role(comment.substr(5));
+}
+
+ParsedOutput parse_output(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    constexpr size_t max_gcode_bytes = 8u * 1024u * 1024u;
+    REQUIRE(gcode.size() <= max_gcode_bytes);
+
+    ParsedOutput output;
+    ExtrusionRole active_role = erNone;
+    bool route_open = false;
+    bool pending_retraction = false;
+    size_t layer_index = 0;
+    size_t emission_index = 0;
+    TravelRoute current_route;
+
+    const auto finish_route = [&]() {
+        if (!route_open)
+            return;
+        if (current_route.points.size() >= 2) {
+            current_route.direct_mm = (current_route.points.back() - current_route.points.front()).norm();
+            current_route.path_mm = 0.;
+            for (size_t i = 1; i < current_route.points.size(); ++i)
+                current_route.path_mm += (current_route.points[i] - current_route.points[i - 1]).norm();
+            REQUIRE(std::isfinite(current_route.direct_mm));
+            REQUIRE(std::isfinite(current_route.path_mm));
+            if (current_route.direct_mm > 0.2)
+                output.routes.push_back(std::move(current_route));
+        }
+        route_open = false;
+    };
+
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        update_role(line, active_role);
+
+        // Layer markers terminate a route before advancing its explicit parsed-layer identity.
+        // Other metadata/comments do not move the nozzle and must not split one travel route.
+        std::string_view comment = line.comment();
+        while (!comment.empty() && (comment.front() == ' ' || comment.front() == '\t'))
+            comment.remove_prefix(1);
+        const bool layer_marker = comment == GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change) ||
+                                  comment == "LAYER_CHANGE" || comment == "CHANGE_LAYER";
+        if (layer_marker) {
+            finish_route();
+            ++layer_index;
+            return;
+        }
+
+        const bool motion = line.cmd_is("G0") || line.cmd_is("G1");
+        if (!motion)
+            return;
+        const size_t current_emission_index = emission_index++;
+
+        const double xy = line.dist_XY(self);
+        const double dz = line.dist_Z(self);
+        const double de = line.dist_E(self);
+        const double new_x = line.new_X(self);
+        const double new_y = line.new_Y(self);
+        const double new_z = line.new_Z(self);
+        REQUIRE(std::isfinite(self.x()));
+        REQUIRE(std::isfinite(self.y()));
+        REQUIRE(std::isfinite(self.z()));
+        REQUIRE(std::isfinite(new_x));
+        REQUIRE(std::isfinite(new_y));
+        REQUIRE(std::isfinite(new_z));
+        REQUIRE(std::isfinite(xy));
+        REQUIRE(std::isfinite(dz));
+        REQUIRE(std::isfinite(de));
+        const bool pure_xy_travel = xy > EPSILON && std::abs(dz) <= EPSILON &&
+                                    std::abs(de) <= EPSILON && !line.extruding(self);
+        if (line.retracting(self)) {
+            finish_route();
+            pending_retraction = true;
+            return;
+        }
+        if (pure_xy_travel) {
+            const Vec2d destination{new_x, new_y};
+            if (!route_open) {
+                current_route = TravelRoute{};
+                current_route.layer_index = layer_index;
+                current_route.start_emission_index = current_emission_index;
+                current_route.z = self.z();
+                current_route.had_retraction = pending_retraction;
+                current_route.points = { Vec2d{self.x(), self.y()}, destination };
+                pending_retraction = false;
+                route_open = true;
+            } else {
+                current_route.points.push_back(destination);
+            }
+            return;
+        }
+
+        finish_route();
+        if (line.extruding(self) && xy > EPSILON && is_perimeter(active_role)) {
+            const double z = line.has_z() ? new_z : self.z();
+            REQUIRE(std::isfinite(z));
+            output.walls.push_back({layer_index, current_emission_index, z, Vec2d{self.x(), self.y()}, Vec2d{new_x, new_y}});
+        }
+        if (line.extruding(self) && xy > EPSILON) {
+            pending_retraction = false;
+            ++output.motion.extrusion_moves;
+            output.motion.xy_path_mm += xy;
+            output.motion.filament_mm += std::abs(de);
+        }
+    });
+    finish_route();
+    REQUIRE(!output.walls.empty());
+    for (TravelRoute &route : output.routes) {
+        route.direct_crosses_wall = wall_crosses_route(route, output.walls, true);
+        route.legs_clear = !wall_crosses_route(route, output.walls, false);
+    }
+    return output;
+}
+
+ParsedOutput export_fixture(const DynamicPrintConfig &config)
+{
+    Model model;
+    Print print;
+    init_print({crossing_wall_fixture()}, print, model, config);
+    REQUIRE(print.validate().string.empty());
+    const std::string output = Test::gcode(print);
+    REQUIRE(!output.empty());
+    return parse_output(output, config);
+}
+
+bool same_endpoints(const TravelRoute &lhs, const TravelRoute &rhs)
+{
+    return lhs.layer_index == rhs.layer_index &&
+           std::abs(lhs.z - rhs.z) < 0.001 &&
+           (lhs.points.front() - rhs.points.front()).norm() < 0.05 &&
+           (lhs.points.back() - rhs.points.back()).norm() < 0.05;
+}
+
+} // namespace reduce_crossing_wall_contracts
+
+TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted wall", "[Wipe][ReduceCrossingWall][SettingsRetractionVariance][Pipeline]")
+{
+    using namespace reduce_crossing_wall_contracts;
+    const ParsedOutput disabled = export_fixture(crossing_wall_config(false));
+    const ParsedOutput enabled = export_fixture(crossing_wall_config(true));
+    REQUIRE(!disabled.routes.empty());
+    REQUIRE(!enabled.routes.empty());
+
+    const TravelRoute *direct = nullptr;
+    const TravelRoute *detour = nullptr;
+    // Search every eligible disabled route: the first crossing is not necessarily the
+    // one whose enabled counterpart is detoured by AvoidCrossingPerimeters.
+    for (const TravelRoute &candidate : disabled.routes) {
+        if (!candidate.had_retraction || !candidate.direct_crosses_wall ||
+            candidate.path_mm > candidate.direct_mm + 0.05)
+            continue;
+        const auto enabled_match = std::find_if(enabled.routes.begin(), enabled.routes.end(),
+                                                [&](const TravelRoute &route) {
+            return same_endpoints(route, candidate) && route.direct_crosses_wall &&
+                   route.path_mm > route.direct_mm + 0.05 && route.legs_clear;
+        });
+        if (enabled_match != enabled.routes.end()) {
+            direct = &candidate;
+            detour = &*enabled_match;
+            break;
+        }
+    }
+    REQUIRE(direct != nullptr);
+    REQUIRE(detour != nullptr);
+    CHECK(direct->path_mm <= direct->direct_mm + 0.05);
+
+    REQUIRE(disabled.motion.extrusion_moves > 0);
+    CHECK(enabled.motion.extrusion_moves == disabled.motion.extrusion_moves);
+    CHECK_THAT(enabled.motion.xy_path_mm, Catch::Matchers::WithinRel(disabled.motion.xy_path_mm, 1e-5));
+    CHECK_THAT(enabled.motion.filament_mm, Catch::Matchers::WithinRel(disabled.motion.filament_mm, 1e-5));
+}
+
+namespace reduce_infill_retraction_contracts {
+namespace {
+
+constexpr std::size_t kMaxGCodeBytes = 4u * 1024u * 1024u;
+constexpr std::size_t kMaxGCodeLines = 100000u;
+constexpr double kCubeSize = 12.0;
+
+struct FixtureExport {
+    std::string output;
+    // A copy of the public post-process internal surfaces, indexed by layer.
+    // The production containment helper consumes the same LayerRegion slices.
+    std::vector<std::vector<ExPolygon>> internal_surfaces;
+    std::vector<double> layer_print_z;
+};
+
+struct TravelWitness {
+    int layer = -1;
+    ExtrusionRole source_role = erNone;
+    ExtrusionRole destination_role = erNone;
+    double start_x = 0.0;
+    double start_y = 0.0;
+    double end_x = 0.0;
+    double end_y = 0.0;
+    std::size_t retractions = 0;
+};
+
+struct ReducedRetractionEvidence {
+    std::size_t positive_moves = 0;
+    std::size_t sparse_positive_moves = 0;
+    std::size_t perimeter_positive_moves = 0;
+    std::size_t retractions = 0;
+    double positive_filament = 0.0;
+    double positive_xy_path = 0.0;
+    double sparse_filament = 0.0;
+    double sparse_xy_path = 0.0;
+    double perimeter_filament = 0.0;
+    double perimeter_xy_path = 0.0;
+    std::size_t finite_layer_z_checks = 0;
+    bool invalid_layer_z = false;
+    bool layer_z_mismatch = false;
+    std::vector<TravelWitness> contained_internal_travels;
+    std::vector<TravelWitness> perimeter_controls;
+};
+
+struct PendingTravel {
+    bool active = false;
+    bool saw_xy = false;
+    bool all_xy_inside = true;
+    bool crossed_layer = false;
+    int source_layer = -1;
+    ExtrusionRole source_role = erNone;
+    std::size_t retractions = 0;
+    double start_x = 0.0;
+    double start_y = 0.0;
+    double end_x = 0.0;
+    double end_y = 0.0;
+};
+
+bool perimeter_role(ExtrusionRole role)
+{
+    return role == erPerimeter || role == erExternalPerimeter || role == erOverhangPerimeter;
+}
+
+DynamicPrintConfig reduce_infill_retraction_config(bool enabled)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height",                    "0.2"},
+        {"initial_layer_print_height",      "0.2"},
+        {"nozzle_diameter",                 "0.4"},
+        {"line_width",                      "0.45"},
+        {"outer_wall_line_width",           "0.45"},
+        {"inner_wall_line_width",           "0.45"},
+        {"sparse_infill_line_width",        "0.45"},
+        {"gcode_flavor",                    "marlin2"},
+        {"use_relative_e_distances",        false},
+        {"wall_generator",                  "classic"},
+        {"print_sequence",                 "by layer"},
+        {"raft_layers",                     "0"},
+        {"skirt_loops",                     "0"},
+        {"brim_type",                       "no_brim"},
+        {"spiral_mode",                     false},
+        {"belt_printer",                    false},
+        {"enable_arc_fitting",              false},
+        {"wall_loops",                      "1"},
+        {"top_shell_layers",                "0"},
+        {"bottom_shell_layers",             "0"},
+        {"top_shell_thickness",             "0"},
+        {"bottom_shell_thickness",          "0"},
+        {"sparse_infill_density",           "20%"},
+        {"sparse_infill_pattern",           "rectilinear"},
+        {"reduce_infill_retraction",        enabled},
+        {"reduce_crossing_wall",            false},
+        {"retraction_length",               "0.8"},
+        {"retraction_speed",               "30"},
+        {"deretraction_speed",              "30"},
+        {"retraction_minimum_travel",       "0"},
+        {"retract_when_changing_layer",     false},
+        {"wipe",                             false},
+        {"wipe_distance",                   "0"},
+        {"z_hop",                            "0"},
+        {"retract_lift_above",              "0"},
+        {"retract_lift_below",              "0"},
+        {"retract_before_wipe",             "0%"},
+        {"retract_after_wipe",              "0%"},
+        {"slow_down_for_layer_cooling",     false},
+        {"slow_down_layer_time",            "0"},
+        {"fan_cooling_layer_time",          "0"},
+        {"close_fan_the_first_x_layers",    0},
+        {"full_fan_speed_layer",            0},
+        {"fan_min_speed",                   "0"},
+        {"fan_max_speed",                   "0"},
+        {"filament_max_volumetric_speed",   "1000"},
+        {"layer_change_gcode",              ""},
+        {"gcode_comments",                  true},
+        {"machine_start_gcode",             ""},
+        {"machine_end_gcode",               ""},
+    });
+    config.set_key_value("extruder_offset", new ConfigOptionPoints{Vec2d(0., 0.)});
+    config.set_key_value("z_hop_types", new ConfigOptionEnumsGeneric{zhtNormal});
+    config.set_key_value("retract_lift_enforce", new ConfigOptionEnumsGeneric{rletAllSurfaces});
+    return config;
+}
+
+FixtureExport export_reduce_fixture(const DynamicPrintConfig &config)
+{
+    // Model must outlive Print because Print owns PrintObjects that refer back
+    // to the model during teardown.
+    Model model;
+    Print print;
+    init_print(std::vector<TriangleMesh>{make_cube(kCubeSize, kCubeSize, 1.0)}, print, model, config, nullptr,
+               /*arrange=*/false);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE_NOTHROW(print.process());
+
+    FixtureExport fixture;
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object->instances().size() == 1);
+    const Point instance_shift = object->instances().front().shift;
+    for (std::size_t layer_index = 0; layer_index < object->layers().size(); ++layer_index) {
+        const Layer *layer = object->layers()[layer_index];
+        REQUIRE(std::isfinite(double(layer->print_z)));
+        fixture.layer_print_z.push_back(layer->print_z);
+        fixture.internal_surfaces.emplace_back();
+        for (const LayerRegion *region : layer->regions())
+            for (const Surface &surface : region->get_slices().surfaces)
+                if (surface.is_internal()) {
+                    ExPolygon shifted_surface = surface.expolygon;
+                    shifted_surface.translate(instance_shift);
+                    fixture.internal_surfaces.back().push_back(std::move(shifted_surface));
+                }
+    }
+    REQUIRE(fixture.internal_surfaces.size() > 0);
+    REQUIRE(fixture.internal_surfaces.front().size() > 0);
+    fixture.output = gcode(print);
+    REQUIRE(fixture.output.size() <= kMaxGCodeBytes);
+    return fixture;
+}
+
+bool segment_inside_internal_surface(const FixtureExport &fixture, int layer,
+                                     double start_x, double start_y, double end_x, double end_y)
+{
+    if (layer < 0 || static_cast<std::size_t>(layer) >= fixture.internal_surfaces.size())
+        return false;
+    REQUIRE(std::isfinite(start_x));
+    REQUIRE(std::isfinite(start_y));
+    REQUIRE(std::isfinite(end_x));
+    REQUIRE(std::isfinite(end_y));
+    const Line segment(Point(scaled(start_x), scaled(start_y)), Point(scaled(end_x), scaled(end_y)));
+    for (const ExPolygon &surface : fixture.internal_surfaces[static_cast<std::size_t>(layer)])
+        if (surface.contains(segment))
+            return true;
+    return false;
+}
+
+ReducedRetractionEvidence reduced_retraction_evidence(const FixtureExport &fixture,
+                                                       const DynamicPrintConfig &config)
+{
+    const std::string &gcode_output = fixture.output;
+    REQUIRE(gcode_output.size() <= kMaxGCodeBytes);
+    REQUIRE(static_cast<std::size_t>(std::count(gcode_output.begin(), gcode_output.end(), '\n')) <= kMaxGCodeLines);
+
+    ReducedRetractionEvidence evidence;
+    const std::string &role_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+    GCodeReader reader;
+    reader.apply_config(config);
+    ExtrusionRole active_role = erNone;
+    ExtrusionRole last_positive_role = erNone;
+    int current_layer = -1;
+    int last_positive_layer = -1;
+    bool have_last_positive = false;
+    PendingTravel pending;
+
+    auto begin_pending = [&]() {
+        if (pending.active || !have_last_positive)
+            return;
+        pending.active = true;
+        pending.all_xy_inside = true;
+        pending.source_role = last_positive_role;
+        pending.source_layer = last_positive_layer;
+    };
+    auto classify_pending = [&]() {
+        if (!pending.active || !pending.saw_xy)
+            return;
+        if (!pending.crossed_layer && pending.source_layer == current_layer) {
+            if (pending.source_role == erInternalInfill && active_role == erInternalInfill && pending.all_xy_inside) {
+                evidence.contained_internal_travels.push_back({
+                    pending.source_layer, pending.source_role, active_role,
+                    pending.start_x, pending.start_y, pending.end_x, pending.end_y, pending.retractions});
+            } else if (pending.source_role == erExternalPerimeter && active_role == erInternalInfill) {
+                // This is deliberately outside the internal-surface gate: its
+                // source endpoint is on the exterior wall. The production
+                // external-wall guard is the control being observed.
+                evidence.perimeter_controls.push_back({
+                    pending.source_layer, pending.source_role, active_role,
+                    pending.start_x, pending.start_y, pending.end_x, pending.end_y, pending.retractions});
+            }
+        }
+    };
+
+    reader.parse_buffer(gcode_output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find(role_tag) == 0)
+            active_role = ExtrusionEntity::string_to_role(comment.substr(role_tag.size()));
+        if (comment.find("LAYER_CHANGE") != std::string_view::npos) {
+            ++current_layer;
+            if (pending.active)
+                pending.crossed_layer = true;
+        }
+
+        if (line.retracting(self)) {
+            ++evidence.retractions;
+            begin_pending();
+            if (pending.active)
+                ++pending.retractions;
+            return;
+        }
+
+        if (line.travel() && line.dist_XY(self) > EPSILON) {
+            begin_pending();
+            if (pending.active) {
+                const double start_x = self.x();
+                const double start_y = self.y();
+                const double end_x = line.new_X(self);
+                const double end_y = line.new_Y(self);
+                if (!pending.saw_xy) {
+                    pending.start_x = start_x;
+                    pending.start_y = start_y;
+                }
+                pending.end_x = end_x;
+                pending.end_y = end_y;
+                pending.all_xy_inside = pending.all_xy_inside &&
+                    segment_inside_internal_surface(fixture, pending.source_layer, start_x, start_y, end_x, end_y);
+                pending.saw_xy = true;
+            }
+            return;
+        }
+
+        if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
+            REQUIRE(std::isfinite(line.dist_E(self)));
+            REQUIRE(std::isfinite(line.dist_XY(self)));
+            if (current_layer < 0 || static_cast<std::size_t>(current_layer) >= fixture.layer_print_z.size()) {
+                evidence.invalid_layer_z = true;
+            } else {
+                const double expected_z = fixture.layer_print_z[static_cast<std::size_t>(current_layer)];
+                const double observed_z = line.new_Z(self);
+                if (!std::isfinite(expected_z) || !std::isfinite(observed_z))
+                    evidence.invalid_layer_z = true;
+                else {
+                    ++evidence.finite_layer_z_checks;
+                    if (std::abs(expected_z - observed_z) > 0.01)
+                        evidence.layer_z_mismatch = true;
+                }
+            }
+            classify_pending();
+            pending = PendingTravel{};
+            ++evidence.positive_moves;
+            evidence.positive_filament += line.dist_E(self);
+            evidence.positive_xy_path += line.dist_XY(self);
+            if (active_role == erInternalInfill) {
+                ++evidence.sparse_positive_moves;
+                evidence.sparse_filament += line.dist_E(self);
+                evidence.sparse_xy_path += line.dist_XY(self);
+            } else if (perimeter_role(active_role)) {
+                ++evidence.perimeter_positive_moves;
+                evidence.perimeter_filament += line.dist_E(self);
+                evidence.perimeter_xy_path += line.dist_XY(self);
+            }
+            last_positive_role = active_role;
+            last_positive_layer = current_layer;
+            have_last_positive = true;
+        }
+    });
+
+    REQUIRE(evidence.sparse_positive_moves > 0);
+    REQUIRE(evidence.finite_layer_z_checks > 0);
+    CHECK_FALSE(evidence.invalid_layer_z);
+    CHECK_FALSE(evidence.layer_z_mismatch);
+    return evidence;
+}
+
+TEST_CASE("Reduce infill retraction skips contained sparse-infill travel", "[Wipe][ReduceInfillRetraction][Pipeline]")
+{
+    const DynamicPrintConfig disabled_config = reduce_infill_retraction_config(false);
+    const DynamicPrintConfig enabled_config = reduce_infill_retraction_config(true);
+    const FixtureExport disabled_fixture = export_reduce_fixture(disabled_config);
+    const FixtureExport enabled_fixture = export_reduce_fixture(enabled_config);
+    const ReducedRetractionEvidence disabled = reduced_retraction_evidence(disabled_fixture, disabled_config);
+    const ReducedRetractionEvidence enabled = reduced_retraction_evidence(enabled_fixture, enabled_config);
+
+    REQUIRE(disabled.positive_moves > 0);
+    REQUIRE(enabled.positive_moves > 0);
+    REQUIRE(disabled.contained_internal_travels.size() == enabled.contained_internal_travels.size());
+    REQUIRE(disabled.contained_internal_travels.size() > 0);
+    bool saw_changed_internal_event = false;
+    for (std::size_t i = 0; i < disabled.contained_internal_travels.size(); ++i) {
+        const TravelWitness &before = disabled.contained_internal_travels[i];
+        const TravelWitness &after = enabled.contained_internal_travels[i];
+        INFO("paired contained travel index " << i);
+        CHECK(before.layer == after.layer);
+        CHECK(before.source_role == after.source_role);
+        CHECK(before.destination_role == after.destination_role);
+        CHECK_THAT(before.start_x, Catch::Matchers::WithinAbs(after.start_x, 0.01));
+        CHECK_THAT(before.start_y, Catch::Matchers::WithinAbs(after.start_y, 0.01));
+        CHECK_THAT(before.end_x, Catch::Matchers::WithinAbs(after.end_x, 0.01));
+        CHECK_THAT(before.end_y, Catch::Matchers::WithinAbs(after.end_y, 0.01));
+        if (before.retractions > after.retractions)
+            saw_changed_internal_event = true;
+    }
+    CHECK(saw_changed_internal_event);
+
+    // A perimeter-to-internal transition remains a visible control: the
+    // external-wall guard must still retract in both fresh exports.
+    REQUIRE(disabled.perimeter_controls.size() == enabled.perimeter_controls.size());
+    REQUIRE(disabled.perimeter_controls.size() > 0);
+    for (std::size_t i = 0; i < disabled.perimeter_controls.size(); ++i) {
+        const TravelWitness &before = disabled.perimeter_controls[i];
+        const TravelWitness &after = enabled.perimeter_controls[i];
+        INFO("paired perimeter control index " << i);
+        CHECK(before.layer == after.layer);
+        CHECK_THAT(before.start_x, Catch::Matchers::WithinAbs(after.start_x, 0.01));
+        CHECK_THAT(before.start_y, Catch::Matchers::WithinAbs(after.start_y, 0.01));
+        CHECK_THAT(before.end_x, Catch::Matchers::WithinAbs(after.end_x, 0.01));
+        CHECK_THAT(before.end_y, Catch::Matchers::WithinAbs(after.end_y, 0.01));
+        CHECK(before.retractions > 0);
+        CHECK(after.retractions > 0);
+        CHECK(before.retractions == after.retractions);
+    }
+
+    // The option changes retraction policy only; positive geometry and
+    // deposited material remain invariant between the fresh public exports.
+    CHECK(disabled.positive_moves == enabled.positive_moves);
+    CHECK(disabled.sparse_positive_moves == enabled.sparse_positive_moves);
+    CHECK(disabled.perimeter_positive_moves == enabled.perimeter_positive_moves);
+    CHECK_THAT(disabled.positive_xy_path, Catch::Matchers::WithinAbs(enabled.positive_xy_path, 0.01));
+    CHECK_THAT(disabled.positive_filament, Catch::Matchers::WithinAbs(enabled.positive_filament, 0.01));
+    CHECK_THAT(disabled.sparse_xy_path, Catch::Matchers::WithinAbs(enabled.sparse_xy_path, 0.01));
+    CHECK_THAT(disabled.sparse_filament, Catch::Matchers::WithinAbs(enabled.sparse_filament, 0.01));
+    CHECK_THAT(disabled.perimeter_xy_path, Catch::Matchers::WithinAbs(enabled.perimeter_xy_path, 0.01));
+    CHECK_THAT(disabled.perimeter_filament, Catch::Matchers::WithinAbs(enabled.perimeter_filament, 0.01));
+}
+
+} // namespace
+} // namespace reduce_infill_retraction_contracts

@@ -754,3 +754,150 @@ TEST_CASE("SLA drain-hole normals remain perpendicular after rotated unequal sca
     CHECK_THAT(hole.radius, Catch::Matchers::WithinAbs(2., 1e-5));
 }
 } // namespace sla_drain_transform_contracts
+
+namespace sla_pad_variance_contracts {
+
+struct PadVarianceRun {
+    double wall_thickness = 0.;
+    double brim_size      = 0.;
+    double z_span         = 0.;
+    double footprint_x    = 0.;
+    double footprint_y    = 0.;
+    double pad_volume     = 0.;
+    double support_area   = 0.;
+    std::size_t model_records = 0;
+    double model_area = 0.;
+};
+
+PadVarianceRun run_pad(double wall_thickness, double brim_size)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("pad_enable", new ConfigOptionBool(true));
+    config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(wall_thickness));
+    config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_brim_size", new ConfigOptionFloat(brim_size));
+    config.set_key_value("pad_wall_slope", new ConfigOptionFloat(45.0));
+    config.set_key_value("pad_max_merge_distance", new ConfigOptionFloat(50.0));
+    config.set_key_value("pad_around_object", new ConfigOptionBool(false));
+    config.set_key_value("pad_around_object_everywhere", new ConfigOptionBool(false));
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.0, 1.0}));
+    config.set_key_value("relative_correction_x", new ConfigOptionFloat(1.0));
+    config.set_key_value("relative_correction_y", new ConfigOptionFloat(1.0));
+    config.set_key_value("relative_correction_z", new ConfigOptionFloat(1.0));
+    config.set_key_value("material_correction", new ConfigOptionFloats({1.0, 1.0, 1.0}));
+    config.set_key_value("material_correction_x", new ConfigOptionFloat(1.0));
+    config.set_key_value("material_correction_y", new ConfigOptionFloat(1.0));
+    config.set_key_value("material_correction_z", new ConfigOptionFloat(1.0));
+    config.set_key_value("absolute_correction", new ConfigOptionFloat(0.0));
+    config.set_key_value("elefant_foot_compensation", new ConfigOptionFloat(0.0));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    const auto validation = fixture.print.validate();
+    INFO("pad validation: " << validation.string);
+    REQUIRE(validation.string.empty());
+
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposPad));
+    TriangleMesh pad = object->pad_mesh();
+    REQUIRE_FALSE(pad.empty());
+
+    const auto bbox = pad.bounding_box();
+    const double z_span      = bbox.max.z() - bbox.min.z();
+    const double footprint_x = bbox.max.x() - bbox.min.x();
+    const double footprint_y = bbox.max.y() - bbox.min.y();
+    const double pad_volume  = pad.volume();
+    const double support_area = support_slice_area(*object);
+
+    CHECK(std::isfinite(z_span));
+    CHECK(std::isfinite(footprint_x));
+    CHECK(std::isfinite(footprint_y));
+    CHECK(std::isfinite(pad_volume));
+    CHECK(std::isfinite(support_area));
+    REQUIRE(z_span > 0.);
+    REQUIRE(footprint_x > 0.);
+    REQUIRE(footprint_y > 0.);
+    REQUIRE(pad_volume > 0.);
+    REQUIRE(support_area > 0.);
+
+    const auto &slice_index = object->get_slice_index();
+    REQUIRE_FALSE(slice_index.empty());
+    std::size_t model_records = 0;
+    double model_area = 0.;
+    for (const SLAPrintObject::SliceRecord &record : slice_index) {
+        const ExPolygons &model_slice = record.get_slice(soModel);
+        if (model_slice.empty())
+            continue;
+        ++model_records;
+        REQUIRE(model_slice.size() == 1);
+        const double area_mm2 = model_slice.front().area() /
+                                (scaled<double>(1.0) * scaled<double>(1.0));
+        CHECK_THAT(area_mm2, Catch::Matchers::WithinAbs(100.0, 1e-4));
+        model_area += area_mm2;
+    }
+    REQUIRE(model_records > 0);
+    CHECK(std::isfinite(model_area));
+
+    return {wall_thickness, brim_size, z_span, footprint_x, footprint_y,
+            pad_volume, support_area, model_records, model_area};
+}
+
+} // namespace sla_pad_variance_contracts
+
+TEST_CASE("SLA pad wall thickness controls pad height",
+          "[SLAFeatures][SLAPadVariance][SLAPadThicknessVariance]")
+{
+    const std::vector<double> values{0.8, 1.2, 2.0};
+    std::vector<sla_pad_variance_contracts::PadVarianceRun> runs;
+    runs.reserve(values.size());
+    for (const double value : values) {
+        INFO("pad_wall_thickness=" << value);
+        // Keep brim comfortably above PadConfig::bottom_offset() for the
+        // thickest wall row, including finite-precision validation margins.
+        runs.emplace_back(sla_pad_variance_contracts::run_pad(value, 4.0));
+    }
+
+    REQUIRE(runs.size() == values.size());
+    for (std::size_t i = 0; i < runs.size(); ++i)
+        CHECK_THAT(runs[i].z_span,
+                   Catch::Matchers::WithinAbs(values[i] + 1.0, 1e-4));
+    for (std::size_t i = 1; i < runs.size(); ++i)
+        CHECK(runs[i].z_span > runs[i - 1].z_span);
+}
+
+TEST_CASE("SLA pad brim size expands the pad footprint",
+          "[SLAFeatures][SLAPadVariance][SLAPadBrimVariance]")
+{
+    const std::vector<double> values{2.0, 5.0, 8.0};
+    std::vector<sla_pad_variance_contracts::PadVarianceRun> runs;
+    runs.reserve(values.size());
+    for (const double value : values) {
+        INFO("pad_brim_size=" << value);
+        runs.emplace_back(sla_pad_variance_contracts::run_pad(0.8, value));
+    }
+
+    REQUIRE(runs.size() == values.size());
+    for (const auto &run : runs)
+        REQUIRE(run.model_records > 0);
+    for (const auto &run : runs)
+        CHECK_THAT(run.z_span, Catch::Matchers::WithinAbs(1.8, 1e-4));
+    const auto &reference = runs.front();
+    for (std::size_t i = 1; i < runs.size(); ++i) {
+        CHECK(runs[i].model_records == reference.model_records);
+        CHECK_THAT(runs[i].model_area,
+                   Catch::Matchers::WithinAbs(reference.model_area, 1e-4));
+    }
+    for (std::size_t i = 1; i < runs.size(); ++i) {
+        const double brim_delta = values[i] - values[i - 1];
+        // PadConfig derives the waffle offset from brim_size + wing_distance.
+        // Keep a conservative fraction of the configured delta as the
+        // public extent witness instead of freezing exact offset coordinates.
+        const double minimum_growth = 0.25 * brim_delta;
+        CHECK(runs[i].footprint_x > runs[i - 1].footprint_x + minimum_growth);
+        CHECK(runs[i].footprint_y > runs[i - 1].footprint_y + minimum_growth);
+    }
+}

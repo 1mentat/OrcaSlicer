@@ -2293,6 +2293,208 @@ std::vector<bool> contour_winding(Print &print)
 }
 }
 
+namespace interface_shells_followup {
+
+constexpr size_t expected_region_count = 2;
+
+DynamicPrintConfig config(bool interface_shells)
+{
+    DynamicPrintConfig result = multifilament_config(2, {
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_generator", "classic"},
+        {"wall_loops", 2},
+        {"top_shell_layers", 2},
+        {"bottom_shell_layers", 2},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"top_surface_density", "100%"},
+        {"bottom_surface_density", "100%"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"single_extruder_multi_material", false},
+        {"spiral_mode", false},
+        {"interface_shells", interface_shells},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"gcode_comments", true},
+        {"outer_wall_line_width", 0.42},
+        {"inner_wall_line_width", 0.45},
+    });
+    return result;
+}
+
+// The lower material ends at z=1.0 while the upper material starts at z=0.6
+// and continues above it.  Their known 8x8 material interface is hidden only
+// when regions are treated as one collective body.  The strongest-delta
+// search intentionally finds the actual transition layer after slicing,
+// rather than assuming which layer owns the overlap precedence.  A single
+// ModelObject with two MODEL_PART volumes gives Print::apply the same public
+// multi-region path used by production.
+struct ProcessedFixture {
+    Model model;
+    Print print;
+
+    explicit ProcessedFixture(bool interface_shells)
+    {
+        ModelObject *object = model.add_object();
+        auto *lower = object->add_volume(make_cube(12., 12., 1.0), ModelVolumeType::MODEL_PART, false);
+        TriangleMesh upper_mesh = make_cube(8., 8., 1.2);
+        upper_mesh.translate(2.f, 2.f, 0.6f);
+        auto *upper = object->add_volume(std::move(upper_mesh), ModelVolumeType::MODEL_PART, false);
+        lower->config.set("extruder", 1);
+        upper->config.set("extruder", 2);
+        object->add_instance();
+        object->ensure_on_bed();
+
+        DynamicPrintConfig cfg = config(interface_shells);
+        print.auto_assign_extruders(object);
+        print.apply(model, cfg);
+        const auto validation = print.validate();
+        INFO("interface_shells=" << interface_shells << " validation=" << validation.string);
+        REQUIRE(validation.string.empty());
+        print.process();
+        REQUIRE(print.objects().size() == 1);
+        REQUIRE(print.objects().front()->num_printing_regions() == expected_region_count);
+    }
+};
+
+double area_mm2(double scaled_area)
+{
+    const double one_mm = double(scale_(1.));
+    return scaled_area / (one_mm * one_mm);
+}
+
+double area_for(const LayerRegion &region, SurfaceType type)
+{
+    double area = 0.;
+    for (const Surface &surface : region.slices.surfaces)
+        if (surface.surface_type == type)
+            area += surface.expolygon.area();
+    return area_mm2(area);
+}
+
+double all_surface_area(const LayerRegion &region)
+{
+    double area = 0.;
+    for (const Surface &surface : region.slices.surfaces)
+        area += surface.expolygon.area();
+    return area_mm2(area);
+}
+
+struct TopSurfaceObservation {
+    double z = 0.;
+    size_t region = 0;
+    double top_disabled = 0.;
+    double top_enabled = 0.;
+    double internal_disabled = 0.;
+    double internal_enabled = 0.;
+};
+
+TopSurfaceObservation strongest_interface_surface_change(const PrintObject &disabled,
+                                                          const PrintObject &enabled)
+{
+    TopSurfaceObservation best;
+    REQUIRE_FALSE(disabled.layers().empty());
+    REQUIRE_FALSE(enabled.layers().empty());
+    for (const Layer *enabled_layer : enabled.layers()) {
+        const Layer *disabled_layer = nullptr;
+        for (const Layer *candidate : disabled.layers()) {
+            if (std::abs(double(candidate->print_z) - double(enabled_layer->print_z)) < 1e-5) {
+                disabled_layer = candidate;
+                break;
+            }
+        }
+        REQUIRE(disabled_layer != nullptr);
+        REQUIRE(enabled_layer->regions().size() == expected_region_count);
+        REQUIRE(disabled_layer->regions().size() == expected_region_count);
+        for (size_t region_idx = 0; region_idx < enabled_layer->regions().size(); ++region_idx) {
+            const LayerRegion &disabled_region = *disabled_layer->get_region(static_cast<int>(region_idx));
+            const LayerRegion &enabled_region = *enabled_layer->get_region(static_cast<int>(region_idx));
+            const double disabled_top = area_for(disabled_region, stTop);
+            const double enabled_top = area_for(enabled_region, stTop);
+            const double gain = enabled_top - disabled_top;
+            if (gain > best.top_enabled - best.top_disabled) {
+                best.z = double(enabled_layer->print_z);
+                best.region = region_idx;
+                best.top_disabled = disabled_top;
+                best.top_enabled = enabled_top;
+                best.internal_disabled = area_for(disabled_region, stInternal);
+                best.internal_enabled = area_for(enabled_region, stInternal);
+            }
+        }
+    }
+    return best;
+}
+
+} // namespace interface_shells_followup
+
+TEST_CASE("Interface shells preserve a material's hidden top surface", "[InterfaceShells][SettingsVariance]")
+{
+    interface_shells_followup::ProcessedFixture disabled(false);
+    interface_shells_followup::ProcessedFixture enabled(true);
+    const PrintObject &disabled_object = *disabled.print.objects().front();
+    const PrintObject &enabled_object = *enabled.print.objects().front();
+    REQUIRE_FALSE(disabled_object.layers().empty());
+    REQUIRE_FALSE(enabled_object.layers().empty());
+    REQUIRE(disabled_object.layers().size() == enabled_object.layers().size());
+    REQUIRE(disabled_object.layers().front()->regions().size() == interface_shells_followup::expected_region_count);
+    REQUIRE(enabled_object.layers().front()->regions().size() == interface_shells_followup::expected_region_count);
+
+    const auto changed = interface_shells_followup::strongest_interface_surface_change(disabled_object, enabled_object);
+    INFO("strongest interface surface change at z=" << changed.z << " region=" << changed.region
+         << " disabled top=" << changed.top_disabled << " enabled top=" << changed.top_enabled
+         << " disabled internal=" << changed.internal_disabled << " enabled internal=" << changed.internal_enabled);
+
+    // The known 8x8 material overlap is hidden from the lower material when
+    // interface shells are disabled.  A safety offset can trim its boundary,
+    // so the oracle intentionally uses a conservative area lower bound.
+    CHECK(changed.top_enabled - changed.top_disabled > 20.0);
+    CHECK(changed.internal_disabled - changed.internal_enabled > 20.0);
+    CHECK_THAT(changed.internal_disabled - changed.internal_enabled,
+               Catch::Matchers::WithinAbs(changed.top_enabled - changed.top_disabled, 2.0));
+
+    // The partition must conserve each region's sliced footprint.  This also
+    // prevents a mutation from passing by deleting the overlap instead of
+    // reclassifying it as a top surface.
+    for (const Layer *enabled_layer : enabled_object.layers()) {
+        const Layer *disabled_layer = nullptr;
+        for (const Layer *candidate : disabled_object.layers()) {
+            if (std::abs(double(candidate->print_z) - double(enabled_layer->print_z)) < 1e-5) {
+                disabled_layer = candidate;
+                break;
+            }
+        }
+        REQUIRE(disabled_layer != nullptr);
+        REQUIRE(enabled_layer->regions().size() == interface_shells_followup::expected_region_count);
+        REQUIRE(disabled_layer->regions().size() == interface_shells_followup::expected_region_count);
+        for (size_t region_idx = 0; region_idx < enabled_layer->regions().size(); ++region_idx) {
+            const double disabled_area = interface_shells_followup::all_surface_area(
+                *disabled_layer->get_region(static_cast<int>(region_idx)));
+            const double enabled_area = interface_shells_followup::all_surface_area(
+                *enabled_layer->get_region(static_cast<int>(region_idx)));
+            CHECK_THAT(enabled_area, Catch::Matchers::WithinAbs(disabled_area, 0.05));
+        }
+    }
+
+    // The upper material's final exterior layer is outside the lower volume;
+    // its top-surface area is therefore an unaffected control for this toggle.
+    const Layer *disabled_last = disabled_object.layers().back();
+    const Layer *enabled_last = enabled_object.layers().back();
+    REQUIRE_THAT(double(enabled_last->print_z), Catch::Matchers::WithinAbs(double(disabled_last->print_z), 1e-5));
+    REQUIRE(disabled_last->regions().size() == interface_shells_followup::expected_region_count);
+    REQUIRE(enabled_last->regions().size() == interface_shells_followup::expected_region_count);
+    double disabled_last_top = 0.;
+    double enabled_last_top = 0.;
+    for (const LayerRegion *region : disabled_last->regions())
+        disabled_last_top += interface_shells_followup::area_for(*region, stTop);
+    for (const LayerRegion *region : enabled_last->regions())
+        enabled_last_top += interface_shells_followup::area_for(*region, stTop);
+    REQUIRE(disabled_last_top > 20.0);
+    REQUIRE(enabled_last_top > 20.0);
+    CHECK_THAT(enabled_last_top, Catch::Matchers::WithinAbs(disabled_last_top, 0.05));
+}
+
 TEST_CASE("Solid infill pattern changes match fresh slicing in both directions", "[SettingsVariance][SettingsReslice]")
 {
     const auto pattern = GENERATE("monotonicline", "rectilinear", "alignedrectilinear", "concentric",

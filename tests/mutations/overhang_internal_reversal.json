@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "overhang-internal-only-protection-gate-inverted",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "                if(reverse_internal_only){",
+      "new": "                if(!reverse_internal_only){",
+      "description": "Protect exterior loops in the opposite boolean mode; the same geometry must distinguish all-wall and internal-only winding on even printed layers.",
+      "test_filter": "OverhangInternalReversal"
+    },
+    {
+      "id": "overhang-internal-only-protects-inner-role",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "                        if(path.role() == erExternalPerimeter){",
+      "new": "                        if(path.role() == erPerimeter){",
+      "description": "Protect internal roles instead of external roles; active internal-only mode must preserve outer winding and reverse inner winding.",
+      "test_filter": "OverhangInternalReversal"
+    }
+  ]
+}

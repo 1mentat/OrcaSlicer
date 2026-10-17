@@ -1,3 +1,5 @@
+#include <set>
+#include <array>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -1740,4 +1742,149 @@ TEST_CASE("Scarf start height changes rising flow and conditional mode can disab
     CHECK(conditional_disabled.outer_moves == none.outer_moves);
     CHECK_THAT(conditional_disabled.print_outer_geometry,
                Catch::Matchers::WithinAbs(none.print_outer_geometry, 1e-6));
+}
+
+namespace seam_scope_contracts {
+
+struct ScopeEvidence {
+    // First index: external/inner wall role. Second index: contour/hole.
+    std::array<std::array<size_t, 2>, 2> positive_moves{};
+    std::array<std::array<size_t, 2>, 2> rising_moves{};
+    std::array<double, 2> print_role_length{};
+    size_t layers = 0;
+};
+
+ScopeEvidence export_scope(const char *mode, bool inner_walls, const char *wall_generator)
+{
+    DynamicPrintConfig config = seam_slope_config(mode, false, "0", 4.0, 4);
+    config.set_deserialize_strict({
+        {"wall_generator", wall_generator},
+        {"wall_loops", 2},
+        {"line_width", "0.45"},
+        {"outer_wall_line_width", "0.45"},
+        {"inner_wall_line_width", "0.45"},
+        {"seam_slope_inner_walls", inner_walls},
+        {"wall_sequence", "inner wall/outer wall"},
+        {"print_sequence", "by layer"},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"wipe", false},
+        {"wipe_on_loops", false},
+    });
+    config.set_key_value("extruder_offset", new ConfigOptionPoints{Vec2d(0., 0.)});
+
+    // The shared mesh has exterior [0,20]^2 and a [5,15]^2 square hole.
+    // Four 0.2 mm layers retain three eligible scarf layers at low cost.
+    TriangleMesh mesh = Test::mesh(Test::TestMesh::cube_with_hole);
+    mesh.scale(Vec3f(1.f, 1.f, 0.08f));
+    Model model;
+    Print print;
+    Test::init_print(std::vector<TriangleMesh>{std::move(mesh)}, print, model, config,
+                     nullptr, /*arrange=*/false);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object->instances().size() == 1);
+    REQUIRE(object->layers().size() == 4);
+
+    ScopeEvidence evidence;
+    for (const Layer *layer : object->layers())
+        for (const LayerRegion *region : layer->regions())
+            for_each_extrusion_path(region->perimeters, [&](const ExtrusionPath &path) {
+                if (path.role() == erExternalPerimeter)
+                    evidence.print_role_length[0] += unscale<double>(path.length());
+                else if (path.role() == erPerimeter)
+                    evidence.print_role_length[1] += unscale<double>(path.length());
+            });
+    for (double length : evidence.print_role_length) {
+        REQUIRE(std::isfinite(length));
+        REQUIRE(length > 0.0);
+    }
+
+    const std::string output = Test::gcode(print);
+    REQUIRE(output.size() <= 4u * 1024u * 1024u);
+    REQUIRE(std::count(output.begin(), output.end(), '\n') <= 100000);
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string role;
+    reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            ++evidence.layers;
+        if (const auto marker = role_marker(line.comment()); !marker.empty())
+            role.assign(marker.begin(), marker.end());
+        if (!line.cmd_is("G1") || !line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        size_t role_index = 0;
+        if (role == "Inner wall")
+            role_index = 1;
+        else if (role != "Outer wall")
+            return;
+
+        const double mid_x = 0.5 * (self.x() + line.new_X(self));
+        const double mid_y = 0.5 * (self.y() + line.new_Y(self));
+        const double dz = line.dist_Z(self);
+        REQUIRE(std::isfinite(mid_x));
+        REQUIRE(std::isfinite(mid_y));
+        REQUIRE(std::isfinite(dz));
+        // With two 0.45 mm walls, contour paths lie outside the 8 mm
+        // Chebyshev radius and hole paths lie inside the 7 mm radius.
+        // Reject the gap so a misplaced/misclassified path cannot count.
+        const double radius = std::max(std::abs(mid_x - 10.), std::abs(mid_y - 10.));
+        const bool contour = radius > 8.;
+        const bool hole = radius < 7.;
+        REQUIRE(contour != hole);
+        const size_t boundary_index = hole ? 1 : 0;
+        ++evidence.positive_moves[role_index][boundary_index];
+        if (dz > 1e-5) {
+            REQUIRE(evidence.layers > 1);
+            ++evidence.rising_moves[role_index][boundary_index];
+        }
+    });
+    REQUIRE(evidence.layers == 4);
+    for (const auto &role_moves : evidence.positive_moves)
+        for (size_t moves : role_moves)
+            REQUIRE(moves > 0);
+    return evidence;
+}
+
+} // namespace seam_scope_contracts
+
+TEST_CASE("Scarf modes distinguish contours and holes for both wall roles", "[PreciseSeam][SeamScopeSettings][GCodeExport]")
+{
+    using namespace seam_scope_contracts;
+    const char *wall_generator = GENERATE("classic", "arachne");
+    const ConfigOptionDef *definition = print_config_def.get("seam_slope_type");
+    REQUIRE(definition != nullptr);
+    const std::set<std::string> registered(definition->enum_values.begin(), definition->enum_values.end());
+    const std::set<std::string> expected_modes{"none", "external", "all"};
+    REQUIRE(registered == expected_modes);
+
+    std::array<double, 2> reference_geometry{};
+    bool have_reference = false;
+    for (const char *mode : {"none", "external", "all"}) {
+        for (bool inner_walls : {false, true}) {
+            INFO("wall generator " << wall_generator << ", mode " << mode
+                 << ", inner walls " << inner_walls);
+            const ScopeEvidence observed = export_scope(mode, inner_walls, wall_generator);
+            if (!have_reference) {
+                reference_geometry = observed.print_role_length;
+                have_reference = true;
+            }
+            for (size_t role = 0; role < 2; ++role) {
+                CHECK_THAT(observed.print_role_length[role],
+                           Catch::Matchers::WithinAbs(reference_geometry[role], 1e-6));
+                for (size_t boundary = 0; boundary < 2; ++boundary) {
+                    const bool enabled_mode = std::string_view(mode) != "none";
+                    const bool enabled_role = role == 0 || inner_walls;
+                    const bool enabled_boundary = boundary == 0 || std::string_view(mode) == "all";
+                    const bool expect_ramp = enabled_mode && enabled_role && enabled_boundary;
+                    INFO("role " << role << ", boundary " << boundary);
+                    CHECK((observed.rising_moves[role][boundary] > 0) == expect_ramp);
+                }
+            }
+        }
+    }
 }
