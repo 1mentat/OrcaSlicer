@@ -173,7 +173,10 @@ static size_t support_segments_in_window(const Print &print, const Point &center
 static CriticalRegionEvidence observe(bool critical_only)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // The ordinary shelf extends left of X=0. Keep both regions and their support
+    // branches inside the bed so boundary clipping cannot erase the shelf witness.
     config.set_deserialize_strict({
+        { "printable_area",               "-100x-100,200x-100,200x200,-100x200" },
         { "enable_support",                1 },
         { "support_type",                  "tree(auto)" },
         { "support_style",                 "tree_slim" },

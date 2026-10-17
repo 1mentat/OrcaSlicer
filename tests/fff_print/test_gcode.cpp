@@ -734,7 +734,10 @@ TEST_CASE("Auto Z-hop uses spiral motion for an overhang travel on one layer",
           "[GCode][ZHopType][GCodePrintVariance]")
 {
     DynamicPrintConfig auto_config = zhop_type_config(ZHopType::zhtAuto);
+    // The custom-mesh helper centers this fixture at the origin. Leave room for
+    // the complete spiral so the printable-area fallback cannot mask Auto routing.
     auto_config.set_deserialize_strict({
+        { "printable_area",             "-100x-100,200x-100,200x200,-100x200" },
         { "enable_support",             true },
         { "support_type",               "normal(auto)" },
         { "support_on_build_plate_only", false },
