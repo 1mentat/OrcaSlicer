@@ -240,6 +240,21 @@ and replacement filament values and checks its public applied retraction config.
 It complements exported-motion checks under `[FilamentRetractionOverrides]`;
 `filament_retraction_routing.json` tests the nullable override lookup itself.
 
+`[ExtrusionRoleGCode]` checks machine, filament, and process hook ordering,
+role transitions, and layer placeholders against emitted motion roles.
+`[CalibrationTowerOutput]` checks temperature, outer-wall speed, junction
+deviation, and jerk bands on six-layer fixtures, including modal values when
+firmware commands are deduplicated. Their mutants are in
+`extrusion_role_hooks.json` and `calibration_tower_output.json`.
+`[PrintStatisticsFilename]` checks deferred placeholders, final filename units
+and aliases, and unchanged filenames after placeholder errors, with mutants in
+`print_statistics_filename.json`. `[AmsComboFallback]` checks generic, previous,
+and system material selection priority and tray metadata, with mutants in
+`ams_combo_fallback.json`. These two groups do not slice or export a print.
+`[Bbs3mfForeignMultiInstance]` checks independent objects, geometry, and world
+placement when the BBS importer loads a foreign multi-instance archive. Its
+mutants are in `bbs_foreign_multi_instance.json`.
+
 `[SplitModel]` and `[AMFArchive]` cover compressed model parts, physical
 placement, mesh ownership, metadata, and malformed inputs. `[SplitModelRestore]`
 checks non-sequential backup IDs, geometry preservation, and missing-part

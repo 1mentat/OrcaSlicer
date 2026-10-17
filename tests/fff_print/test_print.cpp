@@ -394,6 +394,53 @@ TEST_CASE("Print: {first_object_name} is not replaced by the saved-project file 
     CHECK(resolved_output_name(model, "{first_object_name}", "SavedProject") == "WidgetPart.gcode");
 }
 
+TEST_CASE("Print statistics defer placeholders and finalize output filenames", "[Print][PrintStatisticsFilename]")
+{
+    PrintStatistics stats;
+    stats.estimated_normal_print_time = "1h 2m 30s";
+    stats.estimated_silent_print_time = "2h 59m 30s";
+    stats.total_used_filament        = 1250.;
+    stats.total_extruded_volume      = 275.;
+    stats.total_cost                 = 4.5;
+    stats.total_weight               = 6.25;
+    stats.total_wipe_tower_cost      = 0.5;
+    stats.total_wipe_tower_filament  = 12.5;
+    stats.total_toolchanges          = 7;
+    stats.initial_tool               = 3;
+    stats.initial_no_support_tool    = 5;
+
+    const DynamicConfig placeholders = PrintStatistics::placeholders();
+    const auto* time_placeholder = dynamic_cast<const ConfigOptionString*>(placeholders.option("print_time"));
+    const auto* filament_placeholder = dynamic_cast<const ConfigOptionString*>(placeholders.option("used_filament"));
+    const auto* tool_placeholder = dynamic_cast<const ConfigOptionString*>(placeholders.option("initial_tool"));
+    REQUIRE(time_placeholder != nullptr);
+    REQUIRE(filament_placeholder != nullptr);
+    REQUIRE(tool_placeholder != nullptr);
+    CHECK(time_placeholder->value == "{print_time}");
+    CHECK(filament_placeholder->value == "{used_filament}");
+    CHECK(tool_placeholder->value == "{initial_tool}");
+
+    const boost::filesystem::path input = boost::filesystem::path("reports") /
+        "stats_{print_time}_{normal_print_time}_{silent_print_time}_{used_filament}_{extruded_volume}_{extruded_volume_total}_{total_cost}_{total_weight}_{extruded_weight_total}_{total_wipe_tower_cost}_{total_wipe_tower_filament}_{initial_tool}_{initial_extruder}_{initial_no_support_extruder}_{total_toolchanges}.gcode";
+    const boost::filesystem::path expected = boost::filesystem::path("reports") /
+        "stats_1h3m_1h3m_3h0m_1.25_275_275_4.5_6.25_6.25_0.5_12.5_3_3_5_7.gcode";
+
+    CHECK(stats.finalize_output_path(input.string()) == expected.string());
+}
+
+TEST_CASE("Print statistics preserve filenames when placeholders cannot be resolved", "[Print][PrintStatisticsFilename]")
+{
+    PrintStatistics stats;
+    const std::string filename = GENERATE(
+        std::string("plain_name.gcode"),
+        std::string("{missing_statistic}.gcode"),
+        std::string("{total_weight.gcode"));
+    const std::string input = (boost::filesystem::path("reports") / filename).string();
+    CAPTURE(input);
+
+    CHECK(stats.finalize_output_path(input) == input);
+}
+
 TEST_CASE("Print::validate stacks independent warnings", "[Print][validate]")
 {
     // Two unrelated checks (region precise-wall + machine acceleration) must each

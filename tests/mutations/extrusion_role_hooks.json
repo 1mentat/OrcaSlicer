@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "extrusion-role-machine-hook-suppressed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            append_role_gcode(\"change_extrusion_role_gcode\", machine_role_change_gcode);",
+      "new": "            if (false) append_role_gcode(\"change_extrusion_role_gcode\", machine_role_change_gcode);",
+      "description": "Suppress the machine-level role hook while preserving filament and process hooks. The enabled export requires one ordered marker from each configured source on every observed role transition.",
+      "test_filter": "ExtrusionRoleGCode"
+    },
+    {
+      "id": "extrusion-role-process-hook-uses-machine-template",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            append_role_gcode(\"process_change_extrusion_role_gcode\", process_role_change_gcode);",
+      "new": "            append_role_gcode(\"process_change_extrusion_role_gcode\", machine_role_change_gcode);",
+      "description": "Route the process hook through the machine template. Distinct RH_MACHINE/RH_PROCESS markers and the required MACHINE/FILAMENT/PROCESS triplets should reject the wrong source template.",
+      "test_filter": "ExtrusionRoleGCode"
+    },
+    {
+      "id": "extrusion-role-layer-number-zero-based",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            config.set_key_value(\"layer_num\", new ConfigOptionInt(m_layer_index + 1));",
+      "new": "            config.set_key_value(\"layer_num\", new ConfigOptionInt(m_layer_index));",
+      "description": "Drop the public one-based layer-number conversion. The first real role transition must publish a positive layer number within the emitted layer count.",
+      "test_filter": "ExtrusionRoleGCode"
+    }
+  ]
+}

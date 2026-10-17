@@ -15,6 +15,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
+#include <array>
 #include <boost/filesystem.hpp>
 #include <cstddef>
 #include <fstream>
@@ -9901,6 +9902,55 @@ TEST_CASE("AMS combo info resolves matching IDs and preserves changed false slot
     CHECK(info.ams_filament_presets[1] == "Another Selection");
     CHECK(info.ams_filament_colors == std::vector<std::string>{"#AB12CD", "#00AA00"});
 }
+
+TEST_CASE("AMS combo fallback prefers generic material then prior selection then compatible system material", "[PresetBundle][AmsComboFallback]")
+{
+    const int scenario = GENERATE(0, 1, 2, 3, 4);
+    INFO("fallback scenario=" << scenario);
+    BundleFixture fx;
+    fx.bundle.filament_presets.clear();
+    add_filament(fx, "Generic PLA Incompatible", "incompatible", "PLA", true).is_compatible = false;
+    add_filament(fx, "Generic PLA User", "user", "PLA", false);
+    if (scenario == 0 || scenario == 4)
+        add_filament(fx, "Generic PLA Compatible", "generic", "PLA", true);
+    if (scenario != 3)
+        add_filament(fx, "System PETG", "system", "PETG", true);
+    if (scenario == 0 || scenario == 1 || scenario == 4) {
+        add_filament(fx, "Previously Selected", "previous", "PETG", false);
+        fx.bundle.filament_presets = {"Previously Selected"};
+    }
+
+    DynamicPrintConfig physical_tray = tray(scenario == 4 ? "" : "unknown-material", "PLA", "#AB12CD");
+    const std::vector<std::string> colors{"#AB12CD", "#0099FF"};
+    physical_tray.set_key_value("filament_multi_colour", new ConfigOptionStrings(colors));
+    physical_tray.set_key_value("tray_name", new ConfigOptionStrings({"Bay A"}));
+    fx.bundle.filament_ams_list.emplace(7, std::move(physical_tray));
+
+    AMSComboInfo info;
+    info.ams_filament_presets = {"stale"};
+    info.ams_filament_colors = {"stale"};
+    info.ams_multi_color_filment = {{"stale"}};
+    info.ams_names = {"stale"};
+    fx.bundle.get_ams_cobox_infos(info);
+    if (scenario >= 3) {
+        CHECK(info.empty());
+        CHECK(info.ams_filament_presets.empty());
+        CHECK(info.ams_filament_colors.empty());
+        CHECK(info.ams_multi_color_filment.empty());
+        CHECK(info.ams_names.empty());
+    } else {
+        const std::array<std::string, 3> expected{{"Generic PLA Compatible", "Previously Selected", "System PETG"}};
+        REQUIRE(info.ams_filament_presets.size() == 1);
+        CHECK(info.ams_filament_presets.front() == expected[scenario]);
+        REQUIRE(info.ams_filament_colors.size() == 1);
+        CHECK(info.ams_filament_colors.front() == "#AB12CD");
+        REQUIRE(info.ams_multi_color_filment.size() == 1);
+        CHECK(info.ams_multi_color_filment.front() == colors);
+        REQUIRE(info.ams_names.size() == 1);
+        CHECK(info.ams_names.front() == "Bay A");
+    }
+}
+
 
 TEST_CASE("similar printer chooses requested variant among the same model", "[PresetBundle][PresetBundleContracts]")
 {

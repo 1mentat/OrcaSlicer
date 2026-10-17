@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "ams-combo-generic-fallback-suppressed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "return f.is_compatible && f.is_system && boost::algorithm::starts_with(f.name, filament_type);",
+      "new": "return false && f.is_compatible && f.is_system && boost::algorithm::starts_with(f.name, filament_type);",
+      "description": "Generic material must take precedence over the prior selection.",
+      "test_filter": "AmsComboFallback"
+    },
+    {
+      "id": "ams-combo-prior-selection-fallback-suppressed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (combox_info.ams_filament_presets.size() < this->filament_presets.size()) {",
+      "new": "if (false && combox_info.ams_filament_presets.size() < this->filament_presets.size()) {",
+      "description": "Prior selection must survive when no matching generic system material exists.",
+      "test_filter": "AmsComboFallback"
+    },
+    {
+      "id": "ams-combo-system-fallback-suppressed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "iter = std::find_if(filaments.begin(), filaments.end(), [](auto &f) { return f.is_compatible && f.is_system; });",
+      "new": "iter = std::find_if(filaments.begin(), filaments.end(), [](auto &f) { return false && f.is_compatible && f.is_system; });",
+      "description": "A compatible system material must be returned when the tray has no matching generic material or prior selection.",
+      "test_filter": "AmsComboFallback"
+    }
+  ]
+}

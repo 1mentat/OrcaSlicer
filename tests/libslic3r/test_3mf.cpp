@@ -3668,6 +3668,60 @@ TEST_CASE("Legacy non-Prusa multi-instance files split independent model objects
     CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(30., 1e-5));
 }
 
+TEST_CASE("BBS importer splits a foreign multi-instance archive into independent objects",
+          "[3MF][Bbs3mfForeignMultiInstance]")
+{
+    // store_3mf supplies the normal package relationships and model part. Rewrite only its
+    // Application marker so the public BBS importer takes the foreign-project path.
+    Model source = make_cube_model();
+    source.objects.front()->add_instance()->set_offset(Vec3d(20., 0., 0.));
+    const double expected_volume = its_volume(source.objects.front()->raw_mesh().its);
+    REQUIRE(expected_volume > 0.);
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    REQUIRE(replace_in_3mf_entry(archive.string(), "3dmodel.model", "OrcaSlicer-", "ThirdParty-"));
+
+    Model loaded;
+    ScopedTemporaryDir backup("orca_bbs_foreign_multi_load");
+    loaded.set_backup_path(backup.string());
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;
+    std::vector<Preset*> project_presets;
+    bool is_bbl_3mf = false;
+    bool is_orca_3mf = false;
+    Semver file_version;
+    ScopeGuard cleanup([&] {
+        // Detach before the temporary backup directory is destroyed; Model::~Model otherwise
+        // queues cleanup against a path whose owner has already gone out of scope.
+        loaded.set_backup_path("detach");
+        release_PlateData_list(plates);
+        for (Preset *preset : project_presets)
+            delete preset;
+    });
+
+    REQUIRE(load_bbs_3mf(archive.string().c_str(), &config, &substitutions, &loaded, &plates,
+                         &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    CHECK_FALSE(is_bbl_3mf);
+    CHECK_FALSE(is_orca_3mf);
+    REQUIRE(loaded.objects.size() == 2);
+
+    for (const ModelObject *object : loaded.objects) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(!object->volumes.empty());
+        CHECK_THAT(its_volume(object->raw_mesh().its), Catch::Matchers::WithinAbs(expected_volume, 1e-5));
+    }
+
+    // The two source instances span [0, 10] and [20, 30] in world X.  This catches a split
+    // that preserves object count but loses an instance transform.
+    const BoundingBoxf3 world_box = loaded.mesh().bounding_box();
+    CHECK_THAT(double(world_box.max.x() - world_box.min.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+
 TEST_CASE("Legacy importer preserves non-printable and transformed build items", "[Legacy3MF][Geometry]")
 {
     const std::string items =

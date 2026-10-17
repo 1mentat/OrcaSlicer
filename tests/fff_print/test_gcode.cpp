@@ -2003,9 +2003,10 @@ void require_shaper_command(const CalibrationCommand &command, const char *flavo
     }
 }
 
-ExportedPrint export_calibration(const char *flavor, const Calib_Params &params)
+ExportedPrint export_calibration(const char *flavor, const Calib_Params &params,
+                                 const DynamicPrintConfig *config_override = nullptr)
 {
-    DynamicPrintConfig config = base_config();
+    DynamicPrintConfig config = config_override == nullptr ? base_config() : *config_override;
     config.set_deserialize_strict({
         {"gcode_flavor", flavor},
         {"input_shaping_emit", false},
@@ -2139,7 +2140,279 @@ TEST_CASE("Calibration input shaping damping ramps preserve XY frequency endpoin
     REQUIRE(cursor == commands.size());
 }
 
+namespace {
+struct CalibrationLayerCommand {
+    size_t      layer = 0;
+    std::string raw;
+};
+
+std::vector<CalibrationLayerCommand> parse_layer_commands(const std::string &gcode,
+                                                          std::string_view prefix)
+{
+    std::vector<CalibrationLayerCommand> commands;
+    size_t current_layer = std::numeric_limits<size_t>::max();
+    size_t line_start = 0;
+    while (line_start <= gcode.size()) {
+        const size_t line_end = gcode.find('\n', line_start);
+        const size_t length = line_end == std::string::npos ? gcode.size() - line_start : line_end - line_start;
+        const std::string line = gcode.substr(line_start, length);
+        const size_t first = line.find_first_not_of(" \t\r");
+        if (first != std::string::npos && line.compare(first, 13, ";LAYER_CHANGE") == 0) {
+            current_layer = current_layer == std::numeric_limits<size_t>::max() ? 0 : current_layer + 1;
+        } else if (current_layer != std::numeric_limits<size_t>::max() && first != std::string::npos &&
+                   line.compare(first, prefix.size(), prefix) == 0 &&
+                   (first + prefix.size() == line.size() || std::isspace(static_cast<unsigned char>(line[first + prefix.size()])))) {
+            commands.push_back({current_layer, line.substr(first)});
+        }
+        if (line_end == std::string::npos)
+            break;
+        line_start = line_end + 1;
+    }
+    return commands;
+}
+
+std::optional<double> command_word_value(const std::string &line, char word)
+{
+    std::istringstream stream(line);
+    std::string token;
+    while (stream >> token) {
+        if (token == ";" || (!token.empty() && token.front() == ';'))
+            break;
+        if (token.size() < 2 || token.front() != word)
+            continue;
+        try {
+            size_t parsed = 0;
+            const double value = std::stod(token.substr(1), &parsed);
+            if (parsed == token.size() - 1 && std::isfinite(value))
+                return value;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+struct OuterWallFeedEvidence {
+    std::vector<std::vector<double>> feeds;
+    bool                             finite = true;
+};
+
+OuterWallFeedEvidence parse_outer_wall_feeds(const std::string &gcode,
+                                             const DynamicPrintConfig &config)
+{
+    OuterWallFeedEvidence evidence;
+    evidence.feeds.resize(kCalibrationLayerCount);
+    GCodeReader reader;
+    reader.apply_config(config);
+    int current_layer = -1;
+    bool outer_wall = false;
+    reader.parse_buffer(gcode, [&evidence, &current_layer, &outer_wall](GCodeReader &self,
+                                                                         const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("LAYER_CHANGE") != std::string_view::npos)
+            ++current_layer;
+        if (comment.rfind("TYPE:", 0) == 0)
+            outer_wall = comment == "TYPE:Outer wall";
+        if (current_layer < 0 || current_layer >= static_cast<int>(evidence.feeds.size()) ||
+            !outer_wall || !line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        const double feed = double(line.new_F(self));
+        if (!std::isfinite(feed) || feed <= 0.)
+            evidence.finite = false;
+        else
+            evidence.feeds[static_cast<size_t>(current_layer)].push_back(feed);
+    });
+    return evidence;
+}
+
+void require_outer_wall_speed_bands(const ExportedPrint &exported,
+                                    const DynamicPrintConfig &config,
+                                    const std::array<double, kCalibrationLayerCount> &expected_mm_s)
+{
+    const OuterWallFeedEvidence evidence = parse_outer_wall_feeds(exported.text, config);
+    REQUIRE(evidence.finite);
+    REQUIRE(evidence.feeds.size() == kCalibrationLayerCount);
+    for (size_t layer = 1; layer < kCalibrationLayerCount; ++layer) {
+        INFO("layer=" << layer);
+        REQUIRE_FALSE(evidence.feeds[layer].empty());
+        for (const double feed : evidence.feeds[layer])
+            CHECK_THAT(feed, Catch::Matchers::WithinAbs(expected_mm_s[layer] * 60., 0.25));
+    }
+}
+
+std::array<double, kCalibrationLayerCount> parse_effective_word_by_layer(const std::string &gcode,
+                                                                            std::string_view prefix,
+                                                                            char word)
+{
+    const std::vector<CalibrationLayerCommand> commands = parse_layer_commands(gcode, prefix);
+    double current = std::numeric_limits<double>::quiet_NaN();
+    bool have_current = false;
+    bool saw_explicit_layer_zero = false;
+    for (const CalibrationLayerCommand &command : commands)
+        REQUIRE(command.layer < kCalibrationLayerCount);
+
+    std::array<double, kCalibrationLayerCount> effective{};
+    for (size_t layer = 0; layer < kCalibrationLayerCount; ++layer) {
+        for (const CalibrationLayerCommand &command : commands) {
+            if (command.layer != layer)
+                continue;
+            const std::optional<double> value = command_word_value(command.raw, word);
+            REQUIRE(value.has_value());
+            current = *value;
+            have_current = true;
+            if (layer == 0)
+                saw_explicit_layer_zero = true;
+        }
+        // A missing later command is valid modal G-code; layer zero must have
+        // an actual calibration command so this state is never fabricated.
+        REQUIRE(have_current);
+        effective[layer] = current;
+    }
+    REQUIRE(saw_explicit_layer_zero);
+    return effective;
+}
+
+void require_calibration_temperature(const ExportedPrint &exported,
+                                     const std::array<double, kCalibrationLayerCount> &expected)
+{
+    const std::array<double, kCalibrationLayerCount> effective =
+        parse_effective_word_by_layer(exported.text, "M104", 'S');
+    for (size_t layer = 0; layer < kCalibrationLayerCount; ++layer)
+        CHECK_THAT(effective[layer], Catch::Matchers::WithinAbs(expected[layer], 0.01));
+}
+
+void require_calibration_junction_deviation(const ExportedPrint &exported,
+                                            const std::array<double, kCalibrationLayerCount> &expected)
+{
+    const std::array<double, kCalibrationLayerCount> effective =
+        parse_effective_word_by_layer(exported.text, "M205", 'J');
+    for (size_t layer = 0; layer < kCalibrationLayerCount; ++layer)
+        CHECK_THAT(effective[layer], Catch::Matchers::WithinAbs(expected[layer], 0.001));
+}
+
+void require_calibration_jerk(const ExportedPrint &exported,
+                              const std::array<double, kCalibrationLayerCount> &expected)
+{
+    const std::array<double, kCalibrationLayerCount> effective_x =
+        parse_effective_word_by_layer(exported.text, "M205", 'X');
+    const std::array<double, kCalibrationLayerCount> effective_y =
+        parse_effective_word_by_layer(exported.text, "M205", 'Y');
+    for (size_t layer = 0; layer < kCalibrationLayerCount; ++layer) {
+        INFO("layer=" << layer);
+        CHECK_THAT(effective_x[layer], Catch::Matchers::WithinAbs(expected[layer], 0.01));
+        CHECK_THAT(effective_y[layer], Catch::Matchers::WithinAbs(expected[layer], 0.01));
+    }
+}
+
+DynamicPrintConfig calibration_tower_config()
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"filament_max_volumetric_speed", "1000"},
+        {"filament_adaptive_volumetric_speed", false},
+        {"slow_down_layers", 0},
+        {"small_perimeter_speed", 0.0},
+        {"small_perimeter_threshold", 0.0},
+        {"slow_down_for_layer_cooling", false},
+        {"slowdown_for_curled_perimeters", false},
+        {"enable_overhang_speed", false},
+        {"enable_overhang_bridge_fan", false},
+        {"resonance_avoidance", false},
+        {"default_jerk", 0.0},
+        {"initial_layer_jerk", 0.0},
+        {"outer_wall_jerk", 0.0},
+        {"inner_wall_jerk", 0.0},
+        {"top_surface_jerk", 0.0},
+        {"infill_jerk", 0.0},
+        {"travel_jerk", 0.0},
+        {"initial_layer_travel_jerk", 0.0},
+        {"default_junction_deviation", 0.0},
+        {"nozzle_temperature_initial_layer", 200},
+        {"nozzle_temperature", 200},
+        {"machine_max_jerk_x", "100,100"},
+        {"machine_max_jerk_y", "100,100"},
+    });
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("Calibration temperature and speed towers emit bounded per-layer settings",
+          "[GCode][Calibration][CalibrationTowerOutput][GCodeExportWorkflows]")
+{
+    DynamicPrintConfig neutral_config = calibration_tower_config();
+    Calib_Params none;
+    const ExportedPrint neutral = export_calibration("marlin2", none, &neutral_config);
+    require_six_layers(neutral, neutral_config);
+    const MotionEvidence reference = motion_evidence(neutral.text, neutral_config);
+    REQUIRE(reference.xy_path > 0.0);
+
+    Calib_Params temperature;
+    temperature.mode = CalibMode::Calib_Temp_Tower;
+    temperature.start = 200.;
+    temperature.end = 225.;
+    temperature.step = 5.;
+    temperature.nozzle_based_resize = false;
+    const ExportedPrint temperature_export = export_calibration("marlin2", temperature, &neutral_config);
+    require_six_layers(temperature_export, neutral_config);
+    require_same_material(reference, motion_evidence(temperature_export.text, neutral_config));
+    require_calibration_temperature(temperature_export, {200., 200., 210., 215., 220., 225.});
+
+    Calib_Params vfa;
+    vfa.mode = CalibMode::Calib_VFA_Tower;
+    vfa.start = 20.;
+    vfa.end = 60.;
+    vfa.step = 10.;
+    vfa.nozzle_based_resize = false;
+    const ExportedPrint vfa_export = export_calibration("marlin2", vfa, &neutral_config);
+    require_six_layers(vfa_export, neutral_config);
+    require_same_material(reference, motion_evidence(vfa_export.text, neutral_config));
+    require_outer_wall_speed_bands(vfa_export, neutral_config, {20., 20., 40., 50., 60., 60.});
+
+    Calib_Params volumetric;
+    volumetric.mode = CalibMode::Calib_Vol_speed_Tower;
+    volumetric.start = 20.;
+    volumetric.end = 200.;
+    volumetric.step = 10.;
+    volumetric.nozzle_based_resize = false;
+    const ExportedPrint volumetric_export = export_calibration("marlin2", volumetric, &neutral_config);
+    require_six_layers(volumetric_export, neutral_config);
+    require_same_material(reference, motion_evidence(volumetric_export.text, neutral_config));
+    require_outer_wall_speed_bands(volumetric_export, neutral_config, {22., 24., 26., 28., 30., 32.});
+}
+
+TEST_CASE("Cornering calibration selects junction deviation and jerk fallback per layer",
+          "[GCode][Calibration][CalibrationTowerOutput][GCodeExportWorkflows]")
+{
+    DynamicPrintConfig junction_config = calibration_tower_config();
+    junction_config.set_deserialize_strict({{"machine_max_junction_deviation", "0.5,0.5"}});
+    Calib_Params junction;
+    junction.mode = CalibMode::Calib_Cornering;
+    junction.start = 0.05;
+    junction.end = 0.15;
+    const ExportedPrint junction_export = export_calibration("marlin2", junction, &junction_config);
+    require_six_layers(junction_export, junction_config);
+    const MotionEvidence junction_motion = motion_evidence(junction_export.text, junction_config);
+    REQUIRE(junction_motion.extrusion_moves > 0);
+    require_calibration_junction_deviation(junction_export, {0.05, 0.05, 0.09, 0.11, 0.13, 0.15});
+
+    DynamicPrintConfig jerk_config = calibration_tower_config();
+    jerk_config.set_deserialize_strict({{"machine_max_junction_deviation", "0,0"}});
+    Calib_Params jerk;
+    jerk.mode = CalibMode::Calib_Cornering;
+    jerk.start = 3.;
+    jerk.end = 9.;
+    const ExportedPrint jerk_export = export_calibration("marlin2", jerk, &jerk_config);
+    require_six_layers(jerk_export, jerk_config);
+    const MotionEvidence jerk_motion = motion_evidence(jerk_export.text, jerk_config);
+    REQUIRE(jerk_motion.extrusion_moves > 0);
+    require_calibration_jerk(jerk_export, {3., 3., 5.4, 6.6, 7.8, 9.});
+    require_same_material(junction_motion, jerk_motion);
+}
+
+
 } // namespace calibration_gcode_followup
+
 
 namespace small_area_flow_compensation_contracts {
 
@@ -2395,6 +2668,178 @@ TEST_CASE("Small-area flow compensation changes only eligible solid export paths
 }
 
 } // namespace small_area_flow_compensation_contracts
+
+TEST_CASE("Extrusion role hooks publish ordered role transitions and placeholders",
+          "[GCode][ExtrusionRoleGCode][GCodePrintVariance]")
+{
+    struct RoleHookRecord {
+        std::string kind;
+        std::string role;
+        std::string last_role;
+        std::string type_role;
+        int         layer = 0;
+        double      z = 0.;
+    };
+
+    const auto parse_record = [](const std::string &line) -> std::optional<RoleHookRecord> {
+        constexpr std::string_view prefix = "M117 RH_";
+        if (line.rfind(prefix, 0) != 0)
+            return std::nullopt;
+        std::string body = line.substr(prefix.size());
+        if (!body.empty() && body.back() == '\r')
+            body.pop_back();
+        std::vector<std::string> fields;
+        size_t start = 0;
+        while (true) {
+            const size_t end = body.find('|', start);
+            fields.emplace_back(body.substr(start, end == std::string::npos ? end : end - start));
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+        if (fields.size() != 5)
+            return std::nullopt;
+        char *layer_end = nullptr;
+        const long layer = std::strtol(fields[3].c_str(), &layer_end, 10);
+        char *z_end = nullptr;
+        const double z = std::strtod(fields[4].c_str(), &z_end);
+        if (layer_end == fields[3].c_str() || *layer_end != '\0' ||
+            z_end == fields[4].c_str() || *z_end != '\0')
+            return std::nullopt;
+        return RoleHookRecord{fields[0], fields[1], fields[2], {}, static_cast<int>(layer), z};
+    };
+
+    const auto parser_role_matches_type = [](std::string_view parser_role, std::string_view type_role) {
+        // The hook placeholder uses GCode::extrusion_role_to_string_for_parser(),
+        // while the later TYPE marker uses ExtrusionEntity::role_to_string().
+        // Keep this translation table independent of the production helpers.
+        if (parser_role == "Perimeter")
+            return type_role == "Inner wall";
+        if (parser_role == "ExternalPerimeter")
+            return type_role == "Outer wall";
+        if (parser_role == "OverhangPerimeter")
+            return type_role == "Overhang wall";
+        if (parser_role == "InternalInfill")
+            return type_role == "Sparse infill";
+        if (parser_role == "SolidInfill")
+            return type_role == "Internal solid infill";
+        if (parser_role == "TopSolidInfill")
+            return type_role == "Top surface";
+        if (parser_role == "BottomSurface")
+            return type_role == "Bottom surface";
+        if (parser_role == "BridgeInfill")
+            return type_role == "Bridge" || type_role == "Internal Bridge";
+        if (parser_role == "GapFill")
+            return type_role == "Gap infill";
+        if (parser_role == "Ironing")
+            return type_role == "Ironing";
+        if (parser_role == "Skirt")
+            return type_role == "Skirt";
+        if (parser_role == "Brim")
+            return type_role == "Brim";
+        if (parser_role == "SupportMaterial")
+            return type_role == "Support";
+        if (parser_role == "SupportMaterialInterface")
+            return type_role == "Support interface";
+        if (parser_role == "SupportTransition")
+            return type_role == "Support transition";
+        if (parser_role == "WipeTower")
+            return type_role == "Prime tower";
+        if (parser_role == "Custom")
+            return type_role == "Custom";
+        return false;
+    };
+
+    const auto collect_records = [&](const std::string &text) {
+        std::vector<RoleHookRecord> records;
+        size_t start = 0;
+        while (start < text.size()) {
+            const size_t end = text.find('\n', start);
+            const std::string line = text.substr(start, end == std::string::npos ? end : end - start);
+            if (line.rfind("M117 RH_", 0) == 0) {
+                const auto record = parse_record(line);
+                REQUIRE(record.has_value());
+                if (record.has_value())
+                    records.push_back(*record);
+            } else if (line.rfind(";TYPE:", 0) == 0 && records.size() >= 3 &&
+                       records[records.size() - 3].type_role.empty()) {
+                const std::string type_role = line.substr(6);
+                REQUIRE_FALSE(type_role.empty());
+                for (size_t offset = 0; offset < 3; ++offset)
+                    records[records.size() - 3 + offset].type_role = type_role;
+            }
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+        return records;
+    };
+
+    DynamicPrintConfig control = base_config();
+    control.set_deserialize_strict({
+        { "change_extrusion_role_gcode",          "" },
+        { "filament_change_extrusion_role_gcode", "" },
+        { "process_change_extrusion_role_gcode",  "" },
+    });
+    DynamicPrintConfig enabled = control;
+    enabled.set_deserialize_strict({
+        { "change_extrusion_role_gcode",          "M117 RH_MACHINE|[extrusion_role]|[last_extrusion_role]|[layer_num]|[layer_z]" },
+        { "filament_change_extrusion_role_gcode", "M117 RH_FILAMENT|[extrusion_role]|[last_extrusion_role]|[layer_num]|[layer_z]" },
+        { "process_change_extrusion_role_gcode",  "M117 RH_PROCESS|[extrusion_role]|[last_extrusion_role]|[layer_num]|[layer_z]" },
+    });
+
+    const auto export_role_fixture = [](const DynamicPrintConfig &config) {
+        Print print;
+        Model model;
+        Test::init_print({make_cube(8., 8., 1.2)}, print, model, config);
+        require_valid(print);
+        return export_print(print);
+    };
+
+    const ExportedPrint disabled = export_role_fixture(control);
+    const ExportedPrint exported = export_role_fixture(enabled);
+    const MotionEvidence disabled_motion = motion_evidence(disabled.text, control);
+    const MotionEvidence enabled_motion = motion_evidence(exported.text, enabled);
+    require_same_material(disabled_motion, enabled_motion);
+    REQUIRE(count_text(disabled.text, "RH_") == 0);
+    REQUIRE(exported.text.size() < 1000000);
+
+    const std::vector<RoleHookRecord> records = collect_records(exported.text);
+    REQUIRE(records.size() >= 6);
+    REQUIRE(records.size() % 3 == 0);
+    const size_t layers = count_text(exported.text, ";LAYER_CHANGE");
+    REQUIRE(layers == 6);
+    const std::array<std::string_view, 3> expected_kinds{{"MACHINE", "FILAMENT", "PROCESS"}};
+    std::set<std::pair<std::string, std::string>> transitions;
+    for (size_t group = 0; group < records.size(); group += 3) {
+        const RoleHookRecord &first = records[group];
+        REQUIRE_FALSE(first.type_role.empty());
+        REQUIRE(first.layer >= 1);
+        REQUIRE(first.layer <= static_cast<int>(layers));
+        REQUIRE(std::isfinite(first.z));
+        CHECK_THAT(first.z, Catch::Matchers::WithinAbs(0.2 * first.layer, 1e-6));
+        REQUIRE_FALSE(first.role.empty());
+        REQUIRE_FALSE(first.last_role.empty());
+        if (group == 0)
+            CHECK(first.last_role == "Mixed");
+        else
+            CHECK(first.last_role == records[group - 3].role);
+        CHECK(parser_role_matches_type(first.role, first.type_role));
+        transitions.emplace(first.last_role, first.role);
+        for (size_t offset = 0; offset < 3; ++offset) {
+            const RoleHookRecord &record = records[group + offset];
+            CHECK(record.kind == expected_kinds[offset]);
+            CHECK(record.role == first.role);
+            CHECK(record.last_role == first.last_role);
+            CHECK(record.layer == first.layer);
+            CHECK_THAT(record.z, Catch::Matchers::WithinAbs(first.z, 1e-6));
+            CHECK(record.type_role == first.type_role);
+        }
+    }
+    REQUIRE(transitions.size() >= 2);
+}
+
+
 
 } // namespace gcode_print_variance_contracts
 
