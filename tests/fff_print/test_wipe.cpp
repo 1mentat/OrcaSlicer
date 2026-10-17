@@ -1583,6 +1583,8 @@ struct ParsedOutput {
     std::vector<Segment> walls;
     std::vector<TravelRoute> routes;
     MotionSummary motion;
+    size_t central_barrier_walls = 0;
+    size_t non_barrier_walls = 0;
 };
 
 DynamicPrintConfig crossing_wall_config(bool enabled)
@@ -1653,6 +1655,28 @@ std::vector<TriangleMesh> crossing_wall_fixture()
     return meshes;
 }
 
+// The barrier's model-space outer bounds are x=100..120, y=60..100.
+// A one-millimetre margin admits line-center quantization/width offsets while
+// remaining far from the endpoint cubes at x=70..80 and x=140..150. This
+// selects every emitted outer and hole wall of the known barrier, and no
+// endpoint-object wall.
+constexpr double kBarrierMinX = 100.;
+constexpr double kBarrierMaxX = 120.;
+constexpr double kBarrierMinY = 60.;
+constexpr double kBarrierMaxY = 100.;
+constexpr double kBarrierCoordinateMargin = 1.;
+
+bool central_barrier_wall(const Segment &wall)
+{
+    const auto inside = [](const Vec2d &point) {
+        return point.x() >= kBarrierMinX - kBarrierCoordinateMargin &&
+               point.x() <= kBarrierMaxX + kBarrierCoordinateMargin &&
+               point.y() >= kBarrierMinY - kBarrierCoordinateMargin &&
+               point.y() <= kBarrierMaxY + kBarrierCoordinateMargin;
+    };
+    return inside(wall.start) && inside(wall.end);
+}
+
 double cross_2d(const Vec2d &a, const Vec2d &b)
 {
     return a.x() * b.y() - a.y() * b.x();
@@ -1695,6 +1719,10 @@ bool wall_crosses_route(const TravelRoute &route, const std::vector<Segment> &wa
     if (route.points.size() < 2)
         return false;
     for (const Segment &wall : walls) {
+        // Leaving an endpoint object can require crossing its own outer wall.
+        // This comparison checks clearance from the previously printed barrier.
+        if (!central_barrier_wall(wall))
+            continue;
         if (wall.layer_index != route.layer_index ||
             wall.emission_index >= route.start_emission_index ||
             std::abs(wall.z - route.z) > 0.001)
@@ -1827,6 +1855,13 @@ ParsedOutput parse_output(const std::string &gcode, const DynamicPrintConfig &co
     });
     finish_route();
     REQUIRE(!output.walls.empty());
+    for (const Segment &wall : output.walls) {
+        if (central_barrier_wall(wall))
+            ++output.central_barrier_walls;
+        else
+            ++output.non_barrier_walls;
+    }
+    REQUIRE(output.central_barrier_walls > 0);
     for (TravelRoute &route : output.routes) {
         route.direct_crosses_wall = wall_crosses_route(route, output.walls, true);
         route.legs_clear = !wall_crosses_route(route, output.walls, false);
@@ -1896,7 +1931,9 @@ TEST_CASE("Reducing wall crossings detours a retracted travel across an emitted 
     }
     CAPTURE(disabled.routes.size(), enabled.routes.size(), disabled_retracted, disabled_crossing,
             disabled_retracted_crossing, enabled_detoured, enabled_clear_detoured, same_endpoint_pairs,
-            same_endpoint_pairs_with_disabled_crossing, fully_eligible_pairs);
+            same_endpoint_pairs_with_disabled_crossing, fully_eligible_pairs,
+            disabled.central_barrier_walls, disabled.non_barrier_walls,
+            enabled.central_barrier_walls, enabled.non_barrier_walls);
 
     const TravelRoute *direct = nullptr;
     const TravelRoute *detour = nullptr;
