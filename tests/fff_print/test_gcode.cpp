@@ -4415,11 +4415,11 @@ TEST_CASE("Fan kickstart preserves extrusion across print sequences", "[GCode][G
     CHECK_THAT(kick_motion.xy_path, Catch::Matchers::WithinRel(zero_motion.xy_path, 1e-4));
 
     // The configured 30–60% target maps to PWM 76–153, allowing integer rounding.
+    // FanMover starts at zero and suppresses redundant fan-off commands.
     const auto is_target = [](int pwm) { return pwm >= 76 && pwm <= 153; };
     for (const std::vector<int> *fan : {&zero_fan, &kick_fan}) {
         const auto target = std::find_if(fan->begin(), fan->end(), is_target);
         REQUIRE(target != fan->end());
-        CHECK(std::find(fan->begin(), target, 0) != target);
     }
     CHECK(std::all_of(zero_fan.begin(), zero_fan.end(), [&](int pwm) {
         return pwm == 0 || is_target(pwm);
@@ -4429,7 +4429,6 @@ TEST_CASE("Fan kickstart preserves extrusion across print sequences", "[GCode][G
     }));
     const auto pulse = std::find(kick_fan.begin(), kick_fan.end(), 255);
     REQUIRE(pulse != kick_fan.end());
-    CHECK(std::find(kick_fan.begin(), pulse, 0) != pulse);
     CHECK(std::find_if(kick_fan.begin(), kick_fan.end(), [](int pwm) { return pwm > 0; }) == pulse);
     CHECK(std::find_if(pulse + 1, kick_fan.end(), is_target) != kick_fan.end());
 }

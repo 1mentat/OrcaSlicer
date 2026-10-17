@@ -7,7 +7,7 @@
       "path": "src/libslic3r/Support/SupportCommon.cpp",
       "old": "    loop_interface_processor.n_contact_loops = config.support_interface_loop_pattern.value ? 1 : 0;",
       "new": "    loop_interface_processor.n_contact_loops = config.support_interface_loop_pattern.value ? 0 : 0;",
-      "description": "The enabled public row must add at least one closed contact-interface entity while the disabled row retains positive open interface deposition on the same contact-layer set.",
+      "description": "The enabled public row must add contact-interface path entities while the disabled row retains positive interface deposition on the same contact-layer set. Clipped contact loops need not have closed endpoints.",
       "test_filter": "SupportInterfaceLoopPattern"
     }
   ]

@@ -2662,6 +2662,10 @@ TEST_CASE("Per-extruder printable regions expose shared and excluded bed geometr
     };
     const auto configure_areas = [&](size_t nozzle_count, const std::vector<Vec2ds> &areas) {
         DynamicPrintConfig config = multifilament_config(static_cast<unsigned int>(nozzle_count));
+        config.set_deserialize_strict({
+            { "use_relative_e_distances", true },
+            { "layer_change_gcode", "G92 E0\n" },
+        });
         if (nozzle_count > 1)
             config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
         config.set_key_value("printable_area", new ConfigOptionPoints({
