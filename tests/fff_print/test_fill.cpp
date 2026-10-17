@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <functional>
 #include "libslic3r/Fill/FillBase.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Config.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Surface.hpp"
 #include "libslic3r/Point.hpp"
@@ -1887,6 +1889,157 @@ static double unmatched_between_prints(const Print &a, const Print &b, Extrusion
     }
     REQUIRE(sampled > 0);
     return double(unmatched) / double(sampled);
+}
+
+namespace symmetric_infill_y_axis_contracts {
+
+struct LayerSnapshot {
+    Polylines infill;
+    double    area = 0.;
+    double    perimeter_length = 0.;
+    size_t    perimeter_paths = 0;
+};
+
+struct PrintSnapshot {
+    BoundingBox                object_bbox;
+    std::vector<LayerSnapshot> layers;
+};
+
+static TriangleMesh l_mesh(bool mirrored)
+{
+    TriangleMesh mesh = make_cube(20., 6., .4);
+    TriangleMesh stem = make_cube(6., 14., .4);
+    stem.translate(mirrored ? 14. : 0., 6., 0.);
+    mesh.merge(stem);
+    return mesh;
+}
+
+static DynamicPrintConfig config_for(const std::string &pattern, bool symmetric)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", pattern},
+                                   {"sparse_infill_density", "30%"},
+                                   {"sparse_infill_line_width", .45},
+                                   {"nozzle_diameter", .4},
+                                   {"infill_direction", 25.},
+                                   {"infill_shift_step", 0.},
+                                   {"infill_anchor", 0},
+                                   {"infill_anchor_max", 0},
+                                   {"wall_loops", 2},
+                                   {"wall_generator", "classic"},
+                                   {"outer_wall_line_width", .45},
+                                   {"inner_wall_line_width", .45},
+                                   {"symmetric_infill_y_axis", symmetric},
+                                   {"separated_infills", false},
+                                   {"top_shell_layers", 0},
+                                   {"bottom_shell_layers", 0},
+                                   {"top_shell_thickness", 0},
+                                   {"bottom_shell_thickness", 0},
+                                   {"layer_height", .2},
+                                   {"initial_layer_print_height", .2},
+                                   {"initial_layer_line_width", 0},
+                                   {"sparse_infill_rotate_template", ""},
+                                   {"xy_contour_compensation", 0},
+                                   {"infill_wall_overlap", 0}});
+    return config;
+}
+
+static double perimeter_length(const Layer &layer, size_t &path_count)
+{
+    Polylines paths;
+    for (const LayerRegion *region : layer.regions())
+        region->perimeters.collect_polylines(paths);
+    path_count = paths.size();
+    double length = 0.;
+    for (const Polyline &path : paths)
+        length += unscale<double>(path.length());
+    return length;
+}
+
+static PrintSnapshot snapshot(const Print &print)
+{
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    PrintSnapshot out;
+    out.object_bbox = object.bounding_box();
+    REQUIRE(object.layer_count() == 2);
+    out.layers.reserve(object.layer_count());
+    for (size_t i = 0; i < object.layer_count(); ++i) {
+        const Layer &layer = *object.get_layer(int(i));
+        REQUIRE(layer.lslices.size() == 1);
+        LayerSnapshot current;
+        current.infill = layer_paths(layer, erInternalInfill);
+        REQUIRE_FALSE(current.infill.empty());
+        current.area = unscale<double>(unscale<double>(area(layer.lslices)));
+        REQUIRE_THAT(current.area, Catch::Matchers::WithinAbs(204., 1e-3));
+        current.perimeter_length = perimeter_length(layer, current.perimeter_paths);
+        REQUIRE(current.perimeter_paths > 0);
+        REQUIRE(current.perimeter_length > 0.);
+        out.layers.emplace_back(std::move(current));
+    }
+    return out;
+}
+
+static Polylines reflect_x(Polylines paths, coord_t axis)
+{
+    for (Polyline &path : paths)
+        for (Point &point : path.points)
+            point.x() = 2 * axis - point.x();
+    return paths;
+}
+
+static double mismatch_ratio(const Polylines &a, const Polylines &b)
+{
+    size_t sampled = 0, unmatched = 0;
+    count_unmatched(a, b, sampled, unmatched);
+    REQUIRE(sampled > 0);
+    return double(unmatched) / double(sampled);
+}
+
+} // namespace symmetric_infill_y_axis_contracts
+
+TEST_CASE("Symmetric Y-axis infill reflects asymmetric zigzag and crosszag geometry", "[Fill][SymmetricInfill]")
+{
+    using namespace symmetric_infill_y_axis_contracts;
+    const std::string pattern = GENERATE("zigzag", "crosszag");
+    CAPTURE(pattern);
+
+    Print original_off, original_on, mirrored_off;
+    slice_parts(original_off, config_for(pattern, false), {l_mesh(false)});
+    slice_parts(original_on, config_for(pattern, true), {l_mesh(false)});
+    slice_parts(mirrored_off, config_for(pattern, false), {l_mesh(true)});
+
+    const PrintSnapshot off = snapshot(original_off);
+    const PrintSnapshot on = snapshot(original_on);
+    const PrintSnapshot mirrored = snapshot(mirrored_off);
+    REQUIRE(off.object_bbox.min == on.object_bbox.min);
+    REQUIRE(off.object_bbox.max == on.object_bbox.max);
+    REQUIRE(off.object_bbox.min == mirrored.object_bbox.min);
+    REQUIRE(off.object_bbox.max == mirrored.object_bbox.max);
+    const coord_t axis = off.object_bbox.center().x();
+    REQUIRE(axis == on.object_bbox.center().x());
+    REQUIRE(axis == mirrored.object_bbox.center().x());
+    REQUIRE_THAT(unscale<double>(off.object_bbox.size().x()), Catch::Matchers::WithinAbs(20., 1e-6));
+    REQUIRE_THAT(unscale<double>(off.object_bbox.size().y()), Catch::Matchers::WithinAbs(20., 1e-6));
+
+    for (size_t layer_idx = 0; layer_idx < off.layers.size(); ++layer_idx) {
+        CAPTURE(layer_idx);
+        CHECK_THAT(on.layers[layer_idx].area, Catch::Matchers::WithinAbs(off.layers[layer_idx].area, 1e-3));
+        CHECK_THAT(mirrored.layers[layer_idx].area, Catch::Matchers::WithinAbs(off.layers[layer_idx].area, 1e-3));
+        CHECK(on.layers[layer_idx].perimeter_paths == off.layers[layer_idx].perimeter_paths);
+        CHECK(mirrored.layers[layer_idx].perimeter_paths == off.layers[layer_idx].perimeter_paths);
+        CHECK_THAT(on.layers[layer_idx].perimeter_length,
+                   Catch::Matchers::WithinAbs(off.layers[layer_idx].perimeter_length, 1e-3));
+        CHECK_THAT(mirrored.layers[layer_idx].perimeter_length,
+                   Catch::Matchers::WithinAbs(off.layers[layer_idx].perimeter_length, 1e-3));
+
+        const Polylines expected = reflect_x(mirrored.layers[layer_idx].infill, axis);
+        const double reflected_mismatch = mismatch_ratio(on.layers[layer_idx].infill, expected);
+        CHECK(reflected_mismatch <= 0.02);
+
+        const double on_off_mismatch = mismatch_ratio(off.layers[layer_idx].infill, on.layers[layer_idx].infill);
+        CHECK(on_off_mismatch > 0.05);
+    }
 }
 
 TEST_CASE("Separated infill centers the sparse infill of each body on itself", "[Fill][Regression]")

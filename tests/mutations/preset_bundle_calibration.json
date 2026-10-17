@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Calibration-printer filament compatibility and selection reset behavior.",
+  "mutants": [
+    {
+      "id": "calibration-compatible-gate-inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        if (is_compatible) calibrate_filaments.insert(&preset);",
+      "new": "        if (!is_compatible) calibrate_filaments.insert(&preset);",
+      "description": "Invert the public calibration filament compatibility gate; direct-list and condition-compatible profiles should be replaced by rejected profiles.",
+      "test_filter": "PresetCalibration"
+    },
+    {
+      "id": "calibration-empty-reset-removed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    if (name.empty()) {\n        calibrate_filaments.clear();\n        return;\n    }",
+      "new": "    if (name.empty()) {\n        return;\n    }",
+      "description": "Skip clearing the calibration set when the selected printer is reset; the public empty-name reset contract must leave no stale filament pointers.",
+      "test_filter": "PresetCalibration"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Mirrored sparse infill geometry with independent reflection oracles.",
+  "mutants": [
+    {
+      "id": "symmetric-infill-input-reflection-removed",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "                expoly.symmetric_y(params.symmetric_y_axis);",
+      "new": "                // mutation: omit the input reflection",
+      "description": "Removing the input ExPolygon reflection breaks the reflected mirrored-L oracle for both supported consistent rectilinear patterns.",
+      "test_filter": "SymmetricInfill"
+    },
+    {
+      "id": "symmetric-infill-output-reflection-removed",
+      "path": "src/libslic3r/Fill/FillRectilinear.cpp",
+      "old": "            it->symmetric_y(params.symmetric_y_axis);",
+      "new": "            // mutation: omit the output reflection",
+      "description": "Removing the output Polyline reflection leaves the enabled original-L result in the mirrored-L frame and breaks the reflected mirrored-off oracle.",
+      "test_filter": "SymmetricInfill"
+    }
+  ]
+}

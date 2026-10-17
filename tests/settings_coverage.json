@@ -1331,12 +1331,13 @@
       "reason": "The matrix varies 5% and 35% infill/wall overlap with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
     },
     "small_area_infill_flow_compensation_model": {
-      "test": "tests/fff_print/test_small_area_infill_flow_compensator.cpp",
-      "tag": "[SmallAreaInfillFlowCompensator]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SmallAreaFlowCompensation]",
       "dimensions": [
-        "representative_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Direct compensation contracts check model knots, zero and upper-bound bypass, extrusion-role gates, and malformed or non-monotonic models. Full exporter enable/disable wiring is not claimed."
+      "reason": "An empty model and a two-knot model are compared while disabled, then the model is enabled. Exported solid-path E values follow the linear interpolation factor while path geometry and ineligible outer-wall extrusion remain unchanged."
     },
     "printer_model": {
       "test": "tests/fff_print/test_gcodeprocessor.cpp",
@@ -3199,6 +3200,69 @@
         "pipeline_oracle"
       ],
       "reason": "Spacing 0.08 versus 0.30 mm changes ironing move count, XY path length and extruded filament in the expected density order, with positive ironing and unchanged support geometry/layers. Swapping spacings reverses all three witnesses. Numeric boundaries remain unclaimed."
+    },
+    "small_area_infill_flow_compensation": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SmallAreaFlowCompensation]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Disabled and enabled exports use the same two-knot compensation model. Eligible bottom/top solid paths retain XY geometry while their E values follow the independently computed length-based factor; outer-wall extrusion remains unchanged."
+    },
+    "independent_support_layer_height": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[IndependentSupportLayerHeight]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Independent and synchronized normal-support slices use the same 0.2 mm object grid and 0.3 mm top gap. Positive interface geometry ends at the analytically expected 5.7 mm and rounded 5.6 mm heights. Other support styles and numeric gap domains are not claimed."
+    },
+    "wipe_before_external_loop": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[WipeBeforeExternalLoop]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Enabled and disabled exports preserve positive deposition while eligible two-wall loops add bounded zero-E approaches to the outer seam. One-wall and separated wide-inner-wall controls exercise ineligible geometry."
+    },
+    "absolute_correction": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAAbsoluteCorrection]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Negative, zero and positive SLA correction values (-0.5, 0, 0.5 mm) produce independently calculated per-slice area ratios on a fixed cube while preserving the recorded transformed-mesh bounding-box dimensions. The full numeric range is not claimed."
+    },
+    "material_correction_x": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialCorrection]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Neutral and unequal X/Y material corrections are compared through transformed mesh dimensions and every model slice area. X=1.5 and Y=0.8 must produce independent axis factors and a 1.2 area ratio. The full numeric range is not claimed."
+    },
+    "material_correction_y": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialCorrection]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Neutral and unequal X/Y material corrections are compared through transformed mesh dimensions and every model slice area. X=1.5 and Y=0.8 must produce independent axis factors and a 1.2 area ratio. The full numeric range is not claimed."
+    },
+    "symmetric_infill_y_axis": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[SymmetricInfill]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zigzag and crosszag slices compare disabled and enabled infill on an asymmetric L against an independently reflected mirrored-L control. Positive per-layer infill polylines change to match the reflected control while object bounds, slice area, and perimeters remain unchanged. Locked-zag interactions are not claimed."
     }
   }
 }

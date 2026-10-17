@@ -528,6 +528,70 @@ TEST_CASE("Malformed optional commands preserve a later valid move", "[GCodeProc
     CHECK(std::isfinite(normal_time(result)));
 }
 
+namespace {
+
+TestResult process_continuous_rising_outer_wall(bool detect_layer_from_tags)
+{
+    // Keep the seam detector active through the rising external extrusion. The
+    // following inner-wall move ends the continuous outer path, allowing the
+    // two tracking modes to select different seam origins.
+    const std::string gcode =
+        "M83\nG90\n"
+        "G1 X0 Y0 Z0.2 F600\n"
+        ";TYPE:Outer wall\n"
+        "G1 X10 Y0 E1 F600\n"
+        "G1 X10 Y10 Z0.4 E1\n"
+        "G1 X0 Y10 E1\n"
+        "G1 X10.05 Y10 E1\n"
+        ";TYPE:Inner wall\n"
+        "G1 X10.10 Y10 E1\n";
+
+    GCodeProcessor processor;
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    processor.apply_config(config);
+    processor.initialize("gcode_processor_layer_tag_contract.gcode");
+    processor.initialize_result_moves();
+    processor.detect_layer_based_on_tag(detect_layer_from_tags);
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+
+    TestResult result;
+    result = std::move(processor.extract_result());
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Tag-based seam tracking follows a rising continuous outer path", "[GCodeProcessor][GCodeProcessorLayerTags]")
+{
+    const auto z_only = process_continuous_rising_outer_wall(false);
+    const auto tag_based = process_continuous_rising_outer_wall(true);
+    const auto z_only_seams = moves_of(z_only, EMoveType::Seam);
+    const auto tag_based_seams = moves_of(tag_based, EMoveType::Seam);
+
+    const auto z_only_extrusions = moves_of(z_only, EMoveType::Extrude);
+    const auto tag_based_extrusions = moves_of(tag_based, EMoveType::Extrude);
+    REQUIRE(z_only_extrusions.size() == 5);
+    REQUIRE(tag_based_extrusions.size() == 5);
+    for (size_t i = 0; i < z_only_extrusions.size(); ++i) {
+        CAPTURE(i);
+        CHECK_THAT(tag_based_extrusions[i]->position.x(), WithinAbs(z_only_extrusions[i]->position.x(), 1e-4f));
+        CHECK_THAT(tag_based_extrusions[i]->position.y(), WithinAbs(z_only_extrusions[i]->position.y(), 1e-4f));
+        CHECK_THAT(tag_based_extrusions[i]->position.z(), WithinAbs(z_only_extrusions[i]->position.z(), 1e-4f));
+    }
+
+    // The enabled mode starts a new seam at the rising outer endpoint
+    // (10, 10, 0.4). Its midpoint with the final outer endpoint (10.05, 10, 0.4)
+    // is (10.025, 10, 0.4); the disabled mode retains a distant earlier origin.
+    REQUIRE(z_only_seams.empty());
+    REQUIRE(tag_based_seams.size() == 1);
+    CHECK_THAT(tag_based_seams.front()->position.x(), WithinAbs(10.025f, 1e-4f));
+    CHECK_THAT(tag_based_seams.front()->position.y(), WithinAbs(10.f, 1e-4f));
+    CHECK_THAT(tag_based_seams.front()->position.z(), WithinAbs(0.4f, 1e-4f));
+}
+
+
 } // namespace public_processor_contracts
 
 namespace post_processor_contracts {

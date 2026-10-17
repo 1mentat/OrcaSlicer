@@ -10314,3 +10314,79 @@ TEST_CASE("AMS map merges record all project slots pointing at one physical tray
 }
 
 } // namespace preset_ams_sync_contracts
+
+namespace preset_bundle_calibration_contracts {
+namespace {
+
+bool contains_filament(const PresetBundle &bundle, const Preset *preset)
+{
+    return bundle.calibrate_filaments.find(preset) != bundle.calibrate_filaments.end();
+}
+
+} // namespace
+
+TEST_CASE("Calibration printer selection follows filament compatibility profiles", "[PresetBundle][PresetCalibration]")
+{
+    PresetBundle bundle;
+
+    // Loading another preset may insert into the middle of the collection. Keep
+    // references only during setup, and resolve the expected pointers afterward.
+    {
+        Preset &printer = add_inmemory_preset(bundle.printers, "Calibration Printer");
+        printer.is_system = true;
+        printer.config.option<ConfigOptionString>("printer_model", true)->value = "Calibration Model";
+        printer.config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4};
+    }
+    {
+        Preset &printer = add_inmemory_preset(bundle.printers, "Other Printer");
+        printer.is_system = true;
+        printer.config.option<ConfigOptionString>("printer_model", true)->value = "Other Model";
+        printer.config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.6};
+    }
+    {
+        Preset &filament = add_inmemory_preset(bundle.filaments, "Direct Calibration Filament");
+        filament.is_system = true;
+        filament.config.option<ConfigOptionStrings>("compatible_printers", true)->values = {"Calibration Printer"};
+    }
+    {
+        Preset &filament = add_inmemory_preset(bundle.filaments, "Conditional Calibration Filament");
+        filament.is_system = true;
+        filament.config.option<ConfigOptionStrings>("compatible_printers", true)->values.clear();
+        filament.config.option<ConfigOptionString>("compatible_printers_condition", true)->value =
+            R"(printer_model == "Calibration Model")";
+    }
+    {
+        Preset &filament = add_inmemory_preset(bundle.filaments, "Other Printer Filament");
+        filament.is_system = true;
+        filament.config.option<ConfigOptionStrings>("compatible_printers", true)->values = {"Other Printer"};
+    }
+    const Preset *calibration_printer = bundle.printers.find_preset("Calibration Printer");
+    const Preset *other_printer = bundle.printers.find_preset("Other Printer");
+    const Preset *direct = bundle.filaments.find_preset("Direct Calibration Filament");
+    const Preset *conditional = bundle.filaments.find_preset("Conditional Calibration Filament");
+    const Preset *other_only = bundle.filaments.find_preset("Other Printer Filament");
+    REQUIRE(calibration_printer != nullptr);
+    REQUIRE(other_printer != nullptr);
+    REQUIRE(direct != nullptr);
+    REQUIRE(conditional != nullptr);
+    REQUIRE(other_only != nullptr);
+
+    bundle.set_calibrate_printer(calibration_printer->name);
+    REQUIRE(bundle.calibrate_printer == calibration_printer);
+    REQUIRE(bundle.calibrate_filaments.size() == 2);
+    CHECK(contains_filament(bundle, direct));
+    CHECK(contains_filament(bundle, conditional));
+    CHECK_FALSE(contains_filament(bundle, other_only));
+
+    bundle.set_calibrate_printer(other_printer->name);
+    REQUIRE(bundle.calibrate_printer == other_printer);
+    REQUIRE(bundle.calibrate_filaments.size() == 1);
+    CHECK(contains_filament(bundle, other_only));
+    CHECK_FALSE(contains_filament(bundle, direct));
+    CHECK_FALSE(contains_filament(bundle, conditional));
+
+    bundle.set_calibrate_printer("");
+    CHECK(bundle.calibrate_filaments.empty());
+}
+
+} // namespace preset_bundle_calibration_contracts
