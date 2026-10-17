@@ -7,6 +7,7 @@
 #include <memory>
 #include <limits>
 #include "libslic3r/GCode.hpp"
+#include "test_gcode_transform_bridge.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/calib.hpp"
 #include <catch2/catch_all.hpp>
@@ -5858,8 +5859,8 @@ TEST_CASE("G1 transformation leaves comments and arc commands with IJ words unto
 TEST_CASE("G1 never-skip markers force repeated transformed coordinates and are removed",
           "[GCode][TransformGCode]")
 {
-    const std::string input = "G1 X1.000 Y2.000 E1.000\n"
-        + "G1 X1.000 Y2.000 E2.000 " + WipeTower::never_skip_tag() + "\n";
+    const std::string input = std::string("G1 X1.000 Y2.000 E1.000\n"
+        "G1 X1.000 Y2.000 E2.000 ") + WipeTower::never_skip_tag() + "\n";
     const std::string output = transform_gcode(input, Vec2f(1.f, 2.f), Vec2f(10.f, 20.f), 0.f);
     const auto motions = parse_transformed_g1(output);
 

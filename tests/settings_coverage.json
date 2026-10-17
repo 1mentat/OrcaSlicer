@@ -254,10 +254,10 @@
       "test": "tests/fff_print/test_fill.cpp",
       "tag": "[Fill]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "Adaptive TPMS tests exercise disabled, lobes, stepped shells, smooth blend, distance warp, and normal-axis modes with density and invariance oracles; normal_y and the full enum domain are not claimed exhaustive."
+      "reason": "The source registry has exactly eight adaptive TPMS values: disabled, distance_warp, smooth_blend, stepped_shells, lobes, normal_z, normal_y, and normal_x. The accepted Fill cases exercise all eight with density, shell, gradient, or axis-invariance oracles; the normal-Y case passed in the accepted focus run. Numeric density bounds and every pattern-by-mode interaction are not claimed."
     },
     "tpms_interior_density": {
       "test": "tests/fff_print/test_fill.cpp",
@@ -437,9 +437,10 @@
       "tag": "[PrintObject][SurfaceInfill][Regression]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "enum_values"
       ],
-      "reason": "The surface-centering regression generates each_surface, each_model, and each_assembly and requires a changed center to alter paths while a reslice matches a fresh slice; it does not claim every enum transition independently."
+      "reason": "The accepted surface-centering matrix enumerates all three source values each_surface, each_model, and each_assembly and compares changed paths, reslice invalidation, and a fresh slice. This adds enum-domain evidence while leaving untested interaction combinations and numeric behavior unclaimed."
     },
     "enable_support": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
@@ -1117,9 +1118,10 @@
       "tag": "[ValidationContracts]",
       "dimensions": [
         "representative_values",
-        "interaction_matrix"
+        "interaction_matrix",
+        "enum_values"
       ],
-      "reason": "All six concrete bed families are paired with zero and 60 C filament temperatures and both multi-bed-support switch states; incompatible settings identify the filament. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The accepted validation matrix enumerates all six registered bed families and pairs each with both multi-bed-support states and 0/60 C temperatures, identifying incompatible filament state. This adds enum-domain evidence; a complete sliced-output matrix is not claimed."
     },
     "support_multi_bed_types": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1254,36 +1256,40 @@
       "tag": "[MotionFlowVariance]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "The matrix varies 30 and 90 mm/s outer-wall feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+      "reason": "The accepted MotionFlowVariance case exercises this key in both scalar and variant fixtures, with an object override transition nil -> explicit -> nil. It compares each incremental result with fresh parent and fresh explicit exports and requires the role feed to change for the explicit value. Numeric boundaries, percentage domains, and other variant mappings are not claimed."
     },
     "inner_wall_speed": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
       "tag": "[MotionFlowVariance]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "The matrix varies 35 and 110 mm/s inner-wall feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+      "reason": "The accepted MotionFlowVariance case exercises this key in both scalar and variant fixtures, with an object override transition nil -> explicit -> nil. It compares each incremental result with fresh parent and fresh explicit exports and requires the role feed to change for the explicit value. Numeric boundaries, percentage domains, and other variant mappings are not claimed."
     },
     "sparse_infill_speed": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
       "tag": "[MotionFlowVariance]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "The matrix varies 50 and 150 mm/s sparse-infill feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+      "reason": "The accepted MotionFlowVariance case exercises this key in both scalar and variant fixtures, with an object override transition nil -> explicit -> nil. It compares each incremental result with fresh parent and fresh explicit exports and requires the role feed to change for the explicit value. Numeric boundaries, percentage domains, and other variant mappings are not claimed."
     },
     "top_surface_speed": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
       "tag": "[MotionFlowVariance]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "The matrix varies 40 and 120 mm/s top-surface feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+      "reason": "The accepted MotionFlowVariance case exercises this key in both scalar and variant fixtures, with an object override transition nil -> explicit -> nil. It compares each incremental result with fresh parent and fresh explicit exports and requires the role feed to change for the explicit value. Numeric boundaries, percentage domains, and other variant mappings are not claimed."
     },
     "travel_speed": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -1855,13 +1861,14 @@
       "reason": "The config contract maps variant identity strings across column expansion and destination remapping, including duplicate and unmatched variants. This asserts resulting DynamicPrintConfig arrays only; full variant-domain and FFF pipeline coverage are not claimed."
     },
     "small_perimeter_speed": {
-      "test": "tests/libslic3r/test_config.cpp",
-      "tag": "[ConfigMultiMapping]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCode][SmallPerimeterSpeed]",
       "dimensions": [
         "representative_values",
-        "interaction_matrix"
+        "interaction_matrix",
+        "pipeline_oracle"
       ],
-      "reason": "Representative FloatOrPercent arrays exercise per-column value limiting while checking absolute versus percent mode on the mapped result. Numeric boundaries and generated perimeter behavior are not claimed."
+      "reason": "The accepted GCode pipeline case checks absolute 15 mm/s, percent 35% against a 50 mm/s wall speed, and threshold-disabled output at threshold 0. It parses later-layer outer-wall feeds and preserves extrusion/path/material invariants. The prior config-only FloatOrPercent mapping evidence is retained by this entry; numeric boundaries and nullable semantics are not claimed."
     },
     "wipe_inward": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -2200,9 +2207,10 @@
       "tag": "[GcpPost]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boolean_values"
       ],
-      "reason": "The explicitly enabled disable flag suppresses generated M73 output while preserving motion. Default-enabled output is checked independently; exhaustive interaction with every printer flavor is not claimed."
+      "reason": "The accepted post-processing cases exercise both false and true. Enabled output retains progress commands, while the disabled row removes M73 and preserves motion, pause, and color-change events. This adds boolean-domain evidence; exhaustive printer-flavor interactions are not claimed."
     },
     "filament_cost": {
       "test": "tests/fff_print/test_gcode_processor.cpp",
@@ -2534,9 +2542,10 @@
       "tag": "[MultimaterialWipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "enum_values"
       ],
-      "reason": "Rectangle, rib, and cone fixtures generate finite geometry and check their relevant dimensions. Independent comparisons across the entire registered domain remain unclaimed."
+      "reason": "The accepted WipeTower variance case runs rectangle, rib, and cone wall types and checks each defining width, brim, rib, extrusion, or cone output. This adds enum-domain evidence; complete interactions with every tower setting are not claimed."
     },
     "wipe_tower_rib_width": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2867,9 +2876,10 @@
       "tag": "[FuzzyRipple]",
       "dimensions": [
         "representative_values",
-        "fixture_only"
+        "fixture_only",
+        "enum_values"
       ],
-      "reason": "Direct selection truth table checks every FuzzySkinType against contour/hole, outer/inner loop, and first-layer gates. Geometry across all styles and full Print pipeline wiring remain unclaimed."
+      "reason": "The accepted FuzzyRipple truth table enumerates all six registered FuzzySkinType values and checks contour, hole, loop, and first-layer gates. This adds enum-domain evidence; full Print-pipeline geometry wiring across all styles remains unclaimed."
     },
     "fuzzy_skin_thickness": {
       "test": "tests/libslic3r/test_fuzzy_skin.cpp",
@@ -3615,6 +3625,15 @@
         "interaction_matrix"
       ],
       "reason": "Both canonical skirt types are crossed with near and far instances. Public processed skirt groups have the expected ownership and positive volume; far combined skirts span both instances while per-object skirts remain individually bounded. Near per-object skirts merge into one group."
+    },
+    "small_perimeter_threshold": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCode][SmallPerimeterSpeed]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted small-perimeter pipeline case compares threshold 8 mm against threshold 0 disabling, under both absolute and percent speed rows, and checks later-layer outer-wall feeds plus unchanged extrusion/path/material invariants. This is representative threshold output evidence only; numeric boundary coverage and nullable semantics are not claimed."
     }
   }
 }
