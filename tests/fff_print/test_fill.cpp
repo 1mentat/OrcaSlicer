@@ -49,7 +49,6 @@
 #include "libslic3r/IntersectionPoints.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
-#include "libslic3r/PrintObject.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SVG.hpp"
 #include "libslic3r/libslic3r.h"
