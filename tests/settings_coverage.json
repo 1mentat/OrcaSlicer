@@ -971,12 +971,13 @@
     },
     "supports_enable": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
-      "tag": "[SLAFeatures]",
+      "tag": "[SLAPrint][SLAFeatures][SLASupportsEnableVariance]",
       "dimensions": [
         "representative_values",
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "The enabled SLA support path consumes a manual support point and produces elevated geometry, a positive-volume support mesh, and support slices. The disabled pipeline separately checks empty support slices; broader support configuration interactions remain untested."
+      "reason": "Full a44 native run passes the exact case \"SLA supports_enable controls manual support production on one fixture\" once for both disabled and enabled public SLA pipelines: disabled support mesh/slice are empty and enabled support geometry/volume/slice outputs are finite and positive. This adds boolean-state evidence while retaining the existing representative and pipeline dimensions; broader support interactions remain unclaimed."
     },
     "tree_support_branch_angle": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -1961,12 +1962,12 @@
     },
     "auxiliary_fan": {
       "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "tag": "[MultiFilament][AuxiliaryFanVariance]",
       "dimensions": [
-        "representative_values",
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "Each filament cools with the fan speeds of its extruder variant. Enables auxiliary fan and requires parsed M106 P2 S values to equal per-variant additional fan speeds 10/20/40 percent. Enabled path only; disabled behavior is not claimed."
+      "reason": "Full a44 native run passes the exact case \"Each filament cools with the fan speeds of its extruder variant\" once. The false control emits no positive auxiliary-fan M106 P2 S speeds, while true emits the configured per-variant additional speeds 10/20/40 percent. This records both boolean states and retains a public output oracle; no numeric auxiliary-fan range claim is made."
     },
     "bridge_acceleration": {
       "test": "tests/fff_print/test_gcodewriter.cpp",
@@ -4081,6 +4082,15 @@
         "pipeline_oracle"
       ],
       "reason": "Accepted6c public ToolOrdering/WipeTower processing compares a three-slot soluble vector 0,0,0 with 0,1,0 on the same two-object, two-layer-order fixture. The soluble row changes the first-layer extruder order from 0,1 to 1,0 while both rows retain sliced object layers; dedicated-wipe and broader vector index interactions remain unclaimed."
+    },
+    "pad_around_object": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAPrint][SLAFeatures][SLAPadAroundObjectVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Full a44 native run passes the exact case \"SLA pad_around_object selects the standard or around-object pad\" once for both states on the same public no-support cube fixture: false produces a finite positive standard pad footprint/volume and true produces the documented empty around-object result. This is a bounded boolean pipeline claim; pad geometry ranges and interactions remain unclaimed."
     }
   }
 }

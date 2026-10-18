@@ -56,3 +56,64 @@ TEST_CASE("deep_diff distinguishes absolute and percentage speeds for each varia
     transferred.apply_only(edited.config, diff);
     REQUIRE(*transferred.option("small_perimeter_speed") == *edited.config.option("small_perimeter_speed"));
 }
+
+
+TEST_CASE("dirty_options distinguishes deep per-index and shallow whole-option reports",
+          "[Preset][PresetDiff][PresetDeepDiff]")
+{
+    Preset reference(Preset::TYPE_PRINTER, "reference");
+    reference.config.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.4, 0.4}));
+    Preset edited = reference;
+    edited.config.option<ConfigOptionFloats>("nozzle_diameter")->values[1] = 0.5;
+
+    const auto deep_diff = PresetCollection::dirty_options(&edited, &reference, true);
+    CHECK(deep_diff == std::vector<std::string>{"nozzle_diameter#1"});
+    const auto shallow_diff = PresetCollection::dirty_options(&edited, &reference, false);
+    CHECK(shallow_diff == std::vector<std::string>{"nozzle_diameter"});
+}
+
+TEST_CASE("deep_diff reports nullable transitions while shallow diff reports the option",
+          "[Preset][PresetDiff][PresetDeepDiff]")
+{
+    using NullableFloats = ConfigOptionFloatsNullable;
+
+    Preset reference(Preset::TYPE_FILAMENT, "reference");
+    reference.config.set_key_value("filament_retraction_length",
+                                   new NullableFloats({1.0, 1.0}));
+    Preset edited = reference;
+    edited.config.option<NullableFloats>("filament_retraction_length")->values[0] =
+        NullableFloats::nil_value();
+
+    const auto deep_nil = PresetCollection::dirty_options(&edited, &reference, true);
+    CHECK(deep_nil == std::vector<std::string>{"filament_retraction_length#0"});
+    const auto shallow_nil = PresetCollection::dirty_options(&edited, &reference, false);
+    CHECK(shallow_nil == std::vector<std::string>{"filament_retraction_length"});
+
+    Preset nil_reference(Preset::TYPE_FILAMENT, "nil reference");
+    nil_reference.config.set_key_value("filament_retraction_length",
+                                       new NullableFloats({NullableFloats::nil_value(), 1.0}));
+    Preset explicit_value = nil_reference;
+    explicit_value.config.option<NullableFloats>("filament_retraction_length")->values[0] = 2.0;
+
+    const auto deep_explicit = PresetCollection::dirty_options(&explicit_value, &nil_reference, true);
+    CHECK(deep_explicit == std::vector<std::string>{"filament_retraction_length#0"});
+    const auto shallow_explicit = PresetCollection::dirty_options(&explicit_value, &nil_reference, false);
+    CHECK(shallow_explicit == std::vector<std::string>{"filament_retraction_length"});
+}
+
+TEST_CASE("deep_diff flags a nullable vector entry added by growth",
+          "[Preset][PresetDiff][PresetDeepDiff]")
+{
+    using NullableFloats = ConfigOptionFloatsNullable;
+    Preset reference(Preset::TYPE_FILAMENT, "reference");
+    reference.config.set_key_value("filament_retraction_length",
+                                   new NullableFloats({1.0, 1.0}));
+    Preset grown = reference;
+    grown.config.option<NullableFloats>("filament_retraction_length")->values.push_back(
+        NullableFloats::nil_value());
+
+    const auto deep_diff = PresetCollection::dirty_options(&grown, &reference, true);
+    CHECK(std::find(deep_diff.begin(), deep_diff.end(), "filament_retraction_length#2") != deep_diff.end());
+    const auto shallow_diff = PresetCollection::dirty_options(&grown, &reference, false);
+    CHECK(shallow_diff == std::vector<std::string>{"filament_retraction_length"});
+}

@@ -7880,3 +7880,109 @@ TEST_CASE("BBS LoadModel skips malformed project settings before configuration p
 }
 
 } // namespace bbs_model_settings_contracts
+
+namespace high_yield_bbs_import_contracts {
+
+using namespace Slic3r;
+
+namespace {
+
+std::string nested_foreign_component_model()
+{
+    return R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+ <metadata name="Application">ThirdParty-1.0</metadata>
+ <resources>
+  <object id="1" type="model">
+   <mesh>
+    <vertices>
+     <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="10" y="10" z="0"/><vertex x="0" y="10" z="0"/>
+     <vertex x="0" y="0" z="10"/><vertex x="10" y="0" z="10"/><vertex x="10" y="10" z="10"/><vertex x="0" y="10" z="10"/>
+    </vertices>
+    <triangles>
+     <triangle v1="0" v2="2" v3="1"/><triangle v1="0" v2="3" v3="2"/>
+     <triangle v1="4" v2="5" v3="6"/><triangle v1="4" v2="6" v3="7"/>
+     <triangle v1="0" v2="1" v3="5"/><triangle v1="0" v2="5" v3="4"/>
+     <triangle v1="1" v2="2" v3="6"/><triangle v1="1" v2="6" v3="5"/>
+     <triangle v1="2" v2="3" v3="7"/><triangle v1="2" v2="7" v3="6"/>
+     <triangle v1="3" v2="0" v3="4"/><triangle v1="3" v2="4" v3="7"/>
+    </triangles>
+   </mesh>
+  </object>
+  <object id="2" type="model">
+   <components>
+    <component objectid="1" transform="1 0 0 0 1 0 0 0 1 10 0 0"/>
+   </components>
+  </object>
+  <object id="3" type="model">
+   <components>
+    <component objectid="2" transform="1 0 0 0 1 0 0 0 1 20 0 0"/>
+    <component objectid="1" transform="1 0 0 0 1 0 0 0 1 -20 0 0"/>
+   </components>
+  </object>
+ </resources>
+ <build>
+  <item objectid="2" printable="1"/>
+  <item objectid="3" printable="1"/>
+ </build>
+</model>)XML";
+}
+
+void write_nested_foreign_component_archive(const std::string &path)
+{
+    static const std::string relationships = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>)XML";
+    const std::string model = nested_foreign_component_model();
+    Zipper archive(path);
+    archive.add_entry("_rels/.rels", relationships.data(), relationships.size());
+    archive.add_entry("3D/3dmodel.model", model.data(), model.size());
+    archive.finalize();
+}
+
+} // namespace
+
+TEST_CASE("BBS foreign import expands nested components into transformed volumes",
+          "[3MF][Bbs3mfComponents][Bbs3mfForeign]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    write_nested_foreign_component_archive(archive.string());
+
+    Model loaded;
+    archive_variant_contracts::BbsLoaded state;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded, state));
+    CHECK_FALSE(state.is_bbl);
+    REQUIRE(loaded.objects.size() == 2);
+
+    const auto find_object_with_volumes = [&loaded](size_t count) {
+        return std::find_if(loaded.objects.begin(), loaded.objects.end(),
+                            [count](const ModelObject *object) {
+                                return object != nullptr && object->volumes.size() == count;
+                            });
+    };
+    const auto wrapped_it = find_object_with_volumes(1);
+    const auto assembly_it = find_object_with_volumes(2);
+    REQUIRE(wrapped_it != loaded.objects.end());
+    REQUIRE(assembly_it != loaded.objects.end());
+
+    const ModelObject *wrapped = *wrapped_it;
+    const ModelObject *assembly = *assembly_it;
+    REQUIRE(wrapped->volumes.size() == 1);
+    REQUIRE(assembly->volumes.size() == 2);
+    for (const ModelVolume *volume : wrapped->volumes)
+        CHECK_THAT(volume->mesh().volume(), Catch::Matchers::WithinRel(1000., 1e-6));
+    for (const ModelVolume *volume : assembly->volumes)
+        CHECK_THAT(volume->mesh().volume(), Catch::Matchers::WithinRel(1000., 1e-6));
+
+    const BoundingBoxf3 wrapped_box = wrapped->bounding_box_exact();
+    CHECK_THAT(double(wrapped_box.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(wrapped_box.max.x()), Catch::Matchers::WithinAbs(20., 1e-5));
+    const BoundingBoxf3 assembly_box = assembly->bounding_box_exact();
+    CHECK_THAT(double(assembly_box.min.x()), Catch::Matchers::WithinAbs(-20., 1e-5));
+    CHECK_THAT(double(assembly_box.max.x()), Catch::Matchers::WithinAbs(40., 1e-5));
+    CHECK_THAT(double(loaded.mesh().bounding_box().max.x() - loaded.mesh().bounding_box().min.x()),
+               Catch::Matchers::WithinAbs(60., 1e-5));
+}
+
+} // namespace high_yield_bbs_import_contracts

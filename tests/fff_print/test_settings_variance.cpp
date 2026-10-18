@@ -2436,6 +2436,164 @@ TEST_CASE("Adaptive pressure advance emits calibrated values on overhangs",
     CHECK(disabled_gcode.find("SET_PRESSURE_ADVANCE ADVANCE=") == std::string::npos);
 }
 
+namespace gcode_z_contouring_followup {
+
+namespace {
+
+struct ZContouredMotion {
+    size_t extrusion_moves = 0;
+    size_t wall_moves = 0;
+    size_t lowered_wall_moves = 0;
+    double minimum_wall_offset = std::numeric_limits<double>::max();
+    double maximum_wall_offset = std::numeric_limits<double>::lowest();
+    double xy_path = 0.0;
+    double filament = 0.0;
+    double maximum_layer_z_span = 0.0;
+    bool finite = true;
+};
+
+ZContouredMotion parse_z_contoured_motion(const std::string &output, const DynamicPrintConfig &config)
+{
+    ZContouredMotion result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    int layer = -1;
+    bool wall = false;
+    double nominal_layer_z = std::numeric_limits<double>::quiet_NaN();
+    std::map<int, std::pair<double, double>> layer_bounds;
+    reader.parse_buffer(output, [&result, &layer, &wall, &nominal_layer_z, &layer_bounds](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment == "LAYER_CHANGE") {
+            ++layer;
+            nominal_layer_z = std::numeric_limits<double>::quiet_NaN();
+        }
+        if (comment.rfind("Z:", 0) == 0)
+            nominal_layer_z = std::stod(std::string(comment.substr(2)));
+        if (comment.rfind("TYPE:", 0) == 0)
+            wall = comment == "TYPE:Inner wall" || comment == "TYPE:Outer wall";
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON || layer < 0)
+            return;
+        const double xy = line.dist_XY(self);
+        const double de = line.dist_E(self);
+        const double z = line.new_Z(self);
+        if (!std::isfinite(xy) || !std::isfinite(de) || !std::isfinite(z) || de <= 0.0) {
+            result.finite = false;
+            return;
+        }
+        ++result.extrusion_moves;
+        result.xy_path += xy;
+        result.filament += de;
+        if (wall) {
+            if (!std::isfinite(nominal_layer_z)) {
+                result.finite = false;
+                return;
+            }
+            const double offset = z - nominal_layer_z;
+            ++result.wall_moves;
+            result.lowered_wall_moves += offset < -0.01 ? 1 : 0;
+            result.minimum_wall_offset = std::min(result.minimum_wall_offset, offset);
+            result.maximum_wall_offset = std::max(result.maximum_wall_offset, offset);
+        }
+        auto it = layer_bounds.find(layer);
+        if (it == layer_bounds.end())
+            it = layer_bounds.emplace(layer, std::make_pair(z, z)).first;
+        it->second.first = std::min(it->second.first, z);
+        it->second.second = std::max(it->second.second, z);
+    });
+    for (const auto &entry : layer_bounds)
+        result.maximum_layer_z_span = std::max(result.maximum_layer_z_span, entry.second.second - entry.second.first);
+    return result;
+}
+
+DynamicPrintConfig zaa_export_config(bool enabled)
+{
+    DynamicPrintConfig config = family_config();
+    config.set_deserialize_strict({
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", false},
+        {"z_offset", 0.0},
+        {"spiral_mode", false},
+        {"belt_printer", false},
+        {"seam_slope_type", "none"},
+        {"ironing_type", "no ironing"},
+        {"wall_generator", "classic"},
+        {"wall_loops", 2},
+        {"top_shell_layers", 2},
+        {"bottom_shell_layers", 2},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"zaa_enabled", enabled},
+        {"zaa_min_z", 0.05},
+        // slopy_cube has 45-degree roof facets; this threshold selects the same
+        // public contour gate as the existing perimeter-height contract.
+        {"zaa_minimize_perimeter_height", 35.0},
+        // Both overhang detection inputs must be off to keep GCode::_extrude
+        // on its fixed-speed emission path.
+        {"enable_overhang_speed", false},
+        {"enable_overhang_bridge_fan", false},
+        {"detect_overhang_wall", false},
+        {"enable_pressure_advance", false},
+        {"adaptive_pressure_advance", false},
+        {"adaptive_pressure_advance_overhangs", false},
+        {"enable_arc_fitting", false},
+        {"gcode_comments", true},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_support", false},
+        {"enable_prime_tower", false},
+    });
+    return config;
+}
+
+TriangleMesh zaa_export_mesh()
+{
+    // This is the existing public 45-degree upward-roof fixture used by
+    // test_fill.cpp's perimeter-height contract, uniformly reduced to 10 mm.
+    TriangleMesh shape = mesh(TestMesh::slopy_cube);
+    shape.scale(0.5f);
+    return shape;
+}
+
+} // namespace
+
+TEST_CASE("Z-contoured G-code preserves sloped roof height on the fixed-speed path",
+          "[SettingsFamilyVariance][GCodeZContouring]")
+{
+    const DynamicPrintConfig enabled = zaa_export_config(true);
+    const DynamicPrintConfig disabled = zaa_export_config(false);
+    const ZContouredMotion contoured = parse_z_contoured_motion(
+        export_mesh(zaa_export_mesh(), enabled), enabled);
+    const ZContouredMotion planar = parse_z_contoured_motion(
+        export_mesh(zaa_export_mesh(), disabled), disabled);
+
+    REQUIRE(contoured.finite);
+    REQUIRE(planar.finite);
+    REQUIRE(contoured.extrusion_moves > 0);
+    REQUIRE(planar.extrusion_moves > 0);
+    REQUIRE(contoured.xy_path > 0.0);
+    REQUIRE(planar.xy_path > 0.0);
+    REQUIRE(contoured.filament > 0.0);
+    REQUIRE(planar.filament > 0.0);
+    // Layer-to-layer Z changes are excluded. The public ZAA contract is a
+    // nonzero within-layer span on the upward roof, while the disabled control
+    // remains planar within every layer.
+    CHECK(planar.maximum_layer_z_span < 1e-5);
+    CHECK(contoured.maximum_layer_z_span > 0.01);
+    REQUIRE(contoured.wall_moves > 0);
+    REQUIRE(planar.wall_moves > 0);
+    CHECK(planar.lowered_wall_moves == 0);
+    CHECK_THAT(planar.minimum_wall_offset, Catch::Matchers::WithinAbs(0.0, 0.0005));
+    CHECK_THAT(planar.maximum_wall_offset, Catch::Matchers::WithinAbs(0.0, 0.0005));
+    // A 0.2 mm layer must retain at least the configured 0.05 mm thickness.
+    // Contouring lowers roof walls; it must never raise them above nominal Z.
+    REQUIRE(contoured.lowered_wall_moves > 0);
+    CHECK(contoured.minimum_wall_offset >= -(0.2 - 0.05) - 0.0005);
+    CHECK(contoured.maximum_wall_offset <= 0.0005);
+}
+
+} // namespace gcode_z_contouring_followup
+
 } // namespace settings_family_contracts
 
 namespace reslice_settings_contracts {

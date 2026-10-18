@@ -731,3 +731,79 @@ TEST_CASE("Placeholder regex negation complements a whole-string match",
     CHECK(parser.process(R"({if false}{"ABS-12" !~ /[/}{endif}ready)") == "ready");
     CHECK(parser.process(R"({"ABS-12" !~ /ABS-[0-9]+/})") == "false");
 }
+
+
+TEST_CASE("Placeholder parser clones percent vectors as numeric local variables",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "retract_before_wipe", "10,20,30" } });
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    // ConfigOptionPercents is cloned as a numeric local vector, preserving every element.
+    CHECK(parser.process("{local copied = retract_before_wipe}{copied[0]},{copied[1]},{copied[2]}") == "10,20,30");
+    CHECK(parser.process("{local copied = retract_before_wipe}{size(copied)}") == "3");
+}
+
+TEST_CASE("Placeholder parser rejects empty and mixed-type initializer vectors",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{local empty = ()}"),
+                      Catch::Matchers::ContainsSubstring("Cannot create vector variable from an empty initializer list"));
+    CHECK_THROWS_WITH(parser.process("{local mixed = (true, 1)}"),
+                      Catch::Matchers::ContainsSubstring("Mixing numeric and boolean types"));
+}
+
+TEST_CASE("Placeholder parser preserves UTF-8 literals and validates escapes",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    std::string utf8 = "{\"caf";
+    utf8.append("\xC3\xA9", 2);
+    utf8 += " ";
+    utf8.append("\xF0\x9F\x98\x80", 4);
+    utf8 += "\"}";
+    std::string expected = "caf";
+    expected.append("\xC3\xA9", 2);
+    expected += " ";
+    expected.append("\xF0\x9F\x98\x80", 4);
+    CHECK(parser.process(utf8) == expected);
+    CHECK(parser.process(R"({"line\nnext"})") == "line\nnext");
+
+    CHECK_THROWS_WITH(parser.process(R"({"bad\q"})"),
+                      Catch::Matchers::ContainsSubstring("Invalid escape sequence"));
+    std::string invalid = "{\"";
+    invalid.append("\xE2\x28\xA1", 3);
+    invalid += "\"}";
+    CHECK_THROWS_WITH(parser.process(invalid),
+                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
+
+TEST_CASE("Placeholder parser rejects non-ASCII code and reports malformed macro lines",
+          "[PlaceholderParser][PlaceholderParserErrors]")
+{
+    PlaceholderParser parser;
+    std::string non_ascii_code = "{";
+    non_ascii_code.append("\xC3\xA9", 2);
+    non_ascii_code += "}";
+    CHECK_THROWS_WITH(parser.process(non_ascii_code),
+                      Catch::Matchers::ContainsSubstring("Non-ASCII7 characters"));
+    CHECK_THROWS_WITH(parser.process("prefix\n{if true}\nvalue"),
+                      Catch::Matchers::ContainsSubstring("Parsing error at line"));
+}
+
+TEST_CASE("Placeholder parser reports negative legacy vector indexes",
+          "[PlaceholderParser][PlaceholderParserErrors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    parser.set("idx", -1);
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[idx]]"),
+                      Catch::Matchers::ContainsSubstring("Negative vector index"));
+    parser.set("idx", 0);
+    CHECK(parser.process("[nozzle_temperature[idx]]") == "357");
+}

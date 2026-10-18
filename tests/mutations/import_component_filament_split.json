@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "description": "Foreign component transforms and external multi-filament source profile splitting through public imports.",
+  "mutants": [
+    {
+      "id": "bbs-foreign-nested-component-child-transform-dropped",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                        id_list.push_back(std::pair(comp, current_item.second * comp.transform));",
+      "new": "                        id_list.push_back(std::pair(comp, current_item.second));",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfComponents",
+      "description": "Drop the transform accumulated while expanding a nested component. The nested foreign archive's wrapper and assembly world-X boxes must fail their ordinary geometry assertions.",
+      "ordinary_assertion_only": true,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending"
+    },
+    {
+      "id": "bbs-foreign-nested-component-leaf-transform-dropped",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                    sub_objects.push_back({ current_object->first, current_item.second});",
+      "new": "                    sub_objects.push_back({ current_object->first, Transform3d::Identity()});",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfComponents",
+      "description": "Discard the accumulated leaf transform when materializing a component. The wrapper and assembly bounding boxes must fail while volume count and mesh volume remain valid.",
+      "ordinary_assertion_only": true,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending"
+    },
+    {
+      "id": "preset-external-multifilament-slot-index-collapsed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "                                static_cast<ConfigOptionVectorBase*>(configs[i].option(key, false))->set_at(other_opt, 0, i);",
+      "new": "                                static_cast<ConfigOptionVectorBase*>(configs[i].option(key, false))->set_at(other_opt, 0, 0);",
+      "expected_matches": 1,
+      "test_filter": "MultiFilament",
+      "description": "Copy every vector option from source slot zero instead of the current filament slot. The three-slot external profile case must fail its distinct diameter/type and project-color assertions.",
+      "ordinary_assertion_only": true,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending"
+    },
+    {
+      "id": "preset-external-multifilament-profile-name-not-recorded",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "                    this->filament_presets[i] = loaded->name;",
+      "new": "                    this->filament_presets[0] = loaded->name;",
+      "expected_matches": 1,
+      "test_filter": "MultiFilament",
+      "description": "Record each loaded profile only in slot zero. The public filament_presets order and per-slot profile lookup must fail ordinary assertions for slots one and two.",
+      "ordinary_assertion_only": true,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending"
+    }
+  ]
+}
