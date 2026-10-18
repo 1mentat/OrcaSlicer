@@ -34,10 +34,11 @@ std::string pressure_fixture(bool relative_e, Slic3r::ExtrusionRole role)
            ";_EXTRUDE_END\n";
 }
 
-std::string equalize_pressure(const std::string &input, bool relative_e, bool external_only)
+std::string equalize_pressure(const std::string &input, bool relative_e, bool external_only,
+                              const std::vector<double> &filament_diameters = {1.75})
 {
     Slic3r::GCodeConfig config;
-    config.filament_diameter.values = {1.75};
+    config.filament_diameter.values = filament_diameters;
     config.use_relative_e_distances.value = relative_e;
     config.max_volumetric_extrusion_rate_slope.value = 1.0;
     config.max_volumetric_extrusion_rate_slope_segment_length.value = 2.0;
@@ -95,6 +96,129 @@ TEST_CASE("Tagged external flow transitions preserve path geometry while smoothi
     CHECK(internal_control.speed_markers == 1);
     CHECK_THAT(internal_control.total_extrusion, Catch::Matchers::WithinAbs(6.0, 0.001));
     CHECK_THAT(internal_control.final_x, Catch::Matchers::WithinAbs(40.0, 0.001));
+}
+
+namespace {
+
+struct PressureStateObservation {
+    std::size_t g92_lines = 0;
+    std::size_t post_reset_extrusion_moves = 0;
+    double post_reset_distance = 0.0;
+    double post_reset_extrusion = 0.0;
+    double first_post_reset_start_x = 0.0;
+    double first_post_reset_end_x = 0.0;
+    bool saw_post_reset_extrusion = false;
+};
+
+PressureStateObservation observe_g92_state(const std::string &gcode)
+{
+    Slic3r::GCodeConfig config;
+    config.use_relative_e_distances.value = false;
+    Slic3r::GCodeReader reader;
+    reader.apply_config(config);
+    PressureStateObservation observation;
+    bool after_g92 = false;
+    reader.parse_buffer(gcode, [&observation, &after_g92](Slic3r::GCodeReader &state, const Slic3r::GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G92")) {
+            ++observation.g92_lines;
+            after_g92 = true;
+            return;
+        }
+        if (!after_g92 || !line.cmd_is("G1") || !line.extruding(state))
+            return;
+        const double start_x = state.x();
+        const double end_x = line.new_X(state);
+        if (!observation.saw_post_reset_extrusion) {
+            observation.first_post_reset_start_x = start_x;
+            observation.first_post_reset_end_x = end_x;
+            observation.saw_post_reset_extrusion = true;
+        }
+        ++observation.post_reset_extrusion_moves;
+        observation.post_reset_distance += line.dist_XY(state);
+        observation.post_reset_extrusion += line.dist_E(state);
+    });
+    return observation;
+}
+
+struct PressureToolObservation {
+    std::size_t tool_changes = 0;
+    std::size_t tool0_extrusion_moves = 0;
+    std::size_t tool1_extrusion_moves = 0;
+    double tool0_extrusion = 0.0;
+    double tool1_extrusion = 0.0;
+    double final_x = 0.0;
+};
+
+PressureToolObservation observe_pressure_tools(const std::string &gcode)
+{
+    Slic3r::GCodeConfig config;
+    config.use_relative_e_distances.value = false;
+    Slic3r::GCodeReader reader;
+    reader.apply_config(config);
+    PressureToolObservation observation;
+    int active_tool = 0;
+    reader.parse_buffer(gcode, [&observation, &active_tool](Slic3r::GCodeReader &state, const Slic3r::GCodeReader::GCodeLine &line) {
+        const std::string command(line.cmd());
+        if (command.size() > 1 && command[0] == 'T') {
+            const int new_tool = command[1] - '0';
+            if (new_tool != active_tool)
+                ++observation.tool_changes;
+            active_tool = new_tool;
+            return;
+        }
+        if (!line.cmd_is("G1") || !line.extruding(state))
+            return;
+        if (active_tool == 0) {
+            ++observation.tool0_extrusion_moves;
+            observation.tool0_extrusion += line.dist_E(state);
+        } else if (active_tool == 1) {
+            ++observation.tool1_extrusion_moves;
+            observation.tool1_extrusion += line.dist_E(state);
+        }
+        observation.final_x = line.new_X(state);
+    });
+    return observation;
+}
+
+} // namespace
+
+TEST_CASE("G92 resets the logical extrusion state before a new pressure block", "[PressureEqualizer][PressureEqualizerStateTransitions]")
+{
+    const std::string input =
+        ";_EXTRUSION_ROLE:" + std::to_string(int(Slic3r::erExternalPerimeter)) +
+        "\nG1 F600 X10 Y0 E1\nG92 X0 Y0 E5\n"
+        "G1 F600 ;_EXTRUDE_SET_SPEED\n"
+        "G1 F600 X10 Y0 E6\nG1 F600 X20 Y0 E7\nG1 F630 X30 Y0 E8\nG1 F630 X40 Y0 E9\n"
+        ";_EXTRUDE_END\n";
+
+    const PressureStateObservation observation = observe_g92_state(equalize_pressure(input, false, false, {1.75}));
+    REQUIRE(observation.g92_lines == 1);
+    REQUIRE(observation.saw_post_reset_extrusion);
+    CHECK(observation.post_reset_extrusion_moves == 4);
+    CHECK_THAT(observation.post_reset_extrusion, Catch::Matchers::WithinAbs(4.0, 0.001));
+    CHECK_THAT(observation.post_reset_distance, Catch::Matchers::WithinAbs(40.0, 0.001));
+    CHECK_THAT(observation.first_post_reset_start_x, Catch::Matchers::WithinAbs(0.0, 0.001));
+    CHECK_THAT(observation.first_post_reset_end_x, Catch::Matchers::WithinAbs(10.0, 0.001));
+}
+
+TEST_CASE("Tool changes select the filament cross section used by pressure smoothing", "[PressureEqualizer][PressureEqualizerStateTransitions]")
+{
+    const std::string input =
+        ";_EXTRUSION_ROLE:" + std::to_string(int(Slic3r::erExternalPerimeter)) +
+        "\nT0\nG1 F600 ;_EXTRUDE_SET_SPEED\n"
+        "G1 F600 X10 Y0 E1\nG1 F600 X20 Y0 E2\nG1 F630 X30 Y0 E3\nG1 F630 X40 Y0 E4\n"
+        ";_EXTRUDE_END\nG0 X50 Y0 F1200\nT1\n"
+        "G1 F600 ;_EXTRUDE_SET_SPEED\n"
+        "G1 F600 X60 Y0 E5\nG1 F600 X70 Y0 E6\nG1 F630 X80 Y0 E7\nG1 F630 X90 Y0 E8\n"
+        ";_EXTRUDE_END\n";
+
+    const PressureToolObservation observation = observe_pressure_tools(equalize_pressure(input, false, false, {1.75, 3.5}));
+    REQUIRE(observation.tool_changes == 1);
+    CHECK(observation.tool0_extrusion_moves == 4);
+    CHECK(observation.tool1_extrusion_moves > observation.tool0_extrusion_moves);
+    CHECK_THAT(observation.tool0_extrusion, Catch::Matchers::WithinAbs(4.0, 0.001));
+    CHECK_THAT(observation.tool1_extrusion, Catch::Matchers::WithinAbs(4.0, 0.001));
+    CHECK_THAT(observation.final_x, Catch::Matchers::WithinAbs(90.0, 0.001));
 }
 
 } // namespace Slic3r

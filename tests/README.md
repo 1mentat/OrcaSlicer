@@ -203,6 +203,18 @@ mutations are in `preset_cloud_selection.json`.
 against an internal-wall control in absolute and relative extrusion modes.
 The output must preserve total extrusion and its endpoint while introducing
 intermediate feedrates. Its mutations are in `pressure_equalizer.json`.
+`[PressureEqualizerStateTransitions]` checks G92 logical-position resets and
+tool-specific filament cross sections through emitted moves and conserved
+extrusion (`pressure_equalizer_state_transitions.json`).
+
+`[GCodeReaderFileStreaming]` checks long-line buffering, mixed line endings,
+numbered commands, final unterminated moves, cancellation and reuse, and
+empty/missing files. Its mutations are in `gcode_reader_file_streaming.json`.
+
+`[FillRotationTemplates]` checks fourteen deterministic interpolation curves
+and equivalent physical duration units over two complete rotation cycles.
+The path-direction oracle accounts for whole-degree rounding and axial wrap;
+its mutations are in `fill_rotation_templates.json`.
 
 `[PresetBundleSubscribedMultiType]` checks typed subscribed profiles, canonical
 inheritance, missing and unsupported types, and removal of obsolete printer files.

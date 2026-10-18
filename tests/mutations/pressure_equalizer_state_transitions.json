@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "description": "Public PressureEqualizer logical-position and active-tool state transitions, checked through emitted movement and extrusion.",
+  "test_filter": "^PressureEqualizerStateTransitions$",
+  "mutants": [
+    {
+      "id": "pressure-equalizer-g92-e-state-reset",
+      "path": "src/libslic3r/GCode/PressureEqualizer.cpp",
+      "old": "                    m_current_pos[3] = (!is_ws_or_eol(*line)) ? parse_float(line, line_end - line) : 0.f;",
+      "new": "                    m_current_pos[3] = 0.f;",
+      "expected_matches": 1,
+      "test_filter": "^PressureEqualizerStateTransitions$",
+      "ordinary_assertion_only": true,
+      "description": "Force every G92 E value to zero. The fixture uses G92 E5, so the following public G1 is assigned a six-millimeter internal E jump instead of one millimeter; the ordinary move-count oracle then observes a different pressure-smoothing result.",
+      "source_anchor_sha256": "d841eaee40fb0db22a0d37670e6524ce7adefa6519148d946bff8e4df8828ac4"
+    },
+    {
+      "id": "pressure-equalizer-tool-change-keeps-old-extruder",
+      "path": "src/libslic3r/GCode/PressureEqualizer.cpp",
+      "old": "            m_current_extruder = new_extruder;",
+      "new": "            m_current_extruder = 0;",
+      "expected_matches": 1,
+      "test_filter": "^PressureEqualizerStateTransitions$",
+      "ordinary_assertion_only": true,
+      "description": "Force every changed tool to filament slot 0. With configured 1.75 mm and 3.5 mm filaments, the second block no longer crosses the pressure-smoothing segmentation threshold and fails the move-count oracle while extrusion and endpoint conservation remain ordinary output assertions.",
+      "source_anchor_sha256": "91504c6f884fb9e16fbaa84e4482734d5a3b3194afc98a29bba3c3af788e5b55"
+    }
+  ]
+}

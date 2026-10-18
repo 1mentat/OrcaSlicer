@@ -3195,3 +3195,124 @@ TEST_CASE("Zero external bridge angle keeps automatic direction under both mode 
 }
 
 } // namespace external_bridge_direction_contracts
+
+namespace fill_rotation_template_contracts {
+
+DynamicPrintConfig rotation_config(const std::string &rotation_template)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"solid_infill_rotate_template", rotation_template},
+        {"sparse_infill_density", "100%"},
+        {"sparse_infill_pattern", "monotonic"},
+        {"internal_solid_infill_pattern", "monotonic"},
+        {"top_surface_pattern", "monotonic"},
+        {"wall_loops", 0},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", 0.4},
+        {"line_width", 0.4},
+        {"infill_direction", 0.0},
+        {"solid_infill_direction", 0.0},
+        {"top_layer_direction", -1.0},
+        {"align_infill_direction_to_model", false},
+        {"infill_shift_step", 0.0},
+        {"infill_combination", false},
+        {"fill_multiline", 1},
+        {"raft_layers", 0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_arc_fitting", false},
+    });
+    return config;
+}
+
+std::vector<int> observe_angles(const std::string &rotation_template)
+{
+    Print print;
+    Slic3r::Test::init_and_process_print({make_cube(10., 10., 1.6)}, print, rotation_config(rotation_template));
+    const std::vector<int> angles = angles_per_layer(print, solid_role);
+    REQUIRE(angles.size() == 8);
+    for (const int angle : angles) {
+        REQUIRE(angle >= 0);
+        REQUIRE(angle < 180);
+    }
+    return angles;
+}
+
+struct JointCheckpoints
+{
+    char token;
+    std::array<double, 4> degrees;
+};
+
+// Literal checkpoints independently evaluated from the documented joint
+// meanings at progress 1/4, 1/2, 3/4 and 1. The test intentionally does not
+// call or duplicate the production switch as its expected-value oracle.
+const std::array<JointCheckpoints, 14> deterministic_checkpoints = {{
+    {'/', {22.500000, 45.000000, 67.500000, 90.000000}},
+    {'N', {8.176055, 45.000000, 81.823945, 90.000000}},
+    {'n', {15.338028, 45.000000, 74.661972, 90.000000}},
+    {'Z', {36.823945, 45.000000, 53.176055, 90.000000}},
+    {'z', {29.661972, 45.000000, 60.338028, 90.000000}},
+    {'$', {30.000000, 45.000000, 60.000000, 90.000000}},
+    {'L', {34.441509, 63.639610, 83.149158, 90.000000}},
+    {'l', {6.850842, 26.360390, 55.558491, 90.000000}},
+    {'U', {39.375000, 67.500000, 84.375000, 90.000000}},
+    {'u', {50.625000, 22.500000, 5.625000, 0.000000}},
+    {'Q', {52.031250, 78.750000, 88.593750, 90.000000}},
+    {'q', {37.968750, 11.250000, 1.406250, 0.000000}},
+    {'|', {45.000000, 45.000000, 45.000000, 45.000000}},
+    {'#', {90.000000, 90.000000, 90.000000, 90.000000}},
+}};
+
+double axial_distance(double actual, double expected)
+{
+    const double direct = std::abs(actual - expected);
+    return std::min(direct, 180. - direct);
+}
+
+} // namespace fill_rotation_template_contracts
+
+TEST_CASE("Rotation-template deterministic joints follow analytic interpolation curves",
+          "[Fill][FillRotationTemplates]")
+{
+    using namespace fill_rotation_template_contracts;
+    for (const JointCheckpoints &checkpoint : deterministic_checkpoints) {
+        const std::vector<int> angles = observe_angles(std::string("+90") + checkpoint.token + "4");
+        for (size_t i = 0; i < checkpoint.degrees.size(); ++i) {
+            const double distance = axial_distance(static_cast<double>(angles[i]), checkpoint.degrees[i]);
+            CAPTURE(checkpoint.token, i, angles[i], checkpoint.degrees[i], distance);
+            CHECK_THAT(distance, Catch::Matchers::WithinAbs(0., 1.01));
+        }
+    }
+}
+
+TEST_CASE("Rotation-template duration units advance across the same eight physical layers",
+          "[Fill][FillRotationTemplates]")
+{
+    using namespace fill_rotation_template_contracts;
+    const std::vector<int> reference = observe_angles("+90/4");
+    const std::vector<std::string> equivalent_templates = {
+        "+90/0.8mm",
+        "+90/0.08cm",
+        "+90/0.0008m",
+        "+90/0.03149606299212598\"",
+        "+90/0.0026246719160104985'",
+        "+90/50%",
+    };
+    REQUIRE(reference.size() == 8);
+    for (const std::string &rotation_template : equivalent_templates) {
+        const std::vector<int> actual = observe_angles(rotation_template);
+        REQUIRE(actual.size() == reference.size());
+        for (size_t i = 0; i < reference.size(); ++i) {
+            const double distance = axial_distance(static_cast<double>(actual[i]), static_cast<double>(reference[i]));
+            CAPTURE(rotation_template, i, actual[i], reference[i], distance);
+            CHECK_THAT(distance, Catch::Matchers::WithinAbs(0., 1.01));
+        }
+    }
+}
