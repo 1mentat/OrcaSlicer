@@ -1297,7 +1297,8 @@ static void process_print_object_geometric_fixture(Print &print, Model &model,
     // make_cube is [0,4] in XY, while arrange=false keeps this relationship deterministic.
     init_print(std::vector<TriangleMesh>{ cube(4.) }, print, model, config, nullptr, false);
     REQUIRE(model.objects.size() == 1);
-    const auto bounds = model.objects.front()->bounding_box();
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    const auto bounds = model.objects.front()->instance_bounding_box(0);
     REQUIRE_THAT(bounds.min.x(), Catch::Matchers::WithinAbs(0., 1e-6));
     REQUIRE_THAT(bounds.max.x(), Catch::Matchers::WithinAbs(4., 1e-6));
     REQUIRE_NOTHROW(print.process());

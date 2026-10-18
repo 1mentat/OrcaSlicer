@@ -3363,6 +3363,9 @@ TEST_CASE("Ironing type selects terrace, topmost, and all-solid public paths",
     REQUIRE(solid.interior_ironing_paths > 0);
     REQUIRE(solid.interior_ironing_length > 0.0);
 }
+
+namespace settings_family_contracts {
+
 TEST_CASE("Infill anchor maximum preserves zero-boundary and clamp equivalence", "[SettingsFamilyVariance][SettingsVariance][InfillAnchorVariance]")
 {
     auto evidence_for = [](const std::string &anchor, const std::string &maximum) {
@@ -3473,3 +3476,5 @@ TEST_CASE("Infill anchor percentages match equivalent absolute spacing", "[Setti
     check_equivalent(anchor_evidence(config_for("0.3", maximum_percent)));
     check_equivalent(anchor_evidence(config_for(anchor_percent, maximum_percent)));
 }
+
+} // namespace settings_family_contracts
