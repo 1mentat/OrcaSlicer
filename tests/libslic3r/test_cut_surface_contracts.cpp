@@ -183,9 +183,9 @@ TEST_CASE("cut_surface clips a cube to a projected polygon without invalid topol
         REQUIRE(triangle[0] < cut.vertices.size());
         REQUIRE(triangle[1] < cut.vertices.size());
         REQUIRE(triangle[2] < cut.vertices.size());
-        const Vec3f edge_1 = cut.vertices[triangle[1]] - cut.vertices[triangle[0]];
-        const Vec3f edge_2 = cut.vertices[triangle[2]] - cut.vertices[triangle[0]];
-        CHECK(edge_1.cross(edge_2).squaredNorm() > 1e-8f);
+        const Vec3d edge_1 = cut.vertices[triangle[1]].cast<double>() - cut.vertices[triangle[0]].cast<double>();
+        const Vec3d edge_2 = cut.vertices[triangle[2]].cast<double>() - cut.vertices[triangle[0]].cast<double>();
+        CHECK(edge_1.cross(edge_2).squaredNorm() > 0.0);
     }
 
     for (const SurfaceCut::Contour &contour : cut.contours) {
@@ -215,9 +215,14 @@ void check_mesh_indices(const indexed_triangle_set &mesh)
         CHECK(face[0] != face[1]);
         CHECK(face[1] != face[2]);
         CHECK(face[0] != face[2]);
-        const Vec3f edge_a = mesh.vertices[face[1]] - mesh.vertices[face[0]];
-        const Vec3f edge_b = mesh.vertices[face[2]] - mesh.vertices[face[0]];
-        if (!(edge_a.cross(edge_b).squaredNorm() > 1e-10f)) {
+        // SurfaceCut is float-backed, but perform the oracle in double after
+        // reading those public float vertices. Exact zero is the only
+        // representationally invalid case; positive area must remain visible
+        // even when its squared cross product is below an arbitrary epsilon.
+        const Vec3d edge_a = mesh.vertices[face[1]].cast<double>() - mesh.vertices[face[0]].cast<double>();
+        const Vec3d edge_b = mesh.vertices[face[2]].cast<double>() - mesh.vertices[face[0]].cast<double>();
+        const double squared_area = edge_a.cross(edge_b).squaredNorm();
+        if (!(squared_area > 0.0)) {
             UNSCOPED_INFO("face indices: " << face[0] << ", " << face[1] << ", " << face[2]);
             for (int corner = 0; corner < 3; ++corner) {
                 const auto index = face[corner];
@@ -225,7 +230,7 @@ void check_mesh_indices(const indexed_triangle_set &mesh)
                 UNSCOPED_INFO("vertex " << index << ": " << point.x() << ", " << point.y() << ", " << point.z());
             }
         }
-        CHECK(edge_a.cross(edge_b).squaredNorm() > 1e-10f);
+        CHECK(squared_area > 0.0);
     }
 }
 
@@ -243,11 +248,11 @@ double projected_area(const indexed_triangle_set &mesh)
 {
     double area = 0.;
     for (const auto &face : mesh.indices) {
-        const Vec3f &a = mesh.vertices[face[0]];
-        const Vec3f &b = mesh.vertices[face[1]];
-        const Vec3f &c = mesh.vertices[face[2]];
-        area += std::abs(double(b.x() - a.x()) * (c.y() - a.y()) -
-                         double(b.y() - a.y()) * (c.x() - a.x())) / 2.;
+        const Vec3d a = mesh.vertices[face[0]].cast<double>();
+        const Vec3d b = mesh.vertices[face[1]].cast<double>();
+        const Vec3d c = mesh.vertices[face[2]].cast<double>();
+        area += std::abs((b.x() - a.x()) * (c.y() - a.y()) -
+                         (b.y() - a.y()) * (c.x() - a.x())) / 2.;
     }
     return area;
 }
@@ -659,6 +664,23 @@ indexed_triangle_set shifted_strip(float x, float z)
     return model;
 }
 
+Polygon scaled_rectangle(double x0, double y0, double x1, double y1)
+{
+    return Polygon(Points{
+        Point::new_scale(x0, y0), Point::new_scale(x1, y0),
+        Point::new_scale(x1, y1), Point::new_scale(x0, y1)});
+}
+
+Emboss::OrthoProject scaled_cube_projection(float depth = 30.f)
+{
+    Transform3d matrix = Transform3d::Identity();
+    // Match EmbossJob::create_projection_for_cut: translate first, then
+    // apply the shape scale so the z offset remains in model millimetres.
+    matrix.translate(Vec3d(0., 0., -10.));
+    matrix.scale(Vec3d(SCALING_FACTOR, SCALING_FACTOR, 1.));
+    return Emboss::OrthoProject(matrix, Vec3d(0., 0., depth));
+}
+
 ExPolygons projected_footprint(const SurfaceCut &cut)
 {
     Polygons projected_triangles;
@@ -687,19 +709,16 @@ double footprint_area_mm2(const ExPolygons &footprint)
 
 void check_three_strip_footprint(const SurfaceCut &cut, const ExPolygon &expected)
 {
-    const double coordinate_scale = 1. / SCALING_FACTOR;
-    ExPolygon expected_scaled = expected;
-    expected_scaled.scale(coordinate_scale);
+    // `expected` is already in the scaled Point coordinate system. The
+    // projection maps those coordinates back to the model's millimetres.
     const ExPolygons footprint = projected_footprint(cut);
-    const ExPolygons expected_footprint{expected_scaled};
+    const ExPolygons expected_footprint{expected};
     const ExPolygons missing = diff_ex(expected_footprint, footprint);
     const ExPolygons outside = diff_ex(footprint, expected_footprint);
     std::array<ExPolygon, 3> expected_slabs{
-        ExPolygon(rectangle(1, 1, 10, 9)),
-        ExPolygon(rectangle(10, 1, 20, 9)),
-        ExPolygon(rectangle(20, 1, 29, 9))};
-    for (ExPolygon &slab : expected_slabs)
-        slab.scale(coordinate_scale);
+        ExPolygon(scaled_rectangle(1., 1., 10., 9.)),
+        ExPolygon(scaled_rectangle(10., 1., 20., 9.)),
+        ExPolygon(scaled_rectangle(20., 1., 29., 9.))};
     std::array<double, 3> slab_missing_area{};
     for (std::size_t i = 0; i < expected_slabs.size(); ++i)
         slab_missing_area[i] = footprint_area_mm2(diff_ex(ExPolygons{expected_slabs[i]}, footprint));
@@ -734,8 +753,8 @@ void check_three_strip_cut(const SurfaceCut &cut, double expected_area)
 
 TEST_CASE("Surface cuts fill an interior projected gap from an unselected strip", "[CutSurface][CutSurfacePatchSelection]")
 {
-    const ExPolygon shape(rectangle(1, 1, 29, 9));
-    const Emboss::OrthoProject projection = cube_projection(80.f);
+    const ExPolygon shape(scaled_rectangle(1., 1., 29., 9.));
+    const Emboss::OrthoProject projection = scaled_cube_projection(80.f);
 
     // The outer strips touch the query corners, so best-distance selection starts
     // with them. The middle strip lies entirely in the remaining interior gap.
@@ -754,8 +773,8 @@ TEST_CASE("Surface cuts fill an interior projected gap from an unselected strip"
 
 TEST_CASE("Surface cuts choose the closest of overlapping interior strips", "[CutSurface][CutSurfacePatchSelection]")
 {
-    const ExPolygon shape(rectangle(1, 1, 29, 9));
-    const Emboss::OrthoProject projection = cube_projection(100.f);
+    const ExPolygon shape(scaled_rectangle(1., 1., 29., 9.));
+    const Emboss::OrthoProject projection = scaled_cube_projection(100.f);
 
     // The two interior candidates cover the same projected gap. Their depth
     // centers are 25 and 45, while the selected outer strips center around 5;
@@ -767,6 +786,7 @@ TEST_CASE("Surface cuts choose the closest of overlapping interior strips", "[Cu
         projection,
         .5f);
     check_three_strip_cut(cut, 224.);
+    check_three_strip_footprint(cut, shape);
     bool has_near_interior = false;
     for (const Vec3f &vertex : cut.vertices) {
         CHECK(vertex.z() >= -1e-4f);
@@ -865,6 +885,45 @@ TEST_CASE("Surface cuts retain the exterior patches of intersecting solids",
     CHECK_THAT(flat_area, WithinAbs(64. - raised_area_expected, 1e-4));
     CHECK_THAT(raised_area, WithinAbs(raised_area_expected, 1e-4));
     CHECK_THAT(projected_area(cut), WithinAbs(64., 1e-4));
+
+    // The public Emboss consumer turns contours into side walls. Duplicate
+    // output points must not recreate zero-area faces along those walls.
+    const indexed_triangle_set embossed = cut2model(cut, Emboss::OrthoProject3d(Vec3d(0., 0., 30.)));
+    REQUIRE_FALSE(embossed.indices.empty());
+    check_mesh_indices(embossed);
+}
+
+TEST_CASE("Surface cuts preserve positive float-representable projected faces",
+          "[CutSurface][CutSurfaceFloatPrecision]")
+{
+    // A 1e-3 mm square has a positive float-representable cross product near
+    // 1e-6, whose squared norm is about 1e-12: below a 1e-10 cutoff but
+    // far from subnormal arithmetic.
+    const coord_t width_scaled = GENERATE(coord_t(1000), coord_t(2000));
+    const double width = double(width_scaled) * SCALING_FACTOR;
+    const Point corner = Point::new_scale(2., 2.);
+    const ExPolygon shape(rectangle(corner.x(), corner.y(),
+                                    corner.x() + width_scaled, corner.y() + width_scaled));
+    CAPTURE(width);
+    const SurfaceCut cut = cut_surface(
+        {shape},
+        {its_make_cube(10., 10., 10.)},
+        scaled_cube_projection(30.f),
+        .5f);
+    REQUIRE_FALSE(cut.indices.empty());
+    check_mesh_indices(cut);
+
+    bool has_positive_sub_epsilon_face = false;
+    for (const stl_triangle_vertex_indices &face : cut.indices) {
+        const Vec3d edge_a = cut.vertices[face[1]].cast<double>() - cut.vertices[face[0]].cast<double>();
+        const Vec3d edge_b = cut.vertices[face[2]].cast<double>() - cut.vertices[face[0]].cast<double>();
+        const double squared_area = edge_a.cross(edge_b).squaredNorm();
+        has_positive_sub_epsilon_face = has_positive_sub_epsilon_face ||
+            (squared_area > 0.0 && squared_area < 1e-10);
+    }
+    CHECK(has_positive_sub_epsilon_face);
+    // Float output near 2 mm rounds each coordinate by less than 2.5e-7 mm.
+    CHECK_THAT(projected_area(cut), WithinAbs(width * width, width * 1e-6));
 }
 
 } // namespace cut_surface_extended_contracts

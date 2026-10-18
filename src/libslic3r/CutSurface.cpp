@@ -3682,6 +3682,16 @@ SurfaceCut priv::patch2cut(SurfacePatch &patch)
         // Is fi triangle?
         assert(mesh.next(mesh.next(mesh.next(hi))) == hi);
 
+        // Conversion from CGAL doubles can collapse a triangle in SurfaceCut's
+        // float vertices. Check the converted geometry in double so the area
+        // calculation does not underflow for small, valid output triangles.
+        const Vec3d a = sc.vertices[convert_map[mesh.source(hi)]].cast<double>();
+        const Vec3d b = sc.vertices[convert_map[mesh.target(hi)]].cast<double>();
+        const Vec3d c = sc.vertices[convert_map[mesh.target(mesh.next(hi))]].cast<double>();
+        const Vec3d cross = (b - a).cross(c - a);
+        if (cross.squaredNorm() == 0.0)
+            continue;
+
         // triangle indicies
         Vec3i32 ti;
         size_t i = 0;
@@ -3692,12 +3702,24 @@ SurfaceCut priv::patch2cut(SurfacePatch &patch)
         sc.indices.push_back(ti);
     }
 
+    auto same_output_point = [&sc](SurfaceCut::Index lhs, SurfaceCut::Index rhs) {
+        const Vec3f &a = sc.vertices[lhs];
+        const Vec3f &b = sc.vertices[rhs];
+        return a.x() == b.x() && a.y() == b.y() && a.z() == b.z();
+    };
     sc.contours.reserve(patch.loops.size());
-    for (const Loop &loop : patch.loops) { 
-        sc.contours.push_back({});
-        std::vector<SurfaceCut::Index> &contour = sc.contours.back();
+    for (const Loop &loop : patch.loops) {
+        SurfaceCut::Contour contour;
         contour.reserve(loop.size());
-        for (VI vi : loop) contour.push_back(convert_map[vi]);
+        for (VI vi : loop) {
+            const SurfaceCut::Index index = convert_map[vi];
+            if (contour.empty() || !same_output_point(contour.back(), index))
+                contour.push_back(index);
+        }
+        if (contour.size() > 1 && same_output_point(contour.front(), contour.back()))
+            contour.pop_back();
+        if (contour.size() >= 3)
+            sc.contours.push_back(std::move(contour));
     }
 
     // Not neccessary, clean and free memory

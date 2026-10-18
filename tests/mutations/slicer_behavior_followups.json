@@ -1327,6 +1327,45 @@
       "crash_or_exception_is_not_credit": true,
       "ordinary_assertion_only": true,
       "runtime_kill_status": "pending_baseline_gate"
+    },
+    {
+      "id": "surfacecut-float-degenerate-face-emitted",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "        if (cross.squaredNorm() == 0.0)\n            continue;",
+      "new": "        if (false)\n            continue;",
+      "expected_matches": 1,
+      "test_filter": "CutSurfaceClipOverlap",
+      "expected_ordinary_assertion_failure": true,
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true,
+      "description": "Re-enable an exact-zero public float face. The retained overlapping-roof area/height/topology checks and double mesh oracle must fail as an ordinary assertion.",
+      "runtime_kill_status": "pending native baseline and mutant execution"
+    },
+    {
+      "id": "surfacecut-positive-float-area-threshold",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "        if (cross.squaredNorm() == 0.0)\n            continue;",
+      "new": "        if (cross.squaredNorm() <= 1e-10)\n            continue;",
+      "expected_matches": 1,
+      "test_filter": "CutSurfaceFloatPrecision",
+      "expected_ordinary_assertion_failure": true,
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true,
+      "description": "Apply an arbitrary positive squared-area cutoff. The small public square must then lose its positive sub-epsilon faces and fail its area/face oracle by assertion.",
+      "runtime_kill_status": "pending native baseline and mutant execution"
+    },
+    {
+      "id": "surfacecut-contour-duplicate-coalescing-bypassed",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "            if (contour.empty() || !same_output_point(contour.back(), index))\n                contour.push_back(index);",
+      "new": "            if (true)\n                contour.push_back(index);",
+      "expected_matches": 1,
+      "test_filter": "CutSurfaceClipOverlap",
+      "expected_ordinary_assertion_failure": true,
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true,
+      "description": "Bypass exact-equal consecutive contour cleanup. The overlapping-roof cut2model side-wall oracle is intended to expose zero-area walls; if this focused fixture has no duplicate contour edge, native mutation may correctly survive and must not receive kill credit.",
+      "runtime_kill_status": "pending native baseline and mutant execution; survivor is possible until duplicate contour reachability is proven"
     }
   ]
 }
