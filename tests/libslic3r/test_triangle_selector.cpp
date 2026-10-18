@@ -470,6 +470,102 @@ TEST_CASE("Remapping empty painting does not invent target facets", "[TriangleSe
     CHECK(result.triangles_to_split.empty());
 }
 
+TEST_CASE("Recursive bucket fill propagates through split same-state leaves", "[TriangleSelector][TriangleSelectorRecursive]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    select_patch(selector, Vec3f(2.f, 2.f, 0.f), 3.f, true);
+
+    const double enforcer_before = painted_area(selector, EnforcerBlockerType::ENFORCER);
+    const double none_before = painted_area(selector, EnforcerBlockerType::NONE);
+    REQUIRE(enforcer_before > 0.);
+    REQUIRE(none_before > 0.);
+    CHECK_THAT(enforcer_before + none_before, Catch::Matchers::WithinAbs(100., 1e-3));
+
+    TriangleSelector local(mesh);
+    local.deserialize(selector.serialize());
+    local.bucket_fill_select_triangles(Vec3f(8.f, 1.f, 0.f), 0,
+                                       TriangleSelector::ClippingPlane(), 180.f, false, true);
+    local.seed_fill_apply_on_triangles(EnforcerBlockerType::BLOCKER);
+    const double local_area = painted_area(local, EnforcerBlockerType::BLOCKER);
+    REQUIRE(local_area > 0.);
+    REQUIRE(local_area < none_before);
+    CHECK_THAT(painted_area(local, EnforcerBlockerType::ENFORCER),
+               Catch::Matchers::WithinAbs(enforcer_before, 1e-3));
+
+    selector.bucket_fill_select_triangles(Vec3f(8.f, 1.f, 0.f), 0,
+                                          TriangleSelector::ClippingPlane(), 180.f, true, true);
+    selector.seed_fill_apply_on_triangles(EnforcerBlockerType::BLOCKER);
+
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::ENFORCER),
+               Catch::Matchers::WithinAbs(enforcer_before, 1e-3));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::BLOCKER),
+               Catch::Matchers::WithinAbs(none_before, 1e-3));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::NONE),
+               Catch::Matchers::WithinAbs(0., 1e-3));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::ENFORCER) +
+                   painted_area(selector, EnforcerBlockerType::BLOCKER),
+               Catch::Matchers::WithinAbs(100., 1e-3));
+}
+
+TEST_CASE("Recursive bucket fill stops at a different-state split-tree boundary", "[TriangleSelector][TriangleSelectorRecursive]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    select_patch(selector, Vec3f(2.f, 2.f, 0.f), 3.f, true);
+    selector.set_facet(1, EnforcerBlockerType::BLOCKER);
+
+    const double enforcer_before = painted_area(selector, EnforcerBlockerType::ENFORCER);
+    const double blocker_before = painted_area(selector, EnforcerBlockerType::BLOCKER);
+    const double none_before = painted_area(selector, EnforcerBlockerType::NONE);
+    REQUIRE(enforcer_before > 0.);
+    REQUIRE_THAT(blocker_before, Catch::Matchers::WithinAbs(50., 1e-3));
+    REQUIRE(none_before > 0.);
+
+    selector.bucket_fill_select_triangles(Vec3f(8.f, 1.f, 0.f), 0,
+                                          TriangleSelector::ClippingPlane(), 180.f, true, true);
+    selector.seed_fill_apply_on_triangles(EnforcerBlockerType::Extruder4);
+
+    const double filled_area = painted_area(selector, EnforcerBlockerType::Extruder4);
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::ENFORCER),
+               Catch::Matchers::WithinAbs(enforcer_before, 1e-3));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::BLOCKER),
+               Catch::Matchers::WithinAbs(blocker_before, 1e-3));
+    CHECK_THAT(filled_area, Catch::Matchers::WithinAbs(none_before, 1e-3));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::NONE),
+               Catch::Matchers::WithinAbs(0., 1e-3));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::ENFORCER) + blocker_before + filled_area,
+               Catch::Matchers::WithinAbs(100., 1e-3));
+}
+
+TEST_CASE("Bucket fill contours follow a boundary through recursively split facets", "[TriangleSelector][TriangleSelectorRecursive]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    select_patch(selector, Vec3f(2.f, 2.f, 0.f), 3.f, true);
+    const double enforcer_before = painted_area(selector, EnforcerBlockerType::ENFORCER);
+    REQUIRE(enforcer_before > 0.);
+
+    selector.bucket_fill_select_triangles(Vec3f(8.f, 1.f, 0.f), 0,
+                                          TriangleSelector::ClippingPlane(), 180.f, true, true);
+    const std::vector<Vec2i32> contour = selector.get_seed_fill_contour();
+    REQUIRE_FALSE(contour.empty());
+    for (const Vec2i32 &edge : contour) {
+        CHECK(edge(0) >= 0);
+        CHECK(edge(1) >= 0);
+        CHECK(edge(0) != edge(1));
+    }
+
+    selector.seed_fill_apply_on_triangles(EnforcerBlockerType::BLOCKER);
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::ENFORCER),
+               Catch::Matchers::WithinAbs(enforcer_before, 1e-3));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::NONE),
+               Catch::Matchers::WithinAbs(0., 1e-3));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::ENFORCER) +
+                   painted_area(selector, EnforcerBlockerType::BLOCKER),
+               Catch::Matchers::WithinAbs(100., 1e-3));
+}
+
 } // namespace triangle_selector_extended_contracts
 
 namespace triangle_cursor_contracts {

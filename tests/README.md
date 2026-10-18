@@ -379,6 +379,11 @@ including retained values when duplicate commands are omitted. A disabled
 control checks that pressure advance remains off. Its mutation in
 `adaptive_pa_pipeline.json` replaces interpolation with a configured constant.
 
+`[AdaptivePressureAdvanceOverhangGate]` varies only the overhang adjustment,
+checks actual pressure-advance state during matching deposited segments, and
+preserves their geometry and filament. Its setting-binding mutation is in
+`adaptive_pa_overhang_gate.json`.
+
 `[PrintValidationInteractions]` checks belt/raft/draft-shield constraints,
 sequential-print feature gates, and the full ooze-prevention/single-extruder
 multi-material truth table, including valid controls and blocking-error keys.
@@ -408,6 +413,11 @@ source metadata, colors, decoded texture pixels, cancellation, and error types.
 `[EmbossLayout]`, `[TriangleCursor]`, and `[PolylineOperations]` use analytic
 geometry and transformation invariants, including integer-grid partitioning
 and translation far from the coordinate origin.
+
+`[TriangleSelectorRecursive]` checks bucket filling through split paint facets,
+local and propagated selection, distinct paint-state boundaries, and nondegenerate
+contours while conserving the square fixture's area. Its mutations are in
+`triangle_selector_recursive.json`.
 
 `[Bbs3mfThumbnailDownsample]` compares every decoded preview pixel against an
 independent block average for square and wide source images. `[SubscribedBundleReload]`

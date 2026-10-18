@@ -2438,6 +2438,77 @@ TEST_CASE("Adaptive pressure advance emits calibrated values on overhangs",
     CHECK(disabled_gcode.find("SET_PRESSURE_ADVANCE ADVANCE=") == std::string::npos);
 }
 
+TEST_CASE("The adaptive overhang gate preserves deposition and ordinary pressure advance",
+          "[SettingsFamilyVariance][AdaptivePressureAdvanceOverhangGate]")
+{
+    const DynamicPrintConfig enabled = adaptive_pa_output_config(true);
+    DynamicPrintConfig disabled = enabled;
+    disabled.set_deserialize_strict("adaptive_pressure_advance_overhangs", "0");
+    const TriangleMesh mesh = adaptive_pa_overhang_mesh();
+    const std::string enabled_gcode = export_mesh(mesh, enabled);
+    const std::string disabled_gcode = export_mesh(mesh, disabled);
+
+    const auto samples = adaptive_pa_eligible_samples(enabled_gcode, enabled);
+    REQUIRE(samples.size() > 1);
+    for (const AdaptivePASample &sample : samples) {
+        REQUIRE(std::isfinite(sample.actual_pa));
+        CHECK_THAT(sample.actual_pa, Catch::Matchers::WithinAbs(expected_two_knot_pa(sample), 0.0011));
+    }
+    struct DepositedSegment {
+        double start_x = 0.;
+        double start_y = 0.;
+        double end_x = 0.;
+        double end_y = 0.;
+        double z = 0.;
+        double filament = 0.;
+        double pressure_advance = std::numeric_limits<double>::quiet_NaN();
+    };
+    auto deposited_segments = [](const std::string &output, const DynamicPrintConfig &config) {
+        std::vector<DepositedSegment> result;
+        GCodeReader reader;
+        reader.apply_config(config);
+        double active_pa = std::numeric_limits<double>::quiet_NaN();
+        reader.parse_buffer(output, [&result, &active_pa](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.cmd_is("SET_PRESSURE_ADVANCE")) {
+                const std::string raw = line.raw();
+                const size_t marker = raw.find("ADVANCE=");
+                REQUIRE(marker != std::string::npos);
+                active_pa = std::stod(raw.substr(marker + 8));
+                return;
+            }
+            if (!line.cmd_is("G1") || !line.extruding(self) || line.dist_XY(self) <= EPSILON)
+                return;
+            REQUIRE(std::isfinite(active_pa));
+            const double filament = line.dist_E(self);
+            REQUIRE(std::isfinite(filament));
+            REQUIRE(filament > 0.);
+            result.push_back({self.x(), self.y(), line.new_X(self), line.new_Y(self), line.new_Z(self), filament, active_pa});
+        });
+        return result;
+    };
+    const auto enabled_segments = deposited_segments(enabled_gcode, enabled);
+    const auto disabled_segments = deposited_segments(disabled_gcode, disabled);
+    REQUIRE(enabled_segments.size() == disabled_segments.size());
+    REQUIRE_FALSE(enabled_segments.empty());
+    size_t distinct_pa_segments = 0;
+    for (size_t i = 0; i < enabled_segments.size(); ++i) {
+        const auto &with_overhangs = enabled_segments[i];
+        const auto &without_overhangs = disabled_segments[i];
+        REQUIRE_THAT(with_overhangs.start_x, Catch::Matchers::WithinAbs(without_overhangs.start_x, 0.0011));
+        REQUIRE_THAT(with_overhangs.start_y, Catch::Matchers::WithinAbs(without_overhangs.start_y, 0.0011));
+        REQUIRE_THAT(with_overhangs.end_x, Catch::Matchers::WithinAbs(without_overhangs.end_x, 0.0011));
+        REQUIRE_THAT(with_overhangs.end_y, Catch::Matchers::WithinAbs(without_overhangs.end_y, 0.0011));
+        REQUIRE_THAT(with_overhangs.z, Catch::Matchers::WithinAbs(without_overhangs.z, 0.0011));
+        // E is emitted to five decimals; both interval endpoints can round.
+        CHECK_THAT(with_overhangs.filament, Catch::Matchers::WithinAbs(without_overhangs.filament, 0.00002));
+        distinct_pa_segments += std::abs(with_overhangs.pressure_advance - without_overhangs.pressure_advance) > 0.001 ? 1 : 0;
+    }
+    // Both exports retain ordinary PA. The overhang gate additionally changes
+    // the physical PA state used by at least one matching deposited interval.
+    CHECK(distinct_pa_segments > 0);
+
+}
+
 namespace gcode_z_contouring_followup {
 
 namespace {
