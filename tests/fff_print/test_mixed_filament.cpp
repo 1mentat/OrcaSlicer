@@ -229,6 +229,10 @@ std::vector<PositiveExtrusion> read_positive_extrusions(const std::string &gcode
             current_tool = 1;
             return;
         }
+        if (line.cmd_is("T2")) {
+            current_tool = 2;
+            return;
+        }
         // BBL multi-extruder output selects a filament with M1020 S<filament_id> H<nozzle_id>;
         // S is the material/component identity used by this fixture, while H is physical-nozzle
         // context and must not be used to classify the deposited material.
@@ -1114,5 +1118,67 @@ TEST_CASE("BBL mixed sublayers pair object exclusion labels with their boundarie
         CHECK_THAT(bbl.layer_xy[layer_idx], Catch::Matchers::WithinAbs(marlin_split.layer_xy[layer_idx], 1e-6));
         const double expected_xy = layer_idx == 0 ? marlin_whole.layer_xy[layer_idx] : 2. * marlin_whole.layer_xy[layer_idx];
         CHECK_THAT(bbl.layer_xy[layer_idx], Catch::Matchers::WithinRel(expected_xy, 1e-3));
+    }
+}
+
+TEST_CASE("Mixed filament identity selects deposited physical tools", "[MixedFilament][MixedFilamentIdentity][SettingsBooleanVariance]")
+{
+    const bool is_mixed = GENERATE(false, true);
+    DynamicPrintConfig config = mixed_config(false);
+    config.set_deserialize_strict({
+        {"filament_is_mixed",              is_mixed ? "0,0,1" : "0,0,0"},
+        {"filament_mixed_components",      is_mixed ? ";;1,2" : ";;"},
+        {"filament_mixed_sublayer_ratios", is_mixed ? ";;0.6,0.4" : ";;"},
+        {"filament_mixed_gradient",        "0,0,0"},
+        {"filament_mixed_gradient_range",  ";;"},
+        {"filament_mixed_gradient_curve",  ";;"},
+        {"enable_mixed_color_sublayer",    "0"},
+        {"layer_change_gcode",              "G92 E0\n"},
+    });
+
+    Print print;
+    Model model;
+    init_print({make_cube(6., 6., 2.)}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO("validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    const unsigned int initial_tool = print.tool_ordering().first_extruder();
+    REQUIRE(initial_tool < 3);
+
+    const auto samples = mixed_gradient_gcode_contracts::read_positive_extrusions(
+        output, print.config(), static_cast<int>(initial_tool));
+    REQUIRE_FALSE(samples.empty());
+    std::vector<size_t> positive_lines(3, 0);
+    std::vector<double> positive_xy(3, 0.);
+    for (const mixed_gradient_gcode_contracts::PositiveExtrusion &sample : samples) {
+        REQUIRE(sample.tool >= 0);
+        REQUIRE(sample.tool < static_cast<int>(positive_lines.size()));
+        REQUIRE(std::isfinite(sample.e));
+        REQUIRE(std::isfinite(sample.xy));
+        REQUIRE(sample.e > 0.);
+        REQUIRE(sample.xy >= 0.01);
+        ++positive_lines[static_cast<size_t>(sample.tool)];
+        positive_xy[static_cast<size_t>(sample.tool)] += sample.xy;
+    }
+
+    double deposited_xy = 0.;
+    for (double value : positive_xy)
+        deposited_xy += value;
+    REQUIRE(deposited_xy > 0.);
+    if (is_mixed) {
+        REQUIRE(positive_lines[0] > 0);
+        REQUIRE(positive_lines[1] > 0);
+        CHECK(positive_lines[2] == 0);
+        CHECK(positive_xy[0] > 0.);
+        CHECK(positive_xy[1] > 0.);
+    } else {
+        REQUIRE(positive_lines[2] > 0);
+        CHECK(positive_lines[0] == 0);
+        CHECK(positive_lines[1] == 0);
+        CHECK(positive_xy[2] > 0.);
     }
 }

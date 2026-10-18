@@ -737,6 +737,31 @@ TEST_CASE("Malformed color changes match an independent fallback and preserve va
     CHECK_THAT(explicit_item.print_z, WithinAbs(0.2, 1e-4));
 }
 
+TEST_CASE("Nozzle type values reach processor metadata and hardness selection", "[GCodeProcessor][NozzleTypeSettings]")
+{
+    struct Row {
+        NozzleType type;
+        int        expected_hrc;
+    };
+    const std::vector<Row> rows = {
+        {ntUndefine, 0},
+        {ntHardenedSteel, 55},
+        {ntStainlessSteel, 20},
+        {ntTungstenCarbide, 85},
+        {ntBrass, 2},
+    };
+
+    for (const Row &row : rows) {
+        INFO("nozzle_type=" << static_cast<int>(row.type));
+        FullPrintConfig config;
+        config.nozzle_type.values = {static_cast<int>(row.type)};
+        const auto result = process_file(orca_header(config) + "M83\nG90\nG1 X10 Y0 Z0.2 E1 F600\n");
+        REQUIRE(result.nozzle_type.size() == 1);
+        CHECK(result.nozzle_type[0] == row.type);
+        CHECK(Print::get_hrc_by_nozzle_type(row.type) == row.expected_hrc);
+    }
+}
+
 } // namespace public_processor_contracts
 
 namespace post_processor_contracts {

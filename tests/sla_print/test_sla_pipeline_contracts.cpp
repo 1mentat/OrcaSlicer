@@ -1220,3 +1220,186 @@ TEST_CASE("SLA pillar connection modes preserve intended near and far bridge top
     CHECK_THAT(far_dynamic.support_volume,
                Catch::Matchers::WithinRel(far_cross.support_volume, 1e-6));
 }
+
+namespace sla_active_next_contracts {
+
+struct BrimRun {
+    double volume = 0.0;
+    double width = 0.0;
+    double depth = 0.0;
+    double z_span = 0.0;
+};
+
+BrimRun run_everywhere_brim()
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("pad_enable", new ConfigOptionBool(true));
+    config.set_key_value("pad_around_object", new ConfigOptionBool(true));
+    config.set_key_value("pad_around_object_everywhere", new ConfigOptionBool(true));
+    config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_brim_size", new ConfigOptionFloat(4.0));
+    config.set_key_value("pad_wall_slope", new ConfigOptionFloat(45.0));
+    config.set_key_value("pad_max_merge_distance", new ConfigOptionFloat(50.0));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA brim validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposPad));
+    const TriangleMesh pad = object->pad_mesh();
+    REQUIRE_FALSE(pad.empty());
+    const auto bbox = pad.bounding_box();
+    BrimRun result;
+    result.volume = std::abs(static_cast<double>(pad.volume()));
+    result.width = bbox.max.x() - bbox.min.x();
+    result.depth = bbox.max.y() - bbox.min.y();
+    result.z_span = bbox.max.z() - bbox.min.z();
+    REQUIRE(std::isfinite(result.volume));
+    REQUIRE(std::isfinite(result.width));
+    REQUIRE(std::isfinite(result.depth));
+    REQUIRE(std::isfinite(result.z_span));
+    REQUIRE(result.volume > 0.0);
+    REQUIRE(result.width > 10.0);
+    REQUIRE(result.depth > 10.0);
+    REQUIRE(result.z_span > 0.0);
+    return result;
+}
+
+} // namespace sla_active_next_contracts
+
+TEST_CASE("SLA automatic support generation creates printable support geometry",
+          "[SLAPrint][SLAFeatures][SLAActiveNext][SLAAutoSupports]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    config.set_key_value("support_object_elevation", new ConfigOptionFloat(5.0));
+    config.set_key_value("support_points_density_relative", new ConfigOptionInt(100));
+    config.set_key_value("support_points_minimal_distance", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(0.5));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA automatic support validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportPoints));
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    REQUIRE_FALSE(object->get_support_points().empty());
+    const TriangleMesh support = object->support_mesh();
+    REQUIRE_FALSE(support.empty());
+    REQUIRE(std::isfinite(static_cast<double>(support.volume())));
+    REQUIRE(std::abs(static_cast<double>(support.volume())) > 0.0);
+    REQUIRE(std::isfinite(support_slice_area(*object)));
+    REQUIRE(support_slice_area(*object) > 0.0);
+}
+
+TEST_CASE("SLA large layers use the slow exposure statistics path",
+          "[SLAPrint][SLAPipeline][SLAActiveNext][SLASlowLayers]")
+{
+    SlaCubeFixture fixture(sla_config(1.0), make_cube(40.0, 40.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA large-layer validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const auto &stats = fixture.print.print_statistics();
+    const auto *object = fixture.print.objects().front();
+    REQUIRE_FALSE(object->get_slice_index().empty());
+    REQUIRE(stats.layers_times.size() == object->get_slice_index().size());
+    REQUIRE(stats.slow_layers_count > 0);
+    CHECK(stats.fast_layers_count == 0);
+    REQUIRE(stats.estimated_print_time > 0.0);
+    for (const double layer_time : stats.layers_times) {
+        CHECK(std::isfinite(layer_time));
+        CHECK(layer_time > 0.0);
+    }
+}
+
+TEST_CASE("SLA support-backed pads preserve both support and pad products",
+          "[SLAPrint][SLAFeatures][SLAActiveNext][SLASupportPad]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    config.set_key_value("pad_enable", new ConfigOptionBool(true));
+    config.set_key_value("pad_around_object", new ConfigOptionBool(false));
+    config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_brim_size", new ConfigOptionFloat(4.0));
+    config.set_key_value("pad_wall_slope", new ConfigOptionFloat(45.0));
+    config.set_key_value("pad_max_merge_distance", new ConfigOptionFloat(50.0));
+    config.set_key_value("support_object_elevation", new ConfigOptionFloat(5.0));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(0.5));
+    sla::SupportPoints points{sla::SupportPoint(5.f, 5.f, 0.f, 0.5f, true)};
+
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA support-pad validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    REQUIRE(object->is_step_done(slaposPad));
+    const TriangleMesh support = object->support_mesh();
+    const TriangleMesh pad = object->pad_mesh();
+    REQUIRE_FALSE(support.empty());
+    REQUIRE_FALSE(pad.empty());
+    REQUIRE(std::abs(static_cast<double>(support.volume())) > 0.0);
+    REQUIRE(std::abs(static_cast<double>(pad.volume())) > 0.0);
+    REQUIRE(support_slice_area(*object) > 0.0);
+}
+
+TEST_CASE("SLA everywhere brim surrounds the model with a positive public footprint",
+          "[SLAPrint][SLAFeatures][SLAActiveNext][SLABrimEverywhere]")
+{
+    const auto run = sla_active_next_contracts::run_everywhere_brim();
+    CHECK(run.width > 10.0);
+    CHECK(run.depth > 10.0);
+    CHECK(run.z_span > 0.0);
+}
+
+TEST_CASE("SLA overlapping objects are unioned before material statistics",
+          "[SLAPrint][SLALifecycle][SLAActiveNext][SLAMergedSlices]")
+{
+    sla_lifecycle_contracts::LifecycleFixture fixture;
+    fixture.process_all();
+    sla_lifecycle_contracts::add_cube_object(fixture.model, 10.0, 4.0);
+    const auto status = fixture.print.apply(fixture.model, fixture.config);
+    REQUIRE(status == SLAPrint::APPLY_STATUS_INVALIDATED);
+    REQUIRE(fixture.print.objects().size() == 2);
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.print_layers().size() == 4);
+    REQUIRE(fixture.print.print_statistics().objects_used_material > 0.0);
+    // Two 10x10x4 cubes translated by 4 mm have a 140 mm2 union on every
+    // one of the four 1 mm model layers. This is a public material statistic,
+    // independent of the internal polygon container ordering.
+    CHECK_THAT(fixture.print.print_statistics().objects_used_material,
+               Catch::Matchers::WithinRel(560.0, 0.02));
+}

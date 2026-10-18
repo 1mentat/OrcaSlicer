@@ -3886,3 +3886,278 @@ TEST_CASE("Failed G-code exports report their outcome and remain retryable",
     });
     CHECK(deposited_moves > 0);
 }
+namespace print_object_sharing_contracts {
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace {
+
+enum class ShareDifference {
+    MeshPointer,
+    VolumeTransform,
+    VolumeExtruder,
+    LayerProfile,
+    ObjectExtruder,
+};
+
+DynamicPrintConfig sharing_config(ShareDifference difference)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height",                 0.2},
+        {"initial_layer_print_height",   0.2},
+        {"wall_loops",                   2},
+        {"top_shell_layers",             1},
+        {"bottom_shell_layers",          1},
+        {"sparse_infill_density",        "15%"},
+        {"skirt_loops",                  0},
+        {"brim_type",                    "no_brim"},
+        {"raft_layers",                  0},
+        {"machine_start_gcode",          ""},
+        {"machine_end_gcode",            ""},
+        {"layer_change_gcode",           "G92 E0\n"},
+        {"before_layer_change_gcode",    ""},
+        {"print_sequence",               "by layer"},
+    });
+    if (difference == ShareDifference::VolumeExtruder || difference == ShareDifference::ObjectExtruder)
+        config = Test::multifilament_config(2, {
+            {"layer_height", 0.2},
+            {"initial_layer_print_height", 0.2},
+            {"wall_loops", 2},
+            {"top_shell_layers", 1},
+            {"bottom_shell_layers", 1},
+            {"sparse_infill_density", "15%"},
+            {"skirt_loops", 0},
+            {"brim_type", "no_brim"},
+            {"raft_layers", 0},
+            {"machine_start_gcode", ""},
+            {"machine_end_gcode", ""},
+            {"layer_change_gcode", "G92 E0\n"},
+            {"print_sequence", "by layer"},
+        });
+    return config;
+}
+
+struct ShareProbeResult {
+    bool                shared = false;
+    double              first_area = 0.;
+    double              second_area = 0.;
+    std::vector<double> first_print_z;
+    std::vector<double> second_print_z;
+};
+
+double first_layer_area(const PrintObject &object)
+{
+    REQUIRE(object.layer_count() > 0);
+    const Layer *layer = object.get_layer(0);
+    REQUIRE(layer != nullptr);
+    double result = 0.;
+    for (const ExPolygon &slice : layer->lslices)
+        result += std::abs(static_cast<double>(slice.area())) * SCALING_FACTOR * SCALING_FACTOR;
+    return result;
+}
+
+std::vector<double> layer_print_zs(const PrintObject &object)
+{
+    REQUIRE(object.layer_count() > 0);
+    std::vector<double> result;
+    result.reserve(object.layer_count());
+    for (int index = 0; index < object.layer_count(); ++index) {
+        const Layer *layer = object.get_layer(index);
+        REQUIRE(layer != nullptr);
+        result.emplace_back(layer->print_z);
+    }
+    return result;
+}
+
+ShareProbeResult run_nonsharing_probe(ShareDifference difference)
+{
+    DynamicPrintConfig config = sharing_config(difference);
+    Model model;
+    Print print;
+
+    ModelObject *first = model.add_object();
+    REQUIRE(first != nullptr);
+    first->add_volume(make_cube(8., 8., 1.2));
+    REQUIRE(first->volumes.size() == 1);
+    first->add_instance();
+    REQUIRE_FALSE(first->instances.empty());
+    first->config.set_key_value("extruder", new ConfigOptionInt(1));
+
+    ModelObject *second = model.add_object(*first);
+    REQUIRE(second != nullptr);
+    REQUIRE(second->volumes.size() == 1);
+    REQUIRE_FALSE(second->instances.empty());
+    for (ModelInstance *instance : second->instances) {
+        REQUIRE(instance != nullptr);
+        instance->set_offset(instance->get_offset() + Vec3d(28., 0., 0.));
+    }
+
+    if (difference == ShareDifference::MeshPointer)
+        second->volumes.front()->set_mesh(make_cube(10., 8., 1.2));
+    else if (difference == ShareDifference::VolumeTransform)
+        second->volumes.front()->set_scaling_factor(Vec3d(1.25, 1., 1.));
+    else if (difference == ShareDifference::VolumeExtruder) {
+        first->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(1));
+        second->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(2));
+    } else if (difference == ShareDifference::LayerProfile) {
+        second->layer_height_profile.set(std::vector<coordf_t>{0., 0.2, 0.2, 0.25, 1.2, 0.25});
+    } else if (difference == ShareDifference::ObjectExtruder) {
+        first->config.set_key_value("extruder", new ConfigOptionInt(1));
+        second->config.set_key_value("extruder", new ConfigOptionInt(2));
+    }
+
+    for (ModelObject *object : model.objects) {
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+    }
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO("validation=" << validation.string);
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    print.process();
+
+    REQUIRE(print.objects().size() == 2);
+    const PrintObject *first_print_object = print.get_object(0);
+    const PrintObject *second_print_object = print.get_object(1);
+    REQUIRE(first_print_object != nullptr);
+    REQUIRE(second_print_object != nullptr);
+    return {
+        second_print_object->get_shared_object() != nullptr,
+        first_layer_area(*first_print_object),
+        first_layer_area(*second_print_object),
+        layer_print_zs(*first_print_object),
+        layer_print_zs(*second_print_object),
+    };
+}
+
+} // namespace
+
+TEST_CASE("Distinct model meshes keep public Print objects independently sliced",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::MeshPointer);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(80., 0.05));
+}
+
+TEST_CASE("A volume transform difference prevents public Print layer sharing",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::VolumeTransform);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(80., 0.05));
+}
+
+TEST_CASE("A volume extruder difference preserves independent public Print layers",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::VolumeExtruder);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(64., 0.05));
+}
+
+TEST_CASE("A custom layer profile prevents public Print layer sharing",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::LayerProfile);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    REQUIRE(result.first_print_z.size() != result.second_print_z.size());
+    CHECK_FALSE(result.first_print_z == result.second_print_z);
+}
+
+TEST_CASE("An object extruder difference prevents public Print layer sharing",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::ObjectExtruder);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(64., 0.05));
+}
+
+TEST_CASE("A missing previous G-code file reports a failed public export lifecycle",
+          "[Print][PreviousGCodeWorkflow]")
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0}, {"brim_type", "no_brim"},
+        {"machine_start_gcode", ""}, {"machine_end_gcode", ""},
+    });
+    init_print({make_cube(8., 8., 1.2)}, print, model, config);
+
+    ScopedTemporaryDir directory("orca-previous-gcode-missing");
+    const std::string missing = (directory.path() / "not-there.gcode").string();
+    std::vector<LifecycleEvent> events;
+    std::vector<LifecycleEvtCode> codes;
+    std::vector<std::string> messages;
+    ScopedLifecycleHook hook([&](LifecycleEvent event, const LifecycleEventContext &context) {
+        if (event == LifecycleEvent::GCodeExportStarted || event == LifecycleEvent::GCodeExportFinished) {
+            events.push_back(event);
+            codes.push_back(context.code);
+            messages.push_back(context.msg);
+        }
+    });
+
+    GCodeProcessorResult result;
+    const std::vector<unsigned int> filament_sequence{4, 2};
+    const std::vector<unsigned int> nozzle_sequence{1, 0};
+    result.filament_change_sequence = filament_sequence;
+    result.nozzle_change_sequence = nozzle_sequence;
+    REQUIRE_THROWS_AS(print.export_gcode_from_previous_file(missing, &result), Slic3r::RuntimeError);
+    REQUIRE(events.size() == 2);
+    CHECK(events[0] == LifecycleEvent::GCodeExportStarted);
+    CHECK(events[1] == LifecycleEvent::GCodeExportFinished);
+    CHECK(codes[0] == LifecycleEvtCode::Ok);
+    CHECK(codes[1] == LifecycleEvtCode::Error);
+    CHECK(messages[0] == missing);
+    CHECK(messages[1].find(missing) != std::string::npos);
+    CHECK(result.filament_change_sequence == filament_sequence);
+    CHECK(result.nozzle_change_sequence == nozzle_sequence);
+}
+
+TEST_CASE("Reprocessing previous G-code preserves caller tool sequences and public moves",
+          "[Print][PreviousGCodeWorkflow]")
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0}, {"brim_type", "no_brim"},
+        {"machine_start_gcode", ""}, {"machine_end_gcode", ""},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    init_print({make_cube(8., 8., 1.2)}, print, model, config);
+    print.process();
+    ScopedTemporaryFile file(".gcode");
+    REQUIRE(print.export_gcode(file.string(), nullptr, nullptr) == file.string());
+
+    GCodeProcessorResult result;
+    const std::vector<unsigned int> filament_sequence{7, 3, 7};
+    const std::vector<unsigned int> nozzle_sequence{2, 1};
+    result.filament_change_sequence = filament_sequence;
+    result.nozzle_change_sequence = nozzle_sequence;
+    std::vector<LifecycleEvtCode> finished_codes;
+    ScopedLifecycleHook hook([&](LifecycleEvent event, const LifecycleEventContext &context) {
+        if (event == LifecycleEvent::GCodeExportFinished)
+            finished_codes.push_back(context.code);
+    });
+
+    REQUIRE_NOTHROW(print.export_gcode_from_previous_file(file.string(), &result));
+    REQUIRE(result.moves.size() > 0);
+    CHECK(result.filament_change_sequence == filament_sequence);
+    CHECK(result.nozzle_change_sequence == nozzle_sequence);
+    REQUIRE(finished_codes.size() == 1);
+    CHECK(finished_codes.front() == LifecycleEvtCode::Ok);
+}
+
+} // namespace print_object_sharing_contracts

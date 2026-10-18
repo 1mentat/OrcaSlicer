@@ -997,13 +997,13 @@
       "reason": "Tree support generation uses a 1.0 mm branch diameter and checks generated support geometry; numeric boundaries are not claimed."
     },
     "tree_support_branch_distance": {
-      "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupport][SupportCriticalRegionsOnly]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Tree support generation uses a 5.0 mm branch distance and checks generated support geometry; numeric boundaries are not claimed."
+      "reason": "The public critical-region tree-support fixture explicitly pins the canonical tree_support_branch_distance to 5.0 mm and requires positive support points and independent ordinary/cantilever support segments. Numeric bounds and a setting-specific contrast remain unclaimed."
     },
     "z_hop": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -3932,6 +3932,69 @@
         "interaction_matrix"
       ],
       "reason": "With an active internal bridge, false selects an explicit absolute 30-degree direction and true adds 30 degrees to the independently observed automatic direction modulo pi. The comparison preserves bridge surfaces, paths, and layer counts and requires the two modes to differ."
+    },
+    "staggered_inner_seams": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance][StaggeredInnerSeams]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public false/true matrix exports both modes, requires finite positive motion, equal loop/layer counts and layerwise XY/material conservation, and requires an actual internal-loop start shift. No broader seam interaction matrix is claimed."
+    },
+    "tree_support_top_rate": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupport][OrganicTreeDensity]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public organic-support fixture compares the source-declared lower bound 5% with the source max_literal contrast 35% and requires finite positive support plus a larger independent highest-layer covered area for the dense row. The 35% max_literal is not a def->max runtime hard-upper-bound claim; broader numeric range and organic-support interactions remain unclaimed."
+    },
+    "tree_support_branch_distance_organic": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupport][OrganicTreeDensity]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public organic-support fixture varies the exact registered tree_support_branch_distance_organic limits of 1.0 mm and 10.0 mm, requiring finite positive support and a larger independent highest-layer coverage for close spacing. This is distinct from the normal tree_support_branch_distance option."
+    },
+    "belt_slice_rotation": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[BeltRotationEnum]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted 99f case \"Belt rotation enum values select distinct public transform and floor semantics\" deserializes and exercises every registered value (none, x, y, z). It checks the public rotation matrix, physical tilt, and belt-floor/shear result for each value; this is a physical transform oracle rather than serialization-only coverage."
+    },
+    "extruder_type": {
+      "test": "tests/libslic3r/test_config_variant_expansion.cpp",
+      "tag": "[ConfigGapContracts]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted 99f case \"Extruder compatibility detects drive and flow differences beyond the first pair\" exercises both registered values (Direct Drive and Bowden) and checks the public is_using_different_extruders() selection result: three equal Direct Drive entries are compatible, changing the third to Bowden is incompatible, and restoring it is compatible again."
+    },
+    "activate_chamber_temp_control": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ChamberTemperaturePipeline]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public exporter runs activation off with both zero and nonzero chamber targets and activation on with zero and nonzero targets. The enabled/nonzero row requires one pre-extrusion M191 at the configured target and one final M141 zero, while all disabled or zero-target controls emit neither chamber command. Material and motion remain valid in every generated row; the companion used-filament/custom-start case also checks activation ownership."
+    },
+    "filament_mixed_gradient_per_part": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[MixedGradient]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public mixed-filament gradient case runs per-part false and true on one object containing model parts of different heights. False requires one object-level gradient run with no volume-tagged gradients; true requires independent short and tall volume runs with their own layer counts and ratio witnesses. Both rows validate the processed Print and positive gradient metadata."
     }
   }
 }
