@@ -10225,7 +10225,8 @@ TEST_CASE("CadDocument revolves a self-contained entity loop", "[CadDocument][Ca
     REQUIRE_THAT(props.volume, Catch::Matchers::WithinRel(2.0 * M_PI * 15.0 * 100.0, 1e-6));
 
     Bnd_Box box;
-    BRepBndLib::Add(doc.bodies.at(0).shape, box);
+    // Compare the analytic solid bounds; Add() includes display-mesh deflection.
+    BRepBndLib::AddOptimal(doc.bodies.at(0).shape, box, false, false);
     double x0, y0, z0, x1, y1, z1;
     box.Get(x0, y0, z0, x1, y1, z1);
     REQUIRE_THAT(x0, Catch::Matchers::WithinAbs(-5.0, 1e-6));

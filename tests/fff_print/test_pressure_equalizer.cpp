@@ -1,3 +1,4 @@
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -221,6 +222,59 @@ TEST_CASE("G92 resets the logical extrusion state before a new pressure block", 
 {
     const std::string zero_origin_input =
         ";_EXTRUSION_ROLE:" + std::to_string(int(Slic3r::erExternalPerimeter)) +
+        "\nG1 F600 X10 Y0 E1\nG92 E0\n"
+        "G1 F600 ;_EXTRUDE_SET_SPEED\n"
+        "G1 F600 X20 Y0 E1\nG1 F600 X30 Y0 E2\nG1 F630 X40 Y0 E3\nG1 F630 X50 Y0 E4\n"
+        ";_EXTRUDE_END\n";
+    const std::string shifted_origin_input =
+        ";_EXTRUSION_ROLE:" + std::to_string(int(Slic3r::erExternalPerimeter)) +
+        "\nG1 F600 X10 Y0 E1\nG92 E5\n"
+        "G1 F600 ;_EXTRUDE_SET_SPEED\n"
+        "G1 F600 X20 Y0 E6\nG1 F600 X30 Y0 E7\nG1 F630 X40 Y0 E8\nG1 F630 X50 Y0 E9\n"
+        ";_EXTRUDE_END\n";
+
+    const std::string zero_origin_output = equalize_pressure(zero_origin_input, false, false, {1.75});
+    const std::string shifted_origin_output = equalize_pressure(shifted_origin_input, false, false, {1.75});
+    const PressureStateObservation zero_origin = observe_g92_state(zero_origin_output);
+    const PressureStateObservation shifted_origin = observe_g92_state(shifted_origin_output);
+
+    const auto check_physical_contract = [](const PressureStateObservation &observation) {
+        REQUIRE(observation.g92_lines == 1);
+        REQUIRE(observation.saw_post_reset_extrusion);
+        REQUIRE_FALSE(observation.moves.empty());
+        CHECK_THAT(observation.post_reset_extrusion, Catch::Matchers::WithinAbs(4.0, 0.001));
+        CHECK_THAT(observation.post_reset_distance, Catch::Matchers::WithinAbs(40.0, 0.001));
+        CHECK_THAT(observation.first_post_reset_start_x, Catch::Matchers::WithinAbs(10.0, 0.001));
+        CHECK_THAT(observation.last_post_reset_end_x, Catch::Matchers::WithinAbs(50.0, 0.001));
+    };
+    check_physical_contract(zero_origin);
+    check_physical_contract(shifted_origin);
+
+    // Changing only the logical E origin must not change physical pressure
+    // smoothing: compare every emitted XY endpoint, E delta, and feed value.
+    INFO("zero-origin emitted block:\n" << zero_origin_output);
+    INFO("shifted-origin emitted block:\n" << shifted_origin_output);
+    REQUIRE(zero_origin.moves.size() == shifted_origin.moves.size());
+    for (std::size_t i = 0; i < zero_origin.moves.size(); ++i) {
+        const PressureStateMove &lhs = zero_origin.moves[i];
+        const PressureStateMove &rhs = shifted_origin.moves[i];
+        CHECK_THAT(lhs.start_x, Catch::Matchers::WithinAbs(rhs.start_x, 0.001));
+        CHECK_THAT(lhs.start_y, Catch::Matchers::WithinAbs(rhs.start_y, 0.001));
+        CHECK_THAT(lhs.end_x, Catch::Matchers::WithinAbs(rhs.end_x, 0.001));
+        CHECK_THAT(lhs.end_y, Catch::Matchers::WithinAbs(rhs.end_y, 0.001));
+        CHECK_THAT(lhs.delta_e, Catch::Matchers::WithinAbs(rhs.delta_e, 0.001));
+        CHECK_THAT(lhs.feed, Catch::Matchers::WithinAbs(rhs.feed, 0.001));
+    }
+}
+
+// Regression reproducer for the classifier defect: G92 is a logical reset, not a physical extrusion.
+// The current implementation classifies the E5 form as extruding because its stored logical X/Y
+// endpoints differ and its E value increases; the E0 form does not. Keep this expected baseline
+// failure separate from the passing E-only state-transition contract above.
+TEST_CASE("G92 combined coordinate reset is not physical extrusion", "[PressureEqualizer][PressureEqualizerCoordinateResetDefect][KnownBaselineDefect][!shouldfail]")
+{
+    const std::string zero_origin_input =
+        ";_EXTRUSION_ROLE:" + std::to_string(int(Slic3r::erExternalPerimeter)) +
         "\nG1 F600 X10 Y0 E1\nG92 X0 Y0 E0\n"
         "G1 F600 ;_EXTRUDE_SET_SPEED\n"
         "G1 F600 X10 Y0 E1\nG1 F600 X20 Y0 E2\nG1 F630 X30 Y0 E3\nG1 F630 X40 Y0 E4\n"
@@ -232,10 +286,10 @@ TEST_CASE("G92 resets the logical extrusion state before a new pressure block", 
         "G1 F600 X10 Y0 E6\nG1 F600 X20 Y0 E7\nG1 F630 X30 Y0 E8\nG1 F630 X40 Y0 E9\n"
         ";_EXTRUDE_END\n";
 
-    const PressureStateObservation zero_origin =
-        observe_g92_state(equalize_pressure(zero_origin_input, false, false, {1.75}));
-    const PressureStateObservation shifted_origin =
-        observe_g92_state(equalize_pressure(shifted_origin_input, false, false, {1.75}));
+    const std::string zero_origin_output = equalize_pressure(zero_origin_input, false, false, {1.75});
+    const std::string shifted_origin_output = equalize_pressure(shifted_origin_input, false, false, {1.75});
+    const PressureStateObservation zero_origin = observe_g92_state(zero_origin_output);
+    const PressureStateObservation shifted_origin = observe_g92_state(shifted_origin_output);
 
     const auto check_physical_contract = [](const PressureStateObservation &observation) {
         REQUIRE(observation.g92_lines == 1);
@@ -251,6 +305,8 @@ TEST_CASE("G92 resets the logical extrusion state before a new pressure block", 
 
     // Changing only the logical E origin must not change physical pressure
     // smoothing: compare every emitted XY endpoint, E delta, and feed value.
+    INFO("zero-origin emitted block:\n" << zero_origin_output);
+    INFO("shifted-origin emitted block:\n" << shifted_origin_output);
     REQUIRE(zero_origin.moves.size() == shifted_origin.moves.size());
     for (std::size_t i = 0; i < zero_origin.moves.size(); ++i) {
         const PressureStateMove &lhs = zero_origin.moves[i];

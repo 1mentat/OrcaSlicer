@@ -206,6 +206,9 @@ feedrates on the higher-flow moves. Its mutations are in `pressure_equalizer.jso
 `[PressureEqualizerStateTransitions]` checks G92 logical-position resets and
 tool-specific filament cross sections through emitted moves and conserved
 extrusion (`pressure_equalizer_state_transitions.json`).
+The E-only reset contract compares equivalent physical blocks at two logical
+extrusion origins. `[PressureEqualizerCoordinateResetDefect]` separately retains
+the combined XY/E reset regression described under known baseline defects.
 
 `[GCodeReaderFileStreaming]` checks long-line buffering, mixed line endings,
 numbered commands, final unterminated moves, cancellation and reuse, and
@@ -819,7 +822,7 @@ version compatibility still needs a production fix and an executed regression.
 
 ## Exact-head PR validation
 
-`[KnownBaselineDefect]` currently identifies one executed diagnostic:
+`[KnownBaselineDefect]` identifies explicit production regressions:
 `DynamicPrintConfig::set_num_filaments()` does not resize filament vectors because
 `PrintConfigDef` never initializes its filament-option registry. The case retains
 the desired resize assertion and uses Catch2's `[!shouldfail]`; an unexpected pass
@@ -827,6 +830,14 @@ also fails, requiring the marker to be removed when the production defect is fix
 Report this expected failure separately from passing behavior. It provides no
 validated resizing or settings-variance credit. The active
 `PresetBundle::set_num_filaments()` path has separate passing tests.
+
+`[PressureEqualizerCoordinateResetDefect]` retains the physical-equivalence
+assertion for combined `G92 X0 Y0 E0` and `G92 X0 Y0 E5` resets. The pressure
+smoother currently classifies extrusion from logical coordinate deltas without
+checking the command type, so the second reset changes subsequent smoothing
+despite representing the same physical block. This diagnostic also uses
+`[!shouldfail]` and provides no validated reset-behavior or settings credit.
+The E-only reset contract remains a separate ordinary test and mutation baseline.
 
 `scripts/slicer_pr_validation.py` validates the exact head OIDs in the
 externally provided `build/evidence/open-prs.json` snapshot. It first verifies

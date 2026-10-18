@@ -416,6 +416,22 @@ TEST_CASE("Keeping the cooling fan running preserves a positive fan during depos
 
 namespace fan_speedup_overhangs_physical_contracts {
 
+// A compact public stepped mesh: a 1.2 mm base, an overlapping 6x6 mm stem,
+// and an 18x18x1.2 mm cap beginning at Z=3.6 mm. With 0.3 mm layers, the stem gives
+// the ordinary fan target several complete layers to flush before the cap's
+// wider unsupported perimeter requests the overhang target.
+TriangleMesh stepped_overhang_fixture()
+{
+    TriangleMesh fixture = make_cube(18.0, 18.0, 1.2);
+    TriangleMesh stem = make_cube(6.0, 6.0, 3.6);
+    stem.translate(Vec3f(6.0f, 6.0f, 0.6f));
+    TriangleMesh cap = make_cube(18.0, 18.0, 1.2);
+    cap.translate(Vec3f(0.0f, 0.0f, 3.6f));
+    fixture.merge(stem);
+    fixture.merge(cap);
+    return fixture;
+}
+
 struct FanOnEvent {
     double path_distance = 0.0;
     double elapsed_seconds = 0.0;
@@ -562,7 +578,9 @@ TEST_CASE("Fan speedup overhang setting changes physical fan scheduling without 
     using namespace fan_speedup_overhangs_physical_contracts;
     const DynamicPrintConfig ordinary_config = config_for(false);
     const DynamicPrintConfig overhang_config = config_for(true);
-    const TriangleMesh fixture = make_sphere(5.0, PI / 24.0);
+    // The ordinary stem precedes the wider cap in one public mesh, so the
+    // queued S51 rise is flushed before the cap's S255 overhang request.
+    const TriangleMesh fixture = stepped_overhang_fixture();
 
     const std::string ordinary_gcode = slice({fixture}, ordinary_config);
     const std::string overhang_gcode = slice({fixture}, overhang_config);
