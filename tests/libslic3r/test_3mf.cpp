@@ -7971,9 +7971,9 @@ TEST_CASE("BBS foreign import expands nested components into transformed volumes
     REQUIRE(wrapped->volumes.size() == 1);
     REQUIRE(assembly->volumes.size() == 2);
     for (const ModelVolume *volume : wrapped->volumes)
-        CHECK_THAT(volume->mesh().volume(), Catch::Matchers::WithinRel(1000., 1e-6));
+        CHECK_THAT(its_volume(volume->mesh().its), Catch::Matchers::WithinRel(1000., 1e-6));
     for (const ModelVolume *volume : assembly->volumes)
-        CHECK_THAT(volume->mesh().volume(), Catch::Matchers::WithinRel(1000., 1e-6));
+        CHECK_THAT(its_volume(volume->mesh().its), Catch::Matchers::WithinRel(1000., 1e-6));
 
     const BoundingBoxf3 wrapped_box = wrapped->bounding_box_exact();
     CHECK_THAT(double(wrapped_box.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
