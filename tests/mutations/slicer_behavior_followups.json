@@ -2896,13 +2896,13 @@
       "description": "Treat every pad as zero-elevation around-object mode; the standard-pad row must no longer produce its positive footprint."
     },
     {
-      "id": "gcode-silent-mode-estimator-gate-disabled",
-      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
-      "old": "            if (silent_mode->value && m_time_processor.machine_limits.machine_max_acceleration_x.values.size() > 1)",
-      "new": "            if (false)",
+      "id": "gcode-import-obsolete-silent-mode-not-discarded",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        \"smooth_coefficient\", \"overhang_totally_speed\", \"silent_mode\",",
+      "new": "        \"smooth_coefficient\", \"overhang_totally_speed\",",
       "expected_matches": 1,
       "test_filter": "^SilentModeVariance$",
-      "description": "Disable the silent_mode estimator gate in the public DynamicPrintConfig file-import path; the enabled row must lose its positive stealth statistic."
+      "description": "Stop discarding obsolete silent_mode during G-code config import; the imported true row must incorrectly enable a positive stealth estimate."
     },
     {
       "id": "circle-arc-max-radius-gate-inverted",

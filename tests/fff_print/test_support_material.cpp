@@ -2480,7 +2480,7 @@ DynamicPrintConfig support_tool_selection_config(const int support_filament,
         {"outer_wall_filament_id", outer_filament},
         {"inner_wall_filament_id", outer_filament},
         {"sparse_infill_filament_id", infill_filament},
-        {"internal_solid_infill_filament_id", infill_filament},
+        {"internal_solid_filament_id", infill_filament},
         {"top_surface_filament_id", infill_filament},
         {"bottom_surface_filament_id", infill_filament},
         {"filament_soluble", soluble},
@@ -2514,7 +2514,13 @@ TEST_CASE("Support dont-care base avoids an explicitly selected interface tool",
 TEST_CASE("Unspecified support roles avoid the currently soluble filament",
           "[SupportMaterial][GCode][GCodePipeline][GCodeSupportSolublePreference]")
 {
-    const DynamicPrintConfig soluble_config = support_tool_selection_config(0, 0, "1", "2", "1,0");
+    DynamicPrintConfig soluble_config = support_tool_selection_config(0, 0, "1", "2", "1,0");
+    // Selection considers only tools available on this layer. Keep a
+    // non-soluble inner wall alongside the soluble outer wall on each layer.
+    soluble_config.set_deserialize_strict({
+        {"wall_loops", 2},
+        {"inner_wall_filament_id", "2"},
+    });
     const std::string soluble_gcode = slice({TestMesh::overhang}, soluble_config);
     const std::set<int> soluble_base_tools = tools_for_support_role(soluble_gcode, soluble_config, false);
     const std::set<int> soluble_interface_tools = tools_for_support_role(soluble_gcode, soluble_config, true);

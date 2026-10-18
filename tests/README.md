@@ -711,6 +711,15 @@ version compatibility still needs a production fix and an executed regression.
 
 ## Exact-head PR validation
 
+`[KnownBaselineDefect]` currently identifies one executed diagnostic:
+`DynamicPrintConfig::set_num_filaments()` does not resize filament vectors because
+`PrintConfigDef` never initializes its filament-option registry. The case retains
+the desired resize assertion and uses Catch2's `[!shouldfail]`; an unexpected pass
+also fails, requiring the marker to be removed when the production defect is fixed.
+Report this expected failure separately from passing behavior. It provides no
+validated resizing or settings-variance credit. The active
+`PresetBundle::set_num_filaments()` path has separate passing tests.
+
 `scripts/slicer_pr_validation.py` validates the exact head OIDs in the
 externally provided `build/evidence/open-prs.json` snapshot. It first verifies
 that the complete harness at `--harness-ref` passes. It then applies the
