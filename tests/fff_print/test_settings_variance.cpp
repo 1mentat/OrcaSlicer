@@ -3927,6 +3927,12 @@ OverlapEvidence run_top_bottom_overlap(double overlap)
         {"nozzle_diameter", "0.4"},
         {"resolution", 0.01},
         {"wall_loops", 2},
+        // Interior top overlap is applied to top_fills created by the
+        // one-wall-top split; an exposed terrace alone does not enable it.
+        {"only_one_wall_top", true},
+        {"only_one_wall_first_layer", false},
+        {"min_width_top_surface", 0.0},
+        {"top_surface_expansion", 0.0},
         {"top_shell_layers", 2},
         {"bottom_shell_layers", 2},
         {"top_shell_thickness", 0.0},
@@ -3976,8 +3982,8 @@ OverlapEvidence run_top_bottom_overlap(double overlap)
                 if (surface.surface_type == stTop) {
                     evidence.top_surface_area += area;
                     // A top surface below the model's final layer is the exposed
-                    // terrace of the stepped fixture; it proves the top inset
-                    // branch has a real upper_slices context.
+                    // terrace of the stepped fixture. The pinned one-wall-top
+                    // setting also gives its overlap branch a top_fills region.
                     if (layer->print_z + 0.3 < model_max_z)
                         ++evidence.terrace_top_surfaces;
                 }

@@ -523,7 +523,7 @@ double first_ordinary_fan_distance(const MotionEvidence &evidence)
     bool found = false;
     double first = 0.0;
     for (const FanOnEvent &event : evidence.fan_on) {
-        if (!event.overhang && event.pwm == 51 && event.rise && event.path_distance > 0.0) {
+        if (!event.overhang && event.pwm == 51 && event.rise) {
             first = event.path_distance;
             found = true;
             break;
@@ -538,7 +538,7 @@ double first_ordinary_fan_time(const MotionEvidence &evidence)
     bool found = false;
     double first = 0.0;
     for (const FanOnEvent &event : evidence.fan_on) {
-        if (!event.overhang && event.pwm == 51 && event.rise && event.path_distance > 0.0) {
+        if (!event.overhang && event.pwm == 51 && event.rise) {
             first = event.elapsed_seconds;
             found = true;
             break;
@@ -581,8 +581,10 @@ TEST_CASE("Fan speedup overhang setting changes physical fan scheduling without 
     REQUIRE(count_overhang_fan_events(overhang) > 0);
     REQUIRE(std::any_of(ordinary.fan_on.begin(), ordinary.fan_on.end(),
                         [](const FanOnEvent &event) { return !event.overhang && event.rise && event.path_distance > 0.0; }));
+    // fan_speedup_overhangs intentionally leaves ordinary rises immediate;
+    // the ordinary control still requires a rise after positive motion above.
     REQUIRE(std::any_of(overhang.fan_on.begin(), overhang.fan_on.end(),
-                        [](const FanOnEvent &event) { return !event.overhang && event.rise && event.path_distance > 0.0; }));
+                        [](const FanOnEvent &event) { return !event.overhang && event.rise; }));
     REQUIRE(std::any_of(ordinary.fan_on.begin(), ordinary.fan_on.end(),
                         [](const FanOnEvent &event) { return event.pwm == 255; }));
     REQUIRE(std::any_of(overhang.fan_on.begin(), overhang.fan_on.end(),

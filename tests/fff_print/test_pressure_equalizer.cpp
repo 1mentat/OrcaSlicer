@@ -119,14 +119,23 @@ TEST_CASE("Tagged external flow transitions preserve path geometry while smoothi
 
 namespace {
 
+struct PressureStateMove {
+    double start_x = 0.0;
+    double start_y = 0.0;
+    double end_x = 0.0;
+    double end_y = 0.0;
+    double delta_e = 0.0;
+    double feed = 0.0;
+};
+
 struct PressureStateObservation {
     std::size_t g92_lines = 0;
-    std::size_t post_reset_extrusion_moves = 0;
     double post_reset_distance = 0.0;
     double post_reset_extrusion = 0.0;
     double first_post_reset_start_x = 0.0;
-    double first_post_reset_end_x = 0.0;
+    double last_post_reset_end_x = 0.0;
     bool saw_post_reset_extrusion = false;
+    std::vector<PressureStateMove> moves;
 };
 
 PressureStateObservation observe_g92_state(const std::string &gcode)
@@ -145,16 +154,23 @@ PressureStateObservation observe_g92_state(const std::string &gcode)
         }
         if (!after_g92 || !line.cmd_is("G1") || !line.extruding(state))
             return;
+
         const double start_x = state.x();
+        const double start_y = state.y();
         const double end_x = line.new_X(state);
-        if (!observation.saw_post_reset_extrusion) {
-            observation.first_post_reset_start_x = start_x;
-            observation.first_post_reset_end_x = end_x;
-            observation.saw_post_reset_extrusion = true;
-        }
-        ++observation.post_reset_extrusion_moves;
+        const double end_y = line.new_Y(state);
+        const PressureStateMove move{
+            start_x, start_y, end_x, end_y,
+            line.dist_E(state), line.new_F(state)
+        };
+        observation.moves.push_back(move);
         observation.post_reset_distance += line.dist_XY(state);
         observation.post_reset_extrusion += line.dist_E(state);
+        if (!observation.saw_post_reset_extrusion) {
+            observation.first_post_reset_start_x = start_x;
+            observation.saw_post_reset_extrusion = true;
+        }
+        observation.last_post_reset_end_x = end_x;
     });
     return observation;
 }
@@ -203,21 +219,49 @@ PressureToolObservation observe_pressure_tools(const std::string &gcode)
 
 TEST_CASE("G92 resets the logical extrusion state before a new pressure block", "[PressureEqualizer][PressureEqualizerStateTransitions]")
 {
-    const std::string input =
+    const std::string zero_origin_input =
+        ";_EXTRUSION_ROLE:" + std::to_string(int(Slic3r::erExternalPerimeter)) +
+        "\nG1 F600 X10 Y0 E1\nG92 X0 Y0 E0\n"
+        "G1 F600 ;_EXTRUDE_SET_SPEED\n"
+        "G1 F600 X10 Y0 E1\nG1 F600 X20 Y0 E2\nG1 F630 X30 Y0 E3\nG1 F630 X40 Y0 E4\n"
+        ";_EXTRUDE_END\n";
+    const std::string shifted_origin_input =
         ";_EXTRUSION_ROLE:" + std::to_string(int(Slic3r::erExternalPerimeter)) +
         "\nG1 F600 X10 Y0 E1\nG92 X0 Y0 E5\n"
         "G1 F600 ;_EXTRUDE_SET_SPEED\n"
         "G1 F600 X10 Y0 E6\nG1 F600 X20 Y0 E7\nG1 F630 X30 Y0 E8\nG1 F630 X40 Y0 E9\n"
         ";_EXTRUDE_END\n";
 
-    const PressureStateObservation observation = observe_g92_state(equalize_pressure(input, false, false, {1.75}));
-    REQUIRE(observation.g92_lines == 1);
-    REQUIRE(observation.saw_post_reset_extrusion);
-    CHECK(observation.post_reset_extrusion_moves == 4);
-    CHECK_THAT(observation.post_reset_extrusion, Catch::Matchers::WithinAbs(4.0, 0.001));
-    CHECK_THAT(observation.post_reset_distance, Catch::Matchers::WithinAbs(40.0, 0.001));
-    CHECK_THAT(observation.first_post_reset_start_x, Catch::Matchers::WithinAbs(0.0, 0.001));
-    CHECK_THAT(observation.first_post_reset_end_x, Catch::Matchers::WithinAbs(10.0, 0.001));
+    const PressureStateObservation zero_origin =
+        observe_g92_state(equalize_pressure(zero_origin_input, false, false, {1.75}));
+    const PressureStateObservation shifted_origin =
+        observe_g92_state(equalize_pressure(shifted_origin_input, false, false, {1.75}));
+
+    const auto check_physical_contract = [](const PressureStateObservation &observation) {
+        REQUIRE(observation.g92_lines == 1);
+        REQUIRE(observation.saw_post_reset_extrusion);
+        REQUIRE_FALSE(observation.moves.empty());
+        CHECK_THAT(observation.post_reset_extrusion, Catch::Matchers::WithinAbs(4.0, 0.001));
+        CHECK_THAT(observation.post_reset_distance, Catch::Matchers::WithinAbs(40.0, 0.001));
+        CHECK_THAT(observation.first_post_reset_start_x, Catch::Matchers::WithinAbs(0.0, 0.001));
+        CHECK_THAT(observation.last_post_reset_end_x, Catch::Matchers::WithinAbs(40.0, 0.001));
+    };
+    check_physical_contract(zero_origin);
+    check_physical_contract(shifted_origin);
+
+    // Changing only the logical E origin must not change physical pressure
+    // smoothing: compare every emitted XY endpoint, E delta, and feed value.
+    REQUIRE(zero_origin.moves.size() == shifted_origin.moves.size());
+    for (std::size_t i = 0; i < zero_origin.moves.size(); ++i) {
+        const PressureStateMove &lhs = zero_origin.moves[i];
+        const PressureStateMove &rhs = shifted_origin.moves[i];
+        CHECK_THAT(lhs.start_x, Catch::Matchers::WithinAbs(rhs.start_x, 0.001));
+        CHECK_THAT(lhs.start_y, Catch::Matchers::WithinAbs(rhs.start_y, 0.001));
+        CHECK_THAT(lhs.end_x, Catch::Matchers::WithinAbs(rhs.end_x, 0.001));
+        CHECK_THAT(lhs.end_y, Catch::Matchers::WithinAbs(rhs.end_y, 0.001));
+        CHECK_THAT(lhs.delta_e, Catch::Matchers::WithinAbs(rhs.delta_e, 0.001));
+        CHECK_THAT(lhs.feed, Catch::Matchers::WithinAbs(rhs.feed, 0.001));
+    }
 }
 
 TEST_CASE("Tool changes select the filament cross section used by pressure smoothing", "[PressureEqualizer][PressureEqualizerStateTransitions]")

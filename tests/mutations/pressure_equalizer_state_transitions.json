@@ -11,7 +11,7 @@
       "expected_matches": 1,
       "test_filter": "^PressureEqualizerStateTransitions$",
       "ordinary_assertion_only": true,
-      "description": "Force every G92 E value to zero. The fixture uses G92 E5, so the following public G1 is assigned a six-millimeter internal E jump instead of one millimeter; the ordinary move-count oracle then observes a different pressure-smoothing result.",
+      "description": "Force every G92 E value to zero. Physically identical blocks with E0 and E5 logical origins must retain the same emitted XY endpoints, per-move extrusion deltas, and feed values, with 40 mm total path and 4 mm total extrusion. The paired physical-output assertions are intended to detect this state error; native mutation execution determines the outcome.",
       "source_anchor_sha256": "d841eaee40fb0db22a0d37670e6524ce7adefa6519148d946bff8e4df8828ac4"
     },
     {
