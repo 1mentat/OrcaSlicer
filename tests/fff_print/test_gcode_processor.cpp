@@ -6,6 +6,7 @@
 
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/CommonDefs.hpp"
 #include "libslic3r/Utils.hpp"
 #include <algorithm>
 #include <cmath>

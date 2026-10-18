@@ -1,4 +1,6 @@
 #include <catch2/catch_all.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -25,6 +27,7 @@
 
 #include "test_helpers.hpp"
 #include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"

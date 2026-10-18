@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cmath>
 #include <catch2/catch_all.hpp>
+#include <catch2/catch_message.hpp>
 #include <vector>
 #include "libslic3r/Point.hpp"
 

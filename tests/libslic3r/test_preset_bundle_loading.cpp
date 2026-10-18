@@ -14,6 +14,7 @@
 #include <boost/filesystem/directory.hpp>
 #include <boost/filesystem/file_status.hpp>
 #include <catch2/catch_all.hpp>
+#include <catch2/generators/catch_generators_range.hpp>
 
 #include <algorithm>
 #include <array>

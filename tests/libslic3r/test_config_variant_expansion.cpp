@@ -1,4 +1,6 @@
 #include <catch2/catch_all.hpp>
+#include <catch2/catch_message.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Config.hpp"
 #include <string>
 #include <vector>

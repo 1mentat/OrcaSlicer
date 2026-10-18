@@ -13,6 +13,11 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/libslic3r.h"
 #include <libnoise/noise.h>
+#include <libnoise/module/modulebase.h>
+#include <libnoise/module/perlin.h>
+#include <libnoise/module/billow.h>
+#include <libnoise/module/ridgedmulti.h>
+#include <libnoise/module/voronoi.h>
 #include <cmath>
 #include <memory>
 #include <vector>

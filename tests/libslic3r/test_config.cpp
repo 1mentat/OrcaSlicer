@@ -2,6 +2,7 @@
 #include <exception>
 #include <boost/nowide/cstdlib.hpp>
 #include "libslic3r/Point.hpp"
+#include "libslic3r/libslic3r.h"
 #include <string>
 #include <catch2/catch_all.hpp>
 

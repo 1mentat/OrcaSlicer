@@ -8,6 +8,7 @@
 #include <TopAbs_ShapeEnum.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_all.hpp>   // mainline OrcaSlicer ships Catch2 v3 (v2 was catch2/catch.hpp)
 #include <cereal/details/helpers.hpp>
 #include <cereal/cereal.hpp>

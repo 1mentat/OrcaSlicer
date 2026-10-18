@@ -10,6 +10,10 @@
 #include <cstddef>
 #include <memory>
 #include <opencv2/core.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <opencv2/core/matx.hpp>
+#include <opencv2/core/types.hpp>
+#include "TextureToColor/Callbacks.hpp"
 #include <vector>
 
 #include "TextureToColor/TriMesh.hpp"
