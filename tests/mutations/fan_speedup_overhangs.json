@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Fan scheduling changes the physical location of an ordinary rising PWM target while preserving deposition.",
+  "description": "Fan scheduling advances a public non-overhang ironing fan rise while preserving physical deposition.",
   "mutants": [
     {
       "id": "fan-speedup-overhangs-setting-binding",
@@ -20,7 +20,7 @@
       "test_filter": "^FanSpeedupOverhangs$",
       "expected_matches": 1,
       "ordinary_assertion_only": true,
-      "description": "Remove the role-sensitive delay gate; ordinary-role fan-on motion locations no longer differ between paired rows."
+      "description": "Remove the role-sensitive speedup gate; the paired non-overhang ironing rises no longer differ in physical motion or time."
     }
   ]
 }
