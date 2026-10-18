@@ -11515,8 +11515,11 @@ TEST_CASE("External preset resolves an unchanged inherited system profile", "[Pr
     external_id->value = "Imported Child";
     ScopedTemporaryFile source(".gcode");
     const size_t before = collection.size();
+    // Match the production PresetBundle path: its helper retains the bookkeeping
+    // keys (including inherits) while listing only layer_height as a differing setting.
+    const std::set<std::string> different = PresetBundle::project_different_keys("layer_height");
     const auto loaded = collection.load_external_preset(
-        source.string(), "Imported", "Unknown Original", external, {"layer_height"},
+        source.string(), "Imported", "Unknown Original", external, different,
         PresetCollection::LoadAndSelect::Always);
 
     REQUIRE(loaded.first != nullptr);
@@ -11562,3 +11565,392 @@ TEST_CASE("External preset override marks an existing profile dirty", "[Preset][
 }
 
 } // namespace preset_external_match_contracts
+
+namespace preset_project_reset_followup_contracts {
+
+size_t embedded_preset_count(PresetBundle &bundle)
+{
+    auto presets = bundle.get_current_project_embedded_presets();
+    ScopeGuard cleanup([&presets] { for (Preset *preset : presets) delete preset; });
+    return presets.size();
+}
+
+struct ProjectPresetOwners {
+    std::vector<std::unique_ptr<Preset>> values;
+};
+
+void add_embedded(ProjectPresetOwners &owners, std::vector<Preset *> &project,
+                  Preset::Type type, const std::string &name,
+                  const DynamicPrintConfig &base_config, const std::string &parent_name)
+{
+    auto preset = std::make_unique<Preset>(type, name);
+    preset->is_project_embedded = true;
+    preset->config = base_config;
+    preset->inherits() = parent_name;
+    project.push_back(preset.get());
+    owners.values.emplace_back(std::move(preset));
+}
+
+struct ResetNames {
+    std::string printer = "Reset Base Printer";
+    std::string print = "Reset Base Print";
+    std::string filament = "Reset Base Filament";
+    std::string embedded_printer = "Project Printer";
+    std::string embedded_print = "Project Print";
+    std::string embedded_filament = "Project Filament";
+    std::string fallback = "Fallback PLA";
+    std::string preferred = "Preferred PLA";
+};
+
+ResetNames add_base_profiles(PresetBundle &bundle, const std::string &default_filament)
+{
+    ResetNames names;
+    auto &library = bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
+    library.id = library.name = PresetBundle::ORCA_FILAMENT_LIBRARY;
+
+    Preset &printer = add_inmemory_preset(bundle.printers, names.printer);
+    printer.is_system = true;
+    printer.config.option<ConfigOptionString>("default_print_profile", true)->value = names.print;
+    printer.config.option<ConfigOptionStrings>("default_filament_profile", true)->values = {default_filament};
+
+    Preset &print = add_inmemory_preset(bundle.prints, names.print);
+    print.is_system = true;
+    compatible_list(bundle.prints, names.print, "compatible_printers") = {names.printer};
+
+    Preset &filament = add_inmemory_preset(bundle.filaments, names.filament);
+    filament.is_system = true;
+    filament.vendor = &library;
+    filament.config.opt_string("filament_type", 0u) = "PLA";
+    compatible_list(bundle.filaments, names.filament, "compatible_printers") = {names.printer};
+    compatible_list(bundle.filaments, names.filament, "compatible_prints") = {names.print};
+
+    Preset &fallback = add_inmemory_preset(bundle.filaments, names.fallback);
+    fallback.is_system = true;
+    fallback.vendor = &library;
+    fallback.config.opt_string("filament_type", 0u) = "PLA";
+    compatible_list(bundle.filaments, names.fallback, "compatible_printers") = {names.printer};
+    compatible_list(bundle.filaments, names.fallback, "compatible_prints") = {names.print};
+    return names;
+}
+
+void select_base_profiles(PresetBundle &bundle, const ResetNames &names)
+{
+    REQUIRE(bundle.printers.select_preset_by_name(names.printer, true));
+    REQUIRE(bundle.prints.select_preset_by_name(names.print, true));
+    REQUIRE(bundle.filaments.select_preset_by_name(names.filament, true));
+}
+
+} // namespace preset_project_reset_followup_contracts
+
+TEST_CASE("PresetBundle reset restores inherited printer and compatible selections",
+          "[Preset][PresetProjectReset]")
+{
+    ScopedTemporaryDir temp("preset-project-reset-inherited");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    using namespace preset_project_reset_followup_contracts;
+    const ResetNames names = add_base_profiles(bundle, "Reset Base Filament");
+    select_base_profiles(bundle, names);
+
+    ProjectPresetOwners owners;
+    std::vector<Preset *> project;
+    const Preset *base_printer = bundle.printers.find_preset(names.printer, false, true);
+    const Preset *base_print = bundle.prints.find_preset(names.print, false, true);
+    const Preset *base_filament = bundle.filaments.find_preset(names.filament, false, true);
+    REQUIRE(base_printer != nullptr);
+    REQUIRE(base_print != nullptr);
+    REQUIRE(base_filament != nullptr);
+    add_embedded(owners, project, Preset::TYPE_PRINTER, names.embedded_printer,
+                 base_printer->config, names.printer);
+    add_embedded(owners, project, Preset::TYPE_PRINT, names.embedded_print,
+                 base_print->config, names.print);
+    add_embedded(owners, project, Preset::TYPE_FILAMENT, names.embedded_filament,
+                 base_filament->config, names.filament);
+    REQUIRE(bundle.load_project_embedded_presets(project, ForwardCompatibilitySubstitutionRule::Disable).empty());
+
+    REQUIRE(bundle.printers.select_preset_by_name(names.embedded_printer, true));
+    REQUIRE(bundle.prints.select_preset_by_name(names.embedded_print, true));
+    REQUIRE(bundle.filaments.select_preset_by_name(names.embedded_filament, true));
+    bundle.filament_presets = {names.embedded_filament};
+    REQUIRE(embedded_preset_count(bundle) == 3);
+
+    bundle.reset_project_embedded_presets();
+
+    CHECK(embedded_preset_count(bundle) == 0);
+    CHECK(bundle.printers.get_selected_preset_name() == names.printer);
+    CHECK(bundle.prints.get_selected_preset_name() == names.print);
+    CHECK(bundle.filaments.get_selected_preset_name() == names.filament);
+    REQUIRE(bundle.filament_presets.size() == 1);
+    CHECK(bundle.filament_presets.front() == names.filament);
+}
+
+TEST_CASE("PresetBundle reset updates compatible selections without an embedded printer",
+          "[Preset][PresetProjectReset]")
+{
+    ScopedTemporaryDir temp("preset-project-reset-compatible");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    using namespace preset_project_reset_followup_contracts;
+    const ResetNames names = add_base_profiles(bundle, "Reset Base Filament");
+    select_base_profiles(bundle, names);
+
+    ProjectPresetOwners owners;
+    std::vector<Preset *> project;
+    const Preset *base_print = bundle.prints.find_preset(names.print, false, true);
+    const Preset *base_filament = bundle.filaments.find_preset(names.filament, false, true);
+    REQUIRE(base_print != nullptr);
+    REQUIRE(base_filament != nullptr);
+    add_embedded(owners, project, Preset::TYPE_PRINT, names.embedded_print,
+                 base_print->config, names.print);
+    add_embedded(owners, project, Preset::TYPE_FILAMENT, names.embedded_filament,
+                 base_filament->config, names.filament);
+    REQUIRE(bundle.load_project_embedded_presets(project, ForwardCompatibilitySubstitutionRule::Disable).empty());
+
+    REQUIRE(bundle.printers.get_selected_preset_name() == names.printer);
+    REQUIRE(bundle.prints.select_preset_by_name(names.embedded_print, true));
+    REQUIRE(bundle.filaments.select_preset_by_name(names.embedded_filament, true));
+    bundle.filament_presets = {names.embedded_filament};
+    REQUIRE(embedded_preset_count(bundle) == 2);
+
+    bundle.reset_project_embedded_presets();
+
+    CHECK(embedded_preset_count(bundle) == 0);
+    CHECK(bundle.printers.get_selected_preset_name() == names.printer);
+    CHECK(bundle.prints.get_selected_preset_name() == names.print);
+    CHECK(bundle.filaments.get_selected_preset_name() == names.filament);
+    REQUIRE(bundle.filament_presets.size() == 1);
+    CHECK(bundle.filament_presets.front() == names.filament);
+}
+
+TEST_CASE("PresetBundle reset maps unavailable filament slots to visible fallbacks",
+          "[Preset][PresetProjectReset]")
+{
+    const int fallback_mode = GENERATE(0, 1, 2);
+    DYNAMIC_SECTION("fallback mode " << fallback_mode) {
+        ScopedTemporaryDir temp("preset-project-reset-filament-fallback");
+        ScopedDataDir data(temp.path() / "data");
+        PresetBundle bundle;
+        using namespace preset_project_reset_followup_contracts;
+        const std::string default_filament = "Missing Preferred";
+        const ResetNames names = add_base_profiles(bundle, default_filament);
+        // The helper creates a fresh bundle for every generated row; configure the
+        // optional preferred profile only for the visible/hidden rows.
+        if (fallback_mode != 0) {
+            Preset &preferred = add_inmemory_preset(bundle.filaments, names.preferred);
+            preferred.is_system = true;
+            preferred.vendor = &bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
+            preferred.is_visible = fallback_mode == 1;
+            preferred.config.opt_string("filament_type", 0u) = "PLA";
+            compatible_list(bundle.filaments, names.preferred, "compatible_printers") = {names.printer};
+            compatible_list(bundle.filaments, names.preferred, "compatible_prints") = {names.print};
+            Preset *base_printer = bundle.printers.find_preset(names.printer, false, true);
+            REQUIRE(base_printer != nullptr);
+            base_printer->config.option<ConfigOptionStrings>("default_filament_profile", true)->values = {names.preferred};
+        }
+        select_base_profiles(bundle, names);
+
+        ProjectPresetOwners owners;
+        std::vector<Preset *> project;
+        const Preset *base_printer = bundle.printers.find_preset(names.printer, false, true);
+        REQUIRE(base_printer != nullptr);
+        add_embedded(owners, project, Preset::TYPE_PRINTER, names.embedded_printer,
+                     base_printer->config, names.printer);
+        REQUIRE(bundle.load_project_embedded_presets(project, ForwardCompatibilitySubstitutionRule::Disable).empty());
+        REQUIRE(bundle.printers.select_preset_by_name(names.embedded_printer, true));
+        bundle.filament_presets = {"Missing Slot"};
+
+        bundle.reset_project_embedded_presets();
+
+        const std::string expected = fallback_mode == 1 ? names.preferred : names.fallback;
+        CHECK(bundle.printers.get_selected_preset_name() == names.printer);
+        REQUIRE(bundle.filament_presets.size() == 1);
+        CHECK(bundle.filament_presets.front() == expected);
+        const Preset *resolved = bundle.filaments.find_preset(expected, false, true);
+        REQUIRE(resolved != nullptr);
+        CHECK(resolved->is_visible);
+        if (fallback_mode == 2) {
+            const Preset *hidden = bundle.filaments.find_preset(names.preferred, false, true);
+            REQUIRE(hidden != nullptr);
+            CHECK_FALSE(hidden->is_visible);
+        }
+    }
+}
+namespace preset_external_save_followup_contracts {
+
+namespace {
+
+fs::path make_preset_external_data_dir(const fs::path &root)
+{
+    const fs::path path = root / "data";
+    fs::create_directories(path);
+    return path;
+}
+
+struct PrintCollectionFixture {
+    ScopedTemporaryDir temp {"preset-external-save"};
+    ScopedDataDir data;
+    PresetCollection collection;
+
+    PrintCollectionFixture()
+        : data(make_preset_external_data_dir(temp.path()))
+        , collection(Preset::TYPE_PRINT, Preset::print_options(),
+                     static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()))
+    {
+        fs::create_directories(temp.path() / PRESET_PRINT_NAME / "base");
+        collection.update_user_presets_directory(temp.path().string(), PRESET_PRINT_NAME);
+    }
+
+    DynamicPrintConfig config(double layer_height) const
+    {
+        DynamicPrintConfig config = collection.default_preset().config;
+        config.option<ConfigOptionFloat>("layer_height", true)->value = layer_height;
+        return config;
+    }
+};
+
+} // namespace
+
+TEST_CASE("external .3mf presets retain source identity and distinct configs",
+          "[Preset][PresetExternalSave]")
+{
+    PrintCollectionFixture fx;
+    const size_t before = fx.collection.size();
+    ScopedTemporaryFile source_a(".3mf");
+    ScopedTemporaryFile source_b(".3mf");
+
+    const auto first = fx.collection.load_external_preset(
+        source_a.string(), "Model-A.3mf", "Project Process", fx.config(0.27), {},
+        PresetCollection::LoadAndSelect::Always);
+    REQUIRE(first.first != nullptr);
+    const Preset *first_ptr = first.first;
+    const std::string first_name = "Project Process(Model-A.3mf)";
+    const std::string second_name = "Project Process(Model-B.3mf)";
+
+    const auto second = fx.collection.load_external_preset(
+        source_b.string(), "Model-B.3mf", "Project Process", fx.config(0.31), {},
+        PresetCollection::LoadAndSelect::Always);
+    REQUIRE(second.first != nullptr);
+    const Preset *second_ptr = second.first;
+    REQUIRE(first_ptr != second_ptr);
+
+    // Re-find both entries after the sorted deque insertion and use the live lookups for all
+    // field assertions. The pointer identities also verify that insertion did not duplicate or
+    // replace either source-derived preset.
+    Preset *first_after = fx.collection.find_preset(first_name, false, true);
+    Preset *second_after = fx.collection.find_preset(second_name, false, true);
+    REQUIRE(first_after != nullptr);
+    REQUIRE(second_after != nullptr);
+    CHECK(first_ptr == first_after);
+    CHECK(second_ptr == second_after);
+    CHECK(first_after->name == first_name);
+    CHECK(second_after->name == second_name);
+    CHECK(first_after->is_external);
+    CHECK(second_after->is_external);
+    CHECK(first_after->is_project_embedded);
+    CHECK(second_after->is_project_embedded);
+    CHECK(first_after->file == source_a.string());
+    CHECK(second_after->file == source_b.string());
+    CHECK(fx.collection.size() == before + 2);
+    CHECK(fx.collection.get_selected_preset_name() == second_name);
+    CHECK_THAT(first_after->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK_THAT(second_after->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+    CHECK_FALSE(fs::exists(fx.temp.path() / PRESET_PRINT_NAME / (first_name + ".json")));
+    CHECK_FALSE(fs::exists(fx.temp.path() / PRESET_PRINT_NAME / (second_name + ".json")));
+}
+
+TEST_CASE("project embedded external preset refreshes stored config without dirtying it",
+          "[Preset][PresetExternalSave]")
+{
+    PrintCollectionFixture fx;
+    Preset &stored = fx.collection.load_preset({}, "Embedded Process", fx.config(0.20), true);
+    stored.is_project_embedded = true;
+    fx.collection.select_preset(0);
+    const std::string default_name = fx.collection.default_preset().name;
+
+    DynamicPrintConfig external = fx.config(0.31);
+    ScopedTemporaryFile source(".3mf");
+    const auto loaded = fx.collection.load_external_preset(
+        source.string(), "Model.3mf", stored.name, external, {"layer_height"}, PresetCollection::LoadAndSelect::Never);
+    REQUIRE(loaded.first == &stored);
+    CHECK_FALSE(loaded.second);
+    CHECK_THAT(stored.config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+    CHECK_FALSE(stored.is_dirty);
+    CHECK(fx.collection.get_selected_preset_name() == default_name);
+    CHECK(fx.collection.size() == 2);
+}
+
+TEST_CASE("Saving an inherited preset keeps its parent",
+          "[Preset][PresetExternalSave]")
+{
+    PrintCollectionFixture fx;
+    fx.collection.load_preset({}, "Save Parent", fx.config(0.20), true);
+    fx.collection.get_edited_preset().config.option<ConfigOptionFloat>("layer_height")->value = 0.28;
+
+    fx.collection.save_current_preset("Saved Child", false, false);
+    Preset *saved = fx.collection.find_preset("Saved Child", false, true);
+    REQUIRE(saved != nullptr);
+    CHECK(saved->inherits() == "Save Parent");
+    CHECK_FALSE(saved->is_project_embedded);
+    CHECK(fx.collection.get_selected_preset_name() == "Saved Child");
+    REQUIRE(fs::exists(saved->file));
+
+    DynamicPrintConfig serialized;
+    std::map<std::string, std::string> key_values;
+    std::string reason;
+    REQUIRE_NOTHROW(serialized.load_from_json(saved->file,
+                                              ForwardCompatibilitySubstitutionRule::Disable,
+                                              key_values, reason));
+    CHECK(reason.empty());
+    CHECK_THAT(serialized.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.28, 1e-9));
+}
+
+TEST_CASE("Saving a detached preset writes a standalone base",
+          "[Preset][PresetExternalSave]")
+{
+    PrintCollectionFixture fx;
+    fx.collection.load_preset({}, "Detach Parent", fx.config(0.20), true);
+    fx.collection.get_edited_preset().config.option<ConfigOptionFloat>("layer_height")->value = 0.29;
+
+    fx.collection.save_current_preset("Detached Child", true, false);
+    Preset *saved = fx.collection.find_preset("Detached Child", false, true);
+    REQUIRE(saved != nullptr);
+    CHECK(saved->inherits().empty());
+    CHECK_FALSE(saved->is_project_embedded);
+    CHECK(fx.collection.get_selected_preset_name() == "Detached Child");
+    REQUIRE(fs::exists(saved->file));
+    CHECK(fs::equivalent(fs::path(saved->file),
+                         fx.temp.path() / PRESET_PRINT_NAME / "base" / "Detached Child.json"));
+
+    DynamicPrintConfig serialized;
+    std::map<std::string, std::string> key_values;
+    std::string reason;
+    REQUIRE_NOTHROW(serialized.load_from_json(saved->file,
+                                              ForwardCompatibilitySubstitutionRule::Disable,
+                                              key_values, reason));
+    CHECK(reason.empty());
+    CHECK_THAT(serialized.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.29, 1e-9));
+}
+
+TEST_CASE("Saving a root preset reloads its inherited child",
+          "[Preset][PresetExternalSave]")
+{
+    PrintCollectionFixture fx;
+    fx.collection.load_preset({}, "Reload Parent", fx.config(0.20), true);
+    fx.collection.save_current_preset("Reload Child", false, false);
+
+    Preset *child = fx.collection.find_preset("Reload Child", false, true);
+    REQUIRE(child != nullptr);
+    REQUIRE(child->inherits() == "Reload Parent");
+    REQUIRE(fs::exists(child->file));
+
+    REQUIRE(fx.collection.select_preset_by_name("Reload Parent", true));
+    fx.collection.get_edited_preset().config.option<ConfigOptionFloat>("layer_height")->value = 0.33;
+    fx.collection.save_current_preset("Reload Parent", false, false);
+
+    Preset *reloaded = fx.collection.find_preset("Reload Child", false, true);
+    REQUIRE(reloaded != nullptr);
+    CHECK_THAT(reloaded->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.33, 1e-9));
+    CHECK(reloaded->inherits() == "Reload Parent");
+}
+
+} // namespace preset_external_save_followup_contracts

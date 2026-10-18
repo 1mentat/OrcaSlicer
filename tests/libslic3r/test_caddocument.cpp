@@ -9926,3 +9926,86 @@ TEST_CASE("CadDocument loft Boolean modes preserve the analytic overlap volume",
         }
     }
 }
+
+namespace cad_legacy_thread_contracts {
+
+constexpr double legacy_radius = 3.0;
+constexpr double legacy_pitch = 1.0;
+constexpr double legacy_height = 4.0;
+constexpr double legacy_depth = 0.3;
+constexpr double pi = 3.1415926535897932384626433832795;
+
+TEST_CASE("Saved legacy external threads retain crests outside the reference cylinder",
+          "[CadDocument][CadLegacyThread]")
+{
+    CadDocument source;
+    const int thread = source.add_thread(legacy_radius, legacy_pitch, legacy_height,
+        legacy_depth, false, 0., 0., SketchPlane::XY(), "LegacyExternal");
+    REQUIRE(thread >= 0);
+    source.features[thread].thread_major_nominal = false;
+
+    // Geometry is replayed from the saved feature fields; the recipe stores no solid.
+    CadDocument restored;
+    const bool loaded = restored.deserialize_recipe(source.serialize_recipe());
+    INFO(restored.error);
+    REQUIRE(loaded);
+    REQUIRE(restored.features.size() == 1);
+    REQUIRE_FALSE(restored.features[thread].thread_major_nominal);
+    REQUIRE(restored.bodies.size() == 1);
+    const auto properties = restored.body_mass_properties(0);
+    REQUIRE(properties.valid);
+    REQUIRE(properties.is_solid);
+
+    // Legacy threads add a ridge to a full reference cylinder. A missing ridge,
+    // or interpreting this old radius as the new major radius, cannot satisfy this.
+    const double reference_cylinder_volume = pi * legacy_radius * legacy_radius * legacy_height;
+    CHECK(properties.volume > reference_cylinder_volume + 0.05);
+    const auto bounds = restored.display_mesh.bounding_box();
+    CHECK(bounds.max.x() > legacy_radius + 0.1);
+    CHECK(bounds.max.x() < legacy_radius + legacy_depth + 0.05);
+    CHECK(bounds.min.x() < -legacy_radius - 0.1);
+    CHECK(bounds.min.x() > -legacy_radius - legacy_depth - 0.05);
+}
+
+TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groove",
+          "[CadDocument][CadLegacyThread]")
+{
+    constexpr double stock_radius = 6.0;
+    CadDocument source;
+    const int sketch = source.add_sketch(SketchShape::Circle, SketchPlane::XY(),
+        0., 0., stock_radius, "StockProfile");
+    REQUIRE(sketch >= 0);
+    source.add_extrude(sketch, legacy_height, false, BooleanMode::New, "Stock");
+    const int thread = source.add_thread(legacy_radius, legacy_pitch, legacy_height,
+        legacy_depth, true, 0., 0., SketchPlane::XY(), "LegacyInternal");
+    REQUIRE(thread >= 0);
+    source.features[thread].thread_major_nominal = false;
+
+    CadDocument restored;
+    const bool loaded = restored.deserialize_recipe(source.serialize_recipe());
+    INFO(restored.error);
+    REQUIRE(loaded);
+    REQUIRE(restored.features.size() == source.features.size());
+    REQUIRE_FALSE(restored.features[thread].thread_major_nominal);
+    REQUIRE(restored.bodies.size() == 1);
+    const auto properties = restored.body_mass_properties(0);
+    REQUIRE(properties.valid);
+    REQUIRE(properties.is_solid);
+
+    const double stock_volume = pi * stock_radius * stock_radius * legacy_height;
+    const double minor_radius = legacy_radius - legacy_depth;
+    const double plain_bore_volume = pi * minor_radius * minor_radius * legacy_height;
+    const double enclosing_bore_volume = pi * (legacy_radius + legacy_depth) *
+        (legacy_radius + legacy_depth) * legacy_height;
+    // A groove removes more than the plain minor bore, but cannot remove stock
+    // outside its enclosing cylinder. These bounds require both bore and groove.
+    CHECK(properties.volume < stock_volume - plain_bore_volume - 0.05);
+    CHECK(properties.volume > stock_volume - enclosing_bore_volume + 0.05);
+    const auto bounds = restored.display_mesh.bounding_box();
+    CHECK_THAT(bounds.size().x(), Catch::Matchers::WithinAbs(2. * stock_radius, 0.05));
+    CHECK_THAT(bounds.size().y(), Catch::Matchers::WithinAbs(2. * stock_radius, 0.05));
+    CHECK_THAT(bounds.min.z(), Catch::Matchers::WithinAbs(0., 0.05));
+    CHECK_THAT(bounds.max.z(), Catch::Matchers::WithinAbs(legacy_height, 0.05));
+}
+
+} // namespace cad_legacy_thread_contracts

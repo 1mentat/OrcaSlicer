@@ -1243,6 +1243,15 @@ DynamicPrintConfig manual_map_config(bool mixed, const std::vector<int> &filamen
     config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard", "Direct Drive Standard" }));
     config.set_key_value("filament_self_index", new ConfigOptionInts({ 1, 2, 3 }));
     config.set_key_value("filament_map", new ConfigOptionInts(filament_map));
+    // Print::process publishes these derived maps at filament-slot width. Keep the next
+    // apply config equally shaped so changing an unused manual map slot is the only
+    // print-level difference observed by Print::apply.
+    config.set_key_value("filament_volume_map", new ConfigOptionInts({
+        (int)nvtStandard, (int)nvtStandard, (int)nvtStandard }));
+    std::vector<int> nozzle_map = filament_map;
+    for (int &nozzle : nozzle_map)
+        --nozzle; // Engine nozzle indices are zero-based; manual filament assignments are one-based.
+    config.set_key_value("filament_nozzle_map", new ConfigOptionInts(nozzle_map));
     config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
     ConfigOptionEnumsGeneric *extruder_type = config.option<ConfigOptionEnumsGeneric>("extruder_type", true);
     ConfigOptionEnumsGeneric *nozzle_volume_type = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true);
@@ -1255,7 +1264,12 @@ DynamicPrintConfig manual_map_config(bool mixed, const std::vector<int> &filamen
 
 void init_map_fixture(bool mixed, const DynamicPrintConfig &config, Print &print, Model &model)
 {
-    init_print({ make_cube(12., 12., 1.2) }, print, model, config);
+    // A single-volume helper object otherwise inherits ModelVolume::extruder_id()==1.
+    // The mixed row is meant to consume slot 3, so make that model assignment explicit
+    // before Print::apply collects region and volume extruders.
+    std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides(1);
+    overrides.front().emplace_back("extruder", mixed ? 3 : 1);
+    init_print(std::vector<TriangleMesh>{ make_cube(12., 12., 1.2) }, print, model, config, &overrides);
     const StringObjectException error = print.validate();
     INFO("validation.string: " << error.string);
     INFO("validation.opt_key: " << error.opt_key);

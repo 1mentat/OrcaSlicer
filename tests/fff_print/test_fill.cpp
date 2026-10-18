@@ -42,10 +42,13 @@
 #include "libslic3r/Fill/FillGyroid.hpp"
 #include "libslic3r/Fill/FillTpmsAdaptive.hpp"
 #include "libslic3r/Flow.hpp"
+#include "libslic3r/GCodeReader.hpp"
+#include <string_view>
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/IntersectionPoints.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintObject.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SVG.hpp"
 #include "libslic3r/libslic3r.h"
@@ -2767,4 +2770,266 @@ TEST_CASE("Adaptive TPMS anchors match the printed infill", "[Fill][InternalBrid
         for (const Point &point : path.equally_spaced_points(scale_(0.25)))
             max_distance = std::max(max_distance, printed_tree.distance_from_lines<false>(point));
     CHECK(unscale<double>(max_distance) <= 0.012);
+}
+
+namespace ironing_multiregion_contracts {
+
+TEST_CASE("Ironing preserves each region's speed flow and direction", "[Fill][MultiRegionIroning]")
+{
+    enum class Difference { None, Speed, Flow, Angle };
+    const Difference difference = GENERATE(Difference::None, Difference::Speed, Difference::Flow, Difference::Angle);
+    CAPTURE(static_cast<int>(difference));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1}, {"top_shell_layers", 1}, {"bottom_shell_layers", 1},
+        {"sparse_infill_density", "15%"}, {"top_surface_pattern", "monotonic"},
+        {"ironing_type", "topmost"}, {"ironing_pattern", "rectilinear"},
+        {"ironing_spacing", 0.2}, {"ironing_inset", 0.2},
+        {"ironing_speed", 20.}, {"ironing_flow", "10%"},
+        {"filament_ironing_speed", "nil"}, {"filament_ironing_flow", "nil"},
+        {"filament_ironing_spacing", "nil"}, {"filament_ironing_inset", "nil"},
+        {"ironing_angle", 0.}, {"ironing_angle_fixed", true},
+        {"align_infill_direction_to_model", false}, {"top_layer_direction", -1.},
+        {"solid_infill_rotate_template", ""},
+        {"slow_down_for_layer_cooling", false}, {"slow_down_layer_time", 0.},
+        {"enable_support", false}, {"skirt_loops", 0}, {"brim_type", "no_brim"},
+        {"enable_arc_fitting", false}, {"gcode_comments", true},
+        {"use_relative_e_distances", false}, {"layer_change_gcode", "G92 E0\n"},
+    });
+    DynamicPrintConfig changed;
+    if (difference == Difference::Speed) changed.set_deserialize_strict("ironing_speed", "35");
+    if (difference == Difference::Flow) changed.set_deserialize_strict("ironing_flow", "20%");
+    if (difference == Difference::Angle) changed.set_deserialize_strict("ironing_angle", "90");
+    // A harmless region difference keeps two regions even in the equal-ironing
+    // control, so it also exercises grouping of equivalent ironing parameters.
+    changed.set_deserialize_strict("sparse_infill_density", "20%");
+    TriangleMesh left = make_cube(8., 8., 0.8);
+    left.translate(10., 10., 0.);
+    TriangleMesh right = make_cube(8., 8., 0.8);
+    right.translate(30., 10., 0.);
+    Print print;
+    slice_parts(print, config, {left, right}, {{right, changed}});
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.num_print_regions() >= 2);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    const std::string output = Slic3r::Test::gcode(print);
+
+    struct RegionMotion {
+        size_t moves = 0;
+        double length = 0.;
+        double filament = 0.;
+        double longest = 0.;
+        double longest_dx = 0.;
+        double longest_dy = 0.;
+    };
+    std::array<RegionMotion, 2> regions;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool ironing = false;
+    reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const auto comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            ironing = comment.find("Ironing") != std::string_view::npos;
+        if (!ironing || !line.extruding(self) || line.dist_XY(self) <= 0.)
+            return;
+        REQUIRE(std::isfinite(line.new_X(self)));
+        REQUIRE(std::isfinite(line.new_Y(self)));
+        REQUIRE(std::isfinite(line.dist_E(self)));
+        size_t matches = 0;
+        for (size_t i = 0; i < regions.size(); ++i) {
+            const double min_x = 10. + 20. * i;
+            const auto inside = [min_x](double x, double y) {
+                return x >= min_x - 0.01 && x <= min_x + 8.01 && y >= 9.99 && y <= 18.01;
+            };
+            if (!inside(self.x(), self.y()) || !inside(line.new_X(self), line.new_Y(self)))
+                continue;
+            ++matches;
+            INFO("region=" << i << " line=" << line.raw());
+            const double speed = i == 1 && difference == Difference::Speed ? 35. : 20.;
+            CHECK_THAT(double(line.new_F(self)), Catch::Matchers::WithinAbs(60. * speed, 0.1));
+            CHECK_THAT(double(line.new_Z(self)), Catch::Matchers::WithinAbs(0.8, 1e-4));
+            RegionMotion &motion = regions[i];
+            ++motion.moves;
+            motion.length += line.dist_XY(self);
+            motion.filament += line.dist_E(self);
+            if (line.dist_XY(self) > motion.longest) {
+                motion.longest = line.dist_XY(self);
+                motion.longest_dx = std::abs(line.dist_X(self));
+                motion.longest_dy = std::abs(line.dist_Y(self));
+            }
+        }
+        REQUIRE(matches == 1);
+    });
+    for (size_t i = 0; i < regions.size(); ++i) {
+        CAPTURE(i);
+        const RegionMotion &motion = regions[i];
+        REQUIRE(motion.moves > 5);
+        REQUIRE(motion.filament > 0.);
+        REQUIRE(motion.length > 0.);
+        REQUIRE(motion.longest > 5.);
+        if (i == 1 && difference == Difference::Angle)
+            CHECK(motion.longest_dy / motion.longest > 0.99);
+        else
+            CHECK(motion.longest_dx / motion.longest > 0.99);
+    }
+    const double flow_ratio = (regions[1].filament / regions[1].length) /
+                              (regions[0].filament / regions[0].length);
+    CHECK_THAT(flow_ratio, Catch::Matchers::WithinRel(difference == Difference::Flow ? 2. : 1., 0.03));
+}
+
+} // namespace ironing_multiregion_contracts
+
+namespace flow_calibration_order_contracts {
+
+struct TopFillSnapshot {
+    std::vector<Points> paths;
+    std::vector<double> path_lengths_mm;
+    Point                center;
+    double               total_length_mm = 0.;
+    double               footprint_area_mm2 = 0.;
+    bool                 protected_order = true;
+    Polygons             _covered;
+};
+
+static TopFillSnapshot snapshot_top_fill(const Print &print)
+{
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->layer_count() > 0);
+    const Layer *layer = object->get_layer(int(object->layer_count() - 1));
+    REQUIRE(layer != nullptr);
+    REQUIRE_FALSE(layer->lslices.empty());
+
+    TopFillSnapshot result;
+    result.center = get_extents(layer->lslices.front()).center();
+    auto collect = [&](const auto &self, const ExtrusionEntity *entity, bool inherited_no_sort) -> void {
+        REQUIRE(entity != nullptr);
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+            const bool no_sort = inherited_no_sort || collection->no_sort;
+            for (const ExtrusionEntity *child : collection->entities)
+                self(self, child, no_sort);
+            return;
+        }
+        if (entity->role() != erTopSolidInfill)
+            return;
+        const auto *path = dynamic_cast<const ExtrusionPath *>(entity);
+        REQUIRE(path != nullptr);
+        const Polyline polyline = path->polyline.to_polyline();
+        REQUIRE(polyline.points.size() >= 2);
+        REQUIRE(path->length() > 0.);
+        result.paths.push_back(polyline.points);
+        const double path_length_mm = unscale<double>(path->length());
+        result.path_lengths_mm.push_back(path_length_mm);
+        result.total_length_mm += path_length_mm;
+        result.protected_order &= inherited_no_sort && !path->can_reverse();
+        path->polygons_covered_by_width(result._covered, 0.f);
+    };
+
+    // Read the ordered public fill entities produced by the slicing pipeline.
+    for (const LayerRegion *region : layer->regions()) {
+        REQUIRE(region != nullptr);
+        for (const ExtrusionEntity *entity : region->fills.entities)
+            collect(collect, entity, false);
+    }
+    REQUIRE(result.paths.size() >= 2);
+    REQUIRE(!result._covered.empty());
+    result.footprint_area_mm2 = std::abs(unscale<double>(unscale<double>(area(union_(result._covered)))));
+    REQUIRE(std::isfinite(result.total_length_mm));
+    REQUIRE(std::isfinite(result.footprint_area_mm2));
+    REQUIRE(result.total_length_mm > 0.);
+    REQUIRE(result.footprint_area_mm2 > 0.);
+    return result;
+}
+
+static DynamicPrintConfig config_for(bool special_order, const std::string &fill_order)
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"calib_flowrate_topinfill_special_order", special_order},
+        {"top_surface_pattern", "archimedeanchords"},
+        {"top_surface_fill_order", fill_order},
+        {"top_surface_density", "100%"},
+        {"top_surface_line_width", 0.42},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"wall_loops", 2},
+        {"wall_generator", "classic"},
+        {"center_of_surface_pattern", "each_surface"},
+        {"solid_infill_direction", 0.0},
+        {"align_infill_direction_to_model", false},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"enable_arc_fitting", false},
+        {"resolution", 0.01}
+    });
+    return config;
+}
+
+static TopFillSnapshot run_case(bool special_order, const std::string &fill_order)
+{
+    Print print;
+    Model model;
+    const DynamicPrintConfig config = config_for(special_order, fill_order);
+    Slic3r::Test::init_print({make_cube(12., 20., 0.8)}, print, model, config, nullptr, false);
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->config().calib_flowrate_topinfill_special_order == special_order);
+    return snapshot_top_fill(print);
+}
+
+static double center_distance_squared(const Point &point, const Point &center)
+{
+    const double dx = unscale<double>(point.x() - center.x());
+    const double dy = unscale<double>(point.y() - center.y());
+    return dx * dx + dy * dy;
+}
+
+} // namespace flow_calibration_order_contracts
+
+TEST_CASE("Flow calibration special order keeps the Archimedean top fill inside-out", "[Fill][FlowCalibrationOrder]")
+{
+    using namespace flow_calibration_order_contracts;
+    const TopFillSnapshot ordinary = run_case(false, "default");
+    const TopFillSnapshot calibrated = run_case(true, "default");
+
+    REQUIRE(ordinary.paths.size() >= 2);
+    REQUIRE(calibrated.paths.size() >= 2);
+    REQUIRE(calibrated.protected_order);
+    REQUIRE(calibrated.paths.back().size() >= 2);
+    const auto longest = std::max_element(calibrated.path_lengths_mm.begin(), calibrated.path_lengths_mm.end());
+    REQUIRE(longest != calibrated.path_lengths_mm.end());
+    const size_t longest_index = size_t(longest - calibrated.path_lengths_mm.begin());
+    REQUIRE(longest_index == calibrated.paths.size() - 1);
+    REQUIRE(center_distance_squared(calibrated.paths.back().front(), calibrated.center) <
+            center_distance_squared(calibrated.paths.back().back(), calibrated.center));
+
+    // Reordering/reversing the public extrusion paths must conserve deposition.
+    CHECK_THAT(calibrated.total_length_mm, Catch::Matchers::WithinAbs(ordinary.total_length_mm, 1e-6));
+    CHECK_THAT(calibrated.footprint_area_mm2, Catch::Matchers::WithinAbs(ordinary.footprint_area_mm2, 1e-6));
+}
+
+TEST_CASE("Explicit Archimedean top-fill order overrides flow calibration ordering", "[Fill][FlowCalibrationOrder]")
+{
+    using namespace flow_calibration_order_contracts;
+    const std::string fill_order = GENERATE("outward", "inward");
+    CAPTURE(fill_order);
+    const TopFillSnapshot ordinary = run_case(false, fill_order);
+    const TopFillSnapshot calibrated = run_case(true, fill_order);
+
+    REQUIRE(ordinary.paths.size() >= 2);
+    REQUIRE(calibrated.paths.size() == ordinary.paths.size());
+    REQUIRE(ordinary.protected_order);
+    REQUIRE(calibrated.protected_order);
+    // The explicit public order is authoritative even when the calibration
+    // flag is enabled, so both public ordered path sequences must match.
+    CHECK(calibrated.paths == ordinary.paths);
+    CHECK_THAT(calibrated.total_length_mm, Catch::Matchers::WithinAbs(ordinary.total_length_mm, 1e-6));
+    CHECK_THAT(calibrated.footprint_area_mm2, Catch::Matchers::WithinAbs(ordinary.footprint_area_mm2, 1e-6));
 }

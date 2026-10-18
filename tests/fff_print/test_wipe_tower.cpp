@@ -5361,3 +5361,406 @@ TEST_CASE("Unclaimed sparse infill with an absent source filament receives the l
 }
 
 } // namespace wiping_assignment_contracts
+
+namespace wipe_settings_next_contracts {
+
+namespace {
+
+struct WrappingPipelineRun {
+    bool has_tower = false;
+    float depth = 0.f;
+    bool invalid_motion = false;
+    std::string tower_gcode;
+    std::size_t positive_extrusions = 0;
+    float min_y = std::numeric_limits<float>::infinity();
+    float max_y = -std::numeric_limits<float>::infinity();
+};
+
+WrappingPipelineRun run_wrapping_pipeline(bool enabled)
+{
+    DynamicPrintConfig config = tower_estimate_config("rectangle", 1);
+    config.set_deserialize_strict({
+        {"enable_wrapping_detection", enabled},
+        {"wrapping_detection_layers", 2},
+        {"wrapping_exclude_area", "180x180,190x180,190x190,180x190"},
+        {"wipe_tower_x", 50},
+        {"wipe_tower_y", 50},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+        {"use_relative_e_distances", false},
+        {"wipe_tower_rotation_angle", 0},
+        {"gcode_comments", true},
+    });
+
+    Print print;
+    Model model;
+    init_print({make_cube(6., 6., 2.)}, print, model, config);
+    const auto validation = print.validate();
+    INFO("wrapping=" << enabled << " validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+
+    WrappingPipelineRun result;
+    result.has_tower = print.has_wipe_tower();
+    const std::string output = gcode(print);
+    result.tower_gcode = wipe_tower_regions(output);
+    if (result.has_tower)
+        result.depth = print.wipe_tower_data().depth;
+
+    const std::string start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start);
+    const std::string end_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End);
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool in_tower = false;
+    reader.parse_buffer(output, [&result, &in_tower, &start_tag, &end_tag](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string raw = line.raw();
+        if (raw.find(start_tag) != std::string::npos)
+            in_tower = true;
+        if (in_tower && line.extruding(self)) {
+            const double x0 = self.x();
+            const double y0 = self.y();
+            const double x1 = line.new_X(self);
+            const double y1 = line.new_Y(self);
+            const double dx = line.dist_X(self);
+            const double dy = line.dist_Y(self);
+            const double de = line.dist_E(self);
+            if (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(x1) || !std::isfinite(y1) ||
+                !std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(de)) {
+                result.invalid_motion = true;
+            } else if (std::hypot(dx, dy) > EPSILON) {
+                ++result.positive_extrusions;
+                result.min_y = std::min(result.min_y, float(std::min(y0, y1)));
+                result.max_y = std::max(result.max_y, float(std::max(y0, y1)));
+            }
+        }
+        if (raw.find(end_tag) != std::string::npos)
+            in_tower = false;
+    });
+    return result;
+}
+
+static std::optional<ExtrusionRole> output_role(std::string_view raw)
+{
+    if (!is_any_role_line(raw))
+        return std::nullopt;
+    const std::size_t colon = raw.find(':');
+    if (colon == std::string_view::npos)
+        return std::nullopt;
+    std::string_view role = raw.substr(colon + 1);
+    while (!role.empty() && role.front() == ' ')
+        role.remove_prefix(1);
+    while (!role.empty() && (role.back() == ' ' || role.back() == '\r'))
+        role.remove_suffix(1);
+    return ExtrusionEntity::string_to_role(role);
+}
+
+static bool is_object_role(ExtrusionRole role)
+{
+    switch (role) {
+    case erPerimeter:
+    case erExternalPerimeter:
+    case erOverhangPerimeter:
+    case erInternalInfill:
+    case erSolidInfill:
+    case erTopSolidInfill:
+    case erBottomSurface:
+    case erIroning:
+    case erBridgeInfill:
+    case erInternalBridgeInfill:
+    case erGapFill:
+        return true;
+    default:
+        return false;
+    }
+}
+
+struct PrimingPipelineRun {
+    std::string gcode;
+    std::size_t priming_positive_extrusions = 0;
+    std::size_t object_positive_extrusions = 0;
+    double object_xy_path = 0.;
+    double object_filament = 0.;
+    bool invalid_motion = false;
+};
+
+PrimingPipelineRun run_semm_priming(bool enabled)
+{
+    const DynamicPrintConfig config = multifilament_config(2, {
+        {"nozzle_diameter",                        "0.4,0.4"},
+        {"printer_extruder_id",                    "1,2"},
+        {"printer_extruder_variant",               "Direct Drive Standard,Direct Drive Standard"},
+        {"extruder_printable_height",              "0,0"},
+        {"single_extruder_multi_material",         false},
+        {"single_extruder_multi_material_priming", enabled},
+        {"wipe_tower_type",                        "type2"},
+        {"enable_prime_tower",                     true},
+        {"purge_in_prime_tower",                   false},
+        {"prime_tower_width",                      35},
+        {"wipe_tower_x",                           50},
+        {"wipe_tower_y",                           50},
+        {"preheat_time",                           0},
+        {"nozzle_temperature_initial_layer",       "215,215"},
+        {"nozzle_temperature",                     "240,240"},
+        {"wait_for_temp_on_wipe_tower",            true},
+        {"skirt_loops",                            0},
+        {"brim_type",                              "no_brim"},
+        {"raft_layers",                            0},
+        {"layer_change_gcode",                     "G92 E0\n"},
+        {"use_relative_e_distances",               true},
+        {"gcode_comments",                          true},
+    });
+    PrimingPipelineRun result;
+    result.gcode = slice_with_object_overrides(
+        {make_cube(6., 6., 2.), make_cube(6., 6., 2.)}, config,
+        {{{"extruder", 1}}, {{"extruder", 2}}});
+
+    bool in_priming = false;
+    bool in_tower = false;
+    ExtrusionRole active_role = erNone;
+    const std::string tower_start = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start);
+    const std::string tower_end = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End);
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(result.gcode, [&result, &in_priming, &in_tower, &active_role, &tower_start, &tower_end](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string raw = line.raw();
+        const std::string_view raw_view(raw);
+        if (const auto role = output_role(raw_view))
+            active_role = *role;
+        if (raw.find("; CP PRIMING START") != std::string::npos)
+            in_priming = true;
+        if (raw.find(tower_start) != std::string::npos)
+            in_tower = true;
+        if (line.extruding(self)) {
+            const double x0 = self.x();
+            const double y0 = self.y();
+            const double x1 = line.new_X(self);
+            const double y1 = line.new_Y(self);
+            const double dx = line.dist_X(self);
+            const double dy = line.dist_Y(self);
+            const double de = line.dist_E(self);
+            if (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(x1) || !std::isfinite(y1) ||
+                !std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(de)) {
+                result.invalid_motion = true;
+            } else if (std::hypot(dx, dy) > EPSILON) {
+                const bool tower_line = in_tower || active_role == erWipeTower;
+                if (in_priming)
+                    ++result.priming_positive_extrusions;
+                else if (!tower_line && is_object_role(active_role)) {
+                    ++result.object_positive_extrusions;
+                    result.object_xy_path += std::hypot(dx, dy);
+                    result.object_filament += de;
+                }
+            }
+        }
+        if (raw.find("; CP PRIMING END") != std::string::npos)
+            in_priming = false;
+        if (raw.find(tower_end) != std::string::npos)
+            in_tower = false;
+    });
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Wrapping detection creates a one-filament tower and emits its wall", "[WipeTower][WipeTowerSettings][WipeTowerWrappingSettings]")
+{
+    const WrappingPipelineRun disabled = run_wrapping_pipeline(false);
+    const WrappingPipelineRun enabled = run_wrapping_pipeline(true);
+
+    CHECK_FALSE(disabled.has_tower);
+    CHECK(disabled.tower_gcode.empty());
+    CHECK(disabled.positive_extrusions == 0);
+    CHECK_FALSE(disabled.invalid_motion);
+
+    REQUIRE(enabled.has_tower);
+    CHECK(enabled.depth > 0.f);
+    REQUIRE_FALSE(enabled.tower_gcode.empty());
+    CHECK(enabled.positive_extrusions > 0);
+    CHECK_FALSE(enabled.invalid_motion);
+    // Wrapping reserves a 10 mm deep detection wall;
+    // the getter is checked separately so this geometry oracle is not derived only from it.
+    constexpr float expected_wrapping_depth = 10.f;
+    CHECK_THAT(WipeTower::get_wrapping_detection_depth(), Catch::Matchers::WithinAbs(expected_wrapping_depth, 1e-6));
+    CHECK(enabled.max_y - enabled.min_y >= expected_wrapping_depth - 0.1f);
+}
+
+TEST_CASE("SEMM priming setting gates Type2 priming output without changing object deposition", "[WipeTower][WipeTowerSettings][WipeTowerSEMMPriming]")
+{
+    const PrimingPipelineRun disabled = run_semm_priming(false);
+    const PrimingPipelineRun enabled = run_semm_priming(true);
+
+    REQUIRE_FALSE(disabled.gcode.empty());
+    REQUIRE_FALSE(enabled.gcode.empty());
+    CHECK(disabled.gcode.find("; CP PRIMING START") == std::string::npos);
+    CHECK(disabled.gcode.find("; CP PRIMING END") == std::string::npos);
+    CHECK(disabled.priming_positive_extrusions == 0);
+    CHECK_FALSE(disabled.invalid_motion);
+    REQUIRE(disabled.object_positive_extrusions > 0);
+
+    REQUIRE(enabled.gcode.find("; CP PRIMING START") != std::string::npos);
+    REQUIRE(enabled.gcode.find("; CP PRIMING END") != std::string::npos);
+    CHECK(enabled.priming_positive_extrusions > 0);
+    CHECK_FALSE(enabled.invalid_motion);
+    REQUIRE(enabled.object_positive_extrusions > 0);
+    CHECK(enabled.object_positive_extrusions == disabled.object_positive_extrusions);
+    CHECK_THAT(enabled.object_xy_path, Catch::Matchers::WithinRel(disabled.object_xy_path, 1e-6));
+    CHECK_THAT(enabled.object_filament, Catch::Matchers::WithinRel(disabled.object_filament, 1e-6));
+}
+
+} // namespace wipe_settings_next_contracts
+
+
+namespace wiping_export_contracts {
+namespace {
+
+struct CopyDeposition {
+    double wall_length = 0.;
+    double infill_length = 0.;
+    double filament = 0.;
+};
+
+struct WipingExport {
+    std::array<CopyDeposition, 4> copies;
+    size_t overridden_layers = 0;
+};
+
+WipingExport export_wiping_copies(bool objects, bool infill)
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        {"single_extruder_multi_material", true},
+        {"single_extruder_multi_material_priming", false},
+        {"purge_in_prime_tower", true}, {"enable_prime_tower", true},
+        {"wipe_tower_type", "type2"}, {"wipe_tower_x", 100.}, {"wipe_tower_y", 100.},
+        {"prime_tower_width", 20.}, {"prime_volume", 20.},
+        {"flush_volumes_matrix", "0,80,80,0"}, {"flush_multiplier", 1.},
+        {"filament_minimal_purge_on_wipe_tower", "0,0"},
+        {"filament_soluble", "0,0"}, {"filament_is_support", "0,0"},
+        {"filament_flow_ratio", "1,1"}, {"retraction_length", 0.},
+        {"flush_into_objects", false}, {"flush_into_infill", false}, {"flush_into_support", false},
+        {"outer_wall_filament_id", 1}, {"inner_wall_filament_id", 1},
+        {"sparse_infill_filament_id", 2}, {"internal_solid_filament_id", 2},
+        {"top_surface_filament_id", 2}, {"bottom_surface_filament_id", 2},
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1}, {"top_shell_layers", 0}, {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "30%"}, {"sparse_infill_pattern", "rectilinear"},
+        {"is_infill_first", false}, {"wall_generator", "classic"},
+        {"seam_position", "rear"}, {"seam_gap", "0%"},
+        {"enable_support", false}, {"skirt_loops", 0}, {"brim_type", "no_brim"},
+        {"enable_arc_fitting", false}, {"spiral_mode", false},
+        {"gcode_flavor", "marlin"}, {"use_relative_e_distances", true},
+        {"change_filament_gcode", "T[next_extruder]\n"},
+        {"machine_start_gcode", "G90\nM83\nG92 E0\n"},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    // The second object retains both assigned filaments. It prevents the
+    // dedicated wiping object from eliminating a tool as a don't-care color.
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides = {
+        {{"flush_into_objects", objects}, {"flush_into_infill", infill}},
+        {{"flush_into_objects", false}, {"flush_into_infill", false}},
+    };
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{make_cube(8., 8., 0.8), make_cube(6., 6., 0.8)},
+               print, model, config, &overrides, false, 2);
+    std::array<BoundingBoxf3, 4> boxes;
+    REQUIRE(model.objects.size() == 2);
+    for (size_t object = 0; object < 2; ++object) {
+        REQUIRE(model.objects[object]->instances.size() == 2);
+        for (size_t copy = 0; copy < 2; ++copy) {
+            model.objects[object]->instances[copy]->set_offset(Vec3d(20. + 25. * copy, 20. + 25. * object, 0.));
+            boxes[object * 2 + copy] = model.objects[object]->instance_bounding_box(copy);
+        }
+    }
+    print.apply(model, config);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    WipingExport result;
+    for (const LayerTools &layer : print.wipe_tower_data().tool_ordering) {
+        // This public accessor lacks a const overload; the observed predicate
+        // does not modify the tool plan or create overrides.
+        if (const_cast<LayerTools &>(layer).wiping_extrusions().is_anything_overridden())
+            ++result.overridden_layers;
+    }
+
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string role;
+    int current_tool = -1;
+    reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string &raw = line.raw();
+        if (line.cmd() == "T0") current_tool = 0;
+        if (line.cmd() == "T1") current_tool = 1;
+        for (const std::string prefix : {std::string(";TYPE:"), std::string("; FEATURE:")}) {
+            if (raw.compare(0, prefix.size(), prefix) == 0) {
+                role = raw.substr(prefix.size());
+                const size_t first = role.find_first_not_of(" \t");
+                role = first == std::string::npos ? std::string() : role.substr(first);
+                const size_t last = role.find_last_not_of(" \t\r");
+                if (last != std::string::npos)
+                    role.resize(last + 1);
+            }
+        }
+        if (!line.cmd_is("G1") || !line.extruding(self) || line.dist_XY(self) <= 0.)
+            return;
+        REQUIRE(std::isfinite(line.new_X(self)));
+        REQUIRE(std::isfinite(line.new_Y(self)));
+        REQUIRE(std::isfinite(line.dist_E(self)));
+        size_t matched = 0;
+        for (size_t i = 0; i < boxes.size(); ++i) {
+            const auto inside = [&](double x, double y) {
+                return x >= boxes[i].min.x() - 0.02 && x <= boxes[i].max.x() + 0.02 &&
+                       y >= boxes[i].min.y() - 0.02 && y <= boxes[i].max.y() + 0.02;
+            };
+            if (!inside(self.x(), self.y()) || !inside(line.new_X(self), line.new_Y(self)))
+                continue;
+            ++matched;
+            REQUIRE(current_tool >= 0);
+            REQUIRE(current_tool <= 1);
+            CHECK(line.new_Z(self) >= 0.2 - 1e-4);
+            CHECK(line.new_Z(self) <= 0.8 + 1e-4);
+            INFO("copy=" << i << " role=" << role << " line=" << raw);
+            if (role == "Outer wall" || role == "Inner wall") {
+                if (i >= 2) CHECK(current_tool == 0);
+                result.copies[i].wall_length += line.dist_XY(self);
+            }
+            else {
+                REQUIRE(role == "Sparse infill");
+                if (i >= 2) CHECK(current_tool == 1);
+                result.copies[i].infill_length += line.dist_XY(self);
+            }
+            result.copies[i].filament += line.dist_E(self);
+        }
+        CHECK(matched <= 1);
+        // Every object-role deposition must belong to one of the four copies;
+        // tower deposition is physically separate at (100,100).
+        if (role == "Outer wall" || role == "Inner wall" || role == "Sparse infill")
+            CHECK(matched == 1);
+    });
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Object and infill purging preserve every exported copy's deposited material",
+          "[WipeTower][WipingExportCopies]")
+{
+    const bool into_objects = GENERATE(false, true);
+    CAPTURE(into_objects);
+    const WipingExport baseline = export_wiping_copies(false, false);
+    const WipingExport wiping = export_wiping_copies(into_objects, !into_objects);
+    CHECK(baseline.overridden_layers == 0);
+    REQUIRE(wiping.overridden_layers > 0);
+    for (size_t copy = 0; copy < baseline.copies.size(); ++copy) {
+        CAPTURE(copy);
+        const CopyDeposition &before = baseline.copies[copy];
+        const CopyDeposition &after = wiping.copies[copy];
+        REQUIRE(before.wall_length > 0.);
+        REQUIRE(before.infill_length > 0.);
+        REQUIRE(before.filament > 0.);
+        CHECK_THAT(after.wall_length, Catch::Matchers::WithinAbs(before.wall_length, 0.1));
+        CHECK_THAT(after.infill_length, Catch::Matchers::WithinAbs(before.infill_length, 0.1));
+        CHECK_THAT(after.filament, Catch::Matchers::WithinAbs(before.filament, 0.02));
+    }
+}
+
+} // namespace wiping_export_contracts

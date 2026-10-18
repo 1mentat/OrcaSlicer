@@ -6738,3 +6738,275 @@ TEST_CASE("Chamber targets follow used-filament activation, maximum temperature,
 }
 
 } // namespace chamber_temperature_pipeline_contracts
+
+TEST_CASE("Filament z-hop type overrides preserve material while selecting public lift geometry",
+          "[GCode][ZHopType][FilamentRetractionOverrides][Pipeline]")
+{
+    struct Row {
+        const char *serialized;
+        const char *name;
+        ZHopType    effective_type;
+    };
+    const std::array<Row, 5> rows{{
+        {"nil",         "nil fallback", ZHopType::zhtNormal},
+        {"Auto Lift",   "auto",         ZHopType::zhtAuto},
+        {"Normal Lift", "normal",       ZHopType::zhtNormal},
+        {"Slope Lift",  "slope",        ZHopType::zhtSlope},
+        {"Spiral Lift", "spiral",       ZHopType::zhtSpiral},
+    }};
+
+    DynamicPrintConfig baseline_config = gcode_print_variance_contracts::zhop_type_config(ZHopType::zhtNormal);
+    baseline_config.set_deserialize_strict({
+        {"filament_map", "1"},
+        {"filament_z_hop_types", "nil"},
+    });
+    const auto baseline_output = gcode_print_variance_contracts::fresh_export(baseline_config, true);
+    const auto baseline_material = gcode_print_variance_contracts::motion_evidence(baseline_output.text, baseline_config);
+    const auto baseline_motion = gcode_print_variance_contracts::zhop_motion_evidence(baseline_output.text, baseline_config);
+    REQUIRE(baseline_material.extrusion_moves > 0);
+    REQUIRE(baseline_motion.retractions > 0);
+    REQUIRE(baseline_motion.unretractions > 0);
+    REQUIRE(baseline_motion.same_layer_excursions > 0);
+    REQUIRE(baseline_motion.same_layer_z_only_lift_moves > 0);
+    CHECK(baseline_motion.same_layer_diagonal_lift_moves == 0);
+
+    for (const Row &row : rows) {
+        INFO("filament z-hop type " << row.name);
+        DynamicPrintConfig config = gcode_print_variance_contracts::zhop_type_config(ZHopType::zhtNormal);
+        config.set_deserialize_strict({
+            {"filament_map", "1"},
+            {"filament_z_hop_types", row.serialized},
+        });
+        const auto *override_option = config.option<ConfigOptionEnumsGenericNullable>("filament_z_hop_types", true);
+        REQUIRE(override_option != nullptr);
+        REQUIRE(override_option->values.size() == 1);
+        if (std::string(row.serialized) == "nil")
+            REQUIRE(override_option->is_nil());
+        else
+            REQUIRE_FALSE(override_option->is_nil());
+
+        const auto output = gcode_print_variance_contracts::fresh_export(config, true);
+        const auto material = gcode_print_variance_contracts::motion_evidence(output.text, config);
+        const auto motion = gcode_print_variance_contracts::zhop_motion_evidence(output.text, config);
+        REQUIRE(material.extrusion_moves > 0);
+        REQUIRE(motion.retractions > 0);
+        REQUIRE(motion.unretractions > 0);
+        REQUIRE(motion.same_layer_excursions > 0);
+        gcode_print_variance_contracts::require_same_material(baseline_material, material);
+
+        if (row.effective_type == ZHopType::zhtNormal) {
+            REQUIRE(motion.same_layer_z_only_lift_moves > 0);
+            CHECK(motion.same_layer_diagonal_lift_moves == 0);
+        } else if (row.effective_type == ZHopType::zhtSlope) {
+            REQUIRE(motion.same_layer_diagonal_lift_moves > 0);
+            CHECK(motion.same_layer_maximum_diagonal_run == 1);
+        } else if (row.effective_type == ZHopType::zhtSpiral) {
+            REQUIRE(motion.same_layer_maximum_diagonal_run >= 4);
+        } else {
+            // A straight-walled cube has no overhang crossing, so Auto selects the
+            // ordinary slope route. The overhang-specific Auto route is covered by
+            // the dedicated support_fixture case above.
+            REQUIRE(motion.same_layer_diagonal_lift_moves > 0);
+            CHECK(motion.same_layer_maximum_diagonal_run == 1);
+            CHECK(motion.same_layer_overhang_spiral_excursions == 0);
+        }
+    }
+}
+
+namespace gcode_print_variance_contracts {
+namespace calibration_gcode_followup {
+
+namespace {
+
+struct PublicPALineSegment {
+    double pressure_advance = std::numeric_limits<double>::quiet_NaN();
+    double z = std::numeric_limits<double>::quiet_NaN();
+    double xy = 0.0;
+    double e = 0.0;
+};
+
+struct PublicPALineEvidence {
+    std::vector<double> pressure_advances;
+    std::vector<PublicPALineSegment> outer_wall_segments;
+    std::vector<double> bottom_surface_zs;
+    std::vector<double> top_surface_zs;
+    size_t              positive_xy_moves = 0;
+    double              positive_xy_path = 0.0;
+    double              bottom_surface_xy_path = 0.0;
+    double              top_surface_xy_path = 0.0;
+    bool                finite = true;
+};
+
+PublicPALineEvidence parse_public_pa_line_export(const std::string &gcode,
+                                                  const DynamicPrintConfig &config)
+{
+    PublicPALineEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string active_role;
+    double active_pressure_advance = std::numeric_limits<double>::quiet_NaN();
+    reader.parse_buffer(gcode, [&evidence, &active_role, &active_pressure_advance](GCodeReader &self,
+                                                                                    const GCodeReader::GCodeLine &line) {
+        const auto trim_tag = [](std::string_view value) {
+            while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+                value.remove_prefix(1);
+            while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+                value.remove_suffix(1);
+            return value;
+        };
+        const std::string_view comment = trim_tag(line.comment());
+        if (comment.rfind("TYPE:", 0) == 0)
+            active_role = std::string(trim_tag(comment.substr(5)));
+        else if (comment.rfind("FEATURE:", 0) == 0)
+            active_role = std::string(trim_tag(comment.substr(8)));
+
+        if (line.cmd_is("M900")) {
+            float pa = 0.f;
+            if (!line.has_value('K', pa) || !std::isfinite(pa)) {
+                evidence.finite = false;
+                return;
+            }
+            active_pressure_advance = pa;
+            evidence.pressure_advances.push_back(pa);
+            return;
+        }
+
+        if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) ||
+            !line.extruding(self))
+            return;
+        const double xy = line.dist_XY(self);
+        const double de = line.dist_E(self);
+        const double z = line.new_Z(self);
+        if (!std::isfinite(xy) || !std::isfinite(de) || !std::isfinite(z)) {
+            evidence.finite = false;
+            return;
+        }
+        if (xy <= EPSILON || de <= EPSILON)
+            return;
+
+        ++evidence.positive_xy_moves;
+        evidence.positive_xy_path += xy;
+        if (active_role == "Outer wall") {
+            if (!std::isfinite(active_pressure_advance)) {
+                evidence.finite = false;
+                return;
+            }
+            evidence.outer_wall_segments.push_back({active_pressure_advance, z, xy, de});
+        } else if (active_role == "Bottom surface") {
+            evidence.bottom_surface_xy_path += xy;
+            evidence.bottom_surface_zs.push_back(z);
+        } else if (active_role == "Top surface") {
+            evidence.top_surface_xy_path += xy;
+            evidence.top_surface_zs.push_back(z);
+        }
+    });
+    return evidence;
+}
+
+bool contains_pa_sequence(const std::vector<double> &values,
+                          const std::array<double, 6> &expected)
+{
+    if (values.size() < expected.size())
+        return false;
+    for (size_t start = 0; start + expected.size() <= values.size(); ++start) {
+        bool match = true;
+        for (size_t i = 0; i < expected.size(); ++i)
+            match = match && std::abs(values[start + i] - expected[i]) <= 1e-4;
+        if (match)
+            return true;
+    }
+    return false;
+}
+
+void require_public_pa_values(const PublicPALineEvidence &evidence)
+{
+    REQUIRE(evidence.finite);
+    REQUIRE(evidence.positive_xy_moves > 0);
+    REQUIRE(evidence.positive_xy_path > 0.0);
+    REQUIRE_FALSE(evidence.pressure_advances.empty());
+    const std::array<double, 6> expected{{0.0, 0.02, 0.0, 0.03, 0.04, 0.0}};
+    REQUIRE(contains_pa_sequence(evidence.pressure_advances, expected));
+    for (const double pa : evidence.pressure_advances) {
+        REQUIRE(std::isfinite(pa));
+        CHECK(pa >= -1e-6);
+        CHECK(pa <= 0.0401);
+    }
+}
+
+void require_outer_wall_contract(const PublicPALineEvidence &evidence)
+{
+    REQUIRE(evidence.outer_wall_segments.size() == 3);
+    const std::array<double, 3> expected_pa{{0.02, 0.03, 0.04}};
+    for (size_t i = 0; i < expected_pa.size(); ++i) {
+        const PublicPALineSegment &segment = evidence.outer_wall_segments[i];
+        CHECK_THAT(segment.pressure_advance, Catch::Matchers::WithinAbs(expected_pa[i], 1e-4));
+        CHECK_THAT(segment.z, Catch::Matchers::WithinAbs(0.2, 1e-4));
+        CHECK_THAT(segment.xy, Catch::Matchers::WithinAbs(40.0, 1e-3));
+        REQUIRE(std::isfinite(segment.e));
+        REQUIRE(segment.e > 0.0);
+    }
+}
+
+} // namespace
+
+TEST_CASE("Public PA line export emits calibrated lines and optional number layers",
+          "[GCode][Calibration][CalibrationPALine][GCodeExportWorkflows]")
+{
+    Calib_Params without_numbers_params;
+    without_numbers_params.mode = CalibMode::Calib_PA_Line;
+    without_numbers_params.start = 0.02;
+    without_numbers_params.end = 0.04;
+    without_numbers_params.step = 0.01;
+    without_numbers_params.print_numbers = false;
+
+    Calib_Params with_numbers_params = without_numbers_params;
+    with_numbers_params.print_numbers = true;
+
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"gcode_flavor", "marlin2"},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+        {"nozzle_diameter", "0.4"},
+        {"initial_layer_print_height", "0.2"},
+        {"z_offset", 0.0},
+        {"belt_printer", false},
+        {"enable_pressure_advance", false},
+        {"adaptive_pressure_advance", false},
+        {"adaptive_pressure_advance_overhangs", false},
+        {"input_shaping_emit", false},
+    });
+    const ExportedPrint without_numbers = export_calibration("marlin2", without_numbers_params, &config);
+    const ExportedPrint with_numbers = export_calibration("marlin2", with_numbers_params, &config);
+    const PublicPALineEvidence plain = parse_public_pa_line_export(without_numbers.text, config);
+    const PublicPALineEvidence annotated = parse_public_pa_line_export(with_numbers.text, config);
+    require_public_pa_values(plain);
+    require_public_pa_values(annotated);
+    require_outer_wall_contract(plain);
+    require_outer_wall_contract(annotated);
+
+    CHECK_THAT(plain.bottom_surface_xy_path, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(plain.top_surface_xy_path, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE(annotated.bottom_surface_xy_path > 0.0);
+    REQUIRE(annotated.top_surface_xy_path > 0.0);
+    REQUIRE_FALSE(annotated.bottom_surface_zs.empty());
+    REQUIRE_FALSE(annotated.top_surface_zs.empty());
+    for (const double z : annotated.bottom_surface_zs)
+        CHECK_THAT(z, Catch::Matchers::WithinAbs(0.2, 1e-4));
+    for (const double z : annotated.top_surface_zs)
+        CHECK_THAT(z, Catch::Matchers::WithinAbs(0.4, 1e-4));
+
+    for (size_t i = 0; i < plain.outer_wall_segments.size(); ++i) {
+        const PublicPALineSegment &plain_segment = plain.outer_wall_segments[i];
+        const PublicPALineSegment &annotated_segment = annotated.outer_wall_segments[i];
+        CHECK_THAT(annotated_segment.pressure_advance,
+                   Catch::Matchers::WithinAbs(plain_segment.pressure_advance, 1e-4));
+        CHECK_THAT(annotated_segment.z, Catch::Matchers::WithinAbs(plain_segment.z, 1e-4));
+        CHECK_THAT(annotated_segment.xy, Catch::Matchers::WithinAbs(plain_segment.xy, 1e-3));
+        CHECK_THAT(annotated_segment.e, Catch::Matchers::WithinAbs(plain_segment.e, 1e-5));
+    }
+    CHECK(annotated.positive_xy_path > plain.positive_xy_path);
+    CHECK(annotated.positive_xy_moves > plain.positive_xy_moves);
+}
+
+} // namespace calibration_gcode_followup
+} // namespace gcode_print_variance_contracts

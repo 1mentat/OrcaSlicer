@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Public belt tree support landing contracts with a valid large-nozzle configuration. Exact two-neighbour merge reachability and kills require native validation.",
+  "description": "Public belt tree support landing contracts with a valid large-nozzle configuration. Merged landing condition and radius probes remain unvalidated; the assignment-only historical survivor is retained separately with its source-analysis limitation.",
   "test_filter": "BeltTreeLanding",
   "mutants": [
     {
@@ -11,15 +11,6 @@
       "expected_matches": 1,
       "test_filter": "BeltTreeLanding",
       "description": "Disable the two-neighbour merged-node belt termination. The public floor-distance and extrusion checks test the resulting geometry if the fixture reaches this branch."
-    },
-    {
-      "id": "tree-belt-merged-node-keeps-buildplate-large-nozzle",
-      "path": "src/libslic3r/Support/TreeSupport.cpp",
-      "old": "                        node_parent->to_buildplate = false;",
-      "new": "                        node_parent->to_buildplate = true;",
-      "expected_matches": 1,
-      "test_filter": "BeltTreeLanding",
-      "description": "Keep a merged node buildplate-bound after belt landing. The public support geometry checks challenge the classification if the fixture reaches this branch."
     },
     {
       "id": "tree-belt-merged-landing-radius-zero-large-nozzle",
@@ -38,6 +29,19 @@
       "expected_matches": 1,
       "test_filter": "BeltTreeLanding",
       "description": "Ignore the explicit support floor offset. Lower and raised fixtures must land near their configured oblique planes and shift signed height relative to the fixed nominal plane; unchanged geometry fails ordinary assertions."
+    }
+  ],
+  "known_survivors": [
+    {
+      "id": "tree-belt-merged-node-keeps-buildplate-large-nozzle",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "                        node_parent->to_buildplate = false;",
+      "new": "                        node_parent->to_buildplate = true;",
+      "expected_matches": 1,
+      "test_filter": "BeltTreeLanding",
+      "description": "Keep a merged node buildplate-bound after belt landing. The public support geometry checks challenge the classification if the fixture reaches this branch.",
+      "status": "survived",
+      "scope": "Observed survivor at 703579a35a639d78ebd935b9e82d4b306592400a. Withdrawn from future execution: in the merged termination arm the two original nodes are invalidated immediately, and current production consumers do not read their to_buildplate flag afterward. This is source analysis, not a mutation kill or a reduced historical survivor count. The other merged landing probes remain executable and require a threshold-sensitive fixture."
     }
   ]
 }

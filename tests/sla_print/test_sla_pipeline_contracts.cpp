@@ -1403,3 +1403,238 @@ TEST_CASE("SLA overlapping objects are unioned before material statistics",
     CHECK_THAT(fixture.print.print_statistics().objects_used_material,
                Catch::Matchers::WithinRel(560.0, 0.02));
 }
+
+namespace sla_hollowing_thickness_followup_contracts {
+
+struct HollowRun {
+    double volume = 0.;
+    double width = 0.;
+    double depth = 0.;
+};
+
+HollowRun run_hollowing(double min_thickness)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("hollowing_enable", new ConfigOptionBool(true));
+    config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(min_thickness));
+    config.set_key_value("hollowing_quality", new ConfigOptionFloat(0.2));
+    config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(0.25));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(20.0, 20.0, 10.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    REQUIRE(fixture.model.objects.size() == 1);
+    const ModelObject *source = fixture.model.objects.front();
+    REQUIRE(source != nullptr);
+    REQUIRE(std::abs(static_cast<double>(source->raw_mesh().volume())) > 0.);
+    INFO("hollowing validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+
+    PrintBase::TaskParams task;
+    task.to_object_step = slaposHollowing;
+    fixture.print.set_task(task);
+    fixture.print.process();
+
+    REQUIRE(fixture.print.objects().size() == 1);
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->is_step_done(slaposHollowing));
+    // Compare in the same public print-object coordinate frame.
+    const auto source_bbox = object->transformed_mesh().bounding_box();
+    REQUIRE(source_bbox.defined);
+    const indexed_triangle_set &interior = object->hollowed_interior_mesh();
+    REQUIRE_FALSE(interior.empty());
+
+    TriangleMesh interior_mesh(interior);
+    const auto bbox = interior_mesh.bounding_box();
+    const double bounds_tolerance = 0.05;
+    CHECK(bbox.min.x() >= source_bbox.min.x() - bounds_tolerance);
+    CHECK(bbox.max.x() <= source_bbox.max.x() + bounds_tolerance);
+    CHECK(bbox.min.y() >= source_bbox.min.y() - bounds_tolerance);
+    CHECK(bbox.max.y() <= source_bbox.max.y() + bounds_tolerance);
+    CHECK(bbox.min.z() >= source_bbox.min.z() - bounds_tolerance);
+    CHECK(bbox.max.z() <= source_bbox.max.z() + bounds_tolerance);
+    HollowRun result;
+    result.volume = std::abs(static_cast<double>(interior_mesh.volume()));
+    result.width = bbox.max.x() - bbox.min.x();
+    result.depth = bbox.max.y() - bbox.min.y();
+    REQUIRE(std::isfinite(result.volume));
+    REQUIRE(std::isfinite(result.width));
+    REQUIRE(std::isfinite(result.depth));
+    REQUIRE(result.volume > 0.);
+    REQUIRE(result.width > 0.);
+    REQUIRE(result.depth > 0.);
+    return result;
+}
+
+} // namespace sla_hollowing_thickness_followup_contracts
+
+TEST_CASE("SLA hollowing wall thickness contracts the public interior",
+          "[SLAPrint][SLAHollowing][SLAHollowingThickness]")
+{
+    const auto thin = sla_hollowing_thickness_followup_contracts::run_hollowing(1.0);
+    const auto thick = sla_hollowing_thickness_followup_contracts::run_hollowing(3.0);
+
+    REQUIRE(thin.volume > 0.);
+    REQUIRE(thick.volume > 0.);
+    CHECK(thick.volume < thin.volume);
+    CHECK(thick.width < thin.width);
+    CHECK(thick.depth < thin.depth);
+}
+
+namespace sla_support_pad_followup_v4 {
+
+struct AroundPadSummary {
+    bool   empty = true;
+    double volume = 0.0;
+    double width = 0.0;
+    double depth = 0.0;
+    double z_span = 0.0;
+};
+
+void enable_common_pad(DynamicPrintConfig &config, bool everywhere)
+{
+    config.set_key_value("pad_enable", new ConfigOptionBool(true));
+    config.set_key_value("pad_around_object", new ConfigOptionBool(true));
+    config.set_key_value("pad_around_object_everywhere", new ConfigOptionBool(everywhere));
+    config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_brim_size", new ConfigOptionFloat(4.0));
+    config.set_key_value("pad_wall_slope", new ConfigOptionFloat(45.0));
+    config.set_key_value("pad_max_merge_distance", new ConfigOptionFloat(50.0));
+    config.set_key_value("pad_object_gap", new ConfigOptionFloat(1.0));
+}
+
+AroundPadSummary run_around_object_pad(bool everywhere)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    enable_common_pad(config, everywhere);
+
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA around-object pad validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposPad));
+    TriangleMesh pad = object->pad_mesh();
+    AroundPadSummary result;
+    result.empty = pad.empty();
+    if (!everywhere) {
+        REQUIRE(result.empty);
+        return result;
+    }
+
+    REQUIRE_FALSE(result.empty);
+    result.volume = std::abs(static_cast<double>(pad.volume()));
+    const auto bbox = pad.bounding_box();
+    result.width = bbox.max.x() - bbox.min.x();
+    result.depth = bbox.max.y() - bbox.min.y();
+    result.z_span = bbox.max.z() - bbox.min.z();
+    REQUIRE(std::isfinite(result.volume));
+    REQUIRE(std::isfinite(result.width));
+    REQUIRE(std::isfinite(result.depth));
+    REQUIRE(std::isfinite(result.z_span));
+    REQUIRE(result.volume > 0.0);
+    REQUIRE(result.width > 10.0);
+    REQUIRE(result.depth > 10.0);
+    REQUIRE(result.z_span > 0.0);
+    return result;
+}
+
+} // namespace sla_support_pad_followup_v4
+
+TEST_CASE("SLA around-object and everywhere pads expose distinct public footprints",
+          "[SLAPrint][SLAFeatures][SLAAroundPad]")
+{
+    const auto around = sla_support_pad_followup_v4::run_around_object_pad(false);
+    const auto everywhere = sla_support_pad_followup_v4::run_around_object_pad(true);
+    CHECK(around.empty);
+    REQUIRE_FALSE(everywhere.empty);
+    CHECK(everywhere.width > 10.0);
+    CHECK(everywhere.depth > 10.0);
+    CHECK(everywhere.z_span > 0.0);
+    CHECK(everywhere.volume > 0.0);
+}
+
+TEST_CASE("SLA everywhere pads retain a positive product after filtering manual base points",
+          "[SLAPrint][SLAFeatures][SLAAroundPad][SLAManualSupportPoints]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    sla_support_pad_followup_v4::enable_common_pad(config, true);
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(1.0));
+
+    sla::SupportPoints points{
+        sla::SupportPoint(2.f, 2.f, 0.f, 0.5f, true),
+        sla::SupportPoint(8.f, 8.f, 0.f, 0.5f, false),
+    };
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA everywhere support validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportPoints));
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    REQUIRE(object->is_step_done(slaposPad));
+    REQUIRE(object->get_support_points().empty());
+    TriangleMesh pad = object->pad_mesh();
+    REQUIRE_FALSE(pad.empty());
+    CHECK(std::isfinite(static_cast<double>(pad.volume())));
+    CHECK(std::abs(static_cast<double>(pad.volume())) > 0.0);
+}
+
+TEST_CASE("SLA around-object pads retain a footprint from real elevated supports",
+          "[SLAPrint][SLAFeatures][SLAAroundPad][SLAIntersector]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    sla_support_pad_followup_v4::enable_common_pad(config, false);
+    // Keep the elevated island outside the grounded cube footprint. With buildplate-only
+    // support enabled, the pillar must descend unobstructed to the bed.
+    config.set_key_value("support_buildplate_only", new ConfigOptionBool(true));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(1.0));
+
+    TriangleMesh model_mesh = make_cube(10.0, 10.0, 1.0);
+    TriangleMesh elevated_island = make_cube(6.0, 6.0, 2.0);
+    elevated_island.translate(12.f, 2.f, 5.f);
+    model_mesh.merge(elevated_island);
+    sla::SupportPoints points{sla::SupportPoint(15.f, 5.f, 5.f, 0.5f, true)};
+
+    SlaCubeFixture fixture(std::move(config), std::move(model_mesh), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA elevated-support pad validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    REQUIRE(object->is_step_done(slaposPad));
+    REQUIRE(object->get_support_points().size() == 1);
+    TriangleMesh support = object->support_mesh();
+    TriangleMesh pad = object->pad_mesh();
+    REQUIRE_FALSE(support.empty());
+    REQUIRE_FALSE(pad.empty());
+    REQUIRE(std::isfinite(static_cast<double>(support.volume())));
+    REQUIRE(std::isfinite(static_cast<double>(pad.volume())));
+    REQUIRE(std::abs(static_cast<double>(support.volume())) > 0.0);
+    REQUIRE(std::abs(static_cast<double>(pad.volume())) > 0.0);
+}

@@ -776,15 +776,15 @@ TEST_CASE("Surface cuts choose the closest of overlapping interior strips", "[Cu
     const ExPolygon shape(scaled_rectangle(1., 1., 29., 9.));
     const Emboss::OrthoProject projection = scaled_cube_projection(100.f);
 
-    // The two interior candidates cover the same projected gap. Their depth
-    // centers are 25 and 45, while the selected outer strips center around 5;
-    // the production ordering should choose the nearer candidate.
+    // Start this one-shape selection at the front projection, making the
+    // outer strips the initial target; the two overlapping interior candidates
+    // then exercise select_patches' depth-center ordering for the remaining gap.
     const SurfaceCut cut = cut_surface(
         {shape},
         {shifted_strip(0.f, 0.f), shifted_strip(20.f, 0.f),
          shifted_strip(10.f, 20.f), shifted_strip(10.f, 40.f)},
         projection,
-        .5f);
+        0.f);
     check_three_strip_cut(cut, 224.);
     check_three_strip_footprint(cut, shape);
     bool has_near_interior = false;

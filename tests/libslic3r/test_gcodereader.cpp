@@ -1,3 +1,6 @@
+#include <string>
+
+#include "test_utils.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -52,4 +55,17 @@ TEST_CASE("A G-code reader without a config uses the default one", "[GCodeReader
     GCodeReader reader;
     CHECK(reader.config().use_relative_e_distances.value == relative);
     CHECK_THAT(second_move_extrusion(reader), Catch::Matchers::WithinAbs(relative ? 1.f : 0.f, 1e-6));
+}
+
+TEST_CASE("GCodeReader reports a missing file through its boolean contract",
+          "[GCodeReader][GCodeReaderPublic]")
+{
+    ScopedTemporaryDir directory("orca-gcode-reader-missing");
+    const std::string missing = (directory.path() / "not-there.gcode").string();
+    GCodeReader reader;
+    bool callback_invoked = false;
+    const bool parsed = reader.parse_file_raw(missing,
+        [&](GCodeReader&, const char*, const char*) { callback_invoked = true; });
+    CHECK_FALSE(parsed);
+    CHECK_FALSE(callback_invoked);
 }

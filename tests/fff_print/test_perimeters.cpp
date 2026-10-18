@@ -1425,3 +1425,137 @@ TEST_CASE("Arachne fuzzy skin modes preserve their mode-specific perimeter contr
 }
 
 } // namespace fuzzy_mode_pipeline_contracts
+
+namespace fuzzy_mode_pipeline_contracts {
+namespace fuzzy_noise_pipeline_followup {
+
+OuterPerimeterSnapshot slice_noise(const char *noise_type, const char *fuzzy_type)
+{
+    DynamicPrintConfig config = fuzzy_mode_config("displacement");
+    config.set_deserialize_strict({
+        {"fuzzy_skin", fuzzy_type},
+        {"fuzzy_skin_noise_type", noise_type},
+        {"fuzzy_skin_thickness", 0.25},
+        {"fuzzy_skin_point_distance", 0.75},
+        {"fuzzy_skin_scale", 1.0},
+        {"fuzzy_skin_octaves", 4},
+        {"fuzzy_skin_persistence", 0.5},
+        {"fuzzy_skin_ripples_per_layer", 8},
+        {"fuzzy_skin_ripple_offset", 0},
+        {"fuzzy_skin_layers_between_ripple_offset", 1},
+    });
+
+    Print print;
+    init_and_process_print({make_cube(12., 12., 0.8)}, print, config);
+    REQUIRE_FALSE(print.objects().empty());
+    REQUIRE(print.objects().front()->layers().size() == 4);
+    return outer_perimeters_at(print, print.objects().front()->layers().size() / 2);
+}
+
+struct InteriorDisplacement {
+    size_t samples = 0;
+    double maximum_distance = 0.;
+};
+
+InteriorDisplacement displacement_from(const OuterPerimeterSnapshot &actual,
+                                       const OuterPerimeterSnapshot &reference)
+{
+    InteriorDisplacement result;
+    for (const Point &point : actual.points) {
+        CHECK(std::isfinite(unscale<double>(point.x())));
+        CHECK(std::isfinite(unscale<double>(point.y())));
+        bool is_interior = false;
+        const double distance = nearest_safe_reference_distance_mm(point, reference, is_interior);
+        if (is_interior) {
+            ++result.samples;
+            result.maximum_distance = std::max(result.maximum_distance, distance);
+        }
+    }
+    return result;
+}
+
+void require_fuzzy_noise_registry()
+{
+    const ConfigOptionDef *noise = print_config_def.get("fuzzy_skin_noise_type");
+    REQUIRE(noise != nullptr);
+    REQUIRE(noise->type == coEnum);
+    const std::vector<std::string> expected_values{"classic", "perlin", "billow", "ridgedmulti", "voronoi", "ripple"};
+    REQUIRE(noise->enum_values == expected_values);
+    const t_config_enum_values expected_map{
+        {"classic", int(NoiseType::Classic)},
+        {"perlin", int(NoiseType::Perlin)},
+        {"billow", int(NoiseType::Billow)},
+        {"ridgedmulti", int(NoiseType::RidgedMulti)},
+        {"voronoi", int(NoiseType::Voronoi)},
+        {"ripple", int(NoiseType::Ripple)},
+    };
+    REQUIRE(noise->enum_keys_map != nullptr);
+    REQUIRE(*noise->enum_keys_map == expected_map);
+}
+
+} // namespace fuzzy_noise_pipeline_followup
+
+TEST_CASE("Registered fuzzy skin noises produce finite sampled external perimeters",
+          "[FuzzySkinNoisePipeline][Perimeters]")
+{
+    using namespace fuzzy_noise_pipeline_followup;
+    require_fuzzy_noise_registry();
+    const char *noise_type = GENERATE("classic", "perlin", "billow", "ridgedmulti", "voronoi", "ripple");
+    CAPTURE(noise_type);
+
+    const OuterPerimeterSnapshot reference = slice_noise(noise_type, "none");
+    const OuterPerimeterSnapshot actual = slice_noise(noise_type, "external");
+    REQUIRE_FALSE(reference.points.empty());
+    REQUIRE_FALSE(actual.points.empty());
+    // Sampling a 12 mm square at the explicit 0.75 mm point distance must add
+    // public perimeter junctions for every registered noise implementation.
+    REQUIRE(actual.points.size() > reference.points.size());
+
+    size_t interior_samples = 0;
+    for (const Point &point : actual.points) {
+        CHECK(std::isfinite(unscale<double>(point.x())));
+        CHECK(std::isfinite(unscale<double>(point.y())));
+        bool is_interior = false;
+        const double distance = nearest_safe_reference_distance_mm(point, reference, is_interior);
+        CHECK(std::isfinite(distance));
+        if (is_interior)
+            ++interior_samples;
+    }
+    REQUIRE(interior_samples > 0);
+
+    if (std::string(noise_type) != "ripple") {
+        const InteriorDisplacement displacement = displacement_from(actual, reference);
+        REQUIRE(displacement.samples > 0);
+        CHECK(displacement.maximum_distance > 0.001);
+    }
+}
+
+TEST_CASE("Ripple noise path produces a positive external-wall offset",
+          "[FuzzySkinNoisePipeline][Perimeters]")
+{
+    using namespace fuzzy_noise_pipeline_followup;
+    const OuterPerimeterSnapshot reference = slice_noise("ripple", "none");
+    const OuterPerimeterSnapshot actual = slice_noise("ripple", "external");
+    REQUIRE(actual.points.size() > reference.points.size());
+
+    const InteriorDisplacement displacement = displacement_from(actual, reference);
+    REQUIRE(displacement.samples > 0);
+    CHECK(displacement.maximum_distance > 0.005);
+}
+
+TEST_CASE("Disabled fuzzy skin is a no-op for the registered noise pipeline",
+          "[FuzzySkinNoisePipeline][Perimeters]")
+{
+    using namespace fuzzy_noise_pipeline_followup;
+    const OuterPerimeterSnapshot none = slice_noise("ripple", "none");
+    const OuterPerimeterSnapshot disabled = slice_noise("ripple", "disabled_fuzzy");
+
+    REQUIRE(disabled.points.size() == none.points.size());
+    REQUIRE(disabled.widths.size() == none.widths.size());
+    for (size_t i = 0; i < none.points.size(); ++i)
+        CHECK(disabled.points[i] == none.points[i]);
+    for (size_t i = 0; i < none.widths.size(); ++i)
+        CHECK_THAT(disabled.widths[i], Catch::Matchers::WithinAbs(none.widths[i], 1e-6));
+}
+
+} // namespace fuzzy_mode_pipeline_contracts

@@ -755,11 +755,68 @@ TEST_CASE("Nozzle type values reach processor metadata and hardness selection", 
         INFO("nozzle_type=" << static_cast<int>(row.type));
         FullPrintConfig config;
         config.nozzle_type.values = {static_cast<int>(row.type)};
+        config.nozzle_hrc.value = 61;
         const auto result = process_file(orca_header(config) + "M83\nG90\nG1 X10 Y0 Z0.2 E1 F600\n");
         REQUIRE(result.nozzle_type.size() == 1);
         CHECK(result.nozzle_type[0] == row.type);
+        CHECK(result.nozzle_hrc == 61);
         CHECK(Print::get_hrc_by_nozzle_type(row.type) == row.expected_hrc);
     }
+}
+
+
+TEST_CASE("Public result copy and move preserve imported nozzle metadata",
+          "[GCodeProcessor][NozzleTypeSettings][GCodeProcessorPublic]")
+{
+    FullPrintConfig config;
+    const std::vector<NozzleType> expected = {ntHardenedSteel, ntBrass};
+    config.nozzle_type.values = {static_cast<int>(expected[0]), static_cast<int>(expected[1])};
+    config.nozzle_hrc.value = 61;
+
+    // This is the public file-import path: the CONFIG_BLOCK is parsed into a
+    // DynamicPrintConfig before GCodeProcessorResult is extracted.
+    TestResult source = process_file(orca_header(config) +
+        "M83\nG90\nG1 X10 Y0 Z0.2 E1 F600\n");
+    REQUIRE(source.nozzle_type.size() == expected.size());
+    CHECK(source.nozzle_type[0] == expected[0]);
+    CHECK(source.nozzle_type[1] == expected[1]);
+    CHECK(source.nozzle_hrc == 61);
+
+    GCodeProcessorResult copied;
+    copied = source;
+    REQUIRE(copied.nozzle_type.size() == expected.size());
+    CHECK(copied.nozzle_type[0] == expected[0]);
+    CHECK(copied.nozzle_type[1] == expected[1]);
+    CHECK(copied.nozzle_hrc == 61);
+    CHECK(source.nozzle_type == expected);
+    CHECK(source.nozzle_hrc == 61);
+
+    GCodeProcessorResult moved;
+    moved = std::move(copied);
+    REQUIRE(moved.nozzle_type.size() == expected.size());
+    CHECK(moved.nozzle_type[0] == expected[0]);
+    CHECK(moved.nozzle_type[1] == expected[1]);
+    CHECK(moved.nozzle_hrc == 61);
+
+    GCodeProcessorResult fresh;
+    CHECK(fresh.nozzle_type.empty());
+    CHECK(fresh.nozzle_hrc == 0);
+
+    // Reset a processor after importing metadata, then reuse it for a
+    // headerless buffer. Neither the old nozzle types nor HRC may leak.
+    GCodeProcessor reused;
+    reused.apply_config(config);
+    REQUIRE(reused.get_result().nozzle_type.size() == expected.size());
+    CHECK(reused.get_result().nozzle_hrc == 61);
+    reused.reset();
+    CHECK(reused.get_result().nozzle_type.empty());
+    CHECK(reused.get_result().nozzle_hrc == 0);
+    reused.initialize("gcode_processor_headerless_reuse.gcode");
+    reused.initialize_result_moves();
+    reused.process_buffer("M83\nG90\nG1 X2 Y0 Z0.2 E0.2 F600\n");
+    reused.finalize(false);
+    CHECK(reused.get_result().nozzle_type.empty());
+    CHECK(reused.get_result().nozzle_hrc == 0);
 }
 
 TEST_CASE("Counterclockwise IJ arcs preserve direction, endpoint, and extrusion",

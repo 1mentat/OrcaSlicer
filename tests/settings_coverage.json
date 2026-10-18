@@ -1647,12 +1647,12 @@
     },
     "timelapse_type": {
       "test": "tests/fff_print/test_gcode.cpp",
-      "tag": "[GCodeExportWorkflows]",
+      "tag": "[GCodeBroad]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "The traditional mode is exercised with a per-layer snapshot command oracle; the complete enum domain and mode interactions remain unclaimed."
+      "reason": "Both registered timelapse values are selected in public Print exports using the same CoreXY fixture. Traditional 0 changes the nonempty parsed snapshot position sequence when farthest-point mode is enabled; smooth 1 keeps the sequence unchanged under the same toggle. Both rows have explicit no-farthest controls. Other timelapse templates, tower combinations, and printer interactions remain outside this claim."
     },
     "input_shaping_emit": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2484,12 +2484,13 @@
     },
     "single_extruder_multi_material": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[SEMMBehavior]",
       "dimensions": [
+        "boolean_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "SEMM and separate-tool direct WipeTower2 runs consume both values and produce finite purge output. These are separate fixtures; a one-factor boolean comparison and complete Print pipeline remain unclaimed."
+      "reason": "The passing \u201cSEMM suppresses tower temperature waits while retaining purge geometry\u201d case runs one public WipeTower2 plan with single_extruder_multi_material=false/true and otherwise identical temperatures and wait settings. The ordinary row requires one tagged M109 and no M104, the SEMM row requires no M109 and one M104, and both rows retain finite positive purge geometry. Broader SEMM priming, filament-vector, and Print wiring interactions remain unclaimed."
     },
     "purge_in_prime_tower": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2593,12 +2594,13 @@
     },
     "wipe_tower_fillet_wall": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[MultimaterialWipe][WipeTowerFilletWall]",
       "dimensions": [
+        "boolean_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Enabled and disabled fillets occur in rib fixtures that compare generated extrusion length. Extra rib length also varies, so a one-factor boolean comparison remains unclaimed."
+      "reason": "The passing \u201cWipeTower2 rib fillet changes the emitted wall path without changing its plan\u201d case holds the rib plan, purge floor, and ramming setting fixed while wipe_tower_fillet_wall is false/true. Both outputs are finite with positive geometry; plan width/depth/rib dimensions are preserved while emitted positive-segment count, non-collinear turns, and length change. Other wall types and multi-parameter fillet interactions remain unclaimed."
     },
     "wipe_tower_cone_angle": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2611,12 +2613,13 @@
     },
     "enable_filament_ramming": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[RammingEnableControls]",
       "dimensions": [
+        "boolean_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Enabled and disabled direct SEMM runs check the presence or absence of the ramming section and generated extrusion. Cooling parameters also differ; a one-factor boolean comparison remains unclaimed."
+      "reason": "The passing \u201cRamming enable settings gate the configured unload material\u201d case runs the same public WipeTower2 plan with the SEMM route selected and enable_filament_ramming=false/true. Both rows require finite output; the disabled row has zero positive unload E and the enabled row has the independently calculated positive unload volume. The non-SEMM rows are a separate multitool control; complete ramming-rate and cooling interactions remain unclaimed."
     },
     "filament_cooling_moves": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2737,12 +2740,13 @@
     },
     "high_current_on_filament_swap": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[FilamentSwapCurrentControls]",
       "dimensions": [
+        "boolean_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "An enabled high-current fixture emits the M907 E550 command during direct SEMM loading. The disabled command behavior is not independently asserted."
+      "reason": "The passing \u201cFilament swap current is opt-in and restored without changing purge geometry\u201d case holds the public SEMM plan and all other settings fixed while high_current_on_filament_swap is false/true. It parses the disabled command absence and enabled M907/M906 pair for Marlin and RepRapFirmware, while preserving extrusion length, elapsed time, and depth; Klipper\u2019s documented no-command control is also checked. Full printer-current domains remain unclaimed."
     },
     "internal_solid_infill_pattern": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -3995,6 +3999,15 @@
         "pipeline_oracle"
       ],
       "reason": "The public mixed-filament gradient case runs per-part false and true on one object containing model parts of different heights. False requires one object-level gradient run with no volume-tagged gradients; true requires independent short and tall volume runs with their own layer counts and ratio witnesses. Both rows validate the processed Print and positive gradient metadata."
+    },
+    "z_hop_types": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ZHopType]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted 99f public export cases exercise all four registered values: Normal, Slope and Spiral preserve deposited material while producing distinct vertical, single-diagonal and multi-segment lift geometry; Auto produces a spiral across an overhang, with a zero-hop control. These are emitted-motion oracles, not serialization-only coverage."
     }
   }
 }

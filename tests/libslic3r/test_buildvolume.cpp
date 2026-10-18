@@ -339,3 +339,82 @@ TEST_CASE("BuildVolume type names cover every public enum value", "[BuildVolume]
 }
 
 } // namespace volume_geometry_contracts
+
+namespace volume_geometry_contracts {
+
+TEST_CASE("Unlimited nonrectangular build volumes retain horizontal and bed-plane limits",
+          "[BuildVolume][BuildVolumeUnlimited][BuildVolumeVariance]")
+{
+    struct Bed {
+        std::vector<Vec2d> outline;
+        BuildVolume_Type type;
+    };
+    const std::vector<Bed> beds{
+        {circle_bed(20., 96, {15., 15.}), BuildVolume_Type::Circle},
+        {{{0., 0.}, {30., 0.}, {15., 25.}}, BuildVolume_Type::Convex},
+        {{{0., 0.}, {30., 0.}, {30., 30.}, {20., 30.}, {20., 10.},
+          {10., 10.}, {10., 30.}, {0., 30.}}, BuildVolume_Type::Custom},
+    };
+    const indexed_triangle_set cube = its_make_cube(2., 2., 2.);
+    for (const Bed &bed : beds) {
+        INFO("bed type " << BuildVolume::type_name(bed.type));
+        const BuildVolume unlimited(bed.outline, 0., {}, {});
+        const BuildVolume limited(bed.outline, 20., {}, {});
+        REQUIRE(unlimited.type() == bed.type);
+        REQUIRE(limited.type() == bed.type);
+        CHECK(object_state(unlimited, cube, 14.f, 3.f, 1000.f) == BuildVolume::ObjectState::Inside);
+        CHECK(object_state(limited, cube, 14.f, 3.f, 1000.f) == BuildVolume::ObjectState::Outside);
+        CHECK(object_state(unlimited, cube, 100.f, 3.f, 1000.f) == BuildVolume::ObjectState::Outside);
+        CHECK(object_state(unlimited, cube, 14.f, 3.f, -4.f, true) == BuildVolume::ObjectState::Below);
+        CHECK(object_state(unlimited, cube, 14.f, 3.f, -1.f, true) == BuildVolume::ObjectState::Inside);
+    }
+}
+
+TEST_CASE("Unlimited circular extruder areas preserve the independent nozzle mask",
+          "[BuildVolume][BuildVolumeUnlimited][BuildVolumeVariance]")
+{
+    const auto bed = rectangle(0., 0., 40., 30.);
+    const std::vector<std::vector<Vec2d>> areas{
+        circle_bed(8., 96, {10., 15.}), circle_bed(8., 96, {30., 15.})};
+    const BuildVolume volume(bed, 0., areas, {0., 0.});
+    REQUIRE(volume.get_extruder_area_count() == 2);
+    for (int nozzle = 0; nozzle < 2; ++nozzle) {
+        REQUIRE(volume.get_extruder_area_volume(nozzle).type == BuildVolume_Type::Circle);
+        REQUIRE_FALSE(volume.get_extruder_area_volume(nozzle).same_with_bed);
+    }
+    const indexed_triangle_set cylinder = its_make_cylinder(2., 3., PI / 18.);
+    std::vector<bool> inside;
+    CHECK(volume.check_object_state_with_extruder_areas(cylinder, translation(10.f, 15.f, 1000.f), inside) ==
+          BuildVolume::ObjectState::Limited);
+    REQUIRE(inside.size() == 2);
+    CHECK(inside[0]);
+    CHECK_FALSE(inside[1]);
+    CHECK(volume.check_object_state_with_extruder_areas(cylinder, translation(30.f, 15.f, 1000.f), inside) ==
+          BuildVolume::ObjectState::Limited);
+    REQUIRE(inside.size() == 2);
+    CHECK_FALSE(inside[0]);
+    CHECK(inside[1]);
+}
+
+TEST_CASE("Bed-plane intersections expose collisions absent from the above-bed vertices",
+          "[BuildVolume][BuildVolumeClipping][BuildVolumeVariance]")
+{
+    const BuildVolume volume({{0., 0.}, {30., 0.}, {15., 25.}}, 20., {}, {});
+    REQUIRE(volume.type() == BuildVolume_Type::Convex);
+
+    indexed_triangle_set inside_vertices;
+    inside_vertices.vertices = {Vec3f(5.f, 5.f, 1.f), Vec3f(5.f, 6.f, 1.f), Vec3f(100.f, 5.f, -1.f)};
+    inside_vertices.indices.emplace_back(0, 1, 2);
+    // The two visible vertices are inside, but the edges meet Z=0 near X=52.5,
+    // beyond the triangular bed's X<=30 boundary.
+    CHECK(object_state(volume, inside_vertices, 0.f, 0.f, 0.f, true) == BuildVolume::ObjectState::Colliding);
+
+    indexed_triangle_set outside_vertices;
+    outside_vertices.vertices = {Vec3f(-5.f, 5.f, 1.f), Vec3f(-5.f, 6.f, 1.f), Vec3f(25.f, 5.f, -1.f)};
+    outside_vertices.indices.emplace_back(0, 1, 2);
+    // Here the two visible vertices are outside, while both intersections near
+    // X=10 lie inside. The mesh therefore still intersects the printable volume.
+    CHECK(object_state(volume, outside_vertices, 0.f, 0.f, 0.f, true) == BuildVolume::ObjectState::Colliding);
+}
+
+} // namespace volume_geometry_contracts

@@ -2641,6 +2641,8 @@ void GCodeProcessorResult::reset() {
     optimal_assignment.clear();
     filament_change_count_map.clear();
     warnings.clear();
+    nozzle_hrc = 0;
+    nozzle_type.clear();
     // keep the grouping-result field default-empty across resets.
     nozzle_group_result.reset();
     // per-extruder hotend types (pre-heat injector input); repopulated by apply_config.
@@ -3758,7 +3760,7 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
     // pre-processing
     // parse the gcode file to detect its producer
     {
-        m_parser.parse_file_raw(filename, [this](GCodeReader& reader, const char *begin, const char *end) {
+        const bool producer_parse_ok = m_parser.parse_file_raw(filename, [this](GCodeReader& reader, const char *begin, const char *end) {
             begin = skip_whitespaces(begin, end);
             if (begin != end && *begin == ';') {
                 // Comment.
@@ -3775,6 +3777,8 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
                 }
             }
         });
+        if (! producer_parse_ok)
+            throw Slic3r::RuntimeError(std::string("Cannot read G-code file: ") + filename);
         m_parser.reset();
 
         // if the gcode was produced by OrcaSlicer,
@@ -3813,7 +3817,7 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
     m_result.id = ++s_result_id;
     initialize_result_moves();
     size_t parse_line_callback_cntr = 10000;
-    m_parser.parse_file(filename, [this, cancel_callback, &parse_line_callback_cntr](GCodeReader& reader, const GCodeReader::GCodeLine& line) {
+    const bool parse_ok = m_parser.parse_file(filename, [this, cancel_callback, &parse_line_callback_cntr](GCodeReader& reader, const GCodeReader::GCodeLine& line) {
         if (-- parse_line_callback_cntr == 0) {
             // Don't call the cancel_callback() too often, do it every at every 10000'th line.
             parse_line_callback_cntr = 10000;
@@ -3822,6 +3826,8 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
         }
         this->process_gcode_line(line, true);
     }, m_result.lines_ends);
+    if (! parse_ok)
+        throw Slic3r::RuntimeError(std::string("Cannot read G-code file: ") + filename);
 
     // Don't post-process the G-code to update time stamps.
     this->finalize(false);
@@ -3969,7 +3975,7 @@ void GCodeProcessor::apply_config_simplify3d(const std::string& filename)
     BedSize bed_size;
     bool    producer_detected = false;
 
-    m_parser.parse_file_raw(filename, [this, &bed_size, &producer_detected](GCodeReader& reader, const char* begin, const char* end) {
+    const bool parse_ok = m_parser.parse_file_raw(filename, [this, &bed_size, &producer_detected](GCodeReader& reader, const char* begin, const char* end) {
 
         auto extract_double = [](const std::string_view cmt, const std::string& key, double& out) {
             size_t pos = cmt.find(key);
@@ -4033,6 +4039,8 @@ void GCodeProcessor::apply_config_simplify3d(const std::string& filename)
             }
         }
     });
+    if (! parse_ok)
+        throw Slic3r::RuntimeError(std::string("Cannot read G-code file: ") + filename);
 
     if (m_result.filaments_count == 0)
         m_result.filaments_count = std::max<size_t>(1, std::min(m_result.filament_diameters.size(), m_result.filament_densities.size()));

@@ -4161,3 +4161,177 @@ TEST_CASE("Reprocessing previous G-code preserves caller tool sequences and publ
 }
 
 } // namespace print_object_sharing_contracts
+
+namespace print_validation_followup_contracts {
+
+struct TreePatternValidationCase {
+    const char *support_style;
+    int         wall_count;
+    const char *base_pattern;
+    size_t      expected_pattern_warnings;
+    bool        expect_two_wall_warning;
+    bool        expect_lightning_warning;
+};
+
+TEST_CASE("Organic support validation reports wall and base-pattern conflicts",
+          "[Print][ValidationContracts][TreeSupportValidation]")
+{
+    const auto part = GENERATE(
+        TreePatternValidationCase{"organic", 1, "rectilinear", 0, false, false},
+        TreePatternValidationCase{"organic", 2, "rectilinear", 1, true, false},
+        TreePatternValidationCase{"default", 2, "rectilinear", 1, true, false},
+        TreePatternValidationCase{"organic", 2, "lightning", 2, true, true});
+    CAPTURE(part.support_style, part.wall_count, part.base_pattern);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"sparse_infill_density", "15%"},
+        {"enable_support", true},
+        {"support_type", "tree(auto)"},
+        {"support_style", part.support_style},
+        {"support_base_pattern", part.base_pattern},
+        {"support_line_width", 0.45},
+        {"tree_support_wall_count", part.wall_count},
+        {"tree_support_tip_diameter", 0.6},
+        {"tree_support_branch_diameter_organic", 2.0},
+        {"enable_prime_tower", false},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+
+    Print print;
+    Model model;
+    init_print({mesh(TestMesh::overhang)}, print, model, config);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->has_support_material());
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    REQUIRE(validation.string.empty());
+
+    std::vector<const StringObjectException *> pattern_warnings;
+    for (const StringObjectException &warning : warnings)
+        if (warning.opt_key == "support_base_pattern")
+            pattern_warnings.push_back(&warning);
+    REQUIRE(pattern_warnings.size() == part.expected_pattern_warnings);
+
+    bool saw_two_wall_warning = false;
+    bool saw_lightning_warning = false;
+    for (const StringObjectException *warning : pattern_warnings) {
+        saw_two_wall_warning = saw_two_wall_warning ||
+            warning->string.find("two walls are supported only with the Hollow/Default base pattern") != std::string::npos;
+        saw_lightning_warning = saw_lightning_warning ||
+            warning->string.find("Lightning base pattern is not supported") != std::string::npos;
+        CHECK(warning->is_warning);
+    }
+    CHECK(saw_two_wall_warning == part.expect_two_wall_warning);
+    CHECK(saw_lightning_warning == part.expect_lightning_warning);
+}
+
+namespace {
+
+const std::vector<coordf_t> kLayerProfileA{0., 0.2, 0.6, 0.2, 1.2, 0.2};
+const std::vector<coordf_t> kLayerProfileB{0., 0.2, 0.6, 0.25, 1.2, 0.2};
+// Stay clear of rounding at the exact floating-point epsilon boundary.
+const std::vector<coordf_t> kLayerProfileInside{0., 0.2, 0.6, 0.2 + 0.4 * EPSILON, 1.2, 0.2};
+const std::vector<coordf_t> kLayerProfileOutside{0., 0.2, 0.6, 0.2 + 0.6 * EPSILON, 1.2, 0.2};
+
+DynamicPrintConfig custom_layer_validation_config(bool precise_z_height)
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        {"enable_prime_tower", true},
+        {"print_sequence", "by layer"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"sparse_infill_density", "15%"},
+        {"precise_z_height", precise_z_height},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    return config;
+}
+
+std::vector<double> public_layer_zs(const PrintObject &object)
+{
+    std::vector<double> zs;
+    zs.reserve(object.layer_count());
+    for (int i = 0; i < object.layer_count(); ++i) {
+        const Layer *layer = object.get_layer(i);
+        REQUIRE(layer != nullptr);
+        REQUIRE(std::isfinite(layer->print_z));
+        zs.push_back(layer->print_z);
+    }
+    return zs;
+}
+
+} // namespace
+
+TEST_CASE("Print validation compares custom layer profiles across prime-tower objects",
+          "[Print][ValidationContracts][CustomLayerProfiles]")
+{
+    enum class ProfileRelation { Equal, Different, InsideTolerance, OutsideTolerance };
+    const ProfileRelation relation = GENERATE(ProfileRelation::Equal, ProfileRelation::Different, ProfileRelation::InsideTolerance, ProfileRelation::OutsideTolerance);
+    const bool precise_z_height = GENERATE(false, true);
+    CAPTURE(static_cast<int>(relation), precise_z_height);
+
+    const DynamicPrintConfig config = custom_layer_validation_config(precise_z_height);
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {{"extruder", 1}},
+        {{"extruder", 2}},
+    };
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{make_cube(8., 8., 1.2), make_cube(8., 8., 1.2)},
+               print, model, config, &overrides);
+    REQUIRE(model.objects.size() == 2);
+    model.objects[0]->layer_height_profile.set(kLayerProfileA);
+    model.objects[1]->layer_height_profile.set(
+        relation == ProfileRelation::Equal ? kLayerProfileA :
+        relation == ProfileRelation::InsideTolerance ? kLayerProfileInside :
+        relation == ProfileRelation::OutsideTolerance ? kLayerProfileOutside : kLayerProfileB);
+    print.apply(model, config);
+
+    REQUIRE(print.extruders(true).size() == 2);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    CAPTURE(validation.string, validation.opt_key);
+    const size_t precise_warnings = std::count_if(warnings.begin(), warnings.end(), [](const StringObjectException &warning) {
+        return warning.opt_key == "precise_z_height";
+    });
+    CHECK(precise_warnings == (precise_z_height ? 1u : 0u));
+    if (relation == ProfileRelation::Different || relation == ProfileRelation::OutsideTolerance) {
+        REQUIRE(validation.string == "The prime tower is only supported if all objects have the same variable layer height.");
+        CHECK(validation.opt_key.empty());
+        CHECK_FALSE(validation.is_warning);
+        return;
+    }
+    if (relation == ProfileRelation::InsideTolerance) {
+        REQUIRE(validation.string.empty());
+        return;
+    }
+
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    print.process();
+    REQUIRE(print.objects().size() >= 2);
+    const PrintObject *first = print.get_object(0);
+    const PrintObject *second = print.get_object(1);
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    const std::vector<double> first_zs = public_layer_zs(*first);
+    const std::vector<double> second_zs = public_layer_zs(*second);
+    REQUIRE_FALSE(first_zs.empty());
+    REQUIRE(first_zs.size() == second_zs.size());
+    CHECK(first_zs.back() > 1.0);
+    for (size_t i = 0; i < first_zs.size(); ++i)
+        CHECK_THAT(first_zs[i], Catch::Matchers::WithinAbs(second_zs[i], 1e-6));
+}
+
+} // namespace print_validation_followup_contracts

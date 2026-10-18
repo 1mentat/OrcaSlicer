@@ -12,7 +12,9 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/libslic3r.h"
+#include <libnoise/noise.h>
 #include <cmath>
+#include <memory>
 #include <vector>
 
 using namespace Slic3r;
@@ -363,4 +365,87 @@ TEST_CASE("Ripple preserves the input for subresolution and nonpositive sample s
         cfg.point_distance = scaled<coord_t>(distance);
         CHECK(rippled(input, cfg) == input);
     }
+}
+
+namespace {
+
+std::unique_ptr<noise::module::Module> reference_noise(NoiseType noise_type, const FuzzySkinConfig &cfg)
+{
+    if (noise_type == NoiseType::Perlin) {
+        auto module = std::make_unique<noise::module::Perlin>();
+        module->SetFrequency(1. / cfg.noise_scale);
+        module->SetOctaveCount(cfg.noise_octaves);
+        module->SetPersistence(cfg.noise_persistence);
+        return module;
+    }
+    if (noise_type == NoiseType::Billow) {
+        auto module = std::make_unique<noise::module::Billow>();
+        module->SetFrequency(1. / cfg.noise_scale);
+        module->SetOctaveCount(cfg.noise_octaves);
+        module->SetPersistence(cfg.noise_persistence);
+        return module;
+    }
+    if (noise_type == NoiseType::RidgedMulti) {
+        auto module = std::make_unique<noise::module::RidgedMulti>();
+        module->SetFrequency(1. / cfg.noise_scale);
+        module->SetOctaveCount(cfg.noise_octaves);
+        return module;
+    }
+    if (noise_type == NoiseType::Voronoi) {
+        auto module = std::make_unique<noise::module::Voronoi>();
+        module->SetFrequency(1. / cfg.noise_scale);
+        module->SetDisplacement(1.0);
+        return module;
+    }
+    return nullptr;
+}
+
+Arachne::ExtrusionJunctions straight_noise_line(const FuzzySkinConfig &cfg, double slice_z)
+{
+    const coord_t width = scaled<coord_t>(0.45);
+    Arachne::ExtrusionJunctions line{
+        {Point(0, 0), width, 0},
+        {Point(scaled<coord_t>(40.), 0), width, 0},
+    };
+    fuzzy_extrusion_line(line, slice_z, 0.2, cfg, false);
+    return line;
+}
+
+} // namespace
+
+TEST_CASE("Non-Ripple fuzzy noise forwards the configured public displacement",
+          "[FuzzySkin][FuzzySkinNoiseReference]")
+{
+    const NoiseType noise_type = GENERATE(NoiseType::Perlin, NoiseType::Billow, NoiseType::RidgedMulti, NoiseType::Voronoi);
+    CAPTURE(static_cast<int>(noise_type));
+
+    FuzzySkinConfig cfg{};
+    cfg.type              = FuzzySkinType::External;
+    cfg.thickness         = scaled<coord_t>(0.25);
+    cfg.point_distance    = scaled<coord_t>(0.75);
+    cfg.fuzzy_first_layer = true;
+    cfg.noise_type        = noise_type;
+    cfg.noise_scale       = 1.0;
+    cfg.noise_octaves     = 4;
+    cfg.noise_persistence = 0.5;
+    cfg.mode              = FuzzySkinMode::Displacement;
+
+    constexpr double slice_z = 1.7;
+    const auto actual = straight_noise_line(cfg, slice_z);
+    REQUIRE(actual.size() > 10);
+    const auto expected = reference_noise(noise_type, cfg);
+    REQUIRE(expected != nullptr);
+
+    size_t checked = 0;
+    for (const auto &junction : actual) {
+        const double x = unscale<double>(junction.p.x());
+        if (x <= 1.0 || x >= 39.0)
+            continue;
+        const double expected_offset = expected->GetValue(x, 0., slice_z) * unscale<double>(cfg.thickness);
+        CHECK(std::isfinite(expected_offset));
+        CHECK_THAT(unscale<double>(junction.p.y()), WithinAbs(expected_offset, 3e-6));
+        CHECK(junction.w == scaled<coord_t>(0.45));
+        ++checked;
+    }
+    REQUIRE(checked > 10);
 }

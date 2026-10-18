@@ -3173,3 +3173,178 @@ TEST_CASE("Staggered inner seams move internal perimeter starts while preserving
 }
 
 } // namespace reslice_settings_contracts
+namespace ironing_enum_selection_followup {
+
+struct LayerObservation {
+    double z = 0.0;
+    double top_surface_area = 0.0;
+    double interior_fill_area = 0.0;
+    size_t ironing_paths = 0;
+    double ironing_length = 0.0;
+};
+
+struct IroningEnumObservation {
+    std::vector<LayerObservation> layers;
+    double lower_top_area = 0.0;
+    double upper_top_area = 0.0;
+    double interior_fill_area = 0.0;
+    size_t interior_fill_layers = 0;
+    size_t interior_ironing_layers = 0;
+    size_t lower_ironing_paths = 0;
+    size_t upper_ironing_paths = 0;
+    size_t interior_ironing_paths = 0;
+    double lower_ironing_length = 0.0;
+    double upper_ironing_length = 0.0;
+    double interior_ironing_length = 0.0;
+};
+
+TriangleMesh stepped_ironing_fixture()
+{
+    TriangleMesh lower = make_cube(12., 12., 2.);
+    TriangleMesh upper = make_cube(6., 8., 2.);
+    upper.translate(3., 2., 2.);
+    lower.merge(upper);
+    return lower;
+}
+
+IroningEnumObservation run_ironing_type(const char *type)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", 0.4},
+        {"wall_generator", "classic"},
+        {"wall_loops", 2},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "100%"},
+        {"top_surface_density", "100%"},
+        {"bottom_surface_density", "100%"},
+        {"ironing_type", type},
+        {"ironing_pattern", "rectilinear"},
+        {"ironing_flow", "10%"},
+        {"ironing_speed", 20.0},
+        {"ironing_spacing", 0.2},
+        {"ironing_inset", 0.0},
+        {"spiral_mode", false},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+    });
+
+    Print print;
+    Model model;
+    init_print({stepped_ironing_fixture()}, print, model, config, nullptr, false);
+    const auto validation = print.validate();
+    INFO("ironing_type=" << type << " validation=" << validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->layer_count() == 20);
+
+    IroningEnumObservation result;
+    const PrintObject &object = *print.objects().front();
+    result.layers.reserve(object.layers().size());
+    for (const Layer *layer : object.layers()) {
+        LayerObservation observed;
+        observed.z = layer->print_z;
+        for (const LayerRegion *region : layer->regions()) {
+            for (const Surface &surface : region->fill_surfaces.surfaces) {
+                const double area = static_cast<double>(surface.expolygon.area());
+                if (surface.surface_type == stTop)
+                    observed.top_surface_area += area;
+                if (surface.surface_type == stInternal || surface.surface_type == stInternalSolid)
+                    observed.interior_fill_area += area;
+            }
+            for_each_extrusion_path(region->fills, [&observed](const ExtrusionPath &path) {
+                if (path.role() != erIroning)
+                    return;
+                const double length = unscale<double>(path.length());
+                REQUIRE(std::isfinite(length));
+                REQUIRE(length > 0.0);
+                REQUIRE(std::isfinite(path.mm3_per_mm));
+                REQUIRE(path.mm3_per_mm > 0.0);
+                ++observed.ironing_paths;
+                observed.ironing_length += length;
+            });
+        }
+        result.layers.push_back(observed);
+        if (std::abs(observed.z - 2.0) < 0.03) {
+            result.lower_top_area += observed.top_surface_area;
+            result.lower_ironing_paths += observed.ironing_paths;
+            result.lower_ironing_length += observed.ironing_length;
+        }
+        if (std::abs(observed.z - 4.0) < 0.03) {
+            result.upper_top_area += observed.top_surface_area;
+            result.upper_ironing_paths += observed.ironing_paths;
+            result.upper_ironing_length += observed.ironing_length;
+        }
+        if (observed.z > 0.4 && observed.z < 1.8) {
+            if (observed.interior_fill_area > 0.0)
+                ++result.interior_fill_layers;
+            if (observed.ironing_paths > 0)
+                ++result.interior_ironing_layers;
+            result.interior_fill_area += observed.interior_fill_area;
+            result.interior_ironing_paths += observed.ironing_paths;
+            result.interior_ironing_length += observed.ironing_length;
+        }
+    }
+
+    // The mesh has an exposed lower terrace at z=2 and an upper top at z=4;
+    // 100% sparse density gives the intervening layers independent solid area.
+    REQUIRE(result.lower_top_area > 0.0);
+    REQUIRE(result.upper_top_area > 0.0);
+    REQUIRE(result.interior_fill_area > 0.0);
+    return result;
+}
+
+} // namespace ironing_enum_selection_followup
+
+TEST_CASE("Ironing type selects terrace, topmost, and all-solid public paths",
+          "[SettingsVariance][IroningTypeSelection]")
+{
+    using ironing_enum_selection_followup::run_ironing_type;
+
+    const auto no_ironing = run_ironing_type("no ironing");
+    const auto top         = run_ironing_type("top");
+    const auto topmost     = run_ironing_type("topmost");
+    const auto solid       = run_ironing_type("solid");
+
+    REQUIRE(std::all_of(no_ironing.layers.begin(), no_ironing.layers.end(),
+                        [](const ironing_enum_selection_followup::LayerObservation &layer) {
+                            return layer.ironing_paths == 0;
+                        }));
+
+    // The stepped fixture has two independent top surfaces.  Top irons the
+    // lower exposed terrace and the upper top; topmost restricts ironing to
+    // the highest layer while retaining the same upper geometry route.
+    REQUIRE(top.lower_ironing_paths > 0);
+    REQUIRE(top.upper_ironing_paths > 0);
+    REQUIRE(topmost.lower_ironing_paths == 0);
+    REQUIRE(topmost.upper_ironing_paths > 0);
+    CHECK_THAT(top.upper_ironing_length, Catch::Matchers::WithinRel(topmost.upper_ironing_length, 0.05));
+    CHECK(top.lower_ironing_length > 0.0);
+    REQUIRE(top.interior_ironing_layers == 0);
+    REQUIRE(topmost.interior_ironing_layers == 0);
+
+    // AllSolid is independently selected by the sparse 100% interior layers,
+    // so it must produce ironing inside the object as well as on its exposed
+    // step surfaces.
+    REQUIRE(solid.lower_ironing_paths > 0);
+    REQUIRE(solid.upper_ironing_paths > 0);
+    REQUIRE(solid.interior_fill_layers > 0);
+    REQUIRE(solid.interior_ironing_layers == solid.interior_fill_layers);
+    for (const auto &layer : solid.layers) {
+        if (layer.z > 0.4 && layer.z < 1.8) {
+            CAPTURE(layer.z);
+            REQUIRE(layer.interior_fill_area > 0.0);
+            REQUIRE(layer.ironing_paths > 0);
+            REQUIRE(layer.ironing_length > 0.0);
+        }
+    }
+    REQUIRE(solid.interior_ironing_paths > 0);
+    REQUIRE(solid.interior_ironing_length > 0.0);
+}

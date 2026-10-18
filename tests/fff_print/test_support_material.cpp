@@ -2311,3 +2311,120 @@ TEST_CASE("Bridge suppression reduces bridge support while retaining cantilever 
     REQUIRE(without_bridge_support.cantilever_area_mm2 > 1.0);
     CHECK(with_bridge_support.bridge_area_mm2 > without_bridge_support.bridge_area_mm2 + 1.0);
 }
+namespace support_remove_small_overhang_followup {
+
+struct SupportRemovalRun {
+    std::size_t support_layers = 0;
+    std::size_t support_paths = 0;
+    double      support_area_mm2 = 0.0;
+    double      support_path_length_mm = 0.0;
+    bool        finite = true;
+};
+
+TriangleMesh symmetric_ledges(double overhang)
+{
+    TriangleMesh lower = make_cube(20.0, 20.0, 2.0);
+    TriangleMesh upper = make_cube(20.0 + 2.0 * overhang, 20.0, 2.0);
+    upper.translate(float(-overhang), 0.f, 2.f);
+    lower.merge(upper);
+    return lower;
+}
+
+DynamicPrintConfig small_overhang_config(bool remove_small_overhang)
+{
+    DynamicPrintConfig config = support_settings_variance_contracts::support_config();
+    config.set_deserialize_strict({
+        { "support_type",                 "normal(auto)" },
+        { "support_style",                "default" },
+        { "support_remove_small_overhang", remove_small_overhang },
+        { "support_threshold_angle",      0.0 },
+        { "support_threshold_overlap",    0.0 },
+        { "support_on_build_plate_only",  true },
+        { "support_object_xy_distance",   0.1 },
+        { "support_top_z_distance",       0.2 },
+        { "support_bottom_z_distance",    0.2 },
+        { "support_interface_top_layers", 0 },
+        { "support_interface_bottom_layers", 0 },
+        { "support_expansion",            0.0 },
+        { "outer_wall_line_width",         0.4 },
+        { "inner_wall_line_width",         0.4 },
+        { "support_line_width",             0.4 },
+        { "wall_generator",                "classic" },
+        { "bridge_no_support",              false },
+        { "support_critical_regions_only", false },
+        { "wall_loops",                   2 },
+        { "top_shell_layers",             2 },
+        { "bottom_shell_layers",          2 },
+        { "skirt_loops",                  0 },
+        { "brim_width",                   0.0 },
+        { "raft_layers",                  0 },
+        { "nozzle_diameter",              "0.4" },
+        { "line_width",                   0.4 },
+        { "layer_height",                 0.2 },
+        { "initial_layer_print_height",   0.2 },
+    });
+    return config;
+}
+
+SupportRemovalRun run_symmetric_ledges(double overhang, bool remove_small_overhang)
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig config = small_overhang_config(remove_small_overhang);
+    init_print({symmetric_ledges(overhang)}, print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO("small-overhang validation: " << validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE(print.objects().size() == 1);
+    print.process();
+    REQUIRE(print.finished());
+
+    const PrintObject *object = print.objects().front();
+    SupportRemovalRun result;
+    result.support_layers = object->support_layers().size();
+    for (const SupportLayer *layer : object->support_layers()) {
+        for (const ExPolygon &island : layer->support_islands) {
+            result.support_area_mm2 += unscale<double>(unscale<double>(std::abs(island.area())));
+        }
+        for_each_extrusion_path(layer->support_fills, [&result](const ExtrusionPath &path) {
+            if (path.role() != erSupportMaterial && path.role() != erSupportMaterialInterface)
+                return;
+            ++result.support_paths;
+            result.finite = result.finite && std::isfinite(path.mm3_per_mm) && path.mm3_per_mm > 0.0;
+            for (std::size_t i = 1; i < path.polyline.points.size(); ++i) {
+                const Point3 &a = path.polyline.points[i - 1];
+                const Point3 &b = path.polyline.points[i];
+                const double dx = unscale<double>(static_cast<double>(b.x()) - static_cast<double>(a.x()));
+                const double dy = unscale<double>(static_cast<double>(b.y()) - static_cast<double>(a.y()));
+                const double length = std::hypot(dx, dy);
+                result.finite = result.finite && std::isfinite(dx) && std::isfinite(dy) && std::isfinite(length);
+                if (std::isfinite(length))
+                    result.support_path_length_mm += length;
+            }
+        });
+    }
+    return result;
+}
+
+} // namespace support_remove_small_overhang_followup
+
+TEST_CASE("Support removal setting drops only small non-cantilever overhangs",
+          "[SupportMaterial][SupportRemoveSmallOverhang]")
+{
+    const auto kept_small = support_remove_small_overhang_followup::run_symmetric_ledges(0.6, false);
+    const auto removed_small = support_remove_small_overhang_followup::run_symmetric_ledges(0.6, true);
+    const auto kept_large = support_remove_small_overhang_followup::run_symmetric_ledges(1.5, true);
+
+    REQUIRE(kept_small.finite);
+    REQUIRE(removed_small.finite);
+    REQUIRE(kept_large.finite);
+    REQUIRE(kept_small.support_area_mm2 > 0.1);
+    REQUIRE(kept_small.support_paths > 0);
+    REQUIRE(kept_small.support_path_length_mm > 0.1);
+    CHECK_THAT(removed_small.support_area_mm2, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK(removed_small.support_paths == 0);
+    CHECK_THAT(removed_small.support_path_length_mm, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    REQUIRE(kept_large.support_area_mm2 > 0.1);
+    REQUIRE(kept_large.support_paths > 0);
+    REQUIRE(kept_large.support_path_length_mm > 0.1);
+}

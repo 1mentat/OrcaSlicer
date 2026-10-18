@@ -2620,13 +2620,20 @@ TEST_CASE("BBS 3MF export cancellation removes unfinished archives at late stage
         CHECK_FALSE(std::filesystem::exists(output));
     }
 
-    params.proFn = [&stages, target_stage](int stage, int, int, bool& cancel) {
+    bool cancellation_requested = false;
+    bool progress_after_cancellation = false;
+    params.proFn = [&stages, target_stage, &cancellation_requested, &progress_after_cancellation]
+                   (int stage, int, int, bool& cancel) {
+        progress_after_cancellation |= cancellation_requested;
         stages.push_back(stage);
         cancel = stage == target_stage;
+        cancellation_requested |= cancel;
     };
 
     CHECK_FALSE(store_bbs_3mf(params));
     REQUIRE(std::find(stages.begin(), stages.end(), target_stage) != stages.end());
+    CHECK(cancellation_requested);
+    CHECK_FALSE(progress_after_cancellation);
     CHECK_FALSE(std::filesystem::exists(output.string() + ".tmp"));
 
     if (preserve_existing) {
@@ -7352,3 +7359,196 @@ TEST_CASE("BBS text metadata defaults unknown alignment names to center", "[3MF]
 }
 
 } // namespace bbs_text_alignment_compat_contracts
+
+namespace legacy_3mf_contracts {
+
+TEST_CASE("Legacy importer splits a handcrafted multi-build-item resource", "[3MF][Legacy3MFInstanceSplit]")
+{
+    // No slic3rpe:Version3mf metadata is intentional: this is the m_version == 0
+    // third-party path, with one mesh resource referenced by two build items.
+    const std::string items =
+        "  <item objectid=\"1\" transform=\"" + transform_string(0., 0., 0.) + "\"/>\n"
+        "  <item objectid=\"1\" transform=\"" + transform_string(20., 0., 0.) + "\"/>\n";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("ThirdParty", items)));
+
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), loaded, config));
+    REQUIRE(loaded.objects.size() == 2);
+    const std::array<double, 2> expected_raw_min_x{{0., 20.}};
+    for (size_t index = 0; index < loaded.objects.size(); ++index) {
+        const ModelObject *object = loaded.objects[index];
+        REQUIRE(object != nullptr);
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(object->volumes.size() == 1);
+        const ModelInstance *instance = object->instances.front();
+        REQUIRE(instance != nullptr);
+        CHECK(instance->get_object() == object);
+        CHECK(instance->get_transformation().get_matrix().isApprox(Transform3d::Identity(), 1e-5));
+        CHECK_THAT(double(object->raw_mesh().bounding_box().min.x()), Catch::Matchers::WithinAbs(expected_raw_min_x[index], 1e-5));
+        CHECK_THAT(object->raw_mesh().volume(), Catch::Matchers::WithinAbs(1000., 1e-5));
+    }
+    const BoundingBoxf3 first_box = loaded.objects[0]->bounding_box_exact();
+    const BoundingBoxf3 second_box = loaded.objects[1]->bounding_box_exact();
+    CHECK_THAT(double(first_box.max.x() - first_box.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(second_box.max.x() - second_box.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(second_box.min.x() - first_box.min.x()), Catch::Matchers::WithinAbs(20., 1e-5));
+    CHECK_THAT(double(loaded.mesh().bounding_box().max.x() - loaded.mesh().bounding_box().min.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+} // namespace legacy_3mf_contracts
+
+namespace archive_variant_contracts {
+
+namespace {
+
+std::string handcrafted_foreign_split_model()
+{
+    const std::string items =
+        "  <item objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/>\n"
+        "  <item objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 20 0 0\"/>\n";
+    // Reuse the same known-valid cube resource as the generic case.  The BBS
+    // package wrapper below remains handcrafted so this still exercises the
+    // foreign relationship/import route.
+    return legacy_3mf_contracts::cube_model_xml("ThirdParty", items);
+}
+
+void write_handcrafted_foreign_split_archive(const std::string &path)
+{
+    static const std::string relationships = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>)XML";
+    const std::string model = handcrafted_foreign_split_model();
+    Zipper archive(path);
+    archive.add_entry("_rels/.rels", relationships.data(), relationships.size());
+    archive.add_entry("3D/3dmodel.model", model.data(), model.size());
+    archive.finalize();
+}
+
+} // namespace
+
+TEST_CASE("BBS importer splits a handcrafted foreign multi-build-item resource", "[3MF][Bbs3mfForeignInstanceSplit]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    write_handcrafted_foreign_split_archive(archive.string());
+
+    Model loaded;
+    BbsLoaded state;
+    REQUIRE(load_bbs(archive.string(), loaded, state));
+    CHECK_FALSE(state.is_bbl);
+    REQUIRE(loaded.objects.size() == 2);
+    for (const ModelObject *object : loaded.objects) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(object->volumes.size() == 1);
+        const ModelInstance *instance = object->instances.front();
+        REQUIRE(instance != nullptr);
+        CHECK(instance->get_object() == object);
+        CHECK_THAT(object->raw_mesh().volume(), Catch::Matchers::WithinAbs(1000., 1e-5));
+    }
+    const BoundingBoxf3 first_box = loaded.objects[0]->bounding_box_exact();
+    const BoundingBoxf3 second_box = loaded.objects[1]->bounding_box_exact();
+    CHECK_THAT(double(first_box.max.x() - first_box.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(second_box.max.x() - second_box.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(second_box.min.x() - first_box.min.x()), Catch::Matchers::WithinAbs(20., 1e-5));
+    CHECK_THAT(double(loaded.mesh().bounding_box().max.x() - loaded.mesh().bounding_box().min.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+} // namespace archive_variant_contracts
+
+
+namespace bbs_thumbnail_accessor_followup {
+
+using namespace Slic3r;
+
+namespace {
+
+const char *const k_thumbnail_relationship =
+    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail";
+const char *const k_middle_relationship =
+    "http://schemas.bambulab.com/package/2021/cover-thumbnail-middle";
+
+std::string valid_thumbnail_payload(unsigned char value)
+{
+    Model source = archive_variant_contracts::make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ThumbnailData thumbnail;
+    thumbnail.set(2, 2);
+    std::fill(thumbnail.pixels.begin(), thumbnail.pixels.end(), value);
+
+    StoreParams extra;
+    extra.thumbnail_data = {&thumbnail};
+    ScopedTemporaryDir backup("orca_bbs_thumbnail_accessor_payload");
+    source.set_backup_path(backup.string());
+    ScopedTemporaryFile source_archive(".3mf");
+    archive_variant_contracts::store_bbs(source_archive.string(), source, config, plate, &extra);
+
+    std::string encoded;
+    REQUIRE(read_3mf_entry(source_archive.string(), encoded, "Metadata/plate_1.png"));
+    REQUIRE(encoded.size() > 8);
+    REQUIRE(encoded.compare(0, 8, "\x89PNG\r\n\x1a\n", 8) == 0);
+    return encoded;
+}
+
+void write_thumbnail_archive(const std::string &path,
+                             const std::string &standard_path,
+                             const std::string &standard_payload,
+                             const std::string &fixed_path_payload,
+                             const std::string &middle_path = {},
+                             const std::string &middle_payload = {})
+{
+    const std::string relationships =
+        R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Target=")XML" + standard_path + R"XML(" Id="standard" Type=")XML" +
+        k_thumbnail_relationship + R"XML("/>)XML" +
+        (middle_path.empty() ? std::string() :
+            R"XML(
+  <Relationship Target=")XML" + middle_path + R"XML(" Id="middle" Type=")XML" +
+            k_middle_relationship + R"XML("/>)XML") +
+        R"XML(
+</Relationships>)XML";
+
+    Zipper archive(path);
+    archive.add_entry("_rels/.rels", relationships.data(), relationships.size());
+    archive.add_entry(standard_path.substr(1), standard_payload.data(), standard_payload.size());
+    archive.add_entry("Metadata/plate_1.png", fixed_path_payload.data(), fixed_path_payload.size());
+    if (!middle_path.empty())
+        archive.add_entry(middle_path.substr(1), middle_payload.data(), middle_payload.size());
+    archive.finalize();
+}
+
+} // namespace
+
+TEST_CASE("BBS thumbnail accessor prefers the Bambu middle relationship", "[3MF][Bbs3mfThumbnailAccessor]")
+{
+    const std::string standard = valid_thumbnail_payload(0x21);
+    const std::string middle = valid_thumbnail_payload(0x42);
+    const std::string decoy = valid_thumbnail_payload(0x7f);
+    REQUIRE(middle != standard);
+    REQUIRE(decoy != standard);
+    ScopedTemporaryFile archive(".3mf");
+    write_thumbnail_archive(archive.string(), "/Metadata/standard.png", standard, decoy,
+                            "/Metadata/middle.png", middle);
+
+    const std::string selected = bbs_3mf_get_thumbnail(archive.string().c_str());
+    REQUIRE(selected == middle);
+    CHECK(selected != standard);
+}
+
+TEST_CASE("BBS thumbnail accessor falls back to the standard relationship", "[3MF][Bbs3mfThumbnailAccessor]")
+{
+    const std::string standard = valid_thumbnail_payload(0x63);
+    const std::string decoy = valid_thumbnail_payload(0x7f);
+    REQUIRE(decoy != standard);
+    ScopedTemporaryFile archive(".3mf");
+    write_thumbnail_archive(archive.string(), "/Metadata/custom-standard.png", standard, decoy);
+
+    const std::string selected = bbs_3mf_get_thumbnail(archive.string().c_str());
+    CHECK(selected == standard);
+}
+
+} // namespace bbs_thumbnail_accessor_followup

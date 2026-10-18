@@ -223,3 +223,191 @@ TEST_CASE("Layer cooling settings slow extrusion without changing deposited geom
     CHECK_THAT(minimum_feed(slow_five), Catch::Matchers::WithinAbs(5.0 * 60.0, 0.1));
     CHECK_THAT(minimum_feed(slow_one), Catch::Matchers::WithinAbs(1.0 * 60.0, 0.1));
 }
+
+namespace cooling_settings_followup {
+
+struct Evidence
+{
+    std::vector<double> outer_feeds;
+    std::vector<double> inner_feeds;
+    std::vector<int> part_fan_states;
+    double xy_path = 0.0;
+    double filament = 0.0;
+    bool finite = true;
+    bool fan_seen = false;
+    size_t deposition_moves = 0;
+    size_t unknown_role_moves = 0;
+};
+
+DynamicPrintConfig config_for(const bool dont_slow_outer_wall,
+                              const bool reduce_fan_stop_start_freq,
+                              const bool slowdown)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"minimum_sparse_infill_area", 0.0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+        {"enable_arc_fitting", false},
+        {"gcode_comments", true},
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"slow_down_for_layer_cooling", slowdown},
+        {"slow_down_layer_time", slowdown ? 1000.0 : 0.0},
+        {"slow_down_min_speed", 5.0},
+        {"slow_down_layers", 0},
+        {"slowdown_for_curled_perimeters", false},
+        {"dont_slow_down_outer_wall", dont_slow_outer_wall},
+        {"outer_wall_speed", 60.0},
+        {"inner_wall_speed", 60.0},
+        {"initial_layer_speed", 60.0},
+        {"initial_layer_infill_speed", 60.0},
+        {"sparse_infill_speed", 60.0},
+        {"travel_speed", 120.0},
+        {"small_perimeter_speed", "0"},
+        {"small_perimeter_threshold", 0.0},
+        {"fan_cooling_layer_time", 0.0},
+        {"fan_min_speed", slowdown ? 0 : 30},
+        {"fan_max_speed", slowdown ? 0 : 30},
+        {"close_fan_the_first_x_layers", 0},
+        {"full_fan_speed_layer", 0},
+        {"initial_layer_fan_speed", -1},
+        {"reduce_fan_stop_start_freq", reduce_fan_stop_start_freq},
+        {"part_cooling_fan_min_pwm", 0},
+    });
+    return config;
+}
+
+Evidence inspect(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    Evidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string active_role;
+    int part_fan = -1;
+    reader.parse_buffer(gcode, [&evidence, &active_role, &part_fan](GCodeReader &self,
+                                                                    const GCodeReader::GCodeLine &line) {
+        const std::string comment(line.comment());
+        if (comment.rfind("TYPE:", 0) == 0)
+            active_role = comment.substr(5);
+        else if (comment.rfind("FEATURE:", 0) == 0)
+            active_role = comment.substr(8);
+
+        if (line.cmd_is("M107") && !line.has('P')) {
+            part_fan = 0;
+            evidence.fan_seen = true;
+        } else if (line.cmd_is("M106") && !line.has('P')) {
+            float pwm = 0.0f;
+            REQUIRE(line.has_value('S', pwm));
+            REQUIRE(std::isfinite(pwm));
+            REQUIRE(pwm >= 0.0f);
+            REQUIRE(pwm <= 255.0f);
+            part_fan = static_cast<int>(std::lround(pwm));
+            evidence.fan_seen = true;
+        }
+
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        ++evidence.deposition_moves;
+        const double xy = line.dist_XY(self);
+        const double filament = line.dist_E(self);
+        const double feed = line.has_f() ? line.f() : self.f();
+        evidence.finite = evidence.finite && std::isfinite(xy) && std::isfinite(filament) &&
+                          std::isfinite(feed) && xy > 0.0 && filament > 0.0 && feed > 0.0;
+        if (!evidence.finite)
+            return;
+        evidence.xy_path += xy;
+        evidence.filament += filament;
+        if (active_role == "Outer wall")
+            evidence.outer_feeds.push_back(feed);
+        else if (active_role == "Inner wall")
+            evidence.inner_feeds.push_back(feed);
+        else
+            ++evidence.unknown_role_moves;
+        if (part_fan >= 0)
+            evidence.part_fan_states.push_back(part_fan);
+    });
+    return evidence;
+}
+
+void require_same_material(const Evidence &reference, const Evidence &observed)
+{
+    REQUIRE(reference.finite);
+    REQUIRE(observed.finite);
+    REQUIRE(reference.deposition_moves > 0);
+    REQUIRE(observed.deposition_moves > 0);
+    REQUIRE(reference.unknown_role_moves == 0);
+    REQUIRE(observed.unknown_role_moves == 0);
+    REQUIRE(reference.part_fan_states.size() == reference.deposition_moves);
+    REQUIRE(observed.part_fan_states.size() == observed.deposition_moves);
+    REQUIRE(reference.outer_feeds.size() + reference.inner_feeds.size() == reference.deposition_moves);
+    REQUIRE(observed.outer_feeds.size() + observed.inner_feeds.size() == observed.deposition_moves);
+    REQUIRE_FALSE(reference.outer_feeds.empty());
+    REQUIRE_FALSE(reference.inner_feeds.empty());
+    REQUIRE_FALSE(observed.outer_feeds.empty());
+    REQUIRE_FALSE(observed.inner_feeds.empty());
+    CHECK_THAT(observed.xy_path, Catch::Matchers::WithinRel(reference.xy_path, 1e-6));
+    CHECK_THAT(observed.filament, Catch::Matchers::WithinAbs(reference.filament, 1e-3));
+    CHECK(observed.outer_feeds.size() == reference.outer_feeds.size());
+    CHECK(observed.inner_feeds.size() == reference.inner_feeds.size());
+}
+
+double minimum(const std::vector<double> &values)
+{
+    return *std::min_element(values.begin(), values.end());
+}
+
+} // namespace cooling_settings_followup
+
+TEST_CASE("Outer wall slowdown can be disabled without changing deposited material",
+          "[Cooling][CoolingSettings][CoolingDontOuterWall]")
+{
+    using namespace cooling_settings_followup;
+    const DynamicPrintConfig slowdown_config = config_for(false, false, true);
+    const DynamicPrintConfig preserved_config = config_for(true, false, true);
+    const Evidence slowdown = inspect(slice({make_cube(12.0, 12.0, 1.2)}, slowdown_config), slowdown_config);
+    const Evidence preserved = inspect(slice({make_cube(12.0, 12.0, 1.2)}, preserved_config), preserved_config);
+
+    require_same_material(slowdown, preserved);
+    REQUIRE(slowdown.part_fan_states.size() > 0);
+    REQUIRE(preserved.part_fan_states.size() > 0);
+    CHECK(std::all_of(slowdown.part_fan_states.begin(), slowdown.part_fan_states.end(), [](int pwm) { return pwm == 0; }));
+    CHECK(std::all_of(preserved.part_fan_states.begin(), preserved.part_fan_states.end(), [](int pwm) { return pwm == 0; }));
+
+    const double slowed_outer = minimum(slowdown.outer_feeds);
+    const double preserved_outer = minimum(preserved.outer_feeds);
+    REQUIRE(slowed_outer > 0.0);
+    REQUIRE(preserved_outer > slowed_outer + 300.0);
+    CHECK(preserved_outer > slowed_outer * 2.0);
+
+    // Inner walls remain subject to the same cooling slowdown in both rows.
+    CHECK_THAT(minimum(preserved.inner_feeds), Catch::Matchers::WithinAbs(minimum(slowdown.inner_feeds), 0.25));
+}
+
+TEST_CASE("Keeping the cooling fan running preserves a positive fan during deposition",
+          "[Cooling][CoolingSettings][CoolingFanMinHold]")
+{
+    using namespace cooling_settings_followup;
+    const DynamicPrintConfig stop_config = config_for(false, false, false);
+    const DynamicPrintConfig keep_config = config_for(false, true, false);
+    const Evidence stop = inspect(slice({make_cube(8.0, 8.0, 0.8)}, stop_config), stop_config);
+    const Evidence keep = inspect(slice({make_cube(8.0, 8.0, 0.8)}, keep_config), keep_config);
+
+    require_same_material(stop, keep);
+    REQUIRE(stop.fan_seen);
+    REQUIRE(keep.fan_seen);
+    REQUIRE_FALSE(stop.part_fan_states.empty());
+    REQUIRE_FALSE(keep.part_fan_states.empty());
+    CHECK(std::all_of(stop.part_fan_states.begin(), stop.part_fan_states.end(), [](int pwm) { return pwm == 0; }));
+    CHECK(std::all_of(keep.part_fan_states.begin(), keep.part_fan_states.end(), [](int pwm) { return pwm > 0; }));
+    CHECK_THAT(minimum(keep.inner_feeds), Catch::Matchers::WithinAbs(minimum(stop.inner_feeds), 0.25));
+}
