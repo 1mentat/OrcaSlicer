@@ -170,13 +170,13 @@
       "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed. [GCodeBeltApron] additionally counts one expanded layer-change hook per prologue band before the first object layer."
     },
     "ironing_type": {
-      "test": "tests/fff_print/test_boolean_settings.cpp",
-      "tag": "[SettingsBooleanVariance]",
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance][IroningTypeSelection]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "The pipeline comparison covers no ironing and topmost ironing, requiring the latter to emit ironing paths; the top and solid enum values are covered elsewhere but are not claimed here."
+      "reason": "The new public case selects every registered ironing_type value: no ironing, top, topmost, and solid. It requires the expected terrace/topmost selection and positive interior ironing for solid layers, so the enum claim is based on emitted public paths and layer state rather than deserialization alone."
     },
     "ironing_spacing": {
       "test": "tests/fff_print/test_fill.cpp",
@@ -4008,6 +4008,52 @@
         "pipeline_oracle"
       ],
       "reason": "Accepted 99f public export cases exercise all four registered values: Normal, Slope and Spiral preserve deposited material while producing distinct vertical, single-diagonal and multi-segment lift geometry; Auto produces a spiral across an overhang, with a zero-hop control. These are emitted-motion oracles, not serialization-only coverage."
+    },
+    "filament_z_hop_types": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCode][ZHopType][FilamentRetractionOverrides][Pipeline]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "The new public export case exercises the nullable filament_z_hop_types option with nil plus all four registered values (Auto Lift, Normal Lift, Slope Lift, Spiral Lift). It checks nil/non-nil option state, emitted lift geometry, and preserved material for every row."
+    },
+    "raft_expansion": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupport][TreeSupport3D][TreeSupportRaftContact]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The new public tree-support contact case compares raft_expansion 0 and 3 mm at the same contact Z and requires finite positive support footprint area, width, and height in both rows, with the expanded footprint increasing in both dimensions and area. No numeric boundary claim is made."
+    },
+    "enable_wrapping_detection": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTower][WipeTowerSettings][WipeTowerWrappingSettings]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The new public Print export compares enable_wrapping_detection false/true. Disabled output has no tower or positive tower extrusion; enabled output has a valid one-filament tower, finite wall motion, and an independent 10 mm wall-span oracle."
+    },
+    "single_extruder_multi_material_priming": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTower][WipeTowerSettings][WipeTowerSEMMPriming]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The new public Type2 export compares single_extruder_multi_material_priming false/true. The enabled row emits priming markers and positive priming extrusion; the disabled row emits neither, while object deposition remains positive and equal in XY path and filament."
+    },
+    "filament_is_mixed": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[MixedFilament][MixedFilamentIdentity][SettingsBooleanVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The new public mixed-filament export compares filament_is_mixed false/true with the same cube fixture. The false row deposits on physical tool 2, while the true row deposits on tools 0 and 1 and no tool 2, with finite positive XY deposition in both rows."
     }
   }
 }
