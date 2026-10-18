@@ -9,6 +9,7 @@
 #include "libslic3r/PrintConfig.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -21,8 +22,10 @@ struct PressureObservation {
     std::size_t extrusion_moves = 0;
     std::size_t speed_markers = 0;
     double total_extrusion = 0.0;
+    double path_length = 0.0;
+    double max_abs_y = 0.0;
     double final_x = 0.0;
-    std::vector<float> feedrates;
+    std::vector<float> high_flow_feedrates;
 };
 
 std::string pressure_fixture(bool relative_e, Slic3r::ExtrusionRole role)
@@ -59,12 +62,14 @@ PressureObservation observe_pressure(const std::string &gcode, const Slic3r::GCo
     reader.parse_buffer(gcode, [&observation](Slic3r::GCodeReader &state, const Slic3r::GCodeReader::GCodeLine &line) {
         if (line.raw().find(";_EXTRUDE_SET_SPEED") != std::string::npos)
             ++observation.speed_markers;
-        if (line.cmd_is("G1") && line.has_f())
-            observation.feedrates.push_back(line.f());
         if (!line.cmd_is("G1") || !line.extruding(state))
             return;
         ++observation.extrusion_moves;
         observation.total_extrusion += line.dist_E(state);
+        observation.path_length += line.dist_XY(state);
+        observation.max_abs_y = std::max(observation.max_abs_y, std::abs(double(line.new_Y(state))));
+        if (state.x() >= 20.f)
+            observation.high_flow_feedrates.push_back(line.new_F(state));
         observation.final_x = line.new_X(state);
     });
     return observation;
@@ -87,15 +92,29 @@ TEST_CASE("Tagged external flow transitions preserve path geometry while smoothi
     REQUIRE(external.extrusion_moves > 4);
     REQUIRE(external.speed_markers > 1);
     REQUIRE_THAT(external.total_extrusion, Catch::Matchers::WithinAbs(6.0, 0.001));
+    REQUIRE_THAT(external.path_length, Catch::Matchers::WithinAbs(40.0, 0.001));
+    REQUIRE_THAT(external.max_abs_y, Catch::Matchers::WithinAbs(0.0, 0.001));
     REQUIRE_THAT(external.final_x, Catch::Matchers::WithinAbs(40.0, 0.001));
-    CHECK(std::any_of(external.feedrates.begin(), external.feedrates.end(), [](float feedrate) {
-        return feedrate > 600.f && feedrate < 1200.f;
+    REQUIRE_FALSE(external.high_flow_feedrates.empty());
+    for (float feedrate : external.high_flow_feedrates) {
+        CHECK(feedrate > 0.f);
+        CHECK(feedrate <= 1200.f);
+    }
+    // At X20 the filament per millimeter doubles: continuous volumetric flow
+    // can require a speed below the preceding F600, not between F600 and F1200.
+    CHECK(std::any_of(external.high_flow_feedrates.begin(), external.high_flow_feedrates.end(), [](float feedrate) {
+        return feedrate < 1200.f;
     }));
 
     CHECK(internal_control.extrusion_moves == 4);
     CHECK(internal_control.speed_markers == 1);
     CHECK_THAT(internal_control.total_extrusion, Catch::Matchers::WithinAbs(6.0, 0.001));
+    CHECK_THAT(internal_control.path_length, Catch::Matchers::WithinAbs(40.0, 0.001));
+    CHECK_THAT(internal_control.max_abs_y, Catch::Matchers::WithinAbs(0.0, 0.001));
     CHECK_THAT(internal_control.final_x, Catch::Matchers::WithinAbs(40.0, 0.001));
+    REQUIRE(internal_control.high_flow_feedrates.size() == 2);
+    for (float feedrate : internal_control.high_flow_feedrates)
+        CHECK_THAT(feedrate, Catch::Matchers::WithinAbs(1200.f, 0.001f));
 }
 
 namespace {
