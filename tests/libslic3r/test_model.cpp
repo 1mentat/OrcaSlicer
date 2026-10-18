@@ -2300,10 +2300,10 @@ TEST_CASE("Model STEP wrapper classifies malformed input as a load failure",
 namespace model_next_active_contracts {
 using namespace Slic3r;
 
-TEST_CASE("Moving a model object preserves owned volumes and instances", "[Model][ModelOwnership][ModelMove]")
+TEST_CASE("Copying a model object through Model preserves owned volumes and instances", "[Model][ModelOwnership][ModelCopy]")
 {
     Model model;
-    ModelObject *source = model.add_object("move-source", "source.stl", make_cube(4., 5., 6.));
+    ModelObject *source = model.add_object("copy-source", "source.stl", make_cube(4., 5., 6.));
     REQUIRE(source != nullptr);
     REQUIRE(source->volumes.size() == 1);
     source->add_instance();
@@ -2314,28 +2314,34 @@ TEST_CASE("Moving a model object preserves owned volumes and instances", "[Model
     const ObjectID volume_id = source->volumes.front()->id();
     const Vec3d second_offset = second->get_offset();
 
-    ModelObject moved = ModelObject::make_copy(std::move(*source));
+    // Model::add_object is the public ownership/copy API: the clone receives
+    // distinct IDs, remains parented by this Model, and leaves the source intact.
+    ModelObject *copy = model.add_object(*source);
 
-    REQUIRE(moved.id() == object_id);
-    REQUIRE(moved.volumes.size() == 1);
-    REQUIRE(moved.instances.size() == 2);
-    CHECK(moved.name == "move-source");
-    CHECK(moved.input_file == "source.stl");
-    CHECK(moved.volumes.front()->id() == volume_id);
-    CHECK(moved.volumes.front()->get_object() == &moved);
-    CHECK(moved.instances.front()->get_object() == &moved);
-    CHECK(moved.instances.back()->get_object() == &moved);
-    CHECK(moved.instances.back()->get_offset().isApprox(second_offset, 1e-9));
+    REQUIRE(copy != nullptr);
+    REQUIRE(copy != source);
+    REQUIRE(copy->id() != object_id);
+    REQUIRE(copy->volumes.size() == 1);
+    REQUIRE(copy->instances.size() == 2);
+    CHECK(copy->name == "copy-source");
+    CHECK(copy->input_file == "source.stl");
+    CHECK(copy->volumes.front()->id() != volume_id);
+    CHECK(copy->volumes.front()->get_object() == copy);
+    CHECK(copy->instances.front()->get_object() == copy);
+    CHECK(copy->instances.back()->get_object() == copy);
+    CHECK(copy->instances.back()->get_offset().isApprox(second_offset, 1e-9));
+    CHECK(copy->get_model() == &model);
     CHECK(source->get_model() == &model);
-    CHECK(source->volumes.empty());
-    CHECK(source->instances.empty());
+    CHECK(source->volumes.size() == 1);
+    CHECK(source->instances.size() == 2);
 }
 
 TEST_CASE("Named object insertion keeps source mesh geometry and records volume metadata", "[Model][ModelOwnership][ModelGeometry]")
 {
     const TriangleMesh input = make_cube(4., 5., 6.);
     const BoundingBoxf3 input_box = input.bounding_box();
-    const double input_volume = std::abs(static_cast<double>(input.volume()));
+    TriangleMesh input_for_volume = input;
+    const double input_volume = std::abs(static_cast<double>(input_for_volume.volume()));
 
     Model model;
     ModelObject *object = model.add_object("named-part", "input/source.stl", input);
@@ -2352,7 +2358,8 @@ TEST_CASE("Named object insertion keeps source mesh geometry and records volume 
     CHECK(volume->source.object_idx == 0);
     CHECK(volume->source.volume_idx == 0);
     CHECK(object->config.extruder() == 1);
-    CHECK_THAT(std::abs(static_cast<double>(volume->mesh().volume())),
+    TriangleMesh volume_mesh = volume->mesh();
+    CHECK_THAT(std::abs(static_cast<double>(volume_mesh.volume())),
                Catch::Matchers::WithinAbs(input_volume, 1e-5));
     CHECK_THAT(input.bounding_box().min.x(), Catch::Matchers::WithinAbs(input_box.min.x(), 1e-6));
     CHECK_THAT(input.bounding_box().max.y(), Catch::Matchers::WithinAbs(input_box.max.y(), 1e-6));

@@ -1743,13 +1743,13 @@
       "crash_or_exception_is_not_credit": true
     },
     {
-      "id": "model-object-move-instance-parent-retained",
+      "id": "model-object-copy-instance-parent-retained",
       "path": "src/libslic3r/Model.cpp",
-      "old": "        model_instance->set_model_object(this);",
-      "new": "        model_instance->set_model_object(&rhs);",
+      "old": "        this->instances.back()->set_model_object(this);",
+      "new": "        // Keep the copied instance parent unchanged.",
       "expected_matches": 1,
-      "test_filter": "ModelMove",
-      "description": "Assign moved instances to the live source ModelObject instead of the moved destination. Ownership remains with the moved object and the source object remains alive, so the public move contract fails through parent-link assertions without a leak, dangling pointer, invalid access, or crash.",
+      "test_filter": "ModelCopy",
+      "description": "Omit reassignment of a copied instance to its destination ModelObject. The default ModelInstance copy constructor retains the live source parent, so the public Model::add_object clone contract fails its parent-link assertions. Both objects remain owned by Model; no dangling pointer or crash is needed.",
       "expected_ordinary_assertion_failure": true,
       "runtime_kill_status": "pending",
       "crash_or_exception_is_not_credit": true
