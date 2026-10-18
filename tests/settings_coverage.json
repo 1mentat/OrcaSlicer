@@ -4091,6 +4091,159 @@
         "pipeline_oracle"
       ],
       "reason": "Full a44 native run passes the exact case \"SLA pad_around_object selects the standard or around-object pad\" once for both states on the same public no-support cube fixture: false produces a finite positive standard pad footprint/volume and true produces the documented empty around-object result. This is a bounded boolean pipeline claim; pad geometry ranges and interactions remain unclaimed."
+    },
+    "skin_infill_density": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance][SolidSkinInfill]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public locked-zag fixture independently varies skin_infill_density from 35% to 70% while pinning skeleton density, line widths, pattern, walls, and shell settings. The 70% row increases internal-fill length and flow length while retaining positive finite paths and unchanged perimeter length within 0.01 mm. Numeric boundaries, full percent range, and interactions remain unclaimed."
+    },
+    "skin_infill_depth": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance][SolidSkinInfill]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public locked-zag fixture independently varies skin_infill_depth from 1.0 to 2.0 mm with skin density and lock depth held at their control values. The deeper row increases internal-fill length and flow length while retaining positive finite paths and unchanged perimeter length within 0.01 mm. Numeric boundaries and interactions remain unclaimed."
+    },
+    "infill_lock_depth": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance][SolidSkinInfill]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public locked-zag fixture independently varies infill_lock_depth from 0.0 to 0.8 mm with skin density and skin depth held at their control values. The locked row increases internal-fill length and flow length while retaining positive finite paths and unchanged perimeter length within 0.01 mm. Numeric boundaries and interactions remain unclaimed."
+    },
+    "minimum_sparse_infill_area": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance][MinimumSparseArea]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public two-component fixture has analytically separated 8x8 mm (64 mm\u00b2) and 14x14 mm (196 mm\u00b2) components. At 0.0 mm\u00b2 the small component remains internal sparse fill; at 80.0 mm\u00b2 it becomes internal solid fill while the large component remains sparse and its solid-fill count is unchanged. The registered setting has a lower bound of zero and no declared upper bound; only these representative threshold controls are claimed."
+    },
+    "wall_transition_length": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneWallTransition]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct public WallToolPaths fixture compares wall_transition_length at 100% and 300% with distribution count 3 and filter/angle/resolution/deviation pinned. Finite in-outline variable-width paths are required, and width-squared-length/maximum-width/width-area must change. This is direct wall generation evidence, not full Print-pipeline coverage; numeric boundaries and interactions remain unclaimed."
+    },
+    "wall_distribution_count": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneWallTransition]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct public WallToolPaths fixture compares wall_distribution_count 1 and 3 with transition/filter/angle/resolution/deviation pinned. Finite in-outline variable-width paths are required, and width-squared-length/maximum-width/width-area must change. This is representative direct wall-generation evidence; the complete integer domain and Print-pipeline interactions remain unclaimed."
+    },
+    "wall_maximum_resolution": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneWallResolution]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct rounded-wall fixture compares wall_maximum_resolution 0.005 and 0.5 mm while wall_maximum_deviation remains 0.005 mm. Both rows retain four finite in-outline paths with positive minimum width and length; the fine row must have more junctions. A separate comparison of the jointly coarse resolution/deviation row checks a circumference budget and positive width-area. This is representative direct wall-generation evidence; full numeric boundaries and Print-pipeline interactions remain unclaimed."
+    },
+    "extrusion_rate_smoothing_external_perimeter_only": {
+      "test": "tests/fff_print/test_pressure_equalizer.cpp",
+      "tag": "[PressureEqualizer]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public tagged pressure case sets this boolean true and compares an external-perimeter row with an internal-perimeter control under the same config: external output has more than four extrusion moves and more than one speed marker, while total extrusion, 40 mm path, zero Y deviation, and final X=40 remain conserved; the internal control remains exactly four moves and one marker. Only the true value is exercised; false and complete boolean-domain evidence remain unclaimed. max_volumetric_extrusion_rate_slope=1.0 and segment_length=2.0 are pinned fixture parameters, not claims for those settings."
+    },
+    "fan_speedup_overhangs": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][FanSpeedupOverhangs]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The same stepped base/stem/cap mesh and pinned cooling/ironing configuration are sliced with fan_speedup_overhangs=false and true. Both rows require finite positive motion, ordinary PWM=51 and overhang PWM=255 witnesses, then compare the first rising non-overhang ironing PWM=102 event. The false (unrestricted) row must advance that event in signed physical distance and elapsed time relative to the true row while path length and filament remain conserved. This covers both boolean states with a scheduling/material oracle; ironing settings and other fan numeric domains remain pinned/unclaimed."
+    },
+    "top_bottom_infill_wall_overlap": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance][TopBottomOverlap]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The stepped public Print fixture compares top_bottom_infill_wall_overlap=0.0 and 50.0. Layer count and perimeter length remain stable, while top-solid and terrace-top lengths grow for 50.0, bottom length changes, and both top/bottom surfaces remain positive. These are representative percent values only; the full percent range and boundary behavior are not claimed."
+    },
+    "elefant_foot_compensation": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAPrint][SLAElephantFootFade]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public SLA correction case compares compensation=0.0 with compensation=0.3 on the same 10 mm square and valid SLA correction config. It checks four layer areas, unchanged bounds and level/index metadata, and strict first-to-top area recovery for the compensated row. The tested zero/positive pair is representative evidence, not a full numeric-domain claim."
+    },
+    "elefant_foot_min_width": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAPrint][SLAElephantFootFade]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The same public SLA case compares elefant_foot_min_width=0.2 with 30.0 while compensation is positive. The 30 mm protected minimum preserves the 10 mm square at 100 mm\u00b2 on all four layers, while the ordinary minimum allows the correction row to shrink and recover. This is a physical protection pair only; no full minimum-width range or boundary claim is made."
+    },
+    "faded_layers": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAPrint][SLAElephantFootFade]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public SLA elephant-foot case runs faded_layers=3, 4, and the registered maximum 20 on a four-printable-layer cube. It requires four model areas for every row, strict fade ordering for the four-layer row, an earlier unchanged section for the three-layer row, and equivalence of the 20-layer row to the four-layer row because production clamps the configured count to printable layers. These representative layer counts do not claim the full integer domain or minimum boundary."
+    },
+    "seam_slope_entire_loop": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings][GCodeExport]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public case \"Scarf entire-loop mode uses the measured outer loop length\" holds seam_slope_type=external, start height, bound, steps, model, and exporter settings fixed while seam_slope_entire_loop is false/true. Both rows require equal layer count, positive external-wall output, and equal pre-export external-wall geometry; the true row requires a strictly longer measured scarf distance than the bounded false row. This promotes the two boolean values for the external-wall scarf route only; seam type, inner-wall scope, and numeric interactions remain unclaimed."
+    },
+    "reduce_fan_stop_start_freq": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][CoolingSettings][CoolingFanMinHold]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public case \"Keeping the cooling fan running preserves a positive fan during deposition\" keeps the same 8x8x0.8 mm slice and cooling settings while reduce_fan_stop_start_freq is false/true. Both rows preserve deposited material and inner-wall feed; the false row requires zero part-fan states and the true row requires positive part-fan states. This promotes both boolean values for the configured extruder column, not cross-variant arrays."
+    },
+    "flush_into_objects": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTower][WipingExtrusions][WipingAssignmentBudget]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public case \"WipingExtrusions conserves a large purge budget across object copies\" compares the same two-copy Type2 assignment fixture with flush_into_objects=false/true while flush_into_infill=false. The disabled row has no perimeter candidates or per-copy overrides; the enabled row has positive perimeter candidates and matching per-copy overrides, while assigned plus remaining volume equals the requested budget. This is a public WipingExtrusions pipeline oracle for object purging only."
+    },
+    "flush_into_infill": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTower][WipingExtrusions][WipingAssignmentBudget]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The same public case compares flush_into_infill=false/true while flush_into_objects=false on the same two-copy processed print. The disabled row has no infill candidates or per-copy overrides; the enabled row has positive infill candidates and matching per-copy overrides, while assigned plus remaining volume equals the requested budget. This promotes the internal-infill destination only; object/support destinations and broader matrix interactions remain unclaimed."
     }
   }
 }
