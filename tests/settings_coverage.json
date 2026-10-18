@@ -1638,13 +1638,14 @@
     },
     "input_shaping_emit": {
       "test": "tests/fff_print/test_gcode.cpp",
-      "tag": "[GCodeExportWorkflows]",
+      "tag": "[InputShaping]",
       "dimensions": [
+        "boolean_values",
         "representative_values",
         "pipeline_oracle",
         "interaction_matrix"
       ],
-      "reason": "Enabled input shaping emits executable M593 commands for Marlin 2 and omits them for legacy Marlin with machine-limit emission enabled. The boolean-off dimension remains unclaimed."
+      "reason": "Accepted703 \"Marlin 2 input shaping routes axes and honors endpoints and gates\" explicitly exports input_shaping_emit=false and requires positive extrusion with no M593 commands, then exports true and requires X/Y M593 commands plus unchanged material; endpoint rows and the Disable type add interaction evidence. Firmware/type domains beyond these rows remain unclaimed."
     },
     "use_firmware_retraction": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -3689,12 +3690,13 @@
     },
     "zaa_enabled": {
       "test": "tests/fff_print/test_fill.cpp",
-      "tag": "[Fill]",
+      "tag": "[ZContouringSettings]",
       "dimensions": [
+        "boolean_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The accepted Z anti-aliasing keeps the infill rotation template's step case enables zaa_enabled with a cube, explicit +45-degree template, zaa_min_z, and layer height. It requires more than ten valid layers, no missing angle records, every angle transition to be a bounded multiple of 45 degrees, and at least one 45-degree step. This is representative enabled-state pipeline evidence only; the accepted identity does not independently exercise the disabled boolean state, so boolean_values is intentionally not claimed."
+      "reason": "Accepted703 \"Z contouring gates fill-direction alternation\" runs explicit false,false and false,true controls plus true,false and true,true rows on the public Print fixture; disabled rows must match, enabled rows must differ in fill-direction behavior, and all rows retain finite positive geometry. The separate accepted Z anti-aliasing template case remains representative enabled-state evidence; broader numeric/domain interactions remain unclaimed."
     },
     "cool_plate_temp_initial_layer": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -3776,6 +3778,51 @@
         "pipeline_oracle"
       ],
       "reason": "TreeSupportInteractions runs the registered full integer domain 0, 1, and 2. It requires finite positive output, one-wall closed-loop output, and a larger two-wall closed-loop witness; this is complete boundary/domain evidence conditional on the exact native case passing."
+    },
+    "interface_shells": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[InterfaceShells]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public Print/process fixture runs interface_shells=false and true on the same two-material overlapping-volume model. It requires two processed regions, matched layer footprints, a >20 mm2 top/internal surface transfer with an independent area-difference check, and unchanged final-layer top area. This proves both boolean values reach the slice pipeline and affect the intended hidden-interface classification; it does not claim unrelated shell or material interaction combinations."
+    },
+    "toolchange_cyclic_first_layer": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[ToolChangeOrdering]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public Print/process fixture runs toolchange_cyclic_first_layer=false and true under both registered toolchange_ordering values. It verifies the applied bool, two used extruders, positive processed layers, and exact first/later layer tool sequences from print.tool_ordering(). This proves both boolean values affect the public ordering route in the pinned fixture; it does not claim the full cyclic-order, flush-cost, or first-layer interaction matrix."
+    },
+    "activate_air_filtration": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[AirFiltration]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted AirFiltration case changes only the master activation gate from true to false with capability and both phase gates true. Directed P3 PWM commands change from [89,165] to empty while deposited filament and XY path remain equal within tolerance. Both boolean values are tested for one filament; per-filament vector indexing and cooling-filter interactions remain unclaimed."
+    },
+    "activate_air_filtration_during_print": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[AirFiltration]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted AirFiltration case changes only the during-print activation gate from true to false with capability, master and completion true. The initial P3 PWM89 command before deposition disappears while the final PWM165 command remains after deposition, and ordinary extrusion geometry is preserved. Both boolean values are tested for one filament; per-filament vector indexing and cooling-filter interactions remain unclaimed."
+    },
+    "activate_air_filtration_on_completion": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[AirFiltration]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted AirFiltration case changes only the completion activation gate from true to false with capability, master and during-print true. The final P3 PWM165 command after deposition disappears while the initial PWM89 command remains before deposition, and ordinary extrusion geometry is preserved. Both boolean values are tested for one filament; per-filament vector indexing and cooling-filter interactions remain unclaimed."
     }
   }
 }

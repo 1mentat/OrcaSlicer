@@ -1,0 +1,821 @@
+{
+  "schema_version": 1,
+  "description": "Behavioral probes for metadata, geometry, preset classification, thermal commands, parser semantics, settings normalization, volume assignment, painted fuzzy skin and purge-tower rounding. Includes indexed configuration and chamber-temperature pipeline probes. Includes purge-budget assignment probes. Includes intersecting-solid surfaces, Sweep/Loft Boolean volume contracts and legacy text alignment.",
+  "mutants": [
+    {
+      "id": "generic-3mf-layer-profile-object-index-shifted",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "            if (layer_height_profile.size() >= 4 && layer_height_profile.size() % 2 == 0) {\n                sprintf(buffer, \"object_id=%d|\", count);",
+      "new": "            if (layer_height_profile.size() >= 4 && layer_height_profile.size() % 2 == 0) {\n                sprintf(buffer, \"object_id=%d|\", count + 1);",
+      "expected_matches": 1,
+      "test_filter": "Generic3MFMetadata",
+      "description": "Shift the active store_3mf layer-profile object index. The middle ModelObject is exported as object_id=2 while first and last objects remain empty controls."
+    },
+    {
+      "id": "generic-3mf-support-island-flag-dropped",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "                    sprintf(buffer, (i==0 ? \"%f %f %f %f %f\" : \" %f %f %f %f %f\"),  sla_support_points[i].pos(0), sla_support_points[i].pos(1), sla_support_points[i].pos(2), sla_support_points[i].head_front_radius, (float)sla_support_points[i].is_new_island);",
+      "new": "                    sprintf(buffer, (i==0 ? \"%f %f %f %f %f\" : \" %f %f %f %f %f\"),  sla_support_points[i].pos(0), sla_support_points[i].pos(1), sla_support_points[i].pos(2), sla_support_points[i].head_front_radius, 0.f);",
+      "expected_matches": 1,
+      "test_filter": "Generic3MFMetadata",
+      "description": "Drop the second support point is_new_island bit in the active ZIP writer. The typed archive parser requires the true second-point flag."
+    },
+    {
+      "id": "generic-3mf-drain-hole-offset-normalization-dropped",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "                hole.pos -= hole.normal.normalized();",
+      "new": "                hole.pos -= hole.normal;",
+      "expected_matches": 1,
+      "test_filter": "Generic3MFMetadata",
+      "description": "Use a raw rather than normalized non-unit drain normal for the persisted compatibility offset. The typed archive position is compared with the independent source snapshot."
+    },
+    {
+      "id": "generic-3mf-drain-hole-height-compatibility-offset-dropped",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "                hole.height += 1.f;",
+      "new": "                hole.height += 0.f;",
+      "expected_matches": 1,
+      "test_filter": "Generic3MFMetadata",
+      "description": "Drop the active one-millimeter persisted drain-hole height compatibility offset; the archive parser requires source height plus one."
+    },
+    {
+      "id": "generic-3mf-empty-drain-hole-entry-omitted",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "            if (!drain_holes.empty()) {",
+      "new": "            if (false && !drain_holes.empty()) {",
+      "expected_matches": 1,
+      "test_filter": "Generic3MFMetadata",
+      "description": "Suppress a populated drain-hole metadata entry. The export test requires the typed ZIP entry; the separate empty control requires omission only when the source is empty."
+    },
+    {
+      "id": "generic-3mf-minimum-profile-pair-rejected",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "layer_height_profile.size() >= 4 && layer_height_profile.size() % 2 == 0",
+      "new": "layer_height_profile.size() > 4 && layer_height_profile.size() % 2 == 0",
+      "expected_matches": 1,
+      "test_filter": "Generic3MFMetadata",
+      "description": "Reject the smallest accepted four-value profile; the exact boundary row requires the metadata entry."
+    },
+    {
+      "id": "generic-3mf-incomplete-profile-pair-accepted",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "layer_height_profile.size() >= 4 && layer_height_profile.size() % 2 == 0",
+      "new": "layer_height_profile.size() >= 4",
+      "expected_matches": 1,
+      "test_filter": "Generic3MFMetadata",
+      "description": "Accept a five-value profile with an unmatched height; the odd-length row requires the entry to be omitted."
+    },
+    {
+      "id": "machine-envelope-emit-gate-inversion",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        print.config().emit_machine_limits_to_gcode.value == true)",
+      "new": "        print.config().emit_machine_limits_to_gcode.value == false)",
+      "expected_matches": 1,
+      "description": "Invert the public machine-envelope emission gate; the disabled row must remain free of M201/M203 while the enabled rows must emit the exact envelope."
+    },
+    {
+      "id": "machine-envelope-junction-call-zeroed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        file.write_format(writer().set_junction_deviation(MAX_LIMIT(machine_max_junction_deviation)).c_str());",
+      "new": "        file.write_format(writer().set_junction_deviation(0).c_str());",
+      "expected_matches": 1,
+      "description": "Discard the selected machine junction-deviation value at the public envelope call; the positive-JD row must lose M205 J0.250 while the zero-JD row remains a negative control."
+    },
+    {
+      "id": "machine-envelope-x-jerk-uses-y-limit",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            MAX_LIMIT(machine_max_jerk_x) * factor,",
+      "new": "            MAX_LIMIT(machine_max_jerk_y) * factor,",
+      "expected_matches": 1,
+      "description": "Substitute the Y jerk limit for X; the public envelope fixture configures X=11 and Y=13 and checks parsed numeric values independently."
+    },
+    {
+      "id": "cutsurface-gap-candidate-strip-intersection-discarded",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "            ExPolygons patch_intersection = intersection_ex(ExPolygons{patch_shape}, rest);\n            if (patch_intersection.empty()) continue;\n\n            patch_shapes.push_back",
+      "new": "            ExPolygons patch_intersection = intersection_ex(ExPolygons{patch_shape}, rest);\n            if (!patch_intersection.empty()) continue;\n\n            patch_shapes.push_back",
+      "expected_matches": 1,
+      "test_filter": "CutSurfacePatchSelection",
+      "description": "Discard candidate patches that actually intersect the remaining projected gap. The three-strip case requires the interior strip to contribute to the independent area and topology oracle."
+    },
+    {
+      "id": "cutsurface-gap-single-candidate-not-added",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "        if (patch_shapes.size() == 1) {\n            used_shape_patches.push_back(patch_shapes.front().patch_index);        \n            continue;\n        }",
+      "new": "        if (patch_shapes.size() == 1) {\n            continue;\n        }",
+      "expected_matches": 1,
+      "test_filter": "CutSurfacePatchSelection",
+      "description": "Skip adding the only patch that covers the remaining interior gap. The first test should lose the middle strip and fail its area/contour contract without relying on a crash."
+    },
+    {
+      "id": "cutsurface-gap-interior-depth-order-reversed",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "        std::sort(patch_shapes.begin(), patch_shapes.end(), [](const PatchShape &a, const PatchShape &b) \n            { return a.depth_range_center_distance < b.depth_range_center_distance; });",
+      "new": "        std::sort(patch_shapes.begin(), patch_shapes.end(), [](const PatchShape &a, const PatchShape &b) \n            { return a.depth_range_center_distance > b.depth_range_center_distance; });",
+      "expected_matches": 1,
+      "test_filter": "CutSurfacePatchSelection",
+      "description": "Prefer the farther overlapping interior strip. The second test requires the nearer z=20..30 strip and rejects vertices from the z=40..50 strip."
+    },
+    {
+      "id": "type1-ramming-explicit-rate-fallback-halved",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "        if (config.filament_ramming_volumetric_speed.is_nil(idx) || is_approx(config.filament_ramming_volumetric_speed.get_at(idx), -1.)) ramming_vol_speed = max_vol_speed;",
+      "new": "        if (config.filament_ramming_volumetric_speed.is_nil(idx) || is_approx(config.filament_ramming_volumetric_speed.get_at(idx), -1.)) ramming_vol_speed = 0.5f * max_vol_speed;",
+      "test_filter": "Type1WipeRamming",
+      "description": "Reduce only the valid physical-extruder fallback output from 6 to 3 mm3/s; explicit 2, -1 fallback 6, and nil fallback 6 rows provide independent positive rate oracles.",
+      "expected_matches": 1
+    },
+    {
+      "id": "type1-ramming-nozzle-rate-fallback-halved",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "        if (config.filament_ramming_volumetric_speed_nc.is_nil(idx) || is_approx(config.filament_ramming_volumetric_speed_nc.get_at(idx), -1.))\n            ramming_vol_speed_nc = max_vol_speed;",
+      "new": "        if (config.filament_ramming_volumetric_speed_nc.is_nil(idx) || is_approx(config.filament_ramming_volumetric_speed_nc.get_at(idx), -1.))\n            ramming_vol_speed_nc = 0.5f * max_vol_speed;",
+      "test_filter": "Type1WipeRamming",
+      "description": "Reduce only the valid same-extruder fallback output from 6 to 3 mm3/s; explicit 1.5, -1 and nil same-extruder rows provide independent positive rate oracles.",
+      "expected_matches": 1
+    },
+    {
+      "id": "type1-ramming-extruder-reverse-travel-gate",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "        return m_filpar[filament_id].ramming_travel_time.first > EPSILON && m_filaments_change_length.first[filament_id]>EPSILON;",
+      "new": "        return m_filpar[filament_id].ramming_travel_time.first > EPSILON || m_filaments_change_length.first[filament_id]>EPSILON;",
+      "test_filter": "Type1WipeRamming",
+      "description": "Make the physical-extruder reverse gate depend on length alone. The parameterized physical zero-time row must retain its two-point wipe path and zero reverse duration.",
+      "expected_matches": 1
+    },
+    {
+      "id": "type1-ramming-nozzle-reverse-travel-gate",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "    return m_filpar[filament_id].ramming_travel_time.second > EPSILON && m_filaments_change_length.second[filament_id] > EPSILON;",
+      "new": "    return m_filpar[filament_id].ramming_travel_time.second > EPSILON || m_filaments_change_length.second[filament_id] > EPSILON;",
+      "test_filter": "Type1WipeRamming",
+      "description": "Make the same-extruder nozzle reverse gate depend on length alone. The parameterized nozzle zero-time row independently checks the public wipe path and duration.",
+      "expected_matches": 1
+    },
+    {
+      "id": "type1-ramming-preheat-disabled-guard",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "            bool res = config.enable_pre_heating.value; ",
+      "new": "            bool res = false; ",
+      "test_filter": "Type1WipeRamming",
+      "description": "Ignore the public enable_pre_heating flag. The enabled same-extruder row must emit M104 S100 and M106 S255 while the disabled control emits neither.",
+      "expected_matches": 1
+    },
+    {
+      "id": "type1-ramming-cooling-route-inverted",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "    if (!extruder_change) {\n        int new_nozzle_id = m_multi_nozzle_group_result->is_support_dynamic_nozzle_map()",
+      "new": "    if (extruder_change) {\n        int new_nozzle_id = m_multi_nozzle_group_result->is_support_dynamic_nozzle_map()",
+      "test_filter": "Type1WipeRamming",
+      "description": "Invert the Type1 same-extruder cooling preamble. The public hotend row must retain M104/M106 output.",
+      "expected_matches": 1
+    },
+    {
+      "id": "type1-ramming-long-reverse-speed-cap-removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "            if (real_travel_dis < need_reverse_travel_dis)\n                nozzle_change_speed *= real_travel_dis / need_reverse_travel_dis;",
+      "new": "            if (real_travel_dis < need_reverse_travel_dis)\n                nozzle_change_speed *= 1.f;",
+      "test_filter": "Type1WipeRamming",
+      "description": "Remove the length-proportional speed reduction when the 40-second reverse request exceeds available travel. The long-reverse minimum-duration oracle must fail while positive output remains compile-safe.",
+      "expected_matches": 1
+    },
+    {
+      "id": "type1-ramming-first-layer-cooling-uses-later-temperature",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "                m_filpar[idx].precool_t_first_layer.first[i] = std::max(0.f, nozzle_temp_first_layer -float(config.filament_pre_cooling_temperature.get_at(idx))) /float(hotend_cooling_rates[i]);",
+      "new": "                m_filpar[idx].precool_t_first_layer.first[i] = std::max(0.f, nozzle_temp_other_layer -float(config.filament_pre_cooling_temperature.get_at(idx))) /float(hotend_cooling_rates[i]);",
+      "expected_matches": 1,
+      "test_filter": "Type1WipeRamming",
+      "description": "Use the 200-degree later-layer temperature for first-layer cooling instead of the configured240. All output remains positive; the independently derived first-layer140/rate minimum must reject the shorter100/rate schedule."
+    },
+    {
+      "id": "placeholder-random-integer-generator-not-consumed",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "param1.set_i_lite(std::uniform_int_distribution<>(param1.as_i(), param2.as_i())(rng));",
+      "new": "param1.set_i_lite(param1.as_i());",
+      "test_filter": "PlaceholderParserRandom",
+      "description": "Return an in-range constant instead of consuming the caller-supplied integer random generator; state advancement must fail as an ordinary assertion.",
+      "expected_matches": 1
+    },
+    {
+      "id": "placeholder-random-real-bounds-truncated",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "param1.set_d_lite(std::uniform_real_distribution<>(param1.as_d(), param2.as_d())(rng));",
+      "new": "param1.set_d_lite(std::uniform_real_distribution<>(std::floor(param1.as_d()), std::floor(param2.as_d()))(rng));",
+      "test_filter": "PlaceholderParserRandom",
+      "description": "Truncate real endpoints to integer values while retaining a valid ordered distribution; the1.25degenerate interval and fractional-bound rows detect the numerical error.",
+      "expected_matches": 1
+    },
+    {
+      "id": "placeholder-interpolation-lower-clamp-wrong-endpoint",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "if (double x0 = table.table.front().x; x > x0 - EPSILON && x < x0)\n                    out.set_d(table.table.front().y);",
+      "new": "if (double x0 = table.table.front().x; x > x0 - EPSILON && x < x0)\n                    out.set_d(table.table.back().y);",
+      "test_filter": "PlaceholderParserInterpolation",
+      "description": "Clamp a small below-range rounding error to the upper rather than lower endpoint; numeric output must be10rather than30.",
+      "expected_matches": 1
+    },
+    {
+      "id": "placeholder-interpolation-upper-clamp-wrong-endpoint",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "else if (double x1 = table.table.back().x; x > x1 && x < x1 + EPSILON)\n                    out.set_d(table.table.back().y);",
+      "new": "else if (double x1 = table.table.back().x; x > x1 && x < x1 + EPSILON)\n                    out.set_d(table.table.front().y);",
+      "test_filter": "PlaceholderParserInterpolation",
+      "description": "Clamp a small above-range rounding error to the lower rather than upper endpoint; numeric output must be30rather than10.",
+      "expected_matches": 1
+    },
+    {
+      "id": "placeholder-interpolation-out-of-range-error-suppressed",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "expr_x.throw_exception(\"Interpolation value is outside the table range\");",
+      "new": "out.set_d(table.table.front().y);",
+      "test_filter": "PlaceholderParserInterpolation",
+      "description": "Silently return a table endpoint for values outside the rounding tolerance; CHECK_THROWS_WITH fails normally instead of crediting a crash or unhandled exception.",
+      "expected_matches": 1
+    },
+    {
+      "id": "backup-complete-shape-guard",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (object.volumes.empty() || object.instances.empty())",
+      "new": "if (object.volumes.empty() && object.instances.empty())",
+      "test_filter": "Bbs3mfBackup",
+      "description": "Both a volume and an instance are required before a public backup request can reach the worker; missing-volume and missing-instance rows assert no output archive.",
+      "expected_matches": 1,
+      "source_old_matches": 1,
+      "source_new_matches": 0,
+      "test_filter_kind": "CTest --label-regex"
+    },
+    {
+      "id": "backup-valid-clone-output-name",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "auto o = m_temp_model.add_object(object);",
+      "new": "auto o = m_temp_model.add_object(object);\n        o->name = \"mutated-backup\";",
+      "test_filter": "Bbs3mfBackup",
+      "description": "The worker must preserve the valid cloned object name used by the public snapshot filename.",
+      "expected_matches": 1,
+      "source_old_matches": 1,
+      "source_new_matches": 0,
+      "test_filter_kind": "CTest --label-regex"
+    },
+    {
+      "id": "backup-object-id-preserved",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "e.save_object_mesh(t.path, *t.object, (int) t.id);",
+      "new": "e.save_object_mesh(t.path, *t.object, 0);",
+      "test_filter": "Bbs3mfBackup",
+      "description": "The valid snapshot must retain the generated backup identifier in its archive filename. The resource ID oracle only requires a positive 3MF ID.",
+      "expected_matches": 1,
+      "source_old_matches": 1,
+      "source_new_matches": 0,
+      "test_filter_kind": "CTest --label-regex"
+    },
+    {
+      "id": "backup-state-cleared-after-ui",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "m_other_changes_backup = false;\n                break;\n            }\n            case AddObject:",
+      "new": "m_other_changes_backup = true;\n                break;\n            }\n            case AddObject:",
+      "test_filter": "Bbs3mfBackup",
+      "description": "Processing a queued Backup task through the public UI pump must clear the pending backup-change flag.",
+      "expected_matches": 1,
+      "source_old_matches": 1,
+      "source_new_matches": 0,
+      "test_filter_kind": "CTest --label-regex"
+    },
+    {
+      "id": "cad-body-boolean-intersect-uses-fuse",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "case BooleanMode::Intersect: { BRepAlgoAPI_Common op; result = run(op); break; }   // overlap",
+      "new": "case BooleanMode::Intersect: { BRepAlgoAPI_Fuse op; result = run(op); break; }   // overlap",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentBooleanIntersect",
+      "description": "A body-body Intersect must retain only the common prism; using Fuse changes the analytic volume and bounds."
+    },
+    {
+      "id": "cad-extrude-intersect-uses-cut",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "} else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Common common(result, tool);\n            if (!common.IsDone()) throw std::runtime_error(_u8L(\"intersect failed\"));\n            result = common.Shape();\n        }\n        break;\n    }\n    case CadFeatureType::Revolve: {",
+      "new": "} else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Cut cut(result, tool);\n            if (!cut.IsDone()) throw std::runtime_error(_u8L(\"cut failed\"));\n            result = cut.Shape();\n        }\n        break;\n    }\n    case CadFeatureType::Revolve: {",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentBooleanIntersect",
+      "description": "An Extrude feature in Intersect mode must keep the tool overlap; replacing the Common operation with a Cut leaves the complementary base volume."
+    },
+    {
+      "id": "cad-tangent-plane-valid-cylinder-falls-back",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "if (!cyl.ok) { result = fallback_offset(); break; }",
+      "new": "if (cyl.ok) { result = fallback_offset(); break; }",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentDatumPlaneAdvanced",
+      "description": "A valid cylindrical face must resolve a tangent plane at the cylinder wall; treating valid analysis as the fallback path changes both origin and normal."
+    },
+    {
+      "id": "cad-two-edge-plane-cross-branch-inverted",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "if (cross.squaredNorm() > 1e-12) {",
+      "new": "if (cross.squaredNorm() <= 1e-12) {",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentDatumPlaneAdvanced",
+      "description": "Two nonparallel adjacent edges must use their cross-product normal; inverting the branch forces the fallback/parallel path and violates the selected edge origin and normal oracle."
+    },
+    {
+      "id": "cad-tangent-plane-angle-ignored",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "const double theta = f.plane_angle_tilt * M_PI / 180.0;",
+      "new": "const double theta = 0.0;",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentDatumPlaneAdvanced",
+      "description": "Ignoring a nonzero tangent angle preserves a valid tangent but violates the quarter/half-turn normal and chord-length relations."
+    },
+    {
+      "id": "preset-file-type-misses-app-export-path",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "                v.first == \"last_export_path\")",
+      "new": "                v.first == \"not_last_export_path\")",
+      "test_filter": "ConfigFileType",
+      "expected_matches": 1,
+      "description": "Stop recognizing the application export-path leaf. The app and presets rows must remain application configuration.",
+      "anchor_sha256": "56e24827b4461633b1fb5b9a471e3b80d2cbd9fbcfaa6502a828043fa9813c3b"
+    },
+    {
+      "id": "preset-file-type-presets-counted-as-bundle",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        else if (v.first == \"presets\") {\n            ++ app_config;\n            ++ bundle;",
+      "new": "        else if (v.first == \"presets\") {\n            ++ bundle;\n            ++ bundle;",
+      "test_filter": "ConfigFileType",
+      "expected_matches": 1,
+      "description": "Count a presets section as bundle-only. The presets plus export-path row must retain the application classification.",
+      "anchor_sha256": "3a88f0cfefc2132704d2454d56e42995873631afa1a9be26cd54be6cff97e0f7"
+    },
+    {
+      "id": "preset-file-type-app-config-tie-prefers-app",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "    return (app_config > bundle && app_config > config) ? CONFIG_FILE_TYPE_APP_CONFIG :\n           (bundle > config) ? CONFIG_FILE_TYPE_CONFIG_BUNDLE : CONFIG_FILE_TYPE_CONFIG;",
+      "new": "    return (app_config > bundle && app_config >= config) ? CONFIG_FILE_TYPE_APP_CONFIG :\n           (bundle > config) ? CONFIG_FILE_TYPE_CONFIG_BUNDLE : CONFIG_FILE_TYPE_CONFIG;",
+      "test_filter": "ConfigFileType",
+      "expected_matches": 1,
+      "description": "Making app/config equality prefer app violates both explicit export-path plus diameter tie rows, which must select ordinary config. The presets-only app/bundle tie does not distinguish this mutant.",
+      "anchor_sha256": "3f52db77b2467c4bacc95e15bed56d37f6bf8020094233e8eb9e6127d353b6d3"
+    },
+    {
+      "id": "wipe-tower-semm-wait-gate-ignores-mode",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    return config.wait_for_temp_on_wipe_tower.value && !config.single_extruder_multi_material.value;",
+      "new": "    return config.wait_for_temp_on_wipe_tower.value;",
+      "test_filter": "SEMMBehavior",
+      "expected_matches": 1,
+      "description": "Ignore the SEMM suppression in the public wait-for-temperature gate. The same-fixture SEMM=true row must remain nonblocking and fail its M109/M104 contract.",
+      "anchor_sha256": "c1b56f60ca5d182e679077fd2dacf383c2a1ab6e88ec2f24f0950976adfd54b0"
+    },
+    {
+      "id": "wipe-tower-wait-emission-ignores-cached-gate",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    const bool wait_for_temp_here = m_wait_for_temp_on_wipe_tower && wait_for_temp > 0;",
+      "new": "    const bool wait_for_temp_here = wait_for_temp > 0;",
+      "test_filter": "SEMMBehavior",
+      "expected_matches": 1,
+      "description": "Emit a blocking wait whenever a target temperature exists, bypassing the constructor gate. The SEMM=true row must reject the unexpected M109 and fail the setting-specific output oracle.",
+      "anchor_sha256": "70368db03ca17ddf0797bfec1c43f5c9e316c5f97bdbd054c9cb9274e48606b0"
+    },
+    {
+      "id": "sla-disabled-hollowing-probe-forces-enable",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "po.m_hollowing_data.reset();\n\n    if (! po.m_config.hollowing_enable.getBool()) {",
+      "new": "po.m_hollowing_data.reset();\n    po.m_config.hollowing_enable.value = true;\n\n    if (! po.m_config.hollowing_enable.getBool()) {",
+      "expected_matches": 1,
+      "test_filter": "SLAHollowingToggle",
+      "description": "Force the public hollowing option on immediately after the reset; the focused hollowing-toggle case must fail because its disabled control exposes a nonempty interior."
+    },
+    {
+      "id": "sla-disabled-pad-probe-forces-enable",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "void SLAPrint::Steps::slice_model(SLAPrintObject &po)\n{\n    const TriangleMesh &mesh = po.get_mesh_to_slice();",
+      "new": "void SLAPrint::Steps::slice_model(SLAPrintObject &po)\n{\n    po.m_config.pad_enable.value = true;\n\n    const TriangleMesh &mesh = po.get_mesh_to_slice();",
+      "expected_matches": 1,
+      "test_filter": "SLAPadToggle",
+      "description": "Force pad_enable at slice_model entry, before the support-data allocation gate; the focused pad-toggle case must fail because its disabled control now receives a valid pad setup and output.",
+      "source_anchor": "src/libslic3r/SLAPrintSteps.cpp:509-511"
+    },
+    {
+      "id": "gcp-color-default-palette-skips-entry",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            ++m_last_default_color_id;",
+      "new": "            m_last_default_color_id = (m_last_default_color_id + 2) % Default_Colors.size();",
+      "description": "Default color changes must advance one palette entry at a time and wrap after the sixth; the public case requires six distinct fallback colors and the seventh to equal the first.",
+      "test_filter": "GCodeProcessorColorMetadata"
+    },
+    {
+      "id": "gcp-color-invalid-token-accepted",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            if (is_valid_color(tokens[2]))\n                color = tokens[2];",
+      "new": "            if (true)\n                color = tokens[2];",
+      "description": "Malformed explicit color tokens must retain the valid fallback color rather than escaping into public custom-gcode metadata; the case covers wrong prefix, both wrong lengths, and non-hex text.",
+      "test_filter": "GCodeProcessorColorMetadata"
+    },
+    {
+      "id": "wt2-semm-ramming-disable-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_enable_filament_ramming(config.enable_filament_ramming.value),",
+      "new": "m_enable_filament_ramming(true),",
+      "description": "Ignoring the disabled SEMM ramming setting emits nonzero unload material in the otherwise identical disabled fixture.",
+      "test_filter": "RammingEnableControls"
+    },
+    {
+      "id": "wt2-multitool-ramming-disable-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].multitool_ramming = config.filament_multitool_ramming.get_at(idx) && vol > 0.f && flow > 0.f;",
+      "new": "m_filpar[idx].multitool_ramming = vol > 0.f && flow > 0.f;",
+      "description": "Ignoring the multi-tool ramming toggle produces configured positive ram volume in its disabled fixture.",
+      "test_filter": "RammingEnableControls"
+    },
+    {
+      "id": "wt2-swap-current-disable-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_set_extruder_trimpot    = config.high_current_on_filament_swap;",
+      "new": "m_set_extruder_trimpot    = true;",
+      "description": "Always enabling extruder current adjustment emits parsed M906/M907 commands in the disabled fixture.",
+      "test_filter": "FilamentSwapCurrentControls"
+    },
+    {
+      "id": "volume-region-modifier-parent-clipping-dropped",
+      "path": "src/libslic3r/PrintObjectSlice.cpp",
+      "old": "                                    this_slice  .expolygons = intersection_ex(parent_slice.expolygons, source);",
+      "new": "                                    this_slice  .expolygons = source;",
+      "expected_matches": 1,
+      "test_filter": "VolumeRegionAssignment",
+      "description": "Assign the full modifier slice instead of intersecting it with its parent. The modifier deliberately extends outside A; after B clipping, its expected 25 mm\u00b2 region becomes 50 mm\u00b2 and the ordinary area assertions fail."
+    },
+    {
+      "id": "volume-region-model-overlap-trim-dropped",
+      "path": "src/libslic3r/PrintObjectSlice.cpp",
+      "old": "                                        if (const PrintObjectRegions::VolumeRegion& region2 = layer_range.volume_regions[idx_region2];\n                                            !region2.model_volume->is_negative_volume() && overlap_in_xy(*region.bbox, *region2.bbox))\n                                            temp_slices[idx_region2].expolygons = diff_ex(temp_slices[idx_region2].expolygons, temp_slices[idx_region].expolygons);",
+      "new": "                                        if (const PrintObjectRegions::VolumeRegion& region2 = layer_range.volume_regions[idx_region2];\n                                            region.model_volume->is_negative_volume() &&\n                                            !region2.model_volume->is_negative_volume() && overlap_in_xy(*region.bbox, *region2.bbox))\n                                            temp_slices[idx_region2].expolygons = diff_ex(temp_slices[idx_region2].expolygons, temp_slices[idx_region].expolygons);",
+      "expected_matches": 1,
+      "test_filter": "VolumeRegionAssignment",
+      "description": "Restrict the overlap subtraction to the negative-volume case. The preceding model part is no longer trimmed by later model parts, while the negative subtractor remains active; the independent 636 mm2 total and 25/611 mm2 region oracles fail."
+    },
+    {
+      "id": "volume-region-negative-volume-dispatch-dropped",
+      "path": "src/libslic3r/PrintObjectSlice.cpp",
+      "old": "                            } else if ((region.model_volume->is_model_part() && clip_multipart_objects) || region.model_volume->is_negative_volume()) {",
+      "new": "                            } else if (region.model_volume->is_model_part() && clip_multipart_objects) {",
+      "expected_matches": 1,
+      "test_filter": "VolumeRegionAssignment",
+      "description": "Remove the active negative-volume dispatch from the clipping branch. The 64 mm\u00b2 subtractor is ignored and the total-area assertion fails without exercising an exception or unsafe geometry."
+    },
+    {
+      "id": "volume-region-support-union-dropped",
+      "path": "src/libslic3r/PrintObjectSlice.cpp",
+      "old": "                        *to_merge[i] = union_(*to_merge[i]);",
+      "new": "                        *to_merge[i] = *to_merge[i];",
+      "expected_matches": 1,
+      "test_filter": "VolumeRegionAssignment",
+      "description": "Skip the same-type support-volume union. The two overlapping blockers remain three polygons with 48 mm2 instead of the public two-polygon, 40 mm2 oracle."
+    },
+    {
+      "id": "fuzzy-paint-use-mmu-annotation-v5",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "        return {mv.fuzzy_skin_facets, mv.is_fuzzy_skin_painted(), false};",
+      "new": "        return {mv.mmu_segmentation_facets, mv.is_fuzzy_skin_painted(), false};",
+      "test_filter": "FuzzyPaintedSegmentation",
+      "expected_matches": 1,
+      "description": "Use the MMU annotation in the dedicated one-filament fuzzy fixture; its MMU annotation remains empty while the fuzzy paint is positive, so the external-strip assertion fails."
+    },
+    {
+      "id": "fuzzy-paint-reset-skips-nonempty-state-v5",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    m_data.triangles_to_split.clear();\n    m_data.bitstream.clear();",
+      "new": "    if (!m_data.triangles_to_split.empty() || !m_data.bitstream.empty())\n        return;\n    m_data.triangles_to_split.clear();\n    m_data.bitstream.clear();",
+      "test_filter": "FuzzyPaintedSegmentation",
+      "expected_matches": 1,
+      "description": "Skip reset only for a populated annotation, preserving a valid all-state annotation; the clear-after-reslice case must then observe the stale painted regions."
+    },
+    {
+      "id": "fuzzy-paint-include-top-bottom-v5",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "IncludeTopAndBottomLayers::No, throw_on_cancel_callback);",
+      "new": "IncludeTopAndBottomLayers::Yes, throw_on_cancel_callback);",
+      "test_filter": "FuzzyPaintedSegmentation",
+      "expected_matches": 1,
+      "description": "Include top and bottom projections in the public fuzzy wrapper; the dedicated top-facet case must then produce a nonempty region and fail its empty-region oracle."
+    },
+    {
+      "id": "fuzzy-paint-external-depth-ignored-v5",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_external_perimeter_width, 0.f, false, IncludeTopAndBottomLayers::No, throw_on_cancel_callback);",
+      "new": "return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, 20.f, 0.f, false, IncludeTopAndBottomLayers::No, throw_on_cancel_callback);",
+      "test_filter": "FuzzyPaintedSegmentation",
+      "expected_matches": 1,
+      "description": "Ignore the configured external-wall depth cap with a bounded 20 mm cap; the positive right-face fixture must then exceed the independent analytic 0.5 mm strip."
+    },
+    {
+      "id": "wipe-tower-fillet-rounding-call-removed",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "wall_polygon           = rib_wall ? rounding_polygon(wall_polygon) : wall_polygon; // rectangle_wall do nothing",
+      "new": "wall_polygon           = rib_wall ? wall_polygon : wall_polygon; // rectangle_wall do nothing",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerFilletWall",
+      "description": "Remove the rib-wall rounding call while retaining the surrounding union; the emitted path must lose the added rounded segments and turns."
+    },
+    {
+      "id": "wipe-tower-fillet-config-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_used_fillet(config.wipe_tower_fillet_wall),",
+      "new": "m_used_fillet(false),",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerFilletWall",
+      "description": "Ignore the public wipe_tower_fillet_wall setting at WipeTower2 construction; true and false runs collapse to the sharp geometry."
+    },
+    {
+      "id": "wipe-tower-fillet-branch-disabled",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "if (m_used_fillet) {",
+      "new": "if (false) {",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerFilletWall",
+      "description": "Disable the fillet branch in generated rib-wall construction; the public output geometry must no longer differ between the two boolean settings."
+    },
+    {
+      "id": "normalize-fdm2-mixed-filament-gate-inverted",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "&& (  (used_filaments == 1 && !has_mixed_filament)",
+      "new": "&& (  (used_filaments == 1 && has_mixed_filament)",
+      "expected_matches": 1,
+      "test_filter": "NormalizeFdm2Variance",
+      "description": "Treat a single mixed filament as the ordinary single-filament case. The mixed-filament control must retain its prime tower, so this inverted gate fails the public normalization oracle."
+    },
+    {
+      "id": "mixed-component-upper-bound-inclusive",
+      "path": "src/libslic3r/FilamentMixer.cpp",
+      "old": "if (c > num_physical) {",
+      "new": "if (c >= num_physical) {",
+      "expected_matches": 1,
+      "test_filter": "MixedFilamentValidation",
+      "description": "Reject the highest valid physical component index as out of range. The accepted two-component gradient uses component 2 and must fail this boundary mutation."
+    },
+    {
+      "id": "mixed-gradient-component-count-inverted",
+      "path": "src/libslic3r/FilamentMixer.cpp",
+      "old": "if (components.size() != 2) {",
+      "new": "if (components.size() == 2) {",
+      "expected_matches": 1,
+      "test_filter": "MixedFilamentValidation",
+      "description": "Invert the exact-two-component gradient guard. The valid two-component gradient section must report a gradient error."
+    },
+    {
+      "id": "mixed-gradient-range-check-inverted",
+      "path": "src/libslic3r/FilamentMixer.cpp",
+      "old": "if (!validate_gradient_range_strict(range_str, range_err))",
+      "new": "if (validate_gradient_range_strict(range_str, range_err))",
+      "expected_matches": 1,
+      "test_filter": "MixedFilamentValidation",
+      "description": "Report an error for an ordered valid gradient range instead of an invalid range. The valid-range section must fail this mutation."
+    },
+    {
+      "id": "mixed-gradient-curve-invalid-input-ignored",
+      "path": "src/libslic3r/FilamentMixer.cpp",
+      "old": "if (!curve_str.empty() && parse_gradient_curve(curve_str).empty())",
+      "new": "if (curve_str.empty() && parse_gradient_curve(curve_str).empty())",
+      "expected_matches": 1,
+      "test_filter": "MixedFilamentValidation",
+      "description": "Check the invalid curve only when it is empty. The nonempty malformed single-point curve section must still report a curve error."
+    },
+    {
+      "id": "normalize-fdm1-legacy-extruder-gate-disabled",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "//BBS:divide normalize_fdm to 2 steps and call them one by one in Print::Apply\nvoid DynamicPrintConfig::normalize_fdm_1()\n{\n    if (this->has(\"extruder\")) {",
+      "new": "//BBS:divide normalize_fdm to 2 steps and call them one by one in Print::Apply\nvoid DynamicPrintConfig::normalize_fdm_1()\n{\n    if (this->has(\"extruder\") && this->has(\"__mutation_never_present__\")) {",
+      "expected_matches": 1,
+      "test_filter": "NormalizeFdm1",
+      "description": "Gate the split normalize_fdm_1 legacy-extruder migration on an unregistered sentinel key. The legacy role case must then retain the extruder key and fail its ordinary role/removal assertions; the mutation preserves all types and avoids an invalid-index or exception path."
+    },
+    {
+      "id": "apply-index-destination-zero",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "                int index = std::atoi(opt_key.c_str() + n + 1);",
+      "new": "                int index = 0;",
+      "expected_matches": 1,
+      "test_filter": "ConfigApplyOnly",
+      "description": "Use destination slot zero for every indexed key; the #1 oracle must retain the source value at destination index one."
+    },
+    {
+      "id": "apply-index-source-zero",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "                    if (other_opt)\n                        my_opt2->set_at(other_opt, index, index);",
+      "new": "                    if (other_opt)\n                        my_opt2->set_at(other_opt, 0, 0);",
+      "expected_matches": 1,
+      "test_filter": "ConfigApplyOnly",
+      "description": "Copy the source's slot zero into destination slot zero; both populated and materialized #1 cases must observe the requested source and destination indices."
+    },
+    {
+      "id": "nullable-float-const-index-zero",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "    } else if (const ConfigOptionFloatsNullable *opt_floats_nullable = dynamic_cast<const ConfigOptionFloatsNullable *>(this->option(opt_key))) {\n        return opt_floats_nullable->get_at(idx);",
+      "new": "    } else if (const ConfigOptionFloatsNullable *opt_floats_nullable = dynamic_cast<const ConfigOptionFloatsNullable *>(this->option(opt_key))) {\n        return opt_floats_nullable->get_at(0);",
+      "expected_matches": 1,
+      "test_filter": "ConfigAccessors",
+      "description": "Ignore the requested index only for the const nullable-float accessor; the independent index-one value must remain observable."
+    },
+    {
+      "id": "nullable-bool-index-zero",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "        return opt_s->get_at(idx) != 0;",
+      "new": "        return opt_s->get_at(0) != 0;",
+      "expected_matches": 1,
+      "test_filter": "ConfigAccessors",
+      "description": "Ignore the requested index in the nullable-bool accessor; the indexed nil-sentinel/false pair must fail its index-one assertion."
+    },
+    {
+      "id": "chamber-activation-accumulation-overwrite",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "activate_chamber_temp_control |= m_config.activate_chamber_temp_control.get_at(extruder.id());",
+      "new": "activate_chamber_temp_control = m_config.activate_chamber_temp_control.get_at(extruder.id());",
+      "expected_matches": 1,
+      "test_filter": "ChamberTemperaturePipeline",
+      "description": "Overwrite the accumulated activation state on each used extruder. The activation 1,0,0 row must still emit automatic M191 after the later inactive used slot is visited."
+    },
+    {
+      "id": "chamber-temperature-max-replaced-by-min",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "max_chamber_temp = std::max(max_chamber_temp, m_config.chamber_temperature.get_at(extruder.id()));",
+      "new": "max_chamber_temp = std::min(max_chamber_temp, m_config.chamber_temperature.get_at(extruder.id()));",
+      "expected_matches": 1,
+      "test_filter": "ChamberTemperaturePipeline",
+      "description": "Replace the maximum used-filament target with a minimum. Both used-filament activation rows require the emitted target 80 from used slots 65 and 80."
+    },
+    {
+      "id": "chamber-start-zero-guard-relaxed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (activate_chamber_temp_control && max_chamber_temp > 0){",
+      "new": "if (activate_chamber_temp_control && max_chamber_temp >= 0){",
+      "expected_matches": 1,
+      "test_filter": "ChamberTemperaturePipeline",
+      "description": "Allow a zero target through the start guard. The active zero row in the first case remains command-free and fails by ordinary command-count assertions."
+    },
+    {
+      "id": "chamber-custom-start-suppression-inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if(!custom_gcode_sets_temperature(machine_start_gcode,141,191,false,temp_out))",
+      "new": "if(custom_gcode_sets_temperature(machine_start_gcode,141,191,false,temp_out))",
+      "expected_matches": 1,
+      "test_filter": "ChamberTemperaturePipeline",
+      "description": "Invert ownership of explicit M141/M191 start commands. The two custom-start rows require exactly the user command plus the final M141 S0."
+    },
+    {
+      "id": "chamber-start-wait-removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "file.write(m_writer.set_chamber_temperature(max_chamber_temp, true)); // set chamber_temperature",
+      "new": "file.write(m_writer.set_chamber_temperature(max_chamber_temp, false)); // set chamber_temperature",
+      "expected_matches": 1,
+      "test_filter": "ChamberTemperaturePipeline",
+      "description": "Drop the start wait flag. Automatic positive rows require M191 rather than an ordinary M141."
+    },
+    {
+      "id": "chamber-shutdown-target-not-zero",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "file.write(m_writer.set_chamber_temperature(0, false));  //close chamber_temperature",
+      "new": "file.write(m_writer.set_chamber_temperature(max_chamber_temp, false));  //close chamber_temperature",
+      "expected_matches": 1,
+      "test_filter": "ChamberTemperaturePipeline",
+      "description": "Keep the target at shutdown. Positive rows require the public final M141 S0."
+    },
+    {
+      "id": "wiping-object-gate-disabled",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "if (object.config().flush_into_objects)\n        return true;",
+      "new": "if (false)\n        return true;",
+      "expected_matches": 1,
+      "test_filter": "WipingAssignmentBudget",
+      "description": "Disable the public object-level gate. The flush_into_objects row must still override both actual perimeter and infill collections across both copies."
+    },
+    {
+      "id": "wiping-infill-role-gate-weakened",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "if (!object.config().flush_into_infill || eec.role() != erInternalInfill)",
+      "new": "if (!object.config().flush_into_infill && eec.role() != erInternalInfill)",
+      "expected_matches": 1,
+      "test_filter": "WipingAssignmentBudget",
+      "description": "Weaken the infill-only role gate so perimeter collections can be claimed. The infill-only row must keep all perimeter overrides at zero."
+    },
+    {
+      "id": "wiping-infill-pass-condition-anded",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "if (is_infill_first != perimeters_done || wipe_into_infill_only)",
+      "new": "if (is_infill_first != perimeters_done && wipe_into_infill_only)",
+      "expected_matches": 1,
+      "test_filter": "WipingAssignmentBudget",
+      "description": "Change the infill traversal gate from either eligible pass to both conditions. The actual sparse infill collections must still receive both-copy assignments."
+    },
+    {
+      "id": "wiping-perimeter-pass-disabled",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "if (object->config().flush_into_objects && is_infill_first == perimeters_done)",
+      "new": "if (false)",
+      "expected_matches": 1,
+      "test_filter": "WipingAssignmentBudget",
+      "description": "Disable only the public perimeter pass. The object-mode row must still report positive perimeter overrides and conserve the large budget."
+    },
+    {
+      "id": "wiping-infill-budget-added",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "if ((!is_entity_overridden(fill, object, copy) && fill->total_volume() > min_infill_volume))\n                        {     // this infill will be used to wipe this extruder\n                            set_extruder_override(fill, object, copy, new_extruder, num_of_copies);\n                            if ((volume_to_wipe -= float(fill->total_volume())) <= 0.f)",
+      "new": "if ((!is_entity_overridden(fill, object, copy) && fill->total_volume() > min_infill_volume))\n                        {     // this infill will be used to wipe this extruder\n                            set_extruder_override(fill, object, copy, new_extruder, num_of_copies);\n                            if ((volume_to_wipe += float(fill->total_volume())) <= 0.f)",
+      "expected_matches": 1,
+      "test_filter": "WipingAssignmentBudget",
+      "description": "Add rather than subtract each claimed infill collection from the requested purge budget. The large-budget conservation invariant must fail even though assignments are present."
+    },
+    {
+      "id": "cad-sweep-add-dispatches-common",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "    case CadFeatureType::Sweep: {\n        const CadFeature& sk = (f.sketch_ref >= 0 && f.sketch_ref < int(features.size())\n                                && (features[f.sketch_ref].type == CadFeatureType::Sketch\n                                    || features[f.sketch_ref].type == CadFeatureType::Project))\n                               ? features[f.sketch_ref] : f;\n        if (f.sweep_path_ref < 0 || f.sweep_path_ref >= int(features.size()))\n            throw std::runtime_error(_u8L(\"sweep needs a valid path reference\"));\n        const CadFeature& path_feat = features[f.sweep_path_ref];\n        TopoDS_Wire path;\n        if (path_feat.type == CadFeatureType::Helix) {\n            std::string helix_err;\n            path = make_helix_spine(path_feat, helix_err);\n            if (path.IsNull()) throw std::runtime_error(format(_u8L(\"helix path: %1%\"), helix_err));\n        } else if (path_feat.type == CadFeatureType::Sketch) {\n            path = build_sketch_wire(path_feat);\n        } else {\n            throw std::runtime_error(_u8L(\"sweep path must be a sketch or helix\"));\n        }\n        TopoDS_Wire profile = build_sketch_wire(sk, true);\n        TopoDS_Shape tool   = SketchEngine::make_sweep(profile, path);\n        if (!have_body || f.mode == BooleanMode::New) {\n            result = tool;\n            have_body = true;\n        } else if (f.mode == BooleanMode::Add) {\n            BRepAlgoAPI_Fuse fuse(result, tool);\n            if (!fuse.IsDone()) throw std::runtime_error(_u8L(\"fuse failed\"));\n            result = fuse.Shape();\n        } else if (f.mode == BooleanMode::Cut) {\n            BRepAlgoAPI_Cut cut(result, tool);\n            if (!cut.IsDone()) throw std::runtime_error(_u8L(\"cut failed\"));\n            result = cut.Shape();\n        } else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Common common(result, tool);\n            if (!common.IsDone()) throw std::runtime_error(_u8L(\"intersect failed\"));\n            result = common.Shape();\n        }\n        break;\n    }",
+      "new": "    case CadFeatureType::Sweep: {\n        const CadFeature& sk = (f.sketch_ref >= 0 && f.sketch_ref < int(features.size())\n                                && (features[f.sketch_ref].type == CadFeatureType::Sketch\n                                    || features[f.sketch_ref].type == CadFeatureType::Project))\n                               ? features[f.sketch_ref] : f;\n        if (f.sweep_path_ref < 0 || f.sweep_path_ref >= int(features.size()))\n            throw std::runtime_error(_u8L(\"sweep needs a valid path reference\"));\n        const CadFeature& path_feat = features[f.sweep_path_ref];\n        TopoDS_Wire path;\n        if (path_feat.type == CadFeatureType::Helix) {\n            std::string helix_err;\n            path = make_helix_spine(path_feat, helix_err);\n            if (path.IsNull()) throw std::runtime_error(format(_u8L(\"helix path: %1%\"), helix_err));\n        } else if (path_feat.type == CadFeatureType::Sketch) {\n            path = build_sketch_wire(path_feat);\n        } else {\n            throw std::runtime_error(_u8L(\"sweep path must be a sketch or helix\"));\n        }\n        TopoDS_Wire profile = build_sketch_wire(sk, true);\n        TopoDS_Shape tool   = SketchEngine::make_sweep(profile, path);\n        if (!have_body || f.mode == BooleanMode::New) {\n            result = tool;\n            have_body = true;\n        } else if (f.mode == BooleanMode::Add) {\n            BRepAlgoAPI_Common fuse(result, tool);\n            if (!fuse.IsDone()) throw std::runtime_error(_u8L(\"fuse failed\"));\n            result = fuse.Shape();\n        } else if (f.mode == BooleanMode::Cut) {\n            BRepAlgoAPI_Cut cut(result, tool);\n            if (!cut.IsDone()) throw std::runtime_error(_u8L(\"cut failed\"));\n            result = cut.Shape();\n        } else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Common common(result, tool);\n            if (!common.IsDone()) throw std::runtime_error(_u8L(\"intersect failed\"));\n            result = common.Shape();\n        }\n        break;\n    }",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentSweepBoolean",
+      "description": "Use intersection instead of union for the partially overlapping circular sweep. Analytic material-change and strict mode bounds reject the wrong volume by ordinary assertions."
+    },
+    {
+      "id": "cad-sweep-intersect-dispatches-fuse",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "    case CadFeatureType::Sweep: {\n        const CadFeature& sk = (f.sketch_ref >= 0 && f.sketch_ref < int(features.size())\n                                && (features[f.sketch_ref].type == CadFeatureType::Sketch\n                                    || features[f.sketch_ref].type == CadFeatureType::Project))\n                               ? features[f.sketch_ref] : f;\n        if (f.sweep_path_ref < 0 || f.sweep_path_ref >= int(features.size()))\n            throw std::runtime_error(_u8L(\"sweep needs a valid path reference\"));\n        const CadFeature& path_feat = features[f.sweep_path_ref];\n        TopoDS_Wire path;\n        if (path_feat.type == CadFeatureType::Helix) {\n            std::string helix_err;\n            path = make_helix_spine(path_feat, helix_err);\n            if (path.IsNull()) throw std::runtime_error(format(_u8L(\"helix path: %1%\"), helix_err));\n        } else if (path_feat.type == CadFeatureType::Sketch) {\n            path = build_sketch_wire(path_feat);\n        } else {\n            throw std::runtime_error(_u8L(\"sweep path must be a sketch or helix\"));\n        }\n        TopoDS_Wire profile = build_sketch_wire(sk, true);\n        TopoDS_Shape tool   = SketchEngine::make_sweep(profile, path);\n        if (!have_body || f.mode == BooleanMode::New) {\n            result = tool;\n            have_body = true;\n        } else if (f.mode == BooleanMode::Add) {\n            BRepAlgoAPI_Fuse fuse(result, tool);\n            if (!fuse.IsDone()) throw std::runtime_error(_u8L(\"fuse failed\"));\n            result = fuse.Shape();\n        } else if (f.mode == BooleanMode::Cut) {\n            BRepAlgoAPI_Cut cut(result, tool);\n            if (!cut.IsDone()) throw std::runtime_error(_u8L(\"cut failed\"));\n            result = cut.Shape();\n        } else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Common common(result, tool);\n            if (!common.IsDone()) throw std::runtime_error(_u8L(\"intersect failed\"));\n            result = common.Shape();\n        }\n        break;\n    }",
+      "new": "    case CadFeatureType::Sweep: {\n        const CadFeature& sk = (f.sketch_ref >= 0 && f.sketch_ref < int(features.size())\n                                && (features[f.sketch_ref].type == CadFeatureType::Sketch\n                                    || features[f.sketch_ref].type == CadFeatureType::Project))\n                               ? features[f.sketch_ref] : f;\n        if (f.sweep_path_ref < 0 || f.sweep_path_ref >= int(features.size()))\n            throw std::runtime_error(_u8L(\"sweep needs a valid path reference\"));\n        const CadFeature& path_feat = features[f.sweep_path_ref];\n        TopoDS_Wire path;\n        if (path_feat.type == CadFeatureType::Helix) {\n            std::string helix_err;\n            path = make_helix_spine(path_feat, helix_err);\n            if (path.IsNull()) throw std::runtime_error(format(_u8L(\"helix path: %1%\"), helix_err));\n        } else if (path_feat.type == CadFeatureType::Sketch) {\n            path = build_sketch_wire(path_feat);\n        } else {\n            throw std::runtime_error(_u8L(\"sweep path must be a sketch or helix\"));\n        }\n        TopoDS_Wire profile = build_sketch_wire(sk, true);\n        TopoDS_Shape tool   = SketchEngine::make_sweep(profile, path);\n        if (!have_body || f.mode == BooleanMode::New) {\n            result = tool;\n            have_body = true;\n        } else if (f.mode == BooleanMode::Add) {\n            BRepAlgoAPI_Fuse fuse(result, tool);\n            if (!fuse.IsDone()) throw std::runtime_error(_u8L(\"fuse failed\"));\n            result = fuse.Shape();\n        } else if (f.mode == BooleanMode::Cut) {\n            BRepAlgoAPI_Cut cut(result, tool);\n            if (!cut.IsDone()) throw std::runtime_error(_u8L(\"cut failed\"));\n            result = cut.Shape();\n        } else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Fuse common(result, tool);\n            if (!common.IsDone()) throw std::runtime_error(_u8L(\"intersect failed\"));\n            result = common.Shape();\n        }\n        break;\n    }",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentSweepBoolean",
+      "description": "Use union instead of intersection for the partially overlapping circular sweep. Analytic material-change and strict mode bounds reject the wrong volume by ordinary assertions."
+    },
+    {
+      "id": "cad-loft-cut-dispatches-fuse",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "    case CadFeatureType::Loft: {\n        // Loft through 2+ closed profile Sketches, in recipe order. Each profile builds\n        // a wire via build_sketch_wire (so it keeps its own plane); make_loft skins them.\n        std::vector<TopoDS_Wire> profiles;\n        for (int ref : f.loft_profile_refs) {\n            if (ref < 0 || ref >= int(features.size())\n                || (features[ref].type != CadFeatureType::Sketch\n                    && features[ref].type != CadFeatureType::Project))\n                continue;\n            profiles.push_back(build_sketch_wire(features[ref], true));\n        }\n        if (profiles.size() < 2)\n            throw std::runtime_error(_u8L(\"loft needs 2+ valid profile sketches\"));\n        TopoDS_Shape tool = SketchEngine::make_loft(profiles, f.loft_ruled);\n        if (!have_body || f.mode == BooleanMode::New) {\n            result = tool;\n            have_body = true;\n        } else if (f.mode == BooleanMode::Add) {\n            BRepAlgoAPI_Fuse fuse(result, tool);\n            if (!fuse.IsDone()) throw std::runtime_error(_u8L(\"fuse failed\"));\n            result = fuse.Shape();\n        } else if (f.mode == BooleanMode::Cut) {\n            BRepAlgoAPI_Cut cut(result, tool);\n            if (!cut.IsDone()) throw std::runtime_error(_u8L(\"cut failed\"));\n            result = cut.Shape();\n        } else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Common common(result, tool);\n            if (!common.IsDone()) throw std::runtime_error(_u8L(\"intersect failed\"));\n            result = common.Shape();\n        }\n        break;\n    }",
+      "new": "    case CadFeatureType::Loft: {\n        // Loft through 2+ closed profile Sketches, in recipe order. Each profile builds\n        // a wire via build_sketch_wire (so it keeps its own plane); make_loft skins them.\n        std::vector<TopoDS_Wire> profiles;\n        for (int ref : f.loft_profile_refs) {\n            if (ref < 0 || ref >= int(features.size())\n                || (features[ref].type != CadFeatureType::Sketch\n                    && features[ref].type != CadFeatureType::Project))\n                continue;\n            profiles.push_back(build_sketch_wire(features[ref], true));\n        }\n        if (profiles.size() < 2)\n            throw std::runtime_error(_u8L(\"loft needs 2+ valid profile sketches\"));\n        TopoDS_Shape tool = SketchEngine::make_loft(profiles, f.loft_ruled);\n        if (!have_body || f.mode == BooleanMode::New) {\n            result = tool;\n            have_body = true;\n        } else if (f.mode == BooleanMode::Add) {\n            BRepAlgoAPI_Fuse fuse(result, tool);\n            if (!fuse.IsDone()) throw std::runtime_error(_u8L(\"fuse failed\"));\n            result = fuse.Shape();\n        } else if (f.mode == BooleanMode::Cut) {\n            BRepAlgoAPI_Fuse cut(result, tool);\n            if (!cut.IsDone()) throw std::runtime_error(_u8L(\"cut failed\"));\n            result = cut.Shape();\n        } else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Common common(result, tool);\n            if (!common.IsDone()) throw std::runtime_error(_u8L(\"intersect failed\"));\n            result = common.Shape();\n        }\n        break;\n    }",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentLoftBoolean",
+      "description": "Use union instead of subtraction for the offset ruled prism. Analytic material-change and strict mode bounds reject the wrong volume by ordinary assertions."
+    },
+    {
+      "id": "cad-loft-intersect-dispatches-cut",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "    case CadFeatureType::Loft: {\n        // Loft through 2+ closed profile Sketches, in recipe order. Each profile builds\n        // a wire via build_sketch_wire (so it keeps its own plane); make_loft skins them.\n        std::vector<TopoDS_Wire> profiles;\n        for (int ref : f.loft_profile_refs) {\n            if (ref < 0 || ref >= int(features.size())\n                || (features[ref].type != CadFeatureType::Sketch\n                    && features[ref].type != CadFeatureType::Project))\n                continue;\n            profiles.push_back(build_sketch_wire(features[ref], true));\n        }\n        if (profiles.size() < 2)\n            throw std::runtime_error(_u8L(\"loft needs 2+ valid profile sketches\"));\n        TopoDS_Shape tool = SketchEngine::make_loft(profiles, f.loft_ruled);\n        if (!have_body || f.mode == BooleanMode::New) {\n            result = tool;\n            have_body = true;\n        } else if (f.mode == BooleanMode::Add) {\n            BRepAlgoAPI_Fuse fuse(result, tool);\n            if (!fuse.IsDone()) throw std::runtime_error(_u8L(\"fuse failed\"));\n            result = fuse.Shape();\n        } else if (f.mode == BooleanMode::Cut) {\n            BRepAlgoAPI_Cut cut(result, tool);\n            if (!cut.IsDone()) throw std::runtime_error(_u8L(\"cut failed\"));\n            result = cut.Shape();\n        } else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Common common(result, tool);\n            if (!common.IsDone()) throw std::runtime_error(_u8L(\"intersect failed\"));\n            result = common.Shape();\n        }\n        break;\n    }",
+      "new": "    case CadFeatureType::Loft: {\n        // Loft through 2+ closed profile Sketches, in recipe order. Each profile builds\n        // a wire via build_sketch_wire (so it keeps its own plane); make_loft skins them.\n        std::vector<TopoDS_Wire> profiles;\n        for (int ref : f.loft_profile_refs) {\n            if (ref < 0 || ref >= int(features.size())\n                || (features[ref].type != CadFeatureType::Sketch\n                    && features[ref].type != CadFeatureType::Project))\n                continue;\n            profiles.push_back(build_sketch_wire(features[ref], true));\n        }\n        if (profiles.size() < 2)\n            throw std::runtime_error(_u8L(\"loft needs 2+ valid profile sketches\"));\n        TopoDS_Shape tool = SketchEngine::make_loft(profiles, f.loft_ruled);\n        if (!have_body || f.mode == BooleanMode::New) {\n            result = tool;\n            have_body = true;\n        } else if (f.mode == BooleanMode::Add) {\n            BRepAlgoAPI_Fuse fuse(result, tool);\n            if (!fuse.IsDone()) throw std::runtime_error(_u8L(\"fuse failed\"));\n            result = fuse.Shape();\n        } else if (f.mode == BooleanMode::Cut) {\n            BRepAlgoAPI_Cut cut(result, tool);\n            if (!cut.IsDone()) throw std::runtime_error(_u8L(\"cut failed\"));\n            result = cut.Shape();\n        } else if (f.mode == BooleanMode::Intersect) {\n            BRepAlgoAPI_Cut common(result, tool);\n            if (!common.IsDone()) throw std::runtime_error(_u8L(\"intersect failed\"));\n            result = common.Shape();\n        }\n        break;\n    }",
+      "expected_matches": 1,
+      "test_filter": "CadDocumentLoftBoolean",
+      "description": "Use subtraction instead of intersection for the offset ruled prism. Analytic material-change and strict mode bounds reject the wrong volume by ordinary assertions."
+    },
+    {
+      "id": "cutsurface-overlap-clip-bypassed",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "if (has_bb_intersection(patch.bb, model_index2, bbs, m2i) &&\n                        clip_cut(patch, models[model_index2])){",
+      "new": "if (false && has_bb_intersection(patch.bb, model_index2, bbs, m2i) &&\n                        clip_cut(patch, models[model_index2])){",
+      "expected_matches": 1,
+      "test_filter": "CutSurfaceClipOverlap",
+      "description": "Bypass inter-model clipping while retaining containment handling. The analytic exterior-height and disjoint flat/raised projected-area oracles must reject hidden or missing patches."
+    },
+    {
+      "id": "cutsurface-overlap-separated-patches-dropped",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "patches.insert(patches.end(), new_patches.begin(), new_patches.end());",
+      "new": "patches.insert(patches.end(), new_patches.begin(), new_patches.begin());",
+      "expected_matches": 1,
+      "test_filter": "CutSurfaceClipOverlap",
+      "description": "Drop all earlier disconnected fragments after clipping a surface patch. The two surviving flat regions must jointly retain their analytic area."
+    },
+    {
+      "id": "bbs-text-horizontal-legacy-index-disabled",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (horizontal_align_str.length() == 1)",
+      "new": "if (horizontal_align_str.length() == 0)",
+      "test_filter": "Bbs3mfTextAlignment",
+      "expected_matches": 1,
+      "description": "Disable legacy numeric horizontal parsing. Index0 and2 must still map to explicit left/right enums rather than center.",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "bbs-text-vertical-legacy-index-disabled",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (vertical_align_str.length() == 1)",
+      "new": "if (vertical_align_str.length() == 0)",
+      "test_filter": "Bbs3mfTextAlignment",
+      "expected_matches": 1,
+      "description": "Disable legacy numeric vertical parsing. Index0 and2 must still map to explicit top/bottom enums rather than center.",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "bbs-text-horizontal-unknown-fallback-left",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "return bimap_cvt(horizontal_align_to_name, std::string_view(horizontal_align_str), FontProp::HorizontalAlign::center);",
+      "new": "return bimap_cvt(horizontal_align_to_name, std::string_view(horizontal_align_str), FontProp::HorizontalAlign::left);",
+      "test_filter": "Bbs3mfTextAlignment",
+      "expected_matches": 1,
+      "description": "Changing the unknown horizontal-name fallback from center to left breaks the unknown-name compatibility assertion.",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "bbs-text-vertical-unknown-fallback-top",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "return bimap_cvt(vertical_align_to_name, std::string_view(vertical_align_str), FontProp::VerticalAlign::center);",
+      "new": "return bimap_cvt(vertical_align_to_name, std::string_view(vertical_align_str), FontProp::VerticalAlign::top);",
+      "test_filter": "Bbs3mfTextAlignment",
+      "expected_matches": 1,
+      "description": "Changing the unknown vertical-name fallback from center to top breaks the unknown-name compatibility assertion.",
+      "expected_ordinary_assertion_failure": true
+    }
+  ]
+}

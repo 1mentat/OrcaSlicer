@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include "libslic3r_version.h"
 #include <boost/nowide/fstream.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <boost/format.hpp>
 #include <string_view>
 #include "libslic3r/Semver.hpp"
@@ -11347,3 +11348,57 @@ TEST_CASE("Preset parent save emits nil for inherited filament variants",
 }
 
 } // namespace preset_extended_contracts
+
+
+namespace preset_file_type_contracts {
+
+TEST_CASE("Preset configuration trees select their public file type", "[Preset][ConfigFileType]")
+{
+    struct Classification {
+        std::string name;
+        ConfigFileType expected;
+        std::vector<std::pair<std::string, std::string>> leaves;
+    };
+    // Each row supplies recognizable configuration content and an explicit public
+    // result. Tie rows protect precedence; isolated bundle rows test every marker.
+    const std::vector<Classification> rows{
+        { "app export path", CONFIG_FILE_TYPE_APP_CONFIG,
+          {{"last_export_path", "/tmp/export.gcode"}} },
+        { "recent settings", CONFIG_FILE_TYPE_APP_CONFIG,
+          {{"recent.settings_folder", "/tmp/settings"}} },
+        { "recent opened folder", CONFIG_FILE_TYPE_APP_CONFIG,
+          {{"recent.last_opened_folder", "/tmp/models"}} },
+        { "presets plus app content", CONFIG_FILE_TYPE_APP_CONFIG,
+          {{"presets.print", "Fine"}, {"last_export_path", "/tmp/export.gcode"}} },
+        { "print bundle", CONFIG_FILE_TYPE_CONFIG_BUNDLE,
+          {{"print:Fine.layer_height", "0.2"}} },
+        { "filament bundle", CONFIG_FILE_TYPE_CONFIG_BUNDLE,
+          {{"filament:PLA.filament_type", "PLA"}} },
+        { "printer bundle", CONFIG_FILE_TYPE_CONFIG_BUNDLE,
+          {{"printer:X1.printer_model", "X1"}} },
+        { "settings bundle", CONFIG_FILE_TYPE_CONFIG_BUNDLE,
+          {{"settings.version", "1.0.0"}} },
+        { "ordinary config", CONFIG_FILE_TYPE_CONFIG,
+          {{"nozzle_diameter", "0.4"}, {"filament_diameter", "1.75"}} },
+        { "app and bundle tie", CONFIG_FILE_TYPE_CONFIG_BUNDLE,
+          {{"presets.printer", "X1"}} },
+        { "app and nozzle config tie", CONFIG_FILE_TYPE_CONFIG,
+          {{"last_export_path", "/tmp/export.gcode"}, {"nozzle_diameter", "0.4"}} },
+        { "app and filament config tie", CONFIG_FILE_TYPE_CONFIG,
+          {{"last_export_path", "/tmp/export.gcode"}, {"filament_diameter", "1.75"}} },
+        { "bundle and config tie", CONFIG_FILE_TYPE_CONFIG,
+          {{"print:Fine.layer_height", "0.2"}, {"nozzle_diameter", "0.4"}} },
+        { "empty tree", CONFIG_FILE_TYPE_CONFIG, {} },
+        { "unrelated leaf", CONFIG_FILE_TYPE_CONFIG, {{"custom_note", "ignored"}} },
+        { "unrelated recent child", CONFIG_FILE_TYPE_CONFIG, {{"recent.custom_note", "ignored"}} },
+    };
+    const auto index = GENERATE_COPY(Catch::Generators::range(std::size_t(0), rows.size()));
+    const Classification &row = rows[index];
+    CAPTURE(row.name);
+    boost::property_tree::ptree tree;
+    for (const auto &leaf : row.leaves)
+        tree.put(leaf.first, leaf.second);
+    CHECK(guess_config_file_type(tree) == row.expected);
+}
+
+} // namespace preset_file_type_contracts

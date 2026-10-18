@@ -510,6 +510,98 @@ TEST_CASE("Machine envelope emission is a semantic opt-in", "[GCodePrintVariance
     require_same_material(motion_evidence(no_limits.text, disabled), motion_evidence(limits.text, enabled));
 }
 
+TEST_CASE("Machine envelope selects junction deviation only when enabled and positive",
+          "[GCodePrintVariance][MachineEnvelope]")
+{
+    struct EnvelopeRow {
+        const char *name;
+        bool        emit;
+        const char *junction_deviation;
+        double      expected_junction;
+    };
+
+    const DynamicPrintConfig reference_config = base_config();
+    const ExportedPrint reference = fresh_export(reference_config);
+    const MotionEvidence reference_motion = motion_evidence(reference.text, reference_config);
+    REQUIRE(reference_motion.extrusion_moves > 0);
+
+    const std::array<EnvelopeRow, 3> rows = {{
+        {"disabled gate suppresses the envelope", false, "0.25,0.25", 0.0},
+        {"enabled zero deviation keeps classic jerk", true, "0,0", 0.0},
+        {"enabled positive deviation emits M205 J", true, "0.25,0.25", 0.25},
+    }};
+
+    for (const EnvelopeRow &row : rows) {
+        INFO(row.name);
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({
+            {"emit_machine_limits_to_gcode", row.emit},
+            {"default_junction_deviation", 0.0},
+            {"machine_max_junction_deviation", row.junction_deviation},
+            {"machine_max_jerk_x", "11,11"},
+            {"machine_max_jerk_y", "13,13"},
+        });
+        const ExportedPrint output = fresh_export(config);
+        require_same_material(reference_motion, motion_evidence(output.text, config));
+
+        std::array<std::vector<std::array<float, 4>>, 3> limits;
+        std::vector<float> junctions;
+        const std::array<char, 4> axes = {{'X', 'Y', 'Z', 'E'}};
+        GCodeReader reader;
+        reader.apply_config(config);
+        reader.parse_buffer(output.text, [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+            if (line.cmd_is("M205")) {
+                float value = 0.f;
+                if (line.has_value('J', value))
+                    junctions.push_back(value);
+            }
+            int index = -1;
+            if (line.cmd_is("M201"))
+                index = 0;
+            else if (line.cmd_is("M203"))
+                index = 1;
+            else if (line.cmd_is("M205") && line.has('Z') && line.has('E'))
+                index = 2;
+            if (index < 0)
+                return;
+            std::array<float, 4> values{};
+            for (size_t axis = 0; axis < axes.size(); ++axis) {
+                REQUIRE(line.has_value(axes[axis], values[axis]));
+                REQUIRE(std::isfinite(values[axis]));
+            }
+            limits[size_t(index)].push_back(values);
+        });
+
+        if (!row.emit) {
+            CHECK(limits[0].empty());
+            CHECK(limits[1].empty());
+            CHECK(limits[2].empty());
+        } else {
+            // These values are explicitly configured by base_config() and the row overrides.
+            const std::array<std::array<double, 4>, 3> expected = {{
+                {{500., 500., 100., 5000.}},
+                {{100., 100., 10., 50.}},
+                {{11., 13., 0.4, 5.}},
+            }};
+            for (size_t command = 0; command < limits.size(); ++command) {
+                REQUIRE(limits[command].size() == 1);
+                for (size_t axis = 0; axis < axes.size(); ++axis) {
+                    INFO("command index " << command << ", axis " << axes[axis]);
+                    CHECK_THAT(limits[command][0][axis],
+                               Catch::Matchers::WithinAbs(expected[command][axis], 1e-5));
+                }
+            }
+        }
+
+        if (row.expected_junction > 0.) {
+            REQUIRE(junctions.size() == 1);
+            CHECK_THAT(junctions.front(), Catch::Matchers::WithinAbs(row.expected_junction, 1e-6));
+        } else {
+            CHECK(junctions.empty());
+        }
+    }
+}
+
 TEST_CASE("Z hop changes travel height while preserving material paths", "[GCodePrintVariance]")
 {
     DynamicPrintConfig no_hop = base_config();
@@ -6312,3 +6404,182 @@ TEST_CASE("Resonance avoidance is a public feature gate for outer-wall speed",
 }
 
 } // namespace gcode_resonance_contracts
+namespace chamber_temperature_pipeline_contracts {
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace {
+
+struct ChamberCommand
+{
+    std::string code;
+    double      target = 0.0;
+    size_t      extrusions_before = 0;
+};
+
+struct ChamberEvidence
+{
+    std::vector<ChamberCommand> commands;
+    std::array<size_t, 3>       tool_extrusions{};
+    size_t                      extrusions = 0;
+    size_t                      tool_one_changes = 0;
+};
+
+ChamberEvidence parse_chamber_commands(const std::string &text, const DynamicPrintConfig &config)
+{
+    ChamberEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    int current_tool = 0;
+    reader.parse_buffer(text, [&evidence, &current_tool](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("M191") || line.cmd_is("M141")) {
+            float target = -1.f;
+            REQUIRE(line.has_value('S', target));
+            REQUIRE(std::isfinite(target));
+            evidence.commands.push_back({line.cmd_is("M191") ? "M191" : "M141", target, evidence.extrusions});
+        }
+        if (line.cmd_is("T0"))
+            current_tool = 0;
+        else if (line.cmd_is("T1")) {
+            current_tool = 1;
+            ++evidence.tool_one_changes;
+        } else if (line.cmd_is("T2"))
+            current_tool = 2;
+        if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
+            ++evidence.extrusions;
+            REQUIRE(current_tool >= 0);
+            REQUIRE(current_tool < int(evidence.tool_extrusions.size()));
+            ++evidence.tool_extrusions[size_t(current_tool)];
+        }
+    });
+    return evidence;
+}
+
+void require_chamber_material_invariant(const std::string &observed, const DynamicPrintConfig &observed_config,
+                                        const std::string &control, const DynamicPrintConfig &control_config)
+{
+    const auto observed_motion = gcode_print_variance_contracts::motion_evidence(observed, observed_config);
+    const auto control_motion = gcode_print_variance_contracts::motion_evidence(control, control_config);
+    REQUIRE(observed_motion.extrusion_moves > 0);
+    gcode_print_variance_contracts::require_same_material(observed_motion, control_motion);
+}
+
+} // namespace
+
+TEST_CASE("Chamber temperature activation emits guarded start and shutdown targets",
+          "[GCode][GCodeExportWorkflows][ChamberTemperaturePipeline]")
+{
+    const auto [active, target] = GENERATE(table<bool, int>({{false, 0}, {false, 65}, {true, 0}, {true, 65}}));
+    INFO("active=" << active << ", target=" << target);
+
+    DynamicPrintConfig config = gcode_print_variance_contracts::base_config();
+    config.set_deserialize_strict({
+        {"activate_chamber_temp_control", active ? "1" : "0"},
+        {"chamber_temperature", std::to_string(target)},
+    });
+    const auto exported = gcode_print_variance_contracts::fresh_custom_mesh_export(config, make_cube(5., 5., 0.8));
+
+    DynamicPrintConfig control_config = config;
+    control_config.set_deserialize_strict({
+        {"activate_chamber_temp_control", "0"},
+        {"chamber_temperature", "0"},
+    });
+    const auto control = gcode_print_variance_contracts::fresh_custom_mesh_export(control_config, make_cube(5., 5., 0.8));
+    require_chamber_material_invariant(exported.text, config, control.text, control_config);
+
+    const ChamberEvidence evidence = parse_chamber_commands(exported.text, config);
+    const bool should_emit = active && target > 0;
+    if (!should_emit) {
+        CHECK(evidence.commands.empty());
+        return;
+    }
+
+    REQUIRE(evidence.commands.size() == 2);
+    CHECK(evidence.commands[0].code == "M191");
+    CHECK_THAT(evidence.commands[0].target, Catch::Matchers::WithinAbs(target, 1e-4));
+    CHECK(evidence.commands[0].extrusions_before == 0);
+    CHECK(evidence.commands[1].code == "M141");
+    CHECK_THAT(evidence.commands[1].target, Catch::Matchers::WithinAbs(0., 1e-4));
+    CHECK(evidence.commands[1].extrusions_before == evidence.extrusions);
+}
+
+TEST_CASE("Chamber targets follow used-filament activation, maximum temperature, and custom-start ownership",
+          "[GCode][GCodeExportWorkflows][ChamberTemperaturePipeline]")
+{
+    const auto [activation, temperatures, custom_start, expected_automatic] = GENERATE(table<std::string, std::string, std::string, bool>({
+        {"1,0,0", "65,80,99", "", true},
+        {"0,1,0", "65,80,99", "", true},
+        {"0,0,1", "65,80,99", "", false},
+        {"1,0,0", "65,80,99", "M141 S44\n", false},
+        {"1,0,0", "65,80,99", "M191 S44\n", false},
+    }));
+    INFO("activation=" << activation << ", temperatures=" << temperatures << ", custom_start=" << custom_start);
+
+    DynamicPrintConfig config = Test::multifilament_config(3, {
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"sparse_infill_density", "20%"},
+        {"outer_wall_filament_id", 1},
+        {"inner_wall_filament_id", 1},
+        {"sparse_infill_filament_id", 2},
+        {"internal_solid_filament_id", 2},
+        {"top_surface_filament_id", 2},
+        {"bottom_surface_filament_id", 2},
+        {"first_layer_sequence_choice", "Customize"},
+        {"first_layer_print_sequence", "1,2"},
+        {"other_layers_sequence_choice", "Customize"},
+        {"other_layers_print_sequence_nums", 1},
+        {"other_layers_print_sequence", "2,10,1,2"},
+        {"activate_chamber_temp_control", activation},
+        {"chamber_temperature", temperatures},
+        {"machine_start_gcode", custom_start},
+        {"machine_end_gcode", ""},
+        {"gcode_flavor", "marlin2"},
+        {"print_sequence", "by layer"},
+        {"single_extruder_multi_material", false},
+        {"enable_prime_tower", false},
+        {"purge_in_prime_tower", false},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+    });
+
+    const auto exported = gcode_print_variance_contracts::fresh_custom_mesh_export(config, make_cube(5., 5., 2.));
+    const auto evidence = parse_chamber_commands(exported.text, config);
+    REQUIRE(evidence.extrusions > 0);
+    REQUIRE(evidence.tool_one_changes > 0);
+    REQUIRE(evidence.tool_extrusions[0] > 0);
+    REQUIRE(evidence.tool_extrusions[1] > 0);
+    CHECK(evidence.tool_extrusions[2] == 0);
+
+    const bool used_activation = activation.rfind("1,", 0) == 0 || activation.rfind("0,1", 0) == 0;
+    if (!used_activation) {
+        CHECK(evidence.commands.empty());
+    } else {
+        REQUIRE(evidence.commands.size() == 2);
+        CHECK(evidence.commands[1].code == "M141");
+        CHECK_THAT(evidence.commands[1].target, Catch::Matchers::WithinAbs(0., 1e-4));
+        CHECK(evidence.commands[1].extrusions_before == evidence.extrusions);
+        if (expected_automatic) {
+            CHECK(evidence.commands[0].code == "M191");
+            CHECK_THAT(evidence.commands[0].target, Catch::Matchers::WithinAbs(80., 1e-4));
+        } else {
+            CHECK(evidence.commands[0].code == (custom_start.rfind("M141", 0) == 0 ? "M141" : "M191"));
+            CHECK_THAT(evidence.commands[0].target, Catch::Matchers::WithinAbs(44., 1e-4));
+        }
+        CHECK(evidence.commands[0].extrusions_before == 0);
+    }
+
+    DynamicPrintConfig control_config = config;
+    control_config.set_deserialize_strict({
+        {"activate_chamber_temp_control", "0,0,0"},
+        {"machine_start_gcode", ""},
+    });
+    const auto control = gcode_print_variance_contracts::fresh_custom_mesh_export(control_config, make_cube(5., 5., 2.));
+    require_chamber_material_invariant(exported.text, config, control.text, control_config);
+}
+
+} // namespace chamber_temperature_pipeline_contracts

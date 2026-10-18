@@ -1680,6 +1680,373 @@ TEST_CASE("Prime tower flat ironing adds area dependent travel after the gap wal
     CHECK(large_area.layer_extrusion.front() > 0.);
 }
 
+namespace type1_ramming_contracts {
+
+FullPrintConfig type1_ramming_config(double ramming_rate, double ramming_rate_nc,
+                                     double reverse_time, double reverse_time_nc,
+                                     bool enable_pre_heating,
+                                     int pre_cooling_temperature,
+                                     int pre_cooling_temperature_nc,
+                                     double cooling_rate = 2.,
+                                     int initial_temperature = 200)
+{
+    FullPrintConfig config = legacy_config();
+    config.nozzle_diameter.values = {0.4, 0.4};
+    config.filament_diameter.values = {1.75, 1.75};
+    config.filament_map.values = {1, 2};
+    config.physical_extruder_map.values = {0, 1};
+    config.extruder_printable_height.values = {250., 250.};
+    config.filament_max_volumetric_speed.values = {6., 6.};
+    config.filament_ramming_volumetric_speed.values = {ramming_rate, 4.};
+    config.filament_ramming_volumetric_speed_nc.values = {ramming_rate_nc, 4.};
+    config.filament_change_length.values = {10., 10.};
+    config.filament_change_length_nc.values = {10., 10.};
+    config.filament_ramming_travel_time.values = {reverse_time, 0.};
+    config.filament_ramming_travel_time_nc.values = {reverse_time_nc, 0.};
+    config.filament_pre_cooling_temperature.values = {pre_cooling_temperature, pre_cooling_temperature};
+    config.filament_pre_cooling_temperature_nc.values = {pre_cooling_temperature_nc, pre_cooling_temperature_nc};
+    config.hotend_cooling_rate.values = {cooling_rate, cooling_rate};
+    config.enable_pre_heating.value = enable_pre_heating;
+    config.filament_adhesiveness_category.values = {0, 0};
+    config.filament_is_support.values = {false, false};
+    config.filament_soluble.values = {false, false};
+    config.nozzle_temperature.values = {200, 200};
+    config.nozzle_temperature_initial_layer.values = {initial_temperature, initial_temperature};
+    config.use_relative_e_distances.value = true;
+    config.enable_arc_fitting.value = false;
+    config.wipe_tower_no_sparse_layers.value = true;
+    config.timelapse_type.value = TimelapseType::tlTraditional;
+    config.enable_wrapping_detection.value = false;
+    return config;
+}
+
+struct Type1Run {
+    std::vector<WipeTower::ToolChangeResult> changes;
+};
+
+Type1Run run_type1(const FullPrintConfig &config, bool same_extruder)
+{
+    const auto group = group_for_two_filaments(same_extruder);
+    REQUIRE(group.has_value());
+
+    FullPrintConfig effective_config = config;
+    effective_config.physical_extruder_map.values = same_extruder ? std::vector<int>{0, 0} : std::vector<int>{0, 1};
+    WipeTower tower(effective_config, 0, Vec3d::Zero(), 0, 0.6f, {0, 1});
+    tower.set_nozzle_group_result(*group);
+    tower.set_used_filament_ids({0, 1});
+    tower.set_filament_categories({0, 0});
+    tower.set_extruder(0, effective_config);
+    tower.set_extruder(1, effective_config);
+    tower.plan_toolchange(0.2f, 0.2f, 0, 1, 80.f, 80.f, 80.f);
+    tower.plan_toolchange(0.4f, 0.2f, 1, 0, 80.f, 80.f, 80.f);
+    tower.plan_toolchange(0.6f, 0.2f, 0, 1, 80.f, 80.f, 80.f);
+
+    std::vector<std::vector<WipeTower::ToolChangeResult>> layers;
+    tower.generate_new(layers);
+    REQUIRE(layers.size() == 3);
+
+    Type1Run result;
+    for (const auto &layer : layers)
+        for (const auto &change : layer)
+            if (change.is_tool_change)
+                result.changes.push_back(change);
+    return result;
+}
+
+struct RammingMetrics {
+    bool finite = true;
+    std::size_t positive_moves = 0;
+    std::size_t travel_moves = 0;
+    std::size_t m106_count = 0;
+    std::vector<double> m106_duties;
+    std::vector<double> m104_temperatures;
+    double positive_volume = 0.;
+    double positive_extrusion_time = 0.;
+    double positive_rate_max = 0.;
+    double travel_xy = 0.;
+    double motion_time = 0.;
+    double reverse_travel_time = 0.;
+    bool saw_positive_motion = false;
+    bool saw_initial_travel = false;
+};
+
+RammingMetrics parse_ramming(const WipeTower::ToolChangeResult &change)
+{
+    RammingMetrics metrics;
+    GCodeReader reader;
+    DynamicPrintConfig reader_config = DynamicPrintConfig::full_print_config();
+    reader_config.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+    reader.apply_config(reader_config);
+    // WipeTowerWriter does not emit its initial position; the public nozzle result
+    // carries the rotated starting point used by the emitted coordinates.
+    reader.x() = change.nozzle_change_result.start_pos.x();
+    reader.y() = change.nozzle_change_result.start_pos.y();
+    reader.z() = change.print_z;
+    reader.e() = 0.f;
+    reader.f() = 0.f;
+    const double filament_area = std::acos(-1.0) * 1.75 * 1.75 / 4.;
+
+    reader.parse_buffer(change.nozzle_change_result.gcode,
+        [&metrics, filament_area](GCodeReader &reader, const GCodeReader::GCodeLine &line) {
+            if (line.cmd_is("M106")) {
+                ++metrics.m106_count;
+                float duty = 0.f;
+                if (line.has_value('S', duty) && std::isfinite(duty))
+                    metrics.m106_duties.push_back(duty);
+                else
+                    metrics.finite = false;
+                return;
+            }
+            if (line.cmd_is("M104")) {
+                float temperature = 0.f;
+                if (line.has_value('S', temperature) && std::isfinite(temperature))
+                    metrics.m104_temperatures.push_back(temperature);
+                else
+                    metrics.finite = false;
+                return;
+            }
+            if (!line.cmd_is("G0") && !line.cmd_is("G1"))
+                return;
+
+            const double distance = line.dist_XY(reader);
+            const double delta_e = line.dist_E(reader);
+            const double feedrate = line.new_F(reader);
+            if (!std::isfinite(distance) || !std::isfinite(delta_e) || !std::isfinite(feedrate)) {
+                metrics.finite = false;
+                return;
+            }
+            if (distance <= EPSILON)
+                return;
+            if (feedrate <= 0.) {
+                metrics.finite = false;
+                return;
+            }
+            const double seconds = distance / feedrate * 60.;
+            if (!std::isfinite(seconds)) {
+                metrics.finite = false;
+                return;
+            }
+            metrics.motion_time += seconds;
+            if (delta_e > 0. && line.has_e()) {
+                ++metrics.positive_moves;
+                metrics.saw_positive_motion = true;
+                metrics.positive_extrusion_time += seconds;
+                metrics.positive_volume += delta_e * filament_area;
+                metrics.positive_rate_max = std::max(metrics.positive_rate_max,
+                    delta_e * filament_area * feedrate / (distance * 60.));
+            } else if (!line.has_e()) {
+                ++metrics.travel_moves;
+                metrics.travel_xy += distance;
+                if (metrics.saw_positive_motion) {
+                    if (!metrics.saw_initial_travel) {
+                        metrics.saw_initial_travel = true;
+                    } else {
+                        metrics.reverse_travel_time += seconds;
+                    }
+                }
+            }
+        });
+    return metrics;
+}
+
+std::vector<RammingMetrics> parse_all_ramming(const Type1Run &run)
+{
+    std::vector<RammingMetrics> metrics;
+    metrics.reserve(run.changes.size());
+    for (const auto &change : run.changes)
+        metrics.push_back(parse_ramming(change));
+    return metrics;
+}
+
+void require_ramming_result(const Type1Run &run, bool same_extruder)
+{
+    REQUIRE(run.changes.size() == 3);
+    const std::array<int, 3> initial_tools = {{0, 1, 0}};
+    const std::array<int, 3> new_tools = {{1, 0, 1}};
+    for (std::size_t i = 0; i < run.changes.size(); ++i) {
+        const auto &change = run.changes[i];
+        REQUIRE(change.is_tool_change);
+        REQUIRE(change.initial_tool == initial_tools[i]);
+        REQUIRE(change.new_tool == new_tools[i]);
+        REQUIRE_THAT(change.print_z, Catch::Matchers::WithinAbs(0.2 * (i + 1), 1e-6));
+        REQUIRE(change.nozzle_change_result.is_extruder_change == !same_extruder);
+        REQUIRE_FALSE(change.nozzle_change_result.gcode.empty());
+    }
+}
+
+} // namespace type1_ramming_contracts
+
+TEST_CASE("Type1 ramming uses explicit, -1 and nil volumetric fallbacks", "[WipeTower][Type1WipeRamming]")
+{
+    using namespace type1_ramming_contracts;
+    const double nil_rate = ConfigOptionFloatsNullable::nil_value();
+    const Type1Run explicit_rate = run_type1(type1_ramming_config(2., 2., 0., 0., false, 100, 100), false);
+    const Type1Run fallback_rate = run_type1(type1_ramming_config(-1., -1., 0., 0., false, 100, 100), false);
+    const Type1Run nil_fallback = run_type1(type1_ramming_config(nil_rate, nil_rate, 0., 0., false, 100, 100), false);
+    require_ramming_result(explicit_rate, false);
+    require_ramming_result(fallback_rate, false);
+    require_ramming_result(nil_fallback, false);
+    const RammingMetrics explicit_metrics = parse_ramming(explicit_rate.changes.front());
+    const RammingMetrics fallback_metrics = parse_ramming(fallback_rate.changes.front());
+    const RammingMetrics nil_metrics = parse_ramming(nil_fallback.changes.front());
+    REQUIRE(explicit_metrics.finite);
+    REQUIRE(fallback_metrics.finite);
+    REQUIRE(nil_metrics.finite);
+    REQUIRE(explicit_metrics.positive_moves > 0);
+    REQUIRE(fallback_metrics.positive_moves > 0);
+    REQUIRE(nil_metrics.positive_moves > 0);
+    CHECK_THAT(explicit_metrics.positive_rate_max, Catch::Matchers::WithinAbs(2., 0.10));
+    CHECK_THAT(fallback_metrics.positive_rate_max, Catch::Matchers::WithinAbs(6., 0.10));
+    CHECK_THAT(nil_metrics.positive_rate_max, Catch::Matchers::WithinAbs(6., 0.10));
+    CHECK(fallback_metrics.positive_rate_max > explicit_metrics.positive_rate_max + 1.5);
+    CHECK_THAT(nil_metrics.positive_rate_max, Catch::Matchers::WithinAbs(fallback_metrics.positive_rate_max, 0.10));
+    CHECK_THAT(fallback_metrics.positive_volume, Catch::Matchers::WithinAbs(explicit_metrics.positive_volume, 0.05));
+    CHECK_THAT(nil_metrics.positive_volume, Catch::Matchers::WithinAbs(fallback_metrics.positive_volume, 0.05));
+}
+
+TEST_CASE("Type1 nozzle ramming uses the hotend rate and cooling commands", "[WipeTower][Type1WipeRamming]")
+{
+    using namespace type1_ramming_contracts;
+    const double nil_rate = ConfigOptionFloatsNullable::nil_value();
+    const Type1Run explicit_rate = run_type1(type1_ramming_config(2., 1.5, 0., 0., false, 0, 100), true);
+    const Type1Run fallback_rate = run_type1(type1_ramming_config(2., -1., 0., 0., false, 0, 100), true);
+    const Type1Run nil_fallback = run_type1(type1_ramming_config(2., nil_rate, 0., 0., false, 0, 100), true);
+    require_ramming_result(explicit_rate, true);
+    require_ramming_result(fallback_rate, true);
+    require_ramming_result(nil_fallback, true);
+    const RammingMetrics explicit_metrics = parse_ramming(explicit_rate.changes.front());
+    const RammingMetrics fallback_metrics = parse_ramming(fallback_rate.changes.front());
+    const RammingMetrics nil_metrics = parse_ramming(nil_fallback.changes.front());
+    REQUIRE(explicit_metrics.finite);
+    REQUIRE(fallback_metrics.finite);
+    REQUIRE(nil_metrics.finite);
+    REQUIRE(explicit_metrics.positive_moves > 0);
+    REQUIRE(fallback_metrics.positive_moves > 0);
+    REQUIRE(nil_metrics.positive_moves > 0);
+    CHECK_THAT(explicit_metrics.positive_rate_max, Catch::Matchers::WithinAbs(1.5, 0.10));
+    CHECK_THAT(fallback_metrics.positive_rate_max, Catch::Matchers::WithinAbs(6., 0.10));
+    CHECK_THAT(nil_metrics.positive_rate_max, Catch::Matchers::WithinAbs(6., 0.10));
+    CHECK(fallback_metrics.positive_rate_max > explicit_metrics.positive_rate_max + 2.5);
+    CHECK_THAT(nil_metrics.positive_rate_max, Catch::Matchers::WithinAbs(fallback_metrics.positive_rate_max, 0.10));
+    CHECK_THAT(fallback_metrics.positive_volume, Catch::Matchers::WithinAbs(explicit_metrics.positive_volume, 0.05));
+    CHECK_THAT(nil_metrics.positive_volume, Catch::Matchers::WithinAbs(fallback_metrics.positive_volume, 0.05));
+
+    const Type1Run cooling_off = run_type1(type1_ramming_config(2., 1.5, 0., 0., false, 100, 100), true);
+    const Type1Run cooling_on = run_type1(type1_ramming_config(2., 1.5, 0., 0., true, 100, 100), true);
+    require_ramming_result(cooling_off, true);
+    require_ramming_result(cooling_on, true);
+    const RammingMetrics off_metrics = parse_ramming(cooling_off.changes.front());
+    const RammingMetrics on_metrics = parse_ramming(cooling_on.changes.front());
+    REQUIRE(off_metrics.finite);
+    REQUIRE(on_metrics.finite);
+    CHECK(off_metrics.m104_temperatures.empty());
+    CHECK(off_metrics.m106_count == 0);
+    REQUIRE_FALSE(on_metrics.m104_temperatures.empty());
+    CHECK_THAT(on_metrics.m104_temperatures.front(), Catch::Matchers::WithinAbs(100., 0.01));
+    REQUIRE_FALSE(on_metrics.m106_duties.empty());
+    CHECK_THAT(on_metrics.m106_duties.front(), Catch::Matchers::WithinAbs(255., 0.01));
+    CHECK_THAT(on_metrics.positive_volume, Catch::Matchers::WithinAbs(off_metrics.positive_volume, 0.05));
+}
+
+TEST_CASE("Type1 physical cooling time follows target delta and cooling rate", "[WipeTower][Type1WipeRamming]")
+{
+    using namespace type1_ramming_contracts;
+    const Type1Run target_zero = run_type1(type1_ramming_config(2., 2., 0., 0., true, 0, 0, 1., 240), false);
+    const Type1Run disabled = run_type1(type1_ramming_config(2., 2., 0., 0., false, 100, 100, 1., 240), false);
+    const Type1Run target_slow = run_type1(type1_ramming_config(2., 2., 0., 0., true, 100, 100, 1., 240), false);
+    const Type1Run target_fast = run_type1(type1_ramming_config(2., 2., 0., 0., true, 100, 100, 5., 240), false);
+    require_ramming_result(target_zero, false);
+    require_ramming_result(disabled, false);
+    require_ramming_result(target_slow, false);
+    require_ramming_result(target_fast, false);
+    const std::vector<RammingMetrics> zero_metrics = parse_all_ramming(target_zero);
+    const std::vector<RammingMetrics> disabled_metrics = parse_all_ramming(disabled);
+    const std::vector<RammingMetrics> slow_metrics = parse_all_ramming(target_slow);
+    const std::vector<RammingMetrics> fast_metrics = parse_all_ramming(target_fast);
+    REQUIRE(zero_metrics.size() == 3);
+    REQUIRE(disabled_metrics.size() == 3);
+    REQUIRE(slow_metrics.size() == 3);
+    REQUIRE(fast_metrics.size() == 3);
+    for (const auto &metrics : zero_metrics) {
+        REQUIRE(metrics.finite);
+        REQUIRE(metrics.positive_moves > 0);
+    }
+    for (const auto &metrics : disabled_metrics) {
+        REQUIRE(metrics.finite);
+        REQUIRE(metrics.positive_moves > 0);
+    }
+    for (const auto &metrics : slow_metrics) {
+        REQUIRE(metrics.finite);
+        REQUIRE(metrics.positive_moves > 0);
+    }
+    for (const auto &metrics : fast_metrics) {
+        REQUIRE(metrics.finite);
+        REQUIRE(metrics.positive_moves > 0);
+    }
+
+    // First-layer cooling uses (240-100)/rate; later layers use (200-100)/rate.
+    // The writer's integer F and four-decimal E give a small output-quantization allowance.
+    const double slow_first_minimum = 140. - (0.02 * 140. + 0.25);
+    const double slow_later_minimum = 100. - (0.02 * 100. + 0.25);
+    const double fast_first_minimum = 28. - (0.02 * 28. + 0.25);
+    const double fast_later_minimum = 20. - (0.02 * 20. + 0.25);
+    CHECK(slow_metrics[0].positive_extrusion_time >= slow_first_minimum);
+    CHECK(slow_metrics[1].positive_extrusion_time >= slow_later_minimum);
+    CHECK(slow_metrics[2].positive_extrusion_time >= slow_later_minimum);
+    CHECK(fast_metrics[0].positive_extrusion_time >= fast_first_minimum);
+    CHECK(fast_metrics[1].positive_extrusion_time >= fast_later_minimum);
+    CHECK(fast_metrics[2].positive_extrusion_time >= fast_later_minimum);
+    CHECK(slow_metrics[0].positive_extrusion_time > slow_metrics[1].positive_extrusion_time);
+    CHECK(fast_metrics[0].positive_extrusion_time > fast_metrics[1].positive_extrusion_time);
+    CHECK(slow_metrics[0].positive_extrusion_time > fast_metrics[0].positive_extrusion_time);
+    CHECK(slow_metrics[1].positive_extrusion_time > fast_metrics[1].positive_extrusion_time);
+    CHECK(target_zero.changes.front().nozzle_change_result.is_extruder_change);
+    CHECK(zero_metrics[0].positive_extrusion_time < slow_metrics[0].positive_extrusion_time);
+    CHECK(disabled_metrics[0].positive_extrusion_time < slow_metrics[0].positive_extrusion_time);
+
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK_THAT(slow_metrics[i].positive_volume, Catch::Matchers::WithinAbs(zero_metrics[i].positive_volume, 0.05));
+        CHECK_THAT(fast_metrics[i].positive_volume, Catch::Matchers::WithinAbs(zero_metrics[i].positive_volume, 0.05));
+        CHECK_THAT(disabled_metrics[i].positive_volume, Catch::Matchers::WithinAbs(zero_metrics[i].positive_volume, 0.05));
+    }
+}
+
+TEST_CASE("Type1 ramming reverse travel duration follows the active change channel", "[WipeTower][Type1WipeRamming]")
+{
+    using namespace type1_ramming_contracts;
+    for (const bool same_extruder : {false, true}) {
+        INFO("same extruder = " << (same_extruder ? "true" : "false"));
+        const Type1Run no_reverse = run_type1(type1_ramming_config(2., 1.5,
+            0., 0., false, 0, 0), same_extruder);
+        const Type1Run short_reverse = run_type1(type1_ramming_config(2., 1.5,
+            same_extruder ? 0. : 0.5, same_extruder ? 0.5 : 0., false, 0, 0), same_extruder);
+        const Type1Run long_reverse = run_type1(type1_ramming_config(2., 1.5,
+            same_extruder ? 0. : 40., same_extruder ? 40. : 0., false, 0, 0), same_extruder);
+        require_ramming_result(no_reverse, same_extruder);
+        require_ramming_result(short_reverse, same_extruder);
+        require_ramming_result(long_reverse, same_extruder);
+        const RammingMetrics no_metrics = parse_ramming(no_reverse.changes.front());
+        const RammingMetrics short_metrics = parse_ramming(short_reverse.changes.front());
+        const RammingMetrics long_metrics = parse_ramming(long_reverse.changes.front());
+        REQUIRE(no_metrics.finite);
+        REQUIRE(short_metrics.finite);
+        REQUIRE(long_metrics.finite);
+        REQUIRE(no_metrics.positive_moves > 0);
+        REQUIRE(short_metrics.positive_moves > 0);
+        REQUIRE(long_metrics.positive_moves > 0);
+        CHECK(no_reverse.changes.front().nozzle_change_result.wipe_path.size() == 2);
+        CHECK(short_reverse.changes.front().nozzle_change_result.wipe_path.empty());
+        CHECK(long_reverse.changes.front().nozzle_change_result.wipe_path.empty());
+        CHECK_THAT(no_metrics.reverse_travel_time, Catch::Matchers::WithinAbs(0., 0.01));
+        CHECK(short_metrics.reverse_travel_time > no_metrics.reverse_travel_time + 0.1);
+        CHECK(long_metrics.reverse_travel_time > short_metrics.reverse_travel_time);
+        CHECK(short_metrics.reverse_travel_time >= 0.5 - (0.10 + 0.02 * 0.5));
+        CHECK(long_metrics.reverse_travel_time >= 40. - (0.10 + 0.02 * 40.));
+        CHECK_THAT(short_metrics.positive_volume, Catch::Matchers::WithinAbs(no_metrics.positive_volume, 0.05));
+        CHECK_THAT(long_metrics.positive_volume, Catch::Matchers::WithinAbs(no_metrics.positive_volume, 0.05));
+    }
+}
+
 } // namespace legacy_tower_direct_contracts
 
 namespace multimaterial_wipe_variance_contracts {
@@ -2013,7 +2380,7 @@ std::string load_motion(const DirectRun &run)
 
 std::string unload_motion(const DirectRun &run)
 {
-    return command_section(run.gcode, "; CP TOOLCHANGE UNLOAD\n", "; CP TOOLCHANGE CHANGE\n");
+    return command_section(run.gcode, "; CP TOOLCHANGE UNLOAD\n", "[change_filament_gcode]\n");
 }
 
 std::string cooling_park_motion(const DirectRun &run)
@@ -4389,3 +4756,552 @@ TEST_CASE("A soluble filament is preferred at the start of explicit first-layer 
 }
 
 } // namespace toolordering_active_gap_contracts
+
+namespace multimaterial_wipe_variance_contracts {
+
+TEST_CASE("SEMM suppresses tower temperature waits while retaining purge geometry",
+          "[WipeTower][SEMMBehavior]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 60.f}, {0.4f, 0.2f, 1, 0, 60.f}};
+    const auto run = [&](bool semm) {
+        return run_tower(tower_dynamic({
+            {"single_extruder_multi_material", semm},
+            {"single_extruder_multi_material_priming", false},
+            {"wait_for_temp_on_wipe_tower", true},
+            {"enable_tower_interface_features", false},
+            {"enable_tower_interface_cooldown_during_tower", false},
+            {"nozzle_temperature_initial_layer", "210,220"},
+            {"nozzle_temperature", "200,210"},
+        }), plan);
+    };
+
+    const DirectRun multi_tool = run(false);
+    const DirectRun semm      = run(true);
+    require_finite(multi_tool);
+    require_finite(semm);
+
+    struct TemperatureTrace {
+        int m109_s220 = 0;
+        int m104_s220 = 0;
+        int tagged_m109_s220 = 0;
+    };
+    const auto trace_temperature = [](const std::string &gcode) {
+        TemperatureTrace result;
+        GCodeReader reader;
+        reader.parse_buffer(gcode, [&result](GCodeReader &, const GCodeReader::GCodeLine &line) {
+            if (!line.cmd_is("M109") && !line.cmd_is("M104"))
+                return;
+            float temperature = 0.f;
+            if (!line.has_value('S', temperature) || !std::isfinite(temperature) ||
+                std::abs(temperature - 220.f) > 1e-4f)
+                return;
+            if (line.cmd_is("M109")) {
+                ++result.m109_s220;
+                if (line.raw().find(WipeTower2::wait_for_temp_tag()) != std::string::npos)
+                    ++result.tagged_m109_s220;
+            } else {
+                ++result.m104_s220;
+            }
+        });
+        return result;
+    };
+
+    const TemperatureTrace multi_trace = trace_temperature(multi_tool.gcode);
+    const TemperatureTrace semm_trace  = trace_temperature(semm.gcode);
+
+    // The first 0 -> 1 plan transition requests the explicit 220 C target.  In
+    // ordinary multi-tool mode it is a tagged blocking wait; SEMM uses its own
+    // nonblocking temperature path for the same target instead.
+    CHECK(multi_trace.m109_s220 == 1);
+    CHECK(multi_trace.tagged_m109_s220 == multi_trace.m109_s220);
+    CHECK(multi_trace.m104_s220 == 0);
+    CHECK(semm_trace.m109_s220 == 0);
+    CHECK(semm_trace.tagged_m109_s220 == 0);
+    CHECK(semm_trace.m104_s220 == 1);
+    CHECK(multi_tool.extrusion_length > 0.);
+    CHECK(semm.extrusion_length > 0.);
+    CHECK(std::isfinite(multi_tool.extrusion_length));
+    CHECK(std::isfinite(semm.extrusion_length));
+}
+
+} // namespace multimaterial_wipe_variance_contracts
+
+
+namespace multimaterial_wipe_variance_contracts {
+
+TEST_CASE("Ramming enable settings gate the configured unload material",
+          "[WipeTower][RammingEnableControls]")
+{
+    const bool semm = GENERATE(false, true);
+    CAPTURE(semm);
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 60.f}};
+    const auto config_for = [semm](bool enabled) {
+        return tower_dynamic({
+            {"single_extruder_multi_material", semm},
+            {"single_extruder_multi_material_priming", false},
+            {"enable_filament_ramming", semm && enabled},
+            {"filament_multitool_ramming", !semm && enabled ? "1,1" : "0,0"},
+            {"filament_ramming_parameters", "100 100 30 30 30 30"},
+            {"filament_multitool_ramming_volume", "12,12"},
+            {"filament_multitool_ramming_flow", "6,6"},
+            {"filament_diameter", "1.75,1.75"},
+            {"filament_cooling_moves", "0,0"},
+            {"filament_toolchange_delay", "0,0"},
+            {"cooling_tube_length", 0},
+            {"cooling_tube_retraction", 0},
+            {"parking_pos_retraction", 0},
+            {"extra_loading_move", 0},
+            {"high_current_on_filament_swap", false},
+            {"printer_notes", ""},
+            {"gcode_flavor", "marlin"},
+            {"wait_for_temp_on_wipe_tower", false},
+            {"enable_tower_interface_features", false},
+            {"enable_tower_interface_cooldown_during_tower", false},
+        });
+    };
+    const DirectRun disabled = run_tower(config_for(false), plan);
+    const DirectRun enabled = run_tower(config_for(true), plan);
+    require_finite(disabled);
+    require_finite(enabled);
+    const auto unload_material = [](const DirectRun &run) {
+        const size_t begin = run.gcode.find("; CP TOOLCHANGE UNLOAD\n");
+        REQUIRE(begin != std::string::npos);
+        const size_t end = run.gcode.find("[change_filament_gcode]\n", begin);
+        REQUIRE(end != std::string::npos);
+        REQUIRE(end > begin);
+        // A disabled unload may have no motion when cooling and parking are zero.
+        const std::string motion = unload_motion(run);
+        double positive_e = 0.;
+        GCodeReader reader;
+        reader.parse_buffer(motion, [&positive_e](GCodeReader &, const GCodeReader::GCodeLine &line) {
+            // WipeTower2 emits relative E values. Cooling and parking distances
+            // are zero here, so positive E in the unload stage is rammed material.
+            if (line.cmd_is("G1") && line.has_e()) {
+                REQUIRE(std::isfinite(line.e()));
+                if (line.e() > 0.f)
+                    positive_e += line.e();
+            }
+        });
+        return positive_e;
+    };
+    const double diameter = 1.75;
+    const double filament_area = std::acos(-1.0) * diameter * diameter / 4.;
+    // SEMM has four quarter-second segments at 30 mm^3/s; multi-tool
+    // ramming uses the configured 12 mm^3 volume at 6 mm^3/s.
+    const double volume = semm ? 4. * 0.25 * 30. : 12.;
+    CHECK_THAT(unload_material(disabled), WithinAbs(0., 1e-7));
+    CHECK_THAT(unload_material(enabled), WithinAbs(volume / filament_area, 0.01));
+}
+
+TEST_CASE("Filament swap current is opt-in and restored without changing purge geometry",
+          "[WipeTower][FilamentSwapCurrentControls]")
+{
+    const std::string flavor = GENERATE(std::string("marlin"), std::string("reprapfirmware"),
+                                       std::string("klipper"));
+    CAPTURE(flavor);
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 60.f}, {0.4f, 0.2f, 1, 0, 60.f}};
+    const auto config_for = [&flavor](bool high_current) {
+        return tower_dynamic({
+            {"single_extruder_multi_material", true},
+            {"single_extruder_multi_material_priming", false},
+            {"enable_filament_ramming", true},
+            {"filament_ramming_parameters", "100 100 30 30 30 30"},
+            {"filament_cooling_moves", "0,0"},
+            {"filament_toolchange_delay", "0,0"},
+            {"cooling_tube_length", 0},
+            {"cooling_tube_retraction", 0},
+            {"parking_pos_retraction", 0},
+            {"extra_loading_move", 0},
+            {"high_current_on_filament_swap", high_current},
+            {"printer_notes", ""},
+            {"gcode_flavor", flavor},
+            {"wait_for_temp_on_wipe_tower", false},
+            {"enable_tower_interface_features", false},
+            {"enable_tower_interface_cooldown_during_tower", false},
+        });
+    };
+    const DirectRun disabled = run_tower(config_for(false), plan);
+    const DirectRun enabled = run_tower(config_for(true), plan);
+    require_finite(disabled);
+    require_finite(enabled);
+    const auto current_commands = [](const DirectRun &run) {
+        std::vector<std::pair<std::string, float>> commands;
+        GCodeReader reader;
+        reader.parse_buffer(run.gcode, [&commands](GCodeReader &, const GCodeReader::GCodeLine &line) {
+            if (line.cmd_is("M906") || line.cmd_is("M907")) {
+                REQUIRE(line.has_e());
+                REQUIRE(std::isfinite(line.e()));
+                commands.emplace_back(std::string(line.cmd()), line.e());
+            }
+        });
+        return commands;
+    };
+    CHECK(current_commands(disabled).empty());
+    const auto commands = current_commands(enabled);
+    if (flavor == "klipper") {
+        CHECK(commands.empty());
+    } else {
+        REQUIRE(commands.size() >= 2);
+        REQUIRE(commands.size() % 2 == 0);
+        const std::string expected_command = flavor == "reprapfirmware" ? "M906" : "M907";
+        for (size_t i = 0; i < commands.size(); i += 2) {
+            CAPTURE(i);
+            CHECK(commands[i].first == expected_command);
+            CHECK(commands[i + 1].first == expected_command);
+            CHECK_THAT(commands[i].second, WithinAbs(750.f, 1e-5f));
+            CHECK_THAT(commands[i + 1].second, WithinAbs(550.f, 1e-5f));
+        }
+    }
+    CHECK_THAT(enabled.extrusion_length, WithinAbs(disabled.extrusion_length, 1e-6));
+    CHECK_THAT(enabled.elapsed, WithinAbs(disabled.elapsed, 1e-6));
+    CHECK_THAT(enabled.depth, WithinAbs(disabled.depth, 1e-6f));
+}
+
+} // namespace multimaterial_wipe_variance_contracts
+
+namespace multimaterial_wipe_variance_contracts {
+
+TEST_CASE("WipeTower2 rib fillet changes the emitted wall path without changing its plan",
+          "[WipeTower][MultimaterialWipe][WipeTowerFilletWall]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 120.f},
+        {0.4f, 0.2f, 1, 0, 120.f},
+    };
+    const DirectRun sharp = run_tower(tower_dynamic({
+        {"prime_tower_width", 32},
+        {"wipe_tower_wall_type", "rib"},
+        {"wipe_tower_rib_width", 6},
+        {"wipe_tower_extra_rib_length", 8},
+        {"filament_minimal_purge_on_wipe_tower", "120,120"},
+        {"enable_filament_ramming", false},
+        {"wipe_tower_fillet_wall", false},
+    }), plan);
+    const DirectRun rounded = run_tower(tower_dynamic({
+        {"prime_tower_width", 32},
+        {"wipe_tower_wall_type", "rib"},
+        {"wipe_tower_rib_width", 6},
+        {"wipe_tower_extra_rib_length", 8},
+        {"filament_minimal_purge_on_wipe_tower", "120,120"},
+        {"enable_filament_ramming", false},
+        {"wipe_tower_fillet_wall", true},
+    }), plan);
+
+    require_finite(sharp);
+    require_finite(rounded);
+    CHECK_THAT(rounded.width, WithinAbs(sharp.width, 1e-5f));
+    CHECK_THAT(rounded.depth, WithinAbs(sharp.depth, 1e-5f));
+    CHECK_THAT(rounded.rib_width, WithinAbs(sharp.rib_width, 1e-5f));
+    CHECK_THAT(rounded.rib_length, WithinAbs(sharp.rib_length, 1e-5f));
+    CHECK(rounded.box.size().x() > 0.f);
+    CHECK(rounded.box.size().y() > 0.f);
+    CHECK(sharp.box.size().x() > 0.f);
+    CHECK(sharp.box.size().y() > 0.f);
+
+    struct EmittedGeometry {
+        std::size_t positive_segments = 0;
+        std::size_t non_collinear_turns = 0;
+        double length = 0.;
+    };
+    const auto emitted_geometry = [](const DirectRun &run) {
+        EmittedGeometry result;
+        for (const auto &layer : run.layers) {
+            for (const auto &change : layer) {
+                const auto &moves = change.extrusions;
+                for (std::size_t i = 1; i < moves.size(); ++i) {
+                    if (!(moves[i].width > 0.f))
+                        continue;
+                    const Vec2f delta = moves[i].pos - moves[i - 1].pos;
+                    CHECK(delta.norm() > 0.f);
+                    result.length += double(delta.norm());
+                    ++result.positive_segments;
+                    if (i >= 2 && moves[i - 1].width > 0.f && moves[i - 2].width > 0.f) {
+                        const Vec2f incoming = moves[i - 1].pos - moves[i - 2].pos;
+                        const Vec2f outgoing = moves[i].pos - moves[i - 1].pos;
+                        if (std::abs(double(cross2(incoming, outgoing))) > 1e-4)
+                            ++result.non_collinear_turns;
+                    }
+                }
+            }
+        }
+        return result;
+    };
+
+    const EmittedGeometry sharp_geometry = emitted_geometry(sharp);
+    const EmittedGeometry rounded_geometry = emitted_geometry(rounded);
+    REQUIRE(sharp_geometry.positive_segments > 0);
+    REQUIRE(rounded_geometry.positive_segments > 0);
+    CHECK(rounded_geometry.positive_segments > sharp_geometry.positive_segments);
+    CHECK(rounded_geometry.non_collinear_turns > sharp_geometry.non_collinear_turns);
+    CHECK(rounded_geometry.length > 0.);
+    CHECK(sharp_geometry.length > 0.);
+    CHECK(std::abs(rounded_geometry.length - sharp_geometry.length) > 1e-3);
+}
+
+} // namespace multimaterial_wipe_variance_contracts
+namespace wiping_assignment_contracts {
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace {
+
+DynamicPrintConfig wiping_fixture_config(bool flush_into_objects, bool flush_into_infill)
+{
+    return multifilament_config(2, {
+        {"single_extruder_multi_material", true},
+        {"purge_in_prime_tower", false},
+        {"enable_prime_tower", false},
+        {"flush_into_objects", flush_into_objects},
+        {"flush_into_infill", flush_into_infill},
+        {"flush_into_support", false},
+        {"filament_soluble", "0,0"},
+        {"filament_is_support", "0,0"},
+        {"filament_minimal_purge_on_wipe_tower", "0,0"},
+        {"outer_wall_filament_id", 1},
+        {"inner_wall_filament_id", 1},
+        {"sparse_infill_filament_id", 2},
+        {"internal_solid_filament_id", 2},
+        {"top_surface_filament_id", 2},
+        {"bottom_surface_filament_id", 2},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "20%"},
+        {"is_infill_first", false},
+        {"prime_volume", 80},
+        {"prime_tower_width", 35},
+        {"wipe_tower_x", 20},
+        {"wipe_tower_y", 20},
+        {"wipe_tower_type", "type2"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"enable_arc_fitting", false},
+    });
+}
+
+struct AssignmentEvidence
+{
+    float requested = 0.f;
+    float remaining = 0.f;
+    float eligible_volume = 0.f;
+    float assigned_volume = 0.f;
+    size_t infill_candidates = 0;
+    size_t perimeter_candidates = 0;
+    size_t infill_copies = 0;
+    size_t perimeter_copies = 0;
+};
+
+AssignmentEvidence run_large_budget_case(bool flush_into_objects, bool flush_into_infill)
+{
+    const DynamicPrintConfig config = wiping_fixture_config(flush_into_objects, flush_into_infill);
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{make_cube(10., 10., 1.2)}, print, model, config, nullptr, true, 2);
+    REQUIRE_FALSE(print.objects().empty());
+    print.process();
+    REQUIRE(print.objects().front()->layer_count() > 0);
+
+    const PrintObject *object = print.objects().front();
+    const Layer *layer = object->get_layer(0);
+    REQUIRE(layer != nullptr);
+    const size_t copies = object->instances().size();
+    REQUIRE(copies == 2);
+
+    LayerTools tools(layer->print_z);
+    tools.extruders = {0, 1};
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+    AssignmentEvidence evidence;
+
+    for (const LayerRegion *layer_region : layer->regions()) {
+        const PrintRegion &region = layer_region->region();
+        for (const ExtrusionEntity *entity : layer_region->fills.entities) {
+            const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+            if (collection == nullptr)
+                continue;
+            const bool candidate = wiping.is_overriddable_and_mark(*collection, print.config(), *object, region);
+            if (candidate) {
+                evidence.eligible_volume += float(collection->total_volume()) * float(copies);
+                ++evidence.infill_candidates;
+            }
+        }
+        for (const ExtrusionEntity *entity : layer_region->perimeters.entities) {
+            const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+            if (collection == nullptr)
+                continue;
+            const bool candidate = wiping.is_overriddable_and_mark(*collection, print.config(), *object, region);
+            if (candidate) {
+                evidence.eligible_volume += float(collection->total_volume()) * float(copies);
+                ++evidence.perimeter_candidates;
+            }
+        }
+    }
+
+    evidence.requested = evidence.eligible_volume + 25.f;
+    evidence.remaining = wiping.mark_wiping_extrusions(print, 0, 1, evidence.requested);
+
+    auto collect_overrides = [&](const ExtrusionEntityCollection &collection, bool infill, const PrintRegion &region) {
+        const auto *overrides = wiping.get_extruder_overrides(&collection, object,
+                                                               int(tools.extruder(collection, region)), copies);
+        if (overrides == nullptr)
+            return;
+        for (size_t copy = 0; copy < copies; ++copy) {
+            if ((*overrides)[copy] != 1)
+                continue;
+            evidence.assigned_volume += float(collection.total_volume());
+            if (infill)
+                ++evidence.infill_copies;
+            else
+                ++evidence.perimeter_copies;
+        }
+    };
+
+    for (const LayerRegion *layer_region : layer->regions()) {
+        const PrintRegion &region = layer_region->region();
+        for (const ExtrusionEntity *entity : layer_region->fills.entities) {
+            const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+            if (collection != nullptr)
+                collect_overrides(*collection, true, region);
+        }
+        for (const ExtrusionEntity *entity : layer_region->perimeters.entities) {
+            const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+            if (collection != nullptr)
+                collect_overrides(*collection, false, region);
+        }
+    }
+    return evidence;
+}
+
+DynamicPrintConfig absent_original_fixture_config()
+{
+    return multifilament_config(4, {
+        {"single_extruder_multi_material", true},
+        {"purge_in_prime_tower", false},
+        {"enable_prime_tower", false},
+        {"flush_into_objects", false},
+        {"flush_into_infill", true},
+        {"flush_into_support", false},
+        {"filament_soluble", "0,0,0,0"},
+        {"filament_is_support", "0,0,0,0"},
+        {"filament_minimal_purge_on_wipe_tower", "0,0,0,0"},
+        {"outer_wall_filament_id", 3},
+        {"inner_wall_filament_id", 3},
+        {"sparse_infill_filament_id", 4},
+        {"internal_solid_filament_id", 4},
+        {"top_surface_filament_id", 4},
+        {"bottom_surface_filament_id", 4},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "20%"},
+        {"is_infill_first", false},
+        {"prime_volume", 80},
+        {"prime_tower_width", 35},
+        {"wipe_tower_x", 20},
+        {"wipe_tower_y", 20},
+        {"wipe_tower_type", "type2"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"enable_arc_fitting", false},
+    });
+}
+
+} // namespace
+
+TEST_CASE("WipingExtrusions conserves a large purge budget across object copies",
+          "[WipeTower][WipingExtrusions][WipingAssignmentBudget]")
+{
+    const AssignmentEvidence infill_only = run_large_budget_case(false, true);
+    const AssignmentEvidence objects = run_large_budget_case(true, false);
+    const AssignmentEvidence disabled = run_large_budget_case(false, false);
+
+    REQUIRE(infill_only.infill_candidates > 0);
+    REQUIRE(infill_only.perimeter_candidates == 0);
+    CHECK(infill_only.infill_copies == infill_only.infill_candidates * 2);
+    CHECK(infill_only.perimeter_copies == 0);
+    CHECK_THAT(infill_only.assigned_volume + infill_only.remaining,
+               Catch::Matchers::WithinAbs(infill_only.requested, 1e-3));
+
+    REQUIRE(objects.infill_candidates > 0);
+    REQUIRE(objects.perimeter_candidates > 0);
+    CHECK(objects.infill_copies == objects.infill_candidates * 2);
+    CHECK(objects.perimeter_copies == objects.perimeter_candidates * 2);
+    CHECK_THAT(objects.assigned_volume + objects.remaining,
+               Catch::Matchers::WithinAbs(objects.requested, 1e-3));
+
+    CHECK(disabled.infill_candidates == 0);
+    CHECK(disabled.perimeter_candidates == 0);
+    CHECK(disabled.infill_copies == 0);
+    CHECK(disabled.perimeter_copies == 0);
+    CHECK_THAT(disabled.remaining, Catch::Matchers::WithinAbs(disabled.requested, 1e-3));
+}
+
+TEST_CASE("Unclaimed sparse infill with an absent source filament receives the last printable override",
+          "[WipeTower][WipingExtrusions][WipingAssignmentFallback]")
+{
+    const DynamicPrintConfig config = absent_original_fixture_config();
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{make_cube(10., 10., 1.2)}, print, model, config, nullptr, true, 2);
+    REQUIRE_FALSE(print.objects().empty());
+    print.process();
+    REQUIRE(print.objects().front()->layer_count() > 0);
+
+    const PrintObject *object = print.objects().front();
+    const Layer *layer = object->get_layer(0);
+    REQUIRE(layer != nullptr);
+    REQUIRE(object->instances().size() == 2);
+
+    LayerTools tools(layer->print_z);
+    tools.extruders = {0, 1, 2};
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+    size_t eligible_fills = 0;
+    size_t overridden_copies = 0;
+
+    for (const LayerRegion *layer_region : layer->regions()) {
+        const PrintRegion &region = layer_region->region();
+        CHECK_FALSE(region.config().is_infill_first);
+        CHECK(tools.wall_extruder_id(region) == 2);
+        CHECK(tools.sparse_infill_filament_id(region) == 3);
+        CHECK_FALSE(tools.has_extruder(3));
+        CHECK_FALSE(tools.is_extruder_order(2, 2));
+        for (const ExtrusionEntity *entity : layer_region->fills.entities) {
+            const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+            if (collection == nullptr || collection->role() != erInternalInfill)
+                continue;
+            if (wiping.is_overriddable_and_mark(*collection, print.config(), *object, region))
+                ++eligible_fills;
+        }
+    }
+
+    REQUIRE(eligible_fills > 0);
+    wiping.ensure_perimeters_infills_order(print);
+
+    for (const LayerRegion *layer_region : layer->regions()) {
+        const PrintRegion &region = layer_region->region();
+        for (const ExtrusionEntity *entity : layer_region->fills.entities) {
+            const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+            if (collection == nullptr || collection->role() != erInternalInfill)
+                continue;
+            const auto *overrides = wiping.get_extruder_overrides(collection, object, 3, object->instances().size());
+            CHECK(overrides != nullptr);
+            if (overrides == nullptr)
+                continue;
+            for (size_t copy = 0; copy < object->instances().size(); ++copy) {
+                CHECK((*overrides)[copy] == 2);
+                if ((*overrides)[copy] == 2)
+                    ++overridden_copies;
+            }
+        }
+    }
+    CHECK(overridden_copies == eligible_fills * object->instances().size());
+}
+
+} // namespace wiping_assignment_contracts

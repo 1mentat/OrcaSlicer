@@ -268,8 +268,26 @@ TEST_CASE("SLA exposure validation rejects values outside printer bounds", "[SLA
     CHECK_FALSE(invalid.print.validate().string.empty());
 }
 
-TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures]")
+TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures][SLAHollowingToggle]")
 {
+    // Run the disabled control through the same public task boundary.  The
+    // hollowing step is still marked complete, but its public interior product
+    // must remain absent when hollowing_enable is false.
+    DynamicPrintConfig disabled_config = sla_config(1.0);
+    disabled_config.set_key_value("hollowing_enable", new ConfigOptionBool(false));
+    disabled_config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(1.0));
+    disabled_config.set_key_value("hollowing_quality", new ConfigOptionFloat(0.2));
+    disabled_config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(0.25));
+    SlaCubeFixture disabled(std::move(disabled_config), make_cube(20.0, 20.0, 10.0));
+    PrintBase::TaskParams disabled_task;
+    disabled_task.to_object_step = slaposHollowing;
+    disabled.print.set_task(disabled_task);
+    disabled.print.process();
+    REQUIRE(disabled.print.objects().size() == 1);
+    const SLAPrintObject *disabled_object = disabled.print.objects().front();
+    REQUIRE(disabled_object->is_step_done(slaposHollowing));
+    CHECK(disabled_object->hollowed_interior_mesh().empty());
+
     DynamicPrintConfig config = sla_config(1.0);
     config.set_key_value("hollowing_enable", new ConfigOptionBool(true));
     config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(1.0));
@@ -298,8 +316,25 @@ TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures]")
     CHECK(interior_volume < solid_volume);
 }
 
-TEST_CASE("SLA pad processing creates printable pad geometry and slices", "[SLAFeatures]")
+TEST_CASE("SLA pad processing creates printable pad geometry and slices", "[SLAFeatures][SLAPadToggle]")
 {
+    // A complete run with the feature disabled must not expose a pad mesh or
+    // a pad milestone product.  The following enabled run is the positive
+    // control for the same public getters and slice-level output.
+    DynamicPrintConfig disabled_config = sla_config(1.0);
+    disabled_config.set_key_value("pad_enable", new ConfigOptionBool(false));
+    disabled_config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(1.0));
+    disabled_config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    disabled_config.set_key_value("pad_brim_size", new ConfigOptionFloat(2.0));
+    SlaCubeFixture disabled(std::move(disabled_config));
+    disabled.print.process();
+    REQUIRE(disabled.print.objects().size() == 1);
+    const SLAPrintObject *disabled_object = disabled.print.objects().front();
+    REQUIRE(disabled_object->is_step_done(slaposPad));
+    CHECK_FALSE(disabled_object->has_mesh(slaposPad));
+    CHECK(disabled_object->pad_mesh().empty());
+    CHECK_THAT(support_slice_area(*disabled_object), Catch::Matchers::WithinAbs(0.0, 1e-9));
+
     DynamicPrintConfig config = sla_config(1.0);
     config.set_key_value("pad_enable", new ConfigOptionBool(true));
     config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(1.0));
@@ -313,6 +348,7 @@ TEST_CASE("SLA pad processing creates printable pad geometry and slices", "[SLAF
     REQUIRE(fixture.print.finished());
     const SLAPrintObject *object = fixture.print.objects().front();
     REQUIRE(object->is_step_done(slaposPad));
+    REQUIRE(object->has_mesh(slaposPad));
     REQUIRE_FALSE(object->pad_mesh().empty());
     TriangleMesh pad_mesh = object->pad_mesh();
     CHECK(pad_mesh.volume() > 0.f);

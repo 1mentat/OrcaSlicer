@@ -2432,6 +2432,124 @@ TEST_CASE("A negative volume removes only its footprint from the first layer", "
     CHECK_THAT(positive_area - cut_area, Catch::Matchers::WithinAbs(36.0, 1e-3));
 }
 
+TEST_CASE("Overlapping model parts assign modifiers and subtract negative volumes", "[Print][VolumeRegionAssignment]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"brim_type", "no_brim"},
+        {"slice_closing_radius", 0.0},
+        {"xy_hole_compensation", 0.0},
+        {"xy_contour_compensation", 0.0},
+    });
+
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *part_a = object->add_volume(make_cube(20., 20., 4.), ModelVolumeType::MODEL_PART, false);
+    // The slicer orders model volumes by ObjectID, so establish the intended parent/overlap order explicitly.
+    ModelVolume *modifier = object->add_volume(make_cube(10., 10., 4.), ModelVolumeType::PARAMETER_MODIFIER, false);
+    modifier->set_offset(Vec3d(15., 5., 0.));
+    modifier->config.set("wall_loops", 4);
+    ModelVolume *part_b = object->add_volume(make_cube(20., 20., 4.), ModelVolumeType::MODEL_PART, false);
+    part_b->set_offset(Vec3d(10., 10., 0.));
+    ModelVolume *negative = object->add_volume(make_cube(8., 8., 4.), ModelVolumeType::NEGATIVE_VOLUME, false);
+    negative->set_offset(Vec3d(16., 16., 0.));
+    REQUIRE(part_a->is_model_part());
+    REQUIRE(modifier->is_modifier());
+    REQUIRE(part_b->is_model_part());
+    REQUIRE(negative->is_negative_volume());
+    REQUIRE(part_a->id() < modifier->id());
+    REQUIRE(modifier->id() < part_b->id());
+    REQUIRE(part_b->id() < negative->id());
+
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+    PrintObject *print_object = print.get_object(0);
+    REQUIRE(print_object != nullptr);
+    print_object->slice();
+    REQUIRE(print_object->layer_count() > 4);
+    REQUIRE(print_object->num_printing_regions() == 2);
+
+    size_t layer_idx = print_object->layer_count() / 2;
+    REQUIRE(layer_idx < print_object->layer_count());
+    const Layer *layer = print_object->get_layer(static_cast<int>(layer_idx));
+    REQUIRE(layer != nullptr);
+    REQUIRE(layer->print_z > 0.0f);
+    REQUIRE(layer->print_z < 4.0f);
+    auto region_area_mm2 = [](const LayerRegion &region) {
+        double area = 0.;
+        for (const Surface &surface : region.slices.surfaces)
+            area += std::abs(static_cast<double>(surface.expolygon.area())) * SCALING_FACTOR * SCALING_FACTOR;
+        return area;
+    };
+
+    double default_area = 0.;
+    double modifier_area = 0.;
+    for (size_t region_id = 0; region_id < print_object->num_printing_regions(); ++region_id) {
+        const double area = region_area_mm2(*layer->get_region(static_cast<int>(region_id)));
+        if (print_object->printing_region(region_id).config().wall_loops.value == 4)
+            modifier_area += area;
+        else
+            default_area += area;
+    }
+
+    // A=[0,20]^2, B=[10,30]^2 => union 700. N=[16,24]^2 removes 64.
+    // M=[15,25]x[5,15] is clipped to A, then to the later B overlap, leaving 25.
+    CHECK_THAT(modifier_area, Catch::Matchers::WithinAbs(25., 0.05));
+    CHECK_THAT(default_area, Catch::Matchers::WithinAbs(611., 0.05));
+    CHECK_THAT(default_area + modifier_area, Catch::Matchers::WithinAbs(636., 0.05));
+}
+
+TEST_CASE("Same-type support volumes merge overlap and preserve separate islands", "[Print][VolumeRegionAssignment]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"slice_closing_radius", 0.0},
+        {"xy_hole_compensation", 0.0},
+        {"xy_contour_compensation", 0.0},
+    });
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(20., 20., 4.), ModelVolumeType::MODEL_PART, false);
+    object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::SUPPORT_BLOCKER, false)->set_offset(Vec3d(4., 4., 0.));
+    object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::SUPPORT_BLOCKER, false)->set_offset(Vec3d(6., 4., 0.));
+    object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::SUPPORT_BLOCKER, false)->set_offset(Vec3d(15., 4., 0.));
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+    PrintObject *print_object = print.get_object(0);
+    REQUIRE(print_object != nullptr);
+    print_object->slice();
+
+    size_t layer_idx = print_object->layer_count();
+    for (size_t i = 0; i < print_object->layer_count(); ++i)
+        if (print_object->get_layer(static_cast<int>(i))->print_z > 0.3 &&
+            print_object->get_layer(static_cast<int>(i))->print_z < 3.5) {
+            layer_idx = i;
+            break;
+        }
+    REQUIRE(layer_idx < print_object->layer_count());
+    const std::vector<Polygons> blockers = print_object->slice_support_blockers();
+    REQUIRE(blockers.size() == print_object->layer_count());
+    REQUIRE(blockers[layer_idx].size() == 2);
+    CHECK_THAT(polygon_area_mm2(blockers[layer_idx]), Catch::Matchers::WithinAbs(40., 0.05));
+}
+
 TEST_CASE("A layer-range override creates an additional print region and changes wall planning", "[Print][PrintPipelineWorkflows]")
 {
     DynamicPrintConfig config = pipeline_config();

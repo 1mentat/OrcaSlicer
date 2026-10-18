@@ -640,6 +640,20 @@ def _apply_minimum_test_gate(entry: dict[str, Any], *, minimum_tests: int,
             and (not entry["minimum_tests_ok"] or missing or missing_required)):
         entry["status"] = "test_evidence_incomplete"
     entry["junit_reference_usable"] = entry.get("status") in {"pass", "test_failed"}
+    # A complete JUnit run containing isolated execution-error cases remains
+    # useful for identity diagnostics, while its overall status stays
+    # test_error and therefore fail-closed in _overall_status().
+    junit_counts = (entry.get("junit_evidence") or {}).get("counts") or {}
+    entry["junit_error_comparison_usable"] = (
+        entry.get("status") == "test_error"
+        and bool((entry.get("junit_evidence") or {}).get("usable"))
+        and bool(entry.get("minimum_tests_ok"))
+        and not entry.get("missing_baseline_testcases")
+        and not entry.get("missing_required_head_testcases")
+        and int(junit_counts.get("errors", 0)) > 0
+        and int(junit_counts.get("timeouts", 0)) == 0
+        and int(junit_counts.get("skipped", 0)) == 0
+    )
     return entry
 
 
@@ -994,24 +1008,39 @@ def classify_failure_names(reference: dict[str, Any] | None,
     head_names = set(head.get("failed_test_names", []))
     head_timeout_names = {name for name, status in head_statuses.items()
                           if status == "timeout"}
+    head_error_names = {name for name, status in head_statuses.items()
+                        if status == "error"}
     reference_names = {name for name, status in reference_statuses.items()
                        if status == "failed"}
     reference_timeout_names = {name for name, status in reference_statuses.items()
                                if status == "timeout"}
-    if (not reference or not reference.get("junit_reference_usable", False)
-            or not head.get("junit_reference_usable", False)):
+    reference_error_names = {name for name, status in reference_statuses.items()
+                             if status == "error"}
+    reference_usable = bool(reference and (
+        reference.get("junit_reference_usable", False)
+        or reference.get("junit_error_comparison_usable", False)))
+    head_usable = bool(head.get("junit_reference_usable", False)
+                       or head.get("junit_error_comparison_usable", False))
+    if not reference_usable or not head_usable:
         return {
             "reference_available": False,
             "inherited": [], "new": [], "resolved": [],
+            "inherited_errors": [], "new_errors": [], "resolved_errors": [],
             "raw_observed_head_failures": sorted(head_names),
+            "raw_observed_head_errors": sorted(head_error_names),
             "raw_observed_head_timeouts": sorted(head_timeout_names),
             "uncompared_head_failures": sorted(head_names),
+            "uncompared_head_errors": sorted(head_error_names),
             "not_executed_reference_failures": sorted(reference_names),
+            "not_executed_reference_errors": sorted(reference_error_names),
             "reference_timeout_names": sorted(reference_timeout_names),
+            "reference_error_names": sorted(reference_error_names),
+            "head_error_names": sorted(head_error_names),
             "classification_basis": (
                 "No comparable reference testcase execution was available; matching names "
-                "cannot establish a shared root cause."
-                " Timeout cases are recorded separately and are never treated as assertion failures."
+                "cannot establish a shared root cause. "
+                "Timeout and execution-error cases are recorded separately and are never "
+                "treated as ordinary assertion failures."
             ),
             "reason": "reference or head JUnit evidence unavailable or noncomparable",
         }
@@ -1022,21 +1051,40 @@ def classify_failure_names(reference: dict[str, Any] | None,
     resolved = sorted(name for name in reference_names if head_statuses.get(name) == "passed")
     not_executed = sorted(name for name in reference_names
                           if head_statuses.get(name) not in {"passed", "failed"})
+    inherited_errors = sorted(name for name in head_error_names
+                              if reference_statuses.get(name) == "error")
+    new_errors = sorted(name for name in head_error_names
+                        if reference_statuses.get(name) == "passed")
+    uncompared_errors = sorted(name for name in head_error_names
+                               if reference_statuses.get(name) not in {"error", "passed"})
+    resolved_errors = sorted(name for name in reference_error_names
+                             if head_statuses.get(name) == "passed")
+    not_executed_errors = sorted(name for name in reference_error_names
+                                 if head_statuses.get(name) not in {"passed", "error"})
     return {
         "reference_available": True,
         "inherited": inherited,
         "new": new,
         "resolved": resolved,
+        "inherited_errors": inherited_errors,
+        "new_errors": new_errors,
+        "resolved_errors": resolved_errors,
         "raw_observed_head_failures": sorted(head_names),
+        "raw_observed_head_errors": sorted(head_error_names),
         "raw_observed_head_timeouts": sorted(head_timeout_names),
         "uncompared_head_failures": uncompared,
+        "uncompared_head_errors": uncompared_errors,
         "not_executed_reference_failures": not_executed,
+        "not_executed_reference_errors": not_executed_errors,
         "reference_failed": sorted(reference_names),
+        "reference_error_names": sorted(reference_error_names),
         "reference_timeout_names": sorted(reference_timeout_names),
         "head_failed": sorted(head_names),
+        "head_error_names": sorted(head_error_names),
         "classification_basis": (
             "Testcase names compare execution statuses only; matching failure names do not "
-            "establish the same root cause."
+            "establish the same root cause. Execution-error identities use separate buckets "
+            "and do not change the fail-closed overall status."
         ),
     }
 

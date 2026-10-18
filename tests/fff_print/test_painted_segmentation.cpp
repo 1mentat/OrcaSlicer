@@ -7,9 +7,12 @@
 #include "test_helpers.hpp"
 
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/MultiMaterialSegmentation.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 
 #include <algorithm>
@@ -39,9 +42,10 @@ struct PaintedSegmentationFixture {
     PaintedSegmentationFixture(int top_shell_layers = 0, int bottom_shell_layers = 0,
                                bool horizontal_paint = false,
                                double max_width = 0., double interlocking_depth = 0.,
-                               bool interlocking_beam = false)
+                               bool interlocking_beam = false,
+                               bool fuzzy_fixture = false)
     {
-        config = multifilament_config(2, {
+        config = multifilament_config(fuzzy_fixture ? 1 : 2, {
             { "layer_height",                 0.2 },
             { "initial_layer_print_height",   0.2 },
             { "wall_loops",                   1 },
@@ -53,20 +57,69 @@ struct PaintedSegmentationFixture {
             { "mmu_segmented_region_interlocking_depth", interlocking_depth },
             { "interlocking_beam",             interlocking_beam },
         });
+        if (fuzzy_fixture) {
+            // This route deliberately has one ordinary filament and no MMU paint
+            // state, so the fuzzy annotation is the only facet-state input.
+            config.set_deserialize_strict({
+                { "single_extruder_multi_material", false },
+                { "fuzzy_skin",                  "external" },
+                { "outer_wall_line_width",       0.5 },
+                { "nozzle_diameter",             "0.4" },
+                { "xy_hole_compensation",        0.0 },
+                { "xy_contour_compensation",    0.0 },
+                { "elefant_foot_compensation",   0.0 },
+                { "slice_closing_radius",        0.0 },
+            });
+        }
 
         // A cube keeps the fixture small while giving the slicer vertical,
         // top, and bottom facets to project into the real segmentation path.
-        init_print({ make_cube(20.0, 20.0, 4.0) }, print, model, config);
-        if (horizontal_paint)
-            paint_by_horizontal_facets();
-        else
-            paint_by_facet_x();
-        print.apply(model, config);
+        init_print({ make_cube(20.0, 20.0, 4.0) }, print, model, config, nullptr, !fuzzy_fixture);
+        if (!fuzzy_fixture) {
+            if (horizontal_paint)
+                paint_by_horizontal_facets();
+            else
+                paint_by_facet_x();
+        }
+        apply_model_and_reslice();
+    }
 
+    void apply_model_and_reslice()
+    {
+        print.apply(model, config);
         REQUIRE(print.objects().size() == 1);
         PrintObject &object = *print.get_object(0);
         object.slice();
         REQUIRE_FALSE(object.layers().empty());
+    }
+
+    ExPolygon analytic_footprint() const
+    {
+        // init_print's ModelObject::add_volume centers this 20 mm cube to
+        // [-10, 10] in XY and stores the +10 mesh offset. PrintObject's
+        // centered slicing transform subtracts the same center offset, so
+        // this model-space box is also the independent sliced-frame box.
+        const BoundingBoxf3 bounds = model.objects.front()->volumes.front()->mesh().bounding_box();
+        return ExPolygon({
+            Point::new_scale(bounds.min.x(), bounds.min.y()),
+            Point::new_scale(bounds.max.x(), bounds.min.y()),
+            Point::new_scale(bounds.max.x(), bounds.max.y()),
+            Point::new_scale(bounds.min.x(), bounds.max.y())
+        });
+    }
+
+    ExPolygon analytic_external_strip(double depth = 0.5) const
+    {
+        // With the centered cube this is the literal [9.5, 10] right strip
+        // over [-10, 10] in the sliced frame.
+        const BoundingBoxf3 bounds = model.objects.front()->volumes.front()->mesh().bounding_box();
+        const double x0 = std::max<double>(bounds.min.x(), bounds.max.x() - depth);
+        return ExPolygon({
+            Point::new_scale(x0, bounds.min.y()),
+            Point::new_scale(bounds.max.x(), bounds.min.y()),
+            Point::new_scale(bounds.max.x(), bounds.max.y()),
+            Point::new_scale(x0, bounds.max.y())
+        });
     }
 
     void paint_by_facet_x()
@@ -135,6 +188,68 @@ struct PaintedSegmentationFixture {
         REQUIRE(volume.mmu_segmentation_facets.set(selector));
     }
 
+    void paint_fuzzy_by_vertical_facets()
+    {
+        REQUIRE(model.objects.size() == 1);
+        REQUIRE(model.objects.front()->volumes.size() == 1);
+        ModelVolume &volume = *model.objects.front()->volumes.front();
+
+        const TriangleMesh &mesh = volume.mesh();
+        const BoundingBoxf3 bounds = mesh.bounding_box();
+        TriangleSelector selector(mesh);
+        size_t painted_facets = 0;
+        for (size_t facet_idx = 0; facet_idx < mesh.its.indices.size(); ++facet_idx) {
+            const stl_triangle_vertex_indices &triangle = mesh.its.indices[facet_idx];
+            const Vec3f p0 = mesh.its.vertices[triangle[0]];
+            const Vec3f p1 = mesh.its.vertices[triangle[1]];
+            const Vec3f p2 = mesh.its.vertices[triangle[2]];
+            const float z_span = std::max({p0.z(), p1.z(), p2.z()}) - std::min({p0.z(), p1.z(), p2.z()});
+            const bool right_face = std::abs(p0.x() - bounds.max.x()) < 1e-4f &&
+                                    std::abs(p1.x() - bounds.max.x()) < 1e-4f &&
+                                    std::abs(p2.x() - bounds.max.x()) < 1e-4f;
+            if (z_span > 1e-4f && right_face) {
+                selector.set_facet(static_cast<int>(facet_idx), EnforcerBlockerType::Extruder1);
+                ++painted_facets;
+            }
+        }
+        REQUIRE(painted_facets > 0);
+        REQUIRE(volume.fuzzy_skin_facets.set(selector));
+        apply_model_and_reslice();
+    }
+
+    void paint_fuzzy_on_top_facets()
+    {
+        REQUIRE(model.objects.size() == 1);
+        REQUIRE(model.objects.front()->volumes.size() == 1);
+        ModelVolume &volume = *model.objects.front()->volumes.front();
+
+        const TriangleMesh &mesh = volume.mesh();
+        const BoundingBoxf3 bounds = mesh.bounding_box();
+        TriangleSelector selector(mesh);
+        size_t painted_facets = 0;
+        for (size_t facet_idx = 0; facet_idx < mesh.its.indices.size(); ++facet_idx) {
+            const stl_triangle_vertex_indices &triangle = mesh.its.indices[facet_idx];
+            const Vec3f centroid = (mesh.its.vertices[triangle[0]] +
+                                    mesh.its.vertices[triangle[1]] +
+                                    mesh.its.vertices[triangle[2]]) / 3.f;
+            if (centroid.z() >= bounds.max.z() - 1e-4f) {
+                selector.set_facet(static_cast<int>(facet_idx), EnforcerBlockerType::Extruder1);
+                ++painted_facets;
+            }
+        }
+        REQUIRE(painted_facets > 0);
+        REQUIRE(volume.fuzzy_skin_facets.set(selector));
+        apply_model_and_reslice();
+    }
+
+    void clear_fuzzy_paint()
+    {
+        REQUIRE(model.objects.size() == 1);
+        REQUIRE(model.objects.front()->volumes.size() == 1);
+        model.objects.front()->volumes.front()->fuzzy_skin_facets.reset();
+        apply_model_and_reslice();
+    }
+
     PrintObject &object() { return *print.get_object(0); }
 };
 
@@ -161,6 +276,44 @@ double polygon_area(const ExPolygons &expolygons)
     double result = 0.;
     for (const ExPolygon &expolygon : expolygons)
         result += expolygon.area();
+    return result;
+}
+
+double area_mm2(double scaled_area)
+{
+    const double one_mm = double(scale_(1.));
+    return scaled_area / (one_mm * one_mm);
+}
+
+struct LayerRegionAreaObservation {
+    double sum_mm2 = 0.;
+    double union_mm2 = 0.;
+    double fuzzy_all_mm2 = 0.;
+    size_t fuzzy_all_regions = 0;
+    ExPolygons fuzzy_all_surfaces;
+};
+
+LayerRegionAreaObservation observe_layer_regions(const Layer &layer)
+{
+    ExPolygons all_surfaces;
+    LayerRegionAreaObservation result;
+    for (const LayerRegion *region : layer.regions()) {
+        ExPolygons region_surfaces;
+        for (const Surface &surface : region->slices.surfaces) {
+            region_surfaces.push_back(surface.expolygon);
+            all_surfaces.push_back(surface.expolygon);
+        }
+
+        const double region_mm2 = area_mm2(polygon_area(region_surfaces));
+        result.sum_mm2 += region_mm2;
+        if (region->region().config().fuzzy_skin.value == FuzzySkinType::All) {
+            ++result.fuzzy_all_regions;
+            result.fuzzy_all_mm2 += region_mm2;
+            result.fuzzy_all_surfaces.insert(result.fuzzy_all_surfaces.end(), region_surfaces.begin(), region_surfaces.end());
+        }
+    }
+    if (!all_surfaces.empty())
+        result.union_mm2 = area_mm2(polygon_area(union_ex(all_surfaces)));
     return result;
 }
 
@@ -388,5 +541,96 @@ TEST_CASE("painted segmentation wrapper honors width depth parity and beam bypas
                        Catch::Matchers::WithinAbs(unbounded_area,
                                                   std::max(100.0, unbounded_area * 1e-5)));
         }
+    }
+}
+
+
+TEST_CASE("Fuzzy painted vertical facets follow the external depth cap", "[FuzzyPaintedSegmentation][FuzzySkin]")
+{
+    PaintedSegmentationFixture fixture(0, 0, false, 0., 0., false, true);
+    fixture.paint_fuzzy_by_vertical_facets();
+    const auto segmented = fuzzy_skin_segmentation_by_painting(fixture.object(), [] {});
+    REQUIRE(segmented.size() == fixture.object().layers().size());
+
+    const ExPolygons footprint{fixture.analytic_footprint()};
+    const ExPolygons external_strip{fixture.analytic_external_strip()};
+    const double full_area = polygon_area(footprint);
+    const double strip_area = polygon_area(external_strip);
+    REQUIRE(full_area > strip_area);
+    size_t positive_layers = 0;
+    double painted_area = 0.;
+    for (size_t layer_idx = 0; layer_idx < segmented.size(); ++layer_idx) {
+        REQUIRE(segmented[layer_idx].size() == 1);
+        const double area = polygon_area(segmented[layer_idx][0]);
+        const double tolerance = std::max(100.0, strip_area * 1e-5);
+        CHECK(area >= 0.);
+        CHECK(area <= strip_area + tolerance);
+        CHECK(outside_area(segmented[layer_idx], footprint) <= tolerance);
+        CHECK(outside_area(segmented[layer_idx], external_strip) <= tolerance);
+        if (area > tolerance)
+            ++positive_layers;
+        painted_area += area;
+    }
+
+    REQUIRE(positive_layers > 0);
+    CHECK(painted_area > 0.);
+    CHECK(painted_area < full_area * double(segmented.size()));
+
+    // The public wrapper feeds this painted strip back into PrintObject::slice.
+    // On a middle layer that produces a fuzzy override PrintRegion, all region
+    // surfaces must still partition the 20 x 20 analytic slice exactly.
+    REQUIRE(fixture.object().layers().size() >= 3);
+    const Layer &middle_layer = *fixture.object().layers()[fixture.object().layers().size() / 2];
+    const LayerRegionAreaObservation middle = observe_layer_regions(middle_layer);
+    CHECK_THAT(middle.sum_mm2, Catch::Matchers::WithinAbs(400., 0.01));
+    CHECK_THAT(middle.union_mm2, Catch::Matchers::WithinAbs(400., 0.01));
+    CHECK_THAT(middle.sum_mm2, Catch::Matchers::WithinAbs(middle.union_mm2, 0.01));
+    REQUIRE(middle.fuzzy_all_regions > 0);
+    CHECK(middle.fuzzy_all_mm2 > 0.);
+    CHECK(middle.fuzzy_all_mm2 <= area_mm2(strip_area) + 0.01);
+    REQUIRE_FALSE(middle.fuzzy_all_surfaces.empty());
+    const double fuzzy_all_outside_mm2 = area_mm2(polygon_area(diff_ex(union_ex(middle.fuzzy_all_surfaces), external_strip)));
+    CHECK(fuzzy_all_outside_mm2 <= 0.01);
+}
+
+TEST_CASE("Clearing fuzzy facet paint after reslicing removes public regions", "[FuzzyPaintedSegmentation][FuzzySkin]")
+{
+    PaintedSegmentationFixture fixture(0, 0, false, 0., 0., false, true);
+    const auto unpainted = fuzzy_skin_segmentation_by_painting(fixture.object(), [] {});
+    REQUIRE(unpainted.size() == fixture.object().layers().size());
+    for (const auto &layer : unpainted) {
+        REQUIRE(layer.size() == 1);
+        CHECK(layer[0].empty());
+    }
+
+    fixture.paint_fuzzy_by_vertical_facets();
+    const auto painted = fuzzy_skin_segmentation_by_painting(fixture.object(), [] {});
+    REQUIRE(painted.size() == unpainted.size());
+    bool saw_paint = false;
+    for (const auto &layer : painted) {
+        REQUIRE(layer.size() == 1);
+        saw_paint = saw_paint || !layer[0].empty();
+    }
+    REQUIRE(saw_paint);
+
+    fixture.clear_fuzzy_paint();
+    const auto cleared = fuzzy_skin_segmentation_by_painting(fixture.object(), [] {});
+    REQUIRE(cleared.size() == unpainted.size());
+    for (const auto &layer : cleared) {
+        REQUIRE(layer.size() == 1);
+        CHECK(layer[0].empty());
+    }
+}
+
+TEST_CASE("Fuzzy painted top facets stay out of ordinary fuzzy regions", "[FuzzyPaintedSegmentation][FuzzySkin]")
+{
+    PaintedSegmentationFixture fixture(2, 0, false, 0., 0., false, true);
+    fixture.paint_fuzzy_on_top_facets();
+    const auto segmented = fuzzy_skin_segmentation_by_painting(fixture.object(), [] {});
+    REQUIRE(segmented.size() == fixture.object().layers().size());
+
+    for (const auto &layer : segmented) {
+        REQUIRE(layer.size() == 1);
+        CHECK(layer[0].empty());
     }
 }

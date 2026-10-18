@@ -2326,6 +2326,184 @@ TEST_CASE("PrintConfig validates mixed filament metadata cardinality", "[PrintCo
     CHECK(config.validate().count("filament_mixed_sublayer_ratios"));
 }
 
+
+TEST_CASE("normalize_fdm_1 backfills active filament roles through the split public step", "[PrintConfigBehavior][Config][NormalizeFdm1]")
+{
+    SECTION("legacy extruder keeps an explicit outer-wall role")
+    {
+        DynamicPrintConfig config = complete_config();
+        config.option<ConfigOptionInt>("extruder", true)->value = 2;
+        config.set("outer_wall_filament_id", 3);
+        config.set("inner_wall_filament_id", 0);
+        config.set("sparse_infill_filament_id", 0);
+        config.set("internal_solid_filament_id", 0);
+        config.set("top_surface_filament_id", 0);
+        config.set("bottom_surface_filament_id", 0);
+
+        config.normalize_fdm_1();
+
+        CHECK_FALSE(config.has("extruder"));
+        CHECK(config.opt_int("outer_wall_filament_id") == 3);
+        CHECK(config.opt_int("inner_wall_filament_id") == 2);
+        CHECK(config.opt_int("sparse_infill_filament_id") == 2);
+        CHECK(config.opt_int("internal_solid_filament_id") == 2);
+        CHECK(config.opt_int("top_surface_filament_id") == 2);
+        CHECK(config.opt_int("bottom_surface_filament_id") == 2);
+    }
+
+    SECTION("a sparse-filament override backfills missing solid and surface roles")
+    {
+        DynamicPrintConfig config = complete_config();
+        config.set("sparse_infill_filament_id", 4);
+        config.set("internal_solid_filament_id", 0);
+        config.set("top_surface_filament_id", 0);
+        config.set("bottom_surface_filament_id", 0);
+
+        config.normalize_fdm_1();
+
+        CHECK(config.opt_int("sparse_infill_filament_id") == 4);
+        CHECK(config.opt_int("internal_solid_filament_id") == 4);
+        CHECK(config.opt_int("top_surface_filament_id") == 4);
+        CHECK(config.opt_int("bottom_surface_filament_id") == 4);
+    }
+}
+
+TEST_CASE("normalize_fdm_1 applies spiral safety normalization and is idempotent", "[PrintConfigBehavior][Config][NormalizeFdm1]")
+{
+    DynamicPrintConfig config = complete_config();
+    config.set("spiral_mode", true);
+    config.set("alternate_extra_wall", true);
+    config.set("wall_loops", 4);
+    config.set("top_shell_layers", 3);
+    config.set_deserialize_strict("sparse_infill_density", "20");
+    config.set_deserialize_strict("resolution", "0.0001");
+    config.set_deserialize_strict("retract_when_changing_layer", "1,1");
+    config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true)->values = {true, true};
+
+    config.normalize_fdm_1();
+
+    CHECK(config.opt_int("wall_loops") == 1);
+    CHECK(config.opt_int("top_shell_layers") == 0);
+    CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(config.opt_float("resolution"), Catch::Matchers::WithinAbs(0.001, 1e-9));
+    require_all_false(config.opt<ConfigOptionBools>("retract_when_changing_layer"));
+    CHECK_FALSE(config.opt_bool("alternate_extra_wall"));
+    const auto *nullable_retract = config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer");
+    REQUIRE(nullable_retract != nullptr);
+    REQUIRE(nullable_retract->values.size() == 2);
+    CHECK(nullable_retract->values[0] == 0);
+    CHECK(nullable_retract->values[1] == 0);
+
+    const int normalized_wall_loops = config.opt_int("wall_loops");
+    const int normalized_top_shell_layers = config.opt_int("top_shell_layers");
+    const double normalized_density = config.opt<ConfigOptionPercent>("sparse_infill_density")->value;
+    const double normalized_resolution = config.opt_float("resolution");
+    const auto normalized_retract = config.opt<ConfigOptionBools>("retract_when_changing_layer")->values;
+    const auto normalized_nullable_retract = nullable_retract->values;
+    config.normalize_fdm_1();
+    CHECK(config.opt_int("wall_loops") == normalized_wall_loops);
+    CHECK(config.opt_int("top_shell_layers") == normalized_top_shell_layers);
+    CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value,
+               Catch::Matchers::WithinAbs(normalized_density, 1e-12));
+    CHECK_THAT(config.opt_float("resolution"), Catch::Matchers::WithinAbs(normalized_resolution, 1e-12));
+    CHECK(config.opt<ConfigOptionBools>("retract_when_changing_layer")->values == normalized_retract);
+    CHECK(config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer")->values == normalized_nullable_retract);
+    CHECK_FALSE(config.opt_bool("alternate_extra_wall"));
+}
+
+TEST_CASE("normalize_fdm_2 preserves a prime tower for a single mixed filament", "[PrintConfigBehavior][Config][NormalizeFdm2Variance]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set("enable_prime_tower", true);
+    config.set("independent_support_layer_height", true);
+    config.set("enable_wrapping_detection", false);
+    config.set_deserialize_strict("timelapse_type", "0");
+    config.set_deserialize_strict("print_sequence", "by layer");
+    config.set_key_value("filament_is_mixed", new ConfigOptionBools({true}));
+
+    const t_config_option_keys changed = config.normalize_fdm_2(1, 1);
+
+    CHECK(config.opt_bool("enable_prime_tower"));
+    CHECK_FALSE(config.opt_bool("independent_support_layer_height"));
+    CHECK(changed == t_config_option_keys{"independent_support_layer_height"});
+    CHECK(config.normalize_fdm_2(1, 1).empty());
+}
+
+TEST_CASE("PrintConfig validates mixed filament component and gradient semantics", "[PrintConfigBehavior][Config][MixedFilamentValidation]")
+{
+    auto valid_mixed = [] {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, false, true}));
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "1,2"}));
+        config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "0.5,0.5"}));
+        config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, true}));
+        config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "0.2,0.8"}));
+        config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "0,0|1,1"}));
+        return config;
+    };
+
+    SECTION("a two-component gradient is accepted")
+    {
+        const auto errors = valid_mixed().validate();
+        CHECK(errors.empty());
+        CHECK_FALSE(has_error(errors, "filament_mixed_gradient"));
+        CHECK_FALSE(has_error(errors, "filament_mixed_gradient_range"));
+        CHECK_FALSE(has_error(errors, "filament_mixed_gradient_curve"));
+    }
+
+    SECTION("parameters without a mixed slot are rejected")
+    {
+        DynamicPrintConfig config = complete_config();
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"1"}));
+        CHECK(has_error(config.validate(), "filament_is_mixed"));
+    }
+
+    SECTION("a physical component outside the available range is rejected")
+    {
+        DynamicPrintConfig config = valid_mixed();
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "1,3"}));
+        CHECK(has_error(config.validate(), "filament_mixed_components"));
+    }
+
+    SECTION("a mixed slot cannot be used as a physical component")
+    {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, true, true, false, false}));
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "3,1", "1,2", "", ""}));
+        config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "1,1", "1,2", "", ""}));
+        config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, false, false, false}));
+        config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "", "", ""}));
+        config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "", "", ""}));
+        CHECK(has_error(config.validate(), "filament_mixed_components"));
+    }
+
+    SECTION("a three-component gradient is rejected")
+    {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, false, false, true}));
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "", "1,2,3"}));
+        config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "", "1,1,1"}));
+        config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, false, true}));
+        config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "", "0.2,0.8"}));
+        config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "", "0,0|1,1"}));
+        CHECK(has_error(config.validate(), "filament_mixed_gradient"));
+    }
+
+    SECTION("gradient range must stay inside the open unit interval")
+    {
+        DynamicPrintConfig config = valid_mixed();
+        config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "0,0.8"}));
+        CHECK(has_error(config.validate(), "filament_mixed_gradient_range"));
+    }
+
+    SECTION("gradient curve needs two valid control points")
+    {
+        DynamicPrintConfig config = valid_mixed();
+        config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "0,0"}));
+        CHECK(has_error(config.validate(), "filament_mixed_gradient_curve"));
+    }
+}
+
 } // namespace print_config_behavior_contracts
 
 namespace config_multi_mapping_contracts {
@@ -3752,6 +3930,74 @@ TEST_CASE("Scalar overrides reject incompatible types before changing state", "[
     REQUIRE_THROWS_AS(text_base.apply_override(&incompatible, default_index), ConfigurationError);
     CHECK(text.value == "left");
     CHECK(default_index == initial_index);
+}
+
+
+
+TEST_CASE("ConfigBase apply_only materializes indexed vector slots", "[Config][ConfigContracts][ConfigApplyOnly]")
+{
+    DynamicPrintConfig source = DynamicPrintConfig::full_print_config();
+    auto *source_plugins = source.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(source_plugins != nullptr);
+    source_plugins->values = {"alpha", "beta"};
+
+    // The ordinary vector case preserves the untouched slot while copying only #1.
+    DynamicPrintConfig populated = DynamicPrintConfig::full_print_config();
+    auto *populated_plugins = populated.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(populated_plugins != nullptr);
+    populated_plugins->values = {"left", "right"};
+    populated.apply_only(source, {"slicing_pipeline_plugin#1"});
+    CHECK(populated_plugins->values == std::vector<std::string>{"left", "beta"});
+
+    // A DynamicPrintConfig made from a selected default set has no vector object yet;
+    // the indexed route must create, seed, and then update the requested slot.
+    std::unique_ptr<DynamicPrintConfig> sparse(DynamicPrintConfig::new_from_defaults_keys({"layer_height"}));
+    REQUIRE(sparse != nullptr);
+    REQUIRE_FALSE(sparse->has("slicing_pipeline_plugin"));
+    sparse->apply_only(source, {"slicing_pipeline_plugin#1"});
+    const auto *materialized_plugins = sparse->option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(materialized_plugins != nullptr);
+    REQUIRE(materialized_plugins->values.size() == 2);
+    CHECK(materialized_plugins->values == std::vector<std::string>{"alpha", "beta"});
+}
+
+TEST_CASE("DynamicConfig indexed accessors preserve regular and nullable option semantics", "[Config][ConfigContracts][ConfigAccessors]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+    auto *regular_floats = config.option<ConfigOptionFloats>("filament_change_length_nc");
+    REQUIRE(regular_floats != nullptr);
+    regular_floats->values = {6., 7.};
+    double &regular_value = config.opt_float("filament_change_length_nc", 1);
+    regular_value = 7.5;
+    CHECK_THAT(regular_floats->values[1], WithinAbs(7.5, 1e-12));
+
+    auto *nullable_floats = config.option<ConfigOptionFloatsNullable>("filament_retract_length_nc");
+    REQUIRE(nullable_floats != nullptr);
+    nullable_floats->values = {ConfigOptionFloatsNullable::nil_value(), 2.5};
+    double &nullable_value = config.opt_float("filament_retract_length_nc", 1);
+    nullable_value = 2.75;
+    CHECK_THAT(nullable_floats->values[1], WithinAbs(2.75, 1e-12));
+    CHECK(std::isnan(config.opt_float("filament_retract_length_nc", 0)));
+
+    const DynamicPrintConfig &const_config = config;
+    CHECK_THAT(const_config.opt_float("filament_change_length_nc", 1), WithinAbs(7.5, 1e-12));
+    CHECK(std::isnan(const_config.opt_float("filament_retract_length_nc", 0)));
+    CHECK_THAT(const_config.opt_float("filament_retract_length_nc", 1), WithinAbs(2.75, 1e-12));
+
+    auto *regular_bools = config.option<ConfigOptionBools>("retract_when_changing_layer");
+    REQUIRE(regular_bools != nullptr);
+    regular_bools->values = {0, 1};
+    CHECK_FALSE(const_config.opt_bool("retract_when_changing_layer", 0));
+    CHECK(const_config.opt_bool("retract_when_changing_layer", 1));
+
+    auto *nullable_bools = config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer");
+    REQUIRE(nullable_bools != nullptr);
+    nullable_bools->values = {ConfigOptionBoolsNullable::nil_value(), 0};
+    // The accessor intentionally exposes the stored nullable sentinel through its
+    // existing boolean conversion (nonzero), while a concrete false remains false.
+    CHECK(const_config.opt_bool("filament_retract_when_changing_layer", 0));
+    CHECK_FALSE(const_config.opt_bool("filament_retract_when_changing_layer", 1));
 }
 
 } // namespace config_residual_contracts

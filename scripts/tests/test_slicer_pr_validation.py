@@ -278,6 +278,105 @@ class StatusTests(unittest.TestCase):
                          ["suite::reference_only", "suite::skipped_reference"])
         self.assertIn("matching failure names do not", classification["classification_basis"])
 
+    def test_execution_error_identities_have_separate_differential_buckets(self):
+        reference = {
+            "status": "test_error",
+            "junit_error_comparison_usable": True,
+            "junit_case_statuses": {
+                "suite::shared crash": "error",
+                "suite::resolved crash": "error",
+                "suite::shared assertion": "failed",
+                "suite::head-only crash": "passed",
+            },
+            "failed_test_names": ["suite::shared assertion"],
+            "error_test_names": ["suite::shared crash", "suite::resolved crash"],
+        }
+        head = {
+            "status": "test_error",
+            "junit_error_comparison_usable": True,
+            "junit_case_statuses": {
+                "suite::shared crash": "error",
+                "suite::resolved crash": "passed",
+                "suite::shared assertion": "failed",
+                "suite::head-only crash": "error",
+            },
+            "failed_test_names": ["suite::shared assertion"],
+            "error_test_names": ["suite::shared crash", "suite::head-only crash"],
+        }
+        classification = slicer_pr_validation.classify_failure_names(reference, head)
+        self.assertTrue(classification["reference_available"])
+        self.assertEqual(classification["inherited"], ["suite::shared assertion"])
+        self.assertEqual(classification["inherited_errors"], ["suite::shared crash"])
+        self.assertEqual(classification["new_errors"], ["suite::head-only crash"])
+        self.assertEqual(classification["resolved_errors"], ["suite::resolved crash"])
+        self.assertEqual(classification["uncompared_head_errors"], [])
+
+    def test_unusable_error_evidence_cannot_claim_new_or_resolved_crashes(self):
+        reference = {
+            "status": "test_error",
+            "junit_reference_usable": False,
+            "junit_error_comparison_usable": False,
+            "junit_case_statuses": {"suite::reference crash": "error"},
+            "error_test_names": ["suite::reference crash"],
+        }
+        head = {
+            "status": "test_error",
+            "junit_error_comparison_usable": True,
+            "junit_case_statuses": {"suite::head crash": "error"},
+            "error_test_names": ["suite::head crash"],
+        }
+        classification = slicer_pr_validation.classify_failure_names(reference, head)
+        self.assertFalse(classification["reference_available"])
+        self.assertEqual(classification["inherited_errors"], [])
+        self.assertEqual(classification["new_errors"], [])
+        self.assertEqual(classification["resolved_errors"], [])
+        self.assertEqual(classification["raw_observed_head_errors"], ["suite::head crash"])
+        self.assertEqual(classification["uncompared_head_errors"], ["suite::head crash"])
+        self.assertEqual(
+            slicer_pr_validation._overall_status({
+                "baseline": {"status": "pass"},
+                "heads": [{"status": "test_error"}],
+            }),
+            ("infrastructure_error", 2),
+        )
+        head_unusable = dict(head)
+        head_unusable["junit_error_comparison_usable"] = False
+        comparison = slicer_pr_validation.classify_failure_names(
+            {**reference, "junit_error_comparison_usable": True}, head_unusable)
+        self.assertFalse(comparison["reference_available"])
+        self.assertEqual(comparison["new_errors"], [])
+        self.assertEqual(comparison["resolved_errors"], [])
+
+    def test_complete_error_junit_is_comparable_but_status_remains_fail_closed(self):
+        entry = {
+            "status": "test_error",
+            "junit_evidence": {
+                "usable": True,
+                "counts": {"tests": 2, "errors": 1, "timeouts": 0, "skipped": 0},
+            },
+            "minimum_tests_ok": True,
+            "minimum_tests_observed": 2,
+        }
+        slicer_pr_validation._apply_minimum_test_gate(entry, minimum_tests=2)
+        self.assertTrue(entry["junit_error_comparison_usable"])
+        self.assertFalse(entry["junit_reference_usable"])
+        self.assertEqual(
+            slicer_pr_validation._overall_status({
+                "baseline": {"status": "pass"},
+                "heads": [{"status": entry["status"]}],
+            }),
+            ("infrastructure_error", 2),
+        )
+        incomplete = {
+            "status": "test_error",
+            "junit_evidence": {
+                "usable": True,
+                "counts": {"tests": 1, "errors": 1, "timeouts": 0, "skipped": 0},
+            },
+        }
+        slicer_pr_validation._apply_minimum_test_gate(incomplete, minimum_tests=2)
+        self.assertFalse(incomplete["junit_error_comparison_usable"])
+
     def test_build_failure_cannot_claim_reference_failure_resolved(self):
         reference = {
             "junit_reference_usable": True,

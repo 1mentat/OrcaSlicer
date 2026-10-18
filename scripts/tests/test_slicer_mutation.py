@@ -4,6 +4,7 @@
 from pathlib import Path
 import hashlib
 import json
+import os
 import sys
 import subprocess
 import tempfile
@@ -622,6 +623,89 @@ class MutationCheckpointIntegrationTests(unittest.TestCase):
             self.assertFalse(evidence.infrastructure_failure)
             self.assertEqual(slicer_mutation._classify_test(
                 result, evidence.test_count, 1, log_evidence=evidence), "killed")
+
+
+class MutationTempDirectoryPreflightTests(unittest.TestCase):
+    def _args(self, root: Path, out: Path):
+        return slicer_mutation._parser().parse_args([
+            "run", "--root", str(root), "--out", str(out),
+            "--build-command", "configure-build", "--test-command", "ctest",
+        ])
+
+    def test_invalid_explicit_temp_paths_fail_before_any_command(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            out = Path(temp) / "out"
+            for variable, value in (
+                    ("TMPDIR", str(Path(temp) / "missing")),
+                    ("TEMP", str(Path(temp) / "missing-file")),
+                    ("TMP", str(Path(temp) / "missing-tmp"))):
+                with self.subTest(variable=variable):
+                    if variable == "TEMP":
+                        value_path = Path(value)
+                        value_path.write_text("not a directory", encoding="utf-8")
+                    with mock.patch.dict(os.environ, {variable: value}, clear=True), \
+                         mock.patch.object(slicer_mutation, "run_command") as command:
+                        with self.assertRaisesRegex(slicer_mutation.MutationError, variable):
+                            slicer_mutation.run_mutation(self._args(root, out))
+                        command.assert_not_called()
+
+    def test_empty_explicit_temp_paths_fail_before_any_command(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            out = Path(temp) / "out"
+            for variable in slicer_mutation._TEMP_ENVIRONMENT_VARIABLES:
+                with self.subTest(variable=variable):
+                    with mock.patch.dict(os.environ, {variable: ""}, clear=True), \
+                         mock.patch.object(slicer_mutation, "run_command") as command:
+                        with self.assertRaisesRegex(slicer_mutation.MutationError,
+                                                    variable + ".*empty"):
+                            slicer_mutation.run_mutation(self._args(root, out))
+                        command.assert_not_called()
+
+    def test_windows_temp_environment_policy_keeps_python_variables(self):
+        with mock.patch.object(slicer_mutation.os, "name", "nt"):
+            self.assertEqual(slicer_mutation._temp_environment_variables(),
+                             ("TMPDIR", "TMP", "TEMP"))
+
+    def test_absent_temp_environment_preserves_fallback(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(slicer_mutation._preflight_temp_environment(), [])
+
+    def test_relative_explicit_temp_path_fails_before_any_command(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            out = Path(temp) / "out"
+            with mock.patch.dict(os.environ, {"TMPDIR": "relative-temp"}, clear=True), \
+                 mock.patch.object(slicer_mutation, "run_command") as command:
+                with self.assertRaisesRegex(slicer_mutation.MutationError,
+                                            "TMPDIR.*absolute path"):
+                    slicer_mutation.run_mutation(self._args(root, out))
+                command.assert_not_called()
+
+    def test_failed_write_probe_fails_before_any_command(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            out = Path(temp) / "out"
+            with mock.patch.dict(os.environ, {"TMPDIR": temp}, clear=True), \
+                 mock.patch.object(slicer_mutation, "_write_temp_probe",
+                                   side_effect=PermissionError("probe denied")), \
+                 mock.patch.object(slicer_mutation, "run_command") as command:
+                with self.assertRaisesRegex(slicer_mutation.MutationError,
+                                            "TMPDIR.*write probe"):
+                    slicer_mutation.run_mutation(self._args(root, out))
+                command.assert_not_called()
+
+    def test_valid_explicit_temp_path_is_checked_and_probe_is_removed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.dict(os.environ, {"TMPDIR": temp}, clear=True):
+                checked = slicer_mutation._preflight_temp_environment()
+            self.assertEqual(checked, [{"variable": "TMPDIR", "path": temp}])
+            self.assertEqual(list(Path(temp).iterdir()), [])
 
 
 if __name__ == "__main__":

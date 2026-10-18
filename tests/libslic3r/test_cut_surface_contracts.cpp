@@ -633,3 +633,169 @@ TEST_CASE("Surface cuts preserve multiple projected holes", "[CutSurface][CutSur
 }
 
 } // namespace cut_surface_extended_contracts
+
+namespace cut_surface_extended_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+indexed_triangle_set shifted_strip(float x, float z)
+{
+    indexed_triangle_set model = its_make_cube(10., 10., 10.);
+    for (Vec3f &vertex : model.vertices)
+        vertex += Vec3f(x, 0.f, z);
+    return model;
+}
+
+void check_three_strip_cut(const SurfaceCut &cut, double expected_area)
+{
+    REQUIRE_FALSE(cut.vertices.empty());
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(cut.contours.size() >= 3);
+    check_contours(cut);
+    check_mesh_indices(cut);
+    for (const Vec3f &vertex : cut.vertices) {
+        CHECK(vertex.x() >= 1.f - 1e-4f);
+        CHECK(vertex.x() <= 29.f + 1e-4f);
+        CHECK(vertex.y() >= 1.f - 1e-4f);
+        CHECK(vertex.y() <= 9.f + 1e-4f);
+    }
+    CHECK_THAT(projected_area(cut), WithinAbs(expected_area, 1e-4));
+}
+
+} // namespace
+
+TEST_CASE("Surface cuts fill an interior projected gap from an unselected strip", "[CutSurface][CutSurfacePatchSelection]")
+{
+    const ExPolygon shape(rectangle(1, 1, 29, 9));
+    const Emboss::OrthoProject projection = cube_projection(80.f);
+
+    // The outer strips touch the query corners, so best-distance selection starts
+    // with them. The middle strip lies entirely in the remaining interior gap.
+    const SurfaceCut cut = cut_surface(
+        {shape},
+        {shifted_strip(0.f, 0.f), shifted_strip(20.f, 0.f), shifted_strip(10.f, 0.f)},
+        projection,
+        .5f);
+    check_three_strip_cut(cut, 224.);
+    for (const Vec3f &vertex : cut.vertices) {
+        CHECK(vertex.z() >= -1e-4f);
+        CHECK(vertex.z() <= 10.f + 1e-4f);
+    }
+}
+
+TEST_CASE("Surface cuts choose the closest of overlapping interior strips", "[CutSurface][CutSurfacePatchSelection]")
+{
+    const ExPolygon shape(rectangle(1, 1, 29, 9));
+    const Emboss::OrthoProject projection = cube_projection(100.f);
+
+    // The two interior candidates cover the same projected gap. Their depth
+    // centers are 25 and 45, while the selected outer strips center around 5;
+    // the production ordering should choose the nearer candidate.
+    const SurfaceCut cut = cut_surface(
+        {shape},
+        {shifted_strip(0.f, 0.f), shifted_strip(20.f, 0.f),
+         shifted_strip(10.f, 20.f), shifted_strip(10.f, 40.f)},
+        projection,
+        .5f);
+    check_three_strip_cut(cut, 224.);
+    bool has_near_interior = false;
+    for (const Vec3f &vertex : cut.vertices) {
+        CHECK(vertex.z() >= -1e-4f);
+        CHECK(vertex.z() <= 30.f + 1e-4f);
+        has_near_interior = has_near_interior || (vertex.z() > 20.f - 1e-4f);
+    }
+    CHECK(has_near_interior);
+}
+
+} // namespace cut_surface_extended_contracts
+
+namespace cut_surface_extended_contracts {
+namespace {
+
+indexed_triangle_set overlapping_roof(float peak)
+{
+    // A closed triangular prism, with its ridge at x=5. Its roof crosses the
+    // cube's z=10 face twice, so clipping leaves two separate flat patches.
+    indexed_triangle_set mesh;
+    mesh.vertices = {
+        Vec3f(1.f, -1.f, 8.f), Vec3f(9.f, -1.f, 8.f), Vec3f(5.f, -1.f, peak),
+        Vec3f(1.f, 11.f, 8.f), Vec3f(9.f, 11.f, 8.f), Vec3f(5.f, 11.f, peak)
+    };
+    mesh.indices = {
+        stl_triangle_vertex_indices(0, 1, 2), stl_triangle_vertex_indices(3, 5, 4),
+        stl_triangle_vertex_indices(0, 3, 4), stl_triangle_vertex_indices(0, 4, 1),
+        stl_triangle_vertex_indices(1, 4, 5), stl_triangle_vertex_indices(1, 5, 2),
+        stl_triangle_vertex_indices(0, 2, 5), stl_triangle_vertex_indices(0, 5, 3)
+    };
+    return mesh;
+}
+
+} // namespace
+
+TEST_CASE("Surface cuts retain the exterior patches of intersecting solids",
+          "[CutSurface][CutSurfaceClipOverlap]")
+{
+    const float peak = GENERATE(12.f, 16.f);
+    const bool reverse_models = GENERATE(false, true);
+    CAPTURE(peak, reverse_models);
+    const indexed_triangle_set cube = its_make_cube(10., 10., 10.);
+    const indexed_triangle_set roof = overlapping_roof(peak);
+    std::vector<indexed_triangle_set> models{cube, roof};
+    if (reverse_models)
+        std::reverse(models.begin(), models.end());
+
+    const ExPolygon shape(rectangle(1, 1, 9, 9));
+    const SurfaceCut cut = cut_surface({shape}, models, cube_projection(30.f), .5f);
+    REQUIRE_FALSE(cut.vertices.empty());
+    REQUIRE_FALSE(cut.indices.empty());
+    check_mesh_indices(cut);
+    check_contours(cut);
+    CHECK(cut.contours.size() >= 3);
+
+    // Independently intersect the two sloping roof planes with z=10. The
+    // projected query has area64; the raised roof and two flat sides partition it.
+    const double rise = double(peak) - 8.;
+    const double left = 1. + 8. / rise;
+    const double right = 9. - 8. / rise;
+    const double raised_area_expected = (right - left) * 8.;
+    double flat_area = 0.;
+    double raised_area = 0.;
+    float max_z = cut.vertices.front().z();
+    for (const Vec3f &vertex : cut.vertices) {
+        CHECK(vertex.x() >= 1.f - 1e-4f);
+        CHECK(vertex.x() <= 9.f + 1e-4f);
+        CHECK(vertex.y() >= 1.f - 1e-4f);
+        CHECK(vertex.y() <= 9.f + 1e-4f);
+        const double roof_z = 8. + rise * (4. - std::abs(double(vertex.x()) - 5.)) / 4.;
+        CHECK_THAT(double(vertex.z()), WithinAbs(std::max(10., roof_z), 1e-4));
+        max_z = std::max(max_z, vertex.z());
+    }
+    CHECK_THAT(double(max_z), WithinAbs(double(peak), 1e-4));
+    for (const auto &face : cut.indices) {
+        const Vec3f &a = cut.vertices[face[0]];
+        const Vec3f &b = cut.vertices[face[1]];
+        const Vec3f &c = cut.vertices[face[2]];
+        const double area = std::abs(double(b.x() - a.x()) * (c.y() - a.y()) -
+                                     double(b.y() - a.y()) * (c.x() - a.x())) / 2.;
+        const double center_x = (double(a.x()) + b.x() + c.x()) / 3.;
+        const bool flat = std::abs(a.z() - 10.f) < 1e-4f &&
+                          std::abs(b.z() - 10.f) < 1e-4f &&
+                          std::abs(c.z() - 10.f) < 1e-4f;
+        if (flat) {
+            flat_area += area;
+            const bool inside_raised_strip = center_x > left + 1e-4 && center_x < right - 1e-4;
+            CHECK_FALSE(inside_raised_strip);
+        } else {
+            raised_area += area;
+            CHECK(center_x >= left - 1e-4);
+            CHECK(center_x <= right + 1e-4);
+        }
+    }
+    CHECK_THAT(flat_area, WithinAbs(64. - raised_area_expected, 1e-4));
+    CHECK_THAT(raised_area, WithinAbs(raised_area_expected, 1e-4));
+    CHECK_THAT(projected_area(cut), WithinAbs(64., 1e-4));
+}
+
+} // namespace cut_surface_extended_contracts

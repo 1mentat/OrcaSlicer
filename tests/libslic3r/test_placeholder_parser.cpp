@@ -1,10 +1,16 @@
 #include <catch2/catch_all.hpp>
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <initializer_list>
+#include <random>
+#include <utility>
 #include <cstddef>
 #include <vector>
 #include <string>
 #include <memory>
 #include "libslic3r/Config.hpp"
+#include "libslic3r/libslic3r.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
@@ -569,4 +575,119 @@ TEST_CASE("Placeholder parser uses the external filament map for vector access",
     const std::string mapped_last = parser.process("{outer_wall_speed}", 1);
     CHECK(mapped_first == "70");
     CHECK(mapped_last == "80");
+}
+
+TEST_CASE("Placeholder random values respect numeric bounds and their supplied context",
+          "[PlaceholderParser][PlaceholderParserRandom]")
+{
+    PlaceholderParser parser;
+    PlaceholderParser::ContextData context;
+    PlaceholderParser::ContextData replay;
+    context.rng.seed(20261017u);
+    replay.rng.seed(20261017u);
+
+    struct Bounds {
+        const char *expression;
+        double lower;
+        double upper;
+        bool integral;
+    };
+    const std::array<Bounds, 4> bounds = {{
+        {"{random(2,7)}", 2., 7., true},
+        {"{random(1.25,2.75)}", 1.25, 2.75, false},
+        {"{random(2.25,3)}", 2.25, 3., false},
+        {"{random(2,2.75)}", 2., 2.75, false},
+    }};
+    for (const auto &row : bounds) {
+        INFO(row.expression);
+        for (int draw = 0; draw < 8; ++draw) {
+            INFO(draw);
+            const std::mt19937 before = context.rng;
+            const std::string value_text = parser.process(row.expression, 0, nullptr, &context);
+            CHECK(value_text == parser.process(row.expression, 0, nullptr, &replay));
+            const double value = std::stod(value_text);
+            REQUIRE(std::isfinite(value));
+            CHECK(value >= row.lower);
+            CHECK(value <= row.upper);
+            if (row.integral)
+                CHECK_THAT(value, Catch::Matchers::WithinAbs(std::floor(value), 1e-12));
+            CHECK_FALSE(context.rng == before);
+            CHECK(context.rng == replay.rng);
+        }
+    }
+
+    CHECK(parser.process("{random(1,1)/2}", 0, nullptr, &context) == "0");
+    CHECK_THAT(std::stod(parser.process("{random(1,1.0)/2}", 0, nullptr, &context)),
+               Catch::Matchers::WithinAbs(0.5, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{random(1.0,1)/2}", 0, nullptr, &context)),
+               Catch::Matchers::WithinAbs(0.5, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{random(1.25,1.25)}", 0, nullptr, &context)),
+               Catch::Matchers::WithinAbs(1.25, 1e-12));
+}
+
+TEST_CASE("Skipped and rejected random expressions leave the supplied generator unchanged",
+          "[PlaceholderParser][PlaceholderParserRandom]")
+{
+    PlaceholderParser parser;
+    PlaceholderParser::ContextData context;
+    context.rng.seed(173u);
+    const std::mt19937 before = context.rng;
+    CHECK(parser.process("{if false}{random(2,7)}{endif}ready", 0, nullptr, &context) == "ready");
+    CHECK(context.rng == before);
+    CHECK(parser.process("{if false}{random(2,7)}{endif}ready") == "ready");
+    CHECK_THROWS_WITH(parser.process("{random(2,7)}"),
+                      Catch::Matchers::ContainsSubstring("Random number generator not available"));
+
+    const std::array<const char *, 4> rejected = {{
+        "{random(\"invalid\",7)}", "{random(2,\"invalid\")}",
+        "{random(true,7)}", "{random(2,false)}",
+    }};
+    for (const char *expression : rejected) {
+        INFO(expression);
+        CHECK_THROWS_WITH(parser.process(expression, 0, nullptr, &context),
+                          Catch::Matchers::ContainsSubstring("Not a numeric type"));
+        CHECK(context.rng == before);
+    }
+    CHECK(parser.process("{random(4,4)}", 0, nullptr, &context) == "4");
+}
+
+TEST_CASE("Placeholder interpolation clamps rounding error at both table endpoints",
+          "[PlaceholderParser][PlaceholderParserInterpolation]")
+{
+    PlaceholderParser parser;
+    const std::array<std::pair<double, double>, 5> rows = {{
+        {-0.5 * EPSILON, 10.}, {0., 10.}, {1., 20.},
+        {2., 30.}, {2. + 0.5 * EPSILON, 30.},
+    }};
+    for (const auto &row : rows) {
+        INFO(row.first);
+        parser.set("probe", row.first);
+        CHECK_THAT(std::stod(parser.process("{interpolate_table(probe,(0,10),(2,30))}")),
+                   Catch::Matchers::WithinAbs(row.second, 1e-9));
+    }
+    for (double outside : {-2. * EPSILON, 2. + 2. * EPSILON}) {
+        INFO(outside);
+        parser.set("probe", outside);
+        CHECK_THROWS_WITH(parser.process("{interpolate_table(probe,(0,10),(2,30))}"),
+                          Catch::Matchers::ContainsSubstring("outside the table range"));
+    }
+    parser.set("probe", 0.5);
+    CHECK_THAT(std::stod(parser.process("{interpolate_table(probe,(0,10),(2,30))}")),
+               Catch::Matchers::WithinAbs(15., 1e-9));
+}
+
+TEST_CASE("Placeholder interpolation rejects nonnumeric and decreasing table coordinates",
+          "[PlaceholderParser][PlaceholderParserInterpolation]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{interpolate_table(\"invalid\",(0,10),(2,30))}"),
+                      Catch::Matchers::ContainsSubstring("Interpolation value must be a number"));
+    CHECK_THROWS_WITH(parser.process("{interpolate_table(1,(\"invalid\",10),(2,30))}"),
+                      Catch::Matchers::ContainsSubstring("X value of a table point must be a number"));
+    CHECK_THROWS_WITH(parser.process("{interpolate_table(1,(0,\"invalid\"),(2,30))}"),
+                      Catch::Matchers::ContainsSubstring("Y value of a table point must be a number"));
+    CHECK_THROWS_WITH(parser.process("{interpolate_table(1,(2,30),(0,10))}"),
+                      Catch::Matchers::ContainsSubstring("X coordinates of the table must be increasing"));
+    CHECK_THAT(std::stod(parser.process("{interpolate_table(1,(0,10),(2,30))}")),
+               Catch::Matchers::WithinAbs(20., 1e-9));
 }

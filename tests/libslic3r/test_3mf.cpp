@@ -1,4 +1,12 @@
+#include "libslic3r/SLA/Hollowing.hpp"
+#include "libslic3r/SLA/SupportPoint.hpp"
+
 #include <initializer_list>
+#include <chrono>
+#include <condition_variable>
+#include <cmath>
+#include <cstdlib>
+#include <mutex>
 
 #include <array>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -6582,3 +6590,677 @@ TEST_CASE("BBS export round-trips XML-sensitive MakerLab and custom metadata",
 }
 
 } // namespace bbs_remaining_public_gap_contracts
+
+namespace generic_3mf_public_gap_contracts {
+using namespace Slic3r;
+
+namespace {
+
+Model make_three_object_model()
+{
+    Model model;
+    for (size_t i = 0; i < 3; ++i) {
+        ModelObject *object = model.add_object();
+        object->name = "generic-metadata-object-" + std::to_string(i + 1);
+        object->add_volume(make_cube(10. + double(i), 10., 2.));
+        object->add_instance();
+    }
+    return model;
+}
+
+std::pair<int, std::vector<double>> parse_object_profile(const std::string &payload)
+{
+    std::istringstream lines(payload);
+    std::string line;
+    REQUIRE(std::getline(lines, line));
+    const size_t separator = line.find('|');
+    REQUIRE(separator != std::string::npos);
+    REQUIRE(line.rfind("object_id=", 0) == 0);
+    const int object_id = std::stoi(line.substr(10, separator - 10));
+
+    std::vector<double> profile;
+    std::istringstream values(line.substr(separator + 1));
+    std::string value;
+    while (std::getline(values, value, ';'))
+        profile.push_back(std::stod(value));
+    return {object_id, profile};
+}
+
+struct ParsedSupportPoint {
+    Vec3f position;
+    float radius;
+    bool new_island;
+};
+
+std::pair<int, std::vector<ParsedSupportPoint>> parse_support_points(const std::string &payload)
+{
+    std::istringstream lines(payload);
+    std::string header;
+    REQUIRE(std::getline(lines, header));
+    REQUIRE(header == "support_points_format_version=1");
+    std::string line;
+    REQUIRE(std::getline(lines, line));
+    const size_t separator = line.find('|');
+    REQUIRE(separator != std::string::npos);
+    REQUIRE(line.rfind("object_id=", 0) == 0);
+    const int object_id = std::stoi(line.substr(10, separator - 10));
+
+    std::istringstream values(line.substr(separator + 1));
+    std::vector<float> numbers;
+    float value = 0.f;
+    while (values >> value)
+        numbers.push_back(value);
+    REQUIRE(numbers.size() % 5 == 0);
+
+    std::vector<ParsedSupportPoint> points;
+    for (size_t i = 0; i < numbers.size(); i += 5)
+        points.push_back({Vec3f(numbers[i], numbers[i + 1], numbers[i + 2]), numbers[i + 3], numbers[i + 4] != 0.f});
+    return {object_id, points};
+}
+
+struct ParsedDrainHole {
+    Vec3f position;
+    Vec3f normal;
+    float radius;
+    float height;
+};
+
+std::pair<int, std::vector<ParsedDrainHole>> parse_drain_holes(const std::string &payload)
+{
+    std::istringstream lines(payload);
+    std::string header;
+    REQUIRE(std::getline(lines, header));
+    REQUIRE(header == "drain_holes_format_version=1");
+    std::string line;
+    REQUIRE(std::getline(lines, line));
+    const size_t separator = line.find('|');
+    REQUIRE(separator != std::string::npos);
+    REQUIRE(line.rfind("object_id=", 0) == 0);
+    const int object_id = std::stoi(line.substr(10, separator - 10));
+
+    std::istringstream values(line.substr(separator + 1));
+    std::vector<float> numbers;
+    float value = 0.f;
+    while (values >> value)
+        numbers.push_back(value);
+    REQUIRE(numbers.size() % 8 == 0);
+
+    std::vector<ParsedDrainHole> holes;
+    for (size_t i = 0; i < numbers.size(); i += 8)
+        holes.push_back({Vec3f(numbers[i], numbers[i + 1], numbers[i + 2]),
+                         Vec3f(numbers[i + 3], numbers[i + 4], numbers[i + 5]),
+                         numbers[i + 6], numbers[i + 7]});
+    return {object_id, holes};
+}
+
+} // namespace
+
+TEST_CASE("Generic 3MF metadata uses one-based model object indexing", "[3MF][Generic3MFMetadata]")
+{
+    Model source = make_three_object_model();
+    ModelObject *middle = source.objects[1];
+    const std::vector<double> expected_profile = {0., 0.12, 0.8, 0.2, 1.6, 0.28};
+    middle->layer_height_profile.set(expected_profile);
+    DynamicPrintConfig range_config;
+    range_config.set_key_value("layer_height", new ConfigOptionFloat(0.31));
+    middle->layer_config_ranges[{0.4, 1.2}].assign_config(std::move(range_config));
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+
+    std::string profile_payload;
+    REQUIRE(read_3mf_entry(archive.string(), profile_payload, "Metadata/Slic3r_PE_layer_heights_profile.txt"));
+    const auto [profile_object_id, serialized_profile] = parse_object_profile(profile_payload);
+    REQUIRE(profile_object_id == 2);
+    REQUIRE(serialized_profile.size() == expected_profile.size());
+    for (size_t i = 0; i < expected_profile.size(); ++i)
+        CHECK_THAT(serialized_profile[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+
+    std::string ranges_payload;
+    REQUIRE(read_3mf_entry(archive.string(), ranges_payload, "Metadata/Prusa_Slicer_layer_config_ranges.xml"));
+    boost::property_tree::ptree ranges_tree;
+    std::istringstream ranges_input(ranges_payload);
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(ranges_input, ranges_tree));
+    const auto &objects = ranges_tree.get_child("objects");
+    const boost::property_tree::ptree *object_node = nullptr;
+    size_t object_count = 0;
+    for (const auto &child : objects) {
+        if (child.first == "object") {
+            ++object_count;
+            object_node = &child.second;
+        }
+    }
+    REQUIRE(object_count == 1);
+    REQUIRE(object_node != nullptr);
+    REQUIRE(object_node->get<int>("<xmlattr>.id") == 2);
+    const auto &range_node = object_node->get_child("range");
+    CHECK_THAT(range_node.get<double>("<xmlattr>.min_z"), Catch::Matchers::WithinAbs(0.4, 1e-6));
+    CHECK_THAT(range_node.get<double>("<xmlattr>.max_z"), Catch::Matchers::WithinAbs(1.2, 1e-6));
+    REQUIRE(range_node.get_child_optional("option"));
+    CHECK(range_node.get_child("option").get<std::string>("<xmlattr>.opt_key") == "layer_height");
+    const std::string serialized_layer_height = range_node.get_child("option").data();
+    REQUIRE_FALSE(serialized_layer_height.empty());
+    CHECK_THAT(std::stod(serialized_layer_height), Catch::Matchers::WithinAbs(0.31, 1e-6));
+
+    // Export must not rewrite the source metadata while applying its persisted format.
+    REQUIRE(middle->layer_height_profile.get().size() == expected_profile.size());
+    for (size_t i = 0; i < expected_profile.size(); ++i)
+        CHECK_THAT(middle->layer_height_profile.get()[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+    REQUIRE(middle->layer_config_ranges.size() == 1);
+    const auto source_range = middle->layer_config_ranges.begin();
+    CHECK_THAT(source_range->first.first, Catch::Matchers::WithinAbs(0.4, 1e-6));
+    CHECK_THAT(source_range->first.second, Catch::Matchers::WithinAbs(1.2, 1e-6));
+    REQUIRE(source_range->second.has("layer_height"));
+    CHECK_THAT(source_range->second.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
+}
+
+TEST_CASE("Generic 3MF preserves SLA support points and island flags", "[3MF][Generic3MFMetadata]")
+{
+    Model source = make_three_object_model();
+    ModelObject *middle = source.objects[1];
+    const std::vector<sla::SupportPoint> expected_support_points = {
+        sla::SupportPoint(1.25f, 2.5f, 3.75f, 0.42f, false),
+        sla::SupportPoint(-4.5f, 5.25f, 6.75f, 0.83f, true),
+    };
+    middle->sla_support_points = expected_support_points;
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    REQUIRE(middle->sla_support_points.size() == expected_support_points.size());
+    for (size_t i = 0; i < expected_support_points.size(); ++i) {
+        const auto &expected = expected_support_points[i];
+        const auto &actual = middle->sla_support_points[i];
+        CHECK_THAT(actual.pos.x(), Catch::Matchers::WithinAbs(expected.pos.x(), 1e-5));
+        CHECK_THAT(actual.pos.y(), Catch::Matchers::WithinAbs(expected.pos.y(), 1e-5));
+        CHECK_THAT(actual.pos.z(), Catch::Matchers::WithinAbs(expected.pos.z(), 1e-5));
+        CHECK_THAT(actual.head_front_radius, Catch::Matchers::WithinAbs(expected.head_front_radius, 1e-5));
+        CHECK(actual.is_new_island == expected.is_new_island);
+    }
+    std::string payload;
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Metadata/Slic3r_PE_sla_support_points.txt"));
+    const auto [object_id, serialized_points] = parse_support_points(payload);
+    REQUIRE(object_id == 2);
+    REQUIRE(serialized_points.size() == expected_support_points.size());
+    for (size_t i = 0; i < serialized_points.size(); ++i) {
+        const auto &expected = expected_support_points[i];
+        CHECK_THAT(serialized_points[i].position.x(), Catch::Matchers::WithinAbs(expected.pos.x(), 1e-5));
+        CHECK_THAT(serialized_points[i].position.y(), Catch::Matchers::WithinAbs(expected.pos.y(), 1e-5));
+        CHECK_THAT(serialized_points[i].position.z(), Catch::Matchers::WithinAbs(expected.pos.z(), 1e-5));
+        CHECK_THAT(serialized_points[i].radius, Catch::Matchers::WithinAbs(expected.head_front_radius, 1e-5));
+        CHECK(serialized_points[i].new_island == expected.is_new_island);
+    }
+
+}
+
+TEST_CASE("Generic 3MF serializes SLA drain holes with compatibility offset", "[3MF][Generic3MFMetadata]")
+{
+    Model source = make_three_object_model();
+    ModelObject *middle = source.objects[1];
+    const Vec3f source_normal(0.f, 3.f, 4.f);
+    const std::vector<sla::DrainHole> expected_drain_holes = {
+        sla::DrainHole(Vec3f(10.f, 20.f, 30.f), source_normal, 1.25f, 7.5f),
+        sla::DrainHole(Vec3f(-4.f, 8.f, 12.f), Vec3f(2.f, -1.f, 2.f), 2.75f, 3.25f),
+    };
+    middle->sla_drain_holes = expected_drain_holes;
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    REQUIRE(middle->sla_drain_holes.size() == expected_drain_holes.size());
+    for (size_t i = 0; i < expected_drain_holes.size(); ++i) {
+        const auto &expected = expected_drain_holes[i];
+        const auto &actual = middle->sla_drain_holes[i];
+        CHECK_THAT(actual.pos.x(), Catch::Matchers::WithinAbs(expected.pos.x(), 1e-5));
+        CHECK_THAT(actual.pos.y(), Catch::Matchers::WithinAbs(expected.pos.y(), 1e-5));
+        CHECK_THAT(actual.pos.z(), Catch::Matchers::WithinAbs(expected.pos.z(), 1e-5));
+        CHECK_THAT(actual.normal.x(), Catch::Matchers::WithinAbs(expected.normal.x(), 1e-5));
+        CHECK_THAT(actual.normal.y(), Catch::Matchers::WithinAbs(expected.normal.y(), 1e-5));
+        CHECK_THAT(actual.normal.z(), Catch::Matchers::WithinAbs(expected.normal.z(), 1e-5));
+        CHECK_THAT(actual.radius, Catch::Matchers::WithinAbs(expected.radius, 1e-5));
+        CHECK_THAT(actual.height, Catch::Matchers::WithinAbs(expected.height, 1e-5));
+    }
+    std::string payload;
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Metadata/Slic3r_PE_sla_drain_holes.txt"));
+    const auto [object_id, serialized_holes] = parse_drain_holes(payload);
+    REQUIRE(object_id == 2);
+    REQUIRE(serialized_holes.size() == expected_drain_holes.size());
+    for (size_t i = 0; i < serialized_holes.size(); ++i) {
+        const auto &expected = expected_drain_holes[i];
+        const Vec3f stored_position = expected.pos - expected.normal.normalized();
+        CHECK_THAT(serialized_holes[i].position.x(), Catch::Matchers::WithinAbs(stored_position.x(), 1e-5));
+        CHECK_THAT(serialized_holes[i].position.y(), Catch::Matchers::WithinAbs(stored_position.y(), 1e-5));
+        CHECK_THAT(serialized_holes[i].position.z(), Catch::Matchers::WithinAbs(stored_position.z(), 1e-5));
+        CHECK_THAT(serialized_holes[i].normal.x(), Catch::Matchers::WithinAbs(expected.normal.x(), 1e-5));
+        CHECK_THAT(serialized_holes[i].normal.y(), Catch::Matchers::WithinAbs(expected.normal.y(), 1e-5));
+        CHECK_THAT(serialized_holes[i].normal.z(), Catch::Matchers::WithinAbs(expected.normal.z(), 1e-5));
+        CHECK_THAT(serialized_holes[i].radius, Catch::Matchers::WithinAbs(expected.radius, 1e-5));
+        CHECK_THAT(serialized_holes[i].height, Catch::Matchers::WithinAbs(expected.height + 1.f, 1e-5));
+    }
+
+}
+
+TEST_CASE("Generic 3MF omits empty optional metadata entries", "[3MF][Generic3MFMetadata]")
+{
+    Model source = make_three_object_model();
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    REQUIRE(source.objects.size() == 3);
+    for (const ModelObject *object : source.objects) {
+        REQUIRE(object != nullptr);
+        CHECK(object->layer_height_profile.get().empty());
+        CHECK(object->layer_config_ranges.empty());
+        CHECK(object->sla_support_points.empty());
+        CHECK(object->sla_drain_holes.empty());
+    }
+
+    std::string payload;
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/Slic3r_PE_layer_heights_profile.txt"));
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/Prusa_Slicer_layer_config_ranges.xml"));
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/Slic3r_PE_sla_support_points.txt"));
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/Slic3r_PE_sla_drain_holes.txt"));
+}
+
+TEST_CASE("Generic 3MF writes height profiles only when they contain complete pairs",
+          "[3MF][Generic3MFMetadata]")
+{
+    struct ProfileRow {
+        size_t values;
+        bool stored;
+    };
+    const std::vector<double> full_profile = {0., 0.12, 0.8, 0.2, 1.6, 0.28};
+    const std::array<ProfileRow, 6> rows = {{{0, false}, {2, false}, {3, false},
+                                          {4, true}, {5, false}, {6, true}}};
+    for (const ProfileRow row : rows) {
+        INFO("profile value count " << row.values);
+        Model source = make_three_object_model();
+        std::vector<double> expected_profile(full_profile.begin(), full_profile.begin() + row.values);
+        source.objects[1]->layer_height_profile.set(expected_profile);
+        ScopedTemporaryFile archive(".3mf");
+        REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+
+        std::string payload;
+        const bool stored = read_3mf_entry(archive.string(), payload,
+                                          "Metadata/Slic3r_PE_layer_heights_profile.txt");
+        REQUIRE(stored == row.stored);
+        if (stored) {
+            const auto [object_id, profile] = parse_object_profile(payload);
+            REQUIRE(object_id == 2);
+            REQUIRE(profile.size() == expected_profile.size());
+            for (size_t i = 0; i < profile.size(); ++i)
+                CHECK_THAT(profile[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+        }
+        const auto &source_profile = source.objects[1]->layer_height_profile.get();
+        REQUIRE(source_profile.size() == expected_profile.size());
+        for (size_t i = 0; i < source_profile.size(); ++i)
+            CHECK_THAT(source_profile[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+    }
+}
+
+} // namespace generic_3mf_public_gap_contracts
+
+
+namespace bbs_backup_contracts {
+
+using namespace Slic3r;
+using boost::property_tree::ptree;
+
+namespace {
+
+struct BackupCounts
+{
+    std::size_t worker_callbacks = 0;
+    std::size_t ui_backup_callbacks = 0;
+};
+
+// The callback is copied by the worker before it is invoked.  Owning this state with a
+// shared_ptr keeps a timed-out callback safe until that copied std::function is destroyed.
+struct BackupEvents
+{
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::size_t worker_callbacks = 0;
+    std::size_t ui_backup_callbacks = 0;
+
+    void notify(int type)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (type == 0)
+            ++worker_callbacks;
+        else if (type == 1)
+            ++ui_backup_callbacks;
+        condition.notify_all();
+    }
+
+    BackupCounts snapshot()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return { worker_callbacks, ui_backup_callbacks };
+    }
+};
+
+// A Backup task is a public queue barrier: it is appended after all earlier work, and its
+// type-1 callback is emitted only after the UI task pump has processed that prefix.  The
+// caller remains on the main thread while pumping, so no assertion runs from the worker.
+bool flush_backup_barrier(const std::shared_ptr<BackupEvents> &events,
+                          std::chrono::milliseconds timeout = std::chrono::seconds(5))
+{
+    const BackupCounts before = events->snapshot();
+    const std::size_t target_ui_callbacks = before.ui_backup_callbacks + 1;
+    backup_soon();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        // A notification during or just after the pump must trigger another pump.
+        const BackupCounts before_pump = events->snapshot();
+        run_backup_ui_tasks();
+        if (events->snapshot().ui_backup_callbacks >= target_ui_callbacks)
+            return true;
+
+        // Worker callback type 0 wakes this wait so the next iteration can pump the
+        // corresponding UI task.  Type 1 is the completion predicate above.
+        std::unique_lock<std::mutex> lock(events->mutex);
+        events->condition.wait_until(lock, deadline, [&] {
+            return events->ui_backup_callbacks >= target_ui_callbacks ||
+                   events->worker_callbacks > before_pump.worker_callbacks;
+        });
+    }
+    run_backup_ui_tasks();
+    return events->snapshot().ui_backup_callbacks >= target_ui_callbacks;
+}
+
+struct BackupCleanup
+{
+    Model &model;
+    std::shared_ptr<BackupEvents> events;
+
+    ~BackupCleanup()
+    {
+        // RemoveBackup precedes the barrier. Cleanup is bounded best effort after a test
+        // timeout; any worker-held callback still owns its state, and paths are unique.
+        remove_backup(model, true);
+        (void)flush_backup_barrier(events);
+        set_backup_callback({});
+        set_backup_interval(60);
+        model.set_backup_path("detach");
+    }
+};
+
+bool parse_xml_double(const ptree::value_type &node, const char *attribute, double &value)
+{
+    const auto raw = node.second.get_optional<std::string>(std::string("<xmlattr>.") + attribute);
+    if (!raw)
+        return false;
+    char *end = nullptr;
+    value = std::strtod(raw->c_str(), &end);
+    return end != raw->c_str() && *end == '\0' && std::isfinite(value);
+}
+
+bool parse_xml_index(const ptree::value_type &node, const char *attribute, long &value)
+{
+    const auto raw = node.second.get_optional<std::string>(std::string("<xmlattr>.") + attribute);
+    if (!raw)
+        return false;
+    char *end = nullptr;
+    value = std::strtol(raw->c_str(), &end, 10);
+    return end != raw->c_str() && *end == '\0';
+}
+
+} // namespace
+
+TEST_CASE("BBS backup guards require both mesh and instance state", "[3MF][Bbs3mfBackup][Guard]")
+{
+    const std::string shape = GENERATE("backup disabled", "missing volume", "missing instance");
+    CAPTURE(shape);
+
+    // Declare the directory before Model so cleanup detaches the model before the directory dies.
+    ScopedTemporaryDir backup("orca_bbs_backup_guard_v2");
+    Model model;
+    model.set_backup_path(backup.string());
+    boost::filesystem::create_directories(backup.path() / "3D" / "Objects");
+
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    object->name = "guarded-backup";
+    object->input_file = "guarded.stl";
+    if (shape != "missing volume")
+        object->add_volume(make_cube(4., 5., 6.));
+    if (shape != "missing instance")
+        object->add_instance();
+    if (shape != "backup disabled")
+        model.set_need_backup();
+
+    const auto events = std::make_shared<BackupEvents>();
+    set_backup_interval(0);
+    set_backup_callback([events](int type) { events->notify(type); });
+    BackupCleanup cleanup{ model, events };
+
+    REQUIRE(flush_backup_barrier(events));
+    const int backup_id = model.get_object_backup_id(*object);
+    const boost::filesystem::path expected = backup.path() / "3D" / "Objects" /
+        (object->name + "_" + std::to_string(backup_id) + ".model");
+
+    const BackupCounts before = events->snapshot();
+    save_object_mesh(*object);
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts after = events->snapshot();
+    CHECK(after.ui_backup_callbacks == before.ui_backup_callbacks + 1);
+    CHECK_FALSE(boost::filesystem::exists(expected));
+}
+
+TEST_CASE("BBS backup writes valid mesh geometry and completes its public lifecycle",
+          "[3MF][Bbs3mfBackup][Snapshot]")
+{
+    ScopedTemporaryDir backup("orca_bbs_backup_snapshot_v2");
+    Model model;
+    model.set_backup_path(backup.string());
+    boost::filesystem::create_directories(backup.path() / "3D" / "Objects");
+
+    ModelObject *object = model.add_object("snapshot-part", "snapshot.stl", make_cube(10., 11., 12.));
+    REQUIRE(object != nullptr);
+    object->add_instance();
+    model.set_need_backup();
+    const int backup_id = model.get_object_backup_id(*object);
+    const std::string entry = "3D/Objects/" + object->name + "_" + std::to_string(backup_id) + ".model";
+    const boost::filesystem::path snapshot = backup.path() / entry;
+
+    const auto events = std::make_shared<BackupEvents>();
+    set_backup_interval(0);
+    set_backup_callback([events](int type) { events->notify(type); });
+    BackupCleanup cleanup{ model, events };
+
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts before = events->snapshot();
+    save_object_mesh(*object);
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts after = events->snapshot();
+    CHECK(after.ui_backup_callbacks == before.ui_backup_callbacks + 1);
+
+    REQUIRE(boost::filesystem::exists(snapshot));
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(snapshot.string(), model_xml, entry));
+    ptree tree;
+    std::stringstream model_stream(model_xml);
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(model_stream, tree));
+
+    // A model document can contain component objects before the mesh-bearing resource;
+    // select the actual object with a mesh rather than depending on resource order.
+    const auto resources = tree.get_child_optional("model.resources");
+    REQUIRE(resources);
+    const ptree *mesh_object = nullptr;
+    const ptree *mesh = nullptr;
+    for (const auto &node : *resources) {
+        if (node.first != "object")
+            continue;
+        const auto candidate = node.second.get_child_optional("mesh");
+        if (candidate) {
+            mesh_object = &node.second;
+            mesh = &candidate.get();
+            break;
+        }
+    }
+    REQUIRE(mesh_object != nullptr);
+    REQUIRE(mesh != nullptr);
+    const auto object_id = mesh_object->get_optional<unsigned>("<xmlattr>.id");
+    REQUIRE(object_id);
+    // 3MF resources have positive IDs; the source-derived filename above separately
+    // verifies the backup identifier without depending on its packed internal encoding.
+    CHECK(*object_id > 0u);
+
+    const auto vertices = mesh->get_child_optional("vertices");
+    const auto triangles = mesh->get_child_optional("triangles");
+    REQUIRE(vertices);
+    REQUIRE(triangles);
+
+    std::size_t vertex_count = 0;
+    bool vertex_values_ok = true;
+    double min_x = std::numeric_limits<double>::infinity();
+    double min_y = std::numeric_limits<double>::infinity();
+    double min_z = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double max_y = -std::numeric_limits<double>::infinity();
+    double max_z = -std::numeric_limits<double>::infinity();
+    for (const auto &node : *vertices) {
+        if (node.first != "vertex")
+            continue;
+        ++vertex_count;
+        double x = 0., y = 0., z = 0.;
+        if (!parse_xml_double(node, "x", x) || !parse_xml_double(node, "y", y) || !parse_xml_double(node, "z", z)) {
+            vertex_values_ok = false;
+            continue;
+        }
+        min_x = std::min(min_x, x); min_y = std::min(min_y, y); min_z = std::min(min_z, z);
+        max_x = std::max(max_x, x); max_y = std::max(max_y, y); max_z = std::max(max_z, z);
+    }
+    CHECK(vertex_count == 8);
+    CHECK(vertex_values_ok);
+    CHECK_THAT(min_x, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(min_y, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(min_z, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(max_x, Catch::Matchers::WithinAbs(10., 1e-6));
+    CHECK_THAT(max_y, Catch::Matchers::WithinAbs(11., 1e-6));
+    CHECK_THAT(max_z, Catch::Matchers::WithinAbs(12., 1e-6));
+
+    bool triangle_indices_ok = true;
+    std::size_t triangle_count = 0;
+    for (const auto &node : *triangles) {
+        if (node.first != "triangle")
+            continue;
+        ++triangle_count;
+        for (const char *attribute : { "v1", "v2", "v3" }) {
+            long index = -1;
+            if (!parse_xml_index(node, attribute, index) || index < 0 || index >= static_cast<long>(vertex_count))
+                triangle_indices_ok = false;
+        }
+    }
+    CHECK(triangle_count == 12);
+    CHECK(triangle_indices_ok);
+
+    put_other_changes();
+    CHECK(has_other_changes(false));
+    CHECK(has_other_changes(true));
+    clear_other_changes(false);
+    CHECK_FALSE(has_other_changes(false));
+    CHECK(has_other_changes(true));
+
+    const BackupCounts before_backup = events->snapshot();
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts after_backup = events->snapshot();
+    CHECK(after_backup.ui_backup_callbacks == before_backup.ui_backup_callbacks + 1);
+    CHECK_FALSE(has_other_changes(true));
+
+    remove_backup(model, true);
+    const BackupCounts before_remove_barrier = events->snapshot();
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts after_remove_barrier = events->snapshot();
+    CHECK(after_remove_barrier.ui_backup_callbacks == before_remove_barrier.ui_backup_callbacks + 1);
+    CHECK_FALSE(boost::filesystem::exists(backup.path()));
+}
+
+} // namespace bbs_backup_contracts
+
+namespace bbs_text_alignment_compat_contracts {
+
+using namespace Slic3r;
+using BbsLoaded = bbs_3mf_metadata_contracts::BbsLoaded;
+
+static void set_text_configuration(Model &model, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &)
+{
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    TextConfiguration text;
+    text.text = "legacy alignment";
+    text.style.name = "compatibility style";
+    text.style.path = "font.ttf";
+    text.style.type = EmbossStyle::Type::file_path;
+    text.style.prop.size_in_mm = 8.f;
+    text.style.prop.align = {FontProp::HorizontalAlign::right, FontProp::VerticalAlign::bottom};
+    model.objects.front()->volumes.front()->text_configuration = std::move(text);
+}
+
+static FontProp::Align load_alignment(const std::string &archive)
+{
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(bbs_3mf_metadata_contracts::load_followup(archive, loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    const auto &text = loaded_model.objects.front()->volumes.front()->text_configuration;
+    REQUIRE(text.has_value());
+    return text->style.prop.align;
+}
+
+TEST_CASE("BBS text metadata maps legacy numeric alignment indexes", "[3MF][Bbs3mfTextAlignment]")
+{
+    const int index = GENERATE(0, 1, 2);
+    CAPTURE(index);
+    const FontProp::HorizontalAlign horizontal[] = {
+        FontProp::HorizontalAlign::left, FontProp::HorizontalAlign::center, FontProp::HorizontalAlign::right
+    };
+    const FontProp::VerticalAlign vertical[] = {
+        FontProp::VerticalAlign::top, FontProp::VerticalAlign::center, FontProp::VerticalAlign::bottom
+    };
+    ScopedTemporaryFile archive(".3mf");
+    bbs_3mf_metadata_contracts::store_followup(archive.string(), set_text_configuration);
+    REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                 "horizontal=\"right\"", "horizontal=\"" + std::to_string(index) + "\""));
+    REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                 "vertical=\"bottom\"", "vertical=\"" + std::to_string(index) + "\""));
+    const auto align = load_alignment(archive.string());
+    CHECK(align.first == horizontal[index]);
+    CHECK(align.second == vertical[index]);
+}
+
+TEST_CASE("BBS text metadata defaults missing or empty alignment to center", "[3MF][Bbs3mfTextAlignment]")
+{
+    const bool remove_attributes = GENERATE(false, true);
+    CAPTURE(remove_attributes);
+    ScopedTemporaryFile archive(".3mf");
+    bbs_3mf_metadata_contracts::store_followup(archive.string(), set_text_configuration);
+    if (remove_attributes) {
+        REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                     "horizontal=\"right\"", ""));
+        REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                     "vertical=\"bottom\"", ""));
+    } else {
+        REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                     "horizontal=\"right\"", "horizontal=\"\""));
+        REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                     "vertical=\"bottom\"", "vertical=\"\""));
+    }
+    const auto align = load_alignment(archive.string());
+    CHECK(align.first == FontProp::HorizontalAlign::center);
+    CHECK(align.second == FontProp::VerticalAlign::center);
+}
+
+TEST_CASE("BBS text metadata defaults unknown alignment names to center", "[3MF][Bbs3mfTextAlignment]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    bbs_3mf_metadata_contracts::store_followup(archive.string(), set_text_configuration);
+    REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                 "horizontal=\"right\"", "horizontal=\"diagonal\""));
+    REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                 "vertical=\"bottom\"", "vertical=\"upright\""));
+    const auto align = load_alignment(archive.string());
+    CHECK(align.first == FontProp::HorizontalAlign::center);
+    CHECK(align.second == FontProp::VerticalAlign::center);
+}
+
+} // namespace bbs_text_alignment_compat_contracts

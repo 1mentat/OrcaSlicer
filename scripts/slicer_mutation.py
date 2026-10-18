@@ -98,6 +98,64 @@ def _truncate(value: str) -> str:
     return value[:MAX_OUTPUT] + "\n...[output truncated]...\n"
 
 
+def _temp_environment_variables() -> tuple[str, ...]:
+    """Return Python's variables plus Boost's POSIX TEMPDIR fallback."""
+    variables = ("TMPDIR", "TMP", "TEMP")
+    return variables + (("TEMPDIR",) if os.name == "posix" else ())
+
+
+_TEMP_ENVIRONMENT_VARIABLES = _temp_environment_variables()
+
+
+def _write_temp_probe(path: Path) -> None:
+    """Create, write, and remove one file inside a configured temp directory."""
+    with path.open("xb") as stream:
+        stream.write(b"slicer mutation temp-directory probe\n")
+    path.unlink()
+
+
+def _preflight_temp_environment() -> list[dict[str, str]]:
+    """Reject invalid explicit temp variables before worktree/build activity.
+
+    An absent variable retains tempfile's existing fallback behavior.  An
+    explicitly empty value is rejected because Boost.Filesystem treats an
+    empty getenv result as its selected path and reports ENOTDIR.  Relative
+    values are rejected because child commands run from a disposable
+    worktree, so their resolution would differ from this controller's cwd.
+    Every explicit candidate is checked because silently falling through from
+    a misspelled or unwritable higher-priority variable makes later Python and
+    C++ temporary-file failures difficult to diagnose.
+    """
+    checked: list[dict[str, str]] = []
+    for variable in _TEMP_ENVIRONMENT_VARIABLES:
+        configured = os.environ.get(variable)
+        if configured is None:
+            continue
+        if configured == "":
+            raise MutationError(
+                f"explicit {variable} is empty; unset it or set it to an absolute "
+                "writable temporary directory")
+        if not Path(configured).is_absolute():
+            raise MutationError(
+                f"explicit {variable}={configured!r} must be an absolute path; "
+                "relative temporary paths are unsafe across the disposable worktree cwd")
+        try:
+            if not Path(configured).is_dir():
+                raise MutationError(
+                    f"explicit {variable}={configured!r} is not an existing directory")
+            with tempfile.TemporaryDirectory(
+                    prefix=".slicer-mutation-preflight-", dir=configured) as probe:
+                _write_temp_probe(Path(probe) / "write-probe")
+        except MutationError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise MutationError(
+                f"explicit {variable}={configured!r} failed its temporary-directory "
+                f"create/write probe: {exc}") from exc
+        checked.append({"variable": variable, "path": configured})
+    return checked
+
+
 @dataclass
 class CommandResult:
     argv: list[str]
@@ -520,6 +578,7 @@ def run_mutation(args: argparse.Namespace) -> int:
         raise MutationError("--max-mutants must be positive")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise MutationError("--timeout must be finite and positive")
+    temp_preflight = _preflight_temp_environment()
     out_lexical = _lexical_output_path(repo, args.out)
     _output_available(out_lexical)
     out = out_lexical.resolve()
@@ -549,6 +608,7 @@ def run_mutation(args: argparse.Namespace) -> int:
         "git": {"commit": commit, "root": str(repo)},
         "limits": {"max_mutants": args.max_mutants, "timeout_seconds": args.timeout},
         "commands": {"configure": configure_argv, "build": build_argv, "test": test_argv},
+        "preflight": {"explicit_temp_directories": temp_preflight},
         "mutants": [],
     }
     report_path = out / "mutation-report.json"

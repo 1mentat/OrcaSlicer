@@ -1,3 +1,4 @@
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <system_error>
@@ -665,6 +666,76 @@ TEST_CASE("Tag-based seam tracking follows a rising continuous outer path", "[GC
     CHECK_THAT(tag_based_seams.front()->position.z(), WithinAbs(0.4f, 1e-4f));
 }
 
+
+TEST_CASE("Default color changes cycle and wrap public color metadata", "[GCodeProcessor][GCodeProcessorColorMetadata]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\nG1 X0 Y0 Z0.2 F600\n"
+        "; COLOR_CHANGE,T0\nG1 X1 Y0 E0.1 F600\n"
+        "; COLOR_CHANGE,T0\nG1 X2 Y0 E0.1 F600\n"
+        "; COLOR_CHANGE,T0\nG1 X3 Y0 E0.1 F600\n"
+        "; COLOR_CHANGE,T0\nG1 X4 Y0 E0.1 F600\n"
+        "; COLOR_CHANGE,T0\nG1 X5 Y0 E0.1 F600\n"
+        "; COLOR_CHANGE,T0\nG1 X6 Y0 E0.1 F600\n"
+        "; COLOR_CHANGE,T0\nG1 X7 Y0 E0.1 F600\n");
+
+    const auto valid_hex_color = [](const std::string &value) {
+        if (value.size() != 7)
+            return false;
+        if (value.front() != '#')
+            return false;
+        return std::all_of(value.begin() + 1, value.end(), [](char c) {
+            return std::isxdigit(static_cast<unsigned char>(c)) != 0;
+        });
+    };
+
+    const auto color_moves = moves_of(result, EMoveType::Color_change);
+    REQUIRE(color_moves.size() == 7);
+    REQUIRE(result.custom_gcode_per_print_z.size() == 7);
+    std::set<std::string> first_six_colors;
+    for (size_t i = 0; i < result.custom_gcode_per_print_z.size(); ++i) {
+        CAPTURE(i);
+        const auto &item = result.custom_gcode_per_print_z[i];
+        CHECK(color_moves[i]->type == EMoveType::Color_change);
+        CHECK(item.type == CustomGCode::ColorChange);
+        CHECK(item.extruder == 1);
+        CHECK(valid_hex_color(item.color));
+        CHECK_THAT(item.print_z, WithinAbs(0.2, 1e-4));
+        if (i < 6)
+            first_six_colors.insert(item.color);
+    }
+    REQUIRE(first_six_colors.size() == 6);
+    CHECK(result.custom_gcode_per_print_z[6].color == result.custom_gcode_per_print_z[0].color);
+}
+
+TEST_CASE("Malformed color changes match an independent fallback and preserve valid colors", "[GCodeProcessor][GCodeProcessorColorMetadata]")
+{
+    const std::string prefix = "M83\nG90\nG1 X0 Y0 Z0.2 F600\n";
+    const auto make_fixture = [&prefix](const std::string &suffix) {
+        return prefix + "; COLOR_CHANGE,T0" + suffix + "\nG1 X5 Y0 E0.4 F600\n";
+    };
+    const std::string malformed = GENERATE(std::string("#12GGZZ"), std::string("0x12ABCD"),
+                                            std::string("#12345"), std::string("#1234567"));
+
+    const auto fallback = process_buffer(make_fixture(""));
+    const auto malformed_result = process_buffer(make_fixture(std::string(",") + malformed));
+    const auto explicit_result = process_buffer(make_fixture(",#aBc123"));
+    REQUIRE(fallback.custom_gcode_per_print_z.size() == 1);
+    REQUIRE(malformed_result.custom_gcode_per_print_z.size() == 1);
+    REQUIRE(explicit_result.custom_gcode_per_print_z.size() == 1);
+
+    const auto &fallback_item = fallback.custom_gcode_per_print_z.front();
+    const auto &malformed_item = malformed_result.custom_gcode_per_print_z.front();
+    const auto &explicit_item = explicit_result.custom_gcode_per_print_z.front();
+    CHECK(fallback_item.type == CustomGCode::ColorChange);
+    CHECK(malformed_item.type == CustomGCode::ColorChange);
+    CHECK(explicit_item.type == CustomGCode::ColorChange);
+    CHECK(malformed_item.color == fallback_item.color);
+    CHECK(malformed_item.color != malformed);
+    CHECK(explicit_item.color == "#aBc123");
+    CHECK_THAT(malformed_item.print_z, WithinAbs(0.2, 1e-4));
+    CHECK_THAT(explicit_item.print_z, WithinAbs(0.2, 1e-4));
+}
 
 } // namespace public_processor_contracts
 
