@@ -502,3 +502,111 @@ TEST_CASE("reset_selections removes persisted selection keys only", "[AppConfig]
 
 
 } // namespace appconfig_extended_contracts
+
+TEST_CASE("Directory history excludes the shapes gallery and persists export fallbacks",
+          "[AppConfig][AppConfigPreferences]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig source;
+    const std::string settings = (scoped_dir.path() / "settings").string();
+    const std::string models = (scoped_dir.path() / "models").string();
+    const std::string exports = (scoped_dir.path() / "exports").string();
+    const std::string backups = (scoped_dir.path() / "backups").string();
+    const std::string gallery = custom_shapes_dir();
+
+    REQUIRE(source.get_last_dir().empty());
+    REQUIRE(source.get_last_backup_dir().empty());
+    REQUIRE(source.get_last_output_dir(exports) == exports);
+    source.update_config_dir(settings);
+    REQUIRE(source.get_last_dir() == settings);
+    source.update_skein_dir(models);
+    REQUIRE(source.get_last_dir() == models);
+    source.update_skein_dir(gallery);
+    REQUIRE(source.get_last_dir() == models);
+    REQUIRE(source.get("recent", "last_opened_folder") == models);
+    REQUIRE(source.get("recent", "settings_folder") == settings);
+    REQUIRE(source.get_last_output_dir(gallery) == models);
+
+    source.set("recent", "last_opened_folder", std::string());
+    REQUIRE(source.get_last_dir() == settings);
+    REQUIRE(source.get_last_output_dir(gallery) == settings);
+    source.update_last_output_dir(exports);
+    REQUIRE(source.get_last_output_dir(gallery) == exports);
+    REQUIRE(source.get_last_output_dir(models, true) == exports);
+
+    // Updating the backup directory saves all pending preferences immediately.
+    source.update_last_backup_dir(backups);
+    AppConfig loaded;
+    REQUIRE(loaded.load().empty());
+    REQUIRE(loaded.get_last_dir() == settings);
+    REQUIRE(loaded.get_last_output_dir(models) == exports);
+    REQUIRE(loaded.get_last_backup_dir() == backups);
+}
+
+TEST_CASE("Copied vendor selections remain independent of their source",
+          "[AppConfig][AppConfigPreferences]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig source;
+    source.set_variant("Vendor A", "Model A", "0.4", true);
+    source.set_variant("Vendor A", "Model A", "0.6", true);
+    source.set_variant("Vendor B", "Model B", "0.8", true);
+    const AppConfig::VendorMap expected = source.vendors();
+
+    AppConfig copied;
+    copied.set_variant("Old Vendor", "Old Model", "0.2", true);
+    copied.set_vendors(source);
+    source.set_variant("Vendor A", "Model A", "0.4", false);
+    source.set_variant("Vendor B", "Model B", "1.0", true);
+    REQUIRE(copied.vendors() == expected);
+    REQUIRE_FALSE(source.vendors() == expected);
+    copied.save();
+
+    AppConfig loaded;
+    REQUIRE(loaded.load().empty());
+    REQUIRE(loaded.vendors() == expected);
+    REQUIRE_FALSE(loaded.get_variant("Old Vendor", "Old Model", "0.2"));
+}
+
+TEST_CASE("Custom palette updates retain color order after reload",
+          "[AppConfig][AppConfigPreferences]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig source;
+    REQUIRE(source.get_custom_color_from_config().empty());
+    source.save_custom_color_to_config({});
+    REQUIRE(source.get_custom_color_from_config().empty());
+
+    const std::vector<std::string> initial {"#112233", "#AABBCC"};
+    const std::vector<std::string> updated {"#445566", "#DDEEFF", "#778899"};
+    source.save_custom_color_to_config(initial);
+    REQUIRE(source.get_custom_color_from_config() == initial);
+    source.save_custom_color_to_config(updated);
+    REQUIRE(source.get_custom_color_from_config() == updated);
+    source.save();
+
+    AppConfig loaded;
+    REQUIRE(loaded.load().empty());
+    REQUIRE(loaded.get_custom_color_from_config() == updated);
+}
+
+TEST_CASE("Nozzle volume preferences update one printer without changing another",
+          "[AppConfig][AppConfigPreferences]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig source;
+    REQUIRE(source.get_nozzle_volume_types_from_config("Printer A").empty());
+    source.save_nozzle_volume_types_to_config("Printer A", "0;1");
+    source.save_nozzle_volume_types_to_config("Printer B", "1;0;1");
+    source.save_nozzle_volume_types_to_config("Printer A", "1;1");
+    REQUIRE(source.get_nozzle_volume_types_from_config("Printer A") == "1;1");
+    REQUIRE(source.get_nozzle_volume_types_from_config("Printer B") == "1;0;1");
+    REQUIRE(source.get_nozzle_volume_types_from_config("Unknown Printer").empty());
+    source.save();
+
+    AppConfig loaded;
+    REQUIRE(loaded.load().empty());
+    REQUIRE(loaded.get_nozzle_volume_types_from_config("Printer A") == "1;1");
+    REQUIRE(loaded.get_nozzle_volume_types_from_config("Printer B") == "1;0;1");
+    REQUIRE(loaded.get_nozzle_volume_types_from_config("Unknown Printer").empty());
+}

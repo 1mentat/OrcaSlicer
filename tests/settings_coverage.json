@@ -4244,6 +4244,24 @@
         "pipeline_oracle"
       ],
       "reason": "The same public case compares flush_into_infill=false/true while flush_into_objects=false on the same two-copy processed print. The disabled row has no infill candidates or per-copy overrides; the enabled row has positive infill candidates and matching per-copy overrides, while assigned plus remaining volume equals the requested budget. This promotes the internal-infill destination only; object/support destinations and broader matrix interactions remain unclaimed."
+    },
+    "dont_slow_down_outer_wall": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[CoolingDontOuterWall]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted ordinary full-suite case toggles only dont_slow_down_outer_wall with layer cooling enabled. True preserves a higher outer-wall feed while inner-wall slowdown stays equal within tolerance; both rows preserve deposited filament, XY path, role counts, and zero fan state. Both boolean values are covered for one filament; vector indexing and other cooling interactions remain unclaimed."
+    },
+    "adaptive_pressure_advance_overhangs": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[AdaptivePressureAdvanceOverhangGate]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted ordinary full-suite case toggles only adaptive_pressure_advance_overhangs with pressure advance and adaptive pressure advance enabled. Parsed SET_PRESSURE_ADVANCE values on physical positive XY extrusion follow independently calibrated values in both rows, at least one paired interval changes pressure advance, and segment count/order, XYZ trajectory, and extrusion stay equal within tolerance. Both boolean values are covered for one filament; vector indexing, model extrapolation, and broader interactions remain unclaimed."
     }
   }
 }

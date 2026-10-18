@@ -8060,3 +8060,225 @@ TEST_CASE("G-code archive streams keep explicit and fallback thumbnails on their
 }
 
 } // namespace stream_archive_contracts
+
+namespace bbs_import_contracts {
+
+using namespace Slic3r;
+using archive_variant_contracts::BbsLoaded;
+using archive_variant_contracts::read_file;
+using bbs_3mf_metadata_contracts::load_followup;
+using bbs_3mf_metadata_contracts::store_followup;
+
+namespace {
+
+void mutate_model_mesh(const std::string &path, int fault)
+{
+    bool changed = false;
+    REQUIRE(rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+        if (name != "3D/3dmodel.model" || changed)
+            return false;
+        const size_t vertices = data.find("<vertices");
+        const size_t triangles = data.find("<triangles", vertices);
+        const size_t triangles_end = data.find("</triangles>", triangles);
+        REQUIRE(vertices != std::string::npos);
+        REQUIRE(triangles != std::string::npos);
+        REQUIRE(triangles_end != std::string::npos);
+        if (fault == 0) {
+            data.replace(triangles, triangles_end + std::string("</triangles>").size() - triangles,
+                         "<triangles count=\"0\"></triangles>");
+        } else if (fault == 1) {
+            const size_t x = data.find("x=\"", vertices);
+            REQUIRE(x != std::string::npos);
+            const size_t begin = x + 3;
+            const size_t end = data.find('"', begin);
+            REQUIRE(end != std::string::npos);
+            data.replace(begin, end - begin, "nan");
+        } else {
+            const size_t triangle = data.find("<triangle ", triangles);
+            const size_t v3 = data.find("v3=\"", triangle);
+            REQUIRE(triangle != std::string::npos);
+            REQUIRE(v3 != std::string::npos);
+            const size_t begin = v3 + 4;
+            const size_t end = data.find('"', begin);
+            REQUIRE(end != std::string::npos);
+            data.replace(begin, end - begin, "999");
+        }
+        changed = true;
+        return true;
+    }));
+    REQUIRE(changed);
+}
+
+void mutate_model_settings(const std::string &path, int fault)
+{
+    bool changed = false;
+    REQUIRE(rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+        if (name != "Metadata/model_settings.config" || changed)
+            return false;
+        if (fault == 0) {
+            const size_t object = data.find("<object id=\"");
+            const size_t end = data.find("</object>", object);
+            REQUIRE(object != std::string::npos);
+            REQUIRE(end != std::string::npos);
+            const size_t id_begin = object + std::string("<object id=\"").size();
+            const size_t id_end = data.find('"', id_begin);
+            REQUIRE(id_end != std::string::npos);
+            const std::string duplicate = "<object id=\"" + data.substr(id_begin, id_end - id_begin) + "\"/>";
+            data.insert(end + std::string("</object>").size(), duplicate);
+        } else if (fault == 1) {
+            const size_t config = data.find("<config");
+            const size_t config_end = data.find('>', config);
+            REQUIRE(config != std::string::npos);
+            REQUIRE(config_end != std::string::npos);
+            data.insert(config_end + 1, "<part id=\"1\" subtype=\"normal\" first_triangle_id=\"0\" last_triangle_id=\"1\"/>");
+        } else {
+            const size_t object = data.find("<object id=\"");
+            const size_t object_end = data.find('>', object);
+            REQUIRE(object != std::string::npos);
+            REQUIRE(object_end != std::string::npos);
+            data.insert(object_end + 1, "<mesh_stat edges_fixed=\"0\" degenerate_facets=\"0\" facets_removed=\"0\" facets_reversed=\"0\" backwards_edges=\"0\"/>");
+        }
+        changed = true;
+        return true;
+    }));
+    REQUIRE(changed);
+}
+
+void store_settings_archive(const std::string &path, bool foreign)
+{
+    bbs_model_settings_contracts::store_archive_with_model_settings(path, foreign);
+}
+
+} // namespace
+
+TEST_CASE("BBS rejects native archives with invalid mesh data",
+          "[3MF][BbsImportContracts][Errors]")
+{
+    const int fault = GENERATE(0, 1, 2);
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+
+    Model valid_model;
+    BbsLoaded valid;
+    REQUIRE(load_followup(archive.string(), valid_model, valid));
+    REQUIRE(valid_model.objects.size() == 1);
+    REQUIRE(valid_model.mesh().facets_count() > 0);
+    const double valid_volume = its_volume(valid_model.mesh().its);
+    REQUIRE(valid_volume > 0.);
+
+    mutate_model_mesh(archive.string(), fault);
+    Model malformed_model;
+    BbsLoaded malformed;
+    bool loaded = true;
+    REQUIRE_NOTHROW(loaded = load_followup(archive.string(), malformed_model, malformed));
+    CHECK_FALSE(loaded);
+    // load_bbs_3mf may have populated the caller-owned Model before a later guard fails;
+    // this case intentionally claims only false/no-throw, while the valid control proves the
+    // fixture contained real positive-volume geometry before mutation.
+}
+
+TEST_CASE("BBS applies native and foreign model-settings error policy",
+          "[3MF][BbsImportContracts][ModelSettings]")
+{
+    const int fault = GENERATE(0, 1, 2);
+    const bool foreign = GENERATE(false, true);
+    ScopedTemporaryFile archive(".3mf");
+    store_settings_archive(archive.string(), foreign);
+
+    Model valid_model;
+    BbsLoaded valid;
+    REQUIRE(load_followup(archive.string(), valid_model, valid));
+    REQUIRE(valid_model.objects.size() == (foreign ? 2 : 1));
+    for (const ModelObject *object : valid_model.objects) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->instances.size() == (foreign ? 1 : 2));
+    }
+    const size_t valid_facets = valid_model.mesh().facets_count();
+    const double valid_volume = its_volume(valid_model.mesh().its);
+    const BoundingBoxf3 valid_box = valid_model.mesh().bounding_box();
+    REQUIRE(valid_facets > 0);
+    REQUIRE(valid_volume > 0.);
+    CHECK(valid.is_bbl == !foreign);
+
+    mutate_model_settings(archive.string(), fault);
+    Model loaded_model;
+    BbsLoaded loaded;
+    bool result = true;
+    REQUIRE_NOTHROW(result = load_followup(archive.string(), loaded_model, loaded));
+    if (!foreign) {
+        CHECK_FALSE(result);
+    } else {
+        REQUIRE(result);
+        CHECK_FALSE(loaded.is_bbl);
+        REQUIRE(loaded_model.objects.size() == valid_model.objects.size());
+        for (const ModelObject *object : loaded_model.objects) {
+            REQUIRE(object != nullptr);
+            CHECK(object->instances.size() == 1);
+        }
+        CHECK(loaded_model.mesh().facets_count() == valid_facets);
+        CHECK_THAT(its_volume(loaded_model.mesh().its), Catch::Matchers::WithinAbs(valid_volume, 1e-5));
+        for (int axis = 0; axis < 3; ++axis) {
+            CHECK_THAT(double(loaded_model.mesh().bounding_box().min[axis]), Catch::Matchers::WithinAbs(double(valid_box.min[axis]), 1e-5));
+            CHECK_THAT(double(loaded_model.mesh().bounding_box().max[axis]), Catch::Matchers::WithinAbs(double(valid_box.max[axis]), 1e-5));
+        }
+    }
+}
+
+TEST_CASE("BBS imports all declared plate sidecar thumbnails into the load backup",
+          "[3MF][BbsImportContracts][Sidecars]")
+{
+    const std::array<std::string, 4> expected = {"sidecar-plate", "sidecar-no-light", "sidecar-top", "sidecar-pick"};
+    const std::array<std::string, 4> names = {"plate.png", "no-light.png", "top.png", "pick.png"};
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &backup) {
+        std::array<std::string *, 4> fields = {&plate.thumbnail_file, &plate.no_light_thumbnail_file,
+                                                &plate.top_file, &plate.pick_file};
+        for (size_t i = 0; i < names.size(); ++i) {
+            const std::filesystem::path path = std::filesystem::path(backup.string()) / names[i];
+            std::ofstream output(path, std::ios::binary);
+            REQUIRE(output.good());
+            output << expected[i];
+            output.flush();
+            REQUIRE(output.good());
+            *fields[i] = path.string();
+        }
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData *plate = loaded.plates.front();
+    REQUIRE(plate != nullptr);
+    const std::array<std::string, 4> extracted = {plate->thumbnail_file, plate->no_light_thumbnail_file,
+                                                  plate->top_file, plate->pick_file};
+    REQUIRE(loaded.backup != nullptr);
+    const std::array<std::string, 4> archived_names = {
+        "plate_1.png", "plate_no_light_1.png", "top_1.png", "pick_1.png"};
+    for (size_t i = 0; i < extracted.size(); ++i) {
+        const auto expected_path = std::filesystem::path(loaded.backup->string()) / "Metadata" / archived_names[i];
+        REQUIRE_FALSE(extracted[i].empty());
+        CHECK(std::filesystem::path(extracted[i]).lexically_normal() == expected_path.lexically_normal());
+        REQUIRE(std::filesystem::exists(extracted[i]));
+        CHECK(read_file(extracted[i]) == expected[i]);
+    }
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.mesh().facets_count() > 0);
+}
+
+TEST_CASE("BBS SkipModel archives package metadata without serialized model resources",
+          "[3MF][BbsImportContracts][SkipModel]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {},
+                   SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipModel);
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+    CHECK(model_xml.find("<resources>") != std::string::npos);
+    CHECK(model_xml.find("</resources>") != std::string::npos);
+    CHECK(model_xml.find("<object ") == std::string::npos);
+    CHECK(model_xml.find("<item ") == std::string::npos);
+    CHECK(read_3mf_entry(archive.string(), model_xml, "Metadata/model_settings.config"));
+}
+
+} // namespace bbs_import_contracts

@@ -268,6 +268,22 @@ width through public SLA slicing. Its mutations are in
 checks decoded layer images for a stepped model: ordered masks, physical area,
 centroid, and dimensions. Its mutations are in `sla_raster_pipeline.json`.
 
+`[PresetPersistence]` checks inherited JSON imports, unresolved-parent rejection,
+subscription refreshes with newer preset timestamps, complete root-filament
+exports, and preservation of system presets during user-file loading. Its
+mutations are in `preset_persistence.json`.
+
+`[BbsImportContracts]` checks invalid native mesh data, semantic model-settings
+errors in native and foreign archives, exact sidecar extraction paths and bytes,
+and metadata-only `SkipModel` packages. Its mutations are in
+`bbs_import_contracts.json`; mesh-guard bypasses are excluded because they can
+crash before an ordinary assertion.
+
+`[AppConfigPreferences]` checks directory-history precedence and gallery
+exclusion, independent vendor copies, ordered custom-color updates, and
+per-printer nozzle preferences across save/load. These persistence contracts do
+not claim slicing-settings variance coverage.
+
 `[PresetBundleSubscribedMultiType]` checks typed subscribed profiles, canonical
 inheritance, missing and unsupported types, and removal of obsolete printer files.
 Its mutations are in `preset_subscribed_multitype.json`.

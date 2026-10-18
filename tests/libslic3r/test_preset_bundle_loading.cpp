@@ -12432,3 +12432,248 @@ TEST_CASE("Subscribed bundle reconciliation prunes obsolete typed entries while 
     CHECK(stored.filament_presets == std::vector<std::string>{prefix() + "Remote Filament"});
     CHECK(stored.printer_presets.empty());
 }
+
+
+namespace preset_persistence_contracts {
+
+namespace {
+
+void write_inherited_process_json(const fs::path &file, const std::string &name,
+                                  const std::string &inherits, const std::string &layer_height = {})
+{
+    fs::create_directories(file.parent_path());
+    std::ofstream out(file.string());
+    REQUIRE(out.good());
+    out << R"({"type":"process","name":")" << name
+        << R"(","from":"User","version":"1.0.0","print_settings_id":")" << name
+        << R"(","inherits":")" << inherits << '"';
+    if (!layer_height.empty())
+        out << R"(,"layer_height":")" << layer_height << '"';
+    out << "}\n";
+}
+
+std::map<std::string, std::map<std::string, std::string>> refresh_values(
+    double root_layer_height, double child_layer_height, bool include_obsolete, long update_time)
+{
+    std::map<std::string, std::map<std::string, std::string>> values;
+    auto root = cloud_values(PRESET_IOT_PRINT_TYPE, "refresh-root-id", "refresh-account");
+    root.emplace("layer_height", std::to_string(root_layer_height));
+    root[ORCA_JSON_KEY_UPDATE_TIME] = std::to_string(update_time);
+    values.emplace("A Refresh Root", std::move(root));
+
+    auto child = cloud_values(PRESET_IOT_PRINT_TYPE, "refresh-child-id", "refresh-account",
+                              "A Refresh Root");
+    child.emplace("layer_height", std::to_string(child_layer_height));
+    child[ORCA_JSON_KEY_UPDATE_TIME] = std::to_string(update_time);
+    values.emplace("Z Refresh Child", std::move(child));
+
+    if (include_obsolete) {
+        auto obsolete = cloud_values(PRESET_IOT_PRINT_TYPE, "refresh-obsolete-id", "refresh-account");
+        obsolete.emplace("layer_height", "0.22");
+        obsolete[ORCA_JSON_KEY_UPDATE_TIME] = std::to_string(update_time);
+        values.emplace("Obsolete Refresh Process", std::move(obsolete));
+    }
+    return values;
+}
+
+BundleMetadata refresh_metadata(const std::string &name, const std::string &version,
+                                const std::string &description, long updated_time)
+{
+    BundleMetadata metadata = preset_bundle_workflow_contracts::subscribed_metadata("refresh-bundle");
+    metadata.name = name;
+    metadata.version = version;
+    metadata.description = description;
+    metadata.updated_time = updated_time;
+    return metadata;
+}
+
+} // namespace
+
+TEST_CASE("JSON import resolves an inherited parent and rejects an unresolved parent",
+          "[PresetBundle][PresetPersistence][PresetBundleImportInheritance]")
+{
+    ScopedTemporaryDir temp("preset-persistence-json-inheritance");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+
+    Preset &parent = add_inmemory_preset(bundle.prints, "Import Parent");
+    parent.is_system = true;
+    parent.setting_id = "import-parent-id";
+    parent.config.opt<ConfigOptionFloat>("layer_height", true)->value = 0.31;
+    parent.config.opt<ConfigOptionInt>("wall_loops", true)->value = 4;
+
+    const fs::path child_file = temp.path() / "incoming" / "Imported Child.json";
+    write_inherited_process_json(child_file, "Imported Child", "Import Parent", "0.27");
+    const std::string incoming_child = read_file(child_file);
+
+    AppConfig app;
+    std::vector<std::string> files{child_file.string()};
+    REQUIRE_NOTHROW(bundle.import_presets(
+        files, [](std::string const &) { return 1; },
+        ForwardCompatibilitySubstitutionRule::Disable, app));
+    REQUIRE(files.size() == 1);
+    CHECK(files.front() == child_file.string());
+
+    const Preset *child = bundle.prints.find_preset("Imported Child");
+    REQUIRE(child != nullptr);
+    CHECK(child->is_external);
+    CHECK(child->inherits() == "Import Parent");
+    CHECK(child->base_id == "import-parent-id");
+    CHECK_THAT(child->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK(child->config.opt_int("wall_loops") == 4);
+
+    const fs::path saved_child(child->file);
+    REQUIRE(fs::exists(saved_child));
+    CHECK(saved_child != child_file);
+    const std::string saved_child_text = read_file(saved_child);
+    CHECK(saved_child_text != incoming_child);
+    const nlohmann::json saved_child_json = nlohmann::json::parse(saved_child_text);
+    CHECK(saved_child_json.at(BBL_JSON_KEY_INHERITS).get<std::string>() == "Import Parent");
+    CHECK_THAT(std::stod(saved_child_json.at("layer_height").get<std::string>()),
+               Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK_FALSE(saved_child_json.contains("wall_loops"));
+
+    const size_t before_orphan = bundle.prints.size();
+    const fs::path orphan_file = temp.path() / "incoming" / "Orphan Child.json";
+    write_inherited_process_json(orphan_file, "Orphan Child", "No Such Parent", "0.29");
+    std::vector<std::string> orphan_files{orphan_file.string()};
+    REQUIRE_NOTHROW(bundle.import_presets(
+        orphan_files, [](std::string const &) { return 1; },
+        ForwardCompatibilitySubstitutionRule::Disable, app));
+    CHECK(orphan_files.empty());
+    CHECK(bundle.prints.size() == before_orphan);
+    CHECK(bundle.prints.find_preset("Orphan Child") == nullptr);
+    const fs::path orphan_destination = fs::path(data_dir()) / PRESET_USER_DIR /
+                                         DEFAULT_USER_FOLDER_NAME / PRESET_PRINT_NAME /
+                                         "Orphan Child.json";
+    CHECK_FALSE(fs::exists(orphan_destination));
+}
+
+TEST_CASE("Subscribed refresh preserves bundle identity while replacing metadata and values",
+          "[PresetBundle][PresetPersistence][PresetBundleSubscribedRefresh]")
+{
+    ScopedTemporaryDir temp("preset-persistence-subscribed-refresh");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    AppConfig app;
+
+    const BundleMetadata first_metadata = refresh_metadata("Initial Refresh", "1.0.0",
+                                                            "first", 11);
+    REQUIRE_NOTHROW(bundle.update_subscribed_presets(
+        app, refresh_values(0.24, 0.28, true, 10), first_metadata,
+        ForwardCompatibilitySubstitutionRule::EnableSilent));
+    const auto first_bundle = bundle.bundles.m_bundles.find("refresh-bundle");
+    REQUIRE(first_bundle != bundle.bundles.m_bundles.end());
+    const auto imported_time = first_bundle->second.imported_time;
+    const Preset *first_child = bundle.prints.find_preset("_subscribed/refresh-bundle/Z Refresh Child");
+    const Preset *obsolete = bundle.prints.find_preset("_subscribed/refresh-bundle/Obsolete Refresh Process");
+    REQUIRE(first_child != nullptr);
+    REQUIRE(obsolete != nullptr);
+    const fs::path obsolete_file(obsolete->file);
+
+    const BundleMetadata second_metadata = refresh_metadata("Refreshed Bundle", "2.0.0",
+                                                             "second", 22);
+    REQUIRE_NOTHROW(bundle.update_subscribed_presets(
+        app, refresh_values(0.30, 0.33, false, 20), second_metadata,
+        ForwardCompatibilitySubstitutionRule::EnableSilent));
+
+    const auto refreshed = bundle.bundles.m_bundles.find("refresh-bundle");
+    REQUIRE(refreshed != bundle.bundles.m_bundles.end());
+    CHECK(refreshed->second.imported_time == imported_time);
+    CHECK(refreshed->second.name == "Refreshed Bundle");
+    CHECK(refreshed->second.version == "2.0.0");
+    CHECK(refreshed->second.description == "second");
+    CHECK(refreshed->second.updated_time == 22);
+
+    const Preset *root = bundle.prints.find_preset("_subscribed/refresh-bundle/A Refresh Root");
+    const Preset *child = bundle.prints.find_preset("_subscribed/refresh-bundle/Z Refresh Child");
+    REQUIRE(root != nullptr);
+    REQUIRE(child != nullptr);
+    CHECK_THAT(root->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.30, 1e-9));
+    CHECK_THAT(child->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.33, 1e-9));
+    CHECK(child->inherits() == "_subscribed/refresh-bundle/A Refresh Root");
+    CHECK(bundle.prints.find_preset("_subscribed/refresh-bundle/Obsolete Refresh Process") == nullptr);
+    CHECK_FALSE(fs::exists(obsolete_file));
+    CHECK(refreshed->second.print_presets == std::vector<std::string>{
+        "_subscribed/refresh-bundle/A Refresh Root", "_subscribed/refresh-bundle/Z Refresh Child"});
+}
+
+TEST_CASE("Root filament preset export includes changed and default configuration",
+          "[PresetBundle][PresetPersistence][PresetBundleRootCloudDiff]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &root = add_inmemory_preset(collection, "Root Cloud Filament");
+    root.setting_id = "root-filament-id";
+    root.filament_id = "root-filament-family";
+    root.updated_time = 123;
+    const auto version = Semver::parse("2.3.4");
+    REQUIRE(version);
+    root.version = *version;
+
+    const std::string default_type = collection.default_preset().config.opt_string("filament_type", 0u);
+    const std::string changed_type = default_type == "PETG" ? "PLA" : "PETG";
+    root.config.opt<ConfigOptionStrings>("filament_type", true)->values = {changed_type};
+    const auto *default_density = collection.default_preset().config.opt<ConfigOptionFloats>("filament_density");
+    REQUIRE(default_density != nullptr);
+    const std::string unchanged_density = default_density->serialize();
+
+    std::map<std::string, std::string> values;
+    REQUIRE(collection.get_differed_values_to_update(root, values) == 0);
+    REQUIRE(values.find("filament_type") != values.end());
+    REQUIRE(values.find("filament_density") != values.end());
+    CHECK(values.at("filament_type") == root.config.opt<ConfigOptionStrings>("filament_type")->serialize());
+    CHECK(values.at("filament_type") == changed_type);
+    CHECK(values.at("filament_density") == unchanged_density);
+    CHECK(values.at(BBL_JSON_KEY_VERSION) == "2.3.4");
+    CHECK(values.at(BBL_JSON_KEY_TYPE) == Preset::get_iot_type_string(Preset::TYPE_FILAMENT));
+    CHECK(values.at(BBL_JSON_KEY_FILAMENT_ID) == "root-filament-family");
+    CHECK(values.at(ORCA_JSON_KEY_UPDATE_TIME) == "123");
+    CHECK(values.find(BBL_JSON_KEY_BASE_ID) == values.end());
+}
+
+TEST_CASE("User preset names colliding with system presets are skipped while distinct files load",
+          "[PresetBundle][PresetPersistence][PresetBundleCanonicalCollision]")
+{
+    ScopedTemporaryDir temp("preset-persistence-canonical-collision");
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &system = add_inmemory_preset(collection, "System Collision");
+    system.is_system = true;
+    system.config.opt<ConfigOptionFloat>("layer_height", true)->value = 0.19;
+
+    const fs::path dir = temp.path() / PRESET_PRINT_NAME;
+    fs::create_directories(dir);
+    DynamicPrintConfig collision_config = collection.default_preset().config;
+    collision_config.opt<ConfigOptionString>("print_settings_id", true)->value = "System Collision";
+    collision_config.opt<ConfigOptionFloat>("layer_height", true)->value = 0.47;
+    const fs::path collision_file = dir / "System Collision.json";
+    collision_config.save_to_json(collision_file.string(), "System Collision", "User", "1.0.0");
+    const std::string collision_before = read_file(collision_file);
+
+    DynamicPrintConfig distinct_config = collection.default_preset().config;
+    distinct_config.opt<ConfigOptionString>("print_settings_id", true)->value = "Distinct User";
+    distinct_config.opt<ConfigOptionFloat>("layer_height", true)->value = 0.26;
+    const fs::path distinct_file = dir / "Distinct User.json";
+    distinct_config.save_to_json(distinct_file.string(), "Distinct User", "User", "1.0.0");
+
+    PresetsConfigSubstitutions substitutions;
+    collection.load_presets(temp.path().string(), PRESET_PRINT_NAME, substitutions,
+                            ForwardCompatibilitySubstitutionRule::Disable);
+
+    const Preset *retained_system = collection.find_preset("System Collision");
+    const Preset *distinct = collection.find_preset("Distinct User");
+    REQUIRE(retained_system != nullptr);
+    REQUIRE(distinct != nullptr);
+    CHECK(retained_system->is_system);
+    CHECK_THAT(retained_system->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.19, 1e-9));
+    CHECK_FALSE(distinct->is_system);
+    CHECK_THAT(distinct->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.26, 1e-9));
+    CHECK(fs::exists(collision_file));
+    CHECK(read_file(collision_file) == collision_before);
+    CHECK(std::count_if(collection.begin(), collection.end(), [](const Preset &preset) {
+        return preset.name == "System Collision";
+    }) == 1);
+}
+
+} // namespace preset_persistence_contracts
