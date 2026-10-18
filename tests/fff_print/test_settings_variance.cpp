@@ -19,6 +19,7 @@
 #include "catch2/catch_message.hpp"
 #include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/Flow.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
@@ -1938,9 +1939,13 @@ std::vector<double> severe_caged_slope_feeds(const std::string& output, const Dy
 
 struct AnchorEvidence
 {
-    size_t paths             = 0;
-    double length            = 0.;
-    size_t endpoint_contacts = 0;
+    size_t paths                  = 0;
+    double length                 = 0.;
+    size_t endpoint_contacts      = 0;
+    size_t endpoint_samples       = 0;
+    double endpoint_distance_sum  = 0.;
+    double endpoint_distance_max  = 0.;
+    double spacing                = 0.;
 };
 
 double point_line_distance(const Point3& point, const Point3& a, const Point3& b)
@@ -1968,9 +1973,11 @@ AnchorEvidence anchor_evidence(const DynamicPrintConfig& config)
         for (const LayerRegion* region : layer->regions())
             region->perimeters.collect_polylines(perimeter_lines);
         for (const LayerRegion* region : layer->regions())
-            for_each_extrusion_path(region->fills, [&result, &perimeter_lines](const ExtrusionPath& path) {
+            for_each_extrusion_path(region->fills, [&result, &perimeter_lines, layer, region](const ExtrusionPath& path) {
                 if (path.role() != erInternalInfill)
                     return;
+                if (layer->id() > 0 && result.spacing <= 0.)
+                    result.spacing = region->flow(frInfill).spacing();
                 ++result.paths;
                 result.length += unscale<double>(path.length());
                 for (const Point3& endpoint : {path.first_point3(), path.last_point3()}) {
@@ -1981,8 +1988,14 @@ AnchorEvidence anchor_evidence(const DynamicPrintConfig& config)
                                                point_line_distance(endpoint,
                                                                    Point3(line.points[i - 1].x(), line.points[i - 1].y(), endpoint.z()),
                                                                    Point3(line.points[i].x(), line.points[i].y(), endpoint.z())));
-                    if (nearest <= scale_(0.5))
-                        ++result.endpoint_contacts;
+                    if (nearest != std::numeric_limits<double>::max()) {
+                        const double nearest_mm = unscale<double>(nearest);
+                        ++result.endpoint_samples;
+                        result.endpoint_distance_sum += nearest_mm;
+                        result.endpoint_distance_max = std::max(result.endpoint_distance_max, nearest_mm);
+                        if (nearest <= scale_(0.5))
+                            ++result.endpoint_contacts;
+                    }
                 }
             });
     }
@@ -3349,4 +3362,114 @@ TEST_CASE("Ironing type selects terrace, topmost, and all-solid public paths",
     }
     REQUIRE(solid.interior_ironing_paths > 0);
     REQUIRE(solid.interior_ironing_length > 0.0);
+}
+TEST_CASE("Infill anchor maximum preserves zero-boundary and clamp equivalence", "[SettingsFamilyVariance][SettingsVariance][InfillAnchorVariance]")
+{
+    auto evidence_for = [](const std::string &anchor, const std::string &maximum) {
+        DynamicPrintConfig config = family_config();
+        config.set_deserialize_strict({
+            {"layer_height", 0.2},
+            {"initial_layer_print_height", 0.2},
+            // Grid with multiline=1 enters FillRectilinear::fill_surface_by_multilines,
+            // which reaches connect_infill and consumes both anchor controls.
+            {"sparse_infill_pattern", "grid"},
+            {"fill_multiline", 1},
+            {"sparse_infill_density", "35%"},
+            {"sparse_infill_line_width", 0.4},
+            {"initial_layer_line_width", 0.4},
+            {"infill_anchor", anchor},
+            {"infill_anchor_max", maximum},
+        });
+        return anchor_evidence(config);
+    };
+
+    // PrintConfig.cpp documents maximum=0 as the legacy connection mode,
+    // equivalent to the explicit 0/0 no-anchor boundary.
+    const AnchorEvidence legacy = evidence_for("1000", "0");
+    const AnchorEvidence zero    = evidence_for("0", "0");
+    REQUIRE(legacy.paths > 0);
+    REQUIRE(zero.paths > 0);
+    CHECK(legacy.paths == zero.paths);
+    CHECK(legacy.endpoint_contacts == zero.endpoint_contacts);
+    CHECK(legacy.endpoint_samples == zero.endpoint_samples);
+    CHECK_THAT(legacy.length, Catch::Matchers::WithinAbs(zero.length, 1e-6));
+    CHECK_THAT(legacy.endpoint_distance_sum, Catch::Matchers::WithinAbs(zero.endpoint_distance_sum, 1e-6));
+    CHECK_THAT(legacy.endpoint_distance_max, Catch::Matchers::WithinAbs(zero.endpoint_distance_max, 1e-6));
+
+    // The production clamp makes a requested 1.2 mm anchor with a 0.6 mm
+    // maximum observably identical to an explicitly requested 0.6/0.6 pair.
+    const AnchorEvidence requested_above_max = evidence_for("1.2", "0.6");
+    const AnchorEvidence explicit_max        = evidence_for("0.6", "0.6");
+    REQUIRE(requested_above_max.paths > 0);
+    REQUIRE(explicit_max.paths > 0);
+    CHECK(requested_above_max.paths == explicit_max.paths);
+    CHECK(requested_above_max.endpoint_contacts == explicit_max.endpoint_contacts);
+    CHECK(requested_above_max.endpoint_samples == explicit_max.endpoint_samples);
+    CHECK_THAT(requested_above_max.length, Catch::Matchers::WithinAbs(explicit_max.length, 1e-6));
+    CHECK_THAT(requested_above_max.endpoint_distance_sum, Catch::Matchers::WithinAbs(explicit_max.endpoint_distance_sum, 1e-6));
+    CHECK_THAT(requested_above_max.endpoint_distance_max, Catch::Matchers::WithinAbs(explicit_max.endpoint_distance_max, 1e-6));
+
+    // Keep each setting's positive response independently visible: the
+    // anchor changes while max=0.6 is fixed, and max changes while anchor=0.6 is
+    // fixed.  These controls prevent an insensitive fixture from earning
+    // percentage/clamp coverage merely through equal-output rows.
+    const AnchorEvidence no_anchor_limited = evidence_for("0", "0.6");
+    const AnchorEvidence anchor_limited    = evidence_for("0.6", "0.6");
+    REQUIRE(no_anchor_limited.paths > 0);
+    REQUIRE(anchor_limited.paths > 0);
+    CHECK(std::abs(anchor_limited.length - no_anchor_limited.length) > 0.05);
+
+    const AnchorEvidence max_zero = evidence_for("0.6", "0");
+    const AnchorEvidence max_small = anchor_limited;
+    REQUIRE(max_zero.paths > 0);
+    REQUIRE(max_small.paths > 0);
+    CHECK(std::abs(max_small.length - max_zero.length) > 0.05);
+}
+
+TEST_CASE("Infill anchor percentages match equivalent absolute spacing", "[SettingsFamilyVariance][SettingsVariance][InfillAnchorVariance]")
+{
+    constexpr double anchor_mm  = 0.3;
+    constexpr double maximum_mm = 0.6;
+
+    auto config_for = [](const std::string &anchor, const std::string &maximum) {
+        DynamicPrintConfig config = family_config();
+        config.set_deserialize_strict({
+            {"layer_height", 0.2},
+            {"initial_layer_print_height", 0.2},
+            // Grid with multiline=1 enters FillRectilinear::fill_surface_by_multilines,
+            // which reaches connect_infill and consumes both anchor controls.
+            {"sparse_infill_pattern", "grid"},
+            {"fill_multiline", 1},
+            {"sparse_infill_density", "35%"},
+            {"sparse_infill_line_width", 0.4},
+            {"initial_layer_line_width", 0.4},
+            {"infill_anchor", anchor},
+            {"infill_anchor_max", maximum},
+        });
+        return config;
+    };
+
+    DynamicPrintConfig absolute = config_for("0.3", "0.6");
+    const AnchorEvidence absolute_evidence = anchor_evidence(absolute);
+    REQUIRE(absolute_evidence.paths > 0);
+    REQUIRE(std::isfinite(absolute_evidence.spacing));
+    REQUIRE(absolute_evidence.spacing > 0.);
+
+    const std::string anchor_percent = std::to_string(100. * anchor_mm / absolute_evidence.spacing) + "%";
+    const std::string maximum_percent = std::to_string(100. * maximum_mm / absolute_evidence.spacing) + "%";
+
+    auto check_equivalent = [&](const AnchorEvidence &candidate) {
+        REQUIRE(candidate.paths > 0);
+        CHECK(candidate.paths == absolute_evidence.paths);
+        CHECK(candidate.endpoint_contacts == absolute_evidence.endpoint_contacts);
+        CHECK(candidate.endpoint_samples == absolute_evidence.endpoint_samples);
+        CHECK_THAT(candidate.length, Catch::Matchers::WithinAbs(absolute_evidence.length, 0.02));
+        CHECK_THAT(candidate.endpoint_distance_sum, Catch::Matchers::WithinAbs(absolute_evidence.endpoint_distance_sum, 0.02));
+        CHECK_THAT(candidate.endpoint_distance_max, Catch::Matchers::WithinAbs(absolute_evidence.endpoint_distance_max, 0.005));
+    };
+
+    // Isolate each conversion and then exercise both conversions together.
+    check_equivalent(anchor_evidence(config_for(anchor_percent, "0.6")));
+    check_equivalent(anchor_evidence(config_for("0.3", maximum_percent)));
+    check_equivalent(anchor_evidence(config_for(anchor_percent, maximum_percent)));
 }

@@ -3401,7 +3401,8 @@ DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, un
                      bool interface_features = false,
                      float interface_dist = 2.f,
                      float interface_length = 3.f,
-                     TimelapseType timelapse = TimelapseType::tlTraditional)
+                     TimelapseType timelapse = TimelapseType::tlTraditional,
+                     bool gap_wall = false)
 {
     FullPrintConfig config = legacy_tower_direct_contracts::legacy_config(semm, wall, sparse, arc_fitting);
     config.set_deserialize_strict({
@@ -3412,6 +3413,7 @@ DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, un
         {"nozzle_temperature", "200,200"},
         {"printable_area", "0x0,200x0,200x200,0x200"},
     });
+    config.prime_tower_skip_points.value = gap_wall;
     config.timelapse_type.value = timelapse;
     config.wipe_tower_rotation_angle.value = 0.;
     auto group = group_for_two_filaments(same_extruder);
@@ -3447,6 +3449,35 @@ float total_extrusion(const DirectRun &run)
         for (const auto &tcr : layer)
             total += extruded_length(tcr);
     return total;
+}
+
+std::vector<std::tuple<float, float, unsigned int, unsigned int, float>> gap_wall_contact_plan()
+{
+    return {
+        {0.2f, 0.2f, 0, 1, 80.f},
+        {0.4f, 0.2f, 1, 1, 80.f},
+        {0.6f, 0.2f, 1, 1, 80.f},
+        {0.8f, 0.2f, 1, 0, 80.f},
+        {1.0f, 0.2f, 0, 0, 80.f},
+        {1.2f, 0.2f, 0, 0, 80.f},
+        {1.4f, 0.2f, 0, 1, 80.f},
+    };
+}
+
+float layer_extrusion(const DirectRun &run, std::size_t layer_id)
+{
+    REQUIRE(layer_id < run.layers.size());
+    float total = 0.f;
+    for (const auto &tcr : run.layers[layer_id])
+        total += extruded_length(tcr);
+    return total;
+}
+
+bool has_contact_result(const DirectRun &run, std::size_t layer_id)
+{
+    REQUIRE(layer_id < run.layers.size());
+    return std::any_of(run.layers[layer_id].begin(), run.layers[layer_id].end(),
+                       [](const WipeTower::ToolChangeResult &tcr) { return tcr.is_contact; });
 }
 
 struct GridStats {
@@ -3902,6 +3933,65 @@ TEST_CASE("Tower interface pre-extrusion follows the configured length", "[WipeT
             CHECK_FALSE(has_interface_pre_extrusion_move(change.gcode, 5.f));
         }
     CHECK(configured_move);
+}
+
+TEST_CASE("Gap-wall skip points shorten walls without interface features",
+          "[WipeTower][WipeTowerContact][WipeTowerGapWall]")
+{
+    const auto plan = gap_wall_contact_plan();
+    const DirectRun closed = run_direct(plan, false, WipeTowerWallType::wtwRectangle, true, false, false, false,
+                                        2.f, 3.f, TimelapseType::tlTraditional, false);
+    const DirectRun opened = run_direct(plan, false, WipeTowerWallType::wtwRectangle, true, false, false, false,
+                                        2.f, 3.f, TimelapseType::tlTraditional, true);
+    require_finite_run(closed);
+    require_finite_run(opened);
+    REQUIRE(closed.layers.size() == plan.size());
+    REQUIRE(opened.layers.size() == closed.layers.size());
+    CHECK(opened.toolchanges == closed.toolchanges);
+    const float closed_length = total_extrusion(closed);
+    const float opened_length = total_extrusion(opened);
+    REQUIRE(closed_length > 0.f);
+    REQUIRE(opened_length > 0.f);
+    // Interface features are disabled in both controls, so this delta observes
+    // the public gap-wall perimeter path rather than interface pre-extrusion.
+    CHECK(opened_length < closed_length);
+}
+
+TEST_CASE("Interface features add skip geometry for an unused departing-category block",
+          "[WipeTower][WipeTowerContact][WipeTowerGapWall]")
+{
+    const auto plan = gap_wall_contact_plan();
+    const DirectRun closed_without_interface = run_direct(plan, false, WipeTowerWallType::wtwRectangle, true, false, false, false,
+                                                           2.f, 3.f, TimelapseType::tlTraditional, false);
+    const DirectRun opened_without_interface = run_direct(plan, false, WipeTowerWallType::wtwRectangle, true, false, false, false,
+                                                           2.f, 3.f, TimelapseType::tlTraditional, true);
+    const DirectRun closed_with_interface = run_direct(plan, false, WipeTowerWallType::wtwRectangle, true, false, false, true,
+                                                       2.f, 3.f, TimelapseType::tlTraditional, false);
+    const DirectRun opened_with_interface = run_direct(plan, false, WipeTowerWallType::wtwRectangle, true, false, false, true,
+                                                       2.f, 3.f, TimelapseType::tlTraditional, true);
+    for (const DirectRun *run : {&closed_without_interface, &opened_without_interface,
+                                 &closed_with_interface, &opened_with_interface})
+        require_finite_run(*run);
+    REQUIRE(closed_without_interface.layers.size() == plan.size());
+    REQUIRE(opened_without_interface.layers.size() == plan.size());
+    REQUIRE(closed_with_interface.layers.size() == plan.size());
+    REQUIRE(opened_with_interface.layers.size() == plan.size());
+    CHECK(opened_without_interface.toolchanges == closed_without_interface.toolchanges);
+    CHECK(opened_with_interface.toolchanges == closed_with_interface.toolchanges);
+
+    // The layer-3 contact transition remains visible through the public result flag.
+    // Layer 4 is an empty layer where category 1 is absent after layer 3; the
+    // second source loop classifies that unused departing block as Contact and
+    // adds its own layer-4 skip point before propagating it backward.
+    REQUIRE(has_contact_result(opened_with_interface, 3));
+    REQUIRE_FALSE(has_contact_result(opened_with_interface, 4));
+    const float delta_without_interface = layer_extrusion(closed_without_interface, 4) -
+                                          layer_extrusion(opened_without_interface, 4);
+    const float delta_with_interface = layer_extrusion(closed_with_interface, 4) -
+                                       layer_extrusion(opened_with_interface, 4);
+    CAPTURE(delta_without_interface, delta_with_interface);
+    REQUIRE(delta_without_interface >= 0.f);
+    CHECK(delta_with_interface > delta_without_interface);
 }
 
 }

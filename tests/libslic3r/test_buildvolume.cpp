@@ -243,6 +243,14 @@ TEST_CASE("BuildVolume per-extruder rectangle limits are returned as a complete 
     CHECK_FALSE(inside[1]);
     CHECK(inside[2]);
 
+    // Reusing the same output mask for a second object must replace every
+    // extruder result rather than retaining the first object's false entry.
+    CHECK(volume.check_object_state_with_extruder_areas(cube, translation(2.f, 2.f, 0.f), inside) == BuildVolume::ObjectState::Limited);
+    REQUIRE(inside.size() == 3);
+    CHECK(inside[0]);
+    CHECK(inside[1]);
+    CHECK_FALSE(inside[2]);
+
     inside.clear();
     CHECK(volume.check_volume_bbox_state_with_extruder_areas(BoundingBoxf3{Vec3d(8.f, 2.f, 1.f), Vec3d(12.f, 6.f, 3.f)}, inside) == BuildVolume::ObjectState::Limited);
     REQUIRE(inside.size() == 3);

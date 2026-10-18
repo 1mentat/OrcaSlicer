@@ -445,7 +445,7 @@
       "new": "                                    this_slice  .expolygons = source;",
       "expected_matches": 1,
       "test_filter": "VolumeRegionAssignment",
-      "description": "Assign the full modifier slice instead of intersecting it with its parent. The modifier deliberately extends outside A; after B clipping, its expected 25 mm\u00b2 region becomes 50 mm\u00b2 and the ordinary area assertions fail."
+      "description": "Assign the full modifier slice instead of intersecting it with its parent. The modifier deliberately extends outside A; after B clipping, its expected 25 mm² region becomes 50 mm² and the ordinary area assertions fail."
     },
     {
       "id": "volume-region-model-overlap-trim-dropped",
@@ -463,7 +463,7 @@
       "new": "                            } else if (region.model_volume->is_model_part() && clip_multipart_objects) {",
       "expected_matches": 1,
       "test_filter": "VolumeRegionAssignment",
-      "description": "Remove the active negative-volume dispatch from the clipping branch. The 64 mm\u00b2 subtractor is ignored and the total-area assertion fails without exercising an exception or unsafe geometry."
+      "description": "Remove the active negative-volume dispatch from the clipping branch. The 64 mm² subtractor is ignored and the total-area assertion fails without exercising an exception or unsafe geometry."
     },
     {
       "id": "volume-region-support-union-dropped",
@@ -2667,6 +2667,89 @@
       "expected_matches": 1,
       "test_filter": "ExternalBridgeDirection",
       "description": "Drop surface bridge direction before generating paths. Printed interior bridge spans must agree with the requested direction, not merely the surface metadata."
+    },
+    {
+      "id": "fill-anchor-percent-conversion-infill-anchor-variance-v3",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t\t\t\t\tparams.anchor_length = float(params.anchor_length * 0.01 * params.spacing);",
+      "new": "\t\t\t\t\t\tparams.anchor_length = float(params.anchor_length);",
+      "description": "Keep infill_anchor percentage conversion against the nominal normal-layer sparse-infill spacing. The corrected Grid fixture reaches the multiline/connect_infill path.",
+      "test_filter": "InfillAnchorVariance"
+    },
+    {
+      "id": "fill-anchor-max-percent-conversion-infill-anchor-variance-v3",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t\t\t\t\tparams.anchor_length_max = float(params.anchor_length_max * 0.01 * params.spacing);",
+      "new": "\t\t\t\t\t\tparams.anchor_length_max = float(params.anchor_length_max);",
+      "description": "Keep infill_anchor_max percentage conversion against the nominal normal-layer sparse-infill spacing. The corrected Grid fixture reaches the multiline/connect_infill path.",
+      "test_filter": "InfillAnchorVariance"
+    },
+    {
+      "crash_or_exception_is_not_credit": true,
+      "description": "Omit skip-point collection while clearing to one empty vector per planned layer. The interface-free gap-wall case must lose its strict wall-length reduction; no out-of-bounds access or stale skip point is introduced by the mutant.",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "id": "wipe-gap-wall-skip-point-generation-disabled-safe-empty",
+      "new": "if(m_use_gap_wall) m_wall_skip_points.assign(m_plan.size(), {});",
+      "old": "if(m_use_gap_wall) get_all_wall_skip_points();",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "runtime_kill_status": "pending",
+      "test_filter": "WipeTowerGapWall"
+    },
+    {
+      "crash_or_exception_is_not_credit": true,
+      "description": "Omit the interface-feature second block loop skip point while retaining first-loop skip points and their backward propagation. The four-way delta comparison must lose the extra layer-4 reduction.",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "id": "wipe-gap-wall-unused-departing-block-skip-disabled",
+      "new": "bool add_skip_point = false;",
+      "old": "bool add_skip_point = block_solid && std::abs(block_depth - block.start_depth) < EPSILON;",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "runtime_kill_status": "pending",
+      "test_filter": "WipeTowerGapWall"
+    },
+    {
+      "description": "Force the fully painted shortcut into internal state 0. The merge loop skips internal state 0 as the default color, so both positive Extruder1/Extruder2 rows lose their painted area and must fail ordinary area assertions; no exception or crash credit.",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "id": "painted-segmentation-all-one-color-selected-state-defaulted",
+      "new": "segmented_regions[layer_idx][0] = input_expolygons[layer_idx];",
+      "old": "segmented_regions[layer_idx][size_t(color_poly.front().front().color)] = input_expolygons[layer_idx];",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "test_filter": "PaintedShortcut"
+    },
+    {
+      "crash_or_exception_is_not_credit": true,
+      "description": "Initialize the object-mask output with true values using resize(count, true) instead of assign. The first fresh-mask call passes, but the second translated-cube reuse must restore [true,true,false]; a resize-only implementation retains the prior false entry and fails ordinary assertions.",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "id": "buildvolume-object-extruder-mask-aggregate-resize-only",
+      "new": "BuildVolume::ObjectState  BuildVolume::check_object_state_with_extruder_areas(const indexed_triangle_set &its, const Transform3f &trafo, std::vector<bool>& inside_extruders) const\n{\n    ObjectState result = ObjectState::Inside;\n    int extruder_area_count = get_extruder_area_count();\n    inside_extruders.resize(extruder_area_count, true);",
+      "old": "BuildVolume::ObjectState  BuildVolume::check_object_state_with_extruder_areas(const indexed_triangle_set &its, const Transform3f &trafo, std::vector<bool>& inside_extruders) const\n{\n    ObjectState result = ObjectState::Inside;\n    int extruder_area_count = get_extruder_area_count();\n    inside_extruders.assign(extruder_area_count, true);",
+      "path": "src/libslic3r/BuildVolume.cpp",
+      "test_filter": "BuildVolumeVariance"
+    },
+    {
+      "crash_or_exception_is_not_credit": true,
+      "description": "Initialize the bbox-mask output with true values using resize(count, true) instead of assign. The fresh call passes, but the existing reused bbox rows must restore the prior false entry; a resize-only implementation retains it and fails ordinary assertions.",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "id": "buildvolume-bbox-extruder-mask-aggregate-resize-only",
+      "new": "BuildVolume::ObjectState  BuildVolume::check_volume_bbox_state_with_extruder_areas(const BoundingBoxf3& volume_bbox, std::vector<bool>& inside_extruders) const\n{\n    ObjectState result = ObjectState::Inside;\n    int extruder_area_count = get_extruder_area_count();\n    inside_extruders.resize(extruder_area_count, true);",
+      "old": "BuildVolume::ObjectState  BuildVolume::check_volume_bbox_state_with_extruder_areas(const BoundingBoxf3& volume_bbox, std::vector<bool>& inside_extruders) const\n{\n    ObjectState result = ObjectState::Inside;\n    int extruder_area_count = get_extruder_area_count();\n    inside_extruders.assign(extruder_area_count, true);",
+      "path": "src/libslic3r/BuildVolume.cpp",
+      "test_filter": "BuildVolumeVariance"
+    },
+    {
+      "crash_or_exception_is_not_credit": true,
+      "description": "Restore the old legacy internal-thread order by opening the bore before cutting the same helical ridge. The existing internal-thread volume bounds require the groove to survive and must fail ordinary assertions if OCCT drops it.",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "id": "cad-legacy-internal-thread-bore-before-groove",
+      "new": "            try {\n                BRepAlgoAPI_Cut cut_bore(result, bore);\n                if (cut_bore.IsDone() && !cut_bore.Shape().IsNull())\n                    result = cut_bore.Shape();\n            } catch (const std::exception&) { /* keep existing bore */ }\n            if (have_ridge) cut_from(result, ridge);",
+      "old": "            if (have_ridge) cut_from(result, ridge);\n            try {\n                BRepAlgoAPI_Cut cut_bore(result, bore);\n                if (cut_bore.IsDone() && !cut_bore.Shape().IsNull())\n                    result = cut_bore.Shape();\n            } catch (const std::exception&) { /* keep existing bore */ }",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "test_filter": "CadLegacyThread"
     }
   ]
 }

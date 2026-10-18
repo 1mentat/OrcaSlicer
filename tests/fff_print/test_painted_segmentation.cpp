@@ -188,6 +188,30 @@ struct PaintedSegmentationFixture {
         REQUIRE(volume.mmu_segmentation_facets.set(selector));
     }
 
+    void paint_all_facets(EnforcerBlockerType state)
+    {
+        REQUIRE(model.objects.size() == 1);
+        REQUIRE(model.objects.front()->volumes.size() == 1);
+        ModelVolume &volume = *model.objects.front()->volumes.front();
+
+        const TriangleMesh &mesh = volume.mesh();
+        REQUIRE_FALSE(mesh.its.indices.empty());
+        TriangleSelector selector(mesh);
+        for (size_t facet_idx = 0; facet_idx < mesh.its.indices.size(); ++facet_idx)
+            selector.set_facet(static_cast<int>(facet_idx), state);
+
+        REQUIRE(volume.mmu_segmentation_facets.set(selector));
+        apply_model_and_reslice();
+    }
+
+    void clear_mmu_paint()
+    {
+        REQUIRE(model.objects.size() == 1);
+        REQUIRE(model.objects.front()->volumes.size() == 1);
+        model.objects.front()->volumes.front()->mmu_segmentation_facets.reset();
+        apply_model_and_reslice();
+    }
+
     void paint_fuzzy_by_vertical_facets()
     {
         REQUIRE(model.objects.size() == 1);
@@ -355,6 +379,57 @@ double outside_area(const std::vector<ExPolygons> &regions, const ExPolygons &co
 }
 
 } // namespace
+
+TEST_CASE("painted segmentation assigns or clears a fully painted layer", "[PaintedSegmentation][PaintedShortcut]")
+{
+    PaintedSegmentationFixture fixture;
+
+    auto require_only_state = [&](const std::vector<std::vector<ExPolygons>> &segmented, size_t expected_state) {
+        REQUIRE(segmented.size() == fixture.object().layers().size());
+        for (size_t layer_idx = 0; layer_idx < segmented.size(); ++layer_idx) {
+            REQUIRE(segmented[layer_idx].size() == PAINTED_STATES - 1);
+            REQUIRE(expected_state < segmented[layer_idx].size());
+            const ExPolygons source = sliced_layer(*fixture.object().layers()[layer_idx]);
+            const double source_area = polygon_area(source);
+            REQUIRE(source_area > 0.);
+            const double tolerance = std::max(100.0, source_area * 1e-5);
+
+            CHECK(outside_area({ segmented[layer_idx][expected_state] }, source) <= tolerance);
+            const double selected_area = union_region_area({ segmented[layer_idx][expected_state] });
+            CHECK_THAT(selected_area, Catch::Matchers::WithinAbs(source_area, tolerance));
+            CHECK(selected_area > 0.);
+            for (size_t state_idx = 0; state_idx < segmented[layer_idx].size(); ++state_idx) {
+                if (state_idx != expected_state)
+                    CHECK(union_region_area({ segmented[layer_idx][state_idx] }) <= tolerance);
+            }
+        }
+    };
+
+    auto require_cleared = [&](const std::vector<std::vector<ExPolygons>> &segmented) {
+        REQUIRE(segmented.size() == fixture.object().layers().size());
+        for (size_t layer_idx = 0; layer_idx < segmented.size(); ++layer_idx) {
+            REQUIRE(segmented[layer_idx].size() == PAINTED_STATES - 1);
+            const ExPolygons source = sliced_layer(*fixture.object().layers()[layer_idx]);
+            const double source_area = polygon_area(source);
+            REQUIRE(source_area > 0.);
+            const double tolerance = std::max(100.0, source_area * 1e-5);
+            for (const ExPolygons &state_region : segmented[layer_idx])
+                CHECK(union_region_area({ state_region }) <= tolerance);
+        }
+    };
+
+    fixture.paint_all_facets(EnforcerBlockerType::Extruder1);
+    const auto first = multi_material_segmentation_by_painting(fixture.object(), [] {});
+    require_only_state(first, 0);
+
+    fixture.paint_all_facets(EnforcerBlockerType::Extruder2);
+    const auto second = multi_material_segmentation_by_painting(fixture.object(), [] {});
+    require_only_state(second, 1);
+
+    fixture.clear_mmu_paint();
+    const auto cleared = multi_material_segmentation_by_painting(fixture.object(), [] {});
+    require_cleared(cleared);
+}
 
 TEST_CASE("painted segmentation partitions cube slices by painted facet state", "[PaintedSegmentation]")
 {
