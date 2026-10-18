@@ -5439,7 +5439,7 @@ WrappingPipelineRun run_wrapping_pipeline(bool enabled)
 
 static std::optional<ExtrusionRole> output_role(std::string_view raw)
 {
-    if (!is_any_role_line(raw))
+    if (!wipe_tower_pipeline_contracts::is_any_role_line(raw))
         return std::nullopt;
     const std::size_t colon = raw.find(':');
     if (colon == std::string_view::npos)
@@ -5690,7 +5690,7 @@ WipingExport export_wiping_copies(bool objects, bool infill)
         const std::string &raw = line.raw();
         if (line.cmd() == "T0") current_tool = 0;
         if (line.cmd() == "T1") current_tool = 1;
-        for (const std::string prefix : {std::string(";TYPE:"), std::string("; FEATURE:")}) {
+        for (const std::string &prefix : {std::string(";TYPE:"), std::string("; FEATURE:")}) {
             if (raw.compare(0, prefix.size(), prefix) == 0) {
                 role = raw.substr(prefix.size());
                 const size_t first = role.find_first_not_of(" \t");
