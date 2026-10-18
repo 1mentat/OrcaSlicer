@@ -989,8 +989,9 @@ TEST_CASE("Support filament identity follows vendor identifiers and generic mate
         // the PLA first-slot control. Missing identifiers exercise generic types.
         config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA", row.material};
         config.option<ConfigOptionBools>("filament_is_support", true)->values = {false, row.support};
+        // Filament identifiers are dynamic preset metadata, not registered print options.
         if (!row.id.empty())
-            config.option<ConfigOptionStrings>("filament_id", true)->values = {"base", row.id};
+            config.set_key_value("filament_id", new ConfigOptionStrings({"base", row.id}));
         std::string displayed = "unresolved";
         CHECK(config.get_filament_type(displayed, 1) == row.type);
         CHECK(displayed == row.display);

@@ -3991,7 +3991,7 @@ TEST_CASE("DynamicConfig indexed accessors preserve regular and nullable option 
     CHECK_FALSE(const_config.opt_bool("retract_when_changing_layer", 0));
     CHECK(const_config.opt_bool("retract_when_changing_layer", 1));
 
-    auto *nullable_bools = config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer");
+    auto *nullable_bools = config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true);
     REQUIRE(nullable_bools != nullptr);
     nullable_bools->values = {ConfigOptionBoolsNullable::nil_value(), 0};
     // The accessor intentionally exposes the stored nullable sentinel through its

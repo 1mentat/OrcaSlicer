@@ -3780,6 +3780,8 @@ TEST_CASE("Failed G-code exports report their outcome and remain retryable",
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
         {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
         {"layer_height", 0.2},
         {"initial_layer_print_height", 0.2},
         {"skirt_loops", 0},

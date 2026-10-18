@@ -816,6 +816,33 @@
       "expected_matches": 1,
       "description": "Changing the unknown vertical-name fallback from center to top breaks the unknown-name compatibility assertion.",
       "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "xml-unescape-quote-token-omitted",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "\t\t\telse if (s.substr(i, 6) == \"&quot;\") {\n\t\t\t\tret += s.substr(pos, i - pos) + \"\\\"\";\n\t\t\t\ti += 6;\n\t\t\t\tpos = i;\n\t\t\t}",
+      "new": "\t\t\telse if (s.substr(i, 6) == \"&quot;\") {\n\t\t\t\t++i;\n\t\t\t}",
+      "expected_matches": 1,
+      "test_filter": "BbsMakerLabMetadata",
+      "description": "Leave the escaped quote entity undecoded; the existing MakerLab metadata round-trip must fail on its quote-bearing values."
+    },
+    {
+      "id": "xml-unescape-apostrophe-token-omitted",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "\t\t\telse if (s.substr(i, 6) == \"&apos;\") {\n\t\t\t\tret += s.substr(pos, i - pos) + \"'\";\n\t\t\t\ti += 6;\n\t\t\t\tpos = i;\n\t\t\t}",
+      "new": "\t\t\telse if (s.substr(i, 6) == \"&apos;\") {\n\t\t\t\t++i;\n\t\t\t}",
+      "expected_matches": 1,
+      "test_filter": "BbsMakerLabMetadata",
+      "description": "Leave the escaped apostrophe entity undecoded; the existing MakerLab metadata round-trip must fail on its single-quote-bearing values."
+    },
+    {
+      "id": "wiping-absent-source-fallback-grouped-into-tool-index",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "                    || lt.is_extruder_order(lt.wall_extruder_id(region), last_nonsoluble_extruder) // !infill_first, but perimeter is already printed when last extruder prints\n                    || ! lt.has_extruder(lt.sparse_infill_filament_id(region))) // we have to force override - this could violate infill_first (FIXME)",
+      "new": "                    || lt.is_extruder_order(lt.wall_extruder_id(region), last_nonsoluble_extruder    // !infill_first, but perimeter is already printed when last extruder prints\n                    || ! lt.has_extruder(lt.sparse_infill_filament_id(region)))) // we have to force override - this could violate infill_first (FIXME)",
+      "expected_matches": 1,
+      "test_filter": "WipingAssignmentFallback",
+      "description": "Restore the misplaced absent-source condition inside the tool index argument; unclaimed sparse infill must retain an ordinary printable-tool override for every copy."
     }
   ]
 }

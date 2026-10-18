@@ -6312,7 +6312,9 @@ OuterWallFeeds parse_later_outer_wall_feeds(const std::string &text, const Dynam
         if (comment.find("LAYER_CHANGE") != std::string_view::npos) {
             ++layer;
             ++result.layer_changes;
-            outer_wall = false;
+            // TYPE markers are emitted only when the role changes. Preserve the
+            // active role across a layer marker so a continuing outer wall is
+            // attributed to the next layer as well.
         }
         if (comment.rfind("TYPE:", 0) == 0)
             outer_wall = comment == "TYPE:Outer wall";
@@ -6538,6 +6540,8 @@ TEST_CASE("Chamber targets follow used-filament activation, maximum temperature,
         {"machine_start_gcode", custom_start},
         {"machine_end_gcode", ""},
         {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
         {"print_sequence", "by layer"},
         {"single_extruder_multi_material", false},
         {"enable_prime_tower", false},

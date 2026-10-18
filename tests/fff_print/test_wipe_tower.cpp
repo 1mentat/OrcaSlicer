@@ -2042,8 +2042,15 @@ TEST_CASE("Type1 ramming reverse travel duration follows the active change chann
         CHECK(long_metrics.reverse_travel_time > short_metrics.reverse_travel_time);
         CHECK(short_metrics.reverse_travel_time >= 0.5 - (0.10 + 0.02 * 0.5));
         CHECK(long_metrics.reverse_travel_time >= 40. - (0.10 + 0.02 * 40.));
-        CHECK_THAT(short_metrics.positive_volume, Catch::Matchers::WithinAbs(no_metrics.positive_volume, 0.05));
-        CHECK_THAT(long_metrics.positive_volume, Catch::Matchers::WithinAbs(no_metrics.positive_volume, 0.05));
+        // Reverse travel changes the nozzle-result wipe route. Its requested
+        // duration must not change the material emitted by the ramming lines.
+        // The reverse flag also selects reverse-aware block infill spacing in
+        // calc_block_infill_gap() before toolchange depth is recalculated, so
+        // the cross-route no_reverse volume is not an equality oracle here.
+        CHECK_THAT(short_metrics.positive_volume, Catch::Matchers::WithinAbs(long_metrics.positive_volume, 0.05));
+        CHECK(short_metrics.positive_moves == long_metrics.positive_moves);
+        CHECK(short_metrics.positive_volume > 0.);
+        CHECK(long_metrics.positive_volume > 0.);
     }
 }
 

@@ -6546,7 +6546,7 @@ TEST_CASE("BBS export round-trips XML-sensitive MakerLab and custom metadata",
           "[3MF][BbsRemaining][BbsMakerLabMetadata]")
 {
     Model source = make_cube_model();
-    const std::string maker_name = "Maker & <Lab> \"quoted\" 'single' &amp; literal";
+    const std::string maker_name = "Maker & <Lab> \"quoted\" 'single' &amp; &quot; &apos; &unknown; literal";
     const std::string maker_version = "maker-7 & <rev> \"quoted\" 'single' &amp; literal";
     const std::string workflow_value = "prototype & <inside> \"quoted\" 'single' &amp; literal";
     const std::string revision_value = "rev <7> &amp;";
@@ -7131,12 +7131,14 @@ TEST_CASE("BBS backup writes valid mesh geometry and completes its public lifecy
     }
     CHECK(vertex_count == 8);
     CHECK(vertex_values_ok);
-    CHECK_THAT(min_x, Catch::Matchers::WithinAbs(0., 1e-6));
-    CHECK_THAT(min_y, Catch::Matchers::WithinAbs(0., 1e-6));
-    CHECK_THAT(min_z, Catch::Matchers::WithinAbs(0., 1e-6));
-    CHECK_THAT(max_x, Catch::Matchers::WithinAbs(10., 1e-6));
-    CHECK_THAT(max_y, Catch::Matchers::WithinAbs(11., 1e-6));
-    CHECK_THAT(max_z, Catch::Matchers::WithinAbs(12., 1e-6));
+    // ModelObject::add_volume defaults to center_geometry_after_creation(), so
+    // the backup mesh stores the 10x11x12 source centered at the origin.
+    CHECK_THAT(min_x, Catch::Matchers::WithinAbs(-5., 1e-6));
+    CHECK_THAT(min_y, Catch::Matchers::WithinAbs(-5.5, 1e-6));
+    CHECK_THAT(min_z, Catch::Matchers::WithinAbs(-6., 1e-6));
+    CHECK_THAT(max_x, Catch::Matchers::WithinAbs(5., 1e-6));
+    CHECK_THAT(max_y, Catch::Matchers::WithinAbs(5.5, 1e-6));
+    CHECK_THAT(max_z, Catch::Matchers::WithinAbs(6., 1e-6));
 
     bool triangle_indices_ok = true;
     std::size_t triangle_count = 0;

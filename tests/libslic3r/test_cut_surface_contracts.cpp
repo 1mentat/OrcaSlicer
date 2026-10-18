@@ -652,9 +652,10 @@ void check_three_strip_cut(const SurfaceCut &cut, double expected_area)
 {
     REQUIRE_FALSE(cut.vertices.empty());
     REQUIRE_FALSE(cut.indices.empty());
-    REQUIRE(cut.contours.size() >= 3);
     check_contours(cut);
     check_mesh_indices(cut);
+    CAPTURE(cut.contours.size(), projected_area(cut));
+    CHECK(cut.contours.size() >= 3);
     for (const Vec3f &vertex : cut.vertices) {
         CHECK(vertex.x() >= 1.f - 1e-4f);
         CHECK(vertex.x() <= 29.f + 1e-4f);
@@ -747,7 +748,9 @@ TEST_CASE("Surface cuts retain the exterior patches of intersecting solids",
         std::reverse(models.begin(), models.end());
 
     const ExPolygon shape(rectangle(1, 1, 9, 9));
-    const SurfaceCut cut = cut_surface({shape}, models, cube_projection(30.f), .5f);
+    // Use the back projection: the roof is the farther exposed surface, while
+    // ratio .5 would target the z=5 midpoint and prefer the cube top at z=10.
+    const SurfaceCut cut = cut_surface({shape}, models, cube_projection(30.f), 1.f);
     REQUIRE_FALSE(cut.vertices.empty());
     REQUIRE_FALSE(cut.indices.empty());
     check_mesh_indices(cut);
