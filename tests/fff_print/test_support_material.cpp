@@ -15,6 +15,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -2438,13 +2439,14 @@ namespace gcode_process_layer_support_contracts {
 namespace {
 
 std::set<int> tools_for_support_role(const std::string &gcode, const DynamicPrintConfig &config,
-                                     const bool interface_role)
+                                     const bool interface_role,
+                                     std::map<double, std::set<int>> *tools_by_layer = nullptr)
 {
     std::set<int> tools;
     int current_tool = -1;
     GCodeReader reader;
     reader.apply_config(config);
-    reader.parse_buffer(gcode, [&tools, &current_tool, interface_role](GCodeReader &self,
+    reader.parse_buffer(gcode, [&tools, &current_tool, interface_role, tools_by_layer](GCodeReader &self,
                                                                        const GCodeReader::GCodeLine &line) {
         const std::string_view command = line.cmd();
         if (command.size() >= 2 && command.front() == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
@@ -2454,8 +2456,11 @@ std::set<int> tools_for_support_role(const std::string &gcode, const DynamicPrin
         const std::string_view comment = line.comment();
         const bool is_interface = comment.find("support material interface") != std::string_view::npos;
         const bool is_base = !is_interface && comment.find("support material") != std::string_view::npos;
-        if ((interface_role ? is_interface : is_base))
+        if ((interface_role ? is_interface : is_base)) {
             tools.insert(current_tool);
+            if (tools_by_layer != nullptr)
+                (*tools_by_layer)[line.new_Z(self)].insert(current_tool);
+        }
     });
     return tools;
 }
@@ -2515,22 +2520,58 @@ TEST_CASE("Unspecified support roles avoid the currently soluble filament",
           "[SupportMaterial][GCode][GCodePipeline][GCodeSupportSolublePreference]")
 {
     DynamicPrintConfig soluble_config = support_tool_selection_config(0, 0, "1", "2", "1,0");
-    // Selection considers only tools available on this layer. Keep a
-    // non-soluble inner wall alongside the soluble outer wall on each layer.
+    // Object layers offer both materials. Independent support-only layers may
+    // inherit just the previous tool; selection cannot use an unavailable tool.
     soluble_config.set_deserialize_strict({
         {"wall_loops", 2},
         {"inner_wall_filament_id", "2"},
+        {"print_sequence", "by layer"},
+        {"independent_support_layer_height", true},
+        {"enable_prime_tower", false},
+        {"flush_into_support", false},
+        {"flush_into_infill", false},
+        {"flush_into_objects", false},
+        {"z_offset", 0.0},
     });
-    const std::string soluble_gcode = slice({TestMesh::overhang}, soluble_config);
-    const std::set<int> soluble_base_tools = tools_for_support_role(soluble_gcode, soluble_config, false);
-    const std::set<int> soluble_interface_tools = tools_for_support_role(soluble_gcode, soluble_config, true);
+    Print print;
+    Model model;
+    init_print({TestMesh::overhang}, print, model, soluble_config);
+    const std::string soluble_gcode = gcode(print);
+    std::map<double, std::set<int>> base_by_layer;
+    std::map<double, std::set<int>> interface_by_layer;
+    const std::set<int> soluble_base_tools = tools_for_support_role(soluble_gcode, soluble_config, false, &base_by_layer);
+    const std::set<int> soluble_interface_tools = tools_for_support_role(soluble_gcode, soluble_config, true, &interface_by_layer);
 
     REQUIRE(!soluble_gcode.empty());
     REQUIRE(!soluble_base_tools.empty());
     REQUIRE(!soluble_interface_tools.empty());
-    CHECK(soluble_base_tools == std::set<int>{1});
-    CHECK(soluble_interface_tools == std::set<int>{1});
-
+    REQUIRE_FALSE(print.tool_ordering().empty());
+    size_t soluble_first_with_choice = 0;
+    for (const auto *layers : {&base_by_layer, &interface_by_layer}) {
+        size_t non_soluble_choices = 0;
+        for (const auto &[z, emitted_tools] : *layers) {
+            const LayerTools &layer = print.tool_ordering().tools_for_layer(z);
+            CAPTURE(z, layer.print_z, layer.extruders, emitted_tools);
+            REQUIRE_THAT(layer.print_z, Catch::Matchers::WithinAbs(z, 0.001));
+            REQUIRE_FALSE(layer.extruders.empty());
+            REQUIRE(std::all_of(layer.extruders.begin(), layer.extruders.end(),
+                                [](unsigned int tool) { return tool <= 1; }));
+            const bool non_soluble_available =
+                std::find(layer.extruders.begin(), layer.extruders.end(), 1u) != layer.extruders.end();
+            // Tool 1 is the only non-soluble material in this pinned fixture.
+            const std::set<int> expected{non_soluble_available ? 1 : 0};
+            CHECK(emitted_tools == expected);
+            if (non_soluble_available) {
+                ++non_soluble_choices;
+                if (layer.extruders.front() == 0)
+                    ++soluble_first_with_choice;
+            }
+        }
+        REQUIRE(non_soluble_choices > 0);
+    }
+    // Witness the branch's actual decision, not just layers that start on the
+    // correct tool already. Removing the soluble preference must change output.
+    REQUIRE(soluble_first_with_choice > 0);
 }
 
 } // namespace gcode_process_layer_support_contracts
