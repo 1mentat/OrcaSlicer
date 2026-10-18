@@ -4126,3 +4126,46 @@ TEST_CASE("Project JSON migration records support and wall-order differences", "
     for (size_t index = 0; index < expected.size(); ++index)
         CHECK(different->values[index] == expected[index]);
 }
+
+TEST_CASE("read_cli stops option parsing after the positional delimiter", "[Config][ConfigCLI]")
+{
+    Slic3r::DynamicPrintConfig config;
+    t_config_option_keys extra, keys;
+    const char* argv[] = {
+        "orca-slicer", "--nozzle-temperature", "210", "--", "--top-shell-layers", "model.3mf"
+    };
+
+    REQUIRE(config.read_cli(6, argv, &extra, &keys));
+    const auto* temperature = config.opt<Slic3r::ConfigOptionInts>("nozzle_temperature");
+    REQUIRE(temperature != nullptr);
+    CHECK(temperature->values == std::vector<int>{210});
+    CHECK(extra == t_config_option_keys{"--top-shell-layers", "model.3mf"});
+    CHECK(keys == t_config_option_keys{"nozzle_temperature"});
+}
+
+TEST_CASE("read_cli rejects unknown options and missing scalar values", "[Config][ConfigCLI]")
+{
+    SECTION("unknown option")
+    {
+        Slic3r::DynamicPrintConfig config;
+        t_config_option_keys extra, keys;
+        const char* argv[] = {"orca-slicer", "--not-an-orca-setting"};
+
+        CHECK_FALSE(config.read_cli(2, argv, &extra, &keys));
+        CHECK(extra.empty());
+        CHECK(keys.empty());
+        CHECK(config.keys().empty());
+    }
+
+    SECTION("missing scalar value")
+    {
+        Slic3r::DynamicPrintConfig config;
+        t_config_option_keys extra, keys;
+        const char* argv[] = {"orca-slicer", "--top-shell-layers"};
+
+        CHECK_FALSE(config.read_cli(2, argv, &extra, &keys));
+        CHECK(extra.empty());
+        CHECK(keys.empty());
+        CHECK(config.keys().empty());
+    }
+}

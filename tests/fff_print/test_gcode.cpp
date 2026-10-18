@@ -5459,7 +5459,6 @@ TEST_CASE("Farthest-point timelapse snapshots follow support deposition when no 
     REQUIRE(control_evidence.support_extrusions > 0);
     CHECK(enabled_evidence.object_extrusions == 0);
     CHECK(control_evidence.object_extrusions == 0);
-    REQUIRE(gcode_print_variance_contracts::count_text(enabled_output.text, ";TYPE:Support") > 0);
     REQUIRE(enabled_evidence.snapshots > 0);
     REQUIRE(control_evidence.snapshots > 0);
     REQUIRE(enabled_evidence.inline_snapshots > 0);

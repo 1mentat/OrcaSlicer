@@ -1366,6 +1366,66 @@
       "crash_or_exception_is_not_credit": true,
       "description": "Bypass exact-equal consecutive contour cleanup. The overlapping-roof cut2model side-wall oracle is intended to expose zero-area walls; if this focused fixture has no duplicate contour edge, native mutation may correctly survive and must not receive kill credit.",
       "runtime_kill_status": "pending native baseline and mutant execution; survivor is possible until duplicate contour reachability is proven"
+    },
+    {
+      "id": "bbs-import-loading-plates-cancel-gate-ignored",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (proFn) {\n            proFn(IMPORT_STAGE_LOADING_PLATES, 0, 1, cb_cancel);\n            if (cb_cancel)\n                return false;\n        }",
+      "new": "if (proFn) {\n            proFn(IMPORT_STAGE_LOADING_PLATES, 0, 1, cb_cancel);\n            if (false)\n                return false;\n        }",
+      "description": "Ignore cancellation at the public loading-plates progress seam. The focused import row must fail its ordinary false-return and untouched plate-output assertions; exceptions or crashes receive no credit.",
+      "test_filter": "Bbs3mfLateCancellation",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "bbs-export-add-models-cancel-gate-ignored",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (proFn) {\n            proFn(EXPORT_STAGE_ADD_MODELS, 0, 1, cb_cancel);\n            if (cb_cancel)\n                return false;\n        }",
+      "new": "if (proFn) {\n            proFn(EXPORT_STAGE_ADD_MODELS, 0, 1, cb_cancel);\n            if (false)\n                return false;\n        }",
+      "description": "Ignore cancellation before model payload emission. The focused exporter row must fail its ordinary false-return and no-final-or-temporary-output assertions; exceptions or crashes receive no credit.",
+      "test_filter": "Bbs3mfLateCancellation",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "bbs-export-finish-cancel-gate-ignored",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (proFn) {\n            proFn(EXPORT_STAGE_FINISH, 0, 1, cb_cancel);\n            if (cb_cancel)\n                return false;\n        }",
+      "new": "if (proFn) {\n            proFn(EXPORT_STAGE_FINISH, 0, 1, cb_cancel);\n            if (false)\n                return false;\n        }",
+      "description": "Ignore cancellation after archive finalization. The focused exporter row must fail its ordinary false-return and no-final-or-temporary-output assertions; exceptions or crashes receive no credit.",
+      "test_filter": "Bbs3mfLateCancellation",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "config-cli-delimiter-keeps-parsing",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "            parse_options = false;",
+      "new": "            parse_options = true;",
+      "expected_matches": 1,
+      "test_filter": "ConfigCLI",
+      "description": "The public `--` delimiter must stop option parsing so subsequent option-looking arguments remain positional input; continuing to parse them makes the delimiter contract fail on the same six-argument control.",
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending_native"
+    },
+    {
+      "id": "config-cli-unknown-option-accepted",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "            boost::nowide::cerr << \"Invalid option --\" << token.c_str() << std::endl;\n            return false;",
+      "new": "            boost::nowide::cerr << \"Invalid option --\" << token.c_str() << std::endl;\n            return true;",
+      "expected_matches": 1,
+      "test_filter": "ConfigCLI",
+      "description": "An unknown public CLI option must reject the invocation before mutating the configuration; accepting it makes the unknown-option row's ordinary CHECK_FALSE and empty-state assertions fail.",
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending_native"
     }
   ]
 }

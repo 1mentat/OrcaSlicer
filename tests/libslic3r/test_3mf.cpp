@@ -2553,6 +2553,92 @@ TEST_CASE("BBS 3MF export cancellation stops before writing a project", "[3MF][B
     CHECK(called);
 }
 
+TEST_CASE("BBS 3MF import cancellation leaves plate output untouched at loading",
+          "[3MF][Bbs3mfLateCancellation][Import]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_late_import_cancel_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    std::vector<int> stages;
+    Model loaded_model;
+    LoadedProject loaded;
+    const bool result = load_model(archive.string(), loaded_model, loaded,
+        [&stages](int stage, int, int, bool& cancel) {
+            stages.push_back(stage);
+            cancel = stage == IMPORT_STAGE_LOADING_PLATES;
+        });
+
+    CHECK_FALSE(result);
+    REQUIRE(std::find(stages.begin(), stages.end(), IMPORT_STAGE_LOADING_PLATES) != stages.end());
+    CHECK(loaded.plates.empty());
+}
+
+TEST_CASE("BBS 3MF export cancellation removes unfinished archives at late stages",
+          "[3MF][Bbs3mfLateCancellation][Export]")
+{
+    const int target_stage = GENERATE(EXPORT_STAGE_ADD_MODELS, EXPORT_STAGE_FINISH);
+    const bool preserve_existing = GENERATE(false, true);
+    INFO("target export stage " << target_stage);
+    INFO("pre-existing destination " << preserve_existing);
+
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_late_export_cancel_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+
+    ScopedTemporaryDir output_dir("orca_bbs_late_export_cancel_output");
+    const std::filesystem::path output = std::filesystem::path(output_dir.string()) /
+                                         ("cancelled-" + std::to_string(target_stage) + ".3mf");
+    std::vector<int> stages;
+    StoreParams params;
+    params.path = output.string();
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+
+    std::string existing_archive;
+    if (preserve_existing) {
+        REQUIRE(store_bbs_3mf(params));
+        boost::nowide::ifstream input(output.string(), std::ios::binary);
+        REQUIRE(input.good());
+        existing_archive.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+        REQUIRE_FALSE(existing_archive.empty());
+    } else {
+        CHECK_FALSE(std::filesystem::exists(output));
+    }
+
+    params.proFn = [&stages, target_stage](int stage, int, int, bool& cancel) {
+        stages.push_back(stage);
+        cancel = stage == target_stage;
+    };
+
+    CHECK_FALSE(store_bbs_3mf(params));
+    REQUIRE(std::find(stages.begin(), stages.end(), target_stage) != stages.end());
+    CHECK_FALSE(std::filesystem::exists(output.string() + ".tmp"));
+
+    if (preserve_existing) {
+        boost::nowide::ifstream input(output.string(), std::ios::binary);
+        REQUIRE(input.good());
+        const std::string preserved{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        CHECK(preserved == existing_archive);
+    } else {
+        CHECK_FALSE(std::filesystem::exists(output));
+    }
+}
+
 TEST_CASE("BBS 3MF rejects missing package relationships and malformed model XML", "[3MF][Bbs3mfExtended][Errors]")
 {
     Model source;
