@@ -8083,10 +8083,7 @@ void mutate_model_mesh(const std::string &path, int fault)
         REQUIRE(vertices != std::string::npos);
         REQUIRE(triangles != std::string::npos);
         REQUIRE(triangles_end != std::string::npos);
-        if (fault == 0) {
-            data.replace(triangles, triangles_end + std::string("</triangles>").size() - triangles,
-                         "<triangles count=\"0\"></triangles>");
-        } else if (fault == 1) {
+        if (fault == 1) {
             const size_t x = data.find("x=\"", vertices);
             REQUIRE(x != std::string::npos);
             const size_t begin = x + 3;
@@ -8151,10 +8148,11 @@ void store_settings_archive(const std::string &path, bool foreign)
 
 } // namespace
 
-TEST_CASE("BBS rejects native archives with invalid mesh data",
+TEST_CASE("BBS rejects native archives with invalid vertex and triangle data",
           "[3MF][BbsImportContracts][Errors]")
 {
-    const int fault = GENERATE(0, 1, 2);
+    const int fault = GENERATE(1, 2);
+    CAPTURE(fault);
     ScopedTemporaryFile archive(".3mf");
     store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
 

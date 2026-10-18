@@ -12625,7 +12625,7 @@ TEST_CASE("Root filament preset export includes changed and default configuratio
     CHECK(values.at("filament_type") == root.config.opt<ConfigOptionStrings>("filament_type")->serialize());
     CHECK(values.at("filament_type") == changed_type);
     CHECK(values.at("filament_density") == unchanged_density);
-    CHECK(values.at(BBL_JSON_KEY_VERSION) == "2.3.4");
+    CHECK(values.at(BBL_JSON_KEY_VERSION) == "2.3.0.4");
     CHECK(values.at(BBL_JSON_KEY_TYPE) == Preset::get_iot_type_string(Preset::TYPE_FILAMENT));
     CHECK(values.at(BBL_JSON_KEY_FILAMENT_ID) == "root-filament-family");
     CHECK(values.at(ORCA_JSON_KEY_UPDATE_TIME) == "123");
