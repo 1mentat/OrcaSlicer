@@ -1252,7 +1252,7 @@ BrimRun run_everywhere_brim()
 
     const SLAPrintObject *object = fixture.print.objects().front();
     REQUIRE(object->is_step_done(slaposPad));
-    const TriangleMesh pad = object->pad_mesh();
+    TriangleMesh pad = object->pad_mesh();
     REQUIRE_FALSE(pad.empty());
     const auto bbox = pad.bounding_box();
     BrimRun result;
@@ -1301,7 +1301,7 @@ TEST_CASE("SLA automatic support generation creates printable support geometry",
     REQUIRE(object->is_step_done(slaposSupportPoints));
     REQUIRE(object->is_step_done(slaposSupportTree));
     REQUIRE_FALSE(object->get_support_points().empty());
-    const TriangleMesh support = object->support_mesh();
+    TriangleMesh support = object->support_mesh();
     REQUIRE_FALSE(support.empty());
     REQUIRE(std::isfinite(static_cast<double>(support.volume())));
     REQUIRE(std::abs(static_cast<double>(support.volume())) > 0.0);
@@ -1366,8 +1366,8 @@ TEST_CASE("SLA support-backed pads preserve both support and pad products",
     const SLAPrintObject *object = fixture.print.objects().front();
     REQUIRE(object->is_step_done(slaposSupportTree));
     REQUIRE(object->is_step_done(slaposPad));
-    const TriangleMesh support = object->support_mesh();
-    const TriangleMesh pad = object->pad_mesh();
+    TriangleMesh support = object->support_mesh();
+    TriangleMesh pad = object->pad_mesh();
     REQUIRE_FALSE(support.empty());
     REQUIRE_FALSE(pad.empty());
     REQUIRE(std::abs(static_cast<double>(support.volume())) > 0.0);
