@@ -1631,6 +1631,7 @@ std::string export_mesh(const TriangleMesh& mesh, const DynamicPrintConfig& conf
     Print local_print;
     init_print(std::vector<TriangleMesh>{mesh}, local_print, local_model, config, nullptr, false);
     const auto validation = local_print.validate();
+    INFO(validation.string);
     REQUIRE(validation.string.empty());
     REQUIRE_NOTHROW(local_print.process());
     REQUIRE_FALSE(local_print.objects().empty());
@@ -2511,6 +2512,9 @@ DynamicPrintConfig zaa_export_config(bool enabled)
     config.set_deserialize_strict({
         {"gcode_flavor", "marlin2"},
         {"use_relative_e_distances", false},
+        // Absolute extrusion addressing cannot use the family's per-layer E reset.
+        {"before_layer_change_gcode", ""},
+        {"layer_change_gcode", ""},
         {"z_offset", 0.0},
         {"spiral_mode", false},
         {"belt_printer", false},

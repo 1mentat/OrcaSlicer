@@ -750,7 +750,7 @@ TEST_CASE("Placeholder parser rejects empty and mixed-type initializer vectors",
           "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
-    CHECK_THROWS_WITH(parser.process("{local empty = ()}"),
+    CHECK_THROWS_WITH(parser.process("{local empty_vec = ()}"),
                       Catch::Matchers::ContainsSubstring("Cannot create vector variable from an empty initializer list"));
     CHECK_THROWS_WITH(parser.process("{local mixed = (true, 1)}"),
                       Catch::Matchers::ContainsSubstring("Mixing numeric and boolean types"));
