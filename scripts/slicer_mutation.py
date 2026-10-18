@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Run a small, reproducible mutation gate against production libslic3r tests.
 
-The harness validates a clean repository and a passing baseline, then creates
-one disposable detached git worktree.  It applies one exact byte replacement at
-a time, rebuilds and runs the selected tests, records the result, restores the
-source bytes, and removes the worktree.  No mutation is ever applied to the
-caller's checkout.
+The harness validates a clean repository and a passing baseline, then uses an
+opt-in persistent detached worktree or a disposable one. It applies one exact byte
+replacement at a time, rebuilds and runs the selected tests, records the result,
+restores the source bytes, and verifies tracked cleanliness. No mutation is ever
+applied to the caller's checkout.
 
 Commands are split with ``shlex`` and executed with ``shell=False``.  Use
 ``{root}``, ``{build}``, and ``{filter}`` placeholders in command strings.  A
@@ -23,6 +23,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -557,6 +558,328 @@ def _checkpoint(report_path: Path, report: dict[str, Any], phase: str) -> None:
     _write_report(report_path, report)
 
 
+_PERSISTENT_WORKTREE_SCHEMA = 1
+_PERSISTENT_HARNESS = "slicer_mutation"
+_PERSISTENT_MARKER = ".slicer-mutation-worktree.json"
+_PERSISTENT_LOCK_SUFFIX = ".slicer-mutation.lock"
+
+
+def _reject_symlink_components(path: Path, *, label: str) -> None:
+    """Reject symlinked path components before any harness-owned write."""
+    current = Path(path.anchor) if path.anchor else Path()
+    for component in path.parts[1:] if path.is_absolute() else path.parts:
+        current /= component
+        if current.is_symlink():
+            # macOS exposes the ordinary temporary directory through these
+            # system aliases.  They are safe canonical aliases, unlike a
+            # caller-provided link in the worktree path.
+            canonical = Path(os.path.realpath(current))
+            if (current == Path("/var") and canonical == Path("/private/var")) or \
+                    (current == Path("/tmp") and canonical == Path("/private/tmp")):
+                continue
+            raise MutationError(f"{label} must not contain symlink component: {current}")
+
+
+def _canonical_path(path: Path) -> Path:
+    """Canonicalize system aliases before ownership and descendant checks."""
+    return Path(os.path.realpath(path))
+
+
+def _canonical_git_path(repo: Path, value: str) -> Path:
+    candidate = Path(value.strip())
+    if not candidate.is_absolute():
+        candidate = repo / candidate
+    return _canonical_path(candidate)
+
+
+def _persistent_git_common_dir(repo: Path) -> Path:
+    result = _git(repo, "rev-parse", "--git-common-dir")
+    if result.returncode != 0:
+        raise MutationError(f"cannot resolve git common directory: {_truncate(result.stderr)}")
+    return _canonical_git_path(repo, result.stdout)
+
+
+def _registered_worktree(repo: Path, path: Path, expected_head: str) -> None:
+    listing = _git(repo, "worktree", "list", "--porcelain")
+    if listing.returncode != 0:
+        raise MutationError(f"cannot inspect caller worktree registration: {_truncate(listing.stderr)}")
+    record: dict[str, str] = {}
+    records: list[dict[str, str]] = []
+    for line in listing.stdout.splitlines() + [""]:
+        if not line.strip():
+            if record:
+                records.append(record)
+                record = {}
+            continue
+        key, _, value = line.partition(" ")
+        record[key] = value
+    canonical = _canonical_path(path)
+    for candidate in records:
+        if candidate.get("worktree") and _canonical_path(Path(candidate["worktree"])) == canonical:
+            if candidate.get("HEAD") != expected_head:
+                raise MutationError("persistent worktree registration has an unexpected HEAD")
+            return
+    raise MutationError("persistent worktree is not registered with the caller repository")
+
+
+def _verify_persistent_worktree(repo: Path, path: Path, expected_head: str) -> None:
+    top = _git(path, "rev-parse", "--show-toplevel")
+    if top.returncode != 0 or _canonical_git_path(path, top.stdout) != _canonical_path(path):
+        raise MutationError("persistent path is not a valid worktree for this harness")
+    caller_common = _persistent_git_common_dir(repo)
+    worktree_common = _persistent_git_common_dir(path)
+    if caller_common != worktree_common:
+        raise MutationError("persistent worktree belongs to another git repository")
+    branch = _git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch.returncode == 0:
+        raise MutationError("persistent worktree must remain detached")
+    if branch.returncode != 1:
+        raise MutationError(f"cannot inspect persistent worktree HEAD state: {_truncate(branch.stderr)}")
+    head = _git(path, "rev-parse", "HEAD")
+    if head.returncode != 0 or head.stdout.strip() != expected_head:
+        raise MutationError("persistent worktree has an unexpected HEAD")
+    status = _git(path, "status", "--porcelain", "--untracked-files=no")
+    if status.returncode != 0:
+        raise MutationError(f"cannot inspect persistent worktree: {_truncate(status.stderr)}")
+    if status.stdout.strip():
+        raise MutationError("persistent worktree has dirty tracked files")
+    _registered_worktree(repo, path, expected_head)
+
+
+def _persistent_worktree_path(repo: Path, argument: str | os.PathLike[str]) -> Path:
+    path = _lexical_output_path(repo, argument)
+    _reject_symlink_components(path, label="persistent worktree")
+    path = _canonical_path(path)
+    repo = _canonical_path(repo)
+    if path == repo or _path_under(path, repo):
+        raise MutationError("persistent worktree must be outside the caller checkout")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_exclusive_json(path: Path, payload: dict[str, Any]) -> None:
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise MutationError(f"persistent worktree is already in use: {path}") from exc
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+@dataclass
+class _PersistentLease:
+    repo: Path
+    path: Path
+    lock: Path
+    marker: Path
+    reused: bool
+    previous_head: str | None
+    checkout: dict[str, Any] | None
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "persistent": True,
+            "path": str(self.path),
+            "marker": str(self.marker),
+            "lock": str(self.lock),
+            "reused": self.reused,
+            "previous_head": self.previous_head,
+            "checkout": self.checkout,
+            "retained_untracked_build_capability": "preserved by non-forcing detached checkout",
+        }
+
+    def release(self) -> None:
+        try:
+            (self.lock / "owner.json").unlink()
+            self.lock.rmdir()
+        except OSError as exc:
+            raise MutationError(f"cannot release persistent worktree lock {self.lock}: {exc}") from exc
+
+
+def _persistent_worktree(repo: Path, path: Path, commit: str) -> _PersistentLease:
+    """Acquire a marked, detached worktree without deleting its untracked build."""
+    repo = _canonical_path(Path(os.path.abspath(repo)))
+    path = Path(os.path.abspath(path))
+    _reject_symlink_components(path, label="persistent worktree")
+    path = _canonical_path(path)
+    if path == repo or _path_under(path, repo):
+        raise MutationError("persistent worktree must be outside the caller checkout")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_name(path.name + _PERSISTENT_LOCK_SUFFIX)
+    if lock.exists() or lock.is_symlink():
+        raise MutationError(f"persistent worktree is already in use: {lock}")
+    try:
+        lock.mkdir(mode=0o700)
+    except FileExistsError as exc:
+        raise MutationError(f"persistent worktree is already in use: {lock}") from exc
+    owner = lock / "owner.json"
+    try:
+        _write_exclusive_json(owner, {
+            "schema_version": _PERSISTENT_WORKTREE_SCHEMA,
+            "harness": _PERSISTENT_HARNESS,
+            "pid": os.getpid(),
+            "repo": str(repo),
+            "path": str(path),
+        })
+    except Exception:
+        lock.rmdir()
+        raise
+    marker = path / _PERSISTENT_MARKER
+    created = False
+    try:
+        previous_head: str | None = None
+        checkout: dict[str, Any] | None = None
+        if path.exists():
+            if not path.is_dir():
+                raise MutationError(f"persistent worktree path is not a directory: {path}")
+            if marker.is_symlink() or not marker.is_file():
+                raise MutationError("existing persistent path is not a harness-owned worktree")
+            try:
+                identity = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise MutationError(f"cannot read persistent worktree marker: {exc}") from exc
+            expected = {
+                "schema_version": _PERSISTENT_WORKTREE_SCHEMA,
+                "harness": _PERSISTENT_HARNESS,
+                "repo": str(repo),
+                "path": str(path),
+            }
+            if any(identity.get(key) != value for key, value in expected.items()):
+                raise MutationError("existing persistent worktree marker belongs to another repository or harness")
+            current = _git(path, "rev-parse", "HEAD")
+            if current.returncode != 0:
+                raise MutationError(f"cannot resolve persistent worktree HEAD: {_truncate(current.stderr)}")
+            previous_head = current.stdout.strip()
+            _verify_persistent_worktree(repo, path, previous_head)
+            if previous_head != commit:
+                checkout_result = _git(path, "checkout", "--detach", commit)
+                checkout = checkout_result.json()
+                if checkout_result.returncode != 0:
+                    raise MutationError(f"cannot move persistent worktree to {commit}: {_truncate(checkout_result.stderr)}")
+                _verify_persistent_worktree(repo, path, commit)
+            else:
+                _verify_persistent_worktree(repo, path, commit)
+            reused = True
+        else:
+            parent = path.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            add = _git(repo, "worktree", "add", "--detach", str(path), commit)
+            if add.returncode != 0:
+                raise MutationError(f"cannot create persistent worktree: {_truncate(add.stderr)}")
+            created = True
+            _verify_persistent_worktree(repo, path, commit)
+            _write_exclusive_json(marker, {
+                "schema_version": _PERSISTENT_WORKTREE_SCHEMA,
+                "harness": _PERSISTENT_HARNESS,
+                "repo": str(repo),
+                "path": str(path),
+                "created_commit": commit,
+            })
+            reused = False
+        return _PersistentLease(repo, path, lock, marker, reused, previous_head, checkout)
+    except Exception:
+        try:
+            if created and path.exists():
+                _git(repo, "worktree", "remove", "--force", str(path))
+        finally:
+            try:
+                owner.unlink()
+                lock.rmdir()
+            except OSError:
+                pass
+        raise
+
+
+@contextmanager
+def _mutation_worktree(repo: Path, commit: str, work_parent: Path | None,
+                       persistent_path: Path | None, report_path: Path,
+                       report: dict[str, Any]):
+    if persistent_path is not None:
+        lease = _persistent_worktree(repo, persistent_path, commit)
+        body_failed = False
+        try:
+            try:
+                report["worktree"] = lease.report()
+                _checkpoint(report_path, report, "persistent_worktree_ready")
+                yield lease.path
+            except BaseException:
+                body_failed = True
+                raise
+        finally:
+            postflight_error: Exception | None = None
+            try:
+                _verify_persistent_worktree(repo, lease.path, commit)
+                report["worktree"]["postflight_tracked_clean"] = True
+            except MutationError as exc:
+                postflight_error = exc
+                report.setdefault("worktree", {})["postflight_error"] = str(exc)
+                report["status"] = "postflight_dirty"
+            try:
+                lease.release()
+                report.setdefault("worktree", {})["lock_released"] = True
+                _checkpoint(report_path, report, "persistent_worktree_released")
+            except Exception as exc:
+                report.setdefault("worktree", {})["release_error"] = str(exc)
+                report["cleanup_failed"] = True
+                report["status"] = "cleanup_failed"
+                if not body_failed and postflight_error is None:
+                    raise
+            if not body_failed and postflight_error is not None:
+                raise postflight_error
+        return
+    with tempfile.TemporaryDirectory(prefix="slicer-mutation-",
+                                      dir=str(work_parent) if work_parent else None) as parent:
+        worktree = Path(parent) / "repo"
+        report["worktree"] = {"path": str(worktree), "persistent": False}
+        body_failed = False
+        try:
+            try:
+                add = _git(repo, "worktree", "add", "--detach", str(worktree), commit)
+                report["worktree"]["add"] = add.json()
+                _checkpoint(report_path, report, "worktree_add")
+                if add.returncode != 0:
+                    raise MutationError(f"cannot create disposable worktree: {_truncate(add.stderr)}")
+                yield worktree
+            except BaseException:
+                body_failed = True
+                raise
+        finally:
+            postflight_error: Exception | None = None
+            try:
+                if (worktree / ".git").exists():
+                    _verify_persistent_worktree(repo, worktree, commit)
+                    report["worktree"]["postflight_tracked_clean"] = True
+            except MutationError as exc:
+                postflight_error = exc
+                report["worktree"]["postflight_error"] = str(exc)
+                report["status"] = "postflight_dirty"
+            try:
+                remove = _git(repo, "worktree", "remove", "--force", str(worktree))
+                report["worktree"]["remove"] = remove.json()
+                if remove.timed_out or remove.returncode != 0:
+                    report["cleanup_failed"] = True
+                    report["status"] = "cleanup_failed"
+                _checkpoint(report_path, report, "worktree_removed")
+            except Exception as exc:
+                report["worktree"]["cleanup_error"] = str(exc)
+                report["cleanup_failed"] = True
+                report["status"] = "cleanup_failed"
+                if not body_failed and postflight_error is None:
+                    raise
+            if not body_failed and postflight_error is not None:
+                raise postflight_error
+
+
 def _result_log_evidence(result: CommandResult) -> LogEvidence | None:
     if result.log_path is None:
         return None
@@ -623,133 +946,132 @@ def run_mutation(args: argparse.Namespace) -> int:
         command_serial += 1
         return _command_log(log_root, command_serial, phase, label)
 
-    with tempfile.TemporaryDirectory(prefix="slicer-mutation-", dir=str(work_parent) if work_parent else None) as parent:
-        worktree = Path(parent) / "repo"
-        report["worktree"] = {"path": str(worktree)}
-        try:
-            add = _git(repo, "worktree", "add", "--detach", str(worktree), commit)
-            report["worktree"]["add"] = add.json()
-            _checkpoint(report_path, report, "worktree_add")
-            if add.returncode != 0:
-                raise MutationError(f"cannot create disposable worktree: {_truncate(add.stderr)}")
-            build_dir = (worktree / args.build_dir).resolve()
-            if configure_argv:
-                configure = run_command(_expand(configure_argv, root=worktree, build=build_dir),
-                                        cwd=worktree, timeout=args.timeout,
-                                        output_file=next_log("configure"))
-                report["configure"] = configure.json()
-                _checkpoint(report_path, report, "configure")
-                if configure.timed_out or configure.returncode != 0:
-                    report["status"] = "configure_timeout" if configure.timed_out else "configure_error"
-                    _checkpoint(report_path, report, "configure_failed")
-                    return 2
-            build = _expand(build_argv, root=worktree, build=(worktree / args.build_dir).resolve())
-            baseline_build = run_command(build, cwd=worktree, timeout=args.timeout,
-                                         output_file=next_log("baseline-build"))
-            report["baseline_build"] = baseline_build.json()
-            _checkpoint(report_path, report, "baseline_build")
-            if baseline_build.timed_out or baseline_build.returncode != 0:
-                report["status"] = _classify_build(baseline_build)
-                _checkpoint(report_path, report, "baseline_build_failed")
+    persistent_path = (_persistent_worktree_path(repo, args.persistent_worktree)
+                       if args.persistent_worktree else None)
+    with _mutation_worktree(repo, commit, work_parent, persistent_path,
+                        report_path, report) as worktree:
+        build_dir = (worktree / args.build_dir).resolve()
+        if configure_argv:
+            configure = run_command(_expand(configure_argv, root=worktree, build=build_dir),
+                                    cwd=worktree, timeout=args.timeout,
+                                    output_file=next_log("configure"))
+            report["configure"] = configure.json()
+            _checkpoint(report_path, report, "configure")
+            if configure.timed_out or configure.returncode != 0:
+                report["status"] = "configure_timeout" if configure.timed_out else "configure_error"
+                _checkpoint(report_path, report, "configure_failed")
                 return 2
-            # Validate each manifest filter against the unmutated build.  A
-            # broad suite baseline can fail for unrelated reasons while still
-            # hiding whether the selected test actually ran.
-            filters = sorted(set(mutant.test_filter for mutant in mutants))
-            baseline_tests: list[dict[str, Any]] = []
-            baseline_counts: dict[str, int] = {}
-            for test_filter in filters:
-                baseline_mutant = Mutant("baseline", "", "x", "y", "", test_filter)
-                selected = _test_command(test_argv, baseline_mutant)
-                baseline_test = run_command(_expand(selected, root=worktree,
-                                                     build=(worktree / args.build_dir).resolve()),
-                                            cwd=worktree, timeout=args.timeout,
-                                            output_file=next_log("baseline-test", test_filter))
-                log_evidence = _result_log_evidence(baseline_test)
-                evidence = (log_evidence.test_count if log_evidence is not None
-                            else test_evidence(baseline_test.stdout + baseline_test.stderr))
-                baseline_counts[test_filter] = evidence
-                classification = _classify_test(baseline_test, evidence,
-                                                log_evidence=log_evidence)
-                baseline_tests.append({
-                    "filter": test_filter,
-                    "test_evidence": evidence,
-                    "classification": classification,
-                    "result": baseline_test.json(),
-                })
-                if log_evidence is not None:
-                    baseline_tests[-1]["log_evidence"] = asdict(log_evidence)
-                report["baseline_tests"] = baseline_tests
-                _checkpoint(report_path, report, f"baseline_test:{test_filter or 'all'}")
-                if classification != "survived":
-                    report["status"] = ("baseline_test_timeout" if
-                                         (log_evidence is not None and log_evidence.timed_out) or
-                                         _test_timed_out(baseline_test) else
-                                         "baseline_test_failed" if evidence > 0 else
-                                         "baseline_no_evidence")
-                    _checkpoint(report_path, report, "baseline_test_failed")
-                    return 2
+        build = _expand(build_argv, root=worktree, build=(worktree / args.build_dir).resolve())
+        baseline_build = run_command(build, cwd=worktree, timeout=args.timeout,
+                                     output_file=next_log("baseline-build"))
+        report["baseline_build"] = baseline_build.json()
+        _checkpoint(report_path, report, "baseline_build")
+        if baseline_build.timed_out or baseline_build.returncode != 0:
+            report["status"] = _classify_build(baseline_build)
+            _checkpoint(report_path, report, "baseline_build_failed")
+            return 2
+        # Validate each manifest filter against the unmutated build.  A
+        # broad suite baseline can fail for unrelated reasons while still
+        # hiding whether the selected test actually ran.
+        filters = sorted(set(mutant.test_filter for mutant in mutants))
+        baseline_tests: list[dict[str, Any]] = []
+        baseline_counts: dict[str, int] = {}
+        for test_filter in filters:
+            baseline_mutant = Mutant("baseline", "", "x", "y", "", test_filter)
+            selected = _test_command(test_argv, baseline_mutant)
+            baseline_test = run_command(_expand(selected, root=worktree,
+                                                 build=(worktree / args.build_dir).resolve()),
+                                        cwd=worktree, timeout=args.timeout,
+                                        output_file=next_log("baseline-test", test_filter))
+            log_evidence = _result_log_evidence(baseline_test)
+            evidence = (log_evidence.test_count if log_evidence is not None
+                        else test_evidence(baseline_test.stdout + baseline_test.stderr))
+            baseline_counts[test_filter] = evidence
+            classification = _classify_test(baseline_test, evidence,
+                                            log_evidence=log_evidence)
+            baseline_tests.append({
+                "filter": test_filter,
+                "test_evidence": evidence,
+                "classification": classification,
+                "result": baseline_test.json(),
+            })
+            if log_evidence is not None:
+                baseline_tests[-1]["log_evidence"] = asdict(log_evidence)
             report["baseline_tests"] = baseline_tests
-            _checkpoint(report_path, report, "baseline_complete")
+            _checkpoint(report_path, report, f"baseline_test:{test_filter or 'all'}")
+            if classification != "survived":
+                report["status"] = ("baseline_test_timeout" if
+                                     (log_evidence is not None and log_evidence.timed_out) or
+                                     _test_timed_out(baseline_test) else
+                                     "baseline_test_failed" if evidence > 0 else
+                                     "baseline_no_evidence")
+                _checkpoint(report_path, report, "baseline_test_failed")
+                return 2
+        report["baseline_tests"] = baseline_tests
+        _checkpoint(report_path, report, "baseline_complete")
 
-            for mutant in mutants:
-                entry: dict[str, Any] = {
-                    "id": mutant.id, "path": mutant.path, "description": mutant.description,
-                    "test_filter": mutant.test_filter,
-                    "old": mutant.old, "new": mutant.new,
-                    "old_sha256": hashlib.sha256(mutant.old.encode("utf-8")).hexdigest(),
-                    "new_sha256": hashlib.sha256(mutant.new.encode("utf-8")).hexdigest(),
-                }
-                path: Path | None = None
-                original: bytes | None = None
-                try:
-                    path, original = _apply(mutant, worktree)
-                    entry["source_match"] = "exactly_one"
-                    mutant_build = run_command(build, cwd=worktree, timeout=args.timeout,
-                                               output_file=next_log("mutant-build", mutant.id))
-                    entry["build"] = mutant_build.json()
-                    if mutant_build.timed_out or mutant_build.returncode != 0:
-                        entry["status"] = _classify_build(mutant_build)
-                        report["mutants"].append(entry)
-                        _checkpoint(report_path, report, f"mutant:{mutant.id}:build")
-                        continue
-                    selected_test = _test_command(test_argv, mutant)
-                    mutant_test = run_command(_expand(selected_test, root=worktree,
-                                                       build=(worktree / args.build_dir).resolve()),
-                                              cwd=worktree, timeout=args.timeout,
-                                              output_file=next_log("mutant-test", mutant.id))
-                    log_evidence = _result_log_evidence(mutant_test)
-                    mutant_evidence = (log_evidence.test_count if log_evidence is not None
-                                       else test_evidence(mutant_test.stdout + mutant_test.stderr))
-                    entry["test"] = mutant_test.json()
-                    entry["test_evidence"] = mutant_evidence
-                    if log_evidence is not None:
-                        entry["log_evidence"] = asdict(log_evidence)
-                    entry["expected_test_count"] = baseline_counts[mutant.test_filter]
-                    entry["status"] = _classify_test(
-                        mutant_test, mutant_evidence, baseline_counts[mutant.test_filter],
-                        log_evidence=log_evidence)
+        for mutant in mutants:
+            entry: dict[str, Any] = {
+                "id": mutant.id, "path": mutant.path, "description": mutant.description,
+                "test_filter": mutant.test_filter,
+                "old": mutant.old, "new": mutant.new,
+                "old_sha256": hashlib.sha256(mutant.old.encode("utf-8")).hexdigest(),
+                "new_sha256": hashlib.sha256(mutant.new.encode("utf-8")).hexdigest(),
+            }
+            path: Path | None = None
+            original: bytes | None = None
+            try:
+                path, original = _apply(mutant, worktree)
+                entry["source_match"] = "exactly_one"
+                mutant_build = run_command(build, cwd=worktree, timeout=args.timeout,
+                                           output_file=next_log("mutant-build", mutant.id))
+                entry["build"] = mutant_build.json()
+                if mutant_build.timed_out or mutant_build.returncode != 0:
+                    entry["status"] = _classify_build(mutant_build)
                     report["mutants"].append(entry)
-                    _checkpoint(report_path, report, f"mutant:{mutant.id}:test")
-                except MutationError as exc:
-                    entry["status"] = "mutation_error"
-                    entry["error"] = str(exc)
-                    report["mutants"].append(entry)
-                    _checkpoint(report_path, report, f"mutant:{mutant.id}:error")
-                finally:
-                    if path is not None and original is not None:
-                        path.write_bytes(original)
-                        if path.read_bytes() != original:
-                            raise MutationError(f"failed to restore mutant source: {path}")
-        finally:
-            remove = _git(repo, "worktree", "remove", "--force", str(worktree))
-            report["worktree"]["remove"] = remove.json()
-            if remove.timed_out or remove.returncode != 0:
-                report["cleanup_failed"] = True
-                report["status"] = "cleanup_failed"
-            # Also persist early baseline failures after the worktree cleanup,
-            # so the report contains the exact remove command and outcome.
-            _checkpoint(report_path, report, "worktree_removed")
+                    _checkpoint(report_path, report, f"mutant:{mutant.id}:build")
+                    continue
+                selected_test = _test_command(test_argv, mutant)
+                mutant_test = run_command(_expand(selected_test, root=worktree,
+                                                   build=(worktree / args.build_dir).resolve()),
+                                          cwd=worktree, timeout=args.timeout,
+                                          output_file=next_log("mutant-test", mutant.id))
+                log_evidence = _result_log_evidence(mutant_test)
+                mutant_evidence = (log_evidence.test_count if log_evidence is not None
+                                   else test_evidence(mutant_test.stdout + mutant_test.stderr))
+                entry["test"] = mutant_test.json()
+                entry["test_evidence"] = mutant_evidence
+                if log_evidence is not None:
+                    entry["log_evidence"] = asdict(log_evidence)
+                entry["expected_test_count"] = baseline_counts[mutant.test_filter]
+                entry["status"] = _classify_test(
+                    mutant_test, mutant_evidence, baseline_counts[mutant.test_filter],
+                    log_evidence=log_evidence)
+                report["mutants"].append(entry)
+                _checkpoint(report_path, report, f"mutant:{mutant.id}:test")
+            except MutationError as exc:
+                entry["status"] = "mutation_error"
+                entry["error"] = str(exc)
+                report["mutants"].append(entry)
+                _checkpoint(report_path, report, f"mutant:{mutant.id}:error")
+            finally:
+                if path is not None and original is not None:
+                    path.write_bytes(original)
+                    restored = path.read_bytes() == original
+                    entry["restoration"] = {"path": str(path), "restored": restored,
+                                            "sha256": hashlib.sha256(original).hexdigest()}
+                    if not restored:
+                        raise MutationError(f"failed to restore mutant source: {path}")
+                if persistent_path is not None or (worktree / ".git").exists():
+                    try:
+                        _verify_persistent_worktree(repo, worktree, commit)
+                        entry["postflight_tracked_clean"] = True
+                    except MutationError as exc:
+                        entry["postflight_tracked_clean"] = False
+                        entry["postflight_error"] = str(exc)
+                        report["status"] = "postflight_dirty"
+                        _checkpoint(report_path, report, f"mutant:{mutant.id}:postflight_error")
+                        raise
     statuses = [entry.get("status") for entry in report["mutants"]]
     report["counts"] = {status: statuses.count(status) for status in sorted(set(statuses))}
     if report.get("cleanup_failed"):
@@ -785,6 +1107,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-mutants", type=int, default=DEFAULT_MAX_MUTANTS)
     run.add_argument("--out", default="build/slicer-mutation")
     run.add_argument("--work-root", help="parent directory for disposable worktree")
+    run.add_argument("--persistent-worktree", help="opt-in harness-owned detached worktree retained between runs")
     run.add_argument("--timeout", type=float, default=1800.0)
     return parser
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import shlex
 import sys
 import subprocess
 import tempfile
@@ -520,6 +521,34 @@ class MutationEvidenceHardeningTests(unittest.TestCase):
 
 
 class MutationCheckpointIntegrationTests(unittest.TestCase):
+    def test_disposable_worktree_checkpoint_failure_still_attempts_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / "repo"
+            repo.mkdir()
+            out = Path(temp) / "evidence"
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--out", str(out),
+                "--build-command", "build", "--test-command", "test",
+                "--max-mutants", "1",
+            ])
+            mutant = slicer_mutation.Mutant("one", "source.cpp", "old", "new", "")
+
+            def git(_repo, *args):
+                return slicer_mutation.CommandResult(["git", *args], 0, 0.01, "", "")
+
+            def checkpoint(path, report, phase):
+                if phase == "worktree_add":
+                    raise OSError("report disk failure")
+                slicer_mutation._write_report(path, report)
+
+            with mock.patch.object(slicer_mutation, "validate_clean_repo", return_value="a" * 40), \
+                 mock.patch.object(slicer_mutation, "_load_mutants", return_value=[mutant]), \
+                 mock.patch.object(slicer_mutation, "_git", side_effect=git) as run_git, \
+                 mock.patch.object(slicer_mutation, "_checkpoint", side_effect=checkpoint):
+                with self.assertRaises(OSError):
+                    slicer_mutation.run_mutation(args)
+            self.assertEqual([call.args[2] for call in run_git.call_args_list], ["add", "remove"])
+
     def test_failed_worktree_add_still_attempts_cleanup(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp) / "repo"
@@ -706,6 +735,258 @@ class MutationTempDirectoryPreflightTests(unittest.TestCase):
                 checked = slicer_mutation._preflight_temp_environment()
             self.assertEqual(checked, [{"variable": "TMPDIR", "path": temp}])
             self.assertEqual(list(Path(temp).iterdir()), [])
+
+
+class PersistentMutationWorktreeTests(unittest.TestCase):
+    def _git(self, cwd: Path, *args: str) -> str:
+        result = subprocess.run(["git", *args], cwd=cwd, check=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True)
+        return result.stdout.strip()
+
+    def _repo(self, root: Path) -> tuple[Path, str, str]:
+        repo = root / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "mutation-test@example.invalid")
+        self._git(repo, "config", "user.name", "Mutation Test")
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (repo / "source.cpp").write_text("before\n", encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "first")
+        first = self._git(repo, "rev-parse", "HEAD")
+        (repo / "source.cpp").write_text("second\n", encoding="utf-8")
+        self._git(repo, "add", "source.cpp")
+        self._git(repo, "commit", "-qm", "second")
+        second = self._git(repo, "rev-parse", "HEAD")
+        return repo, first, second
+
+    def test_persistent_worktree_reuses_ignored_build_and_moves_clean_commit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, first, second = self._repo(Path(temp))
+            persistent = Path(temp) / "retained"
+            lease = slicer_mutation._persistent_worktree(repo, persistent, first)
+            self.assertFalse(lease.reused)
+            self.assertIsNone(lease.previous_head)
+            (persistent / "build").mkdir()
+            (persistent / "build" / "cache.bin").write_bytes(b"retained-build")
+            lease.release()
+
+            lease = slicer_mutation._persistent_worktree(repo, persistent, second)
+            try:
+                self.assertTrue(lease.reused)
+                self.assertEqual(lease.previous_head, first)
+                self.assertEqual(self._git(persistent, "rev-parse", "HEAD"), second)
+                self.assertEqual((persistent / "source.cpp").read_text(encoding="utf-8"), "second\n")
+                self.assertEqual((persistent / "build" / "cache.bin").read_bytes(), b"retained-build")
+                detached = subprocess.run(
+                    ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                    cwd=persistent, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True)
+                self.assertEqual(detached.returncode, 1)
+            finally:
+                lease.release()
+            self.assertFalse((persistent.with_name(persistent.name + ".slicer-mutation.lock")).exists())
+
+    def test_persistent_rejects_lock_dirty_branch_wrong_owner_and_symlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, first, _ = self._repo(root)
+            persistent = root / "retained"
+            lease = slicer_mutation._persistent_worktree(repo, persistent, first)
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "already in use"):
+                slicer_mutation._persistent_worktree(repo, persistent, first)
+            lease.release()
+
+            (persistent / "source.cpp").write_text("dirty\n", encoding="utf-8")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "dirty tracked"):
+                slicer_mutation._persistent_worktree(repo, persistent, first)
+            (persistent / "source.cpp").write_text("before\n", encoding="utf-8")
+
+            self._git(persistent, "switch", "-c", "attached")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "detached"):
+                slicer_mutation._persistent_worktree(repo, persistent, first)
+            self._git(persistent, "switch", "--detach", first)
+
+            marker = persistent / slicer_mutation._PERSISTENT_MARKER
+            identity = json.loads(marker.read_text(encoding="utf-8"))
+            other = root / "other"
+            other.mkdir()
+            identity["repo"] = str(other)
+            marker.write_text(json.dumps(identity), encoding="utf-8")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "another repository"):
+                slicer_mutation._persistent_worktree(repo, persistent, first)
+            identity["repo"] = str(repo)
+            marker.write_text(json.dumps(identity), encoding="utf-8")
+
+            link = root / "retained-link"
+            link.symlink_to(persistent, target_is_directory=True)
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "symlink"):
+                slicer_mutation._persistent_worktree_path(repo, link)
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "outside"):
+                slicer_mutation._persistent_worktree_path(repo, repo)
+
+    def test_marker_cannot_forge_common_directory_ownership(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            left_root = root / "left"
+            right_root = root / "right"
+            left_root.mkdir()
+            right_root.mkdir()
+            left, left_head, _ = self._repo(left_root)
+            right, right_head, _ = self._repo(right_root)
+            persistent = root / "right-retained"
+            lease = slicer_mutation._persistent_worktree(right, persistent, right_head)
+            lease.release()
+            marker = persistent / slicer_mutation._PERSISTENT_MARKER
+            identity = json.loads(marker.read_text(encoding="utf-8"))
+            identity["repo"] = str(left.resolve())
+            identity["path"] = str(persistent.resolve())
+            marker.write_text(json.dumps(identity), encoding="utf-8")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "another git repository"):
+                slicer_mutation._persistent_worktree(left, persistent, left_head)
+            self._git(right, "worktree", "remove", "--force", str(persistent))
+
+    def test_report_checkpoint_failure_releases_persistent_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, first, _ = self._repo(root)
+            persistent = root / "retained"
+            report_path = root / "report.json"
+            report = {}
+
+            def fail_ready(_path, _report, phase):
+                if phase == "persistent_worktree_ready":
+                    raise OSError("report disk failure")
+
+            with mock.patch.object(slicer_mutation, "_checkpoint", side_effect=fail_ready), \
+                    self.assertRaises(OSError):
+                with slicer_mutation._mutation_worktree(repo, first, None, persistent,
+                                                        report_path, report):
+                    pass
+            self.assertFalse((persistent.with_name(persistent.name + ".slicer-mutation.lock")).exists())
+
+    def test_tracked_edit_by_fake_build_is_rejected_after_source_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, _, current = self._repo(root)
+            (repo / "other.cpp").write_text("clean\n", encoding="utf-8")
+            self._git(repo, "add", "other.cpp")
+            self._git(repo, "commit", "-qm", "other")
+            current = self._git(repo, "rev-parse", "HEAD")
+            manifest = root / "mutants.json"
+            manifest.write_text(json.dumps({"mutants": [{
+                "id": "tracked-side-effect", "path": "source.cpp", "old": "second", "new": "after",
+                "description": "fake build edits another tracked file", "test_filter": "FakeMutation",
+            }]}), encoding="utf-8")
+            persistent = root / "retained"
+            out = root / "evidence"
+            code = ("import pathlib; "
+                    "pathlib.Path('other.cpp').write_text('dirty\\n') if "
+                    "pathlib.Path('source.cpp').read_text() == 'after\\n' else None")
+            test_code = "print('1 tests passed')"
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--build-dir", "build",
+                "--build-command", f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}",
+                "--test-command", f"{shlex.quote(sys.executable)} -c {shlex.quote(test_code)}",
+                "--mutants", str(manifest), "--max-mutants", "1", "--out", str(out),
+                "--persistent-worktree", str(persistent), "--timeout", "30",
+            ])
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "dirty tracked"):
+                slicer_mutation.run_mutation(args)
+            self.assertEqual((persistent / "source.cpp").read_text(encoding="utf-8"), "second\n")
+            self.assertEqual((persistent / "other.cpp").read_text(encoding="utf-8"), "dirty\n")
+            self.assertFalse((persistent.with_name(persistent.name + ".slicer-mutation.lock")).exists())
+            report = json.loads((out / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "postflight_dirty")
+            self.assertEqual(self._git(repo, "rev-parse", "HEAD"), current)
+
+    def test_missing_git_metadata_stops_before_the_next_persistent_mutant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, _, _ = self._repo(root)
+            manifest = root / "mutants.json"
+            manifest.write_text(json.dumps({"mutants": [
+                {"id": name, "path": "source.cpp", "old": "second", "new": name,
+                 "description": "fake build removes worktree metadata", "test_filter": "FakeMutation"}
+                for name in ("first-mutant", "second-mutant")
+            ]}), encoding="utf-8")
+            persistent = root / "retained"
+            code = ("import pathlib; "
+                    "s=pathlib.Path('source.cpp').read_text().strip(); "
+                    "p=pathlib.Path('.git'); "
+                    "pathlib.Path('executed-mutants.txt').open('a').write(s+'\\n') if s!='second' else None; "
+                    "p.unlink() if s!='second' and p.exists() else None")
+            test_code = "print('1 tests passed')"
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo),
+                "--build-command", f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}",
+                "--test-command", f"{shlex.quote(sys.executable)} -c {shlex.quote(test_code)}",
+                "--mutants", str(manifest), "--max-mutants", "2",
+                "--out", str(root / "evidence"), "--persistent-worktree", str(persistent),
+                "--timeout", "30",
+            ])
+            with self.assertRaises(slicer_mutation.MutationError):
+                slicer_mutation.run_mutation(args)
+            self.assertEqual((persistent / "executed-mutants.txt").read_text().splitlines(), ["first-mutant"])
+            self.assertEqual((persistent / "source.cpp").read_text(), "second\n")
+            self.assertFalse(persistent.with_name(persistent.name + ".slicer-mutation.lock").exists())
+            report = json.loads((root / "evidence" / "mutation-report.json").read_text())
+            self.assertEqual(report["status"], "postflight_dirty")
+            self.assertEqual(len(report["mutants"]), 1)
+
+    def test_run_restores_source_when_fake_mutant_build_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, _, current = self._repo(root)
+            manifest = root / "mutants.json"
+            manifest.write_text(json.dumps({"mutants": [{
+                "id": "fail-build", "path": "source.cpp", "old": "second", "new": "after",
+                "description": "fake build failure", "test_filter": "FakeMutation",
+            }]}), encoding="utf-8")
+            persistent = root / "retained"
+            out = root / "evidence"
+            code = ("import pathlib,sys; sys.exit(1 if "
+                    "pathlib.Path('source.cpp').read_text() == 'after\\n' else 0)")
+            test_code = "print('1 tests passed')"
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--build-dir", "build",
+                "--build-command", f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}",
+                "--test-command", f"{shlex.quote(sys.executable)} -c {shlex.quote(test_code)}",
+                "--mutants", str(manifest), "--max-mutants", "1", "--out", str(out),
+                "--persistent-worktree", str(persistent), "--timeout", "30",
+            ])
+            self.assertEqual(slicer_mutation.run_mutation(args), 2)
+            report = json.loads((out / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["mutants"][0]["status"], "build_error")
+            self.assertEqual((persistent / "source.cpp").read_text(encoding="utf-8"), "second\n")
+            self.assertEqual(report["worktree"]["persistent"], True)
+            self.assertEqual(report["worktree"]["reused"], False)
+            self.assertEqual(report["worktree"]["retained_untracked_build_capability"],
+                             "preserved by non-forcing detached checkout")
+            self.assertFalse((persistent.with_name(persistent.name + ".slicer-mutation.lock")).exists())
+            self.assertEqual(self._git(repo, "rev-parse", "HEAD"), current)
+
+            second_manifest = root / "mutants-second.json"
+            second_manifest.write_text(json.dumps({"mutants": [{
+                "id": "fail-build-again", "path": "source.cpp", "old": "second", "new": "third",
+                "description": "fake build failure on reused worktree", "test_filter": "FakeMutation",
+            }]}), encoding="utf-8")
+            second_out = root / "evidence-second"
+            second_code = ("import pathlib,sys; sys.exit(1 if "
+                            "pathlib.Path('source.cpp').read_text() == 'third\\n' else 0)")
+            second_args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--build-dir", "build",
+                "--build-command", f"{shlex.quote(sys.executable)} -c {shlex.quote(second_code)}",
+                "--test-command", f"{shlex.quote(sys.executable)} -c {shlex.quote(test_code)}",
+                "--mutants", str(second_manifest), "--max-mutants", "1", "--out", str(second_out),
+                "--persistent-worktree", str(persistent), "--timeout", "30",
+            ])
+            self.assertEqual(slicer_mutation.run_mutation(second_args), 2)
+            second_report = json.loads((second_out / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertTrue(second_report["worktree"]["reused"])
+            self.assertEqual(second_report["worktree"]["previous_head"], current)
+            self.assertEqual((persistent / "source.cpp").read_text(encoding="utf-8"), "second\n")
 
 
 if __name__ == "__main__":
