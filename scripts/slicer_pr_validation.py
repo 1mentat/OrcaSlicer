@@ -885,6 +885,215 @@ def _git_pathspec(path: str) -> str:
     return f":(top,literal){path.removeprefix('./')}"
 
 
+_OVERLAY_RESOLUTION_MANIFEST_VERSION = 1
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _load_overlay_resolution_manifest(path: Path, *, patch_sha256: str,
+                                       scope: str, includes: Sequence[str]) -> tuple[dict[str, Any], str]:
+    """Load exact-head/base conflict resolutions for one harness overlay.
+
+    A resolution is data, not an instruction: every row pins the overlay patch
+    digest, both commit OIDs, conflict paths, all three Git index stage blobs,
+    and the SHA-256/Git blob ID of the supplied resolved bytes.
+    """
+    try:
+        raw = path.read_bytes()
+        manifest = json.loads(raw)
+    except OSError as exc:
+        raise ValidationError(f"cannot read overlay resolution manifest {path}: {exc}") from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValidationError(f"overlay resolution manifest is not valid JSON: {path}: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != _OVERLAY_RESOLUTION_MANIFEST_VERSION:
+        raise ValidationError("overlay resolution manifest has an unsupported schema_version")
+    rows = manifest.get("resolutions")
+    if not isinstance(rows, list) or not rows:
+        raise ValidationError("overlay resolution manifest resolutions must be a non-empty list")
+    by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    manifest_root = path.parent.resolve()
+    for index, row in enumerate(rows):
+        label = f"resolutions[{index}]"
+        if not isinstance(row, dict):
+            raise ValidationError(f"{label} must be an object")
+        base = row.get("base_sha")
+        head = row.get("head_sha")
+        overlay = row.get("overlay_patch_sha256")
+        if (not isinstance(base, str) or not _HEX40.fullmatch(base)
+                or not isinstance(head, str) or not _HEX40.fullmatch(head)
+                or not isinstance(overlay, str) or not _HEX64.fullmatch(overlay)):
+            raise ValidationError(f"{label} has invalid exact OID or overlay SHA")
+        if overlay != patch_sha256:
+            raise ValidationError(f"{label} overlay patch SHA does not match this run")
+        key = (base, head, overlay)
+        if key in by_key:
+            raise ValidationError(f"duplicate exact overlay resolution row: {key[:2]}")
+        paths = row.get("paths")
+        if not isinstance(paths, list) or not paths:
+            raise ValidationError(f"{label}.paths must be a non-empty list")
+        normalized: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for path_index, item in enumerate(paths):
+            item_label = f"{label}.paths[{path_index}]"
+            if not isinstance(item, dict):
+                raise ValidationError(f"{item_label} must be an object")
+            source_path = item.get("path")
+            if (not isinstance(source_path, str) or not source_path
+                    or Path(source_path).is_absolute() or ".." in Path(source_path).parts
+                    or not _path_is_in_scope(source_path, scope, includes)):
+                raise ValidationError(f"{item_label} has an unsafe or out-of-scope path")
+            source_path = source_path.removeprefix("./")
+            if source_path in seen_paths:
+                raise ValidationError(f"{item_label} duplicates path {source_path}")
+            seen_paths.add(source_path)
+            stages = item.get("stage_blobs")
+            if not isinstance(stages, dict) or set(stages) != {"1", "2", "3"}:
+                raise ValidationError(f"{item_label}.stage_blobs must contain exactly stages 1,2,3")
+            if any(not isinstance(value, str) or not _HEX40.fullmatch(value)
+                   for value in stages.values()):
+                raise ValidationError(f"{item_label}.stage_blobs contains an invalid Git blob ID")
+            resolved_rel = item.get("resolved_path")
+            resolved_sha = item.get("resolved_sha256")
+            resolved_blob = item.get("resolved_blob_sha1")
+            if (not isinstance(resolved_rel, str) or not resolved_rel
+                    or Path(resolved_rel).is_absolute() or ".." in Path(resolved_rel).parts
+                    or not isinstance(resolved_sha, str) or not _HEX64.fullmatch(resolved_sha)
+                    or not isinstance(resolved_blob, str) or not _HEX40.fullmatch(resolved_blob)):
+                raise ValidationError(f"{item_label} has invalid resolved payload metadata")
+            resolved_candidate = manifest_root / resolved_rel
+            if resolved_candidate.is_symlink():
+                raise ValidationError(f"{item_label}.resolved_path must not be a symlink")
+            resolved_file = resolved_candidate.resolve()
+            try:
+                resolved_file.relative_to(manifest_root)
+            except ValueError as exc:
+                raise ValidationError(f"{item_label}.resolved_path escapes manifest directory") from exc
+            if resolved_file.is_symlink() or not resolved_file.is_file():
+                raise ValidationError(f"{item_label}.resolved_path is not a regular file")
+            actual_sha = hashlib.sha256(resolved_file.read_bytes()).hexdigest()
+            if actual_sha != resolved_sha:
+                raise ValidationError(f"{item_label}.resolved_sha256 does not match payload")
+            normalized.append({
+                "path": source_path,
+                "stage_blobs": dict(stages),
+                "resolved_file": str(resolved_file),
+                "resolved_sha256": resolved_sha,
+                "resolved_blob_sha1": resolved_blob,
+            })
+        normalized.sort(key=lambda item: item["path"])
+        by_key[key] = {"base_sha": base, "head_sha": head, "overlay_patch_sha256": overlay,
+                       "paths": normalized}
+    return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "rows": by_key}, hashlib.sha256(raw).hexdigest()
+
+
+def _overlay_unmerged_paths(repo: Path) -> tuple[list[str], CommandResult]:
+    result = _git(repo, "ls-files", "-u")
+    if result.returncode != 0:
+        raise ValidationError(f"cannot inspect overlay index unmerged paths: {result.stderr.strip()}")
+    paths: set[str] = set()
+    for line in result.stdout.splitlines():
+        _, separator, listed_path = line.partition("\t")
+        if not separator or not listed_path:
+            raise ValidationError(f"unparseable overlay index entry: {line!r}")
+        paths.add(listed_path)
+    return sorted(paths), result
+
+
+def _index_unmerged_stages(repo: Path, source_path: str) -> dict[str, str]:
+    result = _git(repo, "ls-files", "-u", "--", source_path)
+    if result.returncode != 0:
+        raise ValidationError(f"cannot inspect conflict stages for {source_path}: {result.stderr.strip()}")
+    stages: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        left, separator, listed_path = line.partition("\t")
+        fields = left.split()
+        if not separator or len(fields) != 3 or listed_path != source_path:
+            raise ValidationError(f"unparseable conflict stage for {source_path}: {line!r}")
+        mode, blob, stage = fields
+        if stage in stages or not _HEX40.fullmatch(blob):
+            raise ValidationError(f"invalid or duplicate conflict stage for {source_path}")
+        stages[stage] = blob
+    return stages
+
+
+def _apply_exact_overlay_resolution(worktree: Path, row: dict[str, Any]) -> dict[str, Any]:
+    expected_paths = [item["path"] for item in row["paths"]]
+    actual_paths, _ = _overlay_unmerged_paths(worktree)
+    if actual_paths != sorted(expected_paths):
+        raise ValidationError(
+            f"overlay resolution conflict paths mismatch: expected={expected_paths}, actual={actual_paths}")
+    details: list[dict[str, Any]] = []
+    for item in row["paths"]:
+        source_path = item["path"]
+        target_candidate = worktree / source_path
+        if target_candidate.is_symlink():
+            raise ValidationError(f"conflict target must not be a symlink: {source_path}")
+        target = target_candidate.resolve()
+        try:
+            target.relative_to(worktree.resolve())
+        except ValueError as exc:
+            raise ValidationError(f"resolved target escapes worktree: {source_path}") from exc
+        if target.is_symlink() or not target.is_file():
+            raise ValidationError(f"conflict target is not a regular file: {source_path}")
+        stages = _index_unmerged_stages(worktree, source_path)
+        if stages != item["stage_blobs"]:
+            raise ValidationError(
+                f"overlay resolution stages mismatch for {source_path}: expected={item['stage_blobs']}, actual={stages}")
+        payload = Path(item["resolved_file"]).read_bytes()
+        if hashlib.sha256(payload).hexdigest() != item["resolved_sha256"]:
+            raise ValidationError(f"resolved payload changed while applying: {source_path}")
+        target.write_bytes(payload)
+        add = _git(worktree, "add", "--", source_path)
+        if add.returncode != 0:
+            raise ValidationError(f"cannot stage resolved overlay path {source_path}: {add.stderr.strip()}")
+        blob = _git(worktree, "hash-object", "--", source_path)
+        if blob.returncode != 0 or blob.stdout.strip() != item["resolved_blob_sha1"]:
+            raise ValidationError(f"resolved Git blob mismatch for {source_path}")
+        details.append({"path": source_path, "stages": stages,
+                        "resolved_sha256": item["resolved_sha256"],
+                        "resolved_blob_sha1": item["resolved_blob_sha1"]})
+    remaining, _ = _overlay_unmerged_paths(worktree)
+    if remaining:
+        raise ValidationError(f"overlay resolution left unmerged paths: {remaining}")
+    return {"applied": True, "paths": details}
+
+
+def _apply_overlay_patch(worktree: Path, patch_path: Path, *, patch_sha256: str,
+                         base_sha: str, head_sha: str,
+                         resolution_manifest: dict[str, Any] | None) -> dict[str, Any]:
+    apply = _git(worktree, "apply", "--3way", "--index", str(patch_path), timeout=300)
+    result: dict[str, Any] = {"patch_apply": apply.json()}
+    try:
+        unresolved, _ = _overlay_unmerged_paths(worktree)
+    except ValidationError as exc:
+        result.update({"applied": False, "status": "overlay_state_inspection_failed",
+                       "resolution_error": str(exc)})
+        return result
+    if apply.returncode == 0:
+        if unresolved:
+            result.update({"applied": False, "status": "overlay_unmerged_after_apply",
+                           "unresolved_paths": unresolved})
+            return result
+        result["applied"] = True
+        return result
+    result["unresolved_paths"] = unresolved
+    if resolution_manifest is None:
+        result.update({"applied": False, "status": "patch_conflict"})
+        return result
+    row = resolution_manifest["rows"].get((base_sha, head_sha, patch_sha256))
+    if row is None:
+        result.update({"applied": False, "status": "overlay_resolution_missing",
+                       "reason": "no exact base/head/overlay row"})
+        return result
+    try:
+        resolution = _apply_exact_overlay_resolution(worktree, row)
+    except ValidationError as exc:
+        result.update({"applied": False, "status": "overlay_resolution_invalid",
+                       "resolution_error": str(exc)})
+        return result
+    result.update({"applied": True, "status": "resolved", "overlay_resolution": resolution})
+    return result
+
+
 def _tracked_source_index_hash(repo: Path) -> tuple[str | None, CommandResult]:
     """Hash the tracked ``src/`` index so test-only overlays cannot alter production."""
     result = _git(repo, "ls-files", "-s", "--", "src/")
@@ -1126,7 +1335,9 @@ def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
                       "tree_resolution_failed", "infrastructure_error", "cleanup_failed",
                       "test_error", "test_evidence_incomplete", "test_timeout",
                       "test_skipped", "no_tests", "identity_manifest_invalid",
-                      "configure_timeout", "build_timeout"}
+                      "configure_timeout", "build_timeout",
+                      "overlay_resolution_missing", "overlay_resolution_invalid",
+                      "overlay_state_inspection_failed", "overlay_unmerged_after_apply"}
            for status in statuses):
         return "infrastructure_error", 2
     if any(status in {"tracked_source_index_changed", "tracked_source_index_resolution_failed"}
@@ -1138,7 +1349,8 @@ def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
 def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
                         base_sha: str, args: argparse.Namespace,
                         configure_args: Sequence[str], build_args: Sequence[str],
-                        patch_path: Path, patch: bytes,
+                        patch_path: Path, patch: bytes, patch_sha256: str,
+                        resolution_manifest: dict[str, Any] | None,
                         baseline_passed_cases: dict[str, str]) -> dict[str, Any]:
     """Run one exact snapshot base with the same guarded tests-only overlay."""
     reference: dict[str, Any] = {
@@ -1157,13 +1369,13 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
     reference["tracked_source_index_hash_before_overlay"] = before
     reference["tracked_source_index_resolution_before"] = before_result.json()
     if patch:
-        apply = _git(worktree, "apply", "--3way", "--index", str(patch_path), timeout=300)
-        reference["patch_apply"] = apply.json()
-        if apply.returncode != 0:
-            reference["status"] = "patch_conflict"
+        overlay = _apply_overlay_patch(
+            worktree, patch_path, patch_sha256=patch_sha256, base_sha=base_sha,
+            head_sha=base_sha, resolution_manifest=resolution_manifest)
+        reference.update(overlay)
+        if not overlay.get("applied", False):
+            reference["status"] = overlay.get("status", "patch_conflict")
             reference["conflict_status"] = _status(worktree)
-            reference["unresolved_paths"] = _git(
-                worktree, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
             return reference
     after, after_result = _tracked_source_index_hash(worktree)
     reference["tracked_source_index_hash_after_overlay"] = after
@@ -1234,6 +1446,12 @@ def run_validation(args: argparse.Namespace) -> int:
     patch_path = output / "testing-harness.patch"
     patch_path.write_bytes(patch)
     patch_sha = hashlib.sha256(patch).hexdigest()
+    resolution_manifest = None
+    resolution_manifest_sha = None
+    if args.overlay_resolution_manifest:
+        resolution_manifest, resolution_manifest_sha = _load_overlay_resolution_manifest(
+            Path(args.overlay_resolution_manifest).expanduser().resolve(),
+            patch_sha256=patch_sha, scope=args.patch_scope, includes=args.patch_include)
     uv = _resolve_uv(args.uv_executable)
     report: dict[str, Any] = {
         "schema_version": 1,
@@ -1282,6 +1500,8 @@ def run_validation(args: argparse.Namespace) -> int:
             "identity_manifest": (str(Path(args.identity_manifest).expanduser().resolve())
                                    if args.identity_manifest else None),
             "identity_manifest_sha256": identity_manifest_sha,
+            "overlay_resolution_manifest": (resolution_manifest.get("path") if resolution_manifest else None),
+            "overlay_resolution_manifest_sha256": resolution_manifest_sha,
         },
         "baseline": {},
         "references": {},
@@ -1416,8 +1636,8 @@ def run_validation(args: argparse.Namespace) -> int:
                                 else f"reference-base-{requested_base_oid[:12]}")
                             reference_for_head = _run_reference_entry(
                                 worktree, output, reference_name, requested_base_oid, args,
-                                configure_args, build_args, patch_path, patch,
-                                baseline_passed_cases)
+                                configure_args, build_args, patch_path, patch, patch_sha,
+                                resolution_manifest, baseline_passed_cases)
                         report["references"][requested_base_oid] = reference_for_head
                         if (identity_policy is None and
                                 reference_for_head.get("commit_sha") and
@@ -1491,13 +1711,13 @@ def run_validation(args: argparse.Namespace) -> int:
                     return_code = 2
                     continue
                 if patch:
-                    apply = _git(worktree, "apply", "--3way", "--index", str(patch_path), timeout=300)
-                    entry["patch_apply"] = apply.json()
-                    if apply.returncode != 0:
-                        entry["status"] = "patch_conflict"
+                    overlay = _apply_overlay_patch(
+                        worktree, patch_path, patch_sha256=patch_sha, base_sha=requested_base_oid,
+                        head_sha=resolved, resolution_manifest=resolution_manifest)
+                    entry.update(overlay)
+                    if not overlay.get("applied", False):
+                        entry["status"] = overlay.get("status", "patch_conflict")
                         entry["conflict_status"] = _status(worktree)
-                        unresolved = _git(worktree, "diff", "--name-only", "--diff-filter=U")
-                        entry["unresolved_paths"] = unresolved.stdout.splitlines()
                         report["heads"].append(entry)
                         return_code = 2
                         continue
@@ -1679,6 +1899,9 @@ def _parser() -> argparse.ArgumentParser:
                         help="run harness-base plus the selected overlay as a failure reference (default: enabled)")
     parser.add_argument("--identity-manifest",
                         help="optional exact-head testcase identity manifest; disabled by default")
+    parser.add_argument("--overlay-resolution-manifest",
+                        help=("optional exact base/head conflict-resolution manifest; each row must pin "
+                              "the overlay patch SHA, conflict stages, and resolved test-file payload"))
     return parser
 
 

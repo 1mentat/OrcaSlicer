@@ -2044,5 +2044,227 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             self._git(repo, "worktree", "remove", "--force", str(worktree))
 
 
+class OverlayResolutionTests(unittest.TestCase):
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def _fixture(self, root):
+        repo = root / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "test@example.invalid")
+        self._git(repo, "config", "user.name", "Test")
+        (repo / "tests").mkdir()
+        path = repo / "tests/overlay.txt"
+        path.write_text("value=base\n", encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "base")
+        base = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+        path.write_text("value=harness\n", encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "harness")
+        harness = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+        self._git(repo, "checkout", "-qb", "pr", base)
+        path.write_text("value=pr\n", encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "pr")
+        head = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+        patch = self._git(repo, "diff", "--binary", "--full-index", base, harness,
+                          "--", "tests/overlay.txt").stdout
+        patch_path = root / "overlay.patch"
+        patch_path.write_bytes(patch)
+        patch_sha = hashlib.sha256(patch).hexdigest()
+        # Record the real three-way stages from this exact base/head/overlay.
+        apply = subprocess.run(["git", "apply", "--3way", "--index", str(patch_path)], cwd=repo,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(apply.returncode, 0)
+        stage_output = self._git(repo, "ls-files", "-u", "--", "tests/overlay.txt").stdout.decode()
+        stages = {}
+        for line in stage_output.splitlines():
+            left, _, listed = line.partition("\t")
+            mode, blob, stage = left.split()
+            self.assertEqual(listed, "tests/overlay.txt")
+            stages[stage] = blob
+        self.assertEqual(set(stages), {"1", "2", "3"})
+        self._git(repo, "reset", "--hard", head)
+        manifest_dir = root / "manifest"
+        manifest_dir.mkdir()
+        payload = b"value=resolved\n"
+        payload_path = manifest_dir / "resolved.txt"
+        payload_path.write_bytes(payload)
+        blob = hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
+        manifest = {
+            "schema_version": 1,
+            "resolutions": [{
+                "base_sha": base, "head_sha": head, "overlay_patch_sha256": patch_sha,
+                "paths": [{"path": "tests/overlay.txt", "stage_blobs": stages,
+                           "resolved_path": "resolved.txt",
+                           "resolved_sha256": hashlib.sha256(payload).hexdigest(),
+                           "resolved_blob_sha1": blob}],
+            }],
+        }
+        manifest_path = manifest_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        args = Namespace(patch_scope="test-only", patch_include=[])
+        return repo, base, harness, head, patch_path, patch_sha, manifest_path, args
+
+    def test_exact_head_base_and_stage_payload_resolves_conflict(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(Path(temp))
+            manifest, _ = slicer_pr_validation._load_overlay_resolution_manifest(
+                manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+            result = slicer_pr_validation._apply_overlay_patch(
+                repo, patch, patch_sha256=patch_sha, base_sha=base, head_sha=head,
+                resolution_manifest=manifest)
+            self.assertTrue(result["applied"])
+            self.assertEqual(result["status"], "resolved")
+            self.assertEqual((repo / "tests/overlay.txt").read_bytes(), b"value=resolved\n")
+            self.assertEqual(self._git(repo, "diff", "--name-only", "--diff-filter=U").stdout, b"")
+
+    def test_matching_overlay_with_wrong_head_fails_closed_and_leaves_conflict(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(Path(temp))
+            raw = json.loads(manifest_path.read_text())
+            raw["resolutions"][0]["head_sha"] = "f" * 40
+            manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+            manifest, _ = slicer_pr_validation._load_overlay_resolution_manifest(
+                manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+            result = slicer_pr_validation._apply_overlay_patch(
+                repo, patch, patch_sha256=patch_sha, base_sha=base, head_sha=head,
+                resolution_manifest=manifest)
+            self.assertFalse(result["applied"])
+            self.assertEqual(result["status"], "overlay_resolution_missing")
+            self.assertEqual(self._git(repo, "diff", "--name-only", "--diff-filter=U").stdout.decode().strip(),
+                             "tests/overlay.txt")
+
+    def test_reference_resolution_pins_harness_overlay_to_reference_base(self):
+        base = "b" * 40
+        observed = {}
+        command = slicer_pr_validation.CommandResult(["git"], 0, 0.0, "", "")
+
+        def capture_overlay(worktree, patch_path, **kwargs):
+            observed.update(kwargs)
+            return {"applied": True}
+
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.object(slicer_pr_validation, "_reset_worktree", return_value=[]), \
+             mock.patch.object(slicer_pr_validation, "_tracked_source_index_hash",
+                               side_effect=[("index", command), ("index", command)]), \
+             mock.patch.object(slicer_pr_validation, "_apply_overlay_patch", side_effect=capture_overlay), \
+             mock.patch.object(slicer_pr_validation, "_tree_sha", return_value=("tree", command)), \
+             mock.patch.object(slicer_pr_validation, "_run_tree", return_value={"status": "pass"}), \
+             mock.patch.object(slicer_pr_validation, "_apply_minimum_test_gate"):
+            result = slicer_pr_validation._run_reference_entry(
+                Path(temp), Path(temp), "reference", base,
+                Namespace(patch_scope="test-only", minimum_tests=1), (), (), Path(temp) / "overlay.patch",
+                b"patch", "a" * 64, None, {})
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(observed["base_sha"], base)
+        self.assertEqual(observed["head_sha"], base)
+
+    def test_nominal_apply_with_unmerged_index_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patch = root / "overlay.patch"
+            patch.write_bytes(b"patch")
+            apply_result = slicer_pr_validation.CommandResult(
+                ["git", "apply"], 0, 0.0, "", "")
+            unmerged_result = slicer_pr_validation.CommandResult(
+                ["git", "ls-files", "-u"], 0, 0.0,
+                "100644 " + "a" * 40 + " 1\ttests/overlay.txt\n", "")
+
+            def fake_git(repo, *git_args, **kwargs):
+                if git_args[:3] == ("apply", "--3way", "--index"):
+                    return apply_result
+                if git_args[:2] == ("ls-files", "-u"):
+                    return unmerged_result
+                raise AssertionError(git_args)
+
+            with mock.patch.object(slicer_pr_validation, "_git", side_effect=fake_git):
+                result = slicer_pr_validation._apply_overlay_patch(
+                    root, patch, patch_sha256="a" * 64, base_sha="b" * 40,
+                    head_sha="c" * 40, resolution_manifest=None)
+            self.assertFalse(result["applied"])
+            self.assertEqual(result["status"], "overlay_unmerged_after_apply")
+            self.assertEqual(result["unresolved_paths"], ["tests/overlay.txt"])
+
+    def test_overlay_payload_sha_mismatch_is_rejected_before_apply(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(Path(temp))
+            raw = json.loads(manifest_path.read_text())
+            raw["resolutions"][0]["overlay_patch_sha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+            with self.assertRaisesRegex(slicer_pr_validation.ValidationError, "overlay patch SHA"):
+                slicer_pr_validation._load_overlay_resolution_manifest(
+                    manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+
+    def test_wrong_base_row_fails_closed_before_payload_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(Path(temp))
+            raw = json.loads(manifest_path.read_text())
+            raw["resolutions"][0]["base_sha"] = "0" * 40
+            manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+            manifest, _ = slicer_pr_validation._load_overlay_resolution_manifest(
+                manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+            result = slicer_pr_validation._apply_overlay_patch(
+                repo, patch, patch_sha256=patch_sha, base_sha=base, head_sha=head,
+                resolution_manifest=manifest)
+            self.assertFalse(result["applied"])
+            self.assertEqual(result["status"], "overlay_resolution_missing")
+            self.assertEqual((repo / "tests/overlay.txt").read_text(),
+                             "<<<<<<< ours\nvalue=pr\n=======\nvalue=harness\n>>>>>>> theirs\n")
+
+    def test_unexpected_conflict_path_fails_before_payload_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(Path(temp))
+            raw = json.loads(manifest_path.read_text())
+            original = raw["resolutions"][0]["paths"][0]
+            extra = dict(original)
+            extra["path"] = "tests/unexpected.txt"
+            raw["resolutions"][0]["paths"].append(extra)
+            manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+            manifest, _ = slicer_pr_validation._load_overlay_resolution_manifest(
+                manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+            result = slicer_pr_validation._apply_overlay_patch(
+                repo, patch, patch_sha256=patch_sha, base_sha=base, head_sha=head,
+                resolution_manifest=manifest)
+            self.assertFalse(result["applied"])
+            self.assertEqual(result["status"], "overlay_resolution_invalid")
+            self.assertIn("conflict paths mismatch", result["resolution_error"])
+            self.assertEqual((repo / "tests/overlay.txt").read_text(),
+                             "<<<<<<< ours\nvalue=pr\n=======\nvalue=harness\n>>>>>>> theirs\n")
+
+    def test_overlay_resolution_statuses_are_infrastructure_failures(self):
+        for status in ("overlay_resolution_missing", "overlay_resolution_invalid",
+                       "overlay_state_inspection_failed", "overlay_unmerged_after_apply"):
+            with self.subTest(status=status):
+                report = {
+                    "baseline": {"status": "pass"},
+                    "configuration": {"reference_baseline": False},
+                    "heads": [{"status": status}],
+                }
+                self.assertEqual(slicer_pr_validation._overall_status(report),
+                                 ("infrastructure_error", 2))
+
+    def test_stage_mismatch_is_rejected_before_resolved_bytes_are_written(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(Path(temp))
+            raw = json.loads(manifest_path.read_text())
+            raw["resolutions"][0]["paths"][0]["stage_blobs"]["2"] = "0" * 40
+            manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+            manifest, _ = slicer_pr_validation._load_overlay_resolution_manifest(
+                manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+            result = slicer_pr_validation._apply_overlay_patch(
+                repo, patch, patch_sha256=patch_sha, base_sha=base, head_sha=head,
+                resolution_manifest=manifest)
+            self.assertFalse(result["applied"])
+            self.assertEqual(result["status"], "overlay_resolution_invalid")
+            self.assertEqual(self._git(repo, "diff", "--name-only", "--diff-filter=U").stdout.decode().strip(),
+                             "tests/overlay.txt")
+            self.assertEqual((repo / "tests/overlay.txt").read_bytes(), b"<<<<<<< ours\nvalue=pr\n=======\nvalue=harness\n>>>>>>> theirs\n")
+
+
 if __name__ == "__main__":
     unittest.main()
