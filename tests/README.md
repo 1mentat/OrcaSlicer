@@ -201,8 +201,8 @@ mutations are in `preset_cloud_selection.json`.
 
 `[PressureEqualizer]` checks smoothing of tagged external-wall flow transitions
 against an internal-wall control in absolute and relative extrusion modes.
-The output must preserve total extrusion and its endpoint while introducing
-intermediate feedrates. Its mutations are in `pressure_equalizer.json`.
+The output must preserve extrusion, path length, and endpoint while reducing
+feedrates on the higher-flow moves. Its mutations are in `pressure_equalizer.json`.
 `[PressureEqualizerStateTransitions]` checks G92 logical-position resets and
 tool-specific filament cross sections through emitted moves and conserved
 extrusion (`pressure_equalizer_state_transitions.json`).
@@ -245,6 +245,25 @@ narrow and wide regions. `[ArachneWallResolution]` checks circular wall sampling
 with separate resolution and deviation controls and bounded circumference change.
 Their mutations are in `arachne_wall_transition.json`; parameter mapping alone
 does not establish full settings coverage.
+
+`[PrintExtents]` checks planned extrusion bounds across layer cutoffs, two
+instances, unequal path widths, and nested infill collections without slicing.
+Its mutations are in `print_extents.json`.
+
+`[CadDocumentHistory]`, `[CadDocumentBooleanKeepTool]`,
+`[CadDocumentThickenSurface]`, and `[CadDocumentRevolveEntities]` check history
+replay and branching, retained boolean tools, opposite sheet offsets, and a
+self-contained revolved profile using volume and bounds. Their production
+mutations are in `cad_active_history.json`.
+
+`[SLAElephantFootFade]` checks first-layer compensation, its fade across three
+and four layers, and preservation of features below the configured minimum
+width through public SLA slicing. Its mutations are in
+`sla_elephant_foot_fade.json`.
+
+`[SLARasterPipeline]` attaches the production SL1 archive before SLA slicing and
+checks decoded layer images for a stepped model: ordered masks, physical area,
+centroid, and dimensions. Its mutations are in `sla_raster_pipeline.json`.
 
 `[PresetBundleSubscribedMultiType]` checks typed subscribed profiles, canonical
 inheritance, missing and unsupported types, and removal of obsolete printer files.

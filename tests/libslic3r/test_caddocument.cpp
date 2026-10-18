@@ -10009,3 +10009,229 @@ TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groov
 }
 
 } // namespace cad_legacy_thread_contracts
+
+TEST_CASE("CadDocument history exposes redo and invalidates it after a new edit", "[CadDocument][CadDocumentHistory]")
+{
+    CadDocument doc;
+    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                      20.0, 20.0, 0.0, "BaseSketch");
+    REQUIRE(sketch >= 0);
+    const int extrude = doc.add_extrude(sketch, 10.0, false, BooleanMode::New, "Base");
+    REQUIRE(extrude >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+
+    auto bbox = [](const CadDocument& d) {
+        Bnd_Box box;
+        BRepBndLib::Add(d.bodies.at(0).shape, box);
+        double x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        return std::make_pair(Vec3d(x0, y0, z0), Vec3d(x1, y1, z1));
+    };
+
+    const auto initial_box = bbox(doc);
+    const double initial_volume = doc.body_mass_properties(0).volume;
+    REQUIRE_THAT(initial_volume, Catch::Matchers::WithinRel(4000.0, 1e-6));
+    REQUIRE_THAT(initial_box.first.x(), Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(initial_box.second.x(), Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_FALSE(doc.can_undo());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 0);
+    REQUIRE(doc.redo_depth() == 0);
+
+    doc.checkpoint();
+    const int shift = doc.add_transform(0, Vec3d(5.0, 0.0, 0.0), Vec3d(0.0, 0.0, 1.0),
+                                        Vec3d(0.0, 0.0, 0.0), 0.0, false, "Shift");
+    REQUIRE(shift >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    const auto shifted_box = bbox(doc);
+    REQUIRE(doc.can_undo());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 1);
+    REQUIRE(doc.redo_depth() == 0);
+    REQUIRE_THAT(shifted_box.first.x(), Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(shifted_box.second.x(), Catch::Matchers::WithinAbs(15.0, 1e-6));
+    REQUIRE_THAT(doc.body_mass_properties(0).volume,
+                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
+
+    REQUIRE(doc.undo());
+    REQUIRE(doc.error.empty());
+    const auto undone_box = bbox(doc);
+    REQUIRE_FALSE(doc.can_undo());
+    REQUIRE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 0);
+    REQUIRE(doc.redo_depth() == 1);
+    REQUIRE_THAT(undone_box.first.x(), Catch::Matchers::WithinAbs(initial_box.first.x(), 1e-6));
+    REQUIRE_THAT(undone_box.second.x(), Catch::Matchers::WithinAbs(initial_box.second.x(), 1e-6));
+    REQUIRE_THAT(doc.body_mass_properties(0).volume,
+                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
+
+    REQUIRE(doc.redo());
+    REQUIRE(doc.error.empty());
+    const auto redone_box = bbox(doc);
+    REQUIRE(doc.can_undo());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 1);
+    REQUIRE(doc.redo_depth() == 0);
+    REQUIRE_THAT(redone_box.first.x(), Catch::Matchers::WithinAbs(shifted_box.first.x(), 1e-6));
+    REQUIRE_THAT(redone_box.second.x(), Catch::Matchers::WithinAbs(shifted_box.second.x(), 1e-6));
+    REQUIRE_THAT(doc.body_mass_properties(0).volume,
+                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
+
+    // A new checkpoint is a new edit branch and must discard the old redo snapshot.
+    REQUIRE(doc.undo());
+    REQUIRE(doc.can_redo());
+    doc.checkpoint();
+    const int second_shift = doc.add_transform(0, Vec3d(-2.0, 0.0, 0.0), Vec3d(0.0, 0.0, 1.0),
+                                               Vec3d(0.0, 0.0, 0.0), 0.0, false, "NewBranch");
+    REQUIRE(second_shift >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.redo_depth() == 0);
+}
+
+TEST_CASE("CadDocument keeps a boolean tool when requested and rejects a new-mode pair",
+          "[CadDocument][CadDocumentBooleanKeepTool]")
+{
+    auto add_overlapping_pair = [](CadDocument& d) {
+        const int base_sketch = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                             10.0, 10.0, 0.0, "BaseSketch");
+        REQUIRE(base_sketch >= 0);
+        REQUIRE(d.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base") >= 0);
+
+        SketchPlane shifted = SketchPlane::XY();
+        shifted.origin = Vec3d(5.0, 0.0, 0.0);
+        const int tool_sketch = d.add_sketch(SketchShape::Rectangle, shifted,
+                                             10.0, 10.0, 0.0, "ToolSketch");
+        REQUIRE(tool_sketch >= 0);
+        REQUIRE(d.add_extrude(tool_sketch, 10.0, false, BooleanMode::New, "Tool") >= 0);
+    };
+
+    CadDocument kept;
+    add_overlapping_pair(kept);
+    REQUIRE(kept.recompute());
+    REQUIRE(kept.error.empty());
+    REQUIRE(kept.bodies.size() == 2);
+
+    const int fuse = kept.add_boolean(BooleanMode::Add, 0, 1, true, 0.0, -1, -1, "KeepToolFuse");
+    REQUIRE(fuse >= 0);
+    REQUIRE(kept.recompute());
+    REQUIRE(kept.error.empty());
+    REQUIRE(kept.bodies.size() == 2);
+    REQUIRE(kept.features.at(fuse).type == CadFeatureType::Boolean);
+    REQUIRE(kept.features.at(fuse).bool_keep_tool);
+
+    const auto target = kept.body_mass_properties(0);
+    const auto tool = kept.body_mass_properties(1);
+    REQUIRE(target.valid);
+    REQUIRE(target.is_solid);
+    REQUIRE(tool.valid);
+    REQUIRE(tool.is_solid);
+    REQUIRE_THAT(target.volume, Catch::Matchers::WithinRel(1500.0, 1e-6));
+    REQUIRE_THAT(tool.volume, Catch::Matchers::WithinRel(1000.0, 1e-6));
+
+    Bnd_Box target_box;
+    BRepBndLib::Add(kept.bodies.at(0).shape, target_box);
+    double tx0, ty0, tz0, tx1, ty1, tz1;
+    target_box.Get(tx0, ty0, tz0, tx1, ty1, tz1);
+    REQUIRE_THAT(tx0, Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(tx1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(tz0, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(tz1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+
+    CadDocument invalid;
+    add_overlapping_pair(invalid);
+    REQUIRE(invalid.recompute());
+    REQUIRE(invalid.error.empty());
+    invalid.add_boolean(BooleanMode::New, 0, 1, false, 0.0, -1, -1, "InvalidNewBoolean");
+    REQUIRE_FALSE(invalid.recompute());
+    REQUIRE_CONTAINS(invalid.error, "choose Union");
+}
+
+TEST_CASE("CadDocument thickens a flat sheet on either side", "[CadDocument][CadDocumentThickenSurface]")
+{
+    auto make_plate = [](bool flip) {
+        CadDocument d;
+        const int sketch = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                        20.0, 20.0, 0.0, "PlateSketch");
+        REQUIRE(sketch >= 0);
+        REQUIRE(d.add_surface_fill(sketch, "PlateFace") >= 0);
+        REQUIRE(d.recompute());
+        REQUIRE(d.error.empty());
+        const int thick = d.add_thicken_surface(0, 2.0, flip, flip ? "PlateMinus" : "PlatePlus");
+        REQUIRE(thick >= 0);
+        REQUIRE(d.recompute());
+        REQUIRE(d.error.empty());
+        REQUIRE(d.bodies.size() == 2);
+        REQUIRE(d.features.at(thick).type == CadFeatureType::ThickenSurface);
+        REQUIRE(d.bodies.at(1).source_feature == thick);
+        return d;
+    };
+
+    CadDocument plus = make_plate(false);
+    CadDocument minus = make_plate(true);
+    const auto plus_props = plus.body_mass_properties(1);
+    const auto minus_props = minus.body_mass_properties(1);
+    REQUIRE(plus_props.valid);
+    REQUIRE(plus_props.is_solid);
+    REQUIRE(minus_props.valid);
+    REQUIRE(minus_props.is_solid);
+    REQUIRE_THAT(plus_props.volume, Catch::Matchers::WithinRel(800.0, 1e-6));
+    REQUIRE_THAT(minus_props.volume, Catch::Matchers::WithinRel(800.0, 1e-6));
+
+    Bnd_Box plus_box;
+    BRepBndLib::Add(plus.bodies.at(1).shape, plus_box);
+    double px0, py0, pz0, px1, py1, pz1;
+    plus_box.Get(px0, py0, pz0, px1, py1, pz1);
+    REQUIRE_THAT(px0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(px1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(pz0, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(pz1, Catch::Matchers::WithinAbs(2.0, 1e-6));
+
+    Bnd_Box minus_box;
+    BRepBndLib::Add(minus.bodies.at(1).shape, minus_box);
+    double mx0, my0, mz0, mx1, my1, mz1;
+    minus_box.Get(mx0, my0, mz0, mx1, my1, mz1);
+    REQUIRE_THAT(mx0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(mx1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(mz0, Catch::Matchers::WithinAbs(-2.0, 1e-6));
+    REQUIRE_THAT(mz1, Catch::Matchers::WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("CadDocument revolves a self-contained entity loop", "[CadDocument][CadDocumentRevolveEntities]")
+{
+    const std::vector<SketchEntity> entities = {
+        {SketchEntity::Type::Line, Vec2d(-5.0, 10.0), Vec2d(5.0, 10.0)},
+        {SketchEntity::Type::Line, Vec2d(5.0, 10.0), Vec2d(5.0, 20.0)},
+        {SketchEntity::Type::Line, Vec2d(5.0, 20.0), Vec2d(-5.0, 20.0)},
+        {SketchEntity::Type::Line, Vec2d(-5.0, 20.0), Vec2d(-5.0, 10.0)},
+    };
+
+    CadDocument doc;
+    const int revolve = doc.add_revolve_entities(entities, SketchPlane::XY(), 360.0, 0,
+                                                 false, BooleanMode::New, "EntityRevolve");
+    REQUIRE(revolve == 0);
+    REQUIRE(doc.features.at(revolve).sketch_ref == -1);
+    REQUIRE(doc.features.at(revolve).entities.size() == 4);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    const auto props = doc.body_mass_properties(0);
+    REQUIRE(props.valid);
+    REQUIRE(props.is_solid);
+    REQUIRE_THAT(props.volume, Catch::Matchers::WithinRel(2.0 * M_PI * 15.0 * 100.0, 1e-6));
+
+    Bnd_Box box;
+    BRepBndLib::Add(doc.bodies.at(0).shape, box);
+    double x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    REQUIRE_THAT(x0, Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(x1, Catch::Matchers::WithinAbs(5.0, 1e-6));
+    REQUIRE_THAT(y0, Catch::Matchers::WithinAbs(-20.0, 1e-6));
+    REQUIRE_THAT(y1, Catch::Matchers::WithinAbs(20.0, 1e-6));
+    REQUIRE_THAT(z0, Catch::Matchers::WithinAbs(-20.0, 1e-6));
+    REQUIRE_THAT(z1, Catch::Matchers::WithinAbs(20.0, 1e-6));
+}

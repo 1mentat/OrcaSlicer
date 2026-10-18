@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary-assertion probes for the public PrintExtents planned-extrusion contract.",
+  "mutants": [
+    {
+      "id": "print-extents-multipath-width-ignored",
+      "path": "src/libslic3r/GCode/PrintExtents.cpp",
+      "old": "static inline BoundingBoxf extrusionentity_extents(const ExtrusionMultiPath &extrusion_multi_path)\n{\n    BoundingBox bbox;\n    for (const ExtrusionPath &extrusion_path : extrusion_multi_path.paths)\n        bbox.merge(extrusion_polyline_extents(extrusion_path.polyline.to_polyline(), coord_t(scale_(0.5 * extrusion_path.width))));",
+      "new": "static inline BoundingBoxf extrusionentity_extents(const ExtrusionMultiPath &extrusion_multi_path)\n{\n    BoundingBox bbox;\n    for (const ExtrusionPath &extrusion_path : extrusion_multi_path.paths)\n        bbox.merge(extrusion_polyline_extents(extrusion_path.polyline.to_polyline(), 0));",
+      "test_filter": "^PrintExtents$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Discard ExtrusionMultiPath half-width inflation. The fixture uses distinct 0.4, 0.6, 0.8, and 1.0 mm planned widths and exact projected bounds, so the ordinary bounding-box assertions should fail."
+    },
+    {
+      "id": "print-extents-instance-shift-ignored",
+      "path": "src/libslic3r/GCode/PrintExtents.cpp",
+      "old": "            bbox_translated.translate(unscale(instance.shift));",
+      "new": "            bbox_translated.translate(Vec2d::Zero());",
+      "test_filter": "^PrintExtents$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Drop the public PrintInstance shift when merging each copy. The two copies are placed at (20,30) and (60,80), and the expected union bounds should fail as an ordinary assertion."
+    },
+    {
+      "id": "print-extents-cutoff-inclusive",
+      "path": "src/libslic3r/GCode/PrintExtents.cpp",
+      "old": "        if (layer->print_z > max_print_z)",
+      "new": "        if (layer->print_z >= max_print_z)",
+      "test_filter": "^PrintExtents$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Make the layer cutoff exclusive at equality. The lower layer at print_z 0.2 is explicitly checked at cutoff 0.2, while 0.399 excludes the upper 0.4 layer; the equality row should fail."
+    }
+  ]
+}

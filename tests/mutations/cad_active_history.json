@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "description": "Public CadDocument history, boolean tool retention, sheet thickening and entity revolution.",
+  "mutants": [
+    {
+      "id": "cad-redo-pops-wrong-history-stack",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "    m_redo.pop_back();",
+      "new": "    m_undo.pop_back();",
+      "expected_matches": 1,
+      "test_filter": "^CadDocumentHistory$",
+      "ordinary_assertion_only": true,
+      "description": "Pop the undo stack instead of consuming the restored redo snapshot. The public history case must fail its post-redo can_undo/depth contract; both stacks are populated at this point, so the mutant is bounded and does not require an invalid access.",
+      "expected_failure": "ordinary assertion at the post-redo undo-stack contract"
+    },
+    {
+      "id": "cad-boolean-inverts-keep-tool-branch",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "    if (!f.bool_keep_tool) bodies.erase(bodies.begin() + tool);   // consume the tool body",
+      "new": "    if (f.bool_keep_tool) bodies.erase(bodies.begin() + tool);   // consume the tool body",
+      "expected_matches": 1,
+      "test_filter": "^CadDocumentBooleanKeepTool$",
+      "ordinary_assertion_only": true,
+      "description": "Invert the production keep-tool branch. The keep_tool=true row must then erase the tool and fail the public two-body/retained-tool volume contract before any invalid body access.",
+      "expected_failure": "ordinary assertion at kept.bodies.size()==2"
+    },
+    {
+      "id": "cad-thicken-surface-ignores-flip",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "    if (!is_sheet_shape(bodies[tgt].shape)) throw std::runtime_error(_u8L(\"thicken-surface: target is not a sheet body\"));\n    if (std::abs(f.thicken_thickness) < 1e-9) throw std::runtime_error(_u8L(\"thicken-surface: thickness is zero\"));\n\n    const double off = f.thicken_flip ? -std::abs(f.thicken_thickness)\n                                      :  std::abs(f.thicken_thickness);",
+      "new": "    if (!is_sheet_shape(bodies[tgt].shape)) throw std::runtime_error(_u8L(\"thicken-surface: target is not a sheet body\"));\n    if (std::abs(f.thicken_thickness) < 1e-9) throw std::runtime_error(_u8L(\"thicken-surface: thickness is zero\"));\n\n    const double off = std::abs(f.thicken_thickness);",
+      "expected_matches": 1,
+      "test_filter": "^CadDocumentThickenSurface$",
+      "ordinary_assertion_only": true,
+      "description": "Ignore the public flip argument in the production sheet-thickening route. The minus row must fail its independent negative-Z bounds while the positive control remains valid.",
+      "expected_failure": "ordinary assertion at minus_box lower Z == -2"
+    },
+    {
+      "id": "cad-revolve-entities-drops-sweep-angle",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "        const double ang = f.flip ? -f.revolve_angle : f.revolve_angle;",
+      "new": "        const double ang = f.flip ? -f.revolve_angle : f.revolve_angle - 1.0;",
+      "expected_matches": 1,
+      "test_filter": "^CadDocumentRevolveEntities$",
+      "ordinary_assertion_only": true,
+      "description": "Drop one degree from a requested non-flipped entity revolve. The 359-degree result must fail the Pappus volume oracle for the requested 360-degree sweep; the mutation remains a valid source-level parameter loss rather than a test-oracle edit.",
+      "expected_failure": "ordinary assertion at the analytic revolve volume"
+    }
+  ]
+}

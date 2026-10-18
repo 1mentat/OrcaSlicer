@@ -48,6 +48,9 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
+#include "libslic3r/GCode/PrintExtents.hpp"
+#include "libslic3r/Polyline.hpp"
+
 #include "test_helpers.hpp"
 
 #include "libslic3r/TriangleMesh.hpp"
@@ -7148,3 +7151,94 @@ TEST_CASE("Smooth timelapse keeps one bed-safe position across all printed layer
 
 } // namespace timelapse_all_layers_contracts
 } // namespace gcode_print_variance_contracts
+
+
+namespace print_extents_contracts {
+
+ExtrusionPath planned_path(float width, std::initializer_list<Point3> points)
+{
+    Points3 scaled_points;
+    scaled_points.reserve(points.size());
+    for (const Point3 &point : points)
+        scaled_points.push_back(point);
+    ExtrusionPath path(erPerimeter, 1.0, width, 0.2);
+    path.polyline = Polyline3(std::move(scaled_points));
+    return path;
+}
+
+void check_extents(const BoundingBoxf &bbox, const bool expected_defined,
+                   const double min_x = 0., const double min_y = 0.,
+                   const double max_x = 0., const double max_y = 0.)
+{
+    CHECK(bbox.defined == expected_defined);
+    if (!expected_defined)
+        return;
+    CHECK_THAT(bbox.min.x(), Catch::Matchers::WithinAbs(min_x, 1e-5));
+    CHECK_THAT(bbox.min.y(), Catch::Matchers::WithinAbs(min_y, 1e-5));
+    CHECK_THAT(bbox.max.x(), Catch::Matchers::WithinAbs(max_x, 1e-5));
+    CHECK_THAT(bbox.max.y(), Catch::Matchers::WithinAbs(max_y, 1e-5));
+}
+
+} // namespace print_extents_contracts
+
+TEST_CASE("Print object extrusion extents honor layers, instances, widths, and nested fills",
+          "[GCode][PrintExtents]")
+{
+    using namespace print_extents_contracts;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+    });
+
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{Test::cube(1.)}, print, model, config, nullptr, false, 2);
+    PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE(object->instances().size() == 2);
+    REQUIRE(object->num_printing_regions() == 1);
+    object->instances()[0].shift = Point::new_scale(20., 30.);
+    object->instances()[1].shift = Point::new_scale(60., 80.);
+
+    Layer *lower = object->add_layer(0, 0.2, 0.2, 0.1);
+    LayerRegion *lower_region = lower->add_region(&object->printing_region(0));
+    ExtrusionMultiPath lower_perimeter;
+    lower_perimeter.paths.emplace_back(planned_path(0.4f, {
+        Point3::new_scale(-2., -1., 0.2), Point3::new_scale(3., -1., 0.2),
+    }));
+    lower_perimeter.paths.emplace_back(planned_path(1.0f, {
+        Point3::new_scale(3., -1., 0.2), Point3::new_scale(3., 4., 0.2),
+    }));
+    lower_region->perimeters.append(std::move(lower_perimeter));
+
+    ExtrusionMultiPath lower_fill;
+    lower_fill.paths.emplace_back(planned_path(0.6f, {
+        Point3::new_scale(-4., 2., 0.2), Point3::new_scale(-1., 2., 0.2),
+    }));
+    ExtrusionEntityCollection nested_fill;
+    nested_fill.append(std::move(lower_fill));
+    lower_region->fills.append(std::move(nested_fill));
+
+    Layer *upper = object->add_layer(1, 0.2, 0.4, 0.3);
+    LayerRegion *upper_region = upper->add_region(&object->printing_region(0));
+    ExtrusionMultiPath upper_perimeter;
+    upper_perimeter.paths.emplace_back(planned_path(0.8f, {
+        Point3::new_scale(0., -6., 0.4), Point3::new_scale(9., -6., 0.4),
+    }));
+    upper_region->perimeters.append(std::move(upper_perimeter));
+
+    REQUIRE(lower_region->perimeters.size() == 1);
+    REQUIRE(lower_region->fills.size() == 1);
+    REQUIRE(upper_region->perimeters.size() == 1);
+
+    check_extents(get_print_object_extrusions_extents(*object, 0.199), false);
+    check_extents(get_print_object_extrusions_extents(*object, 0.2), true, 15.7, 28.5, 63.5, 84.5);
+    check_extents(get_print_object_extrusions_extents(*object, 0.399), true, 15.7, 28.5, 63.5, 84.5);
+    check_extents(get_print_object_extrusions_extents(*object, 0.4), true, 15.7, 23.6, 69.4, 84.5);
+}

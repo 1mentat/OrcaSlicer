@@ -1,3 +1,11 @@
+#include <miniz.h>
+#include <memory>
+#include <cstdint>
+#include "test_utils.hpp"
+#include "libslic3r/Utils.hpp"
+#include "libslic3r/miniz_extension.hpp"
+#include "libslic3r/PNGReadWrite.hpp"
+#include "libslic3r/Format/SL1.hpp"
 #include <catch2/generators/catch_generators.hpp>
 #include <Eigen/Geometry>
 #include <Eigen/Core>
@@ -1774,4 +1782,278 @@ TEST_CASE("SLA pad_around_object selects the standard or around-object pad",
     CHECK(standard.depth > 10.0);
     CHECK(standard.z_span > 0.0);
     REQUIRE(around.pad_empty);
+}
+
+TEST_CASE("SLA elephant foot correction fades by layer and preserves narrow features",
+          "[SLAPrint][SLAElephantFootFade]")
+{
+    struct Settings {
+        double compensation;
+        int faded_layers;
+        double minimum_width;
+    };
+    const std::vector<Settings> settings{
+        {0.0, 4, 0.2},
+        {0.3, 4, 0.2},
+        {0.3, 3, 0.2},
+        {0.3, 4, 30.0},
+        {0.3, 20, 0.2},
+    };
+    std::vector<sla_correction_variance_contracts::Run> runs;
+    for (const Settings &row : settings) {
+        auto config = sla_correction_variance_contracts::correction_config();
+        config.set_key_value("elefant_foot_compensation", new ConfigOptionFloat(row.compensation));
+        config.set_key_value("faded_layers", new ConfigOptionInt(row.faded_layers));
+        config.set_key_value("elefant_foot_min_width", new ConfigOptionFloat(row.minimum_width));
+        runs.emplace_back(sla_correction_variance_contracts::process_cube(std::move(config)));
+    }
+
+    for (const auto &run : runs) {
+        REQUIRE(run.model_areas.size() == 4); // Four 1 mm layers in the 4 mm cube.
+        CHECK_THAT(run.bbox_x, Catch::Matchers::WithinAbs(10.0, 1e-6));
+        CHECK_THAT(run.bbox_y, Catch::Matchers::WithinAbs(10.0, 1e-6));
+        CHECK_THAT(run.bbox_z, Catch::Matchers::WithinAbs(4.0, 1e-6));
+        for (std::size_t i = 0; i < run.model_areas.size(); ++i) {
+            CHECK(run.model_indices[i] == runs.front().model_indices[i]);
+            CHECK_THAT(run.model_levels[i], Catch::Matchers::WithinAbs(runs.front().model_levels[i], 1e-6));
+        }
+    }
+    for (double area : runs[0].model_areas)
+        CHECK_THAT(area, Catch::Matchers::WithinAbs(100.0, 0.02));
+
+    // A wider-than-object minimum prevents compensation from eroding the
+    // feature. The ordinary 0.2 mm minimum allows the 10 mm square to shrink.
+    for (double area : runs[3].model_areas)
+        CHECK_THAT(area, Catch::Matchers::WithinAbs(100.0, 0.02));
+    const auto &four = runs[1].model_areas;
+    const auto &three = runs[2].model_areas;
+    CHECK(four[0] < four[1] - 0.02);
+    CHECK(four[1] < four[2] - 0.02);
+    CHECK(four[2] < four[3] - 0.02);
+    CHECK_THAT(four[3], Catch::Matchers::WithinAbs(100.0, 0.02));
+
+    // Three fade layers reach the unchanged section one layer earlier, while
+    // the configured first-layer correction remains identical in both rows.
+    CHECK_THAT(three[0], Catch::Matchers::WithinAbs(four[0], 0.02));
+    CHECK(three[1] > four[1] + 0.02);
+    CHECK(three[1] < 100.0 - 0.02);
+    CHECK_THAT(three[2], Catch::Matchers::WithinAbs(100.0, 0.02));
+    CHECK_THAT(three[3], Catch::Matchers::WithinAbs(100.0, 0.02));
+
+    // The registered maximum is clamped to the number of printable layers.
+    for (std::size_t i = 0; i < four.size(); ++i)
+        CHECK_THAT(runs[4].model_areas[i], Catch::Matchers::WithinAbs(four[i], 0.02));
+}
+
+namespace sla_raster_active_contracts {
+
+class ArchiveReader
+{
+public:
+    explicit ArchiveReader(const std::string &path)
+        : opened(open_zip_reader(&archive.arch, path))
+    {}
+
+    ~ArchiveReader()
+    {
+        if (opened)
+            close_zip_reader(&archive.arch);
+    }
+
+    bool is_open() const { return opened; }
+    MZ_Archive archive;
+
+private:
+    bool opened;
+};
+
+std::vector<std::uint8_t> read_entry(ArchiveReader &reader, const std::string &name)
+{
+    const int index = mz_zip_reader_locate_file(&reader.archive.arch, name.c_str(), nullptr, 0);
+    REQUIRE(index >= 0);
+
+    mz_zip_archive_file_stat stat;
+    REQUIRE(mz_zip_reader_file_stat(&reader.archive.arch, mz_uint(index), &stat));
+
+    size_t extracted_size = 0;
+    void *raw = mz_zip_reader_extract_to_heap(&reader.archive.arch, mz_uint(index), &extracted_size, 0);
+    std::unique_ptr<void, decltype(&mz_free)> owner(raw, &mz_free);
+    REQUIRE(owner != nullptr);
+    REQUIRE(extracted_size == size_t(stat.m_uncomp_size));
+
+    const auto *begin = static_cast<const std::uint8_t *>(owner.get());
+    return std::vector<std::uint8_t>(begin, begin + extracted_size);
+}
+
+struct RasterLayerSummary
+{
+    std::vector<std::uint8_t> mask;
+    std::size_t               active_pixels = 0;
+    double                    area_mm2 = 0.;
+    double                    centroid_x = 0.;
+    double                    centroid_y = 0.;
+    double                    width_mm = 0.;
+    double                    height_mm = 0.;
+};
+
+RasterLayerSummary summarize_png(const std::vector<std::uint8_t> &bytes,
+                                 const std::size_t expected_pixels,
+                                 const double       pixel_mm)
+{
+    png::ImageGreyscale image;
+    const png::ReadBuf input{bytes.data(), bytes.size()};
+    REQUIRE(png::decode_png(input, image));
+    REQUIRE(image.cols == expected_pixels);
+    REQUIRE(image.rows == expected_pixels);
+    REQUIRE(image.buf.size() == expected_pixels * expected_pixels);
+
+    RasterLayerSummary result;
+    result.mask.resize(image.buf.size());
+    std::size_t min_col = image.cols;
+    std::size_t min_row = image.rows;
+    std::size_t max_col = 0;
+    std::size_t max_row = 0;
+    double sum_x = 0.;
+    double sum_y = 0.;
+
+    for (std::size_t row = 0; row < image.rows; ++row) {
+        for (std::size_t col = 0; col < image.cols; ++col) {
+            const std::uint8_t value = image.get(row, col);
+            const bool active = value >= 128;
+            result.mask[row * image.cols + col] = active ? 1 : 0;
+            if (!active)
+                continue;
+
+            ++result.active_pixels;
+            min_col = std::min(min_col, col);
+            min_row = std::min(min_row, row);
+            max_col = std::max(max_col, col);
+            max_row = std::max(max_row, row);
+            sum_x += (double(col) + 0.5) * pixel_mm;
+            sum_y += (double(image.rows - row) - 0.5) * pixel_mm;
+        }
+    }
+
+    REQUIRE(result.active_pixels > 0);
+    result.area_mm2 = double(result.active_pixels) * pixel_mm * pixel_mm;
+    result.centroid_x = sum_x / double(result.active_pixels);
+    result.centroid_y = sum_y / double(result.active_pixels);
+    result.width_mm = double(max_col - min_col + 1) * pixel_mm;
+    result.height_mm = double(max_row - min_row + 1) * pixel_mm;
+    return result;
+}
+
+struct RasterRun
+{
+    std::vector<RasterLayerSummary> layers;
+    std::vector<coord_t>             levels;
+};
+
+RasterRun run_raster_export()
+{
+    DynamicPrintConfig config = sla_correction_variance_contracts::correction_config();
+    config.set_key_value("layer_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("initial_layer_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("display_width", new ConfigOptionFloat(32.0));
+    config.set_key_value("display_height", new ConfigOptionFloat(32.0));
+    config.set_key_value("display_pixels_x", new ConfigOptionInt(128));
+    config.set_key_value("display_pixels_y", new ConfigOptionInt(128));
+    config.set_key_value("display_orientation",
+                         new ConfigOptionEnum<SLADisplayOrientation>(sladoLandscape));
+    config.set_key_value("display_mirror_x", new ConfigOptionBool(false));
+    config.set_key_value("display_mirror_y", new ConfigOptionBool(false));
+    config.set_key_value("gamma_correction", new ConfigOptionFloat(0.0));
+
+    // SLAPrint::apply supplies the pinned display configuration to this default
+    // archive through SLAArchive::apply; no second printer-config copy is needed.
+    SL1Archive archive;
+    SLAPrint print;
+    // The archive is attached before apply so the public rasterize step is enabled
+    // by the same lifecycle used by BackgroundSlicingProcess.
+    print.set_printer(&archive);
+
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    // make_cube() uses vertices from (0,0,0) to (size_x,size_y,size_z);
+    // the explicit upper-volume translation therefore keeps both tier centers
+    // at (4,4) while placing the union inside the 32 mm raster bed.
+    object->add_volume(make_cube(8.0, 8.0, 2.0));
+    TriangleMesh upper = make_cube(4.0, 4.0, 2.0);
+    upper.translate(Vec3f(2.f, 2.f, 1.99f));
+    object->add_volume(std::move(upper));
+    object->add_instance();
+    object->ensure_on_bed();
+
+    const auto apply_status = print.apply(model, std::move(config));
+    REQUIRE(apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA raster validation: " << print.validate().string);
+    REQUIRE(print.validate().string.empty());
+
+    print.process();
+    REQUIRE(print.finished());
+    // minZ=0, maxZ=3.99, and 1 mm initial/layer heights produce the public
+    // slice centers 0.5, 1.5, and 2.5; the next center is above maxZ.
+    REQUIRE(print.print_layers().size() == 3);
+    for (std::size_t i = 1; i < print.print_layers().size(); ++i)
+        REQUIRE(print.print_layers()[i - 1].level() < print.print_layers()[i].level());
+
+    const auto transformed_box = print.objects().front()->transformed_mesh().bounding_box();
+    CHECK_THAT(transformed_box.min.x(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    CHECK_THAT(transformed_box.min.y(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    CHECK_THAT(transformed_box.min.z(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    CHECK_THAT(transformed_box.max.x(), Catch::Matchers::WithinAbs(8.0, 1e-5));
+    CHECK_THAT(transformed_box.max.y(), Catch::Matchers::WithinAbs(8.0, 1e-5));
+    CHECK_THAT(transformed_box.max.z(), Catch::Matchers::WithinAbs(3.99, 1e-4));
+
+    ScopedTemporaryFile output(".sl1");
+    archive.export_print(output.string(), print, "raster-contract");
+
+    ArchiveReader reader(output.string());
+    REQUIRE(reader.is_open());
+    REQUIRE(mz_zip_reader_locate_file(&reader.archive.arch, "config.ini", nullptr, 0) >= 0);
+    REQUIRE(mz_zip_reader_locate_file(&reader.archive.arch, "prusaslicer.ini", nullptr, 0) >= 0);
+
+    RasterRun result;
+    result.levels.reserve(print.print_layers().size());
+    result.layers.reserve(print.print_layers().size());
+    for (const auto &layer : print.print_layers())
+        result.levels.push_back(layer.level());
+
+    constexpr std::size_t pixels = 128;
+    constexpr double pixel_mm = 32.0 / double(pixels);
+    for (std::size_t i = 0; i < result.levels.size(); ++i) {
+        const std::string name = string_printf("raster-contract%.5d.png", int(i));
+        result.layers.emplace_back(summarize_png(read_entry(reader, name), pixels, pixel_mm));
+    }
+    return result;
+}
+
+} // namespace sla_raster_active_contracts
+
+TEST_CASE("SLA attached SL1 archive rasterizes stepped model layers",
+          "[SLAPrint][SLAFeatures][SLARasterPipeline]")
+{
+    const auto run = sla_raster_active_contracts::run_raster_export();
+
+    REQUIRE(run.levels.size() == 3);
+    REQUIRE(run.layers.size() == run.levels.size());
+    REQUIRE(run.layers[0].mask == run.layers[1].mask);
+    REQUIRE(run.layers[0].mask != run.layers[2].mask);
+
+    for (const auto &layer : run.layers) {
+        CHECK(std::isfinite(layer.area_mm2));
+        CHECK(std::isfinite(layer.centroid_x));
+        CHECK(std::isfinite(layer.centroid_y));
+        CHECK_THAT(layer.centroid_x, Catch::Matchers::WithinAbs(4.0, 0.5));
+        CHECK_THAT(layer.centroid_y, Catch::Matchers::WithinAbs(4.0, 0.5));
+    }
+
+    CHECK_THAT(run.layers[0].area_mm2, Catch::Matchers::WithinAbs(64.0, 1.0));
+    CHECK_THAT(run.layers[1].area_mm2, Catch::Matchers::WithinAbs(64.0, 1.0));
+    CHECK_THAT(run.layers[2].area_mm2, Catch::Matchers::WithinAbs(16.0, 1.0));
+    CHECK_THAT(run.layers[0].width_mm, Catch::Matchers::WithinAbs(8.0, 0.5));
+    CHECK_THAT(run.layers[0].height_mm, Catch::Matchers::WithinAbs(8.0, 0.5));
+    CHECK_THAT(run.layers[2].width_mm, Catch::Matchers::WithinAbs(4.0, 0.5));
+    CHECK_THAT(run.layers[2].height_mm, Catch::Matchers::WithinAbs(4.0, 0.5));
 }

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Public SLA elephant-foot correction fade and minimum feature preservation.",
+  "mutants": [
+    {
+      "id": "sla-elephant-foot-decay-removed",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "return (faded_lyrs_efc - pos) * start_efc / faded_lyrs_efc;",
+      "new": "return start_efc;",
+      "expected_matches": 1,
+      "test_filter": "^SLAElephantFootFade$",
+      "ordinary_assertion_only": true,
+      "description": "Keep the full first-layer correction on every fade layer; physical area must stop increasing to the unchanged top."
+    },
+    {
+      "id": "sla-elephant-foot-minimum-width-ignored",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "double min_w = m_print->m_printer_config.elefant_foot_min_width.getFloat() / 2.;",
+      "new": "double min_w = 0.1;",
+      "expected_matches": 1,
+      "test_filter": "^SLAElephantFootFade$",
+      "ordinary_assertion_only": true,
+      "description": "Ignore the configured protected minimum width; the 30mm minimum control must incorrectly erode the 10mm square."
+    },
+    {
+      "id": "sla-elephant-foot-printer-correction-skipped",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "if (start_efc > 0.) for (size_t i = 0; i < faded_lyrs; ++i) {",
+      "new": "if (false) for (size_t i = 0; i < faded_lyrs; ++i) {",
+      "expected_matches": 1,
+      "test_filter": "^SLAElephantFootFade$",
+      "ordinary_assertion_only": true,
+      "description": "Skip the positive printer correction; the first three slice areas lose their strict fade ordering."
+    }
+  ]
+}
