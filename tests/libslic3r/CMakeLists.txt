@@ -29,6 +29,7 @@ add_executable(${_TEST_NAME}_tests
     test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
+    test_parameter_utils.cpp
     test_cut_surface_contracts.cpp
     test_cut_utils.cpp
     test_texture_painting.cpp

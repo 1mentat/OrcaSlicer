@@ -2589,3 +2589,158 @@ TEST_CASE("Unspecified support roles avoid the currently soluble filament",
 }
 
 } // namespace gcode_process_layer_support_contracts
+
+namespace support_overlap_contracts {
+
+struct OverlapEvidence {
+    std::size_t support_layers = 0;
+    std::size_t interface_paths = 0;
+    std::size_t split_layers = 0;
+    std::size_t reduced_paths = 0;
+    std::size_t reduced_flow_paths = 0;
+    double support_area_mm2 = 0.0;
+    double interface_volume_mm3 = 0.0;
+    double min_height = std::numeric_limits<double>::infinity();
+    double max_height = -std::numeric_limits<double>::infinity();
+    bool finite = true;
+};
+
+static OverlapEvidence process_fixture(bool zero_gap)
+{
+    // Reuse the existing support fixture baseline: it pins relative-E mode and the valid G92 E0 layer reset.
+    DynamicPrintConfig config = support_settings_variance_contracts::support_config();
+    config.set_deserialize_strict({
+        {"enable_support",                    true},
+        {"support_type",                      "normal(auto)"},
+        {"support_style",                     "default"},
+        {"support_on_build_plate_only",       false},
+        {"support_angle",                     0.0},
+        {"support_threshold_angle",            0.0},
+        {"support_threshold_overlap",          0.0},
+        {"support_object_xy_distance",         0.0},
+        {"support_expansion",                  0.0},
+        {"support_remove_small_overhang",      false},
+        {"support_critical_regions_only",     false},
+        {"support_interface_top_layers",       0},
+        {"support_interface_bottom_layers",    6},
+        {"support_interface_spacing",          0.0},
+        {"support_bottom_interface_spacing",   0.0},
+        {"support_top_z_distance",             0.2},
+        {"support_bottom_z_distance",          zero_gap ? 0.0 : 0.2},
+        {"independent_support_layer_height",   true},
+        {"thick_bridges",                      true},
+        {"bridge_flow",                        1.25},
+        {"bridge_no_support",                  false},
+        {"wall_generator",                     "classic"},
+        {"wall_loops",                         2},
+        {"top_shell_layers",                  2},
+        {"bottom_shell_layers",               2},
+        {"outer_wall_line_width",              0.4},
+        {"inner_wall_line_width",              0.4},
+        {"support_line_width",                 0.4},
+        {"line_width",                         0.4},
+        {"nozzle_diameter",                    "0.4"},
+        {"layer_height",                       0.2},
+        {"initial_layer_print_height",         0.2},
+        {"sparse_infill_density",              "0%"},
+        {"enable_prime_tower",                 false},
+        {"z_hop",                              0.0},
+        {"skirt_loops",                        0},
+        {"brim_type",                          "no_brim"},
+        {"raft_layers",                        0}
+    });
+
+    Print print;
+    Model model;
+    init_print({support_capital()}, print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO("support overlap validation: " << validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE(print.objects().size() == 1);
+    print.process();
+
+    const PrintObject &object = *print.objects().front();
+    OverlapEvidence out;
+    out.support_layers = object.support_layers().size();
+    for (const SupportLayer *layer : object.support_layers()) {
+        for (const ExPolygon &island : layer->support_islands)
+            out.support_area_mm2 += unscale<double>(unscale<double>(std::abs(island.area())));
+
+        std::vector<std::pair<double, double>> interface_flows;
+        for_each_extrusion_path(layer->support_fills, [&out, &interface_flows](const ExtrusionPath &path) {
+            if (path.role() != erSupportMaterialInterface)
+                return;
+            ++out.interface_paths;
+            const double length = path.length();
+            const double volume = path.total_volume();
+            const double height = static_cast<double>(path.height);
+            const double flow = path.mm3_per_mm;
+            out.finite = out.finite && std::isfinite(length) && length > 0.0;
+            out.finite = out.finite && std::isfinite(volume) && volume > 0.0;
+            out.finite = out.finite && std::isfinite(height) && height > 0.0;
+            out.finite = out.finite && std::isfinite(flow) && flow > 0.0;
+            out.interface_volume_mm3 += volume;
+            out.min_height = std::min(out.min_height, height);
+            out.max_height = std::max(out.max_height, height);
+            interface_flows.emplace_back(height, flow);
+        });
+
+        if (interface_flows.empty())
+            continue;
+        const double layer_max_height = std::max_element(interface_flows.begin(), interface_flows.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; })->first;
+        const double layer_max_flow = std::max_element(interface_flows.begin(), interface_flows.end(),
+            [](const auto &a, const auto &b) { return a.second < b.second; })->second;
+        bool split = false;
+        for (const auto &[height, flow] : interface_flows) {
+            if (height + 0.01 >= layer_max_height)
+                continue;
+            split = true;
+            ++out.reduced_paths;
+            if (flow + 1e-6 < layer_max_flow)
+                ++out.reduced_flow_paths;
+        }
+        if (split)
+            ++out.split_layers;
+    }
+    return out;
+}
+
+} // namespace support_overlap_contracts
+
+TEST_CASE("Bottom contact modulation distinguishes positive and zero bottom gaps",
+          "[SupportMaterial][SupportOverlap]")
+{
+    const support_overlap_contracts::OverlapEvidence positive_gap =
+        support_overlap_contracts::process_fixture(false);
+    const support_overlap_contracts::OverlapEvidence zero_gap =
+        support_overlap_contracts::process_fixture(true);
+
+    for (const auto &evidence : {positive_gap, zero_gap}) {
+        REQUIRE(evidence.support_layers > 0);
+        REQUIRE(evidence.interface_paths > 0);
+        REQUIRE(evidence.finite);
+        REQUIRE(std::isfinite(evidence.support_area_mm2));
+        REQUIRE(evidence.support_area_mm2 > 0.0);
+        REQUIRE(std::isfinite(evidence.interface_volume_mm3));
+        REQUIRE(evidence.interface_volume_mm3 > 0.0);
+        REQUIRE(std::isfinite(evidence.min_height));
+        REQUIRE(std::isfinite(evidence.max_height));
+        REQUIRE(evidence.max_height >= evidence.min_height);
+    }
+
+    // A positive bottom gap makes the bottom contact a bridging layer. Its generated interface
+    // path overlaps lower support material, so the public collection contains both the original
+    // bridge-height path and a reduced-height fragment with a correspondingly lower flow.
+    REQUIRE(positive_gap.split_layers > 0);
+    REQUIRE(positive_gap.reduced_paths > 0);
+    REQUIRE(positive_gap.reduced_flow_paths > 0);
+    REQUIRE(positive_gap.max_height > positive_gap.min_height + 0.01);
+
+    // With zero bottom gap, the source aligns the bottom contact to the object's layer and clears
+    // the bridging flag; no reduced-height overlap fragment should be emitted.
+    CHECK(zero_gap.split_layers == 0);
+    CHECK(zero_gap.reduced_paths == 0);
+    CHECK(zero_gap.reduced_flow_paths == 0);
+    CHECK_THAT(zero_gap.max_height - zero_gap.min_height, Catch::Matchers::WithinAbs(0.0, 0.01));
+}

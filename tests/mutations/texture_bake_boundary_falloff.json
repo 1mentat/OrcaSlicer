@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Boundary falloff preserves excluded seams and ramps displacement over physical distance, with disabled and unmasked controls.",
+  "mutants": [
+    {
+      "id": "texture-bake-boundary-019f-distance-ratio-inverted",
+      "path": "src/libslic3r/TextureBake/TextureBakeDisplace.cpp",
+      "old": "std::clamp(best / radius, 0.0, 1.0)",
+      "new": "std::clamp(radius / std::max(best, 1e-12), 0.0, 1.0)",
+      "expected_matches": 1,
+      "test_filter": "TextureBakeBoundaryFalloff",
+      "ordinary_assertion_only": true,
+      "description": "Inverting distance over radius makes the one-unit interior point saturate instead of producing the independently expected 0.5 ramp."
+    },
+    {
+      "id": "texture-bake-boundary-019f-falloff-pass-skipped",
+      "path": "src/libslic3r/TextureBake/TextureBakeDisplace.cpp",
+      "old": "if (settings.boundary_falloff > 0.f && unique_count > 0)",
+      "new": "if (false)",
+      "expected_matches": 1,
+      "test_filter": "TextureBakeBoundaryFalloff",
+      "ordinary_assertion_only": true,
+      "description": "Skipping the boundary-distance pass leaves the included strip at hard-edge displacement, so the x=2 vertices fail the 0.5 oracle."
+    },
+    {
+      "id": "texture-bake-boundary-019f-seam-anchor-omitted",
+      "path": "src/libslic3r/TextureBake/TextureBakeDisplace.cpp",
+      "old": "const bool sealed_boundary =\n            !face_excluded && !excluded_pos.empty() && excluded_pos[vid] != 0;",
+      "new": "const bool sealed_boundary = false;",
+      "expected_matches": 1,
+      "test_filter": "TextureBakeBoundaryFalloff",
+      "ordinary_assertion_only": true,
+      "description": "Removing the shared-position seam pin moves the included copy at x=1, violating the zero-height seam oracle."
+    }
+  ]
+}

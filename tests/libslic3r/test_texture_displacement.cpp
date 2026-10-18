@@ -2970,3 +2970,87 @@ TEST_CASE("Texture UV transforms apply scale rotation aspect and offset", "[Text
     CHECK_THAT(fallback_uv.x(), WithinAbs(-0.9f, 1e-5f));
     CHECK_THAT(fallback_uv.y(), WithinAbs(1.8f, 1e-5f));
 }
+
+static TextureBake::TriSoup make_texture_bake_boundary_falloff_strip()
+{
+    TextureBake::TriSoup soup;
+    const Vec3f normal(0.f, 0.f, 1.f);
+    const auto append_triangle = [&](const Vec3f &a, const Vec3f &b, const Vec3f &c, float excluded) {
+        soup.pos.push_back(a);
+        soup.pos.push_back(b);
+        soup.pos.push_back(c);
+        soup.nrm.insert(soup.nrm.end(), 3, normal);
+        soup.exclude_weight.insert(soup.exclude_weight.end(), 3, excluded);
+    };
+    const auto append_quad = [&](int x, float excluded) {
+        const Vec3f p00(float(x), 0.f, 0.f);
+        const Vec3f p10(float(x + 1), 0.f, 0.f);
+        const Vec3f p11(float(x + 1), 1.f, 0.f);
+        const Vec3f p01(float(x), 1.f, 0.f);
+        append_triangle(p00, p10, p11, excluded);
+        append_triangle(p00, p11, p01, excluded);
+    };
+
+    append_quad(0, 1.f);
+    append_quad(1, 0.f);
+    append_quad(2, 0.f);
+    return soup;
+}
+
+TEST_CASE("Texture bake boundary falloff ramps an excluded planar seam", "[TextureDisplacement][TextureBakeBoundaryFalloff]")
+{
+    const TextureBake::TriSoup strip = make_texture_bake_boundary_falloff_strip();
+    const TextureBake::HeightSampleFn sample =
+        [](const Vec3f &, const Vec3f &, const Vec3f &) { return 1.f; };
+
+    TextureBake::DisplaceSettings settings;
+    settings.amplitude              = 1.f;
+    settings.symmetric              = false;
+    settings.bottom_angle_limit     = 0.f;
+    settings.top_angle_limit        = 0.f;
+    settings.no_downward_z           = false;
+    settings.blend_normal_smoothing = 0;
+    settings.boundary_falloff        = 2.f;
+
+    TextureBake::DisplaceBounds bounds;
+    bounds.min = Vec3f(0.f, 0.f, 0.f);
+    bounds.max = Vec3f(3.f, 1.f, 0.f);
+
+    const auto check_output = [&](const TextureBake::TriSoup &input_soup,
+                                  const TextureBake::TriSoup &output,
+                                  const std::array<float, 4> &expected_z) {
+        REQUIRE(output.pos.size() == input_soup.pos.size());
+        REQUIRE(output.nrm.size() == input_soup.nrm.size());
+        REQUIRE(output.exclude_weight == input_soup.exclude_weight);
+
+        float min_z = std::numeric_limits<float>::max();
+        float max_z = std::numeric_limits<float>::lowest();
+        for (size_t i = 0; i < input_soup.pos.size(); ++i) {
+            const Vec3f &input  = input_soup.pos[i];
+            const Vec3f &actual = output.pos[i];
+            CHECK_THAT(actual.x(), WithinAbs(input.x(), 1e-6f));
+            CHECK_THAT(actual.y(), WithinAbs(input.y(), 1e-6f));
+            const size_t column = size_t(input.x());
+            REQUIRE(column < expected_z.size());
+            CHECK_THAT(actual.z(), WithinAbs(expected_z[column], 1e-5f));
+            min_z = std::min(min_z, actual.z());
+            max_z = std::max(max_z, actual.z());
+        }
+        CHECK(min_z >= -1e-6f);
+        CHECK(max_z <= 1.f + 1e-6f);
+    };
+
+    const TextureBake::TriSoup ramp = TextureBake::apply_displacement(strip, sample, settings, bounds);
+    check_output(strip, ramp, { 0.f, 0.f, 0.5f, 1.f });
+
+    settings.boundary_falloff = 0.f;
+    const TextureBake::TriSoup hard = TextureBake::apply_displacement(strip, sample, settings, bounds);
+    check_output(strip, hard, { 0.f, 0.f, 1.f, 1.f });
+
+    TextureBake::TriSoup unmasked = strip;
+    std::fill(unmasked.exclude_weight.begin(), unmasked.exclude_weight.end(), 0.f);
+    settings.boundary_falloff = 2.f;
+    const TextureBake::TriSoup unmasked_output =
+        TextureBake::apply_displacement(unmasked, sample, settings, bounds);
+    check_output(unmasked, unmasked_output, { 1.f, 1.f, 1.f, 1.f });
+}

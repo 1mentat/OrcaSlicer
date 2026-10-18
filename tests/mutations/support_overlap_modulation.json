@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Bottom-contact support overlaps reduce extrusion height and flow with a positive-gap versus zero-gap control.",
+  "mutants": [
+    {
+      "id": "support-overlap-modulation-gate-returned-early",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "    if (n_overlapping_layers == 0 || extrusions_in_out.empty())\n        // The extrusions do not overlap with any other extrusion.\n        return;",
+      "new": "    if (true)\n        // The extrusions do not overlap with any other extrusion.\n        return;",
+      "expected_matches": 1,
+      "test_filter": "SupportOverlap",
+      "description": "Return from the public overlap-modulation helper even when a bottom-contact path has overlapping support layers; the positive-gap row must lose its reduced-height interface fragment.",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "support-overlap-reduced-height-uses-source-height",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "        frag.height = float(this_layer.print_z - overlapping_layer.print_z);",
+      "new": "        frag.height = this_layer.height;",
+      "expected_matches": 1,
+      "test_filter": "SupportOverlap",
+      "description": "Use the current layer height for every clipped fragment instead of the vertical distance to the overlap; the positive-gap row must no longer expose a reduced-height path.",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "support-overlap-reduced-flow-uses-source-height",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "        frag.mm3_per_mm = Flow(frag.width, frag.height, -1.f).mm3_per_mm();",
+      "new": "        frag.mm3_per_mm = Flow(frag.width, this_layer.height, -1.f).mm3_per_mm();",
+      "expected_matches": 1,
+      "test_filter": "SupportOverlap",
+      "description": "Compute clipped fragment flow from the untrimmed source height; the positive-gap row must lose the lower flow associated with its reduced-height fragment.",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Extruder parameter family dispatch preserves physical tool, variant ordering and paired motion slots; sequence encoding replaces previous state.",
+  "mutants": [
+    {
+      "id": "parameter-motion-variant-pair-stride-dropped",
+      "path": "src/libslic3r/ParameterUtils.cpp",
+      "old": "        stride       = 2;",
+      "new": "        stride       = 1;",
+      "expected_matches": 1,
+      "test_filter": "^ParameterVariants$",
+      "ordinary_assertion_only": true,
+      "description": "Normal/silent motion limits occupy two slots per nozzle variant; the literal expected base slots must be preserved."
+    },
+    {
+      "id": "parameter-lookup-first-physical-extruder-forced",
+      "path": "src/libslic3r/ParameterUtils.cpp",
+      "old": "config.get_index_for_extruder(cur_extruder_id + 1, id_name, extruder_type, nozzle_volume_type, variant_name, stride)",
+      "new": "config.get_index_for_extruder(1, id_name, extruder_type, nozzle_volume_type, variant_name, stride)",
+      "expected_matches": 1,
+      "test_filter": "^ParameterVariants$",
+      "ordinary_assertion_only": true,
+      "description": "Always selecting the first physical extruder must fail the second-extruder printer and process column assertions without selecting a missing variant."
+    },
+    {
+      "id": "parameter-filament-variant-map-replaced",
+      "path": "src/libslic3r/ParameterUtils.cpp",
+      "old": "        variant_name = \"filament_extruder_variant\";",
+      "new": "        variant_name = \"printer_extruder_variant\";",
+      "expected_matches": 1,
+      "test_filter": "^ParameterVariants$",
+      "ordinary_assertion_only": true,
+      "description": "Using printer variant order for filament parameters must fail the intentionally distinct literal filament-column expectations."
+    },
+    {
+      "id": "parameter-layer-sequence-output-not-cleared",
+      "path": "src/libslic3r/ParameterUtils.cpp",
+      "old": "    sequence.clear();",
+      "new": "    ;",
+      "expected_matches": 1,
+      "test_filter": "^ParameterSequences$",
+      "ordinary_assertion_only": true,
+      "description": "Encoding must replace prior state, including when the input is empty. Retained stale values fail literal output and empty-control assertions."
+    }
+  ]
+}
