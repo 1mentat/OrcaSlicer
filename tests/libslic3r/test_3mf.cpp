@@ -6475,12 +6475,12 @@ std::map<std::string, std::string> read_model_metadata(const std::string &xml)
 
     std::map<std::string, std::string> metadata;
     const auto model_node = tree.get_child_optional("model");
-    REQUIRE(model_node);
+    REQUIRE(static_cast<bool>(model_node));
     for (const auto &node : *model_node) {
         if (node.first != "metadata")
             continue;
         const auto attributes = node.second.get_child_optional("<xmlattr>");
-        REQUIRE(attributes);
+        REQUIRE(static_cast<bool>(attributes));
         const auto name = attributes->get_optional<std::string>("name");
         REQUIRE(name);
         metadata[*name] = node.second.data();
@@ -6736,7 +6736,7 @@ TEST_CASE("Generic 3MF metadata uses one-based model object indexing", "[3MF][Ge
     const auto &range_node = object_node->get_child("range");
     CHECK_THAT(range_node.get<double>("<xmlattr>.min_z"), Catch::Matchers::WithinAbs(0.4, 1e-6));
     CHECK_THAT(range_node.get<double>("<xmlattr>.max_z"), Catch::Matchers::WithinAbs(1.2, 1e-6));
-    REQUIRE(range_node.get_child_optional("option"));
+    REQUIRE(static_cast<bool>(range_node.get_child_optional("option")));
     CHECK(range_node.get_child("option").get<std::string>("<xmlattr>.opt_key") == "layer_height");
     const std::string serialized_layer_height = range_node.get_child("option").data();
     REQUIRE_FALSE(serialized_layer_height.empty());
@@ -7083,7 +7083,7 @@ TEST_CASE("BBS backup writes valid mesh geometry and completes its public lifecy
     // A model document can contain component objects before the mesh-bearing resource;
     // select the actual object with a mesh rather than depending on resource order.
     const auto resources = tree.get_child_optional("model.resources");
-    REQUIRE(resources);
+    REQUIRE(static_cast<bool>(resources));
     const ptree *mesh_object = nullptr;
     const ptree *mesh = nullptr;
     for (const auto &node : *resources) {
@@ -7106,8 +7106,8 @@ TEST_CASE("BBS backup writes valid mesh geometry and completes its public lifecy
 
     const auto vertices = mesh->get_child_optional("vertices");
     const auto triangles = mesh->get_child_optional("triangles");
-    REQUIRE(vertices);
-    REQUIRE(triangles);
+    REQUIRE(static_cast<bool>(vertices));
+    REQUIRE(static_cast<bool>(triangles));
 
     std::size_t vertex_count = 0;
     bool vertex_values_ok = true;
