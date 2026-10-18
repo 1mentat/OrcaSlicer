@@ -2471,7 +2471,11 @@ TEST_CASE("Volume-to-bed transform cancels quarter-turn anisotropic mirror", "[M
     CHECK_THAT(volume.get_scaling_factor(X), Catch::Matchers::WithinAbs(1. / 3., 1e-12));
     CHECK_THAT(volume.get_scaling_factor(Y), Catch::Matchers::WithinAbs(1. / 2., 1e-12));
     CHECK_THAT(volume.get_scaling_factor(Z), Catch::Matchers::WithinAbs(1. / 4., 1e-12));
-    CHECK(volume.get_mirror().isApprox(Vec3d(1., -1., 1.), 1e-12));
+    // Rotation/reflection factors are not unique; the physical inverse and its
+    // handedness are invariant under an equivalent matrix decomposition.
+    const Transform3d expected = instance.get_matrix_no_offset().inverse();
+    CHECK(volume.get_matrix().isApprox(expected, 1e-12));
+    CHECK(volume.is_left_handed());
 }
 
 TEST_CASE("Volume-to-bed transform keeps general rotation out of the volume", "[Model][Geometry][VolumeBedTransformation]")

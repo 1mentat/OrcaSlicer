@@ -3230,6 +3230,8 @@ IroningEnumObservation run_ironing_type(const char *type)
         {"ironing_spacing", 0.2},
         {"ironing_inset", 0.0},
         {"spiral_mode", false},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
         {"skirt_loops", 0},
         {"brim_type", "no_brim"},
         {"raft_layers", 0},

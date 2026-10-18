@@ -11506,7 +11506,10 @@ TEST_CASE("External preset resolves an unchanged inherited system profile", "[Pr
     parent.is_system = true;
     const std::string parent_name = parent.name;
 
-    DynamicPrintConfig external = parent_config;
+    // Start from the config actually stored by load_preset.  This keeps the
+    // imported profile byte-for-byte equivalent to the system parent apart from
+    // bookkeeping fields, which is the identity-resolution contract under test.
+    DynamicPrintConfig external = parent.config;
     auto *inherits = external.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true);
     REQUIRE(inherits != nullptr);
     inherits->value = parent_name;
@@ -11935,7 +11938,9 @@ TEST_CASE("Saving a root preset reloads its inherited child",
           "[Preset][PresetExternalSave]")
 {
     PrintCollectionFixture fx;
-    fx.collection.load_preset({}, "Reload Parent", fx.config(0.20), true);
+    const fs::path parent_file =
+        fx.temp.path() / PRESET_PRINT_NAME / "base" / "Reload Parent.json";
+    fx.collection.load_preset(parent_file.string(), "Reload Parent", fx.config(0.20), true);
     fx.collection.save_current_preset("Reload Child", false, false);
 
     Preset *child = fx.collection.find_preset("Reload Child", false, true);

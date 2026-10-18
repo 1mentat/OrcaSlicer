@@ -4246,6 +4246,15 @@ DynamicPrintConfig custom_layer_validation_config(bool precise_z_height)
     DynamicPrintConfig config = multifilament_config(2, {
         {"enable_prime_tower", true},
         {"print_sequence", "by layer"},
+        // Keep the generated tower wholly inside a finite, non-belt bed so the
+        // profile-validation rows reach the layer-profile contract.
+        {"belt_printer", false},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+        {"wipe_tower_wall_type", "rectangle"},
+        {"prime_tower_width", 35.0},
+        {"prime_tower_brim_width", 0.0},
+        {"wipe_tower_x", 50.0},
+        {"wipe_tower_y", 50.0},
         {"layer_height", 0.2},
         {"initial_layer_print_height", 0.2},
         {"skirt_loops", 0},

@@ -2377,7 +2377,10 @@ SupportRemovalRun run_symmetric_ledges(double overhang, bool remove_small_overha
     REQUIRE(validation.string.empty());
     REQUIRE(print.objects().size() == 1);
     print.process();
-    REQUIRE(print.finished());
+    // Print::process() completes slicing/support steps; psGCodeExport is not
+    // run by this helper. Check that processing produced object layers, then
+    // retain the support-area/path assertions below as the setting oracle.
+    REQUIRE_FALSE(print.objects().front()->layers().empty());
 
     const PrintObject *object = print.objects().front();
     SupportRemovalRun result;

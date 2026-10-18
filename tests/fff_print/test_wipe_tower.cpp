@@ -5386,7 +5386,8 @@ WrappingPipelineRun run_wrapping_pipeline(bool enabled)
         {"wipe_tower_x", 50},
         {"wipe_tower_y", 50},
         {"printable_area", "0x0,200x0,200x200,0x200"},
-        {"use_relative_e_distances", false},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
         {"wipe_tower_rotation_angle", 0},
         {"gcode_comments", true},
     });
@@ -5642,7 +5643,7 @@ WipingExport export_wiping_copies(bool objects, bool infill)
         {"wall_loops", 1}, {"top_shell_layers", 0}, {"bottom_shell_layers", 0},
         {"sparse_infill_density", "30%"}, {"sparse_infill_pattern", "rectilinear"},
         {"is_infill_first", false}, {"wall_generator", "classic"},
-        {"seam_position", "rear"}, {"seam_gap", "0%"},
+        {"seam_position", "back"}, {"seam_gap", "0%"},
         {"enable_support", false}, {"skirt_loops", 0}, {"brim_type", "no_brim"},
         {"enable_arc_fitting", false}, {"spiral_mode", false},
         {"gcode_flavor", "marlin"}, {"use_relative_e_distances", true},

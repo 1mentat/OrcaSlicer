@@ -249,6 +249,16 @@ TEST_CASE("BuildVolume per-extruder rectangle limits are returned as a complete 
     CHECK(inside[0]);
     CHECK_FALSE(inside[1]);
     CHECK_FALSE(inside[2]);
+
+    // Reusing the output mask must reflect this box, including a nozzle which
+    // could not reach the previous box.
+    CHECK(volume.check_volume_bbox_state_with_extruder_areas(
+              BoundingBoxf3{Vec3d(12., 2., 1.), Vec3d(16., 6., 3.)}, inside) ==
+          BuildVolume::ObjectState::Limited);
+    REQUIRE(inside.size() == 3);
+    CHECK(inside[0]);
+    CHECK_FALSE(inside[1]);
+    CHECK(inside[2]);
 }
 
 TEST_CASE("BuildVolume per-extruder circle limits distinguish radial collision", "[BuildVolume][BuildVolumeVariance]")

@@ -2795,7 +2795,7 @@ TEST_CASE("Ironing preserves each region's speed flow and direction", "[Fill][Mu
         {"slow_down_for_layer_cooling", false}, {"slow_down_layer_time", 0.},
         {"enable_support", false}, {"skirt_loops", 0}, {"brim_type", "no_brim"},
         {"enable_arc_fitting", false}, {"gcode_comments", true},
-        {"use_relative_e_distances", false}, {"layer_change_gcode", "G92 E0\n"},
+        {"use_relative_e_distances", false}, {"layer_change_gcode", ""},
     });
     DynamicPrintConfig changed;
     if (difference == Difference::Speed) changed.set_deserialize_strict("ironing_speed", "35");
@@ -3057,6 +3057,7 @@ DynamicPrintConfig config(double angle, bool relative, bool aligned)
         {"bridge_density", "100%"}, {"bridge_flow", 1.}, {"thick_bridges", false},
         {"enable_support", false}, {"raft_layers", 0},
         {"skirt_loops", 0}, {"brim_type", "no_brim"}, {"resolution", 0.012},
+        {"use_relative_e_distances", true}, {"layer_change_gcode", "G92 E0\n"},
     });
     return result;
 }

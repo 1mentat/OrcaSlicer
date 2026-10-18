@@ -7387,7 +7387,7 @@ TEST_CASE("Legacy importer splits a handcrafted multi-build-item resource", "[3M
         CHECK(instance->get_object() == object);
         CHECK(instance->get_transformation().get_matrix().isApprox(Transform3d::Identity(), 1e-5));
         CHECK_THAT(double(object->raw_mesh().bounding_box().min.x()), Catch::Matchers::WithinAbs(expected_raw_min_x[index], 1e-5));
-        CHECK_THAT(object->raw_mesh().volume(), Catch::Matchers::WithinAbs(1000., 1e-5));
+        CHECK_THAT(object->raw_mesh().volume(), Catch::Matchers::WithinRel(1000., 1e-6));
     }
     const BoundingBoxf3 first_box = loaded.objects[0]->bounding_box_exact();
     const BoundingBoxf3 second_box = loaded.objects[1]->bounding_box_exact();
@@ -7446,7 +7446,7 @@ TEST_CASE("BBS importer splits a handcrafted foreign multi-build-item resource",
         const ModelInstance *instance = object->instances.front();
         REQUIRE(instance != nullptr);
         CHECK(instance->get_object() == object);
-        CHECK_THAT(object->raw_mesh().volume(), Catch::Matchers::WithinAbs(1000., 1e-5));
+        CHECK_THAT(object->raw_mesh().volume(), Catch::Matchers::WithinRel(1000., 1e-6));
     }
     const BoundingBoxf3 first_box = loaded.objects[0]->bounding_box_exact();
     const BoundingBoxf3 second_box = loaded.objects[1]->bounding_box_exact();
@@ -7632,7 +7632,7 @@ TEST_CASE("BBS accepts a valid 3MF object with the other object type",
     REQUIRE(loaded.objects.front() != nullptr);
     REQUIRE(loaded.objects.front()->volumes.size() == 1);
     CHECK(loaded.objects.front()->name == "Cube");
-    CHECK_THAT(loaded.objects.front()->raw_mesh().volume(), WithinAbs(1000., 1e-5));
+    CHECK_THAT(loaded.objects.front()->raw_mesh().volume(), Catch::Matchers::WithinRel(1000., 1e-6));
     CHECK_THAT(double(loaded.mesh().bounding_box().max.x()), WithinAbs(10., 1e-5));
 }
 

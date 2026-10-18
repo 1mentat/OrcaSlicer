@@ -20,6 +20,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Surface.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include "test_helpers.hpp"
@@ -1020,9 +1021,19 @@ struct Evidence {
     size_t support_points = 0;
     size_t positive_paths = 0;
     size_t bridge_segments = 0;
+    size_t bridge_surface_count = 0;
+    double bridge_support_area_mm2 = 0.0;
     double total_length_mm = 0.0;
     bool finite = true;
 };
+
+static double expolygons_area_mm2(const ExPolygons &polygons)
+{
+    double scaled_area = 0.0;
+    for (const ExPolygon &polygon : polygons)
+        scaled_area += std::abs(polygon.area());
+    return unscale<double>(unscale<double>(scaled_area));
+}
 
 // The 20 mm roof is supported only at its two four-millimetre end pillars.  Its
 // x=4..16 middle window is an analytic, horizontally unsupported bridge region.
@@ -1073,10 +1084,24 @@ static Evidence observe(bool thick_bridges)
     const Point &center_offset = object.center_offset();
     result.bridge_segments = tree_support_critical_regions_contracts::support_segments_in_window(
         print, center_offset, 4.5, 15.5, 0.5, 7.5);
+    const ExPolygon bridge_window({ Point::new_scale(4.5, 0.5) - center_offset,
+                                    Point::new_scale(15.5, 0.5) - center_offset,
+                                    Point::new_scale(15.5, 7.5) - center_offset,
+                                    Point::new_scale(4.5, 7.5) - center_offset });
+    // The fixture's roof middle must be represented as a public bottom-bridge
+    // surface before the support trimming oracle is meaningful.
+    for (const Layer *layer : object.layers())
+        for (const LayerRegion *region : layer->regions())
+            for (const Surface &surface : region->fill_surfaces.surfaces)
+                if (surface.surface_type == stBottomBridge &&
+                    expolygons_area_mm2(intersection_ex(ExPolygons{ surface.expolygon }, bridge_window)) > 0.0)
+                    ++result.bridge_surface_count;
     for (const SupportLayer *layer : object.support_layers()) {
         if (layer == nullptr)
             result.finite = false;
         else {
+            result.bridge_support_area_mm2 +=
+                expolygons_area_mm2(intersection_ex(layer->support_islands, bridge_window));
             for_each_extrusion_path(layer->support_fills, [&result](const ExtrusionPath &path) {
                 const double length_mm = unscale<double>(path.length());
                 result.finite = result.finite && std::isfinite(length_mm);
@@ -1105,11 +1130,17 @@ TEST_CASE("Tree support thick bridges change trimming under a positive gap",
         REQUIRE(evidence.support_points > 0);
         REQUIRE(evidence.positive_paths > 0);
         REQUIRE(evidence.total_length_mm > 0.0);
-        REQUIRE(evidence.bridge_segments > 0);
+        REQUIRE(evidence.bridge_surface_count > 0);
+        REQUIRE(std::isfinite(evidence.bridge_support_area_mm2));
+        REQUIRE(evidence.bridge_support_area_mm2 >= 0.0);
     }
-    // The analytic x=4..16 roof middle is stBottomBridge.  The production
-    // thick_bridges path trims this region only when the positive top gap is active.
-    REQUIRE(thick.bridge_segments != regular.bridge_segments);
+    REQUIRE(regular.bridge_segments > 0);
+    REQUIRE(regular.bridge_support_area_mm2 > 0.0);
+    // The analytic x=4..16 roof middle is stBottomBridge.  With a positive
+    // top gap, TreeSupport adds that surface to the trimming polygons when
+    // thick_bridges is enabled, so the public support-island area in the
+    // bridge window must decrease. Path count alone cannot observe this.
+    REQUIRE(thick.bridge_support_area_mm2 + 0.01 < regular.bridge_support_area_mm2);
 }
 
 namespace tree_support_raft_contact_contracts {
@@ -1146,31 +1177,28 @@ static RaftContactEvidence observe(double raft_expansion)
     REQUIRE(print.objects().size() == 1);
     const PrintObject &object = *print.objects().front();
     RaftContactEvidence result;
-    std::vector<Polygons> footprints;
+    std::vector<ExPolygons> footprints;
     const double expected_contact_z = double(object.slicing_parameters().raft_contact_top_z);
     for (const SupportLayer *layer : object.support_layers()) {
-        if (layer == nullptr || layer->support_fills.empty())
+        if (layer == nullptr || layer->support_islands.empty())
             continue;
         if (std::abs(double(layer->print_z) - expected_contact_z) > EPSILON)
             continue;
-        Polygons covered;
-        layer->support_fills.polygons_covered_by_width(covered, float(SCALED_EPSILON));
-        if (!covered.empty())
-            footprints.push_back(std::move(covered));
+        footprints.push_back(layer->support_islands);
     }
 
     REQUIRE(std::isfinite(expected_contact_z));
     result.contact_z = expected_contact_z;
     REQUIRE(!footprints.empty());
-    Polygons all_covered;
-    for (const Polygons &footprint : footprints)
+    ExPolygons all_covered;
+    for (const ExPolygons &footprint : footprints)
         all_covered.insert(all_covered.end(), footprint.begin(), footprint.end());
     const ExPolygons merged = union_ex(all_covered);
     REQUIRE(!merged.empty());
     double scaled_area = 0.0;
     for (const ExPolygon &polygon : merged)
         scaled_area += std::abs(polygon.area());
-    const BoundingBox bbox = get_extents(all_covered);
+    const BoundingBox bbox = get_extents(merged);
     REQUIRE(bbox.defined);
     result.footprint_area_mm2 = unscale<double>(unscale<double>(scaled_area));
     result.footprint_width_mm = unscale<double>(bbox.max.x() - bbox.min.x());

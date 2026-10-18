@@ -486,7 +486,7 @@ BuildVolume::ObjectState  BuildVolume::check_object_state_with_extruder_areas(co
 {
     ObjectState result = ObjectState::Inside;
     int extruder_area_count = get_extruder_area_count();
-    inside_extruders.resize(extruder_area_count, true);
+    inside_extruders.assign(extruder_area_count, true);
     for (int index = 0; index < extruder_area_count; index++)
     {
         ObjectState state = check_object_state_with_extruder_area(its, trafo, index);
@@ -514,7 +514,7 @@ BuildVolume::ObjectState  BuildVolume::check_volume_bbox_state_with_extruder_are
 {
     ObjectState result = ObjectState::Inside;
     int extruder_area_count = get_extruder_area_count();
-    inside_extruders.resize(extruder_area_count, true);
+    inside_extruders.assign(extruder_area_count, true);
     for (int index = 0; index < extruder_area_count; index++)
     {
         ObjectState state = check_volume_bbox_state_with_extruder_area(volume_bbox, index);
