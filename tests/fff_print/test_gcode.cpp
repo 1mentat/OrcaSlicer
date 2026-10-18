@@ -5449,8 +5449,8 @@ TEST_CASE("Farthest-point timelapse snapshots follow support deposition when no 
         control, gcode_print_variance_contracts::support_fixture());
     const SupportTimelapseEvidence enabled_evidence = parse_support_timelapse_output(enabled_output.text, enabled);
     const SupportTimelapseEvidence control_evidence = parse_support_timelapse_output(control_output.text, control);
-    const Motion enabled_material = motion(enabled_output.text, enabled);
-    const Motion control_material = motion(control_output.text, control);
+    const auto enabled_material = gcode_print_variance_contracts::motion_evidence(enabled_output.text, enabled);
+    const auto control_material = gcode_print_variance_contracts::motion_evidence(control_output.text, control);
 
     REQUIRE(enabled_evidence.finite);
     REQUIRE(control_evidence.finite);
@@ -5458,7 +5458,7 @@ TEST_CASE("Farthest-point timelapse snapshots follow support deposition when no 
     REQUIRE(control_evidence.support_extrusions > 0);
     CHECK(enabled_evidence.object_extrusions == 0);
     CHECK(control_evidence.object_extrusions == 0);
-    REQUIRE(count_text(enabled_output.text, ";TYPE:Support") > 0);
+    REQUIRE(gcode_print_variance_contracts::count_text(enabled_output.text, ";TYPE:Support") > 0);
     REQUIRE(enabled_evidence.snapshots > 0);
     REQUIRE(control_evidence.snapshots > 0);
     REQUIRE(enabled_evidence.inline_snapshots > 0);
@@ -5469,7 +5469,7 @@ TEST_CASE("Farthest-point timelapse snapshots follow support deposition when no 
         CHECK(std::isfinite(layer_z));
         CHECK(layer_z > 0.0);
     }
-    require_same_material(control_material, enabled_material);
+    gcode_print_variance_contracts::require_same_material(control_material, enabled_material);
     CHECK(control_evidence.inline_snapshots == 0);
 }
 

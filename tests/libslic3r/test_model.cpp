@@ -2208,7 +2208,8 @@ void require_named_step_model(const Model &model, const std::string &input_file,
         REQUIRE(volume != nullptr);
         CHECK(volume->name == expected_names[i]);
         CHECK(volume->source.input_file == input_file);
-        const double volume_mm3 = std::abs(static_cast<double>(volume->mesh().volume()));
+        TriangleMesh mesh = volume->mesh();
+        const double volume_mm3 = std::abs(static_cast<double>(mesh.volume()));
         CHECK(std::isfinite(volume_mm3));
         CHECK(volume_mm3 > 0.0);
         CHECK(volume->mesh().facets_count() > 0);
