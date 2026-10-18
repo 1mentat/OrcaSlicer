@@ -449,3 +449,75 @@ TEST_CASE("Non-Ripple fuzzy noise forwards the configured public displacement",
     }
     REQUIRE(checked > 10);
 }
+
+namespace fuzzy_noise_analytic_dispatch {
+
+struct Probe {
+    NoiseType type;
+    double x0;
+    double x1;
+    double y;
+    double minimum_noise;
+    double maximum_noise;
+};
+
+FuzzySkinConfig one_octave_config(NoiseType type)
+{
+    FuzzySkinConfig cfg{};
+    cfg.type              = FuzzySkinType::External;
+    cfg.thickness         = scaled<coord_t>(0.5);
+    cfg.point_distance    = scaled<coord_t>(0.002);
+    cfg.fuzzy_first_layer = true;
+    cfg.noise_type        = type;
+    cfg.noise_scale       = 1.0;
+    cfg.noise_octaves     = 1;
+    cfg.noise_persistence = 0.5;
+    cfg.mode              = FuzzySkinMode::Displacement;
+    return cfg;
+}
+
+Points horizontal_probe(const Probe &probe)
+{
+    return {Point::new_scale(probe.x0, probe.y), Point::new_scale(probe.x1, probe.y)};
+}
+
+} // namespace fuzzy_noise_analytic_dispatch
+
+TEST_CASE("One-octave fuzzy noise follows independent lattice-cell displacement bounds",
+          "[FuzzySkin][FuzzySkinAnalyticDispatch]")
+{
+    using namespace fuzzy_noise_analytic_dispatch;
+    const std::array<Probe, 4> probes{{
+        // The libnoise 1.0 gradient interpolation on y=1,z=0 reduces to
+        // g=2.12*((1-s)*a*x+s*b*(x-1)), s=3*x*x-2*x*x*x,
+        // with table gradients a=-0.141751, b=0.976342. Over [0.55,0.65],
+        // g lies in [-0.608,-0.575]; Billow is 2*abs(g)-0.5.
+        {NoiseType::Billow,      0.55,  0.65,  1.0,  0.64,  0.72},
+        {NoiseType::Perlin,      0.55,  0.65,  1.0, -0.62, -0.56},
+        // On y=z=0 the gradients are a=-0.763874, b=-0.224209.
+        // Over [0.001,0.010], g lies in [-0.01605,-0.00161], making
+        // RidgedMulti=1.25*(1-abs(g))^2-1 lie in [0.2101,0.2460].
+        {NoiseType::RidgedMulti, 0.001, 0.010, 0.0,  0.20,   0.26},
+        {NoiseType::Perlin,      0.001, 0.010, 0.0, -0.018, -0.0005},
+    }};
+    const Probe &probe = probes[GENERATE(size_t(0), size_t(1), size_t(2), size_t(3))];
+    CAPTURE(static_cast<int>(probe.type), probe.x0, probe.x1, probe.y);
+
+    const FuzzySkinConfig cfg = one_octave_config(probe.type);
+    Points actual = horizontal_probe(probe);
+    fuzzy_polyline(actual, false, 0., cfg);
+    REQUIRE(actual.size() >= 3);
+
+    const double thickness = unscale<double>(cfg.thickness);
+    for (const Point &point : actual) {
+        const double x = unscale<double>(point.x());
+        const double y = unscale<double>(point.y());
+        CHECK(x >= probe.x0 - 2e-6);
+        CHECK(x <= probe.x1 + 2e-6);
+        // Sampling is random, but the bounds hold over each entire segment.
+        // Positive Billow/RidgedMulti and negative Perlin controls distinguish
+        // dispatch without constructing a reference libnoise module.
+        CHECK(y > probe.y + probe.minimum_noise * thickness);
+        CHECK(y < probe.y + probe.maximum_noise * thickness);
+    }
+}

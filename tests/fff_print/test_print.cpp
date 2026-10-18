@@ -40,6 +40,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/Print.hpp"
+#include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/Support/TreeModelVolumes.hpp"
@@ -4278,6 +4279,213 @@ std::vector<double> public_layer_zs(const PrintObject &object)
         zs.push_back(layer->print_z);
     }
     return zs;
+}
+
+namespace print_validate_followup_detail {
+
+DynamicPrintConfig low_jerk_config(const char *selected_key, double value, const char *machine_max_junction_deviation)
+{
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "machine_max_junction_deviation", machine_max_junction_deviation },
+        { "default_junction_deviation", "0" },
+        { "machine_max_jerk_x", "100,100" },
+        { "machine_max_jerk_y", "100,100" },
+        { "default_jerk", "0" },
+        { "outer_wall_jerk", "0" },
+        { "inner_wall_jerk", "0" },
+        { "default_acceleration", "0" },
+    });
+    config.set_key_value(selected_key, new ConfigOptionFloatsNullable{value});
+    return config;
+}
+
+DynamicPrintConfig adaptive_pa_validation_config(const std::string &adaptive,
+                                                 const std::string &enable,
+                                                 const std::string &model0,
+                                                 const std::string &model1,
+                                                 const std::string &model2)
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "gcode_flavor",                "marlin2" },
+        { "layer_height",                0.2 },
+        { "initial_layer_print_height",  0.2 },
+        { "enable_support",              false },
+        { "spiral_mode",                 false },
+        { "belt_printer",                false },
+        // One physical extruder exposes both variants. The persisted selector result below
+        // migrates filament 1 between these two nozzles, while filament 2 remains Standard.
+        { "extruder_nozzle_stats",       "Standard#1|High Flow#1" },
+        { "extruder_variant_list",       "Direct Drive Standard,Direct Drive High Flow" },
+        { "filament_extruder_variant",   "Direct Drive Standard;Direct Drive High Flow;Direct Drive Standard" },
+        { "filament_self_index",         "1,1,2" },
+        { "filament_map",                "1,1" },
+        { "filament_volume_map",         "0,0" },
+        { "sparse_infill_filament_id",   1 },
+        { "internal_solid_filament_id",  1 },
+        { "top_surface_filament_id",     1 },
+        { "bottom_surface_filament_id",  1 },
+        { "outer_wall_filament_id",      1 },
+        { "inner_wall_filament_id",      1 },
+        { "adaptive_pressure_advance",   adaptive },
+        { "enable_pressure_advance",     enable },
+        { "enable_prime_tower",          false },
+        { "skirt_loops",                 0 },
+        { "brim_type",                   "no_brim" },
+        { "layer_change_gcode",          "G92 E0\n" },
+    });
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {nvtHybrid};
+    config.option<ConfigOptionStrings>("adaptive_pressure_advance_model")->values = {
+        model0,
+        model1,
+        model2,
+    };
+    return config;
+}
+
+void apply_persisted_adaptive_pa_group(Print &print, const Model &model, const DynamicPrintConfig &config)
+{
+    using MultiNozzleUtils::LayeredNozzleGroupResult;
+    using MultiNozzleUtils::NozzleInfo;
+    const std::vector<NozzleInfo> nozzles{
+        NozzleInfo{"0.4", nvtStandard, 0, 0},
+        NozzleInfo{"0.4", nvtHighFlow, 0, 1},
+    };
+    auto group = LayeredNozzleGroupResult::create(
+        std::vector<std::vector<int>>{{0, 0}, {1, 0}}, nozzles, {0}, std::vector<std::vector<unsigned int>>{{0}, {0}});
+    REQUIRE(group.has_value());
+    REQUIRE(group->is_support_dynamic_nozzle_map());
+    print.set_nozzle_group_result(std::make_shared<LayeredNozzleGroupResult>(*group));
+    print.apply(model, config);
+
+    const PrintConfig &expanded = print.config();
+    const auto *self_index = expanded.option<ConfigOptionInts>("filament_self_index");
+    const auto *variants = expanded.option<ConfigOptionStrings>("filament_extruder_variant");
+    const auto *models = expanded.option<ConfigOptionStrings>("adaptive_pressure_advance_model");
+    const auto *adaptive = expanded.option<ConfigOptionBools>("adaptive_pressure_advance");
+    const auto *enable = expanded.option<ConfigOptionBools>("enable_pressure_advance");
+    REQUIRE(self_index != nullptr);
+    REQUIRE(variants != nullptr);
+    REQUIRE(models != nullptr);
+    REQUIRE(adaptive != nullptr);
+    REQUIRE(enable != nullptr);
+    REQUIRE(self_index->values == std::vector<int>{1, 1, 2});
+    REQUIRE(variants->values == std::vector<std::string>{"Direct Drive Standard", "Direct Drive High Flow", "Direct Drive Standard"});
+    REQUIRE(models->values == config.option<ConfigOptionStrings>("adaptive_pressure_advance_model")->values);
+    REQUIRE(adaptive->values == config.option<ConfigOptionBools>("adaptive_pressure_advance")->values);
+    REQUIRE(enable->values == config.option<ConfigOptionBools>("enable_pressure_advance")->values);
+    REQUIRE(print.extruders() == std::vector<unsigned int>{0});
+}
+
+size_t warning_count_for(const std::vector<StringObjectException> &warnings, const std::string &key)
+{
+    return std::count_if(warnings.begin(), warnings.end(), [&key](const auto &entry) {
+        return entry.opt_key == key && entry.is_warning;
+    });
+}
+
+size_t low_jerk_warning_count(const std::vector<StringObjectException> &warnings)
+{
+    return std::count_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.is_warning && (entry.opt_key == "default_jerk" ||
+                                    entry.opt_key == "outer_wall_jerk" ||
+                                    entry.opt_key == "inner_wall_jerk");
+    });
+}
+
+} // namespace print_validate_followup_detail
+
+TEST_CASE("Print validation dispatches low-jerk warnings and honors the Marlin junction gate", "[Print][ValidationContracts][PrintValidationMotion]")
+{
+    struct LowJerkCase {
+        const char *key;
+        double value;
+        const char *machine_max_junction_deviation;
+        bool expected_warning;
+        const char *expected_key;
+    };
+    const auto part = GENERATE(
+        LowJerkCase{ "default_jerk", 0.0, "0,0", false, "" },
+        LowJerkCase{ "default_jerk", 1.0, "0,0", true,  "default_jerk" },
+        LowJerkCase{ "default_jerk", 2.0, "0,0", false, "" },
+        LowJerkCase{ "outer_wall_jerk", 1.0, "0,0", true,  "outer_wall_jerk" },
+        LowJerkCase{ "inner_wall_jerk", 1.0, "0,0", true,  "inner_wall_jerk" },
+        LowJerkCase{ "default_jerk", 1.0, "0.02,0.02", false, "" });
+    CAPTURE(part.key, part.value, part.machine_max_junction_deviation, part.expected_warning, part.expected_key);
+
+    DynamicPrintConfig config = print_validate_followup_detail::low_jerk_config(
+        part.key, part.value, part.machine_max_junction_deviation);
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+
+    std::vector<StringObjectException> warnings;
+    const auto error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+    CHECK(print_validate_followup_detail::low_jerk_warning_count(warnings) ==
+          (part.expected_warning ? 1u : 0u));
+    if (!part.expected_warning)
+        return;
+
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [&part](const auto &entry) {
+        return entry.opt_key == part.expected_key && entry.is_warning;
+    });
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->object == nullptr);
+    CHECK_FALSE(warning->string.empty());
+}
+
+TEST_CASE("Print validation reports an invalid adaptive pressure advance model for a used column", "[Print][ValidationContracts][PrintValidationPressureAdvance]")
+{
+    const std::string invalid_model = "0.04,10";
+    const std::string valid_model = "0.04,10,1000\n0.05,20,2000";
+    DynamicPrintConfig config = print_validate_followup_detail::adaptive_pa_validation_config(
+        "1,1,1", "1,1,1", invalid_model, valid_model, valid_model);
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    print_validate_followup_detail::apply_persisted_adaptive_pa_group(print, model, config);
+
+    std::vector<StringObjectException> warnings;
+    const auto error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+    REQUIRE(print_validate_followup_detail::warning_count_for(warnings, "adaptive_pressure_advance_model") == 1);
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.opt_key == "adaptive_pressure_advance_model" && entry.is_warning;
+    });
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->object == nullptr);
+    CHECK_FALSE(warning->string.empty());
+}
+
+TEST_CASE("Print validation gates adaptive pressure advance by controls and used filament mapping", "[Print][ValidationContracts][PrintValidationPressureAdvance]")
+{
+    struct AdaptiveCase {
+        const char *adaptive;
+        const char *enable;
+        const char *model0;
+        const char *model1;
+        const char *model2;
+        bool expected_warning;
+    };
+    const auto part = GENERATE(
+        AdaptiveCase{ "0,1,1", "1,1,1", "0.04,10", "0.04,10,1000", "0.04,10,1000", false },
+        AdaptiveCase{ "1,1,1", "0,1,1", "0.04,10", "0.04,10,1000", "0.04,10,1000", false },
+        AdaptiveCase{ "1,1,1", "1,1,1", "0.04,10,1000", "0.04,10,1000", "0.04,10", false },
+        AdaptiveCase{ "1,1,1", "1,1,1", "0.04,10,1000", "0.04,10", "0.04,10,1000", true });
+    CAPTURE(part.adaptive, part.enable, part.model0, part.model1, part.model2, part.expected_warning);
+    DynamicPrintConfig config = print_validate_followup_detail::adaptive_pa_validation_config(
+        part.adaptive, part.enable, part.model0, part.model1, part.model2);
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    print_validate_followup_detail::apply_persisted_adaptive_pa_group(print, model, config);
+
+    std::vector<StringObjectException> warnings;
+    const auto error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+    CHECK(print_validate_followup_detail::warning_count_for(warnings, "adaptive_pressure_advance_model") ==
+          (part.expected_warning ? 1 : 0));
 }
 
 } // namespace

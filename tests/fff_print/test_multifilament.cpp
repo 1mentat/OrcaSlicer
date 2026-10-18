@@ -22,6 +22,9 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
 #include <limits>
 #include <optional>
 #include <regex>
@@ -1041,7 +1044,7 @@ static std::set<int> fan_speeds(const std::string &gcode, const std::string &com
 
 // The fan speeds and the recommended nozzle temperature range are tuned per extruder variant like the
 // other filament variant settings.
-TEST_CASE("Each filament cools with the fan speeds of its extruder variant", "[MultiFilament]")
+TEST_CASE("Each filament cools with the fan speeds of its extruder variant", "[MultiFilament][AuxiliaryFanVariance]")
 {
     auto [nozzle_volume_type, filament, fan_min_speed, fan_max_speed, additional_fan_speed, range_high] = GENERATE(table<NozzleVolumeType, int, int, int, int, int>({
         { nvtStandard, 1, 15, 25, 10, 240 },
@@ -1051,7 +1054,9 @@ TEST_CASE("Each filament cools with the fan speeds of its extruder variant", "[M
     // Layers printed faster than slow_down_layer_time run the fan at its maximum speed, layers slower than
     // fan_cooling_layer_time at its minimum.
     const bool fast_layers = GENERATE(false, true);
-    DYNAMIC_SECTION(get_nozzle_volume_type_string(nozzle_volume_type) << " nozzle, filament " << filament << (fast_layers ? ", fast layers" : ", slow layers")) {
+    const bool auxiliary_fan = GENERATE(false, true);
+    DYNAMIC_SECTION(get_nozzle_volume_type_string(nozzle_volume_type) << " nozzle, filament " << filament
+                    << (fast_layers ? ", fast layers" : ", slow layers") << ", auxiliary fan " << auxiliary_fan) {
         DynamicPrintConfig config = multifilament_config(2, {
             { "extruder_variant_list",          "Direct Drive Standard,Direct Drive High Flow" },
             // filament 1 defines Standard and High Flow, filament 2 Standard
@@ -1061,7 +1066,7 @@ TEST_CASE("Each filament cools with the fan speeds of its extruder variant", "[M
             { "fan_max_speed",                  "25,45,65" },
             { "additional_cooling_fan_speed",   "10,20,40" },
             { "nozzle_temperature_range_high",  "240,260,280" },
-            { "auxiliary_fan",                  1 },
+            { "auxiliary_fan",                  auxiliary_fan },
             { "reduce_fan_stop_start_freq",     "1,1" },
             { "slow_down_layer_time",           fast_layers ? "1000,1000" : "0,0" },
             { "fan_cooling_layer_time",         fast_layers ? "1000,1000" : "0,0" },
@@ -1083,7 +1088,8 @@ TEST_CASE("Each filament cools with the fan speeds of its extruder variant", "[M
         const std::string gcode = slice({ cube(20) }, config);
 
         CHECK(fan_speeds(gcode, "M106 S") == std::set<int>{ fast_layers ? fan_max_speed : fan_min_speed });
-        CHECK(fan_speeds(gcode, "M106 P2 S") == std::set<int>{ additional_fan_speed });
+        const std::set<int> expected_auxiliary_speeds = auxiliary_fan ? std::set<int>{ additional_fan_speed } : std::set<int>{};
+        CHECK(fan_speeds(gcode, "M106 P2 S") == expected_auxiliary_speeds);
         CHECK(gcode.find("; start range high " + std::to_string(range_high) + "\n") != std::string::npos);
     }
 }
@@ -1229,4 +1235,142 @@ TEST_CASE("Mixed perimeter collections split outer and inner wall filament assig
     REQUIRE(!inner_tools.empty());
     CHECK(outer_tools == std::set<int>{0});
     CHECK(inner_tools == std::set<int>{1});
+}
+
+namespace {
+
+static DynamicPrintConfig print_object_geometric_config(const Vec2ds &extruder_zero_area,
+                                                        const Vec2ds &extruder_one_area,
+                                                        bool with_fills,
+                                                        int wall_filament,
+                                                        const std::string &printable_height)
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "gcode_flavor",                   "marlin2" },
+        { "layer_height",                   0.2 },
+        { "initial_layer_print_height",     0.2 },
+        { "line_width",                     0.45 },
+        { "enable_support",                 false },
+        { "spiral_mode",                    false },
+        { "belt_printer",                   false },
+        { "nozzle_diameter",                "0.4,0.4" },
+        { "printer_extruder_id",            "1,2" },
+        { "printer_extruder_variant",       "Direct Drive Standard,Direct Drive Standard" },
+        { "extruder_printable_height",      printable_height },
+        { "single_extruder_multi_material", 0 },
+        { "enable_prime_tower",             0 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+        { "raft_layers",                    0 },
+        { "wall_loops",                     2 },
+        { "wall_generator",                 "classic" },
+        { "top_shell_layers",               with_fills ? 2 : 0 },
+        { "bottom_shell_layers",            with_fills ? 2 : 0 },
+        { "sparse_infill_density",          with_fills ? "20%" : "0%" },
+        { "outer_wall_filament_id",         wall_filament },
+        { "inner_wall_filament_id",         wall_filament },
+        { "sparse_infill_filament_id",      1 },
+        { "internal_solid_filament_id",     1 },
+        { "top_surface_filament_id",        1 },
+        { "bottom_surface_filament_id",     1 },
+        { "printable_area",                  "-100x-100,100x-100,100x100,-100x100" },
+        { "use_relative_e_distances",       1 },
+        { "layer_change_gcode",             "G92 E0\n" },
+        { "gcode_comments",                 1 },
+    });
+    config.set_key_value("extruder_printable_area",
+                         new ConfigOptionPointsGroups(std::vector<Vec2ds>{ extruder_zero_area, extruder_one_area }));
+    return config;
+}
+
+static const Vec2ds print_object_full_bed_area = {
+    Vec2d(-100., -100.), Vec2d(100., -100.), Vec2d(100., 100.), Vec2d(-100., 100.)
+};
+
+static const Vec2ds print_object_restricted_x_area = {
+    Vec2d(-100., -100.), Vec2d(2., -100.), Vec2d(2., 100.), Vec2d(-100., 100.)
+};
+
+static void process_print_object_geometric_fixture(Print &print, Model &model,
+                                                    const DynamicPrintConfig &config)
+{
+    // make_cube is [0,4] in XY, while arrange=false keeps this relationship deterministic.
+    init_print(std::vector<TriangleMesh>{ cube(4.) }, print, model, config, nullptr, false);
+    REQUIRE(model.objects.size() == 1);
+    const auto bounds = model.objects.front()->bounding_box();
+    REQUIRE_THAT(bounds.min.x(), Catch::Matchers::WithinAbs(0., 1e-6));
+    REQUIRE_THAT(bounds.max.x(), Catch::Matchers::WithinAbs(4., 1e-6));
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE_FALSE(print.objects().empty());
+    REQUIRE_FALSE(print.objects().front()->layers().empty());
+}
+
+} // namespace
+
+TEST_CASE("PrintObject marks filaments blocked by restricted printable area",
+          "[PrintObjectGeometric][MultiFilament]")
+{
+    const bool restricted = GENERATE(false, true);
+    DYNAMIC_SECTION("restricted per-extruder area " << (restricted ? "on" : "off")) {
+        const Vec2ds &extruder_zero_area = restricted ? print_object_restricted_x_area : print_object_full_bed_area;
+        DynamicPrintConfig config = print_object_geometric_config(
+            extruder_zero_area, print_object_full_bed_area, true, 2, "100,100");
+        Print print;
+        Model model;
+        process_print_object_geometric_fixture(print, model, config);
+
+        const auto unprintable = print.get_extruder_unprintable_polygons();
+        const auto blocked = print.get_geometric_unprintable_filaments();
+        REQUIRE(unprintable.size() == 2);
+        REQUIRE(blocked.size() == 2);
+        if (restricted) {
+            REQUIRE_FALSE(unprintable[0].empty());
+            CHECK(unprintable[1].empty());
+            const BoundingBox bbox = get_extents(unprintable[0]);
+            REQUIRE(bbox.defined);
+            CHECK_THAT(unscaled<double>(bbox.min.x()), Catch::Matchers::WithinAbs(2., 1e-6));
+            CHECK_THAT(unscaled<double>(bbox.max.x()), Catch::Matchers::WithinAbs(100., 1e-6));
+            // Infill (filament 1) and walls (filament 2) both intersect the blocked right-hand strip.
+            CHECK(blocked[0] == std::set<int>{ 0, 1 });
+            CHECK(blocked[1].empty());
+        } else {
+            CHECK(unprintable[0].empty());
+            CHECK(unprintable[1].empty());
+            CHECK(blocked[0].empty());
+            CHECK(blocked[1].empty());
+        }
+    }
+}
+
+TEST_CASE("PrintObject marks wall filaments when only perimeters meet restricted area",
+          "[PrintObjectGeometric][MultiFilament]")
+{
+    DynamicPrintConfig config = print_object_geometric_config(
+        print_object_restricted_x_area, print_object_full_bed_area, false, 2, "100,100");
+    Print print;
+    Model model;
+    process_print_object_geometric_fixture(print, model, config);
+
+    const auto blocked = print.get_geometric_unprintable_filaments();
+    REQUIRE(blocked.size() == 2);
+    // Zero sparse density and zero top/bottom shells leave perimeters as the only entities;
+    // outer/inner walls are both assigned to filament 2, hence zero-based id 1.
+    CHECK(blocked[0] == std::set<int>{ 1 });
+    CHECK(blocked[1].empty());
+}
+
+TEST_CASE("PrintObject marks filaments above each nozzle printable height",
+          "[PrintObjectGeometric][MultiFilament]")
+{
+    DynamicPrintConfig config = print_object_geometric_config(
+        print_object_full_bed_area, print_object_full_bed_area, true, 1, "0.6,100");
+    Print print;
+    Model model;
+    process_print_object_geometric_fixture(print, model, config);
+
+    const auto blocked = print.get_geometric_unprintable_filaments();
+    REQUIRE(blocked.size() == 2);
+    // The 4mm cube has layers above 0.6mm but none above 100mm. All active roles use filament 1.
+    CHECK(blocked[0] == std::set<int>{ 0 });
+    CHECK(blocked[1].empty());
 }

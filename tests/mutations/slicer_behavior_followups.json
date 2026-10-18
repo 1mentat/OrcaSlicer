@@ -2921,6 +2921,96 @@
       "expected_matches": 1,
       "description": "Invert the Points3 arc slice acceptance gate; the known valid Points3 fit should fail its ordinary success assertion.",
       "test_filter": "^CircleArcPublic$"
+    },
+    {
+      "id": "print-validate-low-jerk-positive-comparator",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                    if (m_default_object_config.default_jerk.get_at(extruder_id) == 1 || m_default_object_config.outer_wall_jerk.get_at(extruder_id) == 1 ||\n                        m_default_object_config.inner_wall_jerk.get_at(extruder_id) == 1) {",
+      "new": "                    if (m_default_object_config.default_jerk.get_at(extruder_id) > 0 || m_default_object_config.outer_wall_jerk.get_at(extruder_id) > 0 ||\n                        m_default_object_config.inner_wall_jerk.get_at(extruder_id) > 0) {",
+      "expected_matches": 1,
+      "test_filter": "^PrintValidationMotion$",
+      "description": "Broaden the exact-value low-jerk dispatch to every positive jerk; the default 2.0 control must remain warning-free and the one-value rows must select the documented key."
+    },
+    {
+      "id": "print-validate-adaptive-pa-control-or",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                if (m_config.adaptive_pressure_advance.get_at(column) &&\n                    m_config.enable_pressure_advance.get_at(column)) {",
+      "new": "                if (m_config.adaptive_pressure_advance.get_at(column) ||\n                    m_config.enable_pressure_advance.get_at(column)) {",
+      "expected_matches": 1,
+      "test_filter": "^PrintValidationPressureAdvance$",
+      "description": "Accept a malformed model when either adaptive-pressure control is enabled instead of requiring both controls; the disabled-control rows must remain warning-free."
+    },
+    {
+      "id": "print-validate-filament-self-index-mapping-dropped",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                const unsigned int filament_id = self_index.size() == pa_columns ? self_index[column] - 1 : column;",
+      "new": "                const unsigned int filament_id = column;",
+      "expected_matches": 1,
+      "test_filter": "^PrintValidationPressureAdvance$",
+      "description": "Drop the one-based filament_self_index mapping entirely; the malformed used column-1 row must warn under the production mapping and fail when column numbers are used directly."
+    },
+    {
+      "id": "print-validate-adaptive-pa-unused-column-guard-inverted",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                if (!std::binary_search(extruders.begin(), extruders.end(), filament_id))\n                    continue;",
+      "new": "                if (std::binary_search(extruders.begin(), extruders.end(), filament_id))\n                    continue;",
+      "expected_matches": 1,
+      "test_filter": "^PrintValidationPressureAdvance$",
+      "description": "Invert the used-filament membership guard; the used malformed column and the unused malformed column rows distinguish the public warning scope."
+    },
+    {
+      "id": "cooling-auxiliary-fan-immediate-gate-dropped",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "            if (immediately_apply && m_config.auxiliary_fan.value)\n                new_gcode += GCodeWriter::set_additional_fan(m_additional_fan_speed);",
+      "new": "            if (immediately_apply)\n                new_gcode += GCodeWriter::set_additional_fan(m_additional_fan_speed);",
+      "expected_matches": 1,
+      "test_filter": "^AuxiliaryFanVariance$",
+      "description": "Drop the auxiliary fan capability gate when applying a new filament fan speed. Disabled rows must emit no positive auxiliary-fan command while retaining the configured part-cooling speed."
+    },
+    {
+      "id": "fuzzy-skin-analytic-billow-branch-routed-to-perlin",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "if (cfg.noise_type == NoiseType::Perlin) {",
+      "new": "if (cfg.noise_type == NoiseType::Perlin || cfg.noise_type == NoiseType::Billow) {",
+      "expected_matches": 1,
+      "test_filter": "^FuzzySkinAnalyticDispatch$",
+      "description": "Route configured Billow through the Perlin construction by broadening the first branch. The one-octave Billow lattice-cell witness is strictly positive, whereas the same cell has negative Perlin displacement and fails the ordinary positive-bound assertions."
+    },
+    {
+      "id": "fuzzy-skin-analytic-ridged-branch-routed-to-perlin",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "    } else if (cfg.noise_type == NoiseType::RidgedMulti) {\n        auto ridged_multi_noise = noise::module::RidgedMulti();\n        ridged_multi_noise.SetFrequency(1 / cfg.noise_scale);\n        ridged_multi_noise.SetOctaveCount(cfg.noise_octaves);\n        return std::make_unique<noise::module::RidgedMulti>(ridged_multi_noise);",
+      "new": "    } else if (cfg.noise_type == NoiseType::RidgedMulti) {\n        auto perlin_noise = noise::module::Perlin();\n        perlin_noise.SetFrequency(1 / cfg.noise_scale);\n        perlin_noise.SetOctaveCount(cfg.noise_octaves);\n        perlin_noise.SetPersistence(cfg.noise_persistence);\n        return std::make_unique<noise::module::Perlin>(perlin_noise);",
+      "expected_matches": 1,
+      "test_filter": "^FuzzySkinAnalyticDispatch$",
+      "description": "Keep the RidgedMulti selector but replace its complete construction with a configured Perlin module. Near the integer lattice vertex, one-octave RidgedMulti remains strictly positive while Perlin is negative, so the same ordinary positive-bound assertion fails."
+    },
+    {
+      "id": "printobject-geometric-fill-intersection-skipped",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (fill_bbox.overlap(unprintable_area_bbox[idx]) &&\n                                !intersection(*fill_expolys, unprintable_area_in_obj_coord[idx]).empty()) {",
+      "new": "if (false) {",
+      "expected_matches": 1,
+      "test_filter": "^PrintObjectGeometric$",
+      "description": "Skip the fill/blocked-area intersection. The restricted-area row loses filament 1 while its wall fallback still supplies filament 2, so the ordinary set oracle distinguishes this safe omission."
+    },
+    {
+      "id": "printobject-geometric-wall-intersection-skipped",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (wall_bbox.overlap(unprintable_area_bbox[idx]) &&\n                                !intersection(*wall_expolys, unprintable_area_in_obj_coord[idx]).empty()) {",
+      "new": "if (false) {",
+      "expected_matches": 1,
+      "test_filter": "^PrintObjectGeometric$",
+      "description": "Skip the wall/blocked-area intersection. The perimeter-only fixture then loses the only blocked wall filament without entering an unsafe path."
+    },
+    {
+      "id": "printobject-geometric-height-gate-always-skips",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (layer->print_z <= printable_height)\n                continue;",
+      "new": "if (true)\n                continue;",
+      "expected_matches": 1,
+      "test_filter": "^PrintObjectGeometric$",
+      "description": "Skip every layer above-height row. The 0.6mm versus 100mm controls then lose the expected first-nozzle result through a normal set assertion."
     }
   ]
 }
