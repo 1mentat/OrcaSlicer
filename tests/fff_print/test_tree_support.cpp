@@ -1245,3 +1245,95 @@ TEST_CASE("Organic tree raft expansion changes the public contact footprint",
                  Catch::Matchers::WithinAbs(6.0, 0.05));
     REQUIRE(expanded.footprint_area_mm2 > unexpanded.footprint_area_mm2 * 1.15);
 }
+
+namespace tree_support_independent_layer_height_contracts {
+
+struct LayerHeightEvidence {
+    std::size_t active_layers = 0;
+    std::size_t positive_layers = 0;
+    std::size_t non_nominal_layers = 0;
+    double max_height_delta = 0.0;
+    bool finite = true;
+};
+
+static TriangleMesh compact_two_tier_mesh()
+{
+    TriangleMesh mesh = two_tier_mesh();
+    mesh.scale(Vec3f(1.f, 1.f, 0.25f));
+    return mesh;
+}
+
+static LayerHeightEvidence observe(bool independent)
+{
+    Print print;
+    slice_with_tree_support(compact_two_tier_mesh(), print, "tree_slim", 30, 1, 0, {
+        { "support_top_z_distance",          0.3 },
+        { "initial_layer_print_height",       0.2 },
+        { "independent_support_layer_height", independent },
+        { "min_layer_height",                0.1 },
+        { "max_layer_height",                0.35 },
+        { "support_remove_small_overhang",   0 },
+        { "support_interface_top_layers",    0 },
+        { "support_interface_bottom_layers", 0 },
+        { "tree_support_auto_brim",          false },
+        { "tree_support_brim_width",         0.0 },
+        { "support_line_width",              0.4 },
+        { "line_width",                      0.4 },
+        { "outer_wall_line_width",           0.4 },
+        { "inner_wall_line_width",           0.4 },
+        { "nozzle_diameter",                 "0.4" },
+        { "skirt_loops",                     0 },
+        { "brim_width",                      0.0 },
+        { "enable_arc_fitting",              false },
+    });
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    LayerHeightEvidence result;
+    double previous_z = -std::numeric_limits<double>::infinity();
+    for (const SupportLayer *layer : object.support_layers()) {
+        REQUIRE(layer != nullptr);
+        const double height = static_cast<double>(layer->height);
+        const double print_z = static_cast<double>(layer->print_z);
+        result.finite = result.finite && std::isfinite(height) && std::isfinite(print_z);
+        if (height <= EPSILON || print_z <= EPSILON)
+            continue;
+        ++result.positive_layers;
+        REQUIRE(print_z > previous_z);
+        previous_z = print_z;
+        REQUIRE(height >= 0.1 - 1e-5);
+        REQUIRE(height <= 0.35 + 1e-5);
+        result.max_height_delta = std::max(result.max_height_delta, std::abs(height - 0.2));
+        if (std::abs(height - 0.2) > 0.02)
+            ++result.non_nominal_layers;
+        if (layer->has_extrusions())
+            ++result.active_layers;
+    }
+    REQUIRE(result.positive_layers > 0);
+    REQUIRE(result.active_layers > 0);
+    REQUIRE(result.finite);
+    return result;
+}
+
+} // namespace tree_support_independent_layer_height_contracts
+
+TEST_CASE("Tree support independent layer height preserves a non-grid support interval",
+          "[TreeSupport][TreeSupportLayerHeight][SupportSettingsVariance]")
+{
+    using namespace tree_support_independent_layer_height_contracts;
+    const LayerHeightEvidence independent = observe(true);
+    const LayerHeightEvidence synchronized = observe(false);
+
+    REQUIRE(independent.finite);
+    REQUIRE(synchronized.finite);
+    REQUIRE(independent.active_layers > 0);
+    REQUIRE(synchronized.active_layers > 0);
+    // The compact two-tier fixture is the existing two-tier geometry scaled only in Z by 0.25: its
+    // upper roof starts at z=4.0, so the 0.3 mm contact interval is separated from the build plate
+    // without spending the original 16 mm of object height. The independent planner may split that
+    // interval at its requested top gap, while the synchronized planner retains the pinned 0.2 mm grid.
+    REQUIRE(independent.non_nominal_layers > 0);
+    REQUIRE(independent.max_height_delta > 0.05);
+    CHECK(synchronized.non_nominal_layers == 0);
+    CHECK(synchronized.max_height_delta <= 0.02);
+}

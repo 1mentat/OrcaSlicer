@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Per-plate explicit and fallback thumbnail paths preserve encoded byte ownership, including missing images.",
+  "mutants": [
+    {
+      "id": "bbs-stream-empty-thumbnail-fallback-disabled",
+      "old": "            if (plate->thumbnail_file.empty()) {\n                plate->thumbnail_file = plate->gcode_file;",
+      "new": "            if (false) {\n                plate->thumbnail_file = plate->gcode_file;",
+      "description": "The first plate must derive its thumbnail name from its G-code path and retain the matching entry bytes when present.",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "test_filter": "^BBSStreamThumbnailFallback$",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1
+    },
+    {
+      "id": "bbs-stream-thumbnail-pixels-forced-first-plate",
+      "old": "[&pixels = plate_data_list[it->first - 1]->plate_thumbnail.pixels]",
+      "new": "[&pixels = plate_data_list[0]->plate_thumbnail.pixels]",
+      "description": "Writing both thumbnail entries into the first plate must fail distinct byte ownership and the second plate byte assertion.",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "test_filter": "^BBSStreamThumbnailFallback$",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1
+    }
+  ]
+}

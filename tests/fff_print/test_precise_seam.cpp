@@ -1492,7 +1492,8 @@ DynamicPrintConfig seam_slope_config(const std::string &type,
                                      const std::string &start_height,
                                      double min_length,
                                      int steps,
-                                     int angle_threshold = 155)
+                                     int angle_threshold = 155,
+                                     bool entire_loop = false)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -1512,7 +1513,7 @@ DynamicPrintConfig seam_slope_config(const std::string &type,
         { "seam_slope_start_height",   start_height },
         { "seam_slope_min_length",     std::to_string(min_length) },
         { "seam_slope_steps",           std::to_string(steps) },
-        { "seam_slope_entire_loop",    "0" },
+        { "seam_slope_entire_loop",    entire_loop },
         { "seam_slope_inner_walls",    "0" },
         // Pin exporter/parser semantics used by the G-code oracle. Relative E
         // is paired with the canonical layer reset so each layer starts from a
@@ -1887,4 +1888,24 @@ TEST_CASE("Scarf modes distinguish contours and holes for both wall roles", "[Pr
             }
         }
     }
+}
+
+
+TEST_CASE("Scarf entire-loop mode uses the measured outer loop length",
+          "[SeamSlopeSettings][GCodeExport]")
+{
+    const SeamSlopeEvidence bounded = export_seam_slope(
+        seam_slope_config("external", false, "0", 4.0, 4, 155, false));
+    const SeamSlopeEvidence entire = export_seam_slope(
+        seam_slope_config("external", false, "0", 4.0, 4, 155, true));
+
+    REQUIRE(bounded.layer_changes == entire.layer_changes);
+    REQUIRE(bounded.outer_moves > 0);
+    REQUIRE(entire.outer_moves > 0);
+    CHECK_THAT(entire.print_outer_geometry,
+               Catch::Matchers::WithinAbs(bounded.print_outer_geometry, 1e-6));
+    CHECK(bounded.scarf_distance > 0.0);
+    // With entire_loop=false the configured 4 mm bound is used; true selects
+    // the measured closed-loop length, which is strictly longer on this cube.
+    CHECK(entire.scarf_distance > bounded.scarf_distance + 0.1);
 }

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Regular and even-odd slicing preserve a nested cavity; close-holes mode fills its independently known area.",
+  "mutants": [
+    {
+      "id": "settings-hole-close-holes-mode-map",
+      "path": "src/libslic3r/PrintObjectSlice.cpp",
+      "old": "case SlicingMode::CloseHoles: params_base.mode = MeshSlicingParams::SlicingMode::Positive; break;",
+      "new": "case SlicingMode::CloseHoles: params_base.mode = MeshSlicingParams::SlicingMode::Regular; break;",
+      "test_filter": "^SlicingModeHoleTopology$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Changing the public close_holes mapping to regular leaves the cavity in the close_holes row and fails the zero-hole assertion."
+    },
+    {
+      "id": "settings-hole-positive-loop-reorientation",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "if (this_mode == MeshSlicingParams::SlicingMode::Positive) {",
+      "new": "if (false) {",
+      "test_filter": "^SlicingModeHoleTopology$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Removing positive-mode loop reorientation changes the positive close_holes result and fails the cavity/area oracle."
+    }
+  ]
+}

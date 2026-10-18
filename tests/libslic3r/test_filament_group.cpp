@@ -377,3 +377,41 @@ TEST_CASE("Filament planning rebuilds duplicate reverse maps across layers", "[F
     CHECK(result[3].fil_nozzle_match.at(1) == result[0].fil_nozzle_match.at(1));
 }
 
+
+TEST_CASE("TPU grouping applies its nozzle preference without changing unused filament assignments",
+          "[FilamentGroup][FilamentTPUGrouping]")
+{
+    auto c = context(5, 2);
+    c.group_info.total_filament_num = 5;
+    c.machine_info.master_extruder_id = 1;
+    c.model_info.layer_filaments = {{3, 1, 3}, {}, {1}};
+    c.speed_info.filament_print_time = {{1, {{0, 100.0}, {1, 105.0}}},
+                                      {3, {{0, 200.0}, {1, 400.0}}}};
+    // With two standard nozzles, the first is strictly faster for both used
+    // filaments. The TPU preference discounts nozzle 1's 105 to 94.5 for
+    // filament 1, while filament 3 still prefers its 200 to the discounted 360.
+    FilamentGroup standard(c);
+    CHECK(standard.calc_filament_group_for_tpu() == std::vector<int>{1, 0, 1, 0, 1});
+    c.nozzle_info.nozzle_list[1].volume_type = nvtTPUHighFlow;
+    FilamentGroup preferred(c);
+    CHECK(preferred.calc_filament_group_for_tpu() == std::vector<int>{1, 1, 1, 0, 1});
+}
+
+TEST_CASE("TPU grouping honors physical extruder and nozzle-volume restrictions",
+          "[FilamentGroup][FilamentTPUGrouping]")
+{
+    auto c = context(5, 2);
+    c.group_info.total_filament_num = 5;
+    c.machine_info.master_extruder_id = 1;
+    c.model_info.layer_filaments = {{3, 1}};
+    c.speed_info.filament_print_time = {{1, {{0, 100.0}, {1, 105.0}}},
+                                      {3, {{0, 200.0}, {1, 400.0}}}};
+    c.nozzle_info.nozzle_list[1].volume_type = nvtTPUHighFlow;
+    // The restrictions oppose both unconstrained choices. They use original
+    // filament IDs 1 and 3, not the compact indices in the solver's matrix.
+    c.model_info.unprintable_filaments.resize(2);
+    c.model_info.unprintable_filaments[1].insert(1);
+    c.model_info.unprintable_volumes[3].insert(nvtStandard);
+    FilamentGroup restricted(c);
+    CHECK(restricted.calc_filament_group_for_tpu() == std::vector<int>{1, 0, 1, 1, 1});
+}

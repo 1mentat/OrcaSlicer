@@ -7986,3 +7986,77 @@ TEST_CASE("BBS foreign import expands nested components into transformed volumes
 }
 
 } // namespace high_yield_bbs_import_contracts
+
+namespace stream_archive_contracts {
+
+TEST_CASE("G-code archive streams keep explicit and fallback thumbnails on their own plates",
+          "[3MF][3MFStream][BBSStreamThumbnailFallback]")
+{
+    const bool fallback_present = GENERATE(false, true);
+    ScopedTemporaryDir backup("orca_stream_two_plates");
+    ScopedTemporaryFile archive(".3mf");
+    Model source;
+    make_model(source);
+    source.set_backup_path(backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData first;
+    PlateData second;
+    make_plate(first, 0, {{0, 0}});
+    make_plate(second, 1, {{0, 1}});
+    PlateDataPtrs plates{&first, &second};
+    store_model(archive.string(), source, config, plates);
+
+    // The stream API retains encoded entry bytes without decoding a PNG.
+    const std::string fallback_bytes = std::string("\x89PNG\r\n\x1a\n", 8) + "fallback-first";
+    const std::string explicit_bytes = std::string("\x89PNG\r\n\x1a\n", 8) + "explicit-second";
+    std::vector<std::pair<std::string, std::string>> entries{
+        {"Metadata/explicit-second.png", explicit_bytes},
+        {"Metadata/second.png", "unused-gcode-derived-decoy"}};
+    if (fallback_present)
+        entries.emplace_back("Metadata/first.png", fallback_bytes);
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &name, std::string &data) {
+        if (name != "Metadata/model_settings.config")
+            return false;
+        const std::size_t first_end = data.find("</plate>");
+        REQUIRE(first_end != std::string::npos);
+        const std::size_t second_end = data.find("</plate>", first_end + 8);
+        REQUIRE(second_end != std::string::npos);
+        REQUIRE(data.find("</plate>", second_end + 8) == std::string::npos);
+        // Insert in reverse order so the first offset remains valid.
+        data.insert(second_end,
+            "<metadata key=\"gcode_file\" value=\"Metadata/second.gcode\"/>"
+            "<metadata key=\"thumbnail_file\" value=\"Metadata/explicit-second.png\"/>");
+        data.insert(first_end, "<metadata key=\"gcode_file\" value=\"Metadata/first.gcode\"/>");
+        return true;
+    }, entries));
+
+    Model destination;
+    LoadedProject loaded;
+    REQUIRE(load_stream(archive_variant_contracts::read_file(archive.string()), destination, loaded));
+    REQUIRE(loaded.plates.size() == 2);
+    REQUIRE(loaded.plates[0] != nullptr);
+    REQUIRE(loaded.plates[1] != nullptr);
+    const PlateData &first_loaded = *loaded.plates[0];
+    const PlateData &second_loaded = *loaded.plates[1];
+    CHECK(first_loaded.plate_index == 0);
+    CHECK(second_loaded.plate_index == 1);
+    CHECK_FALSE(first_loaded.locked);
+    CHECK(second_loaded.locked);
+    CHECK(first_loaded.gcode_file == "Metadata/first.gcode");
+    CHECK(second_loaded.gcode_file == "Metadata/second.gcode");
+    CHECK(first_loaded.thumbnail_file == "Metadata/first.png");
+    CHECK(second_loaded.thumbnail_file == "Metadata/explicit-second.png");
+    CHECK(std::string(first_loaded.plate_thumbnail.pixels.begin(), first_loaded.plate_thumbnail.pixels.end()) ==
+          (fallback_present ? fallback_bytes : std::string()));
+    CHECK(std::string(second_loaded.plate_thumbnail.pixels.begin(), second_loaded.plate_thumbnail.pixels.end()) ==
+          explicit_bytes);
+    REQUIRE(first_loaded.obj_inst_map.size() == 1);
+    REQUIRE(second_loaded.obj_inst_map.size() == 1);
+    CHECK(first_loaded.obj_inst_map.begin()->first == second_loaded.obj_inst_map.begin()->first);
+    CHECK(first_loaded.obj_inst_map.begin()->second.first == 0);
+    CHECK(second_loaded.obj_inst_map.begin()->second.first == 1);
+    CHECK(first_loaded.obj_inst_map.begin()->second.second == int(source.objects.front()->instances[0]->id().id));
+    CHECK(second_loaded.obj_inst_map.begin()->second.second == int(source.objects.front()->instances[1]->id().id));
+}
+
+} // namespace stream_archive_contracts

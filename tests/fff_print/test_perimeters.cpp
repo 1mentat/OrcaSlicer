@@ -1559,3 +1559,64 @@ TEST_CASE("Disabled fuzzy skin is a no-op for the registered noise pipeline",
 }
 
 } // namespace fuzzy_mode_pipeline_contracts
+
+
+namespace fuzzy_mode_pipeline_contracts {
+
+OuterPerimeterSnapshot slice_perlin_displacement(size_t &layer_index)
+{
+    DynamicPrintConfig config = fuzzy_mode_config("displacement");
+    config.set_deserialize_strict({
+        {"fuzzy_skin_noise_type", "perlin"},
+        {"fuzzy_skin_thickness", 0.4},
+        {"fuzzy_skin_point_distance", 0.5},
+        {"fuzzy_skin_scale", 2.0},
+        {"fuzzy_skin_octaves", 2},
+        {"fuzzy_skin_persistence", 0.5},
+    });
+    Print print;
+    init_and_process_print({make_cube(12., 12., 0.8)}, print, config);
+    REQUIRE_FALSE(print.objects().empty());
+    REQUIRE(print.objects().front()->layers().size() == 4);
+    layer_index = print.objects().front()->layers().size() / 2;
+    return outer_perimeters_at(print, layer_index);
+}
+
+} // namespace fuzzy_mode_pipeline_contracts
+
+TEST_CASE("Arachne displacement fuzzy skin applies a positive transverse offset",
+          "[FuzzySkinModePipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    size_t control_layer = 0;
+    const OuterPerimeterSnapshot control = slice_mode("none", control_layer);
+    size_t actual_layer = 0;
+    const OuterPerimeterSnapshot actual = slice_perlin_displacement(actual_layer);
+    REQUIRE(actual_layer == control_layer);
+    REQUIRE_FALSE(actual.points.empty());
+    REQUIRE_FALSE(control.points.empty());
+
+    double maximum_interior_offset = 0.0;
+    size_t interior_samples = 0;
+    for (const Point &point : actual.points) {
+        bool is_interior = false;
+        const double distance = nearest_safe_reference_distance_mm(point, control, is_interior);
+        REQUIRE(std::isfinite(distance));
+        if (!is_interior)
+            continue;
+        ++interior_samples;
+        maximum_interior_offset = std::max(maximum_interior_offset, distance);
+    }
+    REQUIRE(interior_samples > 0);
+    // The Perlin field is deterministic, but point placement uses stochastic offsets.
+    // The 0.4 mm thickness and 0.5 mm sampling pins make a nonzero transverse
+    // displacement observable without asserting any implementation-specific sample.
+    CHECK(maximum_interior_offset > 0.01);
+
+    const double control_min_width = *std::min_element(control.widths.begin(), control.widths.end());
+    const double control_max_width = *std::max_element(control.widths.begin(), control.widths.end());
+    for (const float width : actual.widths) {
+        CHECK(width >= control_min_width - 0.002);
+        CHECK(width <= control_max_width + 0.002);
+    }
+}

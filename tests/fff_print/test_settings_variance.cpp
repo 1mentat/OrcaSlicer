@@ -3348,6 +3348,76 @@ TEST_CASE("Staggered inner seams move internal perimeter starts while preserving
 }
 
 } // namespace reslice_settings_contracts
+namespace slicing_mode_hole_topology_followup {
+
+TEST_CASE("Close-holes slicing fills a real nested cavity while parity preserves it",
+          "[SettingsVariance][SettingsReslice][SlicingMode][SlicingModeHoleTopology]")
+{
+    struct HoleObservation {
+        size_t occupied_layers = 0;
+        size_t hole_count = 0;
+        double area_mm2 = 0.0;
+    };
+
+    const auto observe = [](const char *mode) {
+        DynamicPrintConfig cfg = reslice_settings_contracts::config();
+        cfg.set_deserialize_strict({
+            {"layer_height", 0.2},
+            {"initial_layer_print_height", 0.2},
+            {"nozzle_diameter", 0.4},
+            {"wall_loops", 1},
+            {"top_shell_layers", 0},
+            {"bottom_shell_layers", 0},
+            {"sparse_infill_density", "0%"},
+            {"slice_closing_radius", 0.0},
+            {"xy_hole_compensation", 0.0},
+            {"xy_contour_compensation", 0.0},
+            {"slicing_mode", mode},
+        });
+        TriangleMesh shape = mesh(TestMesh::cube_with_hole);
+        shape.scale(Vec3f(1.0f, 1.0f, 0.12f));
+        Print print;
+        Model model;
+        init_print({shape}, print, model, cfg, nullptr, false);
+        const StringObjectException validation = print.validate();
+        INFO("slicing_mode=" << mode << " validation=" << validation.string);
+        REQUIRE(validation.string.empty());
+        print.process();
+        REQUIRE(print.objects().size() == 1);
+        const PrintObject &object = *print.objects().front();
+        REQUIRE(object.layer_count() >= 6);
+
+        HoleObservation result;
+        for (const Layer *layer : object.layers()) {
+            if (layer->lslices.empty())
+                continue;
+            ++result.occupied_layers;
+            for (const ExPolygon &slice : layer->lslices) {
+                result.hole_count += slice.holes.size();
+                result.area_mm2 += std::abs(static_cast<double>(slice.area())) * SCALING_FACTOR * SCALING_FACTOR;
+            }
+        }
+        return result;
+    };
+
+    const HoleObservation regular = observe("regular");
+    const HoleObservation even_odd = observe("even_odd");
+    const HoleObservation close_holes = observe("close_holes");
+
+    REQUIRE(regular.occupied_layers >= 6);
+    REQUIRE(even_odd.occupied_layers == regular.occupied_layers);
+    REQUIRE(close_holes.occupied_layers == regular.occupied_layers);
+    CHECK(regular.hole_count == regular.occupied_layers);
+    CHECK(even_odd.hole_count == even_odd.occupied_layers);
+    CHECK(close_holes.hole_count == 0);
+    // TestMesh::cube_with_hole is a 20x20 shell with a 10x10 cavity.
+    CHECK_THAT(even_odd.area_mm2, Catch::Matchers::WithinAbs(regular.area_mm2, 0.5));
+    CHECK_THAT(close_holes.area_mm2 - regular.area_mm2,
+               Catch::Matchers::WithinAbs(100.0 * static_cast<double>(regular.occupied_layers),
+                                          static_cast<double>(regular.occupied_layers)));
+}
+
+} // namespace slicing_mode_hole_topology_followup
 namespace ironing_enum_selection_followup {
 
 struct LayerObservation {

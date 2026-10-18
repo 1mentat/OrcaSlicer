@@ -204,6 +204,33 @@ against an internal-wall control in absolute and relative extrusion modes.
 The output must preserve total extrusion and its endpoint while introducing
 intermediate feedrates. Its mutations are in `pressure_equalizer.json`.
 
+`[PresetBundleSubscribedMultiType]` checks typed subscribed profiles, canonical
+inheritance, missing and unsupported types, and removal of obsolete printer files.
+Its mutations are in `preset_subscribed_multitype.json`.
+
+`[LayerProfileEditing]` checks decrease and increase saturation, reduction toward
+nominal thickness, local smoothing, and fixed first-layer/object endpoints.
+`[TreeSupportLayerHeight]` compares bounded independent support intervals with
+synchronized object layers. Their mutations are in `layer_profile_editing.json`
+and `tree_support_layer_height.json`.
+
+`[FuzzySkinModePipeline]` checks positive transverse displacement with unchanged
+widths; the Perlin field is deterministic but sampling positions are stochastic.
+`[SeamSlopeSettings]` compares full-loop scarf distance with a bounded scarf.
+Their mutations are in `fuzzy_displacement_scarf_loop.json`.
+`[SlicingModeHoleTopology]` checks a real cavity's hole count and filled area
+across regular, even-odd, and close-holes slicing (`slicing_hole_topology.json`).
+
+`[FanSpeedupOverhangs]` locates genuine rising PWM targets in physical motion,
+without assigning roles from comments that can remain behind moved commands.
+Deposition remains conserved. Its mutations are in `fan_speedup_overhangs.json`.
+
+`[BBSStreamThumbnailFallback]` checks explicit and fallback image bytes remain
+on their own plates, including a missing fallback (`bbs_stream_thumbnail.json`).
+`[FilamentTPUGrouping]` checks preference costs and physical restrictions through
+the public grouping API (`filament_tpu_grouping.json`); it provides no evidence
+for the currently inactive automatic TPU dispatch.
+
 `[PresetBundleImport]` imports an actual ZIP bundle with process, filament, and
 printer profiles, then checks metadata, canonical identities, typed settings,
 and persisted per-type files. Its mutations are in `preset_bundle_import.json`.

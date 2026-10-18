@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Fan scheduling changes the physical location of an ordinary rising PWM target while preserving deposition.",
+  "mutants": [
+    {
+      "id": "fan-speedup-overhangs-setting-binding",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "CNumericLocalesSetter locales_setter;\n\n        if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {\n            if (fan_mover.get() == nullptr)\n                fan_mover.reset(new Slic3r::FanMover(\n                    writer,\n                    std::abs((float)config.fan_speedup_time.value),\n                    config.fan_speedup_time.value > 0,\n                    config.use_relative_e_distances.value,\n                    config.fan_speedup_overhangs.value,\n                    (float)config.fan_kickstart.value));",
+      "new": "CNumericLocalesSetter locales_setter;\n\n        if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {\n            if (fan_mover.get() == nullptr)\n                fan_mover.reset(new Slic3r::FanMover(\n                    writer,\n                    std::abs((float)config.fan_speedup_time.value),\n                    config.fan_speedup_time.value > 0,\n                    config.use_relative_e_distances.value,\n                    false,\n                    (float)config.fan_kickstart.value));",
+      "test_filter": "^FanSpeedupOverhangs$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Bind the public fan_speedup_overhangs option as false; the paired rows then lose their physical scheduling contrast."
+    },
+    {
+      "id": "fan-speedup-overhang-role-gate",
+      "path": "src/libslic3r/GCode/FanMover.cpp",
+      "old": "nb_seconds_delay > 0 && (!only_overhangs || current_role == ExtrusionRole::erOverhangPerimeter)",
+      "new": "nb_seconds_delay > 0 && true",
+      "test_filter": "^FanSpeedupOverhangs$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Remove the role-sensitive delay gate; ordinary-role fan-on motion locations no longer differ between paired rows."
+    }
+  ]
+}

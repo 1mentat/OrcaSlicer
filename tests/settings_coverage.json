@@ -3154,12 +3154,12 @@
     },
     "seam_slope_type": {
       "test": "tests/fff_print/test_precise_seam.cpp",
-      "tag": "[SeamSlopeSettings]",
+      "tag": "[SeamScopeSettings]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "None and external mode distinguish absent and positive outer-wall scarf ramps with unchanged pre-export geometry. The forced-none mutation fails. The registered all mode remains untested; no enum completeness claim."
+      "reason": "The case \"Scarf modes distinguish contours and holes for both wall roles\" checks the registered none, external and all values with both seam_slope_inner_walls values under classic and Arachne wall generators. Public Print/G-code assertions preserve external and inner role geometry and require the expected rising contour and hole ramps for each mode, role and boundary combination. This covers the enum values and their pipeline behavior; numeric domains and unrelated setting interactions remain unclaimed."
     },
     "spiral_finishing_flow_ratio": {
       "test": "tests/fff_print/test_gcode.cpp",

@@ -6,6 +6,7 @@
 #include "test_helpers.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Config.hpp"
@@ -410,4 +411,199 @@ TEST_CASE("Keeping the cooling fan running preserves a positive fan during depos
     CHECK(std::all_of(stop.part_fan_states.begin(), stop.part_fan_states.end(), [](int pwm) { return pwm == 0; }));
     CHECK(std::all_of(keep.part_fan_states.begin(), keep.part_fan_states.end(), [](int pwm) { return pwm > 0; }));
     CHECK_THAT(minimum(keep.inner_feeds), Catch::Matchers::WithinAbs(minimum(stop.inner_feeds), 0.25));
+}
+
+
+namespace fan_speedup_overhangs_physical_contracts {
+
+struct FanOnEvent {
+    double path_distance = 0.0;
+    double elapsed_seconds = 0.0;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    int pwm = 0;
+    bool overhang = false;
+    bool rise = false;
+};
+
+struct MotionEvidence {
+    std::vector<FanOnEvent> fan_on;
+    double path_distance = 0.0;
+    double elapsed_seconds = 0.0;
+    bool finite = true;
+};
+
+DynamicPrintConfig config_for(const bool speedup_overhangs)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"bridge_speed",                   2.0},
+        {"enable_arc_fitting",             false},
+        {"enable_overhang_bridge_fan",     true},
+        {"enable_overhang_speed",          false},
+        {"fan_cooling_layer_time",         0.0},
+        {"fan_kickstart",                  0.0},
+        {"reduce_fan_stop_start_freq",     true},
+        {"fan_speedup_overhangs",          speedup_overhangs},
+        {"fan_speedup_time",               0.5},
+        {"gcode_comments",                 true},
+        {"gcode_flavor",                   "marlin2"},
+        {"initial_layer_print_height",     0.3},
+        {"layer_change_gcode",             ";TEST_LAYER_Z=[layer_z]"},
+        {"layer_height",                   0.3},
+        {"slow_down_for_layer_cooling",    false},
+        {"slowdown_for_curled_perimeters", false},
+        {"close_fan_the_first_x_layers",   1},
+        {"full_fan_speed_layer",           0},
+        {"use_relative_e_distances",       true},
+        {"wall_loops",                     1},
+        {"top_shell_layers",               0},
+        {"bottom_shell_layers",            0},
+        {"sparse_infill_density",          "0%"},
+        {"minimum_sparse_infill_area",     0.0},
+        {"enable_support",                 false},
+    });
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.4});
+    config.set_key_value("fan_max_speed", new ConfigOptionFloats{20.0});
+    config.set_key_value("fan_min_speed", new ConfigOptionFloats{20.0});
+    config.set_key_value("overhang_fan_speed", new ConfigOptionInts{100});
+    config.set_key_value("overhang_fan_threshold", new ConfigOptionEnumsGeneric{Overhang_threshold_2_4});
+    return config;
+}
+
+MotionEvidence inspect_motion_and_fans(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    MotionEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    int previous_fan_pwm = 0;
+    reader.parse_buffer(gcode, [&evidence, &previous_fan_pwm](GCodeReader &self,
+                                                   const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("M106") && !line.has_p()) {
+            float pwm = 0.0f;
+            REQUIRE(line.has_value('S', pwm));
+            REQUIRE(std::isfinite(pwm));
+            REQUIRE(pwm >= 0.0f);
+            REQUIRE(pwm <= 255.0f);
+            const int fan_pwm = static_cast<int>(std::lround(pwm));
+            const bool rising = fan_pwm > previous_fan_pwm;
+            previous_fan_pwm = fan_pwm;
+            if (fan_pwm > 0) {
+                // FanMover can relocate this command across buffered motion; classify by
+                // pinned PWM targets rather than output TYPE comments. Ordinary fan is
+                // 20% (S51), while overhang fan is 100% (S255). Track rises explicitly
+                // so an S51 fall from S255 cannot masquerade as the ordinary rise.
+                const bool overhang = fan_pwm == 255;
+                evidence.fan_on.push_back({evidence.path_distance, evidence.elapsed_seconds,
+                                           self.x(), self.y(), self.z(), fan_pwm, overhang, rising});
+            }
+        }
+
+        if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")))
+            return;
+        const double dx = line.dist_X(self);
+        const double dy = line.dist_Y(self);
+        const double dz = line.dist_Z(self);
+        const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (!(distance > 0.0))
+            return;
+        evidence.path_distance += distance;
+        const double feed = line.has_f() ? line.f() : self.f();
+        if (std::isfinite(feed) && feed > 0.0)
+            evidence.elapsed_seconds += distance * 60.0 / feed;
+        evidence.finite = evidence.finite && std::isfinite(evidence.path_distance) &&
+                          std::isfinite(evidence.elapsed_seconds);
+    });
+    return evidence;
+}
+
+double first_ordinary_fan_distance(const MotionEvidence &evidence)
+{
+    bool found = false;
+    double first = 0.0;
+    for (const FanOnEvent &event : evidence.fan_on) {
+        if (!event.overhang && event.pwm == 51 && event.rise && event.path_distance > 0.0) {
+            first = event.path_distance;
+            found = true;
+            break;
+        }
+    }
+    REQUIRE(found);
+    return first;
+}
+
+double first_ordinary_fan_time(const MotionEvidence &evidence)
+{
+    bool found = false;
+    double first = 0.0;
+    for (const FanOnEvent &event : evidence.fan_on) {
+        if (!event.overhang && event.pwm == 51 && event.rise && event.path_distance > 0.0) {
+            first = event.elapsed_seconds;
+            found = true;
+            break;
+        }
+    }
+    REQUIRE(found);
+    return first;
+}
+
+std::size_t count_overhang_fan_events(const MotionEvidence &evidence)
+{
+    return static_cast<size_t>(std::count_if(evidence.fan_on.begin(), evidence.fan_on.end(),
+        [](const FanOnEvent &event) { return event.overhang; }));
+}
+
+} // namespace fan_speedup_overhangs_physical_contracts
+
+TEST_CASE("Fan speedup overhang setting changes physical fan scheduling without changing deposition",
+          "[Cooling][FanSpeedupOverhangs]")
+{
+    using namespace fan_speedup_overhangs_physical_contracts;
+    const DynamicPrintConfig ordinary_config = config_for(false);
+    const DynamicPrintConfig overhang_config = config_for(true);
+    const TriangleMesh fixture = make_sphere(5.0, PI / 24.0);
+
+    const std::string ordinary_gcode = slice({fixture}, ordinary_config);
+    const std::string overhang_gcode = slice({fixture}, overhang_config);
+    const MotionEvidence ordinary = inspect_motion_and_fans(ordinary_gcode, ordinary_config);
+    const MotionEvidence overhang = inspect_motion_and_fans(overhang_gcode, overhang_config);
+
+    REQUIRE(ordinary.finite);
+    REQUIRE(overhang.finite);
+    REQUIRE(ordinary.path_distance > 0.0);
+    REQUIRE(overhang.path_distance > 0.0);
+    REQUIRE(ordinary.elapsed_seconds > 0.0);
+    REQUIRE(overhang.elapsed_seconds > 0.0);
+    REQUIRE_FALSE(ordinary.fan_on.empty());
+    REQUIRE_FALSE(overhang.fan_on.empty());
+    REQUIRE(count_overhang_fan_events(ordinary) > 0);
+    REQUIRE(count_overhang_fan_events(overhang) > 0);
+    REQUIRE(std::any_of(ordinary.fan_on.begin(), ordinary.fan_on.end(),
+                        [](const FanOnEvent &event) { return !event.overhang && event.rise && event.path_distance > 0.0; }));
+    REQUIRE(std::any_of(overhang.fan_on.begin(), overhang.fan_on.end(),
+                        [](const FanOnEvent &event) { return !event.overhang && event.rise && event.path_distance > 0.0; }));
+    REQUIRE(std::any_of(ordinary.fan_on.begin(), ordinary.fan_on.end(),
+                        [](const FanOnEvent &event) { return event.pwm == 255; }));
+    REQUIRE(std::any_of(overhang.fan_on.begin(), overhang.fan_on.end(),
+                        [](const FanOnEvent &event) { return event.pwm == 255; }));
+
+    // The setting controls where ordinary fan rises are emitted in physical motion;
+    // compare the accumulated motion location/time instead of serialized line positions.
+    const double ordinary_distance_delta = std::abs(first_ordinary_fan_distance(ordinary) -
+                                                    first_ordinary_fan_distance(overhang));
+    const double ordinary_time_delta = std::abs(first_ordinary_fan_time(ordinary) -
+                                                first_ordinary_fan_time(overhang));
+    const bool distance_changed = ordinary_distance_delta > 0.05;
+    const bool time_changed = ordinary_time_delta > 0.01;
+    INFO("ordinary fan scheduling deltas: distance=" << ordinary_distance_delta
+         << ", time=" << ordinary_time_delta);
+    if (!distance_changed)
+        REQUIRE(time_changed);
+
+    const cooling_slowdown_contracts::FeedEvidence ordinary_material =
+        cooling_slowdown_contracts::inspect_feed_evidence(ordinary_gcode, ordinary_config);
+    const cooling_slowdown_contracts::FeedEvidence overhang_material =
+        cooling_slowdown_contracts::inspect_feed_evidence(overhang_gcode, overhang_config);
+    cooling_slowdown_contracts::require_same_deposition(ordinary_material, overhang_material);
 }
