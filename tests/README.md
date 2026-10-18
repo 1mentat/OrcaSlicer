@@ -714,8 +714,10 @@ version compatibility still needs a production fix and an executed regression.
 `scripts/slicer_pr_validation.py` validates the exact head OIDs in the
 externally provided `build/evidence/open-prs.json` snapshot. It first verifies
 that the complete harness at `--harness-ref` passes. It then applies the
-selected diff from `--harness-base..--harness-ref` to the unmodified production
-reference at `--harness-base` and to each PR head in a disposable worktree.
+selected diff from `--harness-base..--harness-ref` to each PR's exact
+`baseRefOid` and `headRefOid` in a disposable worktree. Both snapshot fields
+must contain full commit OIDs. Each head is compared with its own base;
+`--harness-base` determines the test overlay, not the comparison reference.
 The default `--patch-scope test-only` includes tests, scripts, `cmake/`, the
 root `CMakeLists.txt` and `.gitignore`. It excludes production bug fixes from
 the testing branch, and verifies the `src/` index hash is unchanged by the
@@ -731,8 +733,8 @@ state changes during a run, the report records that fact without attributing
 who changed it and exits nonzero.
 
 Use a new or empty output directory for every run. Before building, the runner
-records the snapshot SHA-256 and verifies every selected head resolves to its
-exact commit. Configure, build, and test output goes directly to log files;
+records the snapshot SHA-256 and verifies every selected head and base resolves
+to its exact commit. Configure, build, and test output goes directly to log files;
 the JSON report keeps only a bounded tail. Run the controller under the resource
 limits described above, including a file-size limit for those logs.
 
@@ -747,6 +749,12 @@ testcase identity from the harness baseline must also appear in the reference
 and each head. Equal totals cannot hide a missing test replaced by another name.
 A requested reference with incomplete execution evidence makes the overall
 matrix incomplete, even if individual heads pass.
+
+The report's `references` map binds reference evidence to exact base OIDs.
+Shared bases run once. Within the same invocation, an exact commit already
+tested as a head or reference may supply the other role under the identical
+overlay and execution configuration. This reuse is disabled when an identity
+manifest is active, because head-specific exceptions may differ.
 
 For PRs based on older test suites, `--identity-manifest <path>` accepts an
 audited JSON manifest with `schema_version: 2`, exact `harness_base_sha` and
@@ -808,7 +816,7 @@ The native defaults configure Release/Ninja with `SLIC3R_GUI=OFF`,
 `BUILD_TESTS=ON`, `SLIC3R_CAD=ON`, build the five slicer test targets, and run
 CTest while excluding `NotWorking|RequiresApp`. Use repeated `--cmake-arg`
 or `--target` options for a deliberate override. The JSON report records the
-harness guard, production reference and every exact head, tested tree SHA,
+harness guard, production references and every exact head, tested tree SHA,
 source-index hashes, configure/build/test commands, elapsed time, logs,
 JUnit output, and cleanup result. The reference baseline runs by default;
 its failures do not prevent PR tests from running after a green harness guard.

@@ -2523,6 +2523,150 @@
       "test_filter": "NozzleTypeSettings",
       "description": "After importing non-default nozzle metadata, resetting the public processor must clear this field before headerless reuse.",
       "runtime_kill_status": "pending_native"
+    },
+    {
+      "id": "gcp-preheat-delta-first-filament",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "return (int) (temp - filament_preheat_temperature_delta[filament_id]);",
+      "new": "return (int) (temp - filament_preheat_temperature_delta.front());",
+      "expected_matches": 1,
+      "test_filter": "GcpPreheatVariance",
+      "description": "Use the first filament delta for the second filament; distinct 7 versus 0/10/35 rows must reject it."
+    },
+    {
+      "id": "gcp-preheat-physical-map-bypassed",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "std::to_string(physical_extruder_map[target_extruder])",
+      "new": "std::to_string(target_extruder)",
+      "expected_matches": 1,
+      "test_filter": "GcpPreheatVariance",
+      "description": "Bypass the logical-to-physical heater map; the reversed map must reject it."
+    },
+    {
+      "id": "gcp-preheat-heating-rate-first-extruder",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "float ext_heating_rate = heating_rate[extruder_id];",
+      "new": "float ext_heating_rate = heating_rate.front();",
+      "expected_matches": 1,
+      "test_filter": "GcpPreheatVariance",
+      "description": "Read the first heater rate; varying the second heater no longer schedules later heating."
+    },
+    {
+      "id": "gcp-preheat-cooling-rate-first-extruder",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "float ext_cooling_rate = cooling_rate[extruder_id];",
+      "new": "float ext_cooling_rate = cooling_rate.front();",
+      "expected_matches": 1,
+      "test_filter": "GcpPreheatVariance",
+      "description": "Read the first cooler rate; varying the second cooler no longer changes retained temperature."
+    },
+    {
+      "id": "bbs-object-other-kind-rejected",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        if (bbs_is_valid_object_type(object_type)) {\n            if (!m_curr_object) {",
+      "new": "        if (object_type == \"model\") {\n            if (!m_curr_object) {",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfImportMetadata",
+      "description": "Reject the valid 3MF object type other. The handcrafted public archive must still load one named cube with positive volume; this tests the BBS accepted object-kind set rather than an implementation-only flag."
+    },
+    {
+      "id": "bbs-bbox-json-extraction-suppressed",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                else if (!dont_load_config && boost::algorithm::istarts_with(name, METADATA_DIR) && boost::algorithm::iends_with(name, CALIBRATION_INFO_EXTENSION)) {\n                    //BBS parsing pattern config files\n                    _extract_file_from_archive(archive, stat);\n                }",
+      "new": "                else if (false) {\n                    //BBS parsing pattern config files\n                    _extract_file_from_archive(archive, stat);\n                }",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfImportMetadata",
+      "description": "Suppress extraction of Metadata/*.json. The public plate bounding-box round trip requires the declared Metadata/plate_1.json path to exist under the load backup root and contain the typed bbox payload."
+    },
+    {
+      "id": "bbs-invalid-calibration-thumbnail-not-skipped",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                if (calibration_data[index]->is_valid())",
+      "new": "                if (true)",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfImportMetadata",
+      "description": "Invoke the calibration writer for an invalid thumbnail. The invalid-input public guard must continue producing a usable archive; this is an ordinary store result assertion, with no exception or crash credit."
+    },
+    {
+      "id": "bbs-calibration-static-output-gate-dropped",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        if (!m_skip_static && calibration_data.size() > 0) {",
+      "new": "        if (calibration_data.size() > 0) {",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfImportMetadata",
+      "description": "Ignore SkipStatic for calibration thumbnails. The public SkipStatic row must still omit every calibration PNG; dropping the gate makes the current optional writer return false, so REQUIRE(store) catches the attempted route without claiming positive PNG support."
+    },
+    {
+      "id": "tree-support-thick-bridge-surface-filter-dropped-v2",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "                    offset(region->fill_surfaces.filter_by_type(stBottomBridge), trimming_offset, SUPPORT_SURFACES_OFFSET_PARAMETERS));",
+      "new": "                    offset(region->fill_surfaces.filter_by_type(stBottom), trimming_offset, SUPPORT_SURFACES_OFFSET_PARAMETERS));",
+      "expected_matches": 1,
+      "test_filter": "ThickBridges",
+      "description": "Use ordinary bottom surfaces instead of stBottomBridge for the positive-gap bridge fixture; the thick-versus-regular bridge path-count differential must fail as an ordinary assertion."
+    },
+    {
+      "id": "tree-support-raft-contact-expansion-ignored-v2",
+      "path": "src/libslic3r/Support/TreeSupport3D.cpp",
+      "old": "        interface_placer.add_roof_unguarded(expansion > 0 ? expand(lslices, scaled<float>(expansion)) : to_polygons(lslices), raft_contact_layer_idx, 0);",
+      "new": "        interface_placer.add_roof_unguarded(to_polygons(lslices), raft_contact_layer_idx, 0);",
+      "expected_matches": 1,
+      "test_filter": "TreeSupportRaftContact",
+      "description": "Ignore positive raft expansion when constructing the selected raft_contact_top_z layer; the expanded contact width, height, and area witnesses must fail as ordinary assertions."
+    },
+    {
+      "id": "external-bridge-absolute-override-disabled",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "bridges.surfaces = (custom_angle_deg > 0.0 && !relative_angle) ?",
+      "new": "bridges.surfaces = false ?",
+      "expected_matches": 1,
+      "test_filter": "ExternalBridgeDirection",
+      "description": "Discard explicit external bridge angle selection; 1, 30, 90 and 180 degree rows assert both planned surfaces and printed interior spans."
+    },
+    {
+      "id": "external-bridge-model-alignment-dropped",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "expand_merge_surfaces(this->fill_surfaces.surfaces, stBottomBridge, expansion_zones, closing_radius, custom_angle_rad + align_offset_rad)",
+      "new": "expand_merge_surfaces(this->fill_surfaces.surfaces, stBottomBridge, expansion_zones, closing_radius, custom_angle_rad)",
+      "expected_matches": 1,
+      "test_filter": "ExternalBridgeDirection",
+      "description": "Omit the explicit 37 degree model rotation in aligned absolute mode; the paired false/true rows require 30 and 67 degrees."
+    },
+    {
+      "id": "external-bridge-relative-offset-dropped",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "bridge_surface.bridge_angle += custom_angle_rad;",
+      "new": "bridge_surface.bridge_angle += 0.;",
+      "expected_matches": 1,
+      "test_filter": "ExternalBridgeDirection",
+      "description": "Discard the requested relative offset; 30 and 120 degree rows compare printed geometry with a separately observed automatic direction."
+    },
+    {
+      "id": "external-bridge-zero-treated-as-absolute",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "bridges.surfaces = (custom_angle_deg > 0.0 && !relative_angle) ?",
+      "new": "bridges.surfaces = (custom_angle_deg >= 0.0 && !relative_angle) ?",
+      "expected_matches": 1,
+      "test_filter": "ExternalBridgeDirection",
+      "description": "Treat automatic zero as an explicit horizontal direction; a rotated fixture requires identical automatic output across relative/aligned switches."
+    },
+    {
+      "id": "external-bridge-relative-rotation-added-twice",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "bridge_surface.bridge_angle += custom_angle_rad;",
+      "new": "bridge_surface.bridge_angle += custom_angle_rad + align_offset_rad;",
+      "expected_matches": 1,
+      "test_filter": "ExternalBridgeDirection",
+      "description": "Add model rotation again after automatic orientation already includes it; relative rows with alignment enabled must still add only the requested offset."
+    },
+    {
+      "id": "external-bridge-emitted-direction-ignored",
+      "path": "src/libslic3r/Fill/FillBase.cpp",
+      "old": "out_angle = float(surface->bridge_angle);",
+      "new": "out_angle = this->angle;",
+      "expected_matches": 1,
+      "test_filter": "ExternalBridgeDirection",
+      "description": "Drop surface bridge direction before generating paths. Printed interior bridge spans must agree with the requested direction, not merely the surface metadata."
     }
   ]
 }

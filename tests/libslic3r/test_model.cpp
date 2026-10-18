@@ -2438,7 +2438,7 @@ Vec3d transformed_box_size(const Transform3d &transform, const BoundingBoxf3 &bb
 
 TEST_CASE("Volume-to-bed transform cancels uniform world scale and translation", "[Model][Geometry][VolumeBedTransformation]")
 {
-    const BoundingBoxf3 bbox(Vec3f(-2.f, -3.f, -4.f), Vec3f(2.f, 3.f, 4.f));
+    const BoundingBoxf3 bbox(Vec3d(-2., -3., -4.), Vec3d(2., 3., 4.));
     Geometry::Transformation instance;
     instance.set_scaling_factor(Vec3d(2., 2., 2.));
     instance.set_rotation(Z, Geometry::deg2rad(17.));
@@ -2456,7 +2456,7 @@ TEST_CASE("Volume-to-bed transform cancels uniform world scale and translation",
 
 TEST_CASE("Volume-to-bed transform cancels quarter-turn anisotropic mirror", "[Model][Geometry][VolumeBedTransformation]")
 {
-    const BoundingBoxf3 bbox(Vec3f(-2.f, -3.f, -4.f), Vec3f(2.f, 3.f, 4.f));
+    const BoundingBoxf3 bbox(Vec3d(-2., -3., -4.), Vec3d(2., 3., 4.));
     Geometry::Transformation instance;
     instance.set_scaling_factor(Vec3d(2., 3., 4.));
     instance.set_rotation(Z, 0.5 * double(PI));
@@ -2476,7 +2476,7 @@ TEST_CASE("Volume-to-bed transform cancels quarter-turn anisotropic mirror", "[M
 
 TEST_CASE("Volume-to-bed transform keeps general rotation out of the volume", "[Model][Geometry][VolumeBedTransformation]")
 {
-    const BoundingBoxf3 bbox(Vec3f(-2.f, -3.f, -4.f), Vec3f(2.f, 3.f, 4.f));
+    const BoundingBoxf3 bbox(Vec3d(-2., -3., -4.), Vec3d(2., 3., 4.));
     Geometry::Transformation instance;
     instance.set_scaling_factor(Vec3d(2., 3., 4.));
     instance.set_rotation(Z, Geometry::deg2rad(23.));

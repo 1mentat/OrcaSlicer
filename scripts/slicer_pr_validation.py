@@ -29,6 +29,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import copy
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -703,7 +704,7 @@ def load_snapshot(path: Path, *, content: bytes | None = None) -> list[dict[str,
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
             raise ValidationError(f"snapshot entry #{index + 1} is not an object")
-        for key in ("number", "headRefOid"):
+        for key in ("number", "headRefOid", "baseRefOid"):
             if key not in item:
                 raise ValidationError(f"snapshot entry #{index + 1} lacks {key}")
         try:
@@ -715,7 +716,10 @@ def load_snapshot(path: Path, *, content: bytes | None = None) -> list[dict[str,
         oid = str(item["headRefOid"])
         if not _HEX40.fullmatch(oid):
             raise ValidationError(f"snapshot PR #{number} has a non-exact head OID: {oid}")
-        records.append(dict(item, number=number, headRefOid=oid))
+        base_oid = str(item["baseRefOid"])
+        if not _HEX40.fullmatch(base_oid):
+            raise ValidationError(f"snapshot PR #{number} has a non-exact base OID: {base_oid}")
+        records.append(dict(item, number=number, headRefOid=oid, baseRefOid=base_oid))
         numbers.add(number)
     return records
 
@@ -1101,10 +1105,18 @@ def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
     # retain their previous behavior, while --no-reference-baseline is explicit.
     configuration = report.get("configuration") or {}
     if configuration.get("reference_baseline") is True:
-        reference = report.get("reference")
-        if (not isinstance(reference, dict)
-                or reference.get("status") not in {"pass", "test_failed"}):
-            return "infrastructure_error", 2
+        references = report.get("references")
+        if isinstance(references, dict):
+            if (not references or any(
+                    not isinstance(reference, dict)
+                    or reference.get("status") not in {"pass", "test_failed"}
+                    for reference in references.values())):
+                return "infrastructure_error", 2
+        else:
+            reference = report.get("reference")
+            if (not isinstance(reference, dict)
+                    or reference.get("status") not in {"pass", "test_failed"}):
+                return "infrastructure_error", 2
     statuses = _selected_statuses(report)
     if not statuses:
         return "no_heads", 2
@@ -1122,6 +1134,57 @@ def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
         return "infrastructure_error", 2
     return "heads_failed", 1
 
+
+def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
+                        base_sha: str, args: argparse.Namespace,
+                        configure_args: Sequence[str], build_args: Sequence[str],
+                        patch_path: Path, patch: bytes,
+                        baseline_passed_cases: dict[str, str]) -> dict[str, Any]:
+    """Run one exact snapshot base with the same guarded tests-only overlay."""
+    reference: dict[str, Any] = {
+        "name": reference_name,
+        "commit_sha": base_sha,
+        "reference_base_sha": base_sha,
+        "status": "infrastructure_error",
+        "harness_patch_applied": False,
+    }
+    reset = _reset_worktree(worktree, base_sha)
+    reference["reset"] = reset
+    if any(item.get("returncode") != 0 for item in reset):
+        reference["status"] = "reset_failed"
+        return reference
+    before, before_result = _tracked_source_index_hash(worktree)
+    reference["tracked_source_index_hash_before_overlay"] = before
+    reference["tracked_source_index_resolution_before"] = before_result.json()
+    if patch:
+        apply = _git(worktree, "apply", "--3way", "--index", str(patch_path), timeout=300)
+        reference["patch_apply"] = apply.json()
+        if apply.returncode != 0:
+            reference["status"] = "patch_conflict"
+            reference["conflict_status"] = _status(worktree)
+            reference["unresolved_paths"] = _git(
+                worktree, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
+            return reference
+    after, after_result = _tracked_source_index_hash(worktree)
+    reference["tracked_source_index_hash_after_overlay"] = after
+    reference["tracked_source_index_resolution_after"] = after_result.json()
+    reference["tracked_source_index_unchanged"] = before == after
+    if (args.patch_scope == "test-only" and
+            (after is None or not reference["tracked_source_index_unchanged"])):
+        reference["status"] = "tracked_source_index_changed"
+        return reference
+    tree, tree_result = _tree_sha(worktree)
+    reference["tree_resolution"] = tree_result.json()
+    if tree is None:
+        reference["status"] = "tree_resolution_failed"
+        return reference
+    run = _run_tree(worktree, output, reference_name, args, configure_args, build_args,
+                    commit_sha=base_sha, tree_sha=tree)
+    reference.update(run)
+    _apply_minimum_test_gate(reference, minimum_tests=args.minimum_tests,
+                              baseline_cases=baseline_passed_cases)
+    reference["harness_patch_applied"] = bool(patch)
+    return reference
 
 def run_validation(args: argparse.Namespace) -> int:
     repo = Path(args.root).resolve()
@@ -1180,6 +1243,7 @@ def run_validation(args: argparse.Namespace) -> int:
         "snapshot_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
         "output_device": output.stat().st_dev,
         "preflight_heads": [],
+        "preflight_bases": [],
         "selected_numbers": [int(item["number"]) for item in records],
         "harness": {
             "base_ref": args.harness_base, "base_sha": harness_base,
@@ -1220,6 +1284,7 @@ def run_validation(args: argparse.Namespace) -> int:
             "identity_manifest_sha256": identity_manifest_sha,
         },
         "baseline": {},
+        "references": {},
         "reference": {},
         "heads": [],
     }
@@ -1233,9 +1298,17 @@ def run_validation(args: argparse.Namespace) -> int:
                 "number": record["number"], "requested_oid": record["headRefOid"],
                 "resolved_oid": resolved, "resolution": resolution.json(),
             })
-        if any(item["resolved_oid"] != item["requested_oid"] for item in report["preflight_heads"]):
+            base_resolved, base_resolution = resolve_commit(repo, record["baseRefOid"])
+            report["preflight_bases"].append({
+                "number": record["number"], "requested_oid": record["baseRefOid"],
+                "resolved_oid": base_resolved, "resolution": base_resolution.json(),
+            })
+        if (any(item["resolved_oid"] != item["requested_oid"]
+                for item in report["preflight_heads"]) or
+                any(item["resolved_oid"] != item["requested_oid"]
+                    for item in report["preflight_bases"])):
             report["baseline"] = {"status": "invalid_ref"}
-            raise ValidationError("snapshot contains unavailable exact head commits")
+            raise ValidationError("snapshot contains unavailable exact head or base commits")
         parent = Path(tempfile.mkdtemp(prefix="slicer-pr-validation-", dir=str(output.parent)))
         worktree = parent / "repo"
         add = _git(repo, "worktree", "add", "--detach", str(worktree), harness_ref, timeout=300)
@@ -1292,6 +1365,7 @@ def run_validation(args: argparse.Namespace) -> int:
         _write_json(output / "report.json", report)
 
         if baseline["status"] != "pass":
+            report["references"] = {}
             report["reference"] = {
                 "status": "not_run",
                 "reason": "harness_ref baseline guard did not pass",
@@ -1307,66 +1381,65 @@ def run_validation(args: argparse.Namespace) -> int:
             return_code = 2
         else:
             return_code = 0
+            reference_base_oids = {str(item["baseRefOid"]) for item in records}
+            tested_head_cache: dict[str, dict[str, Any]] = {}
             if args.reference_baseline:
-                reference: dict[str, Any] = {
-                    "name": "reference",
-                    "commit_sha": harness_base,
-                    "status": "infrastructure_error",
-                    "harness_patch_applied": False,
-                }
-                reference_reset = _reset_worktree(worktree, harness_base)
-                reference["reset"] = reference_reset
-                if any(item.get("returncode") != 0 for item in reference_reset):
-                    reference["status"] = "reset_failed"
-                else:
-                    reference_before, reference_before_result = _tracked_source_index_hash(worktree)
-                    reference["tracked_source_index_hash_before_overlay"] = reference_before
-                    reference["tracked_source_index_resolution_before"] = reference_before_result.json()
-                    if patch:
-                        reference_apply = _git(worktree, "apply", "--3way", "--index",
-                                                str(patch_path), timeout=300)
-                        reference["patch_apply"] = reference_apply.json()
-                        if reference_apply.returncode != 0:
-                            reference["status"] = "patch_conflict"
-                            reference["conflict_status"] = _status(worktree)
-                            reference["unresolved_paths"] = _git(
-                                worktree, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
-                    if reference.get("status") != "patch_conflict":
-                        reference_after, reference_after_result = _tracked_source_index_hash(worktree)
-                        reference["tracked_source_index_hash_after_overlay"] = reference_after
-                        reference["tracked_source_index_resolution_after"] = reference_after_result.json()
-                        reference["tracked_source_index_unchanged"] = reference_before == reference_after
-                        if (args.patch_scope == "test-only" and
-                                (reference_after is None or not reference["tracked_source_index_unchanged"])):
-                            reference["status"] = "tracked_source_index_changed"
-                        else:
-                            reference_tree, reference_tree_result = _tree_sha(worktree)
-                            reference["tree_resolution"] = reference_tree_result.json()
-                            if reference_tree is None:
-                                reference["status"] = "tree_resolution_failed"
-                            else:
-                                reference_run = _run_tree(
-                                    worktree, output, "reference", args, configure_args, build_args,
-                                    commit_sha=harness_base, tree_sha=reference_tree)
-                                reference.update(reference_run)
-                                _apply_minimum_test_gate(
-                                    reference, minimum_tests=args.minimum_tests,
-                                    baseline_cases=baseline_passed_cases)
-                                reference["harness_patch_applied"] = bool(patch)
-                report["reference"] = reference
-                _write_json(output / "report.json", report)
+                report["references"] = {}
+                report["reference"] = {}
             else:
+                report["references"] = {}
                 report["reference"] = {
                     "status": "not_run", "reason": "--no-reference-baseline",
                 }
-            return_code = 0
             for record in records:
                 number = int(record["number"])
                 requested_oid = str(record["headRefOid"])
+                requested_base_oid = str(record["baseRefOid"])
+                reference_for_head: dict[str, Any] | None = None
+                if args.reference_baseline:
+                    reference_for_head = report["references"].get(requested_base_oid)
+                    if reference_for_head is None:
+                        previous_head = tested_head_cache.get(requested_base_oid)
+                        if (identity_policy is None and previous_head is not None and
+                                previous_head.get("status") in {"pass", "test_failed"} and
+                                previous_head.get("junit_reference_usable", False)):
+                            reference_for_head = copy.deepcopy(previous_head)
+                            reference_for_head["name"] = (
+                                f"reference-base-{requested_base_oid[:12]}")
+                            reference_for_head["commit_sha"] = requested_base_oid
+                            reference_for_head["reference_base_sha"] = requested_base_oid
+                            reference_for_head["reused_from_head_number"] = previous_head.get("number")
+                        else:
+                            reference_name = (
+                                "reference"
+                                if len(reference_base_oids) == 1 and requested_base_oid == harness_base
+                                else f"reference-base-{requested_base_oid[:12]}")
+                            reference_for_head = _run_reference_entry(
+                                worktree, output, reference_name, requested_base_oid, args,
+                                configure_args, build_args, patch_path, patch,
+                                baseline_passed_cases)
+                        report["references"][requested_base_oid] = reference_for_head
+                        if (identity_policy is None and
+                                reference_for_head.get("commit_sha") and
+                                reference_for_head.get("status") in {"pass", "test_failed"} and
+                                reference_for_head.get("junit_reference_usable", False)):
+                            tested_head_cache.setdefault(
+                                str(reference_for_head["commit_sha"]),
+                                copy.deepcopy(reference_for_head))
+                        if len(report["references"]) == 1 and requested_base_oid == harness_base:
+                            report["reference"] = reference_for_head
+                        else:
+                            report["reference"] = {
+                                "status": "multiple",
+                                "base_count": len(report["references"]),
+                                "base_shas": sorted(report["references"]),
+                            }
+                        _write_json(output / "report.json", report)
                 entry: dict[str, Any] = {
                     "number": number,
                     "head_ref_name": record.get("headRefName", ""),
                     "head_ref_oid": requested_oid,
+                    "reference_base_sha": requested_base_oid,
                     "status": "infrastructure_error",
                 }
                 resolved, resolution = resolve_commit(worktree, requested_oid)
@@ -1377,6 +1450,31 @@ def run_validation(args: argparse.Namespace) -> int:
                     return_code = 2
                     continue
                 entry["commit_sha"] = resolved
+                cached_head = tested_head_cache.get(resolved)
+                if (identity_policy is None and cached_head is not None and
+                        cached_head.get("status") in {"pass", "test_failed"} and
+                        cached_head.get("junit_reference_usable", False)):
+                    entry.update(copy.deepcopy(cached_head))
+                    entry.update({
+                        "number": number,
+                        "head_ref_name": record.get("headRefName", ""),
+                        "head_ref_oid": requested_oid,
+                        "reference_base_sha": requested_base_oid,
+                        "commit_sha": resolved,
+                        "head_resolution": resolution.json(),
+                        "name": f"pr-{number}",
+                        "reused_from_exact_run": cached_head.get("name"),
+                    })
+                    entry["failure_classification"] = classify_failure_names(
+                        reference_for_head, entry)
+                    report["heads"].append(entry)
+                    if entry["status"] != "pass":
+                        return_code = 1 if entry["status"] in {"configure_failed", "build_failed",
+                                                                   "test_failed", "test_skipped", "no_tests",
+                                                                   "test_timeout", "configure_timeout",
+                                                                   "build_timeout"} else 2
+                    _write_json(output / "report.json", report)
+                    continue
                 reset_ops = _reset_worktree(worktree, resolved)
                 entry["reset"] = reset_ops
                 if any(item.get("returncode") != 0 for item in reset_ops):
@@ -1476,8 +1574,12 @@ def run_validation(args: argparse.Namespace) -> int:
                     baseline_cases=gate_baseline_cases,
                     required_cases=required_head_case_statuses)
                 entry["harness_patch_applied"] = bool(patch)
+                if (identity_policy is None and resolved and
+                        entry.get("status") in {"pass", "test_failed"} and
+                        entry.get("junit_reference_usable", False)):
+                    tested_head_cache[resolved] = copy.deepcopy(entry)
                 entry["failure_classification"] = classify_failure_names(
-                    report.get("reference"), entry)
+                    reference_for_head, entry)
                 report["heads"].append(entry)
                 if entry["status"] != "pass":
                     return_code = 1 if entry["status"] in {"configure_failed", "build_failed",

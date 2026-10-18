@@ -7552,3 +7552,163 @@ TEST_CASE("BBS thumbnail accessor falls back to the standard relationship", "[3M
 }
 
 } // namespace bbs_thumbnail_accessor_followup
+
+namespace bbs_3mf_import_metadata_contracts {
+
+using namespace Slic3r;
+using namespace Catch::Matchers;
+
+namespace {
+
+bool store_calibration_archive(const std::string &path, ThumbnailData &thumbnail,
+                               SaveStrategy strategy)
+{
+    ScopedTemporaryDir backup("orca_3mf_active_next_calibration");
+    Model model = archive_variant_contracts::make_cube_model();
+    model.set_backup_path(backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.config = config;
+    plate.plate_index = 0;
+    plate.objects_and_instances = {{0, 0}};
+
+    StoreParams params;
+    params.path = path;
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.calibration_thumbnail_data = {&thumbnail};
+    params.strategy = strategy;
+    return store_bbs_3mf(params);
+}
+
+bool has_entry_suffix(const std::string &path, const std::string &suffix)
+{
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, path));
+    const ScopeGuard close_zip([&zip] { close_zip_reader(&zip); });
+    for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&zip); ++i) {
+        mz_zip_archive_file_stat stat;
+        REQUIRE(mz_zip_reader_file_stat(&zip, i, &stat));
+        std::string name(stat.m_filename);
+        std::replace(name.begin(), name.end(), '\\', '/');
+        if (boost::algorithm::iends_with(name, suffix))
+            return true;
+    }
+    return false;
+}
+
+void write_bbs_object_type_other_archive(const std::string &path)
+{
+    const std::string relationships = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>)XML";
+    std::string model = legacy_3mf_contracts::cube_model_xml("ThirdParty");
+    const size_t type = model.find("type=\"model\"");
+    REQUIRE(type != std::string::npos);
+    model.replace(type, std::string("type=\"model\"").size(), "type=\"other\"");
+
+    Zipper archive(path);
+    archive.add_entry("_rels/.rels", relationships.data(), relationships.size());
+    archive.add_entry("3D/3dmodel.model", model.data(), model.size());
+    archive.finalize();
+}
+
+} // namespace
+
+TEST_CASE("BBS accepts a valid 3MF object with the other object type",
+          "[3MF][Bbs3mfImportMetadata][ObjectType]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    write_bbs_object_type_other_archive(archive.string());
+
+    Model loaded;
+    archive_variant_contracts::BbsLoaded state;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded, state));
+    CHECK_FALSE(state.is_bbl);
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.objects.front() != nullptr);
+    REQUIRE(loaded.objects.front()->volumes.size() == 1);
+    CHECK(loaded.objects.front()->name == "Cube");
+    CHECK_THAT(loaded.objects.front()->raw_mesh().volume(), WithinAbs(1000., 1e-5));
+    CHECK_THAT(double(loaded.mesh().bounding_box().max.x()), WithinAbs(10., 1e-5));
+}
+
+TEST_CASE("BBS extracts a persisted plate bounding-box JSON file on load",
+          "[3MF][Bbs3mfImportMetadata][PlateBBox]")
+{
+    PlateBBoxData bbox;
+    bbox.bbox_all = {1, 2, 31, 42};
+    bbox.filament_ids = {0, 2};
+    bbox.filament_colors = {"#111111", "#222222"};
+    bbox.bed_type = "Textured PEI Plate";
+    bbox.first_layer_time = 8.5f;
+    bbox.bbox_objs.push_back({7, {1, 2, 31, 42}, 120.f, .2f, "bbox-cube"});
+
+    ScopedTemporaryFile archive(".3mf");
+    bbs_3mf_metadata_contracts::store_followup(
+        archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate,
+                              StoreParams &params, ScopedTemporaryDir &) {
+            plate.pattern_bbox_file = "bbox-source.json";
+            params.id_bboxes = {&bbox};
+        });
+
+    Model loaded;
+    archive_variant_contracts::BbsLoaded state;
+    REQUIRE(bbs_3mf_metadata_contracts::load_followup(archive.string(), loaded, state));
+    REQUIRE(state.plates.size() == 1);
+    const PlateData *plate = state.plates.front();
+    REQUIRE(plate != nullptr);
+    REQUIRE_FALSE(plate->pattern_bbox_file.empty());
+    CHECK(plate->pattern_bbox_file.find("Metadata/plate_1.json") != std::string::npos);
+    REQUIRE(std::filesystem::exists(plate->pattern_bbox_file));
+
+    const nlohmann::json persisted = nlohmann::json::parse(
+        archive_variant_contracts::read_file(plate->pattern_bbox_file));
+    const nlohmann::json &bbox_json = persisted.at("bbox_all");
+    REQUIRE(bbox_json.is_array());
+    REQUIRE(bbox_json.size() == bbox.bbox_all.size());
+    for (size_t i = 0; i < bbox.bbox_all.size(); ++i)
+        CHECK_THAT(bbox_json.at(i).get<double>(), WithinAbs(double(bbox.bbox_all[i]), 1e-5));
+    const nlohmann::json &filament_json = persisted.at("filament_ids");
+    REQUIRE(filament_json.is_array());
+    REQUIRE(filament_json.size() == bbox.filament_ids.size());
+    for (size_t i = 0; i < bbox.filament_ids.size(); ++i)
+        CHECK(filament_json.at(i).get<int>() == bbox.filament_ids[i]);
+    REQUIRE(persisted.at("bbox_objects").size() == 1);
+    CHECK(persisted.at("bbox_objects").at(0).at("name").get<std::string>() == "bbox-cube");
+    CHECK_THAT(persisted.at("bbox_objects").at(0).at("area").get<float>(), WithinAbs(120.f, 1e-5));
+}
+
+TEST_CASE("BBS skips invalid calibration thumbnails without rejecting the archive",
+          "[3MF][Bbs3mfImportMetadata][Calibration]")
+{
+    ThumbnailData invalid;
+    invalid.set(2, 2);
+    invalid.pixels.pop_back();
+    REQUIRE_FALSE(invalid.is_valid());
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_calibration_archive(archive.string(), invalid,
+                                       SaveStrategy::Zip64 | SaveStrategy::Silence));
+    CHECK_FALSE(has_entry_suffix(archive.string(), ".png"));
+}
+
+TEST_CASE("BBS omits calibration thumbnails when static archive output is disabled",
+          "[3MF][Bbs3mfImportMetadata][Calibration]")
+{
+    ThumbnailData valid;
+    valid.set(2, 2);
+    std::fill(valid.pixels.begin(), valid.pixels.end(), static_cast<unsigned char>(0x7a));
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_calibration_archive(archive.string(), valid,
+                                       SaveStrategy::Zip64 | SaveStrategy::Silence |
+                                       SaveStrategy::SkipStatic));
+    CHECK_FALSE(has_entry_suffix(archive.string(), ".png"));
+}
+
+
+} // namespace bbs_3mf_import_metadata_contracts

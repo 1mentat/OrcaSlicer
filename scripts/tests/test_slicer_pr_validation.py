@@ -78,8 +78,25 @@ class ParsingTests(unittest.TestCase):
             with self.assertRaises(slicer_pr_validation.ValidationError):
                 slicer_pr_validation.load_snapshot(empty)
             invalid = root / "invalid.json"
-            invalid.write_text(json.dumps([{"number": 1, "headRefOid": "HEAD"}]), encoding="utf-8")
+            invalid.write_text(json.dumps([{"number": 1, "headRefOid": "HEAD",
+                                            "baseRefOid": "a" * 40}]), encoding="utf-8")
             with self.assertRaises(slicer_pr_validation.ValidationError):
+                slicer_pr_validation.load_snapshot(invalid)
+
+    def test_snapshot_requires_exact_base_oid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            missing = root / "missing-base.json"
+            missing.write_text(json.dumps([{
+                "number": 1, "headRefOid": "a" * 40,
+            }]), encoding="utf-8")
+            with self.assertRaisesRegex(slicer_pr_validation.ValidationError, "baseRefOid"):
+                slicer_pr_validation.load_snapshot(missing)
+            invalid = root / "invalid-base.json"
+            invalid.write_text(json.dumps([{
+                "number": 1, "headRefOid": "a" * 40, "baseRefOid": "b" * 39,
+            }]), encoding="utf-8")
+            with self.assertRaisesRegex(slicer_pr_validation.ValidationError, "base OID"):
                 slicer_pr_validation.load_snapshot(invalid)
 
 
@@ -181,6 +198,19 @@ class StatusTests(unittest.TestCase):
             "heads": [{"status": "pass"}],
         }
         self.assertEqual(slicer_pr_validation._overall_status(report), ("pass", 0))
+
+    def test_multiple_reference_bases_fail_closed_when_one_is_not_comparable(self):
+        report = {
+            "baseline": {"status": "pass"},
+            "configuration": {"reference_baseline": True},
+            "references": {
+                "a" * 40: {"status": "pass"},
+                "b" * 40: {"status": "test_error"},
+            },
+            "heads": [{"status": "pass"}],
+        }
+        self.assertEqual(slicer_pr_validation._overall_status(report),
+                         ("infrastructure_error", 2))
 
     def test_legacy_report_without_reference_request_keeps_existing_behavior(self):
         report = {"baseline": {"status": "pass"}, "heads": [{"status": "pass"}]}
@@ -789,10 +819,11 @@ class IdentityManifestIntegrationTests(unittest.TestCase):
         return args
 
     @staticmethod
-    def _snapshot(root, head):
+    def _snapshot(root, head, base):
         path = root / "snapshot.json"
         path.write_text(json.dumps([{
             "number": 1, "headRefName": "head", "headRefOid": head,
+            "baseRefOid": base,
         }]), encoding="utf-8")
         return path
 
@@ -821,7 +852,7 @@ class IdentityManifestIntegrationTests(unittest.TestCase):
 
     def _write_manifest_and_args(self, root, *, moved_exception=False):
         repo, base, harness_ref, head = self._fixture(root, moved_exception=moved_exception)
-        snapshot = self._snapshot(root, head)
+        snapshot = self._snapshot(root, head, base)
         manifest = root / "identity.json"
         manifest.write_text(json.dumps(
             self._manifest(repo, base, harness_ref, head)), encoding="utf-8")
@@ -1378,10 +1409,11 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         args.uv = "uv"
         return args
 
-    def _write_snapshot(self, root, head):
+    def _write_snapshot(self, root, head, base):
         snapshot = root / "snapshot.json"
         snapshot.write_text(json.dumps([{
             "number": 1, "headRefName": "head", "headRefOid": head,
+            "baseRefOid": base,
         }]), encoding="utf-8")
         return snapshot
 
@@ -1389,7 +1421,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base, harness_ref, head = self._fixture(root)
-            snapshot = self._write_snapshot(root, head)
+            snapshot = self._write_snapshot(root, head, base)
             output = root / "evidence"
             output.mkdir()
             (output / "stale-report.json").write_text("stale\n", encoding="utf-8")
@@ -1407,6 +1439,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             missing = "0" * 40
             snapshot.write_text(json.dumps([{
                 "number": 1, "headRefName": "missing", "headRefOid": missing,
+                "baseRefOid": base,
             }]), encoding="utf-8")
             output = root / "evidence"
             args = self._args(repo, snapshot, output)
@@ -1420,11 +1453,35 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             self.assertEqual(report["preflight_heads"][0]["requested_oid"], missing)
             self.assertIsNone(report["preflight_heads"][0]["resolved_oid"])
 
+    def test_missing_snapshot_base_fails_preflight_before_any_tree_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            missing_base = "0" * 40
+            snapshot = root / "snapshot.json"
+            snapshot.write_text(json.dumps([{
+                "number": 1, "headRefName": "head", "headRefOid": head,
+                "baseRefOid": missing_base,
+            }]), encoding="utf-8")
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree) as run_tree:
+                with self.assertRaises(slicer_pr_validation.ValidationError):
+                    slicer_pr_validation.run_validation(args)
+            run_tree.assert_not_called()
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["preflight_heads"][0]["resolved_oid"], head)
+            self.assertEqual(report["preflight_bases"][0]["requested_oid"], missing_base)
+            self.assertIsNone(report["preflight_bases"][0]["resolved_oid"])
+
     def test_report_records_snapshot_digest_and_preflight_heads(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base, harness_ref, head = self._fixture(root)
-            snapshot = self._write_snapshot(root, head)
+            snapshot = self._write_snapshot(root, head, base)
             output = root / "evidence"
             args = self._args(repo, snapshot, output)
             args.harness_base = base
@@ -1456,7 +1513,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base, harness_ref, head = self._fixture(root)
-            snapshot = self._write_snapshot(root, head)
+            snapshot = self._write_snapshot(root, head, base)
             output = root / "evidence"
             args = self._args(repo, snapshot, output)
             args.harness_base = base
@@ -1466,6 +1523,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                 "number": 1,
                 "headRefName": "head",
                 "headRefOid": head,
+                "baseRefOid": base,
                 "changed_after_load": True,
             }]).encode("utf-8")
             real_load_snapshot = slicer_pr_validation.load_snapshot
@@ -1524,7 +1582,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base, harness_ref, head = self._fixture(root)
-            snapshot = self._write_snapshot(root, head)
+            snapshot = self._write_snapshot(root, head, base)
             args = self._args(repo, snapshot, root / "evidence")
             worktree = root / "worktree"
             worktree.mkdir()
@@ -1580,7 +1638,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                 "junit_case_statuses": {"suite::base regression": "passed"},
                 "failed_test_names": [],
             }
-        if name == "reference":
+        if name == "reference" or name.startswith("reference-base-"):
             return {
                 **common,
                 "name": name,
@@ -1598,11 +1656,260 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             "failed_test_names": [],
         }
 
+    def test_no_reference_mode_does_not_run_or_require_reference_entries(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.reference_baseline = False
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree) as run_tree:
+                self.assertEqual(slicer_pr_validation.run_validation(args), 0)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["references"], {})
+            self.assertEqual(report["reference"]["status"], "not_run")
+            self.assertEqual([call.args[2] for call in run_tree.call_args_list],
+                             ["baseline", "pr-1"])
+
+    def test_each_snapshot_base_drives_reference_and_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            self._git(repo, "checkout", "-q", "-b", "base-two", base)
+            (repo / "base-two.txt").write_text("base two\n", encoding="utf-8")
+            self._git(repo, "add", "base-two.txt")
+            self._git(repo, "commit", "-qm", "second base")
+            base_two = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+            self._git(repo, "checkout", "-q", "-b", "head-two", base_two)
+            (repo / "README-two.txt").write_text("head two\n", encoding="utf-8")
+            self._git(repo, "add", "README-two.txt")
+            self._git(repo, "commit", "-qm", "second head")
+            head_two = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+            snapshot = root / "snapshot.json"
+            snapshot.write_text(json.dumps([
+                {"number": 1, "headRefName": "head", "headRefOid": head,
+                 "baseRefOid": base},
+                {"number": 2, "headRefName": "head-two", "headRefOid": head_two,
+                 "baseRefOid": base_two},
+            ]), encoding="utf-8")
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree) as run_tree:
+                self.assertEqual(slicer_pr_validation.run_validation(args), 0)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(report["references"]), {base, base_two})
+            self.assertEqual([item["reference_base_sha"] for item in report["heads"]],
+                             [base, base_two])
+            self.assertEqual([call.args[2] for call in run_tree.call_args_list], [
+                "baseline", f"reference-base-{base[:12]}", "pr-1",
+                f"reference-base-{base_two[:12]}", "pr-2",
+            ])
+            self.assertEqual(report["reference"]["status"], "multiple")
+
+    def test_each_head_classification_uses_its_own_base_failure_set(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            self._git(repo, "checkout", "-q", "-b", "base-two", base)
+            (repo / "base-two.txt").write_text("base two\n", encoding="utf-8")
+            self._git(repo, "add", "base-two.txt")
+            self._git(repo, "commit", "-qm", "second base")
+            base_two = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+            self._git(repo, "checkout", "-q", "-b", "head-two", base_two)
+            (repo / "README-two.txt").write_text("head two\n", encoding="utf-8")
+            self._git(repo, "add", "README-two.txt")
+            self._git(repo, "commit", "-qm", "second head")
+            head_two = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+            snapshot = root / "snapshot.json"
+            snapshot.write_text(json.dumps([
+                {"number": 1, "headRefName": "head", "headRefOid": head,
+                 "baseRefOid": base},
+                {"number": 2, "headRefName": "head-two", "headRefOid": head_two,
+                 "baseRefOid": base_two},
+            ]), encoding="utf-8")
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+
+            def comparison_run(*run_args, **run_kwargs):
+                name = run_args[2]
+                entry = self._fake_run_tree(*run_args, **run_kwargs)
+                if name.startswith("reference-base-"):
+                    if base[:12] in name:
+                        case = "suite::base-a"
+                    else:
+                        case = "suite::base-b"
+                    entry.update({"status": "test_failed",
+                                  "junit_case_statuses": {"suite::base regression": "passed", case: "failed"},
+                                  "failed_test_names": [case]})
+                elif name == "pr-1":
+                    case = "suite::base-a"
+                    entry.update({"status": "test_failed",
+                                  "junit_case_statuses": {"suite::base regression": "passed", case: "failed"},
+                                  "failed_test_names": [case]})
+                elif name == "pr-2":
+                    case = "suite::base-b"
+                    entry.update({"status": "test_failed",
+                                  "junit_case_statuses": {"suite::base regression": "passed", case: "failed"},
+                                  "failed_test_names": [case]})
+                return entry
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=comparison_run):
+                self.assertEqual(slicer_pr_validation.run_validation(args), 1)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["heads"][0]["failure_classification"]["inherited"],
+                             ["suite::base-a"])
+            self.assertEqual(report["heads"][1]["failure_classification"]["inherited"],
+                             ["suite::base-b"])
+            self.assertEqual(report["heads"][0]["failure_classification"]["new"], [])
+            self.assertEqual(report["heads"][1]["failure_classification"]["new"], [])
+
+    def test_shared_snapshot_base_runs_one_cached_reference(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            self._git(repo, "checkout", "-q", "-b", "head-two", base)
+            (repo / "README-two.txt").write_text("head two\n", encoding="utf-8")
+            self._git(repo, "add", "README-two.txt")
+            self._git(repo, "commit", "-qm", "second head")
+            head_two = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+            snapshot = root / "snapshot.json"
+            snapshot.write_text(json.dumps([
+                {"number": 1, "headRefName": "head", "headRefOid": head,
+                 "baseRefOid": base},
+                {"number": 2, "headRefName": "head-two", "headRefOid": head_two,
+                 "baseRefOid": base},
+            ]), encoding="utf-8")
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree) as run_tree:
+                self.assertEqual(slicer_pr_validation.run_validation(args), 0)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(report["references"]), {base})
+            self.assertEqual([call.args[2] for call in run_tree.call_args_list],
+                             ["baseline", "reference", "pr-1", "pr-2"])
+
+    def test_reference_run_for_future_head_can_seed_that_head_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head_one = self._fixture(root)
+            self._git(repo, "checkout", "-q", "-b", "head-two", base)
+            (repo / "README-two.txt").write_text("head two\n", encoding="utf-8")
+            self._git(repo, "add", "README-two.txt")
+            self._git(repo, "commit", "-qm", "second head")
+            head_two = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+            snapshot = root / "snapshot.json"
+            snapshot.write_text(json.dumps([
+                {"number": 1, "headRefName": "head-one", "headRefOid": head_one,
+                 "baseRefOid": head_two},
+                {"number": 2, "headRefName": "head-two", "headRefOid": head_two,
+                 "baseRefOid": base},
+            ]), encoding="utf-8")
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree) as run_tree:
+                self.assertEqual(slicer_pr_validation.run_validation(args), 1)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["heads"][1]["reused_from_exact_run"],
+                             f"reference-base-{head_two[:12]}")
+            self.assertEqual([call.args[2] for call in run_tree.call_args_list], [
+                "baseline", f"reference-base-{head_two[:12]}", "pr-1",
+                f"reference-base-{base[:12]}",
+            ])
+
+    def test_identity_policy_disables_exact_reference_reuse(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head_one = self._fixture(root)
+            self._git(repo, "checkout", "-q", "-b", "head-two", head_one)
+            (repo / "README-three.txt").write_text("head three\n", encoding="utf-8")
+            self._git(repo, "add", "README-three.txt")
+            self._git(repo, "commit", "-qm", "third head")
+            head_two = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+            snapshot = root / "snapshot.json"
+            snapshot.write_text(json.dumps([
+                {"number": 1, "headRefName": "head-one", "headRefOid": head_one,
+                 "baseRefOid": head_two},
+                {"number": 2, "headRefName": "head-two", "headRefOid": head_two,
+                 "baseRefOid": base},
+            ]), encoding="utf-8")
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.identity_manifest = str(root / "identity.json")
+            identity_policy = {
+                "required_harness_runtime_ids": [],
+                "required_harness_cases": {},
+                "heads": {
+                    1: {"exception_cases": {}, "required_head_cases": {},
+                        "exception_group": "none"},
+                    2: {"exception_cases": {}, "required_head_cases": {},
+                        "exception_group": "none"},
+                },
+                "selected_head_count": 2,
+                "all_snapshot_heads_validated": True,
+            }
+            with mock.patch.object(slicer_pr_validation, "_load_identity_manifest",
+                                   return_value=({}, "f" * 64)), \
+                 mock.patch.object(slicer_pr_validation, "_validate_identity_manifest",
+                                   return_value=identity_policy), \
+                 mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree) as run_tree:
+                self.assertEqual(slicer_pr_validation.run_validation(args), 0)
+            self.assertEqual([call.args[2] for call in run_tree.call_args_list], [
+                "baseline", f"reference-base-{head_two[:12]}", "pr-1",
+                f"reference-base-{base[:12]}", "pr-2",
+            ])
+
+    def test_prior_exact_head_can_seed_a_later_reference_base(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            self._git(repo, "checkout", "-q", "-b", "head-two", head)
+            (repo / "README-three.txt").write_text("head three\n", encoding="utf-8")
+            self._git(repo, "add", "README-three.txt")
+            self._git(repo, "commit", "-qm", "third head")
+            head_two = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+            snapshot = root / "snapshot.json"
+            snapshot.write_text(json.dumps([
+                {"number": 1, "headRefName": "head", "headRefOid": head,
+                 "baseRefOid": base},
+                {"number": 2, "headRefName": "head-two", "headRefOid": head_two,
+                 "baseRefOid": head},
+            ]), encoding="utf-8")
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree) as run_tree:
+                self.assertEqual(slicer_pr_validation.run_validation(args), 0)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["references"][head]["reused_from_head_number"], 1)
+            self.assertEqual([call.args[2] for call in run_tree.call_args_list],
+                             ["baseline", f"reference-base-{base[:12]}", "pr-1", "pr-2"])
+
     def test_reference_failure_does_not_suppress_head_and_src_stays_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base, harness_ref, head = self._fixture(root)
-            snapshot = self._write_snapshot(root, head)
+            snapshot = self._write_snapshot(root, head, base)
             output = root / "evidence"
             args = self._args(repo, snapshot, output)
             args.harness_base = base
@@ -1624,7 +1931,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base, harness_ref, head = self._fixture(root)
-            snapshot = self._write_snapshot(root, head)
+            snapshot = self._write_snapshot(root, head, base)
             output = root / "evidence"
             args = self._args(repo, snapshot, output)
             args.harness_base = base
@@ -1659,7 +1966,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base, harness_ref, head = self._fixture(root)
-            snapshot = self._write_snapshot(root, head)
+            snapshot = self._write_snapshot(root, head, base)
             output = root / "evidence"
             args = self._args(repo, snapshot, output)
             args.harness_base = base
@@ -1688,7 +1995,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base, harness_ref, head = self._fixture(root)
-            snapshot = self._write_snapshot(root, head)
+            snapshot = self._write_snapshot(root, head, base)
             output = root / "evidence"
             args = self._args(repo, snapshot, output)
             args.harness_base = base
@@ -1709,7 +2016,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base, harness_ref, head = self._fixture(root)
-            snapshot = self._write_snapshot(root, head)
+            snapshot = self._write_snapshot(root, head, base)
             output = root / "evidence"
             args = self._args(repo, snapshot, output)
             args.harness_base = base

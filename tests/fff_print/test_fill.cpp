@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include "libslic3r/Fill/FillBase.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config.hpp"
@@ -3033,3 +3034,164 @@ TEST_CASE("Explicit Archimedean top-fill order overrides flow calibration orderi
     CHECK_THAT(calibrated.total_length_mm, Catch::Matchers::WithinAbs(ordinary.total_length_mm, 1e-6));
     CHECK_THAT(calibrated.footprint_area_mm2, Catch::Matchers::WithinAbs(ordinary.footprint_area_mm2, 1e-6));
 }
+
+namespace external_bridge_direction_contracts {
+
+struct BridgeDirections {
+    std::vector<double> surfaces;
+    std::vector<double> interior_segments;
+};
+
+DynamicPrintConfig config(double angle, bool relative, bool aligned)
+{
+    DynamicPrintConfig result = DynamicPrintConfig::full_print_config();
+    result.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", "0.4"}, {"line_width", 0.42},
+        {"wall_generator", "classic"}, {"wall_loops", 2},
+        {"top_shell_layers", 2}, {"bottom_shell_layers", 2},
+        {"top_shell_thickness", 0.}, {"bottom_shell_thickness", 0.},
+        {"sparse_infill_density", "15%"}, {"sparse_infill_pattern", "rectilinear"},
+        {"bridge_angle", angle}, {"internal_bridge_angle", 0.},
+        {"relative_bridge_angle", relative}, {"align_infill_direction_to_model", aligned},
+        {"infill_direction", 17.}, {"solid_infill_rotate_template", ""},
+        {"bridge_density", "100%"}, {"bridge_flow", 1.}, {"thick_bridges", false},
+        {"enable_support", false}, {"raft_layers", 0},
+        {"skirt_loops", 0}, {"brim_type", "no_brim"}, {"resolution", 0.012},
+    });
+    return result;
+}
+
+BridgeDirections slice(double angle, bool relative, bool aligned, double rotation)
+{
+    // A roof spans the 12 mm gap between two pillars. The 0.2 mm overlap
+    // joins the roof to the pillars without a coplanar-only mesh contact.
+    TriangleMesh bridge = make_cube(4., 8., 4.);
+    TriangleMesh pillar = make_cube(4., 8., 4.);
+    pillar.translate(16., 0., 0.);
+    bridge.merge(pillar);
+    TriangleMesh roof = make_cube(20., 8., 0.6);
+    roof.translate(0., 0., 3.8);
+    bridge.merge(roof);
+
+    const DynamicPrintConfig settings = config(angle, relative, aligned);
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({bridge}, print, model, settings, nullptr, false);
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    model.objects.front()->instances.front()->set_rotation(
+        Vec3d(0., 0., Geometry::deg2rad(rotation)));
+    print.apply(model, settings);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.objects().size() == 1);
+
+    BridgeDirections result;
+    for (const Layer *layer : print.objects().front()->layers()) {
+        for (const LayerRegion *region : layer->regions()) {
+            ExPolygons bridge_regions;
+            for (const Surface &surface : region->fill_surfaces.surfaces) {
+                if (surface.surface_type == stBottomBridge) {
+                    result.surfaces.push_back(surface.bridge_angle);
+                    bridge_regions.push_back(surface.expolygon);
+                }
+            }
+            if (bridge_regions.empty())
+                continue;
+            // Contour connectors share the bridge role and may be long. Keep
+            // only path portions inside the bridge, a millimeter from its
+            // boundaries, so those connectors cannot stand in for fill spans.
+            const Polygons interior = shrink(to_polygons(bridge_regions), scale_(1.));
+            REQUIRE_FALSE(interior.empty());
+            for_each_extrusion_path(region->fills, [&result, &interior](const ExtrusionPath &path) {
+                if (path.role() != erBridgeInfill)
+                    return;
+                const Polylines clipped = intersection_pl(Polylines{path.as_polyline()}, interior);
+                for (const Polyline &span : clipped) {
+                    for (size_t i = 1; i < span.points.size(); ++i) {
+                        const Point &a = span.points[i - 1];
+                        const Point &b = span.points[i];
+                        const double dx = unscale<double>(b.x() - a.x());
+                        const double dy = unscale<double>(b.y() - a.y());
+                        if (std::hypot(dx, dy) > 1.)
+                            result.interior_segments.push_back(std::atan2(dy, dx));
+                    }
+                }
+            });
+        }
+    }
+    REQUIRE_FALSE(result.surfaces.empty());
+    REQUIRE(result.interior_segments.size() >= 2);
+    return result;
+}
+
+double direction_error(double actual, double expected)
+{
+    return std::abs(std::remainder(actual - expected, PI));
+}
+
+void expect_direction(const BridgeDirections &actual, double expected)
+{
+    for (double angle : actual.surfaces) {
+        REQUIRE(std::isfinite(angle));
+        REQUIRE(angle >= 0.);
+        CHECK_THAT(direction_error(angle, expected), Catch::Matchers::WithinAbs(0., 0.003));
+    }
+    for (double angle : actual.interior_segments) {
+        REQUIRE(std::isfinite(angle));
+        CHECK_THAT(direction_error(angle, expected), Catch::Matchers::WithinAbs(0., 0.003));
+    }
+}
+
+TEST_CASE("External bridge angles reach the printed spans including the horizontal endpoint",
+          "[Fill][ExternalBridgeDirection]")
+{
+    const double angle = GENERATE(1., 30., 90., 180.);
+    CAPTURE(angle);
+    expect_direction(slice(angle, false, false, 0.), Geometry::deg2rad(angle));
+}
+
+TEST_CASE("External bridge alignment adds the model rotation only when enabled",
+          "[Fill][ExternalBridgeDirection]")
+{
+    const bool aligned = GENERATE(false, true);
+    CAPTURE(aligned);
+    const double expected = Geometry::deg2rad(aligned ? 67. : 30.);
+    expect_direction(slice(30., false, aligned, 37.), expected);
+}
+
+TEST_CASE("Relative external bridge angles offset automatic direction once",
+          "[Fill][ExternalBridgeDirection]")
+{
+    const double offset = GENERATE(30., 120.);
+    const bool aligned = GENERATE(false, true);
+    CAPTURE(offset, aligned);
+    const BridgeDirections automatic = slice(0., false, false, 37.);
+    const double detected = automatic.surfaces.front();
+    expect_direction(automatic, detected);
+    // A rotated bridge makes an accidental absolute-angle override observable.
+    REQUIRE(direction_error(detected, 0.) > Geometry::deg2rad(10.));
+    expect_direction(slice(offset, true, aligned, 37.), detected + Geometry::deg2rad(offset));
+}
+
+TEST_CASE("Zero external bridge angle keeps automatic direction under both mode switches",
+          "[Fill][ExternalBridgeDirection]")
+{
+    const BridgeDirections automatic = slice(0., false, false, 37.);
+    const double detected = automatic.surfaces.front();
+    expect_direction(automatic, detected);
+    REQUIRE(direction_error(detected, 0.) > Geometry::deg2rad(10.));
+    for (bool relative : {false, true}) {
+        for (bool aligned : {false, true}) {
+            if (!relative && !aligned)
+                continue; // Already observed above.
+            CAPTURE(relative, aligned);
+            expect_direction(slice(0., relative, aligned, 37.), detected);
+        }
+    }
+}
+
+} // namespace external_bridge_direction_contracts

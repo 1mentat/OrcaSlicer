@@ -12,6 +12,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Model.hpp"
 #include <cstddef>
 #include "libslic3r/libslic3r.h"
@@ -1010,4 +1011,195 @@ TEST_CASE("Organic tree branch distance changes physical highest-layer support c
     // The non-roof organic path uses branch_distance_organic for line spacing, so the close
     // setting must retain a larger physical footprint on the same cap.
     REQUIRE(close.highest_layer_coverage_area_mm2 > far.highest_layer_coverage_area_mm2 + 0.01);
+}
+
+
+namespace tree_support_thick_bridge_contracts {
+
+struct Evidence {
+    size_t support_points = 0;
+    size_t positive_paths = 0;
+    size_t bridge_segments = 0;
+    double total_length_mm = 0.0;
+    bool finite = true;
+};
+
+// The 20 mm roof is supported only at its two four-millimetre end pillars.  Its
+// x=4..16 middle window is an analytic, horizontally unsupported bridge region.
+static TriangleMesh thick_bridge_fixture()
+{
+    TriangleMesh result = make_cube(4.0, 8.0, 4.0);
+    TriangleMesh right_pillar = make_cube(4.0, 8.0, 4.0);
+    right_pillar.translate(16.0, 0.0, 0.0);
+    result.merge(right_pillar);
+
+    // Overlap the pillars by one layer to avoid a coplanar mesh join.
+    TriangleMesh roof = make_cube(20.0, 8.0, 0.6);
+    roof.translate(0.0, 0.0, 3.8);
+    result.merge(roof);
+    return result;
+}
+
+static Evidence observe(bool thick_bridges)
+{
+    Print print;
+    slice_with_tree_support(thick_bridge_fixture(), print, "tree_slim", 30, 0, 0, {
+        { "printable_area",                "-100x-100,200x-100,200x200,-100x200" },
+        { "support_top_z_distance",        0.2 },
+        { "support_interface_top_layers",  0 },
+        { "support_interface_bottom_layers", 0 },
+        { "support_remove_small_overhang", 0 },
+        { "support_critical_regions_only", false },
+        { "support_on_build_plate_only",   0 },
+        { "bridge_no_support",              0 },
+        { "max_bridge_length",              0.0 },
+        { "thick_bridges",                  thick_bridges },
+        { "support_line_width",             0.4 },
+        { "line_width",                     0.4 },
+        { "outer_wall_line_width",          0.4 },
+        { "inner_wall_line_width",          0.4 },
+        { "nozzle_diameter",                "0.4" },
+        { "brim_type",                      "no_brim" },
+        { "brim_width",                     0.0 },
+        { "skirt_loops",                    0 },
+        { "raft_layers",                    0 },
+        { "enable_arc_fitting",             false },
+    });
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    Evidence result;
+    result.support_points = support_points(print).size();
+    const Point &center_offset = object.center_offset();
+    result.bridge_segments = tree_support_critical_regions_contracts::support_segments_in_window(
+        print, center_offset, 4.5, 15.5, 0.5, 7.5);
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer == nullptr)
+            result.finite = false;
+        else {
+            for_each_extrusion_path(layer->support_fills, [&result](const ExtrusionPath &path) {
+                const double length_mm = unscale<double>(path.length());
+                result.finite = result.finite && std::isfinite(length_mm);
+                if (std::isfinite(length_mm) && length_mm > 0.0) {
+                    ++result.positive_paths;
+                    result.total_length_mm += length_mm;
+                }
+            });
+        }
+    }
+    result.finite = result.finite && std::isfinite(result.total_length_mm);
+    return result;
+}
+
+} // namespace tree_support_thick_bridge_contracts
+
+TEST_CASE("Tree support thick bridges change trimming under a positive gap",
+          "[TreeSupport][ThickBridges][SupportSettingsVariance]")
+{
+    using namespace tree_support_thick_bridge_contracts;
+    const Evidence regular = observe(false);
+    const Evidence thick   = observe(true);
+
+    for (const Evidence &evidence : {regular, thick}) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.support_points > 0);
+        REQUIRE(evidence.positive_paths > 0);
+        REQUIRE(evidence.total_length_mm > 0.0);
+        REQUIRE(evidence.bridge_segments > 0);
+    }
+    // The analytic x=4..16 roof middle is stBottomBridge.  The production
+    // thick_bridges path trims this region only when the positive top gap is active.
+    REQUIRE(thick.bridge_segments != regular.bridge_segments);
+}
+
+namespace tree_support_raft_contact_contracts {
+
+struct RaftContactEvidence {
+    double contact_z = std::numeric_limits<double>::infinity();
+    double footprint_area_mm2 = 0.0;
+    double footprint_width_mm = 0.0;
+    double footprint_height_mm = 0.0;
+    bool finite = true;
+};
+
+static RaftContactEvidence observe(double raft_expansion)
+{
+    Print print;
+    slice_with_tree_support(organic_tree_density_contracts::cap_overhang_fixture(), print, "organic", 30, 0, 3, {
+        { "printable_area",                  "-100x-100,200x-100,200x200,-100x200" },
+        { "support_on_build_plate_only",     1 },
+        { "support_top_z_distance",          0.2 },
+        { "support_interface_top_layers",    0 },
+        { "support_interface_bottom_layers", 0 },
+        { "support_remove_small_overhang",   0 },
+        { "tree_support_auto_brim",          false },
+        { "tree_support_brim_width",         0.0 },
+        { "raft_expansion",                  raft_expansion },
+        { "support_line_width",              0.4 },
+        { "line_width",                      0.4 },
+        { "nozzle_diameter",                 "0.4" },
+        { "skirt_loops",                     0 },
+        { "brim_width",                      0.0 },
+        { "enable_arc_fitting",              false },
+    });
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    RaftContactEvidence result;
+    std::vector<Polygons> footprints;
+    const double expected_contact_z = double(object.slicing_parameters().raft_contact_top_z);
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer == nullptr || layer->support_fills.empty())
+            continue;
+        if (std::abs(double(layer->print_z) - expected_contact_z) > EPSILON)
+            continue;
+        Polygons covered;
+        layer->support_fills.polygons_covered_by_width(covered, float(SCALED_EPSILON));
+        if (!covered.empty())
+            footprints.push_back(std::move(covered));
+    }
+
+    REQUIRE(std::isfinite(expected_contact_z));
+    result.contact_z = expected_contact_z;
+    REQUIRE(!footprints.empty());
+    Polygons all_covered;
+    for (const Polygons &footprint : footprints)
+        all_covered.insert(all_covered.end(), footprint.begin(), footprint.end());
+    const ExPolygons merged = union_ex(all_covered);
+    REQUIRE(!merged.empty());
+    double scaled_area = 0.0;
+    for (const ExPolygon &polygon : merged)
+        scaled_area += std::abs(polygon.area());
+    const BoundingBox bbox = get_extents(all_covered);
+    REQUIRE(bbox.defined);
+    result.footprint_area_mm2 = unscale<double>(unscale<double>(scaled_area));
+    result.footprint_width_mm = unscale<double>(bbox.max.x() - bbox.min.x());
+    result.footprint_height_mm = unscale<double>(bbox.max.y() - bbox.min.y());
+    result.finite = std::isfinite(result.footprint_area_mm2) &&
+                    std::isfinite(result.footprint_width_mm) &&
+                    std::isfinite(result.footprint_height_mm);
+    return result;
+}
+
+} // namespace tree_support_raft_contact_contracts
+
+TEST_CASE("Organic tree raft expansion changes the public contact footprint",
+          "[TreeSupport][TreeSupport3D][TreeSupportRaftContact]")
+{
+    using namespace tree_support_raft_contact_contracts;
+    const RaftContactEvidence unexpanded = observe(0.0);
+    const RaftContactEvidence expanded   = observe(3.0);
+
+    for (const RaftContactEvidence &evidence : {unexpanded, expanded}) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.footprint_area_mm2 > 0.0);
+        REQUIRE(evidence.footprint_width_mm > 0.0);
+        REQUIRE(evidence.footprint_height_mm > 0.0);
+    }
+    CHECK_THAT(expanded.contact_z, Catch::Matchers::WithinAbs(unexpanded.contact_z, EPSILON));
+    // The contact is the 24 x 24 mm first object slice selected by raft_contact_top_z.
+    // A 3 mm raft expansion must enlarge each planar side at that contact layer.
+    REQUIRE(expanded.footprint_width_mm > unexpanded.footprint_width_mm + 3.0);
+    REQUIRE(expanded.footprint_height_mm > unexpanded.footprint_height_mm + 3.0);
+    REQUIRE(expanded.footprint_area_mm2 > unexpanded.footprint_area_mm2 * 1.15);
 }

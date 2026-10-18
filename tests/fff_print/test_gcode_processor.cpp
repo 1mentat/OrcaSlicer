@@ -17,6 +17,7 @@
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -1720,6 +1721,158 @@ TEST_CASE("Preheating relocates a back-solved heat command from a skippable move
     CHECK(skip_end < post_skip_move);
     REQUIRE(processed.result.moves.size() > 2);
 }
+
+namespace preheat_variance_contracts {
+
+namespace {
+
+std::string measured_idle_window()
+{
+    std::string gcode = "; MACHINE_START_GCODE_END\nG90\nM83\nT0\n";
+    // Ten-second moves make a thermal scheduling difference observable without
+    // depending on exact acceleration rounding or internal time-block indices.
+    for (int x = 10; x <= 200; x += 10) {
+        if (x == 110)
+            gcode += "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+                     "; CP_TOOLCHANGE_WIPE CT0 FL0\nT1\n";
+        gcode += "G1 X" + std::to_string(x) + " Y0 Z0.2 E0.1 F60\n";
+    }
+    return gcode + "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+                   "; MACHINE_END_GCODE_START\n";
+}
+
+struct TemperatureCommand {
+    float tool;
+    float temperature;
+    float preceding_x;
+};
+
+std::vector<TemperatureCommand> temperature_commands(const std::string &output)
+{
+    std::vector<TemperatureCommand> commands;
+    GCodeReader reader;
+    float last_x = 0.f;
+    reader.parse_buffer(output, [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G1") && line.has_x())
+            last_x = line.x();
+        if (!line.cmd_is("M104"))
+            return;
+        float tool = 0.f;
+        float temperature = 0.f;
+        float generated = -1.f;
+        REQUIRE(line.has_value('T', tool));
+        REQUIRE(line.has_value('S', temperature));
+        REQUIRE(line.has_value('N', generated));
+        CHECK_THAT(generated, WithinAbs(0.f, 1e-6f));
+        commands.push_back({tool, temperature, last_x});
+    });
+    return commands;
+}
+
+TemperatureCommand heating_command(const std::vector<TemperatureCommand> &commands,
+                                   float expected_temperature)
+{
+    const auto matches = [expected_temperature](const TemperatureCommand &command) {
+        return std::abs(command.temperature - expected_temperature) < 1e-4f;
+    };
+    REQUIRE(std::count_if(commands.begin(), commands.end(), matches) == 1);
+    return *std::find_if(commands.begin(), commands.end(), matches);
+}
+
+float cooling_temperature(const std::vector<TemperatureCommand> &commands)
+{
+    REQUIRE(commands.size() >= 2);
+    return std::min_element(commands.begin(), commands.end(),
+        [](const TemperatureCommand &a, const TemperatureCommand &b) {
+            return a.temperature < b.temperature;
+        })->temperature;
+}
+
+} // namespace
+
+TEST_CASE("Preheating uses the next filament temperature delta independently",
+          "[GCodeProcessor][GcpPreheat][GcpPreheatVariance]")
+{
+    const double delta = GENERATE(0., 10., 35.);
+    auto config = preheat_config();
+    config.filament_preheat_temperature_delta.values = {7., delta};
+    const auto processed = process_post(measured_idle_window(), config, true);
+    const auto commands = temperature_commands(processed.output);
+    const float expected = static_cast<float>(230. - delta);
+    const auto heat = heating_command(commands, expected);
+    CHECK_THAT(heat.tool, WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(cooling_temperature(commands), WithinAbs(25.f, 1e-6f));
+    CHECK(heat.preceding_x < 200.f);
+}
+
+TEST_CASE("Preheating translates logical extruders through the physical map",
+          "[GCodeProcessor][GcpPreheat][GcpPreheatVariance]")
+{
+    const bool reversed = GENERATE(false, true);
+    auto config = preheat_config();
+    config.physical_extruder_map.values = reversed ? std::vector<int>{1, 0}
+                                                   : std::vector<int>{0, 1};
+    const auto processed = process_post(measured_idle_window(), config, true);
+    const auto commands = temperature_commands(processed.output);
+    const auto heat = heating_command(commands, 220.f);
+    CHECK_THAT(heat.tool, WithinAbs(reversed ? 0.f : 1.f, 1e-6f));
+    CHECK_THAT(cooling_temperature(commands), WithinAbs(25.f, 1e-6f));
+    // Mapping the physical heater must not remap the logical filament grouping.
+    check_group_mapping(processed.result);
+    for (const auto &command : commands)
+        CHECK_THAT(command.tool, WithinAbs(reversed ? 0.f : 1.f, 1e-6f));
+}
+
+TEST_CASE("A faster target heater starts later without changing its temperature",
+          "[GCodeProcessor][GcpPreheat][GcpPreheatVariance]")
+{
+    auto slow = preheat_config();
+    auto fast = preheat_config();
+    auto unrelated = preheat_config();
+    slow.hotend_heating_rate.values = {4., 2.};
+    fast.hotend_heating_rate.values = {4., 8.};
+    unrelated.hotend_heating_rate.values = {1., 8.};
+    const std::string gcode = measured_idle_window();
+    const auto slow_output = process_post(gcode, slow, true);
+    const auto fast_output = process_post(gcode, fast, true);
+    const auto unrelated_output = process_post(gcode, unrelated, true);
+    const auto slow_heat = heating_command(temperature_commands(slow_output.output), 220.f);
+    const auto fast_heat = heating_command(temperature_commands(fast_output.output), 220.f);
+    const auto unchanged_heat = heating_command(temperature_commands(unrelated_output.output), 220.f);
+    CHECK_THAT(slow_heat.tool, WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(fast_heat.tool, WithinAbs(1.f, 1e-6f));
+    CHECK(fast_heat.preceding_x > slow_heat.preceding_x);
+    CHECK(fast_heat.preceding_x < 200.f);
+    CHECK_THAT(unchanged_heat.preceding_x, WithinAbs(fast_heat.preceding_x, 1e-4f));
+}
+
+TEST_CASE("A slower target cooler retains more heat during the same idle window",
+          "[GCodeProcessor][GcpPreheat][GcpPreheatVariance]")
+{
+    auto slow = preheat_config();
+    auto fast = preheat_config();
+    auto unrelated = preheat_config();
+    slow.hotend_cooling_rate.values = {4., 0.1};
+    fast.hotend_cooling_rate.values = {4., 4.};
+    unrelated.hotend_cooling_rate.values = {0.2, 4.};
+    const std::string gcode = measured_idle_window();
+    const auto slow_output = process_post(gcode, slow, true);
+    const auto fast_output = process_post(gcode, fast, true);
+    const auto unrelated_output = process_post(gcode, unrelated, true);
+    const auto slow_commands = temperature_commands(slow_output.output);
+    const auto fast_commands = temperature_commands(fast_output.output);
+    const auto unchanged_commands = temperature_commands(unrelated_output.output);
+    const float slow_temperature = cooling_temperature(slow_commands);
+    const float fast_temperature = cooling_temperature(fast_commands);
+    CHECK(slow_temperature > fast_temperature);
+    CHECK(slow_temperature < 220.f);
+    CHECK_THAT(fast_temperature, WithinAbs(25.f, 1e-6f));
+    CHECK_THAT(cooling_temperature(unchanged_commands), WithinAbs(fast_temperature, 1e-6f));
+    CHECK_THAT(heating_command(slow_commands, 220.f).tool, WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(heating_command(fast_commands, 220.f).tool, WithinAbs(1.f, 1e-6f));
+}
+
+} // namespace preheat_variance_contracts
 
 namespace gcp_build_volume_contracts {
 
