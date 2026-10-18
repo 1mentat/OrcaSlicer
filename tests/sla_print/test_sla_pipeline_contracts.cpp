@@ -1638,3 +1638,140 @@ TEST_CASE("SLA around-object pads retain a footprint from real elevated supports
     REQUIRE(std::abs(static_cast<double>(support.volume())) > 0.0);
     REQUIRE(std::abs(static_cast<double>(pad.volume())) > 0.0);
 }
+
+namespace sla_settings_variance_followup {
+
+struct SupportEnableRun {
+    bool   support_empty = true;
+    double support_volume = 0.0;
+    double support_slice_area_scaled2 = 0.0;
+};
+
+SupportEnableRun run_support_enable(bool enabled)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(enabled));
+    config.set_key_value("support_object_elevation", new ConfigOptionFloat(5.0));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(0.5));
+
+    sla::SupportPoints points{sla::SupportPoint(5.f, 5.f, 0.f, 0.5f, true)};
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA supports_enable validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposObjectSlice));
+    TriangleMesh support = object->support_mesh();
+    SupportEnableRun result;
+    result.support_empty = support.empty();
+    result.support_slice_area_scaled2 = support_slice_area(*object);
+    if (!enabled) {
+        REQUIRE(result.support_empty);
+        CHECK_THAT(result.support_slice_area_scaled2, Catch::Matchers::WithinAbs(0.0, 1e-9));
+        return result;
+    }
+
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    REQUIRE_FALSE(result.support_empty);
+    result.support_volume = std::abs(static_cast<double>(support.volume()));
+    REQUIRE(std::isfinite(result.support_volume));
+    REQUIRE(std::isfinite(result.support_slice_area_scaled2));
+    REQUIRE(result.support_volume > 0.0);
+    REQUIRE(result.support_slice_area_scaled2 > 0.0);
+    return result;
+}
+
+struct PadAroundRun {
+    bool   pad_empty = true;
+    double pad_volume = 0.0;
+    double width = 0.0;
+    double depth = 0.0;
+    double z_span = 0.0;
+};
+
+PadAroundRun run_pad_around_object(bool around_object)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("pad_enable", new ConfigOptionBool(true));
+    config.set_key_value("pad_around_object", new ConfigOptionBool(around_object));
+    config.set_key_value("pad_around_object_everywhere", new ConfigOptionBool(false));
+    config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_brim_size", new ConfigOptionFloat(4.0));
+    config.set_key_value("pad_wall_slope", new ConfigOptionFloat(45.0));
+    config.set_key_value("pad_max_merge_distance", new ConfigOptionFloat(50.0));
+    config.set_key_value("pad_object_gap", new ConfigOptionFloat(1.0));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA pad_around_object validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposPad));
+    TriangleMesh pad = object->pad_mesh();
+    PadAroundRun result;
+    result.pad_empty = pad.empty();
+    if (around_object) {
+        REQUIRE(result.pad_empty);
+        return result;
+    }
+
+    REQUIRE_FALSE(result.pad_empty);
+    result.pad_volume = std::abs(static_cast<double>(pad.volume()));
+    const auto bbox = pad.bounding_box();
+    result.width = bbox.max.x() - bbox.min.x();
+    result.depth = bbox.max.y() - bbox.min.y();
+    result.z_span = bbox.max.z() - bbox.min.z();
+    REQUIRE(std::isfinite(result.pad_volume));
+    REQUIRE(std::isfinite(result.width));
+    REQUIRE(std::isfinite(result.depth));
+    REQUIRE(std::isfinite(result.z_span));
+    REQUIRE(result.pad_volume > 0.0);
+    REQUIRE(result.width > 10.0);
+    REQUIRE(result.depth > 10.0);
+    REQUIRE(result.z_span > 0.0);
+    return result;
+}
+
+} // namespace sla_settings_variance_followup
+
+TEST_CASE("SLA supports_enable controls manual support production on one fixture",
+          "[SLAPrint][SLAFeatures][SLASupportsEnableVariance]")
+{
+    const auto disabled = sla_settings_variance_followup::run_support_enable(false);
+    const auto enabled = sla_settings_variance_followup::run_support_enable(true);
+
+    REQUIRE(disabled.support_empty);
+    CHECK_THAT(disabled.support_slice_area_scaled2, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    REQUIRE_FALSE(enabled.support_empty);
+    CHECK(enabled.support_volume > 0.0);
+    CHECK(enabled.support_slice_area_scaled2 > 0.0);
+}
+
+TEST_CASE("SLA pad_around_object selects the standard or around-object pad",
+          "[SLAPrint][SLAFeatures][SLAPadAroundObjectVariance]")
+{
+    const auto standard = sla_settings_variance_followup::run_pad_around_object(false);
+    const auto around   = sla_settings_variance_followup::run_pad_around_object(true);
+
+    REQUIRE_FALSE(standard.pad_empty);
+    CHECK(standard.pad_volume > 0.0);
+    CHECK(standard.width > 10.0);
+    CHECK(standard.depth > 10.0);
+    CHECK(standard.z_span > 0.0);
+    REQUIRE(around.pad_empty);
+}

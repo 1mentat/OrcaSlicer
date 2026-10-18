@@ -4169,3 +4169,185 @@ TEST_CASE("read_cli rejects unknown options and missing scalar values", "[Config
         CHECK(config.keys().empty());
     }
 }
+
+namespace print_config_active_followup_contracts {
+
+namespace {
+
+double polygon_area_mm2(const Points &points)
+{
+    if (points.size() < 3)
+        return 0.;
+    double twice_area = 0.;
+    for (size_t index = 0; index < points.size(); ++index) {
+        const Point &a = points[index];
+        const Point &b = points[(index + 1) % points.size()];
+        twice_area += unscale_(a.x()) * unscale_(b.y()) - unscale_(b.x()) * unscale_(a.y());
+    }
+    return std::abs(twice_area) * 0.5;
+}
+
+} // namespace
+
+TEST_CASE("normalize_fdm applies the used-filament prime-tower policy", "[PrintConfigActive][Config]")
+{
+    struct Row {
+        int used_filaments;
+        const char *print_sequence;
+        const char *timelapse_type;
+        bool prime_tower;
+        bool independent_support_layer_height;
+    };
+    const Row rows[] = {
+        {1, "by layer",  "0", false, true},
+        {2, "by layer",  "0", true,  false},
+        {2, "by object", "0", false, true},
+        {1, "by layer",  "1", true,  false},
+    };
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.used_filaments << " filaments, " << row.print_sequence << ", timelapse " << row.timelapse_type) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("enable_prime_tower", true);
+            config.set("independent_support_layer_height", true);
+            config.set_deserialize_strict({
+                {"print_sequence", row.print_sequence},
+                {"timelapse_type", row.timelapse_type},
+            });
+
+            config.normalize_fdm(row.used_filaments);
+
+            CHECK(config.opt_bool("enable_prime_tower") == row.prime_tower);
+            CHECK(config.opt_bool("independent_support_layer_height") == row.independent_support_layer_height);
+        }
+    }
+}
+
+TEST_CASE("set_num_filaments resizes filament vectors while preserving the prefix", "[PrintConfigActive][Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *colours = config.opt<ConfigOptionStrings>("filament_colour");
+    auto *diameters = config.opt<ConfigOptionFloats>("filament_diameter");
+    REQUIRE(colours != nullptr);
+    REQUIRE(diameters != nullptr);
+
+    colours->values = {"#112233", "#445566"};
+    diameters->values = {1.70, 1.80};
+    config.set_num_filaments(3);
+
+    REQUIRE(colours->values.size() == 3);
+    REQUIRE(diameters->values.size() == 3);
+    CHECK(colours->values[0] == "#112233");
+    CHECK(colours->values[1] == "#445566");
+    CHECK_THAT(diameters->values[0], Catch::Matchers::WithinAbs(1.70, 1e-12));
+    CHECK_THAT(diameters->values[1], Catch::Matchers::WithinAbs(1.80, 1e-12));
+
+    config.set_num_filaments(1);
+    REQUIRE(colours->values.size() == 1);
+    REQUIRE(diameters->values.size() == 1);
+    CHECK(colours->values.front() == "#112233");
+    CHECK_THAT(diameters->values.front(), Catch::Matchers::WithinAbs(1.70, 1e-12));
+}
+
+TEST_CASE("get_bed_shape uses the shared extruder intersection for dynamic and full configs", "[PrintConfigActive][Config]")
+{
+    const Vec2ds printable = {
+        Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)
+    };
+    const Vec2ds extruder_areas[] = {
+        {Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)},
+        {Vec2d(5., 0.), Vec2d(18., 0.), Vec2d(18., 20.), Vec2d(5., 20.)},
+    };
+
+    DynamicPrintConfig dynamic;
+    dynamic.set_key_value("printable_area", new ConfigOptionPoints(printable));
+    dynamic.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({extruder_areas[0], extruder_areas[1]}));
+
+    const Points dynamic_shared = get_bed_shape(dynamic, true);
+    const Points dynamic_full = get_bed_shape(dynamic, false);
+    REQUIRE_FALSE(dynamic_shared.empty());
+    REQUIRE_FALSE(dynamic_full.empty());
+    CHECK_THAT(polygon_area_mm2(dynamic_shared), Catch::Matchers::WithinAbs(260., 1e-6));
+    CHECK_THAT(polygon_area_mm2(dynamic_full), Catch::Matchers::WithinAbs(400., 1e-6));
+
+    FullPrintConfig full;
+    full.printable_area.values = printable;
+    full.extruder_printable_area.values = {extruder_areas[0], extruder_areas[1]};
+    const Points full_shared = get_bed_shape(full, true);
+    REQUIRE_FALSE(full_shared.empty());
+    CHECK_THAT(polygon_area_mm2(full_shared), Catch::Matchers::WithinAbs(260., 1e-6));
+    CHECK_THAT(polygon_area_mm2(get_bed_shape(full, false)), Catch::Matchers::WithinAbs(400., 1e-6));
+
+    dynamic.erase("extruder_printable_area");
+    full.extruder_printable_area.values.clear();
+    CHECK_THAT(polygon_area_mm2(get_bed_shape(dynamic, true)), Catch::Matchers::WithinAbs(400., 1e-6));
+    CHECK_THAT(polygon_area_mm2(get_bed_shape(full, true)), Catch::Matchers::WithinAbs(400., 1e-6));
+    CHECK(get_bed_shape(DynamicPrintConfig{}, false).empty());
+}
+
+TEST_CASE("get_real_skirt_dist follows skirt, draft-shield, width, and nozzle fallbacks", "[PrintConfigActive][Config]")
+{
+    struct Row {
+        int skirt_height;
+        int skirt_loops;
+        bool draft_shield;
+        double distance;
+        double initial_width;
+        double line_width;
+        std::vector<double> nozzle_diameters;
+        double expected;
+    };
+    const Row rows[] = {
+        {0, 0, false, 1.5, 0.6, 0.4, {0.4}, 0.0},
+        {1, 2, false, 1.5, 0.6, 0.4, {0.4}, 2.7},
+        {1, 2, false, 1.0, 0.0, 0.5, {0.4}, 2.0},
+        {1, 1, false, 0.2, 0.0, 0.0, {0.45, 0.6}, 0.8},
+        {1, 1, false, 0.1, 0.0, 0.0, {}, 0.5},
+        {0, 0, true,  0.3, 0.7, 0.4, {0.4}, 1.0},
+    };
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.skirt_height << " height, " << row.skirt_loops << " loops, draft " << row.draft_shield
+                        << ", distance " << row.distance << ", widths " << row.initial_width << '/' << row.line_width) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("skirt_height", row.skirt_height);
+            config.set("skirt_loops", row.skirt_loops);
+            config.set("skirt_distance", row.distance);
+            config.set_deserialize_strict("draft_shield", row.draft_shield ? "enabled" : "disabled");
+            config.set("initial_layer_line_width", row.initial_width);
+            config.set("line_width", row.line_width);
+            config.opt<ConfigOptionFloats>("nozzle_diameter")->values = row.nozzle_diameters;
+
+            CHECK_THAT(get_real_skirt_dist(config), Catch::Matchers::WithinAbs(row.expected, 1e-6));
+        }
+    }
+}
+
+TEST_CASE("PrintConfig legacy migrations normalize bed and wall-order spellings", "[PrintConfigActive][Config]")
+{
+    struct Row {
+        const char *input_key;
+        const char *input_value;
+        const char *expected_key;
+        const char *expected_value;
+    };
+    const Row rows[] = {
+        {"curr_bed_type", "SuperTack Plate", "curr_bed_type", "Supertack Plate"},
+        {"wall_infill_order", "inner wall/outer wall/infill", "wall_sequence", "inner wall/outer wall"},
+        {"wall_infill_order", "outer wall/inner wall/infill", "wall_sequence", "outer wall/inner wall"},
+        {"wall_infill_order", "inner-outer-inner wall/infill", "wall_sequence", "inner-outer-inner wall"},
+        {"wall_infill_order", "legacy spelling", "wall_sequence", "legacy spelling"},
+    };
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.input_key << " = " << row.input_value) {
+            t_config_option_key key = row.input_key;
+            std::string value = row.input_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == row.expected_key);
+            CHECK(value == row.expected_value);
+        }
+    }
+}
+
+} // namespace print_config_active_followup_contracts

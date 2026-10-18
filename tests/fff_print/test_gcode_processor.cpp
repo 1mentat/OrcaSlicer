@@ -2119,3 +2119,49 @@ TEST_CASE("The processor maps multi-extruder area, height and material restricti
 
 
 } // namespace gcode_processor_reachable_contracts
+
+namespace silent_mode_variance_contracts {
+
+FullPrintConfig config_with_silent_mode(bool enabled)
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    config.silent_mode.value = enabled;
+    config.machine_max_speed_x.values = {500., 200.};
+    config.machine_max_speed_y.values = {500., 200.};
+    config.machine_max_speed_z.values = {12., 12.};
+    config.machine_max_speed_e.values = {120., 120.};
+    config.machine_max_acceleration_x.values = {1000., 200.};
+    config.machine_max_acceleration_y.values = {1000., 1000.};
+    config.machine_max_acceleration_z.values = {500., 200.};
+    config.machine_max_acceleration_e.values = {5000., 5000.};
+    config.machine_max_acceleration_extruding.values = {1500., 1250.};
+    config.machine_max_acceleration_retracting.values = {1500., 1250.};
+    config.machine_max_acceleration_travel.values = {0., 0.};
+    return config;
+}
+
+} // namespace silent_mode_variance_contracts
+
+TEST_CASE("silent_mode selects the public stealth time estimate",
+          "[GCodeProcessor][GCodeProcessorPublic][SilentModeVariance]")
+{
+    const std::string gcode =
+        "G90\nM83\n"
+        "G1 X100 Y0 Z0.2 E10 F600\n"
+        "G1 X0 Y0 E10 F600\n";
+
+    const auto normal = public_processor_contracts::process_file(
+        public_processor_contracts::orca_header(silent_mode_variance_contracts::config_with_silent_mode(false)) + gcode);
+    const auto silent = public_processor_contracts::process_file(
+        public_processor_contracts::orca_header(silent_mode_variance_contracts::config_with_silent_mode(true)) + gcode);
+
+    REQUIRE(public_processor_contracts::normal_time(normal) > 0.0f);
+    REQUIRE(public_processor_contracts::normal_time(silent) > 0.0f);
+    CHECK_THAT(public_processor_contracts::normal_time(silent),
+               WithinAbs(public_processor_contracts::normal_time(normal), 1e-6f));
+    CHECK_THAT(public_processor_contracts::stealth_time(normal), WithinAbs(0.0f, 1e-6f));
+    REQUIRE(public_processor_contracts::stealth_time(silent) > 0.0f);
+    CHECK(public_processor_contracts::stealth_time(silent) >
+          public_processor_contracts::normal_time(silent));
+}

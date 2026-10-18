@@ -1154,3 +1154,79 @@ TEST_CASE("Machine-gated filament cut distances follow the mapped machine slots"
             CHECK_THAT(actual[index], Catch::Matchers::WithinAbs(expected[index], 1e-9));
     }
 }
+
+
+// The exporter emits the role marker on its own line before the following extrusion moves.
+// Accept both public compatibility spellings (TYPE:/FEATURE:) and keep the active role across
+// travels and layer changes until the next marker.
+static std::string_view marked_role(std::string_view comment)
+{
+    while (!comment.empty() && (comment.front() == ' ' || comment.front() == '\t'))
+        comment.remove_prefix(1);
+    const std::string_view prefixes[] = {"TYPE:", "FEATURE:"};
+    for (const std::string_view prefix : prefixes) {
+        if (comment.size() < prefix.size() || comment.substr(0, prefix.size()) != prefix)
+            continue;
+        comment.remove_prefix(prefix.size());
+        while (!comment.empty() && (comment.front() == ' ' || comment.front() == '\t'))
+            comment.remove_prefix(1);
+        while (!comment.empty() && (comment.back() == ' ' || comment.back() == '\t' || comment.back() == '\r'))
+            comment.remove_suffix(1);
+        return comment;
+    }
+    return {};
+}
+
+static std::set<int> tools_for_marked_role(const std::string &gcode, const DynamicPrintConfig &config,
+                                           std::string_view role)
+{
+    std::set<int> tools;
+    int current_tool = 0;
+    std::string active_role;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&tools, &current_tool, &active_role, role](GCodeReader &self,
+                                                                            const GCodeReader::GCodeLine &line) {
+        const std::string_view marker = marked_role(line.comment());
+        if (!marker.empty())
+            active_role.assign(marker.data(), marker.size());
+        const std::string command(line.cmd());
+        if (command.size() >= 2 && command[0] == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
+            current_tool = std::stoi(command.substr(1));
+        if (line.extruding(self) && std::hypot(line.dist_X(self), line.dist_Y(self)) > 0.0 && active_role == role)
+            tools.insert(current_tool);
+    });
+    return tools;
+}
+
+TEST_CASE("Mixed perimeter collections split outer and inner wall filament assignments",
+          "[MultiFilament][GCode][GCodePipeline][GCodeMixedPerimeters]")
+{
+    const DynamicPrintConfig config = multifilament_config(2, {
+        {"wall_loops", 2},
+        {"wall_generator", "classic"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"gcode_flavor", "marlin"},
+        {"enable_prime_tower", 0},
+        {"use_relative_e_distances", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"outer_wall_filament_id", 1},
+        {"inner_wall_filament_id", 2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"gcode_comments", 1},
+    });
+    const std::string gcode = slice({make_cube(20., 20., 1.2)}, config);
+    const std::set<int> outer_tools = tools_for_marked_role(gcode, config, "Outer wall");
+    const std::set<int> inner_tools = tools_for_marked_role(gcode, config, "Inner wall");
+
+    REQUIRE(!gcode.empty());
+    REQUIRE(!outer_tools.empty());
+    REQUIRE(!inner_tools.empty());
+    CHECK(outer_tools == std::set<int>{0});
+    CHECK(inner_tools == std::set<int>{1});
+}

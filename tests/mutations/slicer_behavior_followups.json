@@ -2784,7 +2784,7 @@
       "old": "void GCodeProcessor::process_M203(const GCodeReader::GCodeLine& line)\n{\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    if (m_flavor == gcfRepetier)\n        return;\n\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    // http://smoothieware.org/supported-g-codes\n    float factor = (m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware || m_flavor == gcfSmoothie || m_flavor == gcfKlipper) ? 1.0f : MMMIN_TO_MMSEC;\n\n    // Slot-major arrays; a firmware M203 changes the live limits globally — write every slot's\n    // mode entry (see process_M201). Per-mode gating unchanged.\n    auto set_all_slots = [](ConfigOptionFloats &option, size_t mode, float value) {\n        for (size_t slot_base = 0; slot_base < option.size(); slot_base += 2)\n            set_option_value(option, slot_base + mode, value);\n    };\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal || m_time_processor.machine_envelope_processing_enabled) {\n",
       "new": "void GCodeProcessor::process_M203(const GCodeReader::GCodeLine& line)\n{\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    if (m_flavor == gcfRepetier)\n        return;\n\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    // http://smoothieware.org/supported-g-codes\n    float factor = (m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware || m_flavor == gcfSmoothie || m_flavor == gcfKlipper) ? 1.0f : MMMIN_TO_MMSEC;\n\n    // Slot-major arrays; a firmware M203 changes the live limits globally — write every slot's\n    // mode entry (see process_M201). Per-mode gating unchanged.\n    auto set_all_slots = [](ConfigOptionFloats &option, size_t mode, float value) {\n        for (size_t slot_base = 0; slot_base < option.size(); slot_base += 2)\n            set_option_value(option, slot_base + mode, value);\n    };\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal) {\n",
       "expected_matches": 1,
-      "test_filter": "[GCodeProcessorStealthLimits]",
+      "test_filter": "^GCodeProcessorStealthLimits$",
       "description": "Stop M203 from updating the stealth machine after the first motion. The constrained stealth time must remain slower than its baseline."
     },
     {
@@ -2793,7 +2793,7 @@
       "old": "void GCodeProcessor::process_M204(const GCodeReader::GCodeLine& line)\n{\n    float value;\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal ||\n            m_time_processor.machine_envelope_processing_enabled) {\n",
       "new": "void GCodeProcessor::process_M204(const GCodeReader::GCodeLine& line)\n{\n    float value;\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal) {\n",
       "expected_matches": 1,
-      "test_filter": "[GCodeProcessorStealthLimits]",
+      "test_filter": "^GCodeProcessorStealthLimits$",
       "description": "Drop the live machine-envelope gate for M204. The low-acceleration stealth row must no longer show the independent time increase."
     },
     {
@@ -2802,8 +2802,125 @@
       "old": "        if (auto lowercase_cmd = to_lowercase(uppercase_cmd); lowercase_cmd != uppercase_cmd)\n            m_command_processor.register_command(lowercase_cmd, handler,early_quit);",
       "new": "        // lowercase aliases omitted",
       "expected_matches": 1,
-      "test_filter": "[GCodeProcessorCase]",
+      "test_filter": "^GCodeProcessorCase$",
       "description": "Remove the public lowercase command aliases. The lowercase motion, positioning, and fan stream must retain the same endpoint and fan metadata as the uppercase control."
+    },
+    {
+      "id": "PrintConfigActive.normalize-fdm-prime-tower-disable",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        if (!is_smooth_timelapse && (used_filaments == 1 || ps_opt->value == PrintSequence::ByObject)) {\n            ept_opt->value = false;\n        }",
+      "new": "        if (!is_smooth_timelapse && (used_filaments == 1 || ps_opt->value == PrintSequence::ByObject)) {\n            ept_opt->value = true;\n        }",
+      "expected_matches": 1,
+      "test_filter": "^PrintConfigActive$",
+      "description": "The one-filament and by-object rows require enable_prime_tower=false; the smooth-timelapse row requires the exception to remain enabled."
+    },
+    {
+      "id": "PrintConfigActive.set-num-filaments-fixed-resize",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "            static_cast<ConfigOptionVectorBase*>(opt)->resize(num_filaments, defaults.option(key));",
+      "new": "            static_cast<ConfigOptionVectorBase*>(opt)->resize(1, defaults.option(key));",
+      "expected_matches": 1,
+      "test_filter": "^PrintConfigActive$",
+      "description": "The case grows two seeded filament entries to three and then checks the resulting vector cardinality and preserved prefix."
+    },
+    {
+      "id": "PrintConfigActive.get-bed-shape-skips-shared-extruder-intersection",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        if (extruder_area_opt && (extruder_area_opt->size() > 0)) {\n            const std::vector<Pointfs>& extruder_areas = extruder_area_opt->values;\n            bed_poly = get_shared_poly(extruder_areas);\n        }",
+      "new": "        if (false) {\n            const std::vector<Pointfs>& extruder_areas = extruder_area_opt->values;\n            bed_poly = get_shared_poly(extruder_areas);\n        }",
+      "expected_matches": 1,
+      "test_filter": "^PrintConfigActive$",
+      "description": "The dynamic shared-bed row expects the 13 by 20 intersection area; suppressing this branch returns the 20 by 20 printable bed instead."
+    },
+    {
+      "id": "PrintConfigActive.get-real-skirt-dist-draft-shield-loop",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    if (opt_draft_shield && opt_draft_shield->getInt() != dsDisabled && loops == 0) {\n        loops = 1;\n    }",
+      "new": "    if (opt_draft_shield && opt_draft_shield->getInt() != dsDisabled && loops == 0) {\n        loops = 0;\n    }",
+      "expected_matches": 1,
+      "test_filter": "^PrintConfigActive$",
+      "description": "The draft-shield row has zero configured loops but expects one fallback loop and a distance of 0.3 + 0.7."
+    },
+    {
+      "id": "PrintConfigActive.handle-legacy-wall-order-branch",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    } else if( opt_key == \"wall_infill_order\" ) {",
+      "new": "    } else if (false) {",
+      "expected_matches": 1,
+      "test_filter": "^PrintConfigActive$",
+      "description": "The four wall-order rows require the legacy key to become wall_sequence and preserve the three canonical spellings or fallback value."
+    },
+    {
+      "id": "gcode-mixed-perimeters-never-split",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                        bool split_mixed_perimeters =\n                            entity_type == ObjectByExtruder::Island::Region::PERIMETERS &&\n                            region.config().outer_wall_filament_id.value != region.config().inner_wall_filament_id.value &&\n                            extrusions->role() == erMixed;",
+      "new": "                        bool split_mixed_perimeters = false;",
+      "expected_matches": 1,
+      "test_filter": "^GCodeMixedPerimeters$",
+      "description": "Keep mixed perimeter collections together even when outer and inner wall filament IDs differ; the public export must lose its distinct Outer wall/Inner wall tool assignments."
+    },
+    {
+      "id": "gcode-support-dontcare-ignores-interface-tool",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                        if (extruder_id == interface_extruder)",
+      "new": "                        if (false)",
+      "expected_matches": 1,
+      "test_filter": "^GCodeSupportDontCareInterface$",
+      "description": "Allow the support dont-care scan to select the explicitly assigned interface tool; the export must instead keep base support on the other non-soluble tool."
+    },
+    {
+      "id": "gcode-support-soluble-preference-disabled",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                    if (print.config().filament_soluble.get_at(dontcare_extruder)) {",
+      "new": "                    if (false) {",
+      "expected_matches": 1,
+      "test_filter": "^GCodeSupportSolublePreference$",
+      "description": "Ignore the current soluble-filament guard when both support roles are dont-care; the public support roles must then remain on the soluble first tool instead of moving to the non-soluble tool."
+    },
+    {
+      "id": "sla-supports-enable-skip-manual-points",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "    if(!po.m_config.supports_enable.getBool()) return;",
+      "new": "    if(true) return;",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportsEnableVariance$",
+      "description": "Force the supports_enable early-return gate on; the enabled row must lose its positive manual support mesh."
+    },
+    {
+      "id": "sla-pad-around-object-ignores-toggle",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    return c.pad_enable.getBool() && c.pad_around_object.getBool();",
+      "new": "    return c.pad_enable.getBool();",
+      "expected_matches": 1,
+      "test_filter": "^SLAPadAroundObjectVariance$",
+      "description": "Treat every pad as zero-elevation around-object mode; the standard-pad row must no longer produce its positive footprint."
+    },
+    {
+      "id": "gcode-silent-mode-estimator-gate-disabled",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            if (silent_mode->value && m_time_processor.machine_limits.machine_max_acceleration_x.values.size() > 1)",
+      "new": "            if (false)",
+      "expected_matches": 1,
+      "test_filter": "^SilentModeVariance$",
+      "description": "Disable the silent_mode estimator gate in the public DynamicPrintConfig file-import path; the enabled row must lose its positive stealth statistic."
+    },
+    {
+      "id": "circle-arc-max-radius-gate-inverted",
+      "path": "src/libslic3r/Circle.cpp",
+      "old": "    if (radius > max_radius)\n        return false;",
+      "new": "    if (radius < max_radius)\n        return false;",
+      "expected_matches": 1,
+      "description": "Invert the public circle max-radius rejection; valid Points3 fitting and the over-radius rejection should fail ordinary assertions.",
+      "test_filter": "^CircleArcPublic$"
+    },
+    {
+      "id": "circle-arc-points3-slice-acceptance-inverted",
+      "path": "src/libslic3r/Circle.cpp",
+      "old": "bool ArcSegment::try_create_arc(\n    const Points3& points,\n    ArcSegment& target_arc,\n    double approximate_length,\n    double max_radius,\n    double tolerance,\n    double path_tolerance_percent)\n{\n    Circle test_circle = (Circle)target_arc;\n    if (!Circle::try_create_circle(points, max_radius, tolerance, test_circle))\n        return false;\n\n    int mid_point_index = ((points.size() - 2) / 2) + 1;\n    ArcSegment test_arc;\n    if (!ArcSegment::try_create_arc(test_circle, points[0].to_point(), points[mid_point_index].to_point(), points[points.size() - 1].to_point(), test_arc, approximate_length, path_tolerance_percent))\n        return false;\n\n    if (ArcSegment::are_points_within_slice(test_arc, points))\n    {\n        target_arc = test_arc;",
+      "new": "bool ArcSegment::try_create_arc(\n    const Points3& points,\n    ArcSegment& target_arc,\n    double approximate_length,\n    double max_radius,\n    double tolerance,\n    double path_tolerance_percent)\n{\n    Circle test_circle = (Circle)target_arc;\n    if (!Circle::try_create_circle(points, max_radius, tolerance, test_circle))\n        return false;\n\n    int mid_point_index = ((points.size() - 2) / 2) + 1;\n    ArcSegment test_arc;\n    if (!ArcSegment::try_create_arc(test_circle, points[0].to_point(), points[mid_point_index].to_point(), points[points.size() - 1].to_point(), test_arc, approximate_length, path_tolerance_percent))\n        return false;\n\n    if (!ArcSegment::are_points_within_slice(test_arc, points))\n    {\n        target_arc = test_arc;",
+      "expected_matches": 1,
+      "description": "Invert the Points3 arc slice acceptance gate; the known valid Points3 fit should fail its ordinary success assertion.",
+      "test_filter": "^CircleArcPublic$"
     }
   ]
 }

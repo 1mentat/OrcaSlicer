@@ -22,6 +22,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cctype>
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/Model.hpp"
@@ -2431,3 +2432,99 @@ TEST_CASE("Support removal setting drops only small non-cantilever overhangs",
     REQUIRE(kept_large.support_paths > 0);
     REQUIRE(kept_large.support_path_length_mm > 0.1);
 }
+
+
+namespace gcode_process_layer_support_contracts {
+namespace {
+
+std::set<int> tools_for_support_role(const std::string &gcode, const DynamicPrintConfig &config,
+                                     const bool interface_role)
+{
+    std::set<int> tools;
+    int current_tool = -1;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&tools, &current_tool, interface_role](GCodeReader &self,
+                                                                       const GCodeReader::GCodeLine &line) {
+        const std::string_view command = line.cmd();
+        if (command.size() >= 2 && command.front() == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
+            current_tool = std::stoi(std::string(command.substr(1)));
+        if (!line.extruding(self) || current_tool < 0)
+            return;
+        const std::string_view comment = line.comment();
+        const bool is_interface = comment.find("support material interface") != std::string_view::npos;
+        const bool is_base = !is_interface && comment.find("support material") != std::string_view::npos;
+        if ((interface_role ? is_interface : is_base))
+            tools.insert(current_tool);
+    });
+    return tools;
+}
+
+DynamicPrintConfig support_tool_selection_config(const int support_filament,
+                                                const int interface_filament,
+                                                const char *outer_filament,
+                                                const char *infill_filament,
+                                                const char *soluble)
+{
+    return multifilament_config(2, {
+        {"enable_support", 1},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"gcode_flavor", "marlin"},
+        {"support_on_build_plate_only", 1},
+        {"support_interface_top_layers", 3},
+        {"support_interface_bottom_layers", 0},
+        {"support_base_pattern_spacing", 2.5},
+        {"support_filament", support_filament},
+        {"support_interface_filament", interface_filament},
+        {"outer_wall_filament_id", outer_filament},
+        {"inner_wall_filament_id", outer_filament},
+        {"sparse_infill_filament_id", infill_filament},
+        {"internal_solid_infill_filament_id", infill_filament},
+        {"top_surface_filament_id", infill_filament},
+        {"bottom_surface_filament_id", infill_filament},
+        {"filament_soluble", soluble},
+        {"filament_is_support", "0,0"},
+        {"gcode_comments", 1},
+        {"use_relative_e_distances", 1},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+    });
+}
+
+} // namespace
+
+TEST_CASE("Support dont-care base avoids an explicitly selected interface tool",
+          "[SupportMaterial][GCode][GCodePipeline][GCodeSupportDontCareInterface]")
+{
+    const DynamicPrintConfig config = support_tool_selection_config(0, 1, "2", "2", "0,0");
+    const std::string gcode = slice({TestMesh::overhang}, config);
+    const std::set<int> base_tools = tools_for_support_role(gcode, config, false);
+    const std::set<int> interface_tools = tools_for_support_role(gcode, config, true);
+
+    REQUIRE(!gcode.empty());
+    REQUIRE(!base_tools.empty());
+    REQUIRE(!interface_tools.empty());
+    CHECK(base_tools == std::set<int>{1});
+    CHECK(interface_tools == std::set<int>{0});
+}
+
+TEST_CASE("Unspecified support roles avoid the currently soluble filament",
+          "[SupportMaterial][GCode][GCodePipeline][GCodeSupportSolublePreference]")
+{
+    const DynamicPrintConfig soluble_config = support_tool_selection_config(0, 0, "1", "2", "1,0");
+    const std::string soluble_gcode = slice({TestMesh::overhang}, soluble_config);
+    const std::set<int> soluble_base_tools = tools_for_support_role(soluble_gcode, soluble_config, false);
+    const std::set<int> soluble_interface_tools = tools_for_support_role(soluble_gcode, soluble_config, true);
+
+    REQUIRE(!soluble_gcode.empty());
+    REQUIRE(!soluble_base_tools.empty());
+    REQUIRE(!soluble_interface_tools.empty());
+    CHECK(soluble_base_tools == std::set<int>{1});
+    CHECK(soluble_interface_tools == std::set<int>{1});
+
+}
+
+} // namespace gcode_process_layer_support_contracts

@@ -19,6 +19,7 @@ add_executable(${_TEST_NAME}_tests
     test_bridge_detector.cpp
     test_buildvolume.cpp
     test_calib.cpp
+    test_circle.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
     test_color.cpp
