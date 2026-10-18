@@ -2678,12 +2678,12 @@
     },
     "filament_multitool_ramming": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[RammingEnableControls]",
       "dimensions": [
-        "representative_values",
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "Enabled separate-tool ramming produces finite motion in two purge fixtures. Disabled behavior and the complete Print pipeline remain unclaimed."
+      "reason": "The passing Ramming enable settings gate the configured unload material case selects the non-SEMM route and compares uniform 0,0 and 1,1 filament vectors through public WipeTower2 output. Both rows require finite output; disabled ramming emits zero positive unload E, while enabled ramming emits the independently calculated 12 mm^3 divided by filament cross-sectional area. Mixed per-index vectors and complete Print wiring remain unclaimed."
     },
     "filament_multitool_ramming_volume": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
