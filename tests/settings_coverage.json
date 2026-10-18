@@ -3922,6 +3922,16 @@
         "pipeline_oracle"
       ],
       "reason": "Accepted703 SLA pillar connection test exercises zigzag, cross and dynamic through public SLAPrint at 3 and 5 mm head spacing. Cross must add support volume at both distances; dynamic must match zigzag below the explicit 4 mm threshold and cross above it. Slice centroid separation proves distinct pillars and model volume stays unchanged. No full support-settings interaction claim."
+    },
+    "relative_bridge_angle": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[RelativeBridgeAngle]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "With an active internal bridge, false selects an explicit absolute 30-degree direction and true adds 30 degrees to the independently observed automatic direction modulo pi. The comparison preserves bridge surfaces, paths, and layer counts and requires the two modes to differ."
     }
   }
 }

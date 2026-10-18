@@ -1288,6 +1288,45 @@
       "expected_ordinary_assertion_failure": true,
       "crash_or_exception_is_not_credit": true,
       "runtime_kill_status": "pending_baseline_gate"
+    },
+    {
+      "id": "organic-top-rate-connect-length-ignored",
+      "path": "src/libslic3r/Support/TreeSupport3D.cpp",
+      "old": "const coord_t connect_length = (config.support_line_width * 100. / mesh_group_settings.support_tree_top_rate) + std::max(2. * config.min_radius - 1.0 * config.support_line_width, 0.0);",
+      "new": "const coord_t connect_length = config.support_line_width + std::max(2. * config.min_radius - 1.0 * config.support_line_width, 0.0);",
+      "expected_matches": 1,
+      "test_filter": "OrganicTreeDensity",
+      "expected_ordinary_assertion_failure": true,
+      "description": "Ignore tree_support_top_rate when deriving the initial organic connect length. The 5% and 35% rows should then produce equal highest-layer unioned path-width coverage, so the ordinary coverage inequality should fail.",
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending_baseline_gate"
+    },
+    {
+      "id": "organic-branch-distance-tip-spacing-ignored",
+      "path": "src/libslic3r/Support/TreeSupport3D.cpp",
+      "old": "supports_roof ? mesh_group_settings.support_roof_line_distance : mesh_group_settings.support_tree_branch_distance",
+      "new": "mesh_group_settings.support_roof_line_distance",
+      "expected_matches": 1,
+      "test_filter": "OrganicTreeDensity",
+      "expected_ordinary_assertion_failure": true,
+      "description": "Use roof spacing for the no-roof organic tip-line path, bypassing tree_support_branch_distance_organic. The 1 mm and 10 mm rows should then have equal highest-layer unioned path-width coverage, so the ordinary coverage inequality should fail.",
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending_baseline_gate"
+    },
+    {
+      "id": "staggered-inner-seams-traversal-removed",
+      "path": "src/libslic3r/GCode/SeamPlacer.cpp",
+      "old": "      while (depth > 0.0f) {",
+      "new": "      while (false) {",
+      "expected_matches": 1,
+      "test_filter": "StaggeredInnerSeams",
+      "description": "Suppresses the depth traversal that advances an enabled inner seam while retaining the feature gate and valid loop. The contract requires a shifted exported loop start while preserving layerwise XY length, positive-E filament, loop count, and Z.",
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "ordinary_assertion_only": true,
+      "runtime_kill_status": "pending_baseline_gate"
     }
   ]
 }

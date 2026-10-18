@@ -2997,4 +2997,179 @@ TEST_CASE("Wall direction reverses every generated perimeter winding", "[Setting
     CHECK(all_reversed);
 }
 
+
+namespace seam_stagger_followup {
+
+struct InnerSeamLayerEvidence {
+    std::vector<std::array<double, 3>> starts;
+    double xy = 0.0;
+    double filament = 0.0;
+    size_t positive_xy_segments = 0;
+};
+
+struct InnerSeamGcodeEvidence {
+    std::vector<InnerSeamLayerEvidence> layers;
+    bool finite = true;
+};
+
+InnerSeamGcodeEvidence parse_inner_seams(const std::string &output,
+                                         const DynamicPrintConfig &config)
+{
+    InnerSeamGcodeEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    int current_layer = -1;
+    bool inner_role = false;
+    bool awaiting_loop_start = false;
+    reader.parse_buffer(output, [&evidence, &current_layer, &inner_role, &awaiting_loop_start](GCodeReader &self,
+                                                                                                const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.rfind("LAYER_CHANGE", 0) == 0) {
+            ++current_layer;
+            evidence.layers.emplace_back();
+            awaiting_loop_start = true;
+        }
+
+        const bool enters_inner_role =
+            comment.rfind("TYPE:Inner wall", 0) == 0 ||
+            comment.rfind("FEATURE:Inner wall", 0) == 0 ||
+            comment.rfind("TYPE:Internal perimeter", 0) == 0 ||
+            comment.rfind("FEATURE:Internal perimeter", 0) == 0;
+        if (enters_inner_role) {
+            if (!inner_role)
+                awaiting_loop_start = true;
+            inner_role = true;
+        } else if (comment.rfind("TYPE:", 0) == 0 || comment.rfind("FEATURE:", 0) == 0) {
+            inner_role = false;
+            awaiting_loop_start = false;
+        }
+
+        if (current_layer < 0 || current_layer >= static_cast<int>(evidence.layers.size()))
+            return;
+
+        const double xy = line.dist_XY(self);
+        if (inner_role && line.retracting(self))
+            awaiting_loop_start = true;
+        if (inner_role && (line.travel() || line.cmd_is("G0")) && xy > EPSILON)
+            awaiting_loop_start = true;
+
+        if (!inner_role || !line.extruding(self) || xy <= EPSILON)
+            return;
+
+        const double de = line.dist_E(self);
+        if (!std::isfinite(xy) || !std::isfinite(de) ||
+            !std::isfinite(static_cast<double>(self.x())) ||
+            !std::isfinite(static_cast<double>(self.y())) ||
+            !std::isfinite(static_cast<double>(self.z()))) {
+            evidence.finite = false;
+            return;
+        }
+
+        InnerSeamLayerEvidence &layer = evidence.layers[static_cast<size_t>(current_layer)];
+        if (awaiting_loop_start) {
+            layer.starts.push_back({static_cast<double>(self.x()),
+                                    static_cast<double>(self.y()),
+                                    static_cast<double>(self.z())});
+            awaiting_loop_start = false;
+        }
+        layer.xy += xy;
+        layer.filament += de;
+        ++layer.positive_xy_segments;
+    });
+    return evidence;
+}
+
+size_t inner_loop_count(const InnerSeamGcodeEvidence &evidence)
+{
+    size_t count = 0;
+    for (const InnerSeamLayerEvidence &layer : evidence.layers)
+        count += layer.starts.size();
+    return count;
+}
+
+} // namespace seam_stagger_followup
+
+TEST_CASE("Staggered inner seams move internal perimeter starts while preserving geometry",
+          "[SettingsVariance][StaggeredInnerSeams]")
+{
+    const auto run = [](const bool staggered) {
+        DynamicPrintConfig config = reslice_settings_contracts::config();
+        config.set_deserialize_strict({
+            {"wall_loops", 3},
+            {"wall_sequence", "inner wall/outer wall"},
+            {"top_shell_layers", 0},
+            {"bottom_shell_layers", 0},
+            {"top_shell_thickness", 0.0},
+            {"bottom_shell_thickness", 0.0},
+            {"sparse_infill_density", "0%"},
+            {"seam_position", "back"},
+            {"seam_slope_type", "none"},
+            {"seam_gap", 0.0},
+            {"resolution", 0.001},
+            {"wall_maximum_resolution", 0.005},
+            {"enable_arc_fitting", false},
+            {"use_relative_e_distances", true},
+            {"gcode_comments", true},
+            {"staggered_inner_seams", staggered},
+        });
+        Print print;
+        Model model;
+        init_print({reslice_settings_contracts::fixture()}, print, model, config, nullptr, false);
+        REQUIRE(print.validate().string.empty());
+        REQUIRE_NOTHROW(print.process());
+        const std::string output = gcode(print);
+        REQUIRE_FALSE(output.empty());
+
+        size_t parsed_motion_moves = 0;
+        size_t parsed_extrusion_moves = 0;
+        REQUIRE(finite_bounded_gcode(output, print.config(), parsed_motion_moves, parsed_extrusion_moves));
+        REQUIRE(parsed_motion_moves > 0);
+        REQUIRE(parsed_extrusion_moves > 0);
+
+        const auto evidence = seam_stagger_followup::parse_inner_seams(output, config);
+        REQUIRE(evidence.finite);
+        REQUIRE_FALSE(evidence.layers.empty());
+        return evidence;
+    };
+
+    const auto disabled = run(false);
+    const auto enabled = run(true);
+    REQUIRE(disabled.layers.size() == enabled.layers.size());
+
+    const size_t disabled_count = seam_stagger_followup::inner_loop_count(disabled);
+    const size_t enabled_count = seam_stagger_followup::inner_loop_count(enabled);
+    REQUIRE(disabled_count > 0);
+    REQUIRE(enabled_count == disabled_count);
+
+    size_t shifted_starts = 0;
+    for (size_t layer = 0; layer < disabled.layers.size(); ++layer) {
+        const auto &disabled_layer = disabled.layers[layer];
+        const auto &enabled_layer = enabled.layers[layer];
+        REQUIRE_FALSE(disabled_layer.starts.empty());
+        REQUIRE_FALSE(enabled_layer.starts.empty());
+        REQUIRE(disabled_layer.starts.size() == enabled_layer.starts.size());
+        CHECK_THAT(enabled_layer.starts.front()[2], WithinAbs(disabled_layer.starts.front()[2], 0.002));
+
+        // GCodeWriter emits XYZ with three decimals and E with five. Bound the
+        // conservation check by the number of positive XY segments; raw segment
+        // count is deliberately not a seam oracle.
+        const size_t max_segments = std::max<size_t>(
+            1, std::max(disabled_layer.positive_xy_segments, enabled_layer.positive_xy_segments));
+        const double xy_tolerance = 2.0 * std::sqrt(2.0) * 0.001 * static_cast<double>(max_segments) + 1e-6;
+        const double filament_tolerance = 2.0 * 0.00001 * static_cast<double>(max_segments) + 1e-6;
+        CHECK_THAT(enabled_layer.xy, WithinAbs(disabled_layer.xy, xy_tolerance));
+        CHECK_THAT(enabled_layer.filament, WithinAbs(disabled_layer.filament, filament_tolerance));
+
+        for (size_t index = 0; index < disabled_layer.starts.size(); ++index) {
+            const auto &a = disabled_layer.starts[index];
+            const auto &b = enabled_layer.starts[index];
+            CHECK_THAT(b[2], WithinAbs(a[2], 0.002));
+            const double shift = std::hypot(a[0] - b[0], a[1] - b[1]);
+            if (shift > 0.01)
+                ++shifted_starts;
+        }
+    }
+    REQUIRE(shifted_starts > 0);
+}
+
 } // namespace reslice_settings_contracts

@@ -23,6 +23,7 @@
 
 #include "test_helpers.hpp"
 #include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -859,4 +860,154 @@ TEST_CASE("Belt tree support floor offset shifts public support landing",
                Catch::Matchers::WithinAbs(two_walls.lowest_nominal_plane_gap_mm - 5.0, 1.6 + EPSILON));
     CHECK_THAT(raised_floor.lowest_nominal_plane_gap_mm,
                Catch::Matchers::WithinAbs(two_walls.lowest_nominal_plane_gap_mm + 5.0, 1.6 + EPSILON));
+}
+
+namespace organic_tree_density_contracts {
+
+struct OrganicDensityEvidence {
+    size_t nonempty_layers = 0;
+    size_t path_count = 0;
+    double total_length_mm = 0.0;
+    double highest_layer_print_z = -std::numeric_limits<double>::infinity();
+    double highest_layer_coverage_area_mm2 = 0.0;
+    bool finite = true;
+};
+
+// Keep the broad, flat cap and narrow vertical stem small enough for a focused test while
+// leaving enough layers for organic branch propagation. The highest support layer is the same
+// model layer for every row because geometry and all support-height settings are held constant.
+static TriangleMesh cap_overhang_fixture()
+{
+    TriangleMesh model = make_cube(24.0, 24.0, 1.0);
+    TriangleMesh stem  = make_cube(6.0, 6.0, 6.0);
+    stem.translate(9.0, 9.0, 0.5);
+    TriangleMesh cap   = make_cube(24.0, 24.0, 0.8);
+    cap.translate(0.0, 0.0, 5.8);
+    model.merge(stem);
+    model.merge(cap);
+    return model;
+}
+
+static double coverage_area_mm2(const Polygons &covered)
+{
+    const ExPolygons merged = union_ex(covered);
+    double scaled_area = 0.0;
+    for (const ExPolygon &polygon : merged)
+        scaled_area += std::abs(polygon.area());
+    return unscale<double>(unscale<double>(scaled_area));
+}
+
+static OrganicDensityEvidence observe(const char *top_rate, double branch_distance)
+{
+    Print print;
+    slice_with_tree_support(cap_overhang_fixture(), print, "organic", 30, 0, 0, {
+        { "printable_area",                    "-100x-100,200x-100,200x200,-100x200" },
+        { "initial_layer_print_height",        0.2 },
+        { "skirt_loops",                       0 },
+        { "brim_type",                         "no_brim" },
+        { "brim_width",                        0.0 },
+        { "tree_support_auto_brim",            false },
+        { "tree_support_brim_width",           0.0 },
+        { "tree_support_top_rate",             top_rate },
+        { "tree_support_branch_distance_organic", branch_distance },
+        { "tree_support_branch_diameter_angle", 5.0 },
+        { "tree_support_tip_diameter",          0.8 },
+        { "tree_support_branch_diameter_organic", 2.0 },
+        { "tree_support_wall_count",            1 },
+        { "support_base_pattern",               "hollow" },
+        { "support_interface_top_layers",       0 },
+        { "support_interface_bottom_layers",    0 },
+        { "support_on_build_plate_only",        0 },
+        { "support_threshold_angle",            30 },
+        { "support_top_z_distance",             0.2 },
+        { "support_line_width",                 0.4 },
+        { "line_width",                         0.4 },
+        { "nozzle_diameter",                    "0.4" },
+        { "enable_arc_fitting",                false },
+        { "resolution",                         0.01 },
+        { "raft_layers",                        0 },
+    });
+
+    OrganicDensityEvidence result;
+    for (const SupportLayer *layer : print.objects().front()->support_layers()) {
+        if (layer == nullptr || !std::isfinite(double(layer->print_z))) {
+            result.finite = false;
+            continue;
+        }
+
+        size_t layer_paths = 0;
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            const double length_mm = unscale<double>(path.length());
+            ++layer_paths;
+            ++result.path_count;
+            result.total_length_mm += length_mm;
+            if (!std::isfinite(length_mm) || length_mm <= 0.0)
+                result.finite = false;
+        });
+        if (layer_paths == 0)
+            continue;
+        ++result.nonempty_layers;
+
+        result.highest_layer_print_z = std::max(result.highest_layer_print_z, double(layer->print_z));
+    }
+
+    // Offset only the top layer's paths; lower layers do not contribute to this oracle.
+    Polygons highest_coverage;
+    for (const SupportLayer *layer : print.objects().front()->support_layers())
+        if (layer != nullptr && std::abs(layer->print_z - result.highest_layer_print_z) <= EPSILON)
+            layer->support_fills.polygons_covered_by_width(highest_coverage, float(SCALED_EPSILON));
+    result.highest_layer_coverage_area_mm2 = coverage_area_mm2(highest_coverage);
+    result.finite = result.finite && std::isfinite(result.total_length_mm);
+    result.finite = result.finite && std::isfinite(result.highest_layer_print_z);
+    result.finite = result.finite && std::isfinite(result.highest_layer_coverage_area_mm2);
+    return result;
+}
+
+} // namespace organic_tree_density_contracts
+
+TEST_CASE("Organic tree top rate changes physical highest-layer support coverage",
+          "[TreeSupport][OrganicTreeDensity]")
+{
+    using namespace organic_tree_density_contracts;
+    const OrganicDensityEvidence sparse = observe("5%", 1.0);
+    const OrganicDensityEvidence dense  = observe("35%", 1.0);
+
+    for (const OrganicDensityEvidence &evidence : { sparse, dense }) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.nonempty_layers > 0);
+        REQUIRE(evidence.path_count > 0);
+        REQUIRE(evidence.total_length_mm > 0.0);
+        REQUIRE(std::isfinite(evidence.highest_layer_print_z));
+        REQUIRE(evidence.highest_layer_print_z > 0.0);
+        REQUIRE(evidence.highest_layer_coverage_area_mm2 > 0.0);
+    }
+    CHECK_THAT(dense.highest_layer_print_z,
+               Catch::Matchers::WithinAbs(sparse.highest_layer_print_z, EPSILON));
+    // TreeSupport3D derives a shorter initial connect length from the higher top-rate value.
+    // Unioned path-width coverage measures physical support footprint, independent of path
+    // tessellation or ordering.
+    REQUIRE(dense.highest_layer_coverage_area_mm2 > sparse.highest_layer_coverage_area_mm2 + 0.01);
+}
+
+TEST_CASE("Organic tree branch distance changes physical highest-layer support coverage",
+          "[TreeSupport][OrganicTreeDensity]")
+{
+    using namespace organic_tree_density_contracts;
+    const OrganicDensityEvidence close = observe("30%", 1.0);
+    const OrganicDensityEvidence far   = observe("30%", 10.0);
+
+    for (const OrganicDensityEvidence &evidence : { close, far }) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.nonempty_layers > 0);
+        REQUIRE(evidence.path_count > 0);
+        REQUIRE(evidence.total_length_mm > 0.0);
+        REQUIRE(std::isfinite(evidence.highest_layer_print_z));
+        REQUIRE(evidence.highest_layer_print_z > 0.0);
+        REQUIRE(evidence.highest_layer_coverage_area_mm2 > 0.0);
+    }
+    CHECK_THAT(close.highest_layer_print_z,
+               Catch::Matchers::WithinAbs(far.highest_layer_print_z, EPSILON));
+    // The non-roof organic path uses branch_distance_organic for line spacing, so the close
+    // setting must retain a larger physical footprint on the same cap.
+    REQUIRE(close.highest_layer_coverage_area_mm2 > far.highest_layer_coverage_area_mm2 + 0.01);
 }
