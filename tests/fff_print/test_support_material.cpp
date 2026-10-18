@@ -2444,22 +2444,36 @@ std::set<int> tools_for_support_role(const std::string &gcode, const DynamicPrin
 {
     std::set<int> tools;
     int current_tool = -1;
+    double nominal_z = std::numeric_limits<double>::quiet_NaN();
     GCodeReader reader;
     reader.apply_config(config);
-    reader.parse_buffer(gcode, [&tools, &current_tool, interface_role, tools_by_layer](GCodeReader &self,
+    reader.parse_buffer(gcode, [&tools, &current_tool, &nominal_z, interface_role, tools_by_layer](GCodeReader &self,
                                                                        const GCodeReader::GCodeLine &line) {
+        std::string_view comment = line.comment();
+        const auto comment_start = comment.find_first_not_of(" \t");
+        if (comment_start != std::string_view::npos)
+            comment.remove_prefix(comment_start);
+        if (comment.rfind("LAYER_CHANGE", 0) == 0)
+            nominal_z = std::numeric_limits<double>::quiet_NaN();
+        else if (comment.rfind("Z:", 0) == 0)
+            nominal_z = std::stod(std::string(comment.substr(2)));
+        else if (comment.rfind("Z_HEIGHT:", 0) == 0)
+            nominal_z = std::stod(std::string(comment.substr(9)));
         const std::string_view command = line.cmd();
         if (command.size() >= 2 && command.front() == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
             current_tool = std::stoi(std::string(command.substr(1)));
         if (!line.extruding(self) || current_tool < 0)
             return;
-        const std::string_view comment = line.comment();
         const bool is_interface = comment.find("support material interface") != std::string_view::npos;
         const bool is_base = !is_interface && comment.find("support material") != std::string_view::npos;
         if ((interface_role ? is_interface : is_base)) {
             tools.insert(current_tool);
-            if (tools_by_layer != nullptr)
-                (*tools_by_layer)[line.new_Z(self)].insert(current_tool);
+            if (tools_by_layer != nullptr) {
+                // Motion Z is rounded and need not identify the exact nominal
+                // layer used by ToolOrdering. The layer metadata does.
+                REQUIRE(std::isfinite(nominal_z));
+                (*tools_by_layer)[nominal_z].insert(current_tool);
+            }
         }
     });
     return tools;
