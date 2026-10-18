@@ -3109,12 +3109,14 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
             // outward into its wall.
             const double bore_r = std::max(0.5, f.thread_radius - f.thread_depth);
             TopoDS_Shape bore = BRepPrimAPI_MakeCylinder(ax2, bore_r, f.thread_height).Shape();
+            // Cut the unchanged legacy groove before opening the bore. OCCT can
+            // otherwise return only the bore and omit the helical groove.
+            if (have_ridge) cut_from(result, ridge);
             try {
                 BRepAlgoAPI_Cut cut_bore(result, bore);
                 if (cut_bore.IsDone() && !cut_bore.Shape().IsNull())
                     result = cut_bore.Shape();
             } catch (const std::exception&) { /* keep existing bore */ }
-            if (have_ridge) cut_from(result, ridge);
         } else {
             // External thread: FUSE the helical ridge onto the existing body, or onto a
             // standalone rod when there is none.
