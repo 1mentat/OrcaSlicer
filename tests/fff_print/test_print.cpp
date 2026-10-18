@@ -3631,6 +3631,8 @@ TEST_CASE("Print validation includes support filament temperature compatibility"
         { "nozzle_temperature_range_high",  "240,260" },
         { "timelapse_type",                 "0" },
         { "enable_wrapping_detection",      false },
+        { "use_relative_e_distances",       true },
+        { "layer_change_gcode",             "G92 E0\n" },
     });
     config.set_key_value("filament_type", new ConfigOptionStrings({ "PLA", "PETG" }));
 
@@ -3648,8 +3650,8 @@ TEST_CASE("Print validation includes support filament temperature compatibility"
     // support extruder.  A set_deserialize_strict call alone is not this proof.
     REQUIRE(print.config().nozzle_diameter.size() == 1);
     REQUIRE(print.config().print_sequence == PrintSequence::ByObject);
-    REQUIRE(print.config().enable_support);
     REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->config().enable_support);
     REQUIRE(print.objects().front()->has_support_material());
     REQUIRE(print.objects().front()->config().support_filament == part.support_filament);
     REQUIRE(print.objects().front()->config().support_interface_filament == 1);
@@ -3658,29 +3660,29 @@ TEST_CASE("Print validation includes support filament temperature compatibility"
     REQUIRE(print.extruders().size() == (part.support_filament == 1 ? 1u : 2u));
 
     print.set_check_multi_filaments_compatibility(!part.allow_mixed_temperatures);
-    const StringObjectException direct = Print::check_multi_filament_valid(print);
-    CAPTURE(direct.string, direct.is_warning);
-    if (part.support_filament == 1) {
-        CHECK(direct.string.empty());
-        CHECK_FALSE(direct.is_warning);
-        return;
-    }
-
-    REQUIRE(direct.string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
-    CHECK(direct.is_warning == part.warning);
-
     std::vector<StringObjectException> warnings;
     const StringObjectException validation = print.validate(&warnings);
     CAPTURE(validation.string, validation.is_warning);
+    if (part.support_filament == 1) {
+        CHECK(validation.string.empty());
+        CHECK_FALSE(validation.is_warning);
+        CHECK(std::none_of(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
+            return entry.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
+        }));
+        return;
+    }
+
     if (part.allow_mixed_temperatures) {
         CHECK(validation.string.empty());
         const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
             return entry.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
         });
         REQUIRE(warning != warnings.end());
-        CHECK(warning->is_warning);
+        REQUIRE(warning->string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
+        CHECK(warning->is_warning == part.warning);
     } else {
         REQUIRE_FALSE(validation.string.empty());
+        REQUIRE(validation.string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
         CHECK(validation.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP);
         CHECK_FALSE(validation.is_warning);
     }
@@ -3712,6 +3714,8 @@ TEST_CASE("Print validation enforces mixed filament temperature policy by sequen
         { "nozzle_temperature",            part.temperatures },
         { "nozzle_temperature_range_low",  part.range_lows },
         { "nozzle_temperature_range_high", part.range_highs },
+        { "use_relative_e_distances",      true },
+        { "layer_change_gcode",            "G92 E0\n" },
     });
     config.set_key_value("filament_type", new ConfigOptionStrings({ "PLA", "PETG" }));
     const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
@@ -3723,34 +3727,37 @@ TEST_CASE("Print validation enforces mixed filament temperature policy by sequen
     init_print(std::vector<TriangleMesh>{ cube(8.0), cube(8.0) }, print, model, config, &overrides);
     REQUIRE(print.config().nozzle_diameter.size() == 1);
     REQUIRE(print.config().print_sequence == PrintSequence::ByLayer);
-    REQUIRE_FALSE(print.config().enable_support);
     REQUIRE(print.objects().size() == 2);
+    for (const PrintObject *object : print.objects()) {
+        REQUIRE(object != nullptr);
+        REQUIRE_FALSE(object->config().enable_support);
+    }
     REQUIRE(print.object_extruders().size() == 2);
     REQUIRE(print.extruders().size() == 2);
 
     print.set_check_multi_filaments_compatibility(!part.allow_mixed_temperatures);
-    const StringObjectException direct = Print::check_multi_filament_valid(print);
-    CAPTURE(direct.string, direct.is_warning);
-    if (part.invalid_range) {
-        REQUIRE(direct.string.rfind("Invalid recommended nozzle temperature range.", 0) == 0);
-        CHECK_FALSE(direct.is_warning);
-    } else {
-        REQUIRE(direct.string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
-        CHECK(direct.is_warning == part.allow_mixed_temperatures);
-    }
-
     std::vector<StringObjectException> warnings;
     const StringObjectException validation = print.validate(&warnings);
     CAPTURE(validation.string, validation.is_warning);
-    if (part.allow_mixed_temperatures && !part.invalid_range) {
+    if (part.invalid_range) {
+        REQUIRE_FALSE(validation.string.empty());
+        REQUIRE(validation.string.rfind("Invalid recommended nozzle temperature range.", 0) == 0);
+        CHECK(validation.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP);
+        CHECK_FALSE(validation.is_warning);
+        return;
+    }
+
+    if (part.allow_mixed_temperatures) {
         CHECK(validation.string.empty());
         const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
             return entry.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
         });
         REQUIRE(warning != warnings.end());
+        REQUIRE(warning->string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
         CHECK(warning->is_warning);
     } else {
         REQUIRE_FALSE(validation.string.empty());
+        REQUIRE(validation.string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
         CHECK(validation.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP);
         CHECK_FALSE(validation.is_warning);
     }

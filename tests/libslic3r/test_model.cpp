@@ -2062,8 +2062,8 @@ TEST_CASE("Model archive progress cancellation is honored at each post-load stag
     CAPTURE(cancelled_stage);
     ScopedSlic3rTemporaryDir backup("orca_model_import_post_load_cancel");
     ScopedTemporaryFile archive(".3mf");
-    store_archive(archive.string());
-    DynamicPrintConfig config = archive_config();
+    model_import_contracts::store_archive(archive.string());
+    DynamicPrintConfig config = model_import_contracts::archive_config();
     ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
     En3mfType type = En3mfType::From_Other;
     PlateDataPtrs plates;
