@@ -3400,7 +3400,8 @@ DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, un
                      bool same_extruder = false,
                      bool interface_features = false,
                      float interface_dist = 2.f,
-                     float interface_length = 3.f)
+                     float interface_length = 3.f,
+                     TimelapseType timelapse = TimelapseType::tlTraditional)
 {
     FullPrintConfig config = legacy_tower_direct_contracts::legacy_config(semm, wall, sparse, arc_fitting);
     config.set_deserialize_strict({
@@ -3411,6 +3412,8 @@ DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, un
         {"nozzle_temperature", "200,200"},
         {"printable_area", "0x0,200x0,200x200,0x200"},
     });
+    config.timelapse_type.value = timelapse;
+    config.wipe_tower_rotation_angle.value = 0.;
     auto group = group_for_two_filaments(same_extruder);
     REQUIRE(group.has_value());
     WipeTower tower(config, 0, Vec3d::Zero(), 0, 8.f,
@@ -3752,6 +3755,52 @@ TEST_CASE("Wipe tower contact pre-extrusion is clipped to the configured rectang
     CHECK(max_x <= 180.001f);
     CHECK(min_x < -19.9f);
     CHECK(max_x > 179.9f);
+}
+
+TEST_CASE("Smooth timelapse prints a separate closed tower wall before each purge",
+          "[WipeTower][WipeTowerContact][WipeTowerTimelapseWall]")
+{
+    const std::vector<std::tuple<float, float, unsigned int, unsigned int, float>> plan{
+        {0.2f, 0.2f, 0, 1, 80.f}, {0.4f, 0.2f, 1, 0, 80.f},
+        {0.6f, 0.2f, 0, 1, 80.f}, {0.8f, 0.2f, 1, 0, 80.f},
+    };
+    const DirectRun ordinary = run_direct(plan, false, WipeTowerWallType::wtwRectangle, true);
+    const DirectRun smooth = run_direct(plan, false, WipeTowerWallType::wtwRectangle,
+                                       true, false, false, false, 2.f, 3.f,
+                                       TimelapseType::tlSmooth);
+    require_finite_run(ordinary);
+    require_finite_run(smooth);
+    REQUIRE(smooth.layers.size() == ordinary.layers.size());
+    REQUIRE(smooth.layers.size() == plan.size());
+    CHECK(smooth.toolchanges == ordinary.toolchanges);
+    for (std::size_t layer = 0; layer < smooth.layers.size(); ++layer) {
+        CAPTURE(layer);
+        REQUIRE(smooth.layers[layer].size() == ordinary.layers[layer].size() + 1);
+        const WipeTower::ToolChangeResult &wall = smooth.layers[layer].front();
+        CHECK_FALSE(wall.is_tool_change);
+        CHECK(wall.is_finish_first);
+        CHECK(wall.initial_tool == wall.new_tool);
+        CHECK_THAT(wall.purge_volume, WithinAbs(0.f, 1e-6f));
+        CHECK_THAT(wall.print_z, WithinAbs(std::get<0>(plan[layer]), 1e-5f));
+        REQUIRE(wall.extrusions.size() >= 5);
+        REQUIRE_THAT(wall.extrusions.front().width, WithinAbs(0.f, 1e-7f));
+        CHECK_THAT((wall.extrusions.front().pos - wall.extrusions.back().pos).norm(),
+                   WithinAbs(0.f, 1e-4f));
+        float min_x = std::numeric_limits<float>::infinity();
+        float min_y = std::numeric_limits<float>::infinity();
+        float max_x = -std::numeric_limits<float>::infinity();
+        float max_y = -std::numeric_limits<float>::infinity();
+        for (const auto &vertex : wall.extrusions) {
+            min_x = std::min(min_x, vertex.pos.x());
+            min_y = std::min(min_y, vertex.pos.y());
+            max_x = std::max(max_x, vertex.pos.x());
+            max_y = std::max(max_y, vertex.pos.y());
+        }
+        REQUIRE(max_x > min_x);
+        REQUIRE(max_y > min_y);
+        const float perimeter = 2.f * ((max_x - min_x) + (max_y - min_y));
+        CHECK_THAT(extruded_length(wall), WithinAbs(perimeter, 1e-3f));
+    }
 }
 
 TEST_CASE("Wipe tower generate_new accepts an empty planned layer set", "[WipeTower][WipeTowerContact]")

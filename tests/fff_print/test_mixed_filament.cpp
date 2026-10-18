@@ -25,6 +25,7 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 
 #include "test_helpers.hpp"
 
@@ -1181,4 +1182,198 @@ TEST_CASE("Mixed filament identity selects deposited physical tools", "[MixedFil
         CHECK(positive_lines[1] == 0);
         CHECK(positive_xy[2] > 0.);
     }
+}
+
+namespace mixed_map_invalidation_contracts {
+
+struct ExtrusionSummary {
+    std::vector<double> positive_mm_by_filament;
+    std::vector<size_t> positive_moves_by_filament;
+    size_t positive_moves = 0;
+};
+
+DynamicPrintConfig manual_map_config(bool mixed, const std::vector<int> &filament_map)
+{
+    DynamicPrintConfig config = mixed ? mixed_config(false) : multifilament_config(3);
+    config.set_deserialize_strict({
+        { "single_extruder_multi_material", 0 },
+        { "nozzle_diameter",                "0.4,0.4" },
+        { "extruder_printable_height",      "0,0" },
+        { "enable_prime_tower",             0 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+        { "wall_loops",                     1 },
+        { "top_shell_layers",               0 },
+        { "bottom_shell_layers",            0 },
+        { "sparse_infill_density",          "0%" },
+        { "layer_height",                   0.2 },
+        { "initial_layer_print_height",     0.2 },
+        { "machine_start_gcode",            "" },
+        { "machine_end_gcode",              "" },
+        { "layer_change_gcode",             "G92 E0\n" },
+        { "use_relative_e_distances",       true },
+    });
+    if (!mixed) {
+        config.set_deserialize_strict({
+            { "filament_is_mixed",             "0,0,0" },
+            { "filament_mixed_components",     ";;" },
+            { "filament_mixed_sublayer_ratios", ";;" },
+            { "filament_mixed_gradient",       "0,0,0" },
+            { "filament_mixed_gradient_range", ";;" },
+            { "filament_mixed_gradient_curve", ";;" },
+            { "filament_mixed_gradient_per_part", "0,0,0" },
+            { "enable_mixed_color_sublayer",   0 },
+            { "outer_wall_filament_id",        1 },
+            { "inner_wall_filament_id",        1 },
+            { "sparse_infill_filament_id",     1 },
+            { "internal_solid_filament_id",    1 },
+            { "top_surface_filament_id",       1 },
+            { "bottom_surface_filament_id",    1 },
+        });
+    }
+
+    // These arrays describe two physical nozzles and three filament slots. Values are kept in
+    // the legal 1-based range so the contract tests the used/unused decision rather than error
+    // handling for malformed maps.
+    config.set_key_value("printer_extruder_id", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("print_extruder_id", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("print_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("filament_self_index", new ConfigOptionInts({ 1, 2, 3 }));
+    config.set_key_value("filament_map", new ConfigOptionInts(filament_map));
+    config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+    ConfigOptionEnumsGeneric *extruder_type = config.option<ConfigOptionEnumsGeneric>("extruder_type", true);
+    ConfigOptionEnumsGeneric *nozzle_volume_type = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true);
+    REQUIRE(extruder_type != nullptr);
+    REQUIRE(nozzle_volume_type != nullptr);
+    extruder_type->values = { etDirectDrive, etDirectDrive };
+    nozzle_volume_type->values = { nvtStandard, nvtStandard };
+    return config;
+}
+
+void init_map_fixture(bool mixed, const DynamicPrintConfig &config, Print &print, Model &model)
+{
+    init_print({ make_cube(12., 12., 1.2) }, print, model, config);
+    const StringObjectException error = print.validate();
+    INFO("validation.string: " << error.string);
+    INFO("validation.opt_key: " << error.opt_key);
+    REQUIRE(error.string.empty());
+    const ConfigOptionInts *expected_map = config.opt<ConfigOptionInts>("filament_map");
+    REQUIRE(expected_map != nullptr);
+    REQUIRE(print.config().filament_map.values == expected_map->values);
+    REQUIRE(print.extruders(true) == (mixed ? std::vector<unsigned int>{ 2 } : std::vector<unsigned int>{ 0 }));
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front() != nullptr);
+}
+
+ExtrusionSummary export_summary(Print &print)
+{
+    GCodeProcessorResult result;
+    const std::string output = gcode(print, &result);
+    REQUIRE_FALSE(output.empty());
+
+    ExtrusionSummary summary;
+    // GCodeProcessor stores get_filament_id() in MoveVertex::extruder_id. This is the logical
+    // filament slot, not the physical nozzle selected by filament_map, so the deposition oracle
+    // is intentionally per-filament while lifecycle assertions cover manual-map invalidation.
+    summary.positive_mm_by_filament.assign(3, 0.);
+    summary.positive_moves_by_filament.assign(3, 0);
+    for (const GCodeProcessorResult::MoveVertex &move : result.moves) {
+        if (move.type != EMoveType::Extrude || move.delta_extruder <= 0.f)
+            continue;
+        REQUIRE(move.extruder_id < summary.positive_mm_by_filament.size());
+        REQUIRE(std::isfinite(move.delta_extruder));
+        summary.positive_mm_by_filament[move.extruder_id] += move.delta_extruder;
+        ++summary.positive_moves_by_filament[move.extruder_id];
+        ++summary.positive_moves;
+    }
+    REQUIRE(summary.positive_moves > 0);
+    return summary;
+}
+
+void compare_output(const ExtrusionSummary &incremental, const ExtrusionSummary &fresh)
+{
+    REQUIRE(incremental.positive_mm_by_filament.size() == fresh.positive_mm_by_filament.size());
+    REQUIRE(incremental.positive_moves_by_filament == fresh.positive_moves_by_filament);
+    CHECK(incremental.positive_moves == fresh.positive_moves);
+    for (size_t i = 0; i < fresh.positive_mm_by_filament.size(); ++i)
+        CHECK_THAT(incremental.positive_mm_by_filament[i], Catch::Matchers::WithinAbs(fresh.positive_mm_by_filament[i], 1e-5));
+}
+
+ExtrusionSummary fresh_summary(bool mixed, const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_map_fixture(mixed, config, print, model);
+    return export_summary(print);
+}
+
+} // namespace mixed_map_invalidation_contracts
+
+TEST_CASE("Used mixed filament components invalidate manual map state and match a fresh print",
+          "[Print][MixedFilament][MixedFilamentIdentity][FilamentMap][PrintApply]")
+{
+    using namespace mixed_map_invalidation_contracts;
+    const DynamicPrintConfig baseline = manual_map_config(true, { 1, 2, 1 });
+    const DynamicPrintConfig changed = manual_map_config(true, { 2, 2, 1 });
+
+    Print incremental_print;
+    Model incremental_model;
+    init_map_fixture(true, baseline, incremental_print, incremental_model);
+    const ExtrusionSummary before = export_summary(incremental_print);
+    REQUIRE(incremental_print.objects().size() == 1);
+    REQUIRE(incremental_print.objects().front() != nullptr);
+    REQUIRE(incremental_print.objects().front()->is_step_done(posSlice));
+    REQUIRE(incremental_print.is_step_done(psSkirtBrim));
+    REQUIRE(incremental_print.is_step_done(psGCodeExport));
+
+    const PrintBase::ApplyStatus status = incremental_print.apply(incremental_model, changed);
+    REQUIRE(status == PrintBase::APPLY_STATUS_INVALIDATED);
+    REQUIRE(incremental_print.objects().size() == 1);
+    REQUIRE(incremental_print.objects().front() != nullptr);
+    CHECK(incremental_print.objects().front()->is_step_done(posSlice));
+    CHECK_FALSE(incremental_print.is_step_done(psSkirtBrim));
+    CHECK_FALSE(incremental_print.is_step_done(psGCodeExport));
+    CHECK(before.positive_moves > 0);
+    const StringObjectException changed_error = incremental_print.validate();
+    INFO("changed validation.string: " << changed_error.string);
+    REQUIRE(changed_error.string.empty());
+    const ExtrusionSummary incremental = export_summary(incremental_print);
+    const ExtrusionSummary fresh = fresh_summary(true, changed);
+    compare_output(incremental, fresh);
+}
+
+TEST_CASE("Unused manual filament map entries preserve slicing state while refreshing export",
+          "[Print][FilamentMap][PrintApply]")
+{
+    using namespace mixed_map_invalidation_contracts;
+    const DynamicPrintConfig baseline = manual_map_config(false, { 1, 2, 1 });
+    const DynamicPrintConfig changed = manual_map_config(false, { 1, 2, 2 });
+
+    Print print;
+    Model model;
+    init_map_fixture(false, baseline, print, model);
+    const ExtrusionSummary before = export_summary(print);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front() != nullptr);
+    REQUIRE(print.objects().front()->is_step_done(posSlice));
+    REQUIRE(print.is_step_done(psSkirtBrim));
+    REQUIRE(print.is_step_done(psGCodeExport));
+
+    const PrintBase::ApplyStatus status = print.apply(model, changed);
+    REQUIRE(status == PrintBase::APPLY_STATUS_INVALIDATED);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front() != nullptr);
+    CHECK(print.objects().front()->is_step_done(posSlice));
+    CHECK(print.is_step_done(psSkirtBrim));
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+    const StringObjectException changed_error = print.validate();
+    INFO("changed validation.string: " << changed_error.string);
+    REQUIRE(changed_error.string.empty());
+    const ExtrusionSummary after = export_summary(print);
+    const ExtrusionSummary fresh = fresh_summary(false, changed);
+    compare_output(after, fresh);
+    compare_output(after, before);
 }

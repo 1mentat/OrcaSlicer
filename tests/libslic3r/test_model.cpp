@@ -43,6 +43,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Format/STEP.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/BuildVolume.hpp"
@@ -2295,3 +2296,95 @@ TEST_CASE("Model STEP wrapper classifies malformed input as a load failure",
 }
 
 } // namespace model_step_wrapper_contracts
+
+namespace model_next_active_contracts {
+using namespace Slic3r;
+
+TEST_CASE("Moving a model object preserves owned volumes and instances", "[Model][ModelOwnership][ModelMove]")
+{
+    Model model;
+    ModelObject *source = model.add_object("move-source", "source.stl", make_cube(4., 5., 6.));
+    REQUIRE(source != nullptr);
+    REQUIRE(source->volumes.size() == 1);
+    source->add_instance();
+    ModelInstance *second = source->add_instance();
+    REQUIRE(second != nullptr);
+    second->set_offset(Vec3d(20., 3., 1.));
+    const ObjectID object_id = source->id();
+    const ObjectID volume_id = source->volumes.front()->id();
+    const Vec3d second_offset = second->get_offset();
+
+    ModelObject moved = ModelObject::make_copy(std::move(*source));
+
+    REQUIRE(moved.id() == object_id);
+    REQUIRE(moved.volumes.size() == 1);
+    REQUIRE(moved.instances.size() == 2);
+    CHECK(moved.name == "move-source");
+    CHECK(moved.input_file == "source.stl");
+    CHECK(moved.volumes.front()->id() == volume_id);
+    CHECK(moved.volumes.front()->get_object() == &moved);
+    CHECK(moved.instances.front()->get_object() == &moved);
+    CHECK(moved.instances.back()->get_object() == &moved);
+    CHECK(moved.instances.back()->get_offset().isApprox(second_offset, 1e-9));
+    CHECK(source->get_model() == &model);
+    CHECK(source->volumes.empty());
+    CHECK(source->instances.empty());
+}
+
+TEST_CASE("Named object insertion keeps source mesh geometry and records volume metadata", "[Model][ModelOwnership][ModelGeometry]")
+{
+    const TriangleMesh input = make_cube(4., 5., 6.);
+    const BoundingBoxf3 input_box = input.bounding_box();
+    const double input_volume = std::abs(static_cast<double>(input.volume()));
+
+    Model model;
+    ModelObject *object = model.add_object("named-part", "input/source.stl", input);
+    REQUIRE(object != nullptr);
+    REQUIRE(object->volumes.size() == 1);
+    const ModelVolume *volume = object->volumes.front();
+    REQUIRE(volume != nullptr);
+
+    CHECK(object->instances.empty());
+    CHECK(object->name == "named-part");
+    CHECK(object->input_file == "input/source.stl");
+    CHECK(volume->name == "named-part");
+    CHECK(volume->source.input_file == "input/source.stl");
+    CHECK(volume->source.object_idx == 0);
+    CHECK(volume->source.volume_idx == 0);
+    CHECK(object->config.extruder() == 1);
+    CHECK_THAT(std::abs(static_cast<double>(volume->mesh().volume())),
+               Catch::Matchers::WithinAbs(input_volume, 1e-5));
+    CHECK_THAT(input.bounding_box().min.x(), Catch::Matchers::WithinAbs(input_box.min.x(), 1e-6));
+    CHECK_THAT(input.bounding_box().max.y(), Catch::Matchers::WithinAbs(input_box.max.y(), 1e-6));
+}
+
+TEST_CASE("Shifting painted filament states moves only states at or above the threshold", "[Model][ModelPainting][ModelOwnership]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+
+    TriangleSelector selector(volume->mesh());
+    selector.set_facet(0, EnforcerBlockerType::Extruder2);
+    selector.set_facet(1, EnforcerBlockerType::Extruder3);
+    selector.set_facet(2, EnforcerBlockerType::Extruder4);
+    REQUIRE(volume->mmu_segmentation_facets.set(selector));
+    REQUIRE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder2));
+    REQUIRE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder3));
+    REQUIRE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder4));
+
+    volume->mmu_segmentation_facets.shift_states_above(*volume, EnforcerBlockerType::Extruder3, 2);
+
+    CHECK(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder2));
+    CHECK_FALSE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder3));
+    CHECK_FALSE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder4));
+    CHECK(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder5));
+    CHECK(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder6));
+    CHECK(volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder2).indices.size() == 1);
+    CHECK(volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder5).indices.size() == 1);
+    CHECK(volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder6).indices.size() == 1);
+}
+
+} // namespace model_next_active_contracts

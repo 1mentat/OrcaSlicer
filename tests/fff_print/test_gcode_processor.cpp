@@ -762,6 +762,129 @@ TEST_CASE("Nozzle type values reach processor metadata and hardness selection", 
     }
 }
 
+TEST_CASE("Counterclockwise IJ arcs preserve direction, endpoint, and extrusion",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorArcCCW]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\nG1 X0 Y0 Z0.2 F600\n"
+        "G3 X10 Y0 I5 J0 E1 F600\n");
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() > 2);
+
+    float minimum_y = extrusions.front()->position.y();
+    float total_extrusion = 0.f;
+    for (const auto *move : extrusions) {
+        REQUIRE(std::isfinite(move->position.x()));
+        REQUIRE(std::isfinite(move->position.y()));
+        minimum_y = std::min(minimum_y, move->position.y());
+        total_extrusion += move->delta_extruder;
+    }
+
+    // In the processor's XY convention a CCW half-circle from (0,0) to (10,0)
+    // with I5/J0 passes below the chord.  This checks orientation independently
+    // of the internal segment count.
+    CHECK(minimum_y < -4.5f);
+    CHECK_THAT(extrusions.back()->position.x(), WithinAbs(10.f, 1e-4f));
+    CHECK_THAT(extrusions.back()->position.y(), WithinAbs(0.f, 1e-4f));
+    CHECK_THAT(total_extrusion, WithinAbs(1.f, 1e-3f));
+}
+
+TEST_CASE("Counterclockwise radius arcs preserve endpoint and physical extrusion",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorArcRadius]")
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfRepRapFirmware;
+    const auto result = process_buffer(
+        "M83\nG90\nG1 X0 Y0 Z0.2 F600\n"
+        "G3 X10 Y0 R8 E1 F600\n", config);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() > 2);
+
+    float minimum_y = extrusions.front()->position.y();
+    float total_extrusion = 0.f;
+    for (const auto *move : extrusions) {
+        REQUIRE(std::isfinite(move->position.x()));
+        REQUIRE(std::isfinite(move->position.y()));
+        minimum_y = std::min(minimum_y, move->position.y());
+        total_extrusion += move->delta_extruder;
+    }
+
+    CHECK(minimum_y < -1.f);
+    CHECK_THAT(extrusions.back()->position.x(), WithinAbs(10.f, 1e-4f));
+    CHECK_THAT(extrusions.back()->position.y(), WithinAbs(0.f, 1e-4f));
+    CHECK_THAT(total_extrusion, WithinAbs(1.f, 1e-3f));
+}
+
+TEST_CASE("M201 applies a Y acceleration limit to a physical extrusion move",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorAxisLimits]")
+{
+    const std::string body =
+        "M83\nG90\nG1 X0 Y0 Z0.2 F600\nG1 X0 Y20 E1 F1200\n";
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    config.machine_max_acceleration_extruding.values = {2000., 2000.};
+    const std::string limits = "M201 Y2000\nM204 P2000\n";
+    const auto baseline = process_buffer(limits + body, config);
+    const auto limited = process_buffer(limits + "M201 Y321\n" + body, config);
+    const auto *baseline_move = last_of(baseline, EMoveType::Extrude);
+    const auto *limited_move = last_of(limited, EMoveType::Extrude);
+    REQUIRE(baseline_move != nullptr);
+    REQUIRE(limited_move != nullptr);
+
+    CHECK(normal_time(limited) > normal_time(baseline));
+    CHECK_THAT(limited_move->position.y(), WithinAbs(20.f, 1e-4f));
+    CHECK_THAT(limited_move->delta_extruder, WithinAbs(1.f, 1e-4f));
+}
+
+TEST_CASE("M203 applies independent Y and E axis speed limits",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorAxisLimits]")
+{
+    const std::string body =
+        "M83\nG90\nG1 X0 Y0 Z0.2 F600\n"
+        "G1 X0 Y20 E1 F1200\nG1 E1 F1200\n";
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    const std::string limits = "M203 Y100 E100\n";
+    const auto baseline = process_buffer(limits + body, config);
+    const auto y_limited = process_buffer(limits + "M203 Y5\n" + body, config);
+    const auto e_limited = process_buffer(limits + "M203 E2\n" + body, config);
+    const auto both_limited = process_buffer(limits + "M203 Y5 E2\n" + body, config);
+
+    CHECK(normal_time(y_limited) > normal_time(baseline));
+    CHECK(normal_time(e_limited) > normal_time(baseline));
+    CHECK(normal_time(both_limited) > normal_time(y_limited));
+    CHECK(normal_time(both_limited) > normal_time(e_limited));
+    const auto *move = last_of(both_limited, EMoveType::Unretract);
+    REQUIRE(move != nullptr);
+    CHECK_THAT(move->delta_extruder, WithinAbs(1.f, 1e-4f));
+}
+
+TEST_CASE("M203 converts non-Marlin maximum feedrate units",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorFirmwareLimits]")
+{
+    const std::string body =
+        "M83\nG90\nM203 X60\nG1 X0 Y0 Z0.2 F600\nG1 X20 Y0 E1 F1200\n";
+    FullPrintConfig marlin_config;
+    marlin_config.gcode_flavor.value = gcfMarlinFirmware;
+    FullPrintConfig reprap_config;
+    reprap_config.gcode_flavor.value = gcfRepRapFirmware;
+
+    const auto marlin = process_buffer(body, marlin_config);
+    const auto reprap = process_buffer(body, reprap_config);
+    const auto *marlin_move = last_of(marlin, EMoveType::Extrude);
+    const auto *reprap_move = last_of(reprap, EMoveType::Extrude);
+    REQUIRE(marlin_move != nullptr);
+    REQUIRE(reprap_move != nullptr);
+
+    // The processor interprets Marlin M203 values in mm/s and converts the
+    // RepRapFirmware values from mm/min. Both streams retain the same endpoint.
+    CHECK(normal_time(reprap) > normal_time(marlin));
+    CHECK_THAT(marlin_move->position.x(), WithinAbs(20.f, 1e-4f));
+    CHECK_THAT(reprap_move->position.x(), WithinAbs(20.f, 1e-4f));
+    CHECK_THAT(marlin_move->delta_extruder, WithinAbs(1.f, 1e-4f));
+    CHECK_THAT(reprap_move->delta_extruder, WithinAbs(1.f, 1e-4f));
+}
+
 } // namespace public_processor_contracts
 
 namespace post_processor_contracts {
