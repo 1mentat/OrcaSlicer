@@ -41,7 +41,9 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Format/STEP.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ObjectID.hpp"
@@ -2164,3 +2166,131 @@ TEST_CASE("Model instance auto brim width follows speed, geometry, and adhesion"
     CHECK_THAT(narrow_brim, Catch::Matchers::WithinAbs(0., 1e-9));
     CHECK_THAT(wide_brim, Catch::Matchers::WithinAbs(3. * std::sqrt(2.), 1e-9));
 }
+
+namespace model_step_wrapper_contracts
+{
+using namespace Slic3r;
+
+std::string named_step_fixture_path()
+{
+    return std::string(TEST_DATA_DIR) + PATH_SEPARATOR + "utf8_part_names.step";
+}
+
+void write_malformed_step_fixture(const std::string &path)
+{
+    boost::nowide::ofstream output(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+    output << "ISO-10303-21;\n"
+              "HEADER;\n"
+              "ENDSEC;\n"
+              "DATA;\n"
+              "#1 = ;\n"
+              "ENDSEC;\n"
+              "END-ISO-10303-21;\n";
+    REQUIRE(output.good());
+    output.flush();
+    REQUIRE(output.good());
+    output.close();
+}
+
+void require_named_step_model(const Model &model, const std::string &input_file, bool expect_default_instance)
+{
+    REQUIRE(model.objects.size() == 1);
+    const ModelObject *object = model.objects.front();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->volumes.size() == 3);
+    CHECK(object->input_file == input_file);
+
+    const std::array<const char *, 3> expected_names{
+        "pi\xC3\xA8" "ce", "Geh\xC3\xA4use", "bracket"};
+    for (std::size_t i = 0; i < expected_names.size(); ++i) {
+        const ModelVolume *volume = object->volumes[i];
+        REQUIRE(volume != nullptr);
+        CHECK(volume->name == expected_names[i]);
+        CHECK(volume->source.input_file == input_file);
+        const double volume_mm3 = std::abs(static_cast<double>(volume->mesh().volume()));
+        CHECK(std::isfinite(volume_mm3));
+        CHECK(volume_mm3 > 0.0);
+        CHECK(volume->mesh().facets_count() > 0);
+    }
+
+    if (expect_default_instance)
+        CHECK(object->instances.size() == 1);
+    else
+        CHECK(object->instances.empty());
+}
+
+TEST_CASE("Model STEP wrapper imports named solids and adds a default instance",
+          "[Model][ModelImport][Step][ModelStepWrapper]")
+{
+    const std::string input_file = named_step_fixture_path();
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_step(input_file,
+                                                  LoadStrategy::AddDefaultInstances,
+                                                  nullptr, nullptr, nullptr,
+                                                  0.003, 0.5, false));
+    require_named_step_model(model, input_file, true);
+}
+
+TEST_CASE("Model STEP wrapper passes requested options to the mesh callback",
+          "[Model][ModelImport][Step][ModelStepWrapper]")
+{
+    const std::string input_file = named_step_fixture_path();
+    int callback_calls = 0;
+    double callback_linear_deflection = -1.0;
+    double callback_angle_deflection = -1.0;
+    bool callback_split_compound = true;
+    auto mesh_options = [&](Step &, double &linear_deflection, double &angle_deflection,
+                            bool &is_split_compound) {
+        ++callback_calls;
+        callback_linear_deflection = linear_deflection;
+        callback_angle_deflection = angle_deflection;
+        callback_split_compound = is_split_compound;
+        linear_deflection = 0.05;
+        angle_deflection = 0.25;
+        is_split_compound = true;
+        return 0;
+    };
+
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_step(input_file, LoadStrategy::Default,
+                                                  nullptr, nullptr, mesh_options,
+                                                  0.003, 0.5, false));
+    REQUIRE(callback_calls == 1);
+    CHECK_THAT(callback_linear_deflection, Catch::Matchers::WithinAbs(0.003, 1e-12));
+    CHECK_THAT(callback_angle_deflection, Catch::Matchers::WithinAbs(0.5, 1e-12));
+    CHECK_FALSE(callback_split_compound);
+    require_named_step_model(model, input_file, false);
+}
+
+TEST_CASE("Model STEP wrapper cancellation returns an empty model",
+          "[Model][ModelImport][Step][ModelStepWrapper]")
+{
+    const std::string input_file = named_step_fixture_path();
+    bool callback_called = false;
+    auto cancel = [&](Step &, double &, double &, bool &) {
+        callback_called = true;
+        return -1;
+    };
+
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_step(input_file, LoadStrategy::Default,
+                                                  nullptr, nullptr, cancel,
+                                                  0.003, 0.5, false));
+    REQUIRE(callback_called);
+    CHECK(model.objects.empty());
+    CHECK(model.materials.empty());
+}
+
+TEST_CASE("Model STEP wrapper classifies malformed input as a load failure",
+          "[Model][ModelImport][Step][ModelStepWrapper][ModelImportErrors]")
+{
+    ScopedTemporaryFile malformed(".step");
+    write_malformed_step_fixture(malformed.string());
+    CHECK_THROWS_WITH(Model::read_from_step(malformed.string(), LoadStrategy::Default,
+                                            nullptr, nullptr, nullptr,
+                                            0.003, 0.5, false),
+                      Catch::Matchers::ContainsSubstring("Loading of a model file failed."));
+}
+
+} // namespace model_step_wrapper_contracts

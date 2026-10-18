@@ -10,6 +10,8 @@
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
@@ -174,4 +176,90 @@ TEST_CASE("Mesh projection exposes each requested surface independently", "[Tria
     CHECK_THAT(std::abs(double(bottom.front().area())) * SCALING_FACTOR * SCALING_FACTOR, Catch::Matchers::WithinAbs(200.0, 1e-4));
     CHECK_THAT(unscaled<double>(bottom.front().bounding_box().size().x()), Catch::Matchers::WithinAbs(10., 1e-4));
     CHECK_THAT(unscaled<double>(bottom.front().bounding_box().size().y()), Catch::Matchers::WithinAbs(20., 1e-4));
+}
+
+TEST_CASE("Single-plane slicing honors the top-inclusive bottom-exclusive solid boundary",
+          "[TriangleMeshSlicer][SinglePlaneSlice]")
+{
+    const indexed_triangle_set mesh = its_make_cube(10., 20., 30.);
+    const float plane_z = GENERATE(-1.f, 0.f, 15.f, 30.f, 31.f);
+    CAPTURE(plane_z);
+    const Polygons polygons = slice_mesh(mesh, plane_z, MeshSlicingParams{});
+    if (plane_z <= 0.f || plane_z > 30.f) {
+        CHECK(polygons.empty());
+        return;
+    }
+    REQUIRE(polygons.size() == 1);
+    require_xy_bounds(polygons.front(), 0., 10., 0., 20.);
+    CHECK_THAT(polygons.front().area() * SCALING_FACTOR * SCALING_FACTOR,
+               Catch::Matchers::WithinAbs(200., 1e-4));
+}
+
+TEST_CASE("Single-plane slicing transforms both its plane classification and contour coordinates",
+          "[TriangleMeshSlicer][SinglePlaneSlice]")
+{
+    const indexed_triangle_set mesh = its_make_cube(10., 20., 30.);
+    const bool rotate_axes = GENERATE(false, true);
+    CAPTURE(rotate_axes);
+    MeshSlicingParams params;
+    float plane_z;
+    if (rotate_axes) {
+        // World x=z+2, y=y+3, z=4-x.  The z=-1 section is the
+        // original x=5 plane, so its independent footprint is 30 by 20.
+        params.trafo.matrix() << 0., 0., 1., 2.,
+                                 0., 1., 0., 3.,
+                                -1., 0., 0., 4.,
+                                 0., 0., 0., 1.;
+        plane_z = -1.f;
+    } else {
+        // World x=2x+2, y=y/2+3, z=3z/2+4; the z=19 section
+        // is the original z=10 plane, with a 20 by 10 footprint.
+        params.trafo.matrix() << 2., 0., 0., 2.,
+                                 0., 0.5, 0., 3.,
+                                 0., 0., 1.5, 4.,
+                                 0., 0., 0., 1.;
+        plane_z = 19.f;
+    }
+    const Polygons polygons = slice_mesh(mesh, plane_z, params);
+    REQUIRE(polygons.size() == 1);
+    require_xy_bounds(polygons.front(), 2., rotate_axes ? 32. : 22., 3., rotate_axes ? 23. : 13.);
+    CHECK_THAT(polygons.front().area() * SCALING_FACTOR * SCALING_FACTOR,
+               Catch::Matchers::WithinAbs(rotate_axes ? 600. : 200., 1e-4));
+}
+
+TEST_CASE("Single-plane slicing preserves hole orientation and applies the selected contour mode",
+          "[TriangleMeshSlicer][SinglePlaneSlice]")
+{
+    indexed_triangle_set mesh = its_make_cube(10., 20., 30.);
+    indexed_triangle_set hole = its_make_cube(4., 6., 30.);
+    for (Vec3f &vertex : hole.vertices)
+        vertex += Vec3f(3.f, 7.f, 0.f);
+    for (Vec3i32 &face : hole.indices)
+        std::swap(face[0], face[1]);
+    its_merge(mesh, hole);
+
+    using Mode = MeshSlicingParams::SlicingMode;
+    const Mode mode = GENERATE(Mode::Regular, Mode::EvenOdd, Mode::Positive, Mode::PositiveLargestContour);
+    const bool lower_layer_override = GENERATE(false, true);
+    CAPTURE(static_cast<unsigned int>(mode), lower_layer_override);
+    MeshSlicingParams params;
+    if (lower_layer_override) {
+        params.slicing_mode_normal_below_layer = 1;
+        params.mode_below = mode;
+    } else {
+        params.mode = mode;
+    }
+    const Polygons polygons = slice_mesh(mesh, 15.f, params);
+    REQUIRE(polygons.size() == (mode == Mode::PositiveLargestContour ? 1u : 2u));
+    double signed_area = 0.;
+    unsigned int holes = 0;
+    for (const Polygon &polygon : polygons) {
+        const double area = polygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+        signed_area += area;
+        holes += area < 0. ? 1u : 0u;
+    }
+    const double expected_area = mode == Mode::PositiveLargestContour ? 200. : mode == Mode::Positive ? 224. : 176.;
+    CHECK_THAT(signed_area, Catch::Matchers::WithinAbs(expected_area, 1e-4));
+    const unsigned int expected_holes = mode == Mode::Regular || mode == Mode::EvenOdd ? 1u : 0u;
+    CHECK(holes == expected_holes);
 }

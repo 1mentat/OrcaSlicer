@@ -691,3 +691,43 @@ TEST_CASE("Placeholder interpolation rejects nonnumeric and decreasing table coo
     CHECK_THAT(std::stod(parser.process("{interpolate_table(1,(0,10),(2,30))}")),
                Catch::Matchers::WithinAbs(20., 1e-9));
 }
+
+
+TEST_CASE("Placeholder one_of evaluates supplied regex patterns as whole-string matches",
+          "[PlaceholderParser][PlaceholderParserRegexBranches]")
+{
+    PlaceholderParser parser;
+    parser.set("material_pattern", std::string("ABS-[0-9]+"));
+    parser.set("invalid_pattern", std::string("["));
+
+    CHECK(parser.process(R"({one_of("ABS-12", ~material_pattern)})") == "true");
+    CHECK(parser.process(R"({one_of("PLA-12", ~material_pattern)})") == "false");
+    CHECK(parser.process(R"({one_of("prefixABS-12", ~material_pattern)})") == "false");
+    CHECK(parser.process(R"({one_of("ABS-12", "PLA", ~material_pattern)})") == "true");
+    // A successful earlier alternative avoids compiling a later pattern.
+    CHECK(parser.process(R"({one_of("ABS-12", "ABS-12", ~invalid_pattern)})") == "true");
+    CHECK_THROWS_WITH(parser.process(R"({one_of("ABS-12", ~invalid_pattern)})"),
+                      Catch::Matchers::ContainsSubstring("Regular expression compilation failed"));
+    CHECK_THROWS_WITH(parser.process(R"({one_of(12, ~material_pattern)})"),
+                      Catch::Matchers::ContainsSubstring("First parameter"));
+    CHECK_THROWS_WITH(parser.process(R"({one_of("ABS-12", ~12)})"),
+                      Catch::Matchers::ContainsSubstring("Pattern has to be a string"));
+    CHECK(parser.process(R"({if false}{one_of("ABS-12", ~invalid_pattern)}{endif}ready)") == "ready");
+    // Rejected and skipped expressions must not corrupt later evaluations.
+    CHECK(parser.process(R"({one_of("ABS-12", ~material_pattern)})") == "true");
+}
+
+TEST_CASE("Placeholder regex negation complements a whole-string match",
+          "[PlaceholderParser][PlaceholderParserRegexBranches]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process(R"({"ABS-12" !~ /ABS-[0-9]+/})") == "false");
+    CHECK(parser.process(R"({"PLA-12" !~ /ABS-[0-9]+/})") == "true");
+    CHECK(parser.process(R"({"prefixABS-12" !~ /ABS-[0-9]+/})") == "true");
+    CHECK_THROWS_WITH(parser.process(R"({12 !~ /ABS-[0-9]+/})"),
+                      Catch::Matchers::ContainsSubstring("Left hand side of a regex match must be a string"));
+    CHECK_THROWS_WITH(parser.process(R"({"ABS-12" !~ /[/})"),
+                      Catch::Matchers::ContainsSubstring("Regular expression compilation failed"));
+    CHECK(parser.process(R"({if false}{"ABS-12" !~ /[/}{endif}ready)") == "ready");
+    CHECK(parser.process(R"({"ABS-12" !~ /ABS-[0-9]+/})") == "false");
+}

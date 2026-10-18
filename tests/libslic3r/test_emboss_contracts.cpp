@@ -692,3 +692,106 @@ TEST_CASE("Orthogonal direction projection is reversible through the 3d adapter"
 }
 
 } // namespace emboss_extra
+
+namespace emboss_spike_followups {
+
+namespace {
+
+Point emboss_point(coord_t x, coord_t y)
+{
+    // Emboss healing operates on raw glyph-grid coordinates.  Point(x, y)
+    // deliberately avoids Point::new_scale, which would rescale these units.
+    return Point(x, y);
+}
+
+ExPolygon broad_triangle()
+{
+    return ExPolygon(Polygon{emboss_point(0, 0),
+                             emboss_point(-10000, 0),
+                             emboss_point(0, -10000)});
+}
+
+ExPolygon sharp_duplicate_island()
+{
+    // The fixed duplicate-spike half-bevel is 500 raw units.  Both legs are
+    // shorter than that and their angle is below the five-pixel threshold.
+    return ExPolygon(Polygon{emboss_point(0, 0),
+                             emboss_point(300, 0),
+                             emboss_point(450, 20)});
+}
+
+ExPolygon blunt_duplicate_island()
+{
+    // The same shared origin and short legs, but a 45 degree corner, provide
+    // a duplicate-point control that must not be classified as a spike.
+    return ExPolygon(Polygon{emboss_point(0, 0),
+                             emboss_point(300, 0),
+                             emboss_point(300, 300)});
+}
+
+void check_positive_oriented_contours(const ExPolygons &shape)
+{
+    for (const ExPolygon &expolygon : shape) {
+        REQUIRE(expolygon.contour.points.size() >= 3);
+        CHECK(expolygon.contour.area() > 0.);
+        CHECK(expolygon.holes.empty());
+    }
+}
+
+} // namespace
+
+TEST_CASE("Healing removes a sharp duplicate-point island and preserves the broad contour", "[Emboss][EmbossSpikeFollowup]")
+{
+    const ExPolygon broad = broad_triangle();
+    const double broad_area = broad.area();
+    ExPolygons shape{sharp_duplicate_island(), broad};
+
+    REQUIRE(Emboss::heal_expolygons(shape, 10));
+    REQUIRE(shape.size() == 1);
+    check_positive_oriented_contours(shape);
+    CHECK(shape.front().area() > broad_area - 4.);
+    CHECK(shape.front().area() < broad_area + 4.);
+}
+
+TEST_CASE("Healing retains a non-spike duplicate-point island as a separate contour", "[Emboss][EmbossSpikeFollowup]")
+{
+    const ExPolygon broad = broad_triangle();
+    const double broad_area = broad.area();
+    ExPolygons shape{blunt_duplicate_island(), broad};
+
+    REQUIRE(Emboss::heal_expolygons(shape, 10));
+    REQUIRE(shape.size() == 2);
+    check_positive_oriented_contours(shape);
+
+    double largest_area = 0.;
+    double smallest_area = broad_area;
+    for (const ExPolygon &expolygon : shape) {
+        const double current_area = expolygon.area();
+        if (current_area > largest_area)
+            largest_area = current_area;
+        if (current_area < smallest_area)
+            smallest_area = current_area;
+    }
+    CHECK(largest_area > broad_area - 4.);
+    CHECK(largest_area < broad_area + 4.);
+    CHECK(smallest_area > 40000.);
+    CHECK(smallest_area < 50000.);
+}
+
+TEST_CASE("Healing leaves a shape without duplicate points unchanged", "[Emboss][EmbossSpikeFollowup]")
+{
+    ExPolygons shape{broad_triangle()};
+    const ExPolygons original = shape;
+
+    REQUIRE(Emboss::heal_expolygons(shape, 10));
+    REQUIRE(shape.size() == original.size());
+    REQUIRE(shape.front().contour.points.size() == original.front().contour.points.size());
+    CHECK_THAT(shape.front().area(), Catch::Matchers::WithinAbs(original.front().area(), 0.));
+    check_positive_oriented_contours(shape);
+    for (size_t i = 0; i < original.front().contour.points.size(); ++i) {
+        CHECK(shape.front().contour.points[i].x() == original.front().contour.points[i].x());
+        CHECK(shape.front().contour.points[i].y() == original.front().contour.points[i].y());
+    }
+}
+
+} // namespace emboss_spike_followups

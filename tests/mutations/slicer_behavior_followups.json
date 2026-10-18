@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Behavioral probes for metadata, geometry, preset classification, thermal commands, parser semantics, settings normalization, volume assignment, painted fuzzy skin and purge-tower rounding. Includes indexed configuration and chamber-temperature pipeline probes. Includes purge-budget assignment probes. Includes intersecting-solid surfaces, Sweep/Loft Boolean volume contracts and legacy text alignment.",
+  "description": "Behavioral probes for metadata, geometry, preset classification, thermal commands, parser semantics, settings normalization, volume assignment, painted fuzzy skin and purge-tower rounding. Includes indexed configuration and chamber-temperature pipeline probes. Includes purge-budget assignment probes. Includes intersecting-solid surfaces, Sweep/Loft Boolean volume contracts and legacy text alignment. Includes the reviewed d226 followups and ModelArrange contracts.",
   "mutants": [
     {
       "id": "generic-3mf-layer-profile-object-index-shifted",
@@ -843,6 +843,400 @@
       "expected_matches": 1,
       "test_filter": "WipingAssignmentFallback",
       "description": "Restore the misplaced absent-source condition inside the tool index argument; unclaimed sparse infill must retain an ordinary printable-tool override for every copy."
+    },
+    {
+      "id": "single-plane-transform-z-classification-ignored",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "                    float z = (tf * mesh.vertices[i]).z();",
+      "new": "                    float z = mesh.vertices[i].z();",
+      "expected_matches": 1,
+      "test_filter": "SinglePlaneSlice",
+      "description": "Ignore world-space Z when selecting intersecting faces. The rotated cube section at world Z=-1 must still have its analytic600mm2footprint."
+    },
+    {
+      "id": "single-plane-identity-xy-axes-swapped",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "            lines.emplace_back(slice_make_lines(\n                mesh.vertices, [](const Vec3f &p) { return Vec3f(scaled<float>(p.x()), scaled<float>(p.y()), p.z()); }, \n                mesh.indices, face_edge_ids, plane_z, [&face_mask](int face_idx) { return face_mask[face_idx]; }));",
+      "new": "            lines.emplace_back(slice_make_lines(\n                mesh.vertices, [](const Vec3f &p) { return Vec3f(scaled<float>(p.y()), scaled<float>(p.x()), p.z()); }, \n                mesh.indices, face_edge_ids, plane_z, [&face_mask](int face_idx) { return face_mask[face_idx]; }));",
+      "expected_matches": 1,
+      "test_filter": "SinglePlaneSlice",
+      "description": "Swap identity-path XY coordinates. Independent10x20bounds must reject the transposedcontour."
+    },
+    {
+      "id": "single-plane-contour-mode-defaulted",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "    std::vector<Polygons> layers = make_loops(lines, coplanar, params, [](){});",
+      "new": "    std::vector<Polygons> layers = make_loops(lines, coplanar, MeshSlicingParams{}, [](){});",
+      "expected_matches": 1,
+      "test_filter": "SinglePlaneSlice",
+      "description": "Discard requestedcontourmode andbelow-layeroverride. Positive/largestcontour cases require different signedarea andholecount."
+    },
+    {
+      "id": "sketch-array-copy-count",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "for (int i = 1; i < count; ++i) {",
+      "new": "for (int i = 1; i <= count; ++i) {",
+      "expected_matches": 1,
+      "test_filter": "SketchArrayChamfer",
+      "description": "array output count and source ordering fail under inclusive-copy mutation.",
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_status": "pending",
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "sketch-array-step-scaling",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "const Vec2d  tr  = double(i) * step;",
+      "new": "const Vec2d  tr  = step;",
+      "expected_matches": 1,
+      "test_filter": "SketchArrayChamfer",
+      "description": "linear copy 2 must be two steps away, not one.",
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_status": "pending",
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "sketch-array-ellipse-rotation",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "m.rotation = e.rotation + ang;              // major axis rotates with the body",
+      "new": "m.rotation = e.rotation;              // major axis rotates with the body",
+      "expected_matches": 1,
+      "test_filter": "SketchArrayChamfer",
+      "description": "polar ellipse orientation is checked against the analytic rigid rotation.",
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_status": "pending",
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "sketch-array-arc-start-angle",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "m.start_angle = e.start_angle + ang;",
+      "new": "m.start_angle = e.start_angle;",
+      "expected_matches": 1,
+      "test_filter": "SketchArrayChamfer",
+      "description": "polar arc parameter orientation and endpoint geometry are checked.",
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_status": "pending",
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "sketch-chamfer-second-setback",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "Vec2d Tb = C + d * ub;",
+      "new": "Vec2d Tb = C - d * ub;",
+      "expected_matches": 1,
+      "test_filter": "SketchArrayChamfer",
+      "description": "the second leg endpoint and analytic chamfer length are checked.",
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_status": "pending",
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "sketch-chamfer-overrun-conjunction",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "if (d > (a_far - C).norm() || d > (b_far - C).norm())",
+      "new": "if (d > (a_far - C).norm() && d > (b_far - C).norm())",
+      "expected_matches": 1,
+      "test_filter": "SketchArrayChamfer",
+      "description": "a one-short-leg generated row must reject an overrun before output mutation.",
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_status": "pending",
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "model-step-wrapper-default-instances-omitted",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    for (ModelObject *o : model.objects)\n        o->input_file = input_file;\n\n    if (options & LoadStrategy::AddDefaultInstances)\n        model.add_default_instances();\n\n    return model;\n}",
+      "new": "    for (ModelObject *o : model.objects)\n        o->input_file = input_file;\n\n    if (options & LoadStrategy::AddDefaultInstances) {\n        /* mutation: omit the requested default instance */\n    }\n\n    return model;\n}",
+      "expected_matches": 1,
+      "test_filter": "ModelStepWrapper",
+      "description": "Omit only Model::read_from_step's AddDefaultInstances action while preserving source-path assignment. The valid import row requires exactly one instance and must fail an ordinary assertion."
+    },
+    {
+      "id": "model-step-wrapper-callback-not-entered",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    if (step_mesh_fn) {\n        if (step_mesh_fn(step_file, linear_deflection, angle_deflection, is_split_compound) == -1) {\n            status = Step::Step_Status::CANCEL;\n            goto _finished;\n        }\n    }",
+      "new": "    if (step_mesh_fn && linear_deflection < 0.0) {\n        if (step_mesh_fn(step_file, linear_deflection, angle_deflection, is_split_compound) == -1) {\n            status = Step::Step_Status::CANCEL;\n            goto _finished;\n        }\n    }",
+      "expected_matches": 1,
+      "test_filter": "ModelStepWrapper",
+      "description": "Gate the callback on an impossible positive-deflection condition for this fixture. The callback-forwarding row and cancellation row both require that the callback ran, producing ordinary assertion failures."
+    },
+    {
+      "id": "model-step-wrapper-cancel-result-inverted",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "        if (step_mesh_fn(step_file, linear_deflection, angle_deflection, is_split_compound) == -1) {\n            status = Step::Step_Status::CANCEL;\n            goto _finished;\n        }",
+      "new": "        if (step_mesh_fn(step_file, linear_deflection, angle_deflection, is_split_compound) != -1) {\n            status = Step::Step_Status::CANCEL;\n            goto _finished;\n        }",
+      "expected_matches": 1,
+      "test_filter": "ModelStepWrapper",
+      "description": "Invert the callback cancellation result. The callback returns 0 in the valid mesh-options row and -1 in the cancellation row; each row then fails its public model oracle."
+    },
+    {
+      "id": "model-step-wrapper-load-error-misclassified-as-mesh-error",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "        case Step::Step_Status::LOAD_ERROR:\n            throw Slic3r::RuntimeError(_L(\"Loading of a model file failed.\"));",
+      "new": "        case Step::Step_Status::LOAD_ERROR:\n            throw Slic3r::RuntimeError(_L(\"Meshing of a model file failed or no valid shape.\"));",
+      "expected_matches": 1,
+      "test_filter": "ModelStepWrapper",
+      "description": "Report malformed ASCII input as a mesh failure. The deterministic written-invalid-STEP row checks the load-failure classification message and must fail an ordinary assertion."
+    },
+    {
+      "id": "texture-anchor-centroid-uses-first-vertex",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "        centroid_sum += (a + b + c) / 3.f;",
+      "new": "        centroid_sum += a; /* mutation: discard the triangle centroid */",
+      "expected_matches": 1,
+      "test_filter": "TextureDisplacementAnchor",
+      "description": "The unequal-area analytic centroid row must reject replacing each triangle centroid with its first vertex; this probe remains ineligible for kill credit while that baseline is failing.",
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_status": "pending_baseline_gate",
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "texture-anchor-degenerate-normal-zero",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "    anchor_normal = (normal_sum.norm() > 1e-8f) ? Vec3f(normal_sum.normalized()) : Vec3f::UnitZ();",
+      "new": "    anchor_normal = (normal_sum.norm() > 1e-8f) ? Vec3f(normal_sum.normalized()) : Vec3f::Zero(); /* mutation: remove stable fallback */",
+      "expected_matches": 1,
+      "test_filter": "TextureDisplacementAnchor",
+      "description": "The degenerate selected triangle must retain the source-specified stable +Z fallback normal.",
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_status": "pending",
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "texture-anchor-empty-reports-success",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "    if (patch.indices.empty())\n        return false;",
+      "new": "    if (patch.indices.empty())\n        return true; /* mutation: claim an unpainted layer succeeded */",
+      "expected_matches": 1,
+      "test_filter": "TextureDisplacementAnchor",
+      "description": "Both empty-base and valid-base/no-selected-facets rows must return false and preserve caller outputs.",
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_status": "pending",
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "emboss-spike-duplicate-cleanup-omitted",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "        remove_spikes_in_duplicates(shape, duplicate_points);",
+      "new": "        // mutation: duplicate-point spike cleanup omitted",
+      "expected_matches": 1,
+      "test_filter": "EmbossSpikeFollowup",
+      "description": "Omit the active duplicate-point cleanup call. The sharp shared-origin island should remain a second healed contour, violating the ordinary topology assertion.",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "emboss-spike-angle-gate-disabled",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "        if (cos_angle < spike_desc.cos_angle)\n            return false; // not a spike",
+      "new": "        if (cos_angle < -1.)\n            return false; // not a spike",
+      "expected_matches": 1,
+      "test_filter": "EmbossSpikeFollowup",
+      "description": "Disable the sharp-angle gate for all finite corners. The blunt duplicate-point control would then be erased as a short spike and fail its separate-contour assertion.",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "emboss-spike-short-legs-not-erased",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "        if (is_ba_short && is_bc_short) {\n            // remove short spike\n            do_erase = true;",
+      "new": "        if (false) {\n            // mutation: short spike is never erased\n            do_erase = true;",
+      "expected_matches": 1,
+      "test_filter": "EmbossSpikeFollowup",
+      "description": "Prevent the both-short branch from erasing the sharp duplicate-point island. The sharp case should retain a second contour or changed topology and fail an ordinary assertion.",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "texture-placement-project-planar-signed-normal",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "    const Vec3f n = normal.cwiseAbs();",
+      "new": "    const Vec3f n = normal;",
+      "expected_matches": 1,
+      "test_filter": "TexturePlacement",
+      "description": "Use the signed normal instead of its component magnitudes. The negative dominant components in the public projection rows must still choose the corresponding dropped axis."
+    },
+    {
+      "id": "texture-placement-apply-aspect-on-wrong-axis",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "    if (aspect > 0.f && aspect != 1.f)\n        rotated.y() *= aspect;\n\n    return rotated + layer.offset;",
+      "new": "    if (aspect > 0.f && aspect != 1.f)\n        rotated.x() *= aspect;\n\n    return rotated + layer.offset;",
+      "expected_matches": 1,
+      "test_filter": "TexturePlacement",
+      "description": "Apply non-square texture correction to U rather than V. The aspect-2 row has an independent post-rotation V expectation."
+    },
+    {
+      "id": "texture-placement-ignore-tiling-scale",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "    const float scale = (layer.tiling_scale > 1e-6f) ? (1.f / layer.tiling_scale) : 1.f;",
+      "new": "    const float scale = 1.f;",
+      "expected_matches": 1,
+      "test_filter": "TexturePlacement",
+      "description": "Ignore the configured tiling scale. The scale-2 rows and the separate zero-scale fallback distinguish the public scale contract."
+    },
+    {
+      "id": "belt-rotation-y-axis-matrix-wrong",
+      "path": "src/libslic3r/BeltTransform.cpp",
+      "old": "Matrix3d BeltTransformPipeline::build_rotation_matrix(const PrintConfig &config, bool *has_rot_out)\n{\n    BeltRotationAxis axis = config.belt_slice_rotation.value;\n    double angle_deg = config.belt_slice_rotation_angle.value;\n    bool active = axis != BeltRotationAxis::None && std::abs(angle_deg) > EPSILON;\n    if (has_rot_out) *has_rot_out = active;\n    if (!active)\n        return Matrix3d::Identity();\n    double angle_rad = Geometry::deg2rad(angle_deg);\n    Vec3d unit_axis;\n    switch (axis) {\n    case BeltRotationAxis::X: unit_axis = Vec3d::UnitX(); break;\n    case BeltRotationAxis::Y: unit_axis = Vec3d::UnitY(); break;\n    case BeltRotationAxis::Z: unit_axis = Vec3d::UnitZ(); break;",
+      "new": "Matrix3d BeltTransformPipeline::build_rotation_matrix(const PrintConfig &config, bool *has_rot_out)\n{\n    BeltRotationAxis axis = config.belt_slice_rotation.value;\n    double angle_deg = config.belt_slice_rotation_angle.value;\n    bool active = axis != BeltRotationAxis::None && std::abs(angle_deg) > EPSILON;\n    if (has_rot_out) *has_rot_out = active;\n    if (!active)\n        return Matrix3d::Identity();\n    double angle_rad = Geometry::deg2rad(angle_deg);\n    Vec3d unit_axis;\n    switch (axis) {\n    case BeltRotationAxis::X: unit_axis = Vec3d::UnitX(); break;\n    case BeltRotationAxis::Y: unit_axis = Vec3d::UnitX(); break;\n    case BeltRotationAxis::Z: unit_axis = Vec3d::UnitZ(); break;",
+      "expected_matches": 1,
+      "description": "Use the wrong rotation basis for the Y enum. The independent Y-axis basis-vector oracle must fail for the Y row.",
+      "test_filter": "BeltRotationEnum",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "belt-rotation-z-axis-matrix-wrong",
+      "path": "src/libslic3r/BeltTransform.cpp",
+      "old": "Matrix3d BeltTransformPipeline::build_rotation_matrix(const PrintConfig &config, bool *has_rot_out)\n{\n    BeltRotationAxis axis = config.belt_slice_rotation.value;\n    double angle_deg = config.belt_slice_rotation_angle.value;\n    bool active = axis != BeltRotationAxis::None && std::abs(angle_deg) > EPSILON;\n    if (has_rot_out) *has_rot_out = active;\n    if (!active)\n        return Matrix3d::Identity();\n    double angle_rad = Geometry::deg2rad(angle_deg);\n    Vec3d unit_axis;\n    switch (axis) {\n    case BeltRotationAxis::X: unit_axis = Vec3d::UnitX(); break;\n    case BeltRotationAxis::Y: unit_axis = Vec3d::UnitY(); break;\n    case BeltRotationAxis::Z: unit_axis = Vec3d::UnitZ(); break;",
+      "new": "Matrix3d BeltTransformPipeline::build_rotation_matrix(const PrintConfig &config, bool *has_rot_out)\n{\n    BeltRotationAxis axis = config.belt_slice_rotation.value;\n    double angle_deg = config.belt_slice_rotation_angle.value;\n    bool active = axis != BeltRotationAxis::None && std::abs(angle_deg) > EPSILON;\n    if (has_rot_out) *has_rot_out = active;\n    if (!active)\n        return Matrix3d::Identity();\n    double angle_rad = Geometry::deg2rad(angle_deg);\n    Vec3d unit_axis;\n    switch (axis) {\n    case BeltRotationAxis::X: unit_axis = Vec3d::UnitX(); break;\n    case BeltRotationAxis::Y: unit_axis = Vec3d::UnitY(); break;\n    case BeltRotationAxis::Z: unit_axis = Vec3d::UnitX(); break;",
+      "expected_matches": 1,
+      "description": "Use the wrong rotation basis for the Z enum. The independent Z-axis basis-vector oracle must fail for the Z row.",
+      "test_filter": "BeltRotationEnum",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "belt-rotation-x-tilt-axis-swapped",
+      "path": "src/libslic3r/BeltTransform.hpp",
+      "old": "        case BeltRotationAxis::X: t.tilt_x_deg = mag; break;",
+      "new": "        case BeltRotationAxis::X: t.tilt_y_deg = mag; break;",
+      "expected_matches": 1,
+      "description": "Swap the reported physical tilt axis for X. The X row independently checks tilt_x=30 and tilt_y=0.",
+      "test_filter": "BeltRotationEnum",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "belt-rotation-x-floor-axis-swapped",
+      "path": "src/libslic3r/BeltTransform.cpp",
+      "old": "        out.from_axis    = 1; // Y",
+      "new": "        out.from_axis    = 0; // X",
+      "expected_matches": 1,
+      "description": "Use X rather than Y as the X-rotation floor coordinate. The X row checks the public floor from-axis and tan(30) shear.",
+      "test_filter": "BeltRotationEnum",
+      "expected_ordinary_assertion_failure": true
+    },
+    {
+      "id": "farthest-support-require-external-photo-candidate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (max_dist_sq > 0) {",
+      "new": "    if (max_dist_sq > 0 && max_dist_sq_ext > 0) {",
+      "expected_matches": 1,
+      "test_filter": "FarthestSupport",
+      "description": "Require an external-perimeter candidate before marking any selected point as the photo head. With object perimeter/infill/shell output disabled, this suppresses the support fallback photo event without reading an uninitialized point."
+    },
+    {
+      "id": "colorutils-flood-majority-assignment-preserved",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "map_face_to_cluster_id[fid] = cluster_id;",
+      "new": "map_face_to_cluster_id[fid] = 0;",
+      "description": "A face selected by strict adjacent-color majority must retain that majority cluster, including a blue seed in the disconnected and fan fixtures.",
+      "test_filter": "ColorUtilsFlood",
+      "expected_matches": 1
+    },
+    {
+      "id": "colorutils-flood-nearest-adjacent-assignment-preserved",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "map_face_to_cluster_id[fid] = map_face_to_dists[fid].front().second;",
+      "new": "map_face_to_cluster_id[fid] = 0;",
+      "description": "When adjacent cluster counts tie, an ambiguous face must use its nearest adjacent center rather than always selecting the first center.",
+      "test_filter": "ColorUtilsFlood",
+      "expected_matches": 1
+    },
+    {
+      "id": "model-arrange-seed-bed-index-omitted",
+      "path": "src/libslic3r/ModelArrange.cpp",
+      "old": "            ap.bed_idx = 0;",
+      "new": "            ap.bed_idx = arrangement::UNARRANGED;",
+      "expected_matches": 1,
+      "test_filter": "ModelArrangeActive",
+      "description": "get_arrange_polys must seed every collected instance to the physical bed before arrangement; the public collection case checks all three bed indices."
+    },
+    {
+      "id": "model-arrange-virtual-callback-condition-inverted",
+      "path": "src/libslic3r/ModelArrange.cpp",
+      "old": "        if (input[i].bed_idx != 0) { ret = false; if (vfn) vfn(input[i]); }",
+      "new": "        if (input[i].bed_idx == 0) { ret = false; if (vfn) vfn(input[i]); }",
+      "expected_matches": 1,
+      "test_filter": "ModelArrangeActive",
+      "description": "Virtual-bed placements must invoke the callback while physical-bed placements do not; the callback vector distinguishes bed 2 from bed 0."
+    },
+    {
+      "id": "model-arrange-nonnegative-placement-skipped",
+      "path": "src/libslic3r/ModelArrange.cpp",
+      "old": "        if (input[i].bed_idx >= 0)",
+      "new": "        if (input[i].bed_idx > 0)",
+      "expected_matches": 1,
+      "test_filter": "ModelArrangeActive",
+      "description": "A placement on physical bed 0 is still applied even when another item is on a virtual bed; the first offset oracle catches this gate regression."
+    },
+    {
+      "id": "model-arrange-duplicate-placement-offset-perturbed",
+      "path": "src/libslic3r/ModelArrange.cpp",
+      "old": "                Vec2d pos = unscale(ap.translation);",
+      "new": "                Vec2d pos = unscale(ap.translation) + Vec2d(1., 0.);",
+      "expected_matches": 1,
+      "test_filter": "ModelArrangeActive",
+      "description": "The duplicate overload must add each requested placement translation to the copied source offset; the independent four-instance offset oracle catches a placement perturbation."
+    },
+    {
+      "id": "preset-texture-model-id-match-omitted",
+      "description": "Omit the public model-id lookup arm; the id row must fail by ordinary assertion.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "            if (vendor_model.name == model_name || vendor_model.id == model_name)",
+      "new": "            if (vendor_model.name == model_name)",
+      "expected_matches": 1,
+      "test_filter": "PresetAssetLookup",
+      "ordinary_assertion_only": true,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending"
+    },
+    {
+      "id": "preset-texture-asset-root-fallback-inverted",
+      "description": "Invert local-vendor versus resources-root fallback; local precedence and fallback rows must fail by ordinary assertion.",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    if (!texture_name.empty())\n    {\n        out = Slic3r::data_dir() + \"/vendor/\" + vendor_name + \"/\" + texture_name;\n        if (!boost::filesystem::exists(boost::filesystem::path(out)))",
+      "new": "    if (!texture_name.empty())\n    {\n        out = Slic3r::data_dir() + \"/vendor/\" + vendor_name + \"/\" + texture_name;\n        if (boost::filesystem::exists(boost::filesystem::path(out)))",
+      "expected_matches": 1,
+      "test_filter": "PresetAssetLookup",
+      "ordinary_assertion_only": true,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending"
+    },
+    {
+      "id": "preset-root-filament-empty-alias-fallback-inverted",
+      "description": "Invert the empty-prefix alias fallback; the root @Vendor alias must fail by ordinary assertion.",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "            if (alias_name.empty())",
+      "new": "            if (! alias_name.empty())",
+      "expected_matches": 1,
+      "test_filter": "PresetAlias",
+      "ordinary_assertion_only": true,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending"
+    },
+    {
+      "id": "placeholder-supplied-regex-treated-as-literal",
+      "old": "                        out.set_b(SLIC3R_REGEX_NAMESPACE::regex_match(match.s(), SLIC3R_REGEX_NAMESPACE::regex(pattern.s())));",
+      "new": "                        out.set_b(match.s() == pattern.s());",
+      "description": "Supplied regex must match ABS-12 by pattern syntax, with negative whole-string controls.",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "test_filter": "PlaceholderParserRegexBranches",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending"
+    },
+    {
+      "id": "placeholder-regex-negation-omitted",
+      "old": "                if (op == '!')\n                    result = ! result;",
+      "new": "                if (op == '!')\n                    result = result;",
+      "description": "Negated matches must invert both matching and nonmatching ordinary outputs.",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "test_filter": "PlaceholderParserRegexBranches",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending"
     }
   ]
 }

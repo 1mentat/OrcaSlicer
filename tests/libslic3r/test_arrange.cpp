@@ -968,4 +968,96 @@ TEST_CASE("Model arrange out of bed callback has a stable exception contract", "
     REQUIRE_THROWS_AS(throw_if_out_of_bed(polygon), RuntimeError);
 }
 
+
+TEST_CASE("Model arrange collects instances and applies reachable bed results", "[Arrange][ModelArrange][ModelArrangeActive]")
+{
+    Model model = arrange_model(3);
+    ModelInstancePtrs instances;
+    ArrangePolygons polygons = get_arrange_polys(model, instances);
+
+    REQUIRE(polygons.size() == 3);
+    REQUIRE(instances.size() == 3);
+    for (size_t i = 0; i < instances.size(); ++i) {
+        REQUIRE(instances[i] == model.objects.front()->instances[i]);
+        CHECK(polygons[i].bed_idx == 0);
+    }
+
+    polygons[0].translation = Vec2crd{scaled(4.), scaled(5.)};
+    polygons[1].translation = Vec2crd{scaled(8.), scaled(9.)};
+    polygons[1].bed_idx = 2;
+    polygons[2].translation = Vec2crd{scaled(12.), scaled(13.)};
+    polygons[2].bed_idx = arrangement::UNARRANGED;
+
+    std::vector<int> callback_beds;
+    const bool all_on_physical_bed = apply_arrange_polys(
+        polygons, instances, [&callback_beds](ArrangePolygon &polygon) {
+            callback_beds.push_back(polygon.bed_idx);
+        });
+
+    REQUIRE_FALSE(all_on_physical_bed);
+    REQUIRE(callback_beds.size() == 2);
+    CHECK(callback_beds[0] == 2);
+    CHECK(callback_beds[1] == arrangement::UNARRANGED);
+    CHECK_THAT(instances[0]->get_offset(X), Catch::Matchers::WithinAbs(4., 1e-9));
+    CHECK_THAT(instances[0]->get_offset(Y), Catch::Matchers::WithinAbs(5., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(X), Catch::Matchers::WithinAbs(8., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(Y), Catch::Matchers::WithinAbs(9., 1e-9));
+    CHECK_THAT(instances[2]->get_offset(X), Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(instances[2]->get_offset(Y), Catch::Matchers::WithinAbs(0., 1e-9));
+
+    Model physical_model = arrange_model(2);
+    ModelInstancePtrs physical_instances;
+    ArrangePolygons physical_polygons = get_arrange_polys(physical_model, physical_instances);
+    REQUIRE(physical_polygons.size() == 2);
+    REQUIRE(physical_instances.size() == 2);
+    physical_polygons[0].translation = Vec2crd{scaled(1.), scaled(2.)};
+    physical_polygons[1].translation = Vec2crd{scaled(3.), scaled(4.)};
+    std::vector<int> physical_callbacks;
+    REQUIRE(apply_arrange_polys(
+        physical_polygons, physical_instances, [&physical_callbacks](ArrangePolygon &polygon) {
+            physical_callbacks.push_back(polygon.bed_idx);
+        }));
+    CHECK(physical_callbacks.empty());
+    CHECK_THAT(physical_instances[0]->get_offset(X), Catch::Matchers::WithinAbs(1., 1e-9));
+    CHECK_THAT(physical_instances[0]->get_offset(Y), Catch::Matchers::WithinAbs(2., 1e-9));
+    CHECK_THAT(physical_instances[1]->get_offset(X), Catch::Matchers::WithinAbs(3., 1e-9));
+    CHECK_THAT(physical_instances[1]->get_offset(Y), Catch::Matchers::WithinAbs(4., 1e-9));
+}
+
+TEST_CASE("Model arrange duplicates each source instance for every requested placement", "[Arrange][ModelArrange][ModelArrangeActive]")
+{
+    Model model = arrange_model(2);
+    ModelObject *object = model.objects.front();
+    object->instances[0]->set_offset(Vec3d(1., 2., 0.));
+    object->instances[1]->set_offset(Vec3d(11., 12., 0.));
+
+    ArrangePolygon first = make_square(scaled(8.));
+    first.translation = Vec2crd{scaled(4.), scaled(5.)};
+    first.bed_idx = 0;
+    ArrangePolygon virtual_bed = make_square(scaled(8.));
+    virtual_bed.translation = Vec2crd{scaled(-6.), scaled(7.)};
+    virtual_bed.bed_idx = 2;
+    ArrangePolygons copies{first, virtual_bed};
+
+    std::vector<int> callback_beds;
+    duplicate(model, copies, [&callback_beds](ArrangePolygon &polygon) {
+        callback_beds.push_back(polygon.bed_idx);
+    });
+
+    REQUIRE(object->instances.size() == 4);
+    REQUIRE(callback_beds.size() == 2);
+    CHECK(callback_beds[0] == 2);
+    CHECK(callback_beds[1] == 2);
+
+    CHECK_THAT(object->instances[0]->get_offset(X), Catch::Matchers::WithinAbs(5., 1e-9));
+    CHECK_THAT(object->instances[0]->get_offset(Y), Catch::Matchers::WithinAbs(7., 1e-9));
+    CHECK_THAT(object->instances[1]->get_offset(X), Catch::Matchers::WithinAbs(-5., 1e-9));
+    CHECK_THAT(object->instances[1]->get_offset(Y), Catch::Matchers::WithinAbs(9., 1e-9));
+    CHECK_THAT(object->instances[2]->get_offset(X), Catch::Matchers::WithinAbs(15., 1e-9));
+    CHECK_THAT(object->instances[2]->get_offset(Y), Catch::Matchers::WithinAbs(17., 1e-9));
+    CHECK_THAT(object->instances[3]->get_offset(X), Catch::Matchers::WithinAbs(5., 1e-9));
+    CHECK_THAT(object->instances[3]->get_offset(Y), Catch::Matchers::WithinAbs(19., 1e-9));
+}
+
+
 } // namespace model_arrange_contracts

@@ -2766,3 +2766,164 @@ TEST_CASE("Projective colour projection enforces depth and untiled bounds", "[Te
                                            Vec3f::UnitZ()),
                WithinAbs(0.f, 1e-6f));
 }
+
+namespace texture_anchor_contracts {
+
+TriangleSelector::TriangleSplittingData select_facets(const indexed_triangle_set &mesh,
+                                                       const std::vector<int> &facet_ids)
+{
+    const TriangleMesh triangle_mesh(mesh);
+    TriangleSelector selector(triangle_mesh);
+    for (const int facet_id : facet_ids)
+        selector.set_facet(facet_id, EnforcerBlockerType::ENFORCER);
+    return selector.serialize();
+}
+
+void check_vec3(const Vec3f &actual, const Vec3f &expected, float tolerance)
+{
+    CHECK_THAT(actual.x(), WithinAbs(expected.x(), tolerance));
+    CHECK_THAT(actual.y(), WithinAbs(expected.y(), tolerance));
+    CHECK_THAT(actual.z(), WithinAbs(expected.z(), tolerance));
+}
+
+TEST_CASE("Painted anchors use the analytic area-weighted patch centroid and normal",
+          "[TextureDisplacement][TextureDisplacementAnchor]")
+{
+    const bool equal_area = GENERATE(false, true);
+    CAPTURE(equal_area);
+
+    indexed_triangle_set mesh;
+    if (equal_area) {
+        // Both triangles have area 1.5 and +Z orientation.  This is a positive
+        // control for the current unweighted implementation as well as a check
+        // that the selector preserves both selected leaves.
+        mesh.vertices = {
+            { 0.f, 0.f, 0.f }, { 3.f, 0.f, 0.f }, { 0.f, 1.f, 0.f },
+            { 10.f, 0.f, 0.f }, { 13.f, 0.f, 0.f }, { 10.f, 1.f, 0.f }
+        };
+        mesh.indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    } else {
+        // The first triangle has area 1.5, centroid (1, 1/3, 0), and +Z
+        // normal.  The second has area 6, centroid (10, 4/3, 1), and +X
+        // normal.  Disjoint facets keep the expected result independent of
+        // topology or ordering conventions in the selector.
+        mesh.vertices = {
+            { 0.f, 0.f, 0.f }, { 3.f, 0.f, 0.f }, { 0.f, 1.f, 0.f },
+            { 10.f, 0.f, 0.f }, { 10.f, 4.f, 0.f }, { 10.f, 0.f, 3.f }
+        };
+        mesh.indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    }
+
+    Vec3f anchor_position(99.f, 98.f, 97.f);
+    Vec3f anchor_normal(-1.f, -2.f, -3.f);
+    REQUIRE(compute_layer_paint_anchor(mesh, select_facets(mesh, {0, 1}),
+                                       anchor_position, anchor_normal));
+
+    if (equal_area) {
+        // The two equal-area centroids average to (6, 1/3, 0), and both
+        // oriented cross products point along +Z.
+        check_vec3(anchor_position, Vec3f(6.f, 1.f / 3.f, 0.f), 1e-5f);
+        check_vec3(anchor_normal, Vec3f::UnitZ(), 1e-5f);
+    } else {
+        // (1.5*(1,1/3,0) + 6*(10,4/3,1)) / 7.5.
+        check_vec3(anchor_position, Vec3f(8.2f, 17.f / 15.f, 0.8f), 1e-5f);
+        // Cross products are (0,0,3) and (12,0,0), so the normalized sum is (12,0,3)/sqrt(153).
+        check_vec3(anchor_normal, Vec3f(12.f / std::sqrt(153.f), 0.f, 3.f / std::sqrt(153.f)), 1e-5f);
+    }
+}
+
+TEST_CASE("Unpainted anchors preserve caller outputs",
+          "[TextureDisplacement][TextureDisplacementAnchor]")
+{
+    const bool has_mesh = GENERATE(false, true);
+    CAPTURE(has_mesh);
+
+    indexed_triangle_set mesh;
+    if (has_mesh)
+        mesh = its_make_cube(10., 10., 10.);
+    // Both rows have no selected facets.  The nonempty row verifies that the
+    // valid base mesh itself does not turn an unpainted layer into a patch.
+    TriangleSelector::TriangleSplittingData empty_facets;
+    const Vec3f original_position(7.f, -8.f, 9.f);
+    const Vec3f original_normal(-4.f, 5.f, -6.f);
+    Vec3f anchor_position = original_position;
+    Vec3f anchor_normal = original_normal;
+
+    CHECK_FALSE(compute_layer_paint_anchor(mesh, empty_facets, anchor_position, anchor_normal));
+    check_vec3(anchor_position, original_position, 0.f);
+    check_vec3(anchor_normal, original_normal, 0.f);
+}
+
+TEST_CASE("Degenerate painted patches use the stable fallback normal",
+          "[TextureDisplacement][TextureDisplacementAnchor]")
+{
+    // TriangleSelector::reset/push_triangle retains every indexed leaf,
+    // including this collinear one; set_facet/serialize therefore provide a
+    // valid selected patch for the source fallback branch to consume.
+    indexed_triangle_set mesh;
+    mesh.vertices = { { 0.f, 0.f, 0.f }, { 2.f, 0.f, 0.f }, { 1.f, 0.f, 0.f } };
+    mesh.indices = { { 0, 1, 2 } };
+
+    Vec3f anchor_position = Vec3f::Zero();
+    Vec3f anchor_normal = Vec3f::Zero();
+    REQUIRE(compute_layer_paint_anchor(mesh, select_facets(mesh, {0}),
+                                       anchor_position, anchor_normal));
+    check_vec3(anchor_position, Vec3f(1.f, 0.f, 0.f), 1e-5f);
+    // The +Z result is source-specified by TextureDisplacement.cpp's
+    // near-zero normal guard; it is not separately promised by the header.
+    check_vec3(anchor_normal, Vec3f::UnitZ(), 1e-5f);
+}
+
+} // namespace texture_anchor_contracts
+TEST_CASE("Planar projection follows the dominant normal axis", "[TextureDisplacement][TexturePlacement]")
+{
+    const Vec3f position(1.25f, -2.5f, 3.75f);
+    struct Row {
+        Vec3f normal;
+        Vec2f expected;
+    };
+    const std::array<Row, 4> rows{{
+        { Vec3f(3.f, -1.f, 0.5f), Vec2f(-2.5f, 3.75f) },
+        { Vec3f(-0.5f, 4.f, -1.f), Vec2f(1.25f, 3.75f) },
+        { Vec3f(0.5f, -1.f, -5.f), Vec2f(1.25f, -2.5f) },
+        { Vec3f(-5.f, 1.f, 0.5f), Vec2f(-2.5f, 3.75f) },
+    }};
+
+    for (size_t row = 0; row < rows.size(); ++row) {
+        INFO("row=" << row);
+        const Vec2f actual = project_planar(position, rows[row].normal);
+        CHECK_THAT(actual.x(), WithinAbs(rows[row].expected.x(), 1e-6f));
+        CHECK_THAT(actual.y(), WithinAbs(rows[row].expected.y(), 1e-6f));
+    }
+}
+
+TEST_CASE("Texture UV transforms apply scale rotation aspect and offset", "[TextureDisplacement][TexturePlacement]")
+{
+    TextureDisplacementLayer layer;
+    layer.tiling_scale = 2.f;
+    layer.rotation_deg = 90.f;
+    layer.offset       = Vec2f(0.1f, -0.2f);
+    const Vec2f planar(2.f, 1.f);
+
+    struct Row {
+        float aspect;
+        Vec2f expected;
+    };
+    const std::array<Row, 3> rows{{
+        { 1.f, Vec2f(-0.4f, 0.8f) },
+        { 2.f, Vec2f(-0.4f, 1.8f) },
+        { 0.f, Vec2f(-0.4f, 0.8f) },
+    }};
+    for (size_t row = 0; row < rows.size(); ++row) {
+        INFO("row=" << row);
+        const Vec2f actual = apply_uv_transform(planar, layer, rows[row].aspect);
+        CHECK_THAT(actual.x(), WithinAbs(rows[row].expected.x(), 1e-5f));
+        CHECK_THAT(actual.y(), WithinAbs(rows[row].expected.y(), 1e-5f));
+    }
+
+    TextureDisplacementLayer fallback = layer;
+    fallback.tiling_scale = 0.f;
+    const Vec2f fallback_uv = apply_uv_transform(planar, fallback, 1.f);
+    CHECK_THAT(fallback_uv.x(), WithinAbs(-0.9f, 1e-5f));
+    CHECK_THAT(fallback_uv.y(), WithinAbs(1.8f, 1e-5f));
+}

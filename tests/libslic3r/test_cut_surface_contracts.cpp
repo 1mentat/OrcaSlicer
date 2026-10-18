@@ -13,14 +13,17 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <libslic3r/BoundingBox.hpp>
 #include <libslic3r/Point.hpp>
+#include <libslic3r/Polygon.hpp>
 #include <libslic3r/ExPolygon.hpp>
 #include <vector>
 
 #include "catch2/catch_test_macros.hpp"
 #include "catch2/catch_message.hpp"
 #include "libslic3r/CutSurface.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Emboss.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -214,6 +217,14 @@ void check_mesh_indices(const indexed_triangle_set &mesh)
         CHECK(face[0] != face[2]);
         const Vec3f edge_a = mesh.vertices[face[1]] - mesh.vertices[face[0]];
         const Vec3f edge_b = mesh.vertices[face[2]] - mesh.vertices[face[0]];
+        if (!(edge_a.cross(edge_b).squaredNorm() > 1e-10f)) {
+            UNSCOPED_INFO("face indices: " << face[0] << ", " << face[1] << ", " << face[2]);
+            for (int corner = 0; corner < 3; ++corner) {
+                const auto index = face[corner];
+                const Vec3f &point = mesh.vertices[index];
+                UNSCOPED_INFO("vertex " << index << ": " << point.x() << ", " << point.y() << ", " << point.z());
+            }
+        }
         CHECK(edge_a.cross(edge_b).squaredNorm() > 1e-10f);
     }
 }
@@ -648,6 +659,60 @@ indexed_triangle_set shifted_strip(float x, float z)
     return model;
 }
 
+ExPolygons projected_footprint(const SurfaceCut &cut)
+{
+    Polygons projected_triangles;
+    projected_triangles.reserve(cut.indices.size());
+    for (const stl_triangle_vertex_indices &face : cut.indices) {
+        Polygon triangle{
+            Point::new_scale(cut.vertices[face[0]].x(), cut.vertices[face[0]].y()),
+            Point::new_scale(cut.vertices[face[1]].x(), cut.vertices[face[1]].y()),
+            Point::new_scale(cut.vertices[face[2]].x(), cut.vertices[face[2]].y())};
+        if (triangle.area() == 0.)
+            continue;
+        if (triangle.area() < 0.)
+            std::reverse(triangle.points.begin(), triangle.points.end());
+        projected_triangles.emplace_back(std::move(triangle));
+    }
+    return union_ex(projected_triangles);
+}
+
+double footprint_area_mm2(const ExPolygons &footprint)
+{
+    double area = 0.;
+    for (const ExPolygon &polygon : footprint)
+        area += polygon.area();
+    return area * SCALING_FACTOR * SCALING_FACTOR;
+}
+
+void check_three_strip_footprint(const SurfaceCut &cut, const ExPolygon &expected)
+{
+    const double coordinate_scale = 1. / SCALING_FACTOR;
+    ExPolygon expected_scaled = expected;
+    expected_scaled.scale(coordinate_scale);
+    const ExPolygons footprint = projected_footprint(cut);
+    const ExPolygons expected_footprint{expected_scaled};
+    const ExPolygons missing = diff_ex(expected_footprint, footprint);
+    const ExPolygons outside = diff_ex(footprint, expected_footprint);
+    std::array<ExPolygon, 3> expected_slabs{
+        ExPolygon(rectangle(1, 1, 10, 9)),
+        ExPolygon(rectangle(10, 1, 20, 9)),
+        ExPolygon(rectangle(20, 1, 29, 9))};
+    for (ExPolygon &slab : expected_slabs)
+        slab.scale(coordinate_scale);
+    std::array<double, 3> slab_missing_area{};
+    for (std::size_t i = 0; i < expected_slabs.size(); ++i)
+        slab_missing_area[i] = footprint_area_mm2(diff_ex(ExPolygons{expected_slabs[i]}, footprint));
+
+    CAPTURE(footprint.size(), footprint_area_mm2(footprint), footprint_area_mm2(missing),
+            footprint_area_mm2(outside), slab_missing_area[0], slab_missing_area[1], slab_missing_area[2]);
+    CHECK_THAT(footprint_area_mm2(footprint), WithinAbs(footprint_area_mm2(expected_footprint), 1e-4));
+    CHECK(missing.empty());
+    CHECK(outside.empty());
+    for (double missing_area : slab_missing_area)
+        CHECK_THAT(missing_area, WithinAbs(0., 1e-4));
+}
+
 void check_three_strip_cut(const SurfaceCut &cut, double expected_area)
 {
     REQUIRE_FALSE(cut.vertices.empty());
@@ -680,6 +745,7 @@ TEST_CASE("Surface cuts fill an interior projected gap from an unselected strip"
         projection,
         .5f);
     check_three_strip_cut(cut, 224.);
+    check_three_strip_footprint(cut, shape);
     for (const Vec3f &vertex : cut.vertices) {
         CHECK(vertex.z() >= -1e-4f);
         CHECK(vertex.z() <= 10.f + 1e-4f);

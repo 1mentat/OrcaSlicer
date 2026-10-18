@@ -740,3 +740,168 @@ TEST_CASE("Nearest-color IDs preserve first occurrence on an exact tie", "[Color
 }
 
 } // namespace extended_color_contracts
+
+
+namespace color_utils_flood_followups {
+namespace {
+
+TriMesh ambiguous_fan_mesh()
+{
+    TriVertices vertices{
+        TriVertex(0.f, 0.f, 0.f), TriVertex(2.f, 0.f, 0.f), TriVertex(0.f, 2.f, 0.f),
+        TriVertex(1.f, -2.f, 0.f), TriVertex(3.f, 1.f, 0.f)};
+    TriFaces faces{
+        TriFace(0, 1, 2), // ambiguous center: exactly two adjacent seed faces
+        TriFace(1, 0, 3), // red seed
+        TriFace(2, 1, 4)  // blue seed
+    };
+    return TriMesh(std::move(faces), std::move(vertices));
+}
+
+TriMesh disconnected_open_squares_mesh()
+{
+    TriVertices vertices{
+        TriVertex(0.f, 0.f, 0.f), TriVertex(10.f, 0.f, 0.f), TriVertex(10.f, 10.f, 0.f), TriVertex(0.f, 10.f, 0.f),
+        TriVertex(30.f, 0.f, 0.f), TriVertex(40.f, 0.f, 0.f), TriVertex(40.f, 10.f, 0.f), TriVertex(30.f, 10.f, 0.f)};
+    TriFaces faces{
+        TriFace(0, 1, 2), TriFace(0, 2, 3),
+        TriFace(4, 5, 6), TriFace(4, 6, 7)};
+    return TriMesh(std::move(faces), std::move(vertices));
+}
+
+} // namespace
+
+TEST_CASE("Mesh clustering propagates ambiguous faces through connected and disconnected regions",
+          "[ColorUtils][ColorUtilsExtended][ColorUtilsFlood]")
+{
+    const Color gray{{128, 128, 128}};
+    const Color blue_leaning{{140, 140, 180}};
+    const double gray_to_red = calc_rgb_color_difference_by_ciede2000(gray, RED);
+    const double gray_to_blue = calc_rgb_color_difference_by_ciede2000(gray, BLUE);
+    const double blue_to_red = calc_rgb_color_difference_by_ciede2000(blue_leaning, RED);
+    const double blue_to_blue = calc_rgb_color_difference_by_ciede2000(blue_leaning, BLUE);
+    const double gray_min = std::min(gray_to_red, gray_to_blue);
+    const double gray_max = std::max(gray_to_red, gray_to_blue);
+    const double blue_min = std::min(blue_to_red, blue_to_blue);
+    const double blue_max = std::max(blue_to_red, blue_to_blue);
+    // These are setup preconditions for the public seed/flood route.  They
+    // deliberately fail closed if a future color-math change makes either
+    // ambiguous fixture a direct seed or too far from the 1.5 ratio boundary.
+    REQUIRE(gray_to_red > 3.0);
+    REQUIRE(gray_to_blue > 3.0);
+    REQUIRE(gray_min * 1.5 >= gray_max);
+    REQUIRE(blue_to_red > 3.0);
+    REQUIRE(blue_to_blue > 3.0);
+    REQUIRE(blue_min * 1.5 >= blue_max);
+    REQUIRE(blue_to_blue < blue_to_red);
+
+    // One valid neighbor is a strict majority. The neutral face is neither a
+    // first-pass seed nor a direct color center, so the public flood route must
+    // inherit the definitive red neighbor.
+    {
+        const TriMesh mesh = open_square_mesh();
+        std::vector<Color> colors{RED, gray};
+        std::vector<std::size_t> ids;
+        REQUIRE(mesh_cluster(mesh, {RED, BLUE}, colors, ids));
+        REQUIRE(ids.size() == mesh.indices.size());
+        CHECK(ids[0] == 0);
+        CHECK(ids[1] == 0);
+        CHECK(colors[0] == RED);
+        CHECK(colors[1] == RED);
+
+        std::vector<Color> blue_colors{BLUE, gray};
+        std::vector<std::size_t> blue_ids;
+        REQUIRE(mesh_cluster(mesh, {RED, BLUE}, blue_colors, blue_ids));
+        REQUIRE(blue_ids.size() == mesh.indices.size());
+        CHECK(blue_ids[0] == 1);
+        CHECK(blue_ids[1] == 1);
+        CHECK(blue_colors[0] == BLUE);
+        CHECK(blue_colors[1] == BLUE);
+    }
+
+    // The center has one red and one blue adjacent seed, so majority flooding
+    // cannot decide it. Its nearest adjacent center is blue, which exercises
+    // the second public propagation rule.
+    {
+        const TriMesh mesh = ambiguous_fan_mesh();
+        std::vector<Color> colors{blue_leaning, RED, BLUE};
+        std::vector<std::size_t> ids;
+        REQUIRE(mesh_cluster(mesh, {RED, BLUE}, colors, ids));
+        REQUIRE(ids.size() == mesh.indices.size());
+        CHECK(ids[0] == 1);
+        CHECK(ids[1] == 0);
+        CHECK(ids[2] == 1);
+        CHECK(colors[0] == BLUE);
+        CHECK(colors[1] == RED);
+        CHECK(colors[2] == BLUE);
+    }
+
+    // Each disconnected two-face component has one seed and one ambiguous
+    // face, so one valid neighbor is a strict majority in both components.
+    {
+        const TriMesh mesh = disconnected_open_squares_mesh();
+        std::vector<Color> colors{RED, gray, BLUE, gray};
+        std::vector<std::size_t> ids;
+        REQUIRE(mesh_cluster(mesh, {RED, BLUE}, colors, ids));
+        REQUIRE(ids.size() == mesh.indices.size());
+        CHECK(ids[0] == 0);
+        CHECK(ids[1] == 0);
+        CHECK(ids[2] == 1);
+        CHECK(ids[3] == 1);
+        CHECK(colors[0] == RED);
+        CHECK(colors[1] == RED);
+        CHECK(colors[2] == BLUE);
+        CHECK(colors[3] == BLUE);
+    }
+}
+
+} // namespace color_utils_flood_followups
+
+
+
+TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
+          "[ColorUtils][ColorUtilsExtended][ColorUtilsCIEDEReference]")
+{
+    // Expected values follow Sharma, Wu, and Dalal (2005),
+    // https://hajim.rochester.edu/ece/sites/gsharma/ciede2000/ciede2000noteCRNA.pdf
+    // (Eqs. 2-22, including independent signed delta-h and mean-hue branches,
+    // Cbar^7, and the 63-degree final T-term angle). The published Table I
+    // pairs 1-34 reproduce within 5e-5 under the independent reference.
+    const double green_magenta_expected = 111.41433059755204;
+    const Color green{{0, 255, 0}};
+    const Color magenta{{255, 0, 255}};
+    CHECK_THAT(calc_rgb_color_difference_by_ciede2000(green, magenta),
+               Catch::Matchers::WithinAbs(green_magenta_expected, 1e-6));
+    CHECK_THAT(calc_rgb_color_difference_by_ciede2000(magenta, green),
+               Catch::Matchers::WithinAbs(green_magenta_expected, 1e-6));
+
+    const ColorDouble green01{{0.0, 1.0, 0.0}};
+    const ColorDouble magenta01{{1.0, 0.0, 1.0}};
+    CHECK_THAT(calc_rgb_color_difference_by_ciede2000_srgb01(green01, magenta01),
+               Catch::Matchers::WithinAbs(green_magenta_expected, 1e-6));
+    CHECK_THAT(calc_rgb_color_difference_by_ciede2000_srgb01(magenta01, green01),
+               Catch::Matchers::WithinAbs(green_magenta_expected, 1e-6));
+
+    // Black/white is a symmetric magnitude control independent of the
+    // green/magenta hue-sector discriminator.
+    const double black_white_expected = 100.00000386666865;
+    const Color black{{0, 0, 0}};
+    const Color white{{255, 255, 255}};
+    CHECK_THAT(calc_rgb_color_difference_by_ciede2000(black, white),
+               Catch::Matchers::WithinAbs(black_white_expected, 1e-6));
+    CHECK_THAT(calc_rgb_color_difference_by_ciede2000(white, black),
+               Catch::Matchers::WithinAbs(black_white_expected, 1e-6));
+
+    // This explicit pair exercises Eq. 14's second wrap branch: the adjusted
+    // hue separation exceeds 180 degrees and the adjusted hue sum is above
+    // 360 degrees, so the mean must subtract 360 degrees. It is independent
+    // of the green/magenta T-term discriminator and catches an unconditional
+    // wrap addition even after the published 63-degree T term is restored.
+    const double mean_hue_wrap_expected = 45.73921346241746;
+    const Color mean_hue_wrap_a{{96, 32, 255}};
+    const Color mean_hue_wrap_b{{160, 96, 64}};
+    CHECK_THAT(calc_rgb_color_difference_by_ciede2000(mean_hue_wrap_a, mean_hue_wrap_b),
+               Catch::Matchers::WithinAbs(mean_hue_wrap_expected, 1e-6));
+    CHECK_THAT(calc_rgb_color_difference_by_ciede2000(mean_hue_wrap_b, mean_hue_wrap_a),
+               Catch::Matchers::WithinAbs(mean_hue_wrap_expected, 1e-6));
+}

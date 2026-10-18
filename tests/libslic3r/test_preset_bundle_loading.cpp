@@ -11402,3 +11402,52 @@ TEST_CASE("Preset configuration trees select their public file type", "[Preset][
 }
 
 } // namespace preset_file_type_contracts
+
+namespace preset_workflow_contracts {
+
+TEST_CASE("Vendor bed texture lookup honors model ids and asset-root fallback", "[Preset][PresetBundle][PresetAssetLookup]")
+{
+    ScopedTemporaryDir dir("preset-texture-lookup");
+    ScopedDataDir data(dir.path() / "data");
+    ScopedResourcesDir resources(dir.path() / "resources");
+    const fs::path local = dir.path() / "data" / "vendor" / "Acme" / "bed.png";
+    const fs::path fallback = dir.path() / "resources" / "profiles" / "Acme" / "bed.png";
+    write_text(local, "local texture");
+    write_text(fallback, "resource texture");
+
+    VendorProfile profile("Acme");
+    profile.name = "Acme";
+    VendorProfile::PrinterModel model;
+    model.id = "M1";
+    model.name = "Acme One";
+    model.bed_texture = "bed.png";
+    profile.models.push_back(model);
+    PresetBundle bundle;
+    bundle.vendors["Acme"] = profile;
+
+    CHECK(bundle.get_texture_for_printer_model("Acme One") == local.string());
+    CHECK(bundle.get_texture_for_printer_model("M1") == local.string());
+    fs::remove(local);
+    CHECK(bundle.get_texture_for_printer_model("Acme One") == fallback.string());
+    CHECK(bundle.get_texture_for_printer_model("missing").empty());
+}
+
+TEST_CASE("Root filament aliases preserve a name when the vendor suffix has no prefix", "[Preset][PresetAlias]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    DynamicPrintConfig config = collection.default_preset().config;
+    auto *inherits = config.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true);
+    REQUIRE(inherits != nullptr);
+    inherits->value.clear();
+
+    Preset &root = collection.load_preset({}, "@Vendor", config, false);
+    root.alias.clear();
+    CHECK(collection.get_preset_alias(root, true) == "@Vendor");
+
+    Preset &named = collection.load_preset({}, "PLA @Vendor", config, false);
+    named.alias.clear();
+    CHECK(collection.get_preset_alias(named, true) == "PLA");
+}
+
+} // namespace preset_workflow_contracts

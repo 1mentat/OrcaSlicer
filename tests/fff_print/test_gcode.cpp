@@ -5322,6 +5322,157 @@ TEST_CASE("Public belt frame decoupling transforms a remapped export", "[GCode][
     REQUIRE(changed);
 }
 
+struct SupportTimelapseEvidence
+{
+    bool finite = true;
+    size_t support_extrusions = 0;
+    size_t object_extrusions = 0;
+    size_t snapshots = 0;
+    size_t inline_snapshots = 0;
+    size_t inline_after_support = 0;
+    std::vector<double> inline_layer_z;
+};
+
+std::string_view trim_support_timelapse_comment(std::string_view comment)
+{
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.front())))
+        comment.remove_prefix(1);
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.back())))
+        comment.remove_suffix(1);
+    return comment;
+}
+
+SupportTimelapseEvidence parse_support_timelapse_output(const std::string &text,
+                                                        const DynamicPrintConfig &config)
+{
+    SupportTimelapseEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string active_role;
+    size_t support_moves_in_layer = 0;
+    reader.parse_buffer(text, [&evidence, &active_role, &support_moves_in_layer](GCodeReader &self,
+                                                                                  const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = trim_support_timelapse_comment(line.comment());
+        if (comment.rfind("LAYER_CHANGE", 0) == 0 || comment.rfind("CHANGE_LAYER", 0) == 0)
+            support_moves_in_layer = 0;
+        if (comment.rfind("TYPE:", 0) == 0)
+            active_role = std::string(trim_support_timelapse_comment(comment.substr(5)));
+        else if (comment.rfind("FEATURE:", 0) == 0)
+            active_role = std::string(trim_support_timelapse_comment(comment.substr(8)));
+
+        const bool motion = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+        if (motion && (!std::isfinite(static_cast<double>(self.x())) ||
+                       !std::isfinite(static_cast<double>(self.y())) ||
+                       !std::isfinite(static_cast<double>(self.z())) ||
+                       !std::isfinite(static_cast<double>(self.e())) ||
+                       (line.has_x() && !std::isfinite(static_cast<double>(line.x()))) ||
+                       (line.has_y() && !std::isfinite(static_cast<double>(line.y()))) ||
+                       (line.has_z() && !std::isfinite(static_cast<double>(line.z()))) ||
+                       (line.has_e() && !std::isfinite(static_cast<double>(line.e()))))) {
+            evidence.finite = false;
+            return;
+        }
+
+        const bool support_role = active_role == "Support" ||
+                                  active_role == "Support interface" ||
+                                  active_role == "Support transition";
+        if (motion && line.extruding(self) && line.dist_XY(self) > EPSILON) {
+            if (support_role) {
+                ++evidence.support_extrusions;
+                ++support_moves_in_layer;
+            } else {
+                ++evidence.object_extrusions;
+            }
+        }
+
+        if (!line.cmd_is("M117"))
+            return;
+        const std::string raw(line.raw());
+        if (raw.find("SUPPORT-SNAPSHOT-") == std::string::npos)
+            return;
+        ++evidence.snapshots;
+        const bool inline_photo = raw.find("-INLINE-1-Z-") != std::string::npos;
+        if (!inline_photo)
+            return;
+        ++evidence.inline_snapshots;
+        if (support_moves_in_layer > 0)
+            ++evidence.inline_after_support;
+
+        const size_t z_marker = raw.find("-Z-");
+        if (z_marker == std::string::npos) {
+            evidence.finite = false;
+            return;
+        }
+        const char *start = raw.c_str() + z_marker + 3;
+        char *end = nullptr;
+        const double z = std::strtod(start, &end);
+        if (end == start || !std::isfinite(z))
+            evidence.finite = false;
+        else
+            evidence.inline_layer_z.push_back(z);
+    });
+    return evidence;
+}
+
+TEST_CASE("Farthest-point timelapse snapshots follow support deposition when no object perimeter exists",
+          "[GCode][GCodeBroad][FarthestSupport]")
+{
+    DynamicPrintConfig enabled = base_config();
+    enabled.set_deserialize_strict({
+        {"wall_loops", 0},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"enable_support", true},
+        {"support_type", "normal(auto)"},
+        {"support_on_build_plate_only", false},
+        {"support_base_pattern", "rectilinear"},
+        {"support_filament", 1},
+        {"support_interface_filament", 1},
+        {"support_threshold_angle", 30},
+        {"printer_structure", "corexy"},
+        {"timelapse_type", "0"},
+        {"farthest_point_timelapse", true},
+        {"time_lapse_gcode", "M117 SUPPORT-SNAPSHOT-[layer_num]-INLINE-[timelapse_inline_photo]-Z-[layer_z]\n"},
+    });
+    DynamicPrintConfig control = enabled;
+    control.set_deserialize_strict({
+        {"farthest_point_timelapse", false},
+        {"time_lapse_gcode", "M117 SUPPORT-SNAPSHOT-[layer_num]-INLINE-[timelapse_inline_photo]-Z-[layer_z]\n"},
+    });
+
+    const auto enabled_output = gcode_print_variance_contracts::fresh_custom_mesh_export(
+        enabled, gcode_print_variance_contracts::support_fixture());
+    const auto control_output = gcode_print_variance_contracts::fresh_custom_mesh_export(
+        control, gcode_print_variance_contracts::support_fixture());
+    const SupportTimelapseEvidence enabled_evidence = parse_support_timelapse_output(enabled_output.text, enabled);
+    const SupportTimelapseEvidence control_evidence = parse_support_timelapse_output(control_output.text, control);
+    const Motion enabled_material = motion(enabled_output.text, enabled);
+    const Motion control_material = motion(control_output.text, control);
+
+    REQUIRE(enabled_evidence.finite);
+    REQUIRE(control_evidence.finite);
+    REQUIRE(enabled_evidence.support_extrusions > 0);
+    REQUIRE(control_evidence.support_extrusions > 0);
+    CHECK(enabled_evidence.object_extrusions == 0);
+    CHECK(control_evidence.object_extrusions == 0);
+    REQUIRE(count_text(enabled_output.text, ";TYPE:Support") > 0);
+    REQUIRE(enabled_evidence.snapshots > 0);
+    REQUIRE(control_evidence.snapshots > 0);
+    REQUIRE(enabled_evidence.inline_snapshots > 0);
+    REQUIRE(enabled_evidence.inline_after_support > 0);
+    REQUIRE_FALSE(enabled_evidence.inline_layer_z.empty());
+    for (double layer_z : enabled_evidence.inline_layer_z) {
+        INFO("support snapshot layer z=" << layer_z);
+        CHECK(std::isfinite(layer_z));
+        CHECK(layer_z > 0.0);
+    }
+    require_same_material(control_material, enabled_material);
+    CHECK(control_evidence.inline_snapshots == 0);
+}
+
 } // namespace gcode_broad_contracts
 
 namespace belt_apron_contracts {

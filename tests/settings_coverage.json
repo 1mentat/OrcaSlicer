@@ -3823,6 +3823,87 @@
         "pipeline_oracle"
       ],
       "reason": "The accepted AirFiltration case changes only the completion activation gate from true to false with capability, master and during-print true. The final P3 PWM165 command after deposition disappears while the initial PWM89 command remains before deposition, and ordinary extrusion geometry is preserved. Both boolean values are tested for one filament; per-filament vector indexing and cooling-filter interactions remain unclaimed."
+    },
+    "enable_mixed_color_sublayer": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[MixedFilament]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted703 runs the same public mixed-filament fixture with enable_mixed_color_sublayer=true and false. The enabled route emits mixed sub-layer groups and literal 0.12/0.08 HEIGHT tags, while the disabled route emits no groups, records whole-layer resolutions, and omits those sub-heights. Mixed component, gradient, and filament-vector domains remain unclaimed."
+    },
+    "enable_pre_heating": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GcpPreheat]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted703 \"Preheating is a gate for inserted temperature commands\" processes the same public GCodeProcessor input with enable_pre_heating=false and true. The disabled output contains neither multi-extruder pre-heating nor pre-cooling commands; the enabled output contains both, with the parsed motion/result path still valid. Other preheat timing and filament-marker combinations remain unclaimed."
+    },
+    "seam_slope_inner_walls": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamScopeSettings]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted703 \"Scarf modes distinguish contours and holes for both wall roles\" runs seam_slope_inner_walls=false and true across none/external/all modes and classic/Arachne generators. It preserves role geometry and independently checks rising outer/inner contour and hole moves; the inner-wall rising rows appear only when the boolean is enabled and the mode reaches them. Seam-slope numeric bounds and unrelated wall interactions remain unclaimed."
+    },
+    "support_interface_not_for_body": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[ToolOrderingSupportInterface]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted703 \"Support-only interface fallback honors body exclusion and flush costs\" processes the same two-cap public support fixture with support_interface_not_for_body=false and true. Support volume and non-grid rows remain equal; body-allowed rows use the interface tool alone, while body-excluded rows require both physical tools. Other support-filament and flush-matrix combinations remain unclaimed."
+    },
+    "ironing_angle_fixed": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[IroningAngleFixed]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted703 \"Fixed ironing angle controls inherited solid direction and layer alternation\" exports one cube with paired (ironing_angle_fixed=false, ironing_angle=0) and (true,90) settings. Both outputs have positive ironing motion and material. Relative output must alternate 45/135-degree directions inherited from solid infill, while fixed output must remain at90degrees. Each row has an independent expected direction; this is paired-setting evidence, not an isolated one-factor comparison. Other ironing types, angle ranges and spacing interactions remain unclaimed."
+    },
+    "zaa_dont_alternate_fill_direction": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[ZContouringSettings]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted703 \"Z contouring gates fill-direction alternation\" runs explicit false,false and false,true controls plus true,false and true,true rows on the public Print fixture. The disabled rows must match, while enabled alternating and fixed rows must differ in public fill-direction behavior and every row retains finite positive sparse geometry. This proves both values of the secondary gate; zaa_min_z and perimeter-threshold numeric interactions remain unclaimed."
+    },
+    "fuzzy_skin_mode": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[FuzzySkinModePipeline]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted703 Arachne pipeline test runs displacement, extrusion and combined on the same four-layer cube with a disabled control. Displacement preserves the width range; extrusion increases width while preserving interior XY positions; combined increases width and offsets interior geometry. Displacement itself lacks a positive geometric-offset assertion, so exhaustive mode-specific behavior is not claimed."
+    },
+    "input_shaping_type": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[InputShaping]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted703 RRF pipeline test visits all 13 registered names and checks X-only frequency/damping output, disabled-value omission and material invariance. It checks explicit type tokens for six RRF spellings and default-token omission. Other spellings lack a type-specific output oracle; full enum behavior and firmware acceptance are not claimed."
+    },
+    "support_pillar_connection_mode": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SupportPillarConnection]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted703 SLA pillar connection test exercises zigzag, cross and dynamic through public SLAPrint at 3 and 5 mm head spacing. Cross must add support volume at both distances; dynamic must match zigzag below the explicit 4 mm threshold and cross above it. Slice centroid separation proves distinct pillars and model volume stays unchanged. No full support-settings interaction claim."
     }
   }
 }
