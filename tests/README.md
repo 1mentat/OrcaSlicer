@@ -228,6 +228,24 @@ volumes through public model splitting. Geometry, painting categories, per-volum
 configuration, and source metadata must remain paired after the split. Its
 mutations are in `model_split_painted.json`.
 
+`[TimelapseAllLayers]` checks smooth timelapse through public BBL G-code export
+with objects of different heights. Snapshot positions must stay fixed across
+layers, inside the bed, and clear of both object projections with the configured
+clearance. Its mutations are in `timelapse_all_layers.json`.
+
+`[SolidSkinInfill]` checks locked-zag skin density, depth, and locking overlap
+through material and path length with unchanged perimeters. `[MinimumSparseArea]`
+checks selective solid promotion of a small component. `[TopBottomOverlap]`
+checks bottom, top, and interior terrace fill against fixed perimeters. Their
+mutations are in `infill_settings_active.json`.
+
+`[ArachneWallTransitionMapping]` checks nozzle-relative and scaled parameter
+conversion. `[ArachneWallTransition]` checks physical width redistribution through
+narrow and wide regions. `[ArachneWallResolution]` checks circular wall sampling
+with separate resolution and deviation controls and bounded circumference change.
+Their mutations are in `arachne_wall_transition.json`; parameter mapping alone
+does not establish full settings coverage.
+
 `[PresetBundleSubscribedMultiType]` checks typed subscribed profiles, canonical
 inheritance, missing and unsupported types, and removal of obsolete printer files.
 Its mutations are in `preset_subscribed_multitype.json`.

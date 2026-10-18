@@ -1,3 +1,4 @@
+#include "libslic3r/BoundingBox.hpp"
 #include <array>
 #include <tuple>
 #include <catch2/generators/catch_generators_range.hpp>
@@ -3710,3 +3711,366 @@ TEST_CASE("Infill anchor percentages match equivalent absolute spacing", "[Setti
 }
 
 } // namespace settings_family_contracts
+
+namespace infill_settings_contracts {
+
+struct LockedZagEvidence {
+    size_t paths = 0;
+    double length = 0.0;
+    double flow_length = 0.0;
+    double perimeter_length = 0.0;
+    bool finite = true;
+};
+
+DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, double lock_depth)
+{
+    DynamicPrintConfig config = variance_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "classic"},
+        {"nozzle_diameter", "0.4"},
+        {"resolution", 0.01},
+        {"wall_loops", 2},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "35%"},
+        {"sparse_infill_pattern", "lockedzag"},
+        {"sparse_infill_line_width", 0.4},
+        {"skin_infill_line_width", 0.4},
+        {"skeleton_infill_line_width", 0.4},
+        {"skeleton_infill_density", 10.0},
+        {"minimum_sparse_infill_area", 0.0},
+        {"skin_infill_density", skin_density},
+        {"skin_infill_depth", skin_depth},
+        {"infill_lock_depth", lock_depth},
+        {"infill_wall_overlap", 0.0},
+        {"top_bottom_infill_wall_overlap", 0.0},
+        {"infill_anchor", 0.0},
+        {"infill_anchor_max", 0.0},
+        {"enable_support", false},
+        {"skirt_loops", 0},
+        {"brim_width", 0.0},
+        {"raft_layers", 0},
+    });
+    return config;
+}
+
+LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double lock_depth)
+{
+    const DynamicPrintConfig config = locked_zag_config(skin_density, skin_depth, lock_depth);
+    Print print;
+    Model model;
+    init_print({make_cube(20.0, 20.0, 1.6)}, print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->layer_count() >= 6);
+
+    LockedZagEvidence evidence;
+    const PrintObject &object = *print.objects().front();
+    for (const Layer *layer : object.layers()) {
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->perimeters, [&evidence](const ExtrusionPath &path) {
+                const double length = unscale<double>(path.length());
+                REQUIRE(path.polyline.points.size() >= 2);
+                REQUIRE(std::isfinite(length));
+                REQUIRE(length > 0.0);
+                evidence.perimeter_length += length;
+            });
+            for_each_extrusion_path(region->fills, [&evidence](const ExtrusionPath &path) {
+                if (path.role() != erInternalInfill)
+                    return;
+                const double length = unscale<double>(path.length());
+                REQUIRE(path.polyline.points.size() >= 2);
+                REQUIRE(std::isfinite(length));
+                REQUIRE(length > 0.0);
+                REQUIRE(std::isfinite(path.mm3_per_mm));
+                REQUIRE(path.mm3_per_mm > 0.0);
+                ++evidence.paths;
+                evidence.length += length;
+                evidence.flow_length += length * path.mm3_per_mm;
+            });
+        }
+    }
+    evidence.finite = std::isfinite(evidence.length) &&
+                       std::isfinite(evidence.flow_length) &&
+                       std::isfinite(evidence.perimeter_length);
+    return evidence;
+}
+
+struct SparseComponentEvidence {
+    size_t small_internal = 0;
+    size_t small_solid = 0;
+    size_t large_internal = 0;
+    size_t large_solid = 0;
+    double small_area = 0.0;
+    double large_area = 0.0;
+};
+
+TriangleMesh sparse_component_fixture()
+{
+    TriangleMesh small = make_cube(8.0, 8.0, 1.2);
+    TriangleMesh large = make_cube(14.0, 14.0, 1.2);
+    large.translate(18.0, 0.0, 0.0);
+    small.merge(large);
+    return small;
+}
+
+SparseComponentEvidence run_sparse_component_threshold(double minimum_area)
+{
+    DynamicPrintConfig config = variance_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "classic"},
+        {"nozzle_diameter", "0.4"},
+        {"resolution", 0.01},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "20%"},
+        {"sparse_infill_pattern", "rectilinear"},
+        {"sparse_infill_line_width", 0.4},
+        {"skin_infill_line_width", 0.4},
+        {"skeleton_infill_line_width", 0.4},
+        {"skeleton_infill_density", 25.0},
+        {"minimum_sparse_infill_area", minimum_area},
+        {"infill_wall_overlap", 0.0},
+        {"top_bottom_infill_wall_overlap", 0.0},
+        {"enable_support", false},
+        {"skirt_loops", 0},
+        {"brim_width", 0.0},
+        {"raft_layers", 0},
+    });
+
+    Print print;
+    Model model;
+    init_print({sparse_component_fixture()}, print, model, config, nullptr, false);
+    REQUIRE(print.validate().string.empty());
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->layer_count() >= 6);
+
+    const PrintObject &object = *print.objects().front();
+    const BoundingBoxf3 box = object.instances().front().get_bounding_box();
+    CHECK_THAT(box.min.x(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(box.min.y(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(box.max.x(), Catch::Matchers::WithinAbs(32.0, 1e-6));
+    CHECK_THAT(box.max.y(), Catch::Matchers::WithinAbs(14.0, 1e-6));
+    CHECK_THAT(box.max.z(), Catch::Matchers::WithinAbs(1.2, 1e-6));
+
+    SparseComponentEvidence evidence;
+    for (const Layer *layer : object.layers()) {
+        for (const LayerRegion *region : layer->regions()) {
+            for (const Surface &surface : region->fill_surfaces.surfaces) {
+                const double area = unscale<double>(unscale<double>(surface.expolygon.area()));
+                const Point model_center = surface.expolygon.contour.bounding_box().center() + object.center_offset();
+                const double center_x = unscale<double>(model_center.x());
+                const bool small = center_x < 10.0;
+                if (small) {
+                    REQUIRE(center_x >= -0.01);
+                    REQUIRE(center_x <= 8.01);
+                    evidence.small_area += area;
+                } else {
+                    REQUIRE(center_x >= 17.99);
+                    REQUIRE(center_x <= 32.01);
+                    evidence.large_area += area;
+                }
+                if (small && surface.surface_type == stInternal)
+                    ++evidence.small_internal;
+                if (small && surface.surface_type == stInternalSolid)
+                    ++evidence.small_solid;
+                if (!small && surface.surface_type == stInternal)
+                    ++evidence.large_internal;
+                if (!small && surface.surface_type == stInternalSolid)
+                    ++evidence.large_solid;
+                REQUIRE(std::isfinite(area));
+                REQUIRE(area > 0.0);
+            }
+        }
+    }
+    REQUIRE(std::isfinite(evidence.small_area));
+    REQUIRE(std::isfinite(evidence.large_area));
+    REQUIRE(evidence.small_area > 0.0);
+    REQUIRE(evidence.large_area > 0.0);
+    return evidence;
+}
+
+TriangleMesh overlap_step_fixture()
+{
+    TriangleMesh base = make_cube(20.0, 20.0, 1.2);
+    TriangleMesh upper = make_cube(12.0, 12.0, 0.8);
+    upper.translate(4.0, 4.0, 1.19);
+    base.merge(upper);
+    return base;
+}
+
+struct OverlapEvidence {
+    size_t layers = 0;
+    size_t terrace_top_surfaces = 0;
+    double top_surface_area = 0.0;
+    double bottom_surface_area = 0.0;
+    double top_length = 0.0;
+    double terrace_top_length = 0.0;
+    double bottom_length = 0.0;
+    double perimeter_length = 0.0;
+};
+
+OverlapEvidence run_top_bottom_overlap(double overlap)
+{
+    DynamicPrintConfig config = variance_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "classic"},
+        {"nozzle_diameter", "0.4"},
+        {"resolution", 0.01},
+        {"wall_loops", 2},
+        {"top_shell_layers", 2},
+        {"bottom_shell_layers", 2},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "15%"},
+        {"sparse_infill_pattern", "rectilinear"},
+        {"sparse_infill_line_width", 0.4},
+        {"skin_infill_line_width", 0.4},
+        {"skeleton_infill_line_width", 0.4},
+        {"skeleton_infill_density", 25.0},
+        {"top_surface_pattern", "rectilinear"},
+        {"bottom_surface_pattern", "rectilinear"},
+        {"internal_solid_infill_pattern", "rectilinear"},
+        {"infill_wall_overlap", 0.0},
+        {"top_bottom_infill_wall_overlap", overlap},
+        {"minimum_sparse_infill_area", 0.0},
+        {"enable_support", false},
+        {"skirt_loops", 0},
+        {"brim_width", 0.0},
+        {"raft_layers", 0},
+    });
+
+    Print print;
+    Model model;
+    init_print({overlap_step_fixture()}, print, model, config, nullptr, false);
+    REQUIRE(print.validate().string.empty());
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->layer_count() >= 8);
+
+    const PrintObject &object = *print.objects().front();
+    OverlapEvidence evidence;
+    evidence.layers = object.layers().size();
+    const double model_max_z = object.instances().front().get_bounding_box().max.z();
+    for (const Layer *layer : object.layers()) {
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->perimeters, [&evidence](const ExtrusionPath &path) {
+                const double length = unscale<double>(path.length());
+                REQUIRE(std::isfinite(length));
+                REQUIRE(length > 0.0);
+                evidence.perimeter_length += length;
+            });
+            for (const Surface &surface : region->fill_surfaces.surfaces) {
+                const double area = unscale<double>(unscale<double>(surface.expolygon.area()));
+                REQUIRE(std::isfinite(area));
+                REQUIRE(area > 0.0);
+                if (surface.surface_type == stTop) {
+                    evidence.top_surface_area += area;
+                    // A top surface below the model's final layer is the exposed
+                    // terrace of the stepped fixture; it proves the top inset
+                    // branch has a real upper_slices context.
+                    if (layer->print_z + 0.3 < model_max_z)
+                        ++evidence.terrace_top_surfaces;
+                }
+                if (surface.surface_type == stBottom)
+                    evidence.bottom_surface_area += area;
+            }
+            for_each_extrusion_path(region->fills, [&evidence, layer, model_max_z](const ExtrusionPath &path) {
+                const double length = unscale<double>(path.length());
+                REQUIRE(std::isfinite(length));
+                REQUIRE(length > 0.0);
+                if (path.role() == erTopSolidInfill) {
+                    evidence.top_length += length;
+                    if (layer->print_z + 0.3 < model_max_z)
+                        evidence.terrace_top_length += length;
+                }
+                if (path.role() == erBottomSurface)
+                    evidence.bottom_length += length;
+            });
+        }
+    }
+    REQUIRE(evidence.layers >= 8);
+    REQUIRE(evidence.terrace_top_surfaces > 0);
+    REQUIRE(evidence.top_surface_area > 0.0);
+    REQUIRE(evidence.bottom_surface_area > 0.0);
+    REQUIRE(evidence.top_length > 0.0);
+    REQUIRE(evidence.terrace_top_length > 0.0);
+    REQUIRE(evidence.bottom_length > 0.0);
+    REQUIRE(evidence.perimeter_length > 0.0);
+    return evidence;
+}
+
+} // namespace infill_settings_contracts
+
+TEST_CASE("Locked-zag skin controls change distinct public fill properties",
+          "[SettingsVariance][SolidSkinInfill]")
+{
+    const auto base = infill_settings_contracts::run_locked_zag(35.0, 1.0, 0.0);
+    const auto dense = infill_settings_contracts::run_locked_zag(70.0, 1.0, 0.0);
+    const auto deep = infill_settings_contracts::run_locked_zag(35.0, 2.0, 0.0);
+    const auto locked = infill_settings_contracts::run_locked_zag(35.0, 1.0, 0.8);
+
+    for (const auto &row : {base, dense, deep, locked}) {
+        REQUIRE(row.finite);
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.length > 0.0);
+        REQUIRE(row.flow_length > 0.0);
+        REQUIRE(row.perimeter_length > 0.0);
+    }
+
+    // Density controls the requested skin/skeleton fill density, so the dense
+    // row must carry more internal material on this fixed footprint.
+    REQUIRE(dense.length > base.length + 0.05);
+    REQUIRE(dense.flow_length > base.flow_length + 0.01);
+    // A deeper skin band leaves more cross-skin material at the configured
+    // 35% skin density, while lock depth expands the lower-density skeleton
+    // region. Both directional changes are part of the FillLockedZag contract.
+    REQUIRE(deep.length > base.length + 0.05);
+    REQUIRE(deep.flow_length > base.flow_length + 0.01);
+    REQUIRE(locked.length > base.length + 0.05);
+    REQUIRE(locked.flow_length > base.flow_length + 0.01);
+    for (const auto &row : {dense, deep, locked})
+        CHECK_THAT(row.perimeter_length, Catch::Matchers::WithinAbs(base.perimeter_length, 0.01));
+}
+
+TEST_CASE("Minimum sparse area promotes only the analytically small component",
+          "[SettingsVariance][MinimumSparseArea]")
+{
+    const auto baseline = infill_settings_contracts::run_sparse_component_threshold(0.0);
+    const auto thresholded = infill_settings_contracts::run_sparse_component_threshold(80.0);
+
+    REQUIRE(baseline.small_internal > 0);
+    REQUIRE(baseline.small_solid == 0);
+    REQUIRE(baseline.large_internal > 0);
+    REQUIRE(thresholded.small_solid > 0);
+    CHECK(thresholded.small_internal == 0);
+    REQUIRE(thresholded.large_internal > 0);
+    CHECK(thresholded.large_solid == baseline.large_solid);
+    // The model bounding box and all model-space surface centers are checked
+    // in each row; no serialized-surface area tolerance is used as the oracle.
+}
+
+TEST_CASE("Top and bottom overlap changes solid fill while preserving the model perimeter",
+          "[SettingsVariance][TopBottomOverlap]")
+{
+    const auto no_overlap = infill_settings_contracts::run_top_bottom_overlap(0.0);
+    const auto overlap = infill_settings_contracts::run_top_bottom_overlap(50.0);
+
+    REQUIRE(overlap.layers == no_overlap.layers);
+    CHECK_THAT(overlap.perimeter_length, Catch::Matchers::WithinAbs(no_overlap.perimeter_length, 0.01));
+    REQUIRE(overlap.top_length > no_overlap.top_length + 0.05);
+    // The terrace has an upper layer, so this also covers the interior top-overlap branch.
+    REQUIRE(overlap.terrace_top_length > no_overlap.terrace_top_length + 0.05);
+    REQUIRE(std::abs(overlap.bottom_length - no_overlap.bottom_length) > 0.05);
+    CHECK(overlap.top_surface_area > 0.0);
+    CHECK(overlap.bottom_surface_area > 0.0);
+}

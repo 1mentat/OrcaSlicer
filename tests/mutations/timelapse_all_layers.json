@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary assertion probes for the public smooth-timelapse all-layer position contract; runtime kill status remains pending native execution.",
+  "mutants": [
+    {
+      "id": "timelapse-all-layer-dispatch-disabled",
+      "path": "src/libslic3r/GCode/TimelapsePosPicker.cpp",
+      "old": "if (m_based_on_all_layer)",
+      "new": "if (false)",
+      "test_filter": "^TimelapseAllLayers$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Force smooth timelapse through the current-layer picker. The fixture still exercises a public export and checks the smooth all-layer safe-position contract; this is a source-faithful probe whose kill status must be measured rather than assumed.",
+      "actual_old_occurrences": 1,
+      "source_sha256": "7bd631244422f5eb1dccef94cc36a02d5b11d4e0584c83d87dc9cf041e3c467e"
+    },
+    {
+      "id": "timelapse-all-layer-safe-position-dropped",
+      "path": "src/libslic3r/GCode/TimelapsePosPicker.cpp",
+      "old": "m_all_layer_pos = pick_pos_internal(starting_pos, safe_area, {}, by_object);",
+      "new": "m_all_layer_pos = DefaultTimelapsePos;",
+      "test_filter": "^TimelapseAllLayers$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Drop the calculated safe position. The fixture's SAFE-1, non-default, stable, bed-bound, and outside-both-object-box assertions should fail as ordinary test assertions.",
+      "actual_old_occurrences": 1,
+      "source_sha256": "7bd631244422f5eb1dccef94cc36a02d5b11d4e0584c83d87dc9cf041e3c467e"
+    }
+  ]
+}

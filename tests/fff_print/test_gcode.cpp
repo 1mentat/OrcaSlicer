@@ -7010,3 +7010,141 @@ TEST_CASE("Public PA line export emits calibrated lines and optional number laye
 
 } // namespace calibration_gcode_followup
 } // namespace gcode_print_variance_contracts
+
+namespace gcode_print_variance_contracts {
+namespace timelapse_all_layers_contracts {
+
+namespace {
+
+ExportedPrint export_all_layer_fixture(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    // Set the public BBL marker before init_print applies the public configuration.
+    print.is_BBL_printer() = true;
+    TriangleMesh short_object = make_cube(10., 10., 0.4);
+    TriangleMesh tall_object = make_cube(10., 10., 2.0);
+    tall_object.translate(65., 0., 0.);
+
+    Test::init_print(std::vector<TriangleMesh>{std::move(short_object), std::move(tall_object)},
+                     print, model, config, nullptr, false);
+
+    require_valid(print);
+
+    const auto &objects = print.objects();
+    REQUIRE(objects.size() == 2);
+    REQUIRE(objects[0] != nullptr);
+    REQUIRE(objects[1] != nullptr);
+    REQUIRE(objects[0]->instances().size() == 1);
+    REQUIRE(objects[1]->instances().size() == 1);
+    const BoundingBoxf3 first_box = objects[0]->instances().front().get_bounding_box();
+    const BoundingBoxf3 second_box = objects[1]->instances().front().get_bounding_box();
+    CHECK_THAT(first_box.min.x(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(first_box.min.y(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(first_box.max.x(), Catch::Matchers::WithinAbs(10.0, 1e-6));
+    CHECK_THAT(first_box.max.y(), Catch::Matchers::WithinAbs(10.0, 1e-6));
+    CHECK_THAT(first_box.max.z(), Catch::Matchers::WithinAbs(0.4, 1e-6));
+    CHECK_THAT(second_box.min.x(), Catch::Matchers::WithinAbs(65.0, 1e-6));
+    CHECK_THAT(second_box.min.y(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(second_box.max.x(), Catch::Matchers::WithinAbs(75.0, 1e-6));
+    CHECK_THAT(second_box.max.y(), Catch::Matchers::WithinAbs(10.0, 1e-6));
+    CHECK_THAT(second_box.max.z(), Catch::Matchers::WithinAbs(2.0, 1e-6));
+
+    return export_print(print);
+}
+
+std::vector<Vec3d> all_layer_snapshot_positions(const std::string &text,
+                                                const DynamicPrintConfig &config)
+{
+    std::vector<Vec3d> positions;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&positions](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("M117") || line.raw().find("ALL-LAYER") == std::string::npos)
+            return;
+        positions.emplace_back(state.x(), state.y(), state.z());
+    });
+    return positions;
+}
+
+bool outside_xy_box(const Vec3d &position, const BoundingBoxf3 &box, double clearance)
+{
+    const bool outside_x = position.x() < box.min.x() - clearance || position.x() > box.max.x() + clearance;
+    const bool outside_y = position.y() < box.min.y() - clearance || position.y() > box.max.y() + clearance;
+    return outside_x || outside_y;
+}
+
+DynamicPrintConfig all_layer_config()
+{
+    DynamicPrintConfig config = base_config();
+    // One nozzle uses the explicitly configured bed without per-extruder restrictions.
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups{});
+    config.set_deserialize_strict({
+        {"nozzle_diameter", "0.4"},
+        {"printable_area", "0x0,220x0,220x220,0x220"},
+        {"printer_structure", "corexy"},
+        {"timelapse_type", "1"},
+        {"time_lapse_gcode", "G0 X{timelapse_pos_x} Y{timelapse_pos_y}\nM117 ALL-LAYER-[layer_num]-SAFE-{has_timelapse_safe_pos ? 1 : 0}\n"},
+        {"gcode_comments", true},
+        {"enable_prime_tower", false},
+        {"enable_support", false},
+        {"extruder_clearance_radius", 20.0},
+        {"extruder_clearance_height_to_rod", 2.0},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "15%"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+    });
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("Smooth timelapse keeps one bed-safe position across all printed layers",
+          "[GCode][GCodeExportWorkflows][TimelapseAllLayers]")
+{
+    const DynamicPrintConfig smooth = all_layer_config();
+    const auto output = export_all_layer_fixture(smooth);
+    const auto positions = all_layer_snapshot_positions(output.text, smooth);
+
+    const ConfigOptionFloat *clearance_radius = smooth.option<ConfigOptionFloat>("extruder_clearance_radius");
+    const ConfigOptionFloat *clearance_height = smooth.option<ConfigOptionFloat>("extruder_clearance_height_to_rod");
+    REQUIRE(clearance_radius != nullptr);
+    REQUIRE(clearance_height != nullptr);
+    CHECK_THAT(clearance_radius->value, Catch::Matchers::WithinAbs(20.0, 1e-6));
+    CHECK_THAT(clearance_height->value, Catch::Matchers::WithinAbs(2.0, 1e-6));
+
+    REQUIRE(positions.size() >= 6);
+    CHECK(count_text(output.text, "SAFE-1") == positions.size());
+    CHECK(count_text(output.text, "SAFE-0") == 0);
+
+    const Vec3d first = positions.front();
+    const bool non_default = std::abs(first.x()) > 0.5 || std::abs(first.y()) > 0.5;
+    CHECK(non_default);
+    // pick_pos_for_all_layer expands each non-ByObject projection by radius / 2.
+    // The generated placeholder stores integer coordinates; subtract 1 mm as a
+    // conservative truncation allowance, rather than claiming extra clearance.
+    const double object_clearance = clearance_radius->value / 2.0 - 1.0;
+    REQUIRE(object_clearance > 0.0);
+    const BoundingBoxf3 first_box(Vec3d(0., 0., 0.), Vec3d(10., 10., 0.4));
+    const BoundingBoxf3 second_box(Vec3d(65., 0., 0.), Vec3d(75., 10., 2.0));
+    for (const Vec3d &position : positions) {
+        INFO("snapshot position=" << position.x() << "," << position.y() << "," << position.z());
+        CHECK(std::isfinite(position.x()));
+        CHECK(std::isfinite(position.y()));
+        CHECK(std::isfinite(position.z()));
+        CHECK(position.x() >= 0.0);
+        CHECK(position.x() <= 220.0);
+        CHECK(position.y() >= 0.0);
+        CHECK(position.y() <= 220.0);
+        CHECK_THAT(position.x(), Catch::Matchers::WithinAbs(first.x(), 1e-6));
+        CHECK_THAT(position.y(), Catch::Matchers::WithinAbs(first.y(), 1e-6));
+        CHECK(outside_xy_box(position, first_box, object_clearance));
+        CHECK(outside_xy_box(position, second_box, object_clearance));
+    }
+}
+
+} // namespace timelapse_all_layers_contracts
+} // namespace gcode_print_variance_contracts

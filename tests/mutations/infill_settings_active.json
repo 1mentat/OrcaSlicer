@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "base_commit": "71854be25a9b2d2861ee19c6d37f7a53a95ad220",
+  "test_file": "tests/fff_print/test_settings_variance.cpp",
+  "test_filters": [
+    "^SolidSkinInfill$",
+    "^MinimumSparseArea$",
+    "^TopBottomOverlap$"
+  ],
+  "description": "Private ordinary-assertion probes for pinned locked-zag skin/lock geometry, sparse-area promotion, and stepped top/bottom overlap.",
+  "mutants": [
+    {
+      "id": "solid-skin-locked-zag-depth-forwarded",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "            params.skin_infill_depth = scale_(region_config.skin_infill_depth);",
+      "new": "            params.skin_infill_depth = 0.f;",
+      "expected_matches": 1,
+      "test_filter": "^SolidSkinInfill$",
+      "ordinary_assertion_only": true,
+      "description": "Drop the public skin-depth value at the locked-zag FillParams gate; the independent deep-depth physical-length/flow row must lose its contrast.",
+      "source_anchor_sha256": "54f66dc60cb6954a0bd656bde0ebd802740a182ddc4d328595a23a4822dfc792"
+    },
+    {
+      "id": "solid-skin-density-forwarding-disabled",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t\t\t\tappend_density_param(lock_param.skin_density_params, float(0.01 * region_config.skin_infill_density), surface.expolygon);",
+      "new": "\t\t\t\t\tappend_density_param(lock_param.skin_density_params, 0.01f, surface.expolygon);",
+      "expected_matches": 1,
+      "test_filter": "^SolidSkinInfill$",
+      "ordinary_assertion_only": true,
+      "description": "Replace the public skin density with a constant at the locked-zag parameter gate; the dense row must lose its independent material contrast.",
+      "source_anchor_sha256": "7690ad49422e202b80f85ab55cf06369fef4dee885ccc40b0695cc6e89d7e770"
+    },
+    {
+      "id": "solid-sparse-threshold-disabled",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "            if (ex_polygon.area() <= min_area) {",
+      "new": "            if (false) {",
+      "expected_matches": 1,
+      "test_filter": "^MinimumSparseArea$",
+      "ordinary_assertion_only": true,
+      "description": "Disable promotion of the analytically sub-threshold small component; its required internal-solid state must disappear.",
+      "source_anchor_sha256": "ad40b854052ccc25183d8b735e3b30a0783fd8662a01e6e4d73c045816a4f8da"
+    },
+    {
+      "id": "solid-top-overlap-ignored",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "                top_infill_peri_overlap = coord_t(scale_(this->config->top_bottom_infill_wall_overlap.get_abs_value(unscale<double>(inset + solid_infill_spacing / 2))));",
+      "new": "                top_infill_peri_overlap = coord_t(0);",
+      "expected_matches": 1,
+      "test_filter": "^TopBottomOverlap$",
+      "ordinary_assertion_only": true,
+      "description": "Ignore top solid wall overlap at its unique assignment; the stepped fixture requires a terrace-top surface and must lose its top solid-fill contrast.",
+      "source_anchor_sha256": "59c0781aa735e5fc948d409f6542ae6b26071f08f5416478cbcf30530824b51e"
+    }
+  ]
+}

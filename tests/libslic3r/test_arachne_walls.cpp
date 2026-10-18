@@ -1,3 +1,5 @@
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include "libslic3r/BoundingBox.hpp"
 // Test file for Arachne wall generation
 // 
 // Tests for duplicate/coinciding wall segment detection in Arachne output.
@@ -389,4 +391,207 @@ TEST_CASE("Fuzzy skin displacement mode leaves widths untouched", "[Arachne][Fuz
 
     REQUIRE(loop.size() > 100);
     CHECK(std::all_of(loop.begin(), loop.end(), [width](const auto& j) { return j.w == width; }));
+}
+
+namespace arachne_wall_transition_contracts {
+
+struct ConfiguredWall {
+    PrintConfig       print;
+    PrintObjectConfig object;
+};
+
+ConfiguredWall wall_config(double transition_length_percent,
+                           double filter_deviation_percent,
+                           double transition_angle,
+                           int    distribution_count,
+                           double maximum_resolution_mm,
+                           double maximum_deviation_mm)
+{
+    ConfiguredWall config;
+    config.print.nozzle_diameter.values = {0.4};
+    config.object.layer_height.value = 0.2;
+    config.object.min_feature_size.value = 25.;
+    config.object.min_bead_width.value = 50.;
+    config.object.min_length_factor.value = 0.5;
+    config.object.wall_transition_length.value = transition_length_percent;
+    config.object.wall_transition_filter_deviation.value = filter_deviation_percent;
+    config.object.wall_transition_angle.value = transition_angle;
+    config.object.wall_distribution_count.value = distribution_count;
+    config.object.wall_maximum_resolution.value = maximum_resolution_mm;
+    config.object.wall_maximum_deviation.value = maximum_deviation_mm;
+    return config;
+}
+
+WallToolPathsParams params_for(const ConfiguredWall &config)
+{
+    return make_paths_params(1, config.object, config.print);
+}
+
+Polygon plus_outline()
+{
+    constexpr double fixture_scale = 0.3;
+    Polygon outline;
+    outline.points.emplace_back(Point::new_scale(0., 0.));
+    outline.points.emplace_back(Point::new_scale(24. * fixture_scale, 0.));
+    outline.points.emplace_back(Point::new_scale(24. * fixture_scale, 8. * fixture_scale));
+    outline.points.emplace_back(Point::new_scale(16. * fixture_scale, 8. * fixture_scale));
+    outline.points.emplace_back(Point::new_scale(16. * fixture_scale, 16. * fixture_scale));
+    outline.points.emplace_back(Point::new_scale(24. * fixture_scale, 16. * fixture_scale));
+    outline.points.emplace_back(Point::new_scale(24. * fixture_scale, 24. * fixture_scale));
+    outline.points.emplace_back(Point::new_scale(0., 24. * fixture_scale));
+    outline.points.emplace_back(Point::new_scale(0., 16. * fixture_scale));
+    outline.points.emplace_back(Point::new_scale(8. * fixture_scale, 16. * fixture_scale));
+    outline.points.emplace_back(Point::new_scale(8. * fixture_scale, 8. * fixture_scale));
+    outline.points.emplace_back(Point::new_scale(0., 8. * fixture_scale));
+    return outline;
+}
+
+Polygon round_outline()
+{
+    Polygon outline;
+    constexpr int points = 256;
+    constexpr double radius = 12.;
+    for (int i = 0; i < points; ++i) {
+        const double angle = 2. * M_PI * double(i) / double(points);
+        outline.points.emplace_back(Point::new_scale(12. + radius * std::cos(angle),
+                                                       12. + radius * std::sin(angle)));
+    }
+    return outline;
+}
+
+struct WallSummary {
+    size_t lines = 0;
+    size_t junctions = 0;
+    double length_mm = 0.;
+    double width_area_mm2 = 0.;
+    double width_squared_length_mm3 = 0.;
+    double minimum_width_mm = 1e9;
+    double maximum_width_mm = 0.;
+    double width_span_mm = 0.;
+    bool finite = true;
+    bool inside_fixture = true;
+};
+
+WallSummary summarize(const std::vector<VariableWidthLines> &toolpaths,
+                      const BoundingBox &fixture_bounds)
+{
+    const double fixture_min_x = unscaled<double>(fixture_bounds.min.x()) - 0.05;
+    const double fixture_max_x = unscaled<double>(fixture_bounds.max.x()) + 0.05;
+    const double fixture_min_y = unscaled<double>(fixture_bounds.min.y()) - 0.05;
+    const double fixture_max_y = unscaled<double>(fixture_bounds.max.y()) + 0.05;
+    WallSummary summary;
+    for (const VariableWidthLines &inset : toolpaths) {
+        for (const ExtrusionLine &line : inset) {
+            if (line.empty())
+                continue;
+            ++summary.lines;
+            summary.junctions += line.junctions.size();
+            for (const ExtrusionJunction &junction : line.junctions) {
+                const double x = unscaled<double>(junction.p.x());
+                const double y = unscaled<double>(junction.p.y());
+                const double w = unscaled<double>(junction.w);
+                summary.minimum_width_mm = std::min(summary.minimum_width_mm, w);
+                summary.maximum_width_mm = std::max(summary.maximum_width_mm, w);
+                summary.finite &= std::isfinite(x) && std::isfinite(y) && std::isfinite(w);
+                summary.inside_fixture &= x >= fixture_min_x && x <= fixture_max_x &&
+                                           y >= fixture_min_y && y <= fixture_max_y;
+            }
+            for (size_t i = 1; i < line.junctions.size(); ++i) {
+                const double segment_mm = unscaled<double>((line.junctions[i].p - line.junctions[i - 1].p).cast<double>().norm());
+                const double mean_width_mm = 0.5 * (unscaled<double>(line.junctions[i].w) +
+                                                     unscaled<double>(line.junctions[i - 1].w));
+                summary.length_mm += segment_mm;
+                summary.width_area_mm2 += segment_mm * mean_width_mm;
+                const double w0 = unscaled<double>(line.junctions[i - 1].w);
+                const double w1 = unscaled<double>(line.junctions[i].w);
+                // Integral of the squared, linearly interpolated width along the segment.
+                // This distinguishes width redistribution even when total material is conserved.
+                summary.width_squared_length_mm3 += segment_mm * (w0 * w0 + w0 * w1 + w1 * w1) / 3.;
+            }
+        }
+    }
+    summary.width_span_mm = summary.maximum_width_mm - summary.minimum_width_mm;
+    return summary;
+}
+
+WallSummary generate(const Polygon &outline, const WallToolPathsParams &params)
+{
+    const double spacing_factor = 1. - 0.25 * M_PI;
+    const coord_t bead_width_0 = scaled<coord_t>(0.42 - 0.2 * spacing_factor);
+    const coord_t bead_width_x = scaled<coord_t>(0.45 - 0.2 * spacing_factor);
+    const Polygons outlines{outline};
+    WallToolPaths walls(outlines, bead_width_0, bead_width_x, 4, 0, 0.2, params);
+    return summarize(walls.getToolPaths(), outline.bounding_box());
+}
+
+} // namespace arachne_wall_transition_contracts
+
+TEST_CASE("Arachne wall settings map to the active wall-path controls", "[ArachneWallTransitionMapping]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const ConfiguredWall config = wall_config(250., 75., 37., 3, 0.06, 0.012);
+    const WallToolPathsParams params = params_for(config);
+
+    CHECK_THAT(params.wall_transition_length, Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT(params.wall_transition_filter_deviation, Catch::Matchers::WithinAbs(0.3, 1e-6));
+    CHECK_THAT(params.wall_transition_angle, Catch::Matchers::WithinAbs(37., 1e-6));
+    CHECK(params.wall_distribution_count == 3);
+    CHECK(params.wall_maximum_resolution == scaled<coord_t>(0.06));
+    CHECK(params.wall_maximum_deviation == scaled<coord_t>(0.012));
+}
+
+TEST_CASE("Arachne wall transitions preserve the scaled plus outline while changing wall geometry", "[ArachneWallTransition]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const Polygon outline = plus_outline();
+    const WallSummary baseline = generate(outline, params_for(wall_config(100., 25., 10., 1, 0.5, 0.025)));
+    const WallSummary distributed = generate(outline, params_for(wall_config(100., 25., 10., 3, 0.5, 0.025)));
+    const WallSummary long_transition = generate(outline, params_for(wall_config(300., 25., 10., 3, 0.5, 0.025)));
+
+    for (const WallSummary &row : {baseline, distributed, long_transition}) {
+        REQUIRE(row.lines > 0);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.minimum_width_mm > 0.05);
+        CHECK(row.width_span_mm > 0.05);
+        CHECK(row.length_mm > 0.5);
+    }
+
+    const bool distribution_changed = std::abs(baseline.width_squared_length_mm3 - distributed.width_squared_length_mm3) > 1e-4 ||
+                                      std::abs(baseline.maximum_width_mm - distributed.maximum_width_mm) > 1e-4 ||
+                                      std::abs(baseline.width_area_mm2 - distributed.width_area_mm2) > 1e-3;
+    CHECK(distribution_changed);
+    const bool transition_changed = std::abs(distributed.width_squared_length_mm3 - long_transition.width_squared_length_mm3) > 1e-4 ||
+                                    std::abs(distributed.maximum_width_mm - long_transition.maximum_width_mm) > 1e-4 ||
+                                    std::abs(distributed.width_area_mm2 - long_transition.width_area_mm2) > 1e-3;
+    CHECK(transition_changed);
+
+
+}
+
+TEST_CASE("Arachne wall resolution preserves a rounded wall while simplifying its sampling", "[ArachneWallResolution]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const Polygon outline = round_outline();
+    const WallSummary fine = generate(outline, params_for(wall_config(100., 25., 10., 1, 0.005, 0.005)));
+    const WallSummary coarse_resolution = generate(outline, params_for(wall_config(100., 25., 10., 1, 0.5, 0.005)));
+    const WallSummary coarse_deviation = generate(outline, params_for(wall_config(100., 25., 10., 1, 0.005, 0.05)));
+    const WallSummary coarse = generate(outline, params_for(wall_config(100., 25., 10., 1, 0.5, 0.05)));
+
+    for (const WallSummary &row : {fine, coarse_resolution, coarse_deviation, coarse}) {
+        REQUIRE(row.lines == 4);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.minimum_width_mm > 0.05);
+        CHECK(row.length_mm > 1.);
+    }
+    CHECK(fine.junctions > coarse_resolution.junctions);
+    CHECK(coarse_deviation.junctions > coarse.junctions);
+
+    // Four convex circular tracks: their circumference changes by at most
+    // 2*pi times a radial change. Include both rows' deviation budgets.
+    const double length_budget_mm = 4. * 2. * M_PI * (0.005 + 0.05);
+    CHECK_THAT(fine.length_mm, Catch::Matchers::WithinAbs(coarse.length_mm, length_budget_mm));
+    REQUIRE(fine.width_area_mm2 > 0.);
+    REQUIRE(coarse.width_area_mm2 > 0.);
 }
