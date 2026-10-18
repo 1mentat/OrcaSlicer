@@ -7712,3 +7712,171 @@ TEST_CASE("BBS omits calibration thumbnails when static archive output is disabl
 
 
 } // namespace bbs_3mf_import_metadata_contracts
+
+namespace bbs_model_settings_contracts {
+
+using namespace Slic3r;
+using namespace bbs_archive_contracts;
+
+namespace {
+
+void store_archive_with_model_settings(const std::string &path, bool foreign)
+{
+    ScopedTemporaryDir backup("orca_3mf_model_settings_store");
+    Model source;
+    make_model(source, false);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    store_model(path, source, config, plates);
+
+    if (!foreign)
+        return;
+
+    size_t marker_replacements = 0;
+    bool residual_marker = false;
+    REQUIRE(rewrite_3mf_entries(path, [&marker_replacements, &residual_marker](std::string &name, std::string &data) {
+        if (name != "3D/3dmodel.model")
+            return false;
+
+        const std::array<std::pair<const char *, const char *>, 4> markers{{
+            {"<metadata name=\"Application\">BambuStudio-", "<metadata name=\"Application\">ThirdParty-"},
+            {"<metadata name=\"OrcaSlicer\">", "<metadata name=\"ThirdParty:Generator\">"},
+            {"<metadata name=\"BambuStudio:3mfVersion\">", "<metadata name=\"ThirdParty:Version3mf\">"},
+            {"<metadata name=\"bamboo_slicer:Version3mf\">", "<metadata name=\"ThirdParty:LegacyVersion3mf\">"},
+        }};
+        bool changed = false;
+        for (const auto &[from, to] : markers) {
+            size_t offset = 0;
+            while ((offset = data.find(from, offset)) != std::string::npos) {
+                const std::string from_text(from);
+                const std::string to_text(to);
+                data.replace(offset, from_text.size(), to_text);
+                offset += to_text.size();
+                ++marker_replacements;
+                changed = true;
+            }
+        }
+        for (const auto &[from, to] : markers)
+            if (data.find(from) != std::string::npos)
+                residual_marker = true;
+        return changed;
+    }));
+    REQUIRE(marker_replacements >= 3);
+    REQUIRE_FALSE(residual_marker);
+
+}
+
+void corrupt_model_settings(const std::string &path)
+{
+    REQUIRE(rewrite_3mf_entries(path, [](std::string &name, std::string &data) {
+        if (name != "Metadata/model_settings.config")
+            return false;
+        data = "<config><broken";
+        return true;
+    }));
+}
+
+void check_same_box(const BoundingBoxf3 &actual, const BoundingBoxf3 &expected)
+{
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK_THAT(double(actual.min[axis]), Catch::Matchers::WithinAbs(double(expected.min[axis]), 1e-5));
+        CHECK_THAT(double(actual.max[axis]), Catch::Matchers::WithinAbs(double(expected.max[axis]), 1e-5));
+    }
+}
+
+} // namespace
+
+TEST_CASE("BBS rejects malformed model settings in native archives",
+          "[3MF][Bbs3mfImportValidation][Errors]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_archive_with_model_settings(archive.string(), false);
+    corrupt_model_settings(archive.string());
+
+    LoadedProject loaded;
+    Model loaded_model;
+    CHECK_FALSE(load_model(archive.string(), loaded_model, loaded));
+}
+
+TEST_CASE("BBS tolerates malformed model settings in foreign archives",
+          "[3MF][Bbs3mfImportValidation][Errors][Foreign]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_archive_with_model_settings(archive.string(), true);
+
+    // Establish that all generator/version markers were neutralized while the archive is valid.
+    LoadedProject valid_loaded;
+    Model valid_model;
+    REQUIRE(load_model(archive.string(), valid_model, valid_loaded));
+    CHECK_FALSE(valid_loaded.is_bbl);
+    CHECK_FALSE(valid_loaded.is_orca);
+    REQUIRE(valid_model.objects.size() == 2);
+    const BoundingBoxf3 valid_box = valid_model.mesh().bounding_box();
+    const double valid_volume = its_volume(valid_model.mesh().its);
+    const size_t valid_facets = valid_model.mesh().facets_count();
+    REQUIRE(valid_facets > 0);
+    REQUIRE(valid_volume > 0.);
+
+    corrupt_model_settings(archive.string());
+
+    LoadedProject loaded;
+    Model loaded_model;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    CHECK_FALSE(loaded.is_bbl);
+    CHECK_FALSE(loaded.is_orca);
+    REQUIRE(loaded_model.objects.size() == 2);
+    CHECK(loaded_model.mesh().facets_count() == valid_facets);
+    CHECK_THAT(its_volume(loaded_model.mesh().its), Catch::Matchers::WithinAbs(valid_volume, 1e-5));
+    check_same_box(loaded_model.mesh().bounding_box(), valid_box);
+    for (const ModelObject *object : loaded_model.objects) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(!object->volumes.empty());
+        CHECK(its_volume(object->raw_mesh().its) > 0.);
+    }
+}
+
+TEST_CASE("BBS LoadModel skips malformed project settings before configuration parsing",
+          "[3MF][Bbs3mfImportValidation][Strategy]")
+{
+    Model source;
+    make_model(source, false);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_3mf_project_settings_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    // Load a valid control with the same public strategy before corrupting only project settings.
+    archive_variant_contracts::BbsLoaded valid_loaded;
+    Model valid_model;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), valid_model, valid_loaded,
+                                                 LoadStrategy::LoadModel));
+    CHECK(valid_loaded.config.empty());
+    REQUIRE(valid_model.objects.size() == 1);
+    const BoundingBoxf3 valid_box = valid_model.mesh().bounding_box();
+    const double valid_volume = its_volume(valid_model.mesh().its);
+    const size_t valid_facets = valid_model.mesh().facets_count();
+    REQUIRE(valid_facets > 0);
+    REQUIRE(valid_volume > 0.);
+
+    REQUIRE(replace_in_3mf_entry(archive.string(), "project_settings.config", "{", "not-json"));
+
+    archive_variant_contracts::BbsLoaded loaded;
+    Model loaded_model;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded_model, loaded,
+                                                 LoadStrategy::LoadModel));
+    CHECK(loaded.config.empty());
+    REQUIRE(loaded_model.objects.size() == valid_model.objects.size());
+    CHECK(loaded_model.mesh().facets_count() == valid_facets);
+    CHECK_THAT(its_volume(loaded_model.mesh().its), Catch::Matchers::WithinAbs(valid_volume, 1e-5));
+    check_same_box(loaded_model.mesh().bounding_box(), valid_box);
+}
+
+} // namespace bbs_model_settings_contracts

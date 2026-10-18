@@ -721,12 +721,12 @@
     },
     "hollowing_enable": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
-      "tag": "[SLAFeatures]",
+      "tag": "[SLAFeatures][SLAHollowingToggle]",
       "dimensions": [
-        "representative_values",
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "The enabled SLA hollowing path produces a nonempty interior mesh with smaller absolute volume than the solid. The test stops at the hollowing stage because the production drill_holes stage is disabled; disabled-mode interior behavior is not independently asserted."
+      "reason": "Accepted6c public SLA processing runs matching 20x20x10 fixtures with hollowing_enable false and true through the hollowing task boundary. The disabled public interior is empty; the enabled interior is finite, nonempty, and has smaller volume than the solid. Drill-hole behavior remains unclaimed because that production step is disabled."
     },
     "initial_layer_height": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
@@ -899,12 +899,12 @@
     },
     "pad_enable": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
-      "tag": "[SLAFeatures]",
+      "tag": "[SLAFeatures][SLAPadToggle]",
       "dimensions": [
-        "representative_values",
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "The enabled SLA pad path produces nonempty positive-volume pad geometry and support slices. Disabled pad geometry is not independently asserted."
+      "reason": "Accepted6c public SLA processing runs matching cube fixtures with pad_enable false and true. The disabled row requires no pad mesh/product and zero support slice area; the enabled row requires a completed nonempty positive-volume pad and positive support slices. Pad geometry parameters remain unclaimed."
     },
     "printer_technology": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
@@ -4054,6 +4054,33 @@
         "pipeline_oracle"
       ],
       "reason": "The new public mixed-filament export compares filament_is_mixed false/true with the same cube fixture. The false row deposits on physical tool 2, while the true row deposits on tools 0 and 1 and no tool 2, with finite positive XY deposition in both rows."
+    },
+    "support_remove_small_overhang": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportMaterial][SupportRemoveSmallOverhang]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted6c public Print processing uses the same symmetric-ledges mesh and explicitly compares false/true removal. The false row retains positive support area, paths, and length; true removes the small non-cantilever ledge while a 1.5 mm overhang remains supported. This is an isolated boolean/output contract; angle and size boundaries remain unclaimed."
+    },
+    "pad_around_object_everywhere": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAPrint][SLAFeatures][SLAAroundPad]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted6c public SLA processing runs the same cube/config with pad_around_object true and pad_around_object_everywhere false/true. The false row has no pad product, while the true row has finite positive pad volume, height, and footprint larger than the model. Pad geometry ranges and interactions remain unclaimed."
+    },
+    "filament_soluble": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTower][ToolOrdering][ToolOrderingGap]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Accepted6c public ToolOrdering/WipeTower processing compares a three-slot soluble vector 0,0,0 with 0,1,0 on the same two-object, two-layer-order fixture. The soluble row changes the first-layer extruder order from 0,1 to 1,0 while both rows retain sliced object layers; dedicated-wipe and broader vector index interactions remain unclaimed."
     }
   }
 }

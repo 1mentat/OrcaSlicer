@@ -2750,6 +2750,60 @@
       "old": "            if (have_ridge) cut_from(result, ridge);\n            try {\n                BRepAlgoAPI_Cut cut_bore(result, bore);\n                if (cut_bore.IsDone() && !cut_bore.Shape().IsNull())\n                    result = cut_bore.Shape();\n            } catch (const std::exception&) { /* keep existing bore */ }",
       "path": "src/libslic3r/CAD/CadDocument.cpp",
       "test_filter": "CadLegacyThread"
+    },
+    {
+      "id": "bbs-native-model-settings-error-tolerance-inverted-v2",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (m_is_bbl_3mf) {\n                            add_error(\"Archive does not contain a valid model config\");",
+      "new": "if (false) {\n                            add_error(\"Archive does not contain a valid model config\");",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfImportValidation",
+      "description": "Suppress the native-archive model-settings error gate. The malformed native archive must fail its public load result; accepting the damaged project is an ordinary assertion failure."
+    },
+    {
+      "id": "bbs-model-settings-error-returns-success-v2",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                            add_error(\"Archive does not contain a valid model config\");\n                            return false;",
+      "new": "                            add_error(\"Archive does not contain a valid model config\");\n                            return true;",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfImportValidation",
+      "description": "Report malformed model settings as a successful public import at the strict error exit. The native malformed-archive case must reject it through an ordinary CHECK_FALSE."
+    },
+    {
+      "id": "bbs-foreign-instance-split-gate-inverted-v2",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!m_is_bbl_3mf && !_is_published_3mf()) {\n            // if the 3mf was not produced by OrcaSlicer and there is more than one instance,\n            // split the object in as many objects as instances",
+      "new": "if (m_is_bbl_3mf && !_is_published_3mf()) {\n            // if the 3mf was not produced by OrcaSlicer and there is more than one instance,\n            // split the object in as many objects as instances",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfImportValidation",
+      "description": "Invert only the public foreign-project multi-instance split gate. The malformed foreign archive must still load as two one-instance objects with unchanged positive geometry."
+    },
+    {
+      "id": "gcp-m203-stealth-envelope-gate-ignored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "void GCodeProcessor::process_M203(const GCodeReader::GCodeLine& line)\n{\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    if (m_flavor == gcfRepetier)\n        return;\n\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    // http://smoothieware.org/supported-g-codes\n    float factor = (m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware || m_flavor == gcfSmoothie || m_flavor == gcfKlipper) ? 1.0f : MMMIN_TO_MMSEC;\n\n    // Slot-major arrays; a firmware M203 changes the live limits globally — write every slot's\n    // mode entry (see process_M201). Per-mode gating unchanged.\n    auto set_all_slots = [](ConfigOptionFloats &option, size_t mode, float value) {\n        for (size_t slot_base = 0; slot_base < option.size(); slot_base += 2)\n            set_option_value(option, slot_base + mode, value);\n    };\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal || m_time_processor.machine_envelope_processing_enabled) {\n",
+      "new": "void GCodeProcessor::process_M203(const GCodeReader::GCodeLine& line)\n{\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    if (m_flavor == gcfRepetier)\n        return;\n\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    // http://smoothieware.org/supported-g-codes\n    float factor = (m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware || m_flavor == gcfSmoothie || m_flavor == gcfKlipper) ? 1.0f : MMMIN_TO_MMSEC;\n\n    // Slot-major arrays; a firmware M203 changes the live limits globally — write every slot's\n    // mode entry (see process_M201). Per-mode gating unchanged.\n    auto set_all_slots = [](ConfigOptionFloats &option, size_t mode, float value) {\n        for (size_t slot_base = 0; slot_base < option.size(); slot_base += 2)\n            set_option_value(option, slot_base + mode, value);\n    };\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal) {\n",
+      "expected_matches": 1,
+      "test_filter": "[GCodeProcessorStealthLimits]",
+      "description": "Stop M203 from updating the stealth machine after the first motion. The constrained stealth time must remain slower than its baseline."
+    },
+    {
+      "id": "gcp-m204-stealth-envelope-gate-ignored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "void GCodeProcessor::process_M204(const GCodeReader::GCodeLine& line)\n{\n    float value;\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal ||\n            m_time_processor.machine_envelope_processing_enabled) {\n",
+      "new": "void GCodeProcessor::process_M204(const GCodeReader::GCodeLine& line)\n{\n    float value;\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal) {\n",
+      "expected_matches": 1,
+      "test_filter": "[GCodeProcessorStealthLimits]",
+      "description": "Drop the live machine-envelope gate for M204. The low-acceleration stealth row must no longer show the independent time increase."
+    },
+    {
+      "id": "gcp-lowercase-command-registration-removed",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "        if (auto lowercase_cmd = to_lowercase(uppercase_cmd); lowercase_cmd != uppercase_cmd)\n            m_command_processor.register_command(lowercase_cmd, handler,early_quit);",
+      "new": "        // lowercase aliases omitted",
+      "expected_matches": 1,
+      "test_filter": "[GCodeProcessorCase]",
+      "description": "Remove the public lowercase command aliases. The lowercase motion, positioning, and fan stream must retain the same endpoint and fan metadata as the uppercase control."
     }
   ]
 }

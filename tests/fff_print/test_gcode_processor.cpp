@@ -204,6 +204,44 @@ float normal_time(const GCodeProcessorResult &result)
     return result.print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
 }
 
+float stealth_time(const GCodeProcessorResult &result)
+{
+    return result.print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)].time;
+}
+
+FullPrintConfig stealth_config()
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    // Pin the source defaults consumed by the live M203/M204 paths.
+    config.machine_max_speed_x.values = {500., 200.};
+    config.machine_max_speed_y.values = {500., 200.};
+    config.machine_max_speed_z.values = {12., 12.};
+    config.machine_max_speed_e.values = {120., 120.};
+    config.machine_max_acceleration_x.values = {1000., 1000.};
+    config.machine_max_acceleration_y.values = {1000., 1000.};
+    config.machine_max_acceleration_z.values = {500., 200.};
+    config.machine_max_acceleration_e.values = {5000., 5000.};
+    config.machine_max_acceleration_extruding.values = {1500., 1250.};
+    config.machine_max_acceleration_retracting.values = {1500., 1250.};
+    config.machine_max_acceleration_travel.values = {0., 0.};
+    return config;
+}
+
+TestResult process_buffer_with_stealth(const std::string &gcode)
+{
+    GCodeProcessor processor;
+    processor.apply_config(stealth_config());
+    processor.enable_stealth_time_estimator(true);
+    processor.initialize("gcode_processor_stealth_contract.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+    TestResult result;
+    result = std::move(processor.extract_result());
+    return result;
+}
+
 } // namespace
 
 TEST_CASE("Orca file import preserves parsed filament dimensions and density", "[GCodeProcessor][GCodeProcessorPublic]")
@@ -941,6 +979,64 @@ TEST_CASE("M203 converts non-Marlin maximum feedrate units",
     CHECK_THAT(reprap_move->position.x(), WithinAbs(20.f, 1e-4f));
     CHECK_THAT(marlin_move->delta_extruder, WithinAbs(1.f, 1e-4f));
     CHECK_THAT(reprap_move->delta_extruder, WithinAbs(1.f, 1e-4f));
+}
+
+TEST_CASE("Live M203 updates the stealth estimator after motion starts",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorStealthLimits]")
+{
+    const std::string prefix = "M83\nG1 X0 Y0 Z0.2 F600\n";
+    const auto baseline = process_buffer_with_stealth(prefix + "G1 X40 Y0 E1 F1200\n");
+    const auto limited = process_buffer_with_stealth(prefix + "M203 X5\nG1 X40 Y0 E1 F1200\n");
+
+    REQUIRE(normal_time(baseline) > 0.f);
+    REQUIRE(stealth_time(baseline) > 0.f);
+    CHECK(normal_time(limited) > normal_time(baseline) + 0.5f);
+    CHECK(stealth_time(limited) > stealth_time(baseline) + 0.5f);
+}
+
+TEST_CASE("Live M204 updates the stealth acceleration estimate after motion starts",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorStealthLimits]")
+{
+    const std::string prefix = "M83\nG1 X0 Y0 Z0.2 F600\n";
+    const auto baseline = process_buffer_with_stealth(prefix + "G1 X40 Y0 E1 F1200\n");
+    const auto limited = process_buffer_with_stealth(prefix + "M204 P20\nG1 X40 Y0 E1 F1200\n");
+
+    REQUIRE(normal_time(baseline) > 0.f);
+    REQUIRE(stealth_time(baseline) > 0.f);
+    CHECK(normal_time(limited) > normal_time(baseline) + 0.5f);
+    CHECK(stealth_time(limited) > stealth_time(baseline) + 0.5f);
+}
+
+TEST_CASE("Lowercase standard commands retain public motion state semantics",
+          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorCase]")
+{
+    const std::string upper_stream =
+        "M83\nG90\nM106 S128\nG1 X10 Y0 Z0.2 E1 F600\n"
+        "G91\nG1 X5 Y0 E0.5 F600\nG90\nG1 X20 Y0 E1 F600\n";
+    const std::string lower_stream =
+        "m83\ng90\nm106 S128\ng1 X10 Y0 Z0.2 E1 F600\n"
+        "g91\ng1 X5 Y0 E0.5 F600\ng90\ng1 X20 Y0 E1 F600\n";
+    const auto upper = process_buffer(upper_stream);
+    const auto lower = process_buffer(lower_stream);
+    const auto upper_extrusions = moves_of(upper, EMoveType::Extrude);
+    const auto lower_extrusions = moves_of(lower, EMoveType::Extrude);
+    REQUIRE(upper_extrusions.size() == 3);
+    REQUIRE(lower_extrusions.size() == upper_extrusions.size());
+    REQUIRE(upper_extrusions.front()->fan_speed > 0.f);
+    REQUIRE(lower_extrusions.front()->fan_speed > 0.f);
+    for (size_t i = 0; i < upper_extrusions.size(); ++i) {
+        CHECK_THAT(lower_extrusions[i]->position.x(), WithinAbs(upper_extrusions[i]->position.x(), 1e-4f));
+        CHECK_THAT(lower_extrusions[i]->position.y(), WithinAbs(upper_extrusions[i]->position.y(), 1e-4f));
+        CHECK_THAT(lower_extrusions[i]->position.z(), WithinAbs(upper_extrusions[i]->position.z(), 1e-4f));
+        CHECK_THAT(lower_extrusions[i]->delta_extruder, WithinAbs(upper_extrusions[i]->delta_extruder, 1e-4f));
+        CHECK_THAT(lower_extrusions[i]->fan_speed, WithinAbs(upper_extrusions[i]->fan_speed, 1e-4f));
+    }
+    CHECK_THAT(upper_extrusions[0]->position.x(), WithinAbs(10.f, 1e-4f));
+    CHECK_THAT(upper_extrusions[1]->position.x(), WithinAbs(15.f, 1e-4f));
+    CHECK_THAT(upper_extrusions[2]->position.x(), WithinAbs(20.f, 1e-4f));
+    CHECK_THAT(upper_extrusions[0]->delta_extruder, WithinAbs(1.f, 1e-4f));
+    CHECK_THAT(upper_extrusions[1]->delta_extruder, WithinAbs(0.5f, 1e-4f));
+    CHECK_THAT(upper_extrusions[2]->delta_extruder, WithinAbs(1.f, 1e-4f));
 }
 
 } // namespace public_processor_contracts
