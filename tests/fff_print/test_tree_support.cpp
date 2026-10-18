@@ -1064,6 +1064,9 @@ static Evidence observe(bool thick_bridges)
         { "support_on_build_plate_only",   0 },
         { "bridge_no_support",              0 },
         { "max_bridge_length",              0.0 },
+        // A round bridge is about 0.447 mm thick at this flow, extending below
+        // the 0.4 mm layer-plus-gap boundary so trimming has a positive margin.
+        { "bridge_flow",                    1.25 },
         { "thick_bridges",                  thick_bridges },
         { "support_line_width",             0.4 },
         { "line_width",                     0.4 },
@@ -1100,8 +1103,11 @@ static Evidence observe(bool thick_bridges)
         if (layer == nullptr)
             result.finite = false;
         else {
+            // Legacy tree support exposes its footprint through extrusion paths.
+            Polygons bridge_covered;
+            layer->support_fills.polygons_covered_by_width(bridge_covered, float(SCALED_EPSILON));
             result.bridge_support_area_mm2 +=
-                expolygons_area_mm2(intersection_ex(layer->support_islands, bridge_window));
+                expolygons_area_mm2(intersection_ex(union_ex(bridge_covered), bridge_window));
             for_each_extrusion_path(layer->support_fills, [&result](const ExtrusionPath &path) {
                 const double length_mm = unscale<double>(path.length());
                 result.finite = result.finite && std::isfinite(length_mm);
@@ -1124,6 +1130,10 @@ TEST_CASE("Tree support thick bridges change trimming under a positive gap",
     using namespace tree_support_thick_bridge_contracts;
     const Evidence regular = observe(false);
     const Evidence thick   = observe(true);
+    INFO("bridge support area: regular=" << regular.bridge_support_area_mm2
+         << " thick=" << thick.bridge_support_area_mm2
+         << "; intersecting segments: regular=" << regular.bridge_segments
+         << " thick=" << thick.bridge_segments);
 
     for (const Evidence &evidence : {regular, thick}) {
         REQUIRE(evidence.finite);
@@ -1138,7 +1148,7 @@ TEST_CASE("Tree support thick bridges change trimming under a positive gap",
     REQUIRE(regular.bridge_support_area_mm2 > 0.0);
     // The analytic x=4..16 roof middle is stBottomBridge.  With a positive
     // top gap, TreeSupport adds that surface to the trimming polygons when
-    // thick_bridges is enabled, so the public support-island area in the
+    // thick_bridges is enabled, so the public extruded support area in the
     // bridge window must decrease. Path count alone cannot observe this.
     REQUIRE(thick.bridge_support_area_mm2 + 0.01 < regular.bridge_support_area_mm2);
 }
@@ -1156,7 +1166,9 @@ struct RaftContactEvidence {
 static RaftContactEvidence observe(double raft_expansion)
 {
     Print print;
-    slice_with_tree_support(organic_tree_density_contracts::cap_overhang_fixture(), print, "organic", 30, 0, 3, {
+    // Isolate the raft contact: overhanging caps also contribute tree bases to
+    // support_islands, which can mask the expanded contact's outer bounds.
+    slice_with_tree_support(make_cube(24.0, 24.0, 2.0), print, "organic", 30, 0, 3, {
         { "printable_area",                  "-100x-100,200x-100,200x200,-100x200" },
         { "support_on_build_plate_only",     1 },
         { "support_top_z_distance",          0.2 },
@@ -1225,9 +1237,11 @@ TEST_CASE("Organic tree raft expansion changes the public contact footprint",
         REQUIRE(evidence.footprint_height_mm > 0.0);
     }
     CHECK_THAT(expanded.contact_z, Catch::Matchers::WithinAbs(unexpanded.contact_z, EPSILON));
-    // The contact is the 24 x 24 mm first object slice selected by raft_contact_top_z.
-    // A 3 mm raft expansion must enlarge each planar side at that contact layer.
-    REQUIRE(expanded.footprint_width_mm > unexpanded.footprint_width_mm + 3.0);
-    REQUIRE(expanded.footprint_height_mm > unexpanded.footprint_height_mm + 3.0);
+    // Expanding each side of the square contact by 3 mm adds 6 mm to both
+    // dimensions; any common raft inflation cancels in the paired difference.
+    REQUIRE_THAT(expanded.footprint_width_mm - unexpanded.footprint_width_mm,
+                 Catch::Matchers::WithinAbs(6.0, 0.05));
+    REQUIRE_THAT(expanded.footprint_height_mm - unexpanded.footprint_height_mm,
+                 Catch::Matchers::WithinAbs(6.0, 0.05));
     REQUIRE(expanded.footprint_area_mm2 > unexpanded.footprint_area_mm2 * 1.15);
 }

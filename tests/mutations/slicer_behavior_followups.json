@@ -2603,7 +2603,7 @@
       "new": "                    offset(region->fill_surfaces.filter_by_type(stBottom), trimming_offset, SUPPORT_SURFACES_OFFSET_PARAMETERS));",
       "expected_matches": 1,
       "test_filter": "ThickBridges",
-      "description": "Use ordinary bottom surfaces instead of stBottomBridge for the positive-gap bridge fixture; the thick-versus-regular bridge path-count differential must fail as an ordinary assertion."
+      "description": "Use ordinary bottom surfaces instead of stBottomBridge for the positive-gap bridge fixture; the strict reduction of covered extruded-support area in the thick-versus-regular bridge window must fail as an ordinary assertion."
     },
     {
       "id": "tree-support-raft-contact-expansion-ignored-v2",

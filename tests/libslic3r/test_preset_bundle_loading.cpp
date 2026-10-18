@@ -11526,7 +11526,8 @@ TEST_CASE("External preset resolves an unchanged inherited system profile", "[Pr
         PresetCollection::LoadAndSelect::Always);
 
     REQUIRE(loaded.first != nullptr);
-    const Preset *resolved = collection.find_preset(parent_name);
+    // load_external_preset returns the stored profile, so request that same lookup.
+    const Preset *resolved = collection.find_preset(parent_name, false, true);
     REQUIRE(resolved != nullptr);
     CHECK(loaded.first == resolved);
     CHECK_FALSE(loaded.second);
