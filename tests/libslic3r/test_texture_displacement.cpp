@@ -2874,6 +2874,49 @@ TEST_CASE("Degenerate painted patches use the stable fallback normal",
     check_vec3(anchor_normal, Vec3f::UnitZ(), 1e-5f);
 }
 
+
+TEST_CASE("Painted anchor geometry ignores zero-area faces and winding cancellation",
+          "[TextureDisplacement][TextureDisplacementAnchor]")
+{
+    const bool opposite_winding = GENERATE(false, true);
+    CAPTURE(opposite_winding);
+
+    indexed_triangle_set mesh;
+    if (opposite_winding) {
+        // Equal-area triangles with opposite winding retain their geometric centroid,
+        // while the signed normal sum intentionally reaches the existing +Z fallback.
+        mesh.vertices = {
+            { 0.f, 0.f, 0.f }, { 3.f, 0.f, 0.f }, { 0.f, 1.f, 0.f },
+            { 10.f, 0.f, 0.f }, { 10.f, 1.f, 0.f }, { 13.f, 0.f, 0.f }
+        };
+        mesh.indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    } else {
+        // The second face is far away but has exactly zero area. It must not move
+        // the positive-area face's centroid or normal.
+        mesh.vertices = {
+            { 0.f, 0.f, 0.f }, { 3.f, 0.f, 0.f }, { 0.f, 1.f, 0.f },
+            { 100.f, 100.f, 100.f }, { 102.f, 100.f, 100.f }, { 101.f, 100.f, 100.f }
+        };
+        mesh.indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    }
+
+    REQUIRE(mesh.vertices.size() == 6);
+    REQUIRE(mesh.indices.size() == 2);
+    const auto selected = select_facets(mesh, {0, 1});
+    REQUIRE_FALSE(selected.triangles_to_split.empty());
+
+    Vec3f anchor_position(99.f, 98.f, 97.f);
+    Vec3f anchor_normal(-1.f, -2.f, -3.f);
+    REQUIRE(compute_layer_paint_anchor(mesh, selected, anchor_position, anchor_normal));
+
+    if (opposite_winding) {
+        check_vec3(anchor_position, Vec3f(6.f, 1.f / 3.f, 0.f), 1e-5f);
+        check_vec3(anchor_normal, Vec3f::UnitZ(), 1e-5f);
+    } else {
+        check_vec3(anchor_position, Vec3f(1.f, 1.f / 3.f, 0.f), 1e-5f);
+        check_vec3(anchor_normal, Vec3f::UnitZ(), 1e-5f);
+    }
+}
 } // namespace texture_anchor_contracts
 TEST_CASE("Planar projection follows the dominant normal axis", "[TextureDisplacement][TexturePlacement]")
 {

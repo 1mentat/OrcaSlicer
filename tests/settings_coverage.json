@@ -340,6 +340,24 @@
       ],
       "reason": "An overhang fixture is sliced with reversal disabled and enabled; signed external-perimeter winding must change."
     },
+    "overhang_reverse_internal_only": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[BooleanSettings][OverhangInternalReversal][SettingsVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public perimeter pipeline runs reverse=false/true with internal-only=false/true across classic and arachne generators and both wall directions; geometry remains invariant while independent signed winding checks show all-wall reversal versus internal-only reversal on alternating layers."
+    },
+    "resonance_avoidance": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCode][ResonanceAvoidanceGCode]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public G-code pipeline runs resonance avoidance enabled across lower, midpoint, upper-bound, and over-band speeds plus a disabled control; parsed finite positive outer-wall feeds distinguish the configured clamp behavior from the feature-gated passthrough. The numeric speed band is representative and is not claimed exhaustive."
+    },
     "is_infill_first": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsBooleanVariance]",

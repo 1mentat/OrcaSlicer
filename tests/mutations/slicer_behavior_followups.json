@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Behavioral probes for metadata, geometry, preset classification, thermal commands, parser semantics, settings normalization, volume assignment, painted fuzzy skin and purge-tower rounding. Includes indexed configuration and chamber-temperature pipeline probes. Includes purge-budget assignment probes. Includes intersecting-solid surfaces, Sweep/Loft Boolean volume contracts and legacy text alignment. Includes the reviewed d226 followups and ModelArrange contracts.",
+  "description": "Behavioral probes for metadata, geometry, preset classification, thermal commands, parser semantics, settings normalization, volume assignment, painted fuzzy skin and purge-tower rounding. Includes indexed configuration and chamber-temperature pipeline probes. Includes purge-budget assignment probes. Includes intersecting-solid surfaces, Sweep/Loft Boolean volume contracts and legacy text alignment. Includes the reviewed d226 followups and ModelArrange contracts. Includes CIEDE2000 reference and area-weighted painted-anchor probes.",
   "mutants": [
     {
       "id": "generic-3mf-layer-profile-object-index-shifted",
@@ -71,7 +71,8 @@
       "old": "        print.config().emit_machine_limits_to_gcode.value == true)",
       "new": "        print.config().emit_machine_limits_to_gcode.value == false)",
       "expected_matches": 1,
-      "description": "Invert the public machine-envelope emission gate; the disabled row must remain free of M201/M203 while the enabled rows must emit the exact envelope."
+      "description": "Invert the public machine-envelope emission gate; the disabled row must remain free of M201/M203 while the enabled rows must emit the exact envelope.",
+      "test_filter": "MachineEnvelope"
     },
     {
       "id": "machine-envelope-junction-call-zeroed",
@@ -79,7 +80,8 @@
       "old": "        file.write_format(writer().set_junction_deviation(MAX_LIMIT(machine_max_junction_deviation)).c_str());",
       "new": "        file.write_format(writer().set_junction_deviation(0).c_str());",
       "expected_matches": 1,
-      "description": "Discard the selected machine junction-deviation value at the public envelope call; the positive-JD row must lose M205 J0.250 while the zero-JD row remains a negative control."
+      "description": "Discard the selected machine junction-deviation value at the public envelope call; the positive-JD row must lose M205 J0.250 while the zero-JD row remains a negative control.",
+      "test_filter": "MachineEnvelope"
     },
     {
       "id": "machine-envelope-x-jerk-uses-y-limit",
@@ -87,7 +89,8 @@
       "old": "            MAX_LIMIT(machine_max_jerk_x) * factor,",
       "new": "            MAX_LIMIT(machine_max_jerk_y) * factor,",
       "expected_matches": 1,
-      "description": "Substitute the Y jerk limit for X; the public envelope fixture configures X=11 and Y=13 and checks parsed numeric values independently."
+      "description": "Substitute the Y jerk limit for X; the public envelope fixture configures X=11 and Y=13 and checks parsed numeric values independently.",
+      "test_filter": "MachineEnvelope"
     },
     {
       "id": "cutsurface-gap-candidate-strip-intersection-discarded",
@@ -982,11 +985,11 @@
     {
       "id": "texture-anchor-centroid-uses-first-vertex",
       "path": "src/libslic3r/TextureDisplacement.cpp",
-      "old": "        centroid_sum += (a + b + c) / 3.f;",
-      "new": "        centroid_sum += a; /* mutation: discard the triangle centroid */",
+      "old": "        normal_sum            += cross;\n        centroid_sum          += area2 * triangle_centroid;",
+      "new": "        normal_sum            += cross;\n        centroid_sum          += area2 * a;",
       "expected_matches": 1,
       "test_filter": "TextureDisplacementAnchor",
-      "description": "The unequal-area analytic centroid row must reject replacing each triangle centroid with its first vertex; this probe remains ineligible for kill credit while that baseline is failing.",
+      "description": "After the area-weighted centroid correction, replacing each triangle centroid with its first vertex must fail the unequal-area and zero-area geometry rows by ordinary assertion.",
       "expected_ordinary_assertion_failure": true,
       "runtime_kill_status": "pending_baseline_gate",
       "crash_or_exception_is_not_credit": true
@@ -1237,6 +1240,54 @@
       "expected_ordinary_assertion_failure": true,
       "crash_or_exception_is_not_credit": true,
       "runtime_kill_status": "pending"
+    },
+    {
+      "id": "ciede2000-t-term-published-63-to-source-90",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": " -\n               0.20 * std::cos(4.0 * h_prime_avg - 7.0 * M_PI / 20.0);",
+      "new": " -\n               0.20 * std::cos(4.0 * h_prime_avg - 3.0 * M_PI / 6.0);",
+      "description": "Change the published 63-degree T-term angle to 90 degrees; the independent green/magenta and hue-wrap reference rows must fail ordinary numeric assertions.",
+      "test_filter": "ColorUtilsCIEDEReference",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_claim": false
+    },
+    {
+      "id": "ciede2000-mean-hue-wrap-always-add",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "if (h1_prime + h2_prime < 2 * M_PI) {\n            h_prime_avg = (h1_prime + h2_prime + 2 * M_PI) / 2.0;\n        } else {\n            h_prime_avg = (h1_prime + h2_prime - 2 * M_PI) / 2.0;\n        }",
+      "new": "h_prime_avg = (h1_prime + h2_prime + 2 * M_PI) / 2.0;",
+      "description": "Always add one hue revolution when averaging across the wrap. The independent RGB reference pair has adjusted hue separation above 180 degrees and hue sum above 360 degrees and must detect this error.",
+      "test_filter": "ColorUtilsCIEDEReference",
+      "expected_matches": 1,
+      "expected_ordinary_assertion_failure": true,
+      "runtime_kill_claim": false
+    },
+    {
+      "id": "texture-anchor-area-weighting-omitted",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "        centroid_sum          += area2 * triangle_centroid;",
+      "new": "        centroid_sum          += triangle_centroid;",
+      "expected_matches": 1,
+      "test_filter": "TextureDisplacementAnchor",
+      "description": "Remove triangle-area weighting from the centroid accumulator; the unequal-area analytic centroid must fail by ordinary assertion.",
+      "ordinary_assertion_only": true,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending_baseline_gate"
+    },
+    {
+      "id": "texture-anchor-area-denominator-face-count",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "        anchor_pos = centroid_sum / total_area2;",
+      "new": "        anchor_pos = centroid_sum / float(patch.indices.size());",
+      "expected_matches": 1,
+      "test_filter": "TextureDisplacementAnchor",
+      "description": "Use selected-face count as the positive-area denominator; the unequal-area centroid row must fail while the degenerate fallback remains defined.",
+      "ordinary_assertion_only": true,
+      "expected_ordinary_assertion_failure": true,
+      "crash_or_exception_is_not_credit": true,
+      "runtime_kill_status": "pending_baseline_gate"
     }
   ]
 }

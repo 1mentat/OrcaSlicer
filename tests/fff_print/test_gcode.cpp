@@ -618,11 +618,12 @@ TEST_CASE("Z hop changes travel height while preserving material paths", "[GCode
 }
 
 
-ExportedPrint fresh_custom_mesh_export(const DynamicPrintConfig &config, TriangleMesh mesh)
+ExportedPrint fresh_custom_mesh_export(const DynamicPrintConfig &config, TriangleMesh mesh, bool bbl = false)
 {
     Model model;
     Print print;
     Test::init_print({std::move(mesh)}, print, model, config);
+    print.is_BBL_printer() = bbl;
     require_valid(print);
     return export_print(print);
 }
@@ -5435,18 +5436,18 @@ TEST_CASE("Farthest-point timelapse snapshots follow support deposition when no 
         {"printer_structure", "corexy"},
         {"timelapse_type", "0"},
         {"farthest_point_timelapse", true},
-        {"time_lapse_gcode", "M117 SUPPORT-SNAPSHOT-[layer_num]-INLINE-[timelapse_inline_photo]-Z-[layer_z]\n"},
+        {"time_lapse_gcode", "M117 SUPPORT-SNAPSHOT-[layer_num]-INLINE-{timelapse_inline_photo ? 1 : 0}-Z-[layer_z]\n"},
     });
     DynamicPrintConfig control = enabled;
     control.set_deserialize_strict({
         {"farthest_point_timelapse", false},
-        {"time_lapse_gcode", "M117 SUPPORT-SNAPSHOT-[layer_num]-INLINE-[timelapse_inline_photo]-Z-[layer_z]\n"},
+        {"time_lapse_gcode", "M117 SUPPORT-SNAPSHOT-[layer_num]-INLINE-{timelapse_inline_photo ? 1 : 0}-Z-[layer_z]\n"},
     });
 
     const auto enabled_output = gcode_print_variance_contracts::fresh_custom_mesh_export(
-        enabled, gcode_print_variance_contracts::support_fixture());
+        enabled, gcode_print_variance_contracts::support_fixture(), true);
     const auto control_output = gcode_print_variance_contracts::fresh_custom_mesh_export(
-        control, gcode_print_variance_contracts::support_fixture());
+        control, gcode_print_variance_contracts::support_fixture(), true);
     const SupportTimelapseEvidence enabled_evidence = parse_support_timelapse_output(enabled_output.text, enabled);
     const SupportTimelapseEvidence control_evidence = parse_support_timelapse_output(control_output.text, control);
     const auto enabled_material = gcode_print_variance_contracts::motion_evidence(enabled_output.text, enabled);
