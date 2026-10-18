@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Public curled-edge quality and maximum point-length contracts with explicit disabled and geometry controls.",
+  "mutants": [
+    {
+      "id": "extrusion-curled-projected-coverage-threshold-ignored",
+      "path": "src/libslic3r/GCode/ExtrusionProcessor.hpp",
+      "old": "if (projected_lengths_sum < 0.4 * len) {",
+      "new": "if (projected_lengths_sum < 0.0 * len) {",
+      "expected_matches": 1,
+      "test_filter": "^CurledLineInfluence$",
+      "description": "Disable the 40 percent projected-coverage gate. The 7 mm nearby curled line must no longer match the disabled control while the 20 mm line remains above-threshold, so the paired coverage oracle fails.",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "e9e8c64f067aaffd0caa3d8d4e317e482265a758b669235ab689f36e0603138a"
+    },
+    {
+      "id": "extrusion-curled-height-influence-ignored",
+      "path": "src/libslic3r/GCode/ExtrusionProcessor.hpp",
+      "old": "line.curled_height / (path.height * 10.0f)",
+      "new": "0.0f",
+      "expected_matches": 1,
+      "test_filter": "^CurledLineInfluence$",
+      "description": "Ignore curled height when creating artificial distance. The full nearby line must lose its exact 100 speed and 0.1 overlap changes.",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "ced310cdccf5d3d5b224c1130d4c701505da751b653d08495f42791630b14a74"
+    },
+    {
+      "id": "extrusion-point-estimator-max-length-gate-ignored",
+      "path": "src/libslic3r/GCode/ExtrusionProcessor.hpp",
+      "old": "if (max_line_length > 0) {",
+      "new": "if (max_line_length > 12) {",
+      "expected_matches": 1,
+      "test_filter": "^PointEstimatorMaxLength$",
+      "description": "Raise the positive maximum-length gate above the 4 mm request. The nonempty 12 mm public estimate must retain four points, <=4 mm segments, and its 12 mm total length.",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "dffa82ab1b2f6ecb4b2b9a74c4511ae8e8d9fbb1d6d5c63e35ee33bc4ac0742e"
+    }
+  ]
+}

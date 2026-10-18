@@ -2503,3 +2503,168 @@ TEST_CASE("Volume-to-bed transform keeps general rotation out of the volume", "[
 }
 
 } // namespace volume_bed_transformation_contracts
+
+namespace model_split_paint_contracts {
+using namespace Slic3r;
+
+TEST_CASE("Splitting a painted disconnected model restores component facet state", "[Model][ModelSplit][ModelPainting]")
+{
+    Model model;
+    ModelObject *source = model.add_object();
+    REQUIRE(source != nullptr);
+    source->name = "painted-disconnected";
+    source->config.set("extruder", 1);
+    ModelVolume *volume = source->add_volume(disconnected_cubes(), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+    volume->name = "painted-volume";
+    volume->source.input_file = "painted-disconnected.stl";
+    volume->config.set("extruder", 2);
+    source->add_instance();
+
+    TriangleSelector selector(volume->mesh());
+    selector.set_facet(0, EnforcerBlockerType::Extruder2);
+    REQUIRE(volume->mmu_segmentation_facets.set(selector));
+    REQUIRE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder2));
+
+    ModelObjectPtrs outputs;
+    source->split(&outputs, true);
+    REQUIRE(outputs.size() == 2);
+    for (ModelObject *output : outputs) {
+        REQUIRE(output != nullptr);
+        REQUIRE(output->instances.size() == 1);
+    }
+    std::sort(outputs.begin(), outputs.end(), [](const ModelObject *lhs, const ModelObject *rhs) {
+        return lhs->instance_bounding_box(0).min.x() < rhs->instance_bounding_box(0).min.x();
+    });
+
+    CHECK_THAT(outputs[0]->instance_bounding_box(0).min.x(), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(outputs[0]->instance_bounding_box(0).max.x(), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(outputs[1]->instance_bounding_box(0).min.x(), Catch::Matchers::WithinAbs(30., 1e-5));
+    CHECK_THAT(outputs[1]->instance_bounding_box(0).max.x(), Catch::Matchers::WithinAbs(40., 1e-5));
+    for (ModelObject *output : outputs) {
+        REQUIRE(output->volumes.size() == 1);
+        CHECK(output->config.extruder() == 2);
+        CHECK_FALSE(output->volumes.front()->config.has("extruder"));
+        CHECK(output->volumes.front()->source.input_file.empty());
+    }
+    CHECK(outputs[0]->volumes.front()->mmu_segmentation_facets.has_facets(
+        *outputs[0]->volumes.front(), EnforcerBlockerType::Extruder2));
+    CHECK_FALSE(outputs[1]->volumes.front()->mmu_segmentation_facets.has_facets(
+        *outputs[1]->volumes.front(), EnforcerBlockerType::Extruder2));
+}
+
+TEST_CASE("Splitting a multi-volume model copies per-volume facet state and configuration", "[Model][ModelSplit][ModelPainting]")
+{
+    Model model;
+    ModelObject *source = model.add_object();
+    REQUIRE(source != nullptr);
+    source->name = "painted-multivolume";
+    source->config.set("extruder", 1);
+    ModelVolume *left = source->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *right = source->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(left != nullptr);
+    REQUIRE(right != nullptr);
+    left->name = "left";
+    right->name = "right";
+    left->source.input_file = "left.stl";
+    right->source.input_file = "right.stl";
+    right->set_offset(Vec3d(30., 0., 0.));
+    left->config.set("extruder", 2);
+    right->config.set("extruder", 3);
+    source->add_instance();
+
+    TriangleSelector left_support(left->mesh());
+    left_support.set_facet(0, EnforcerBlockerType::ENFORCER);
+    REQUIRE(left->supported_facets.set(left_support));
+    TriangleSelector left_seam(left->mesh());
+    left_seam.set_facet(1, EnforcerBlockerType::BLOCKER);
+    REQUIRE(left->seam_facets.set(left_seam));
+    TriangleSelector left_material(left->mesh());
+    left_material.set_facet(2, EnforcerBlockerType::Extruder2);
+    REQUIRE(left->mmu_segmentation_facets.set(left_material));
+    TriangleSelector left_fuzzy(left->mesh());
+    left_fuzzy.set_facet(3, EnforcerBlockerType::ENFORCER);
+    REQUIRE(left->fuzzy_skin_facets.set(left_fuzzy));
+
+    TriangleSelector right_support(right->mesh());
+    right_support.set_facet(4, EnforcerBlockerType::ENFORCER);
+    REQUIRE(right->supported_facets.set(right_support));
+    TriangleSelector right_seam(right->mesh());
+    right_seam.set_facet(5, EnforcerBlockerType::BLOCKER);
+    REQUIRE(right->seam_facets.set(right_seam));
+    TriangleSelector right_material(right->mesh());
+    right_material.set_facet(6, EnforcerBlockerType::Extruder3);
+    REQUIRE(right->mmu_segmentation_facets.set(right_material));
+    TriangleSelector right_fuzzy(right->mesh());
+    right_fuzzy.set_facet(7, EnforcerBlockerType::ENFORCER);
+    REQUIRE(right->fuzzy_skin_facets.set(right_fuzzy));
+
+    REQUIRE(left->supported_facets.has_facets(*left, EnforcerBlockerType::ENFORCER));
+    REQUIRE(left->seam_facets.has_facets(*left, EnforcerBlockerType::BLOCKER));
+    REQUIRE(left->mmu_segmentation_facets.has_facets(*left, EnforcerBlockerType::Extruder2));
+    REQUIRE(left->fuzzy_skin_facets.has_facets(*left, EnforcerBlockerType::ENFORCER));
+    REQUIRE(right->supported_facets.has_facets(*right, EnforcerBlockerType::ENFORCER));
+    REQUIRE(right->seam_facets.has_facets(*right, EnforcerBlockerType::BLOCKER));
+    REQUIRE(right->mmu_segmentation_facets.has_facets(*right, EnforcerBlockerType::Extruder3));
+    REQUIRE(right->fuzzy_skin_facets.has_facets(*right, EnforcerBlockerType::ENFORCER));
+
+    ModelObjectPtrs outputs;
+    source->split(&outputs, false);
+    REQUIRE(outputs.size() == 2);
+    for (ModelObject *output : outputs) {
+        REQUIRE(output != nullptr);
+        REQUIRE(output->instances.size() == 1);
+        REQUIRE(output->volumes.size() == 1);
+    }
+    std::sort(outputs.begin(), outputs.end(), [](const ModelObject *lhs, const ModelObject *rhs) {
+        return lhs->instance_bounding_box(0).min.x() < rhs->instance_bounding_box(0).min.x();
+    });
+
+    CHECK(outputs[0]->volumes.front()->name == "left");
+    CHECK(outputs[1]->volumes.front()->name == "right");
+    CHECK_THAT(outputs[0]->instance_bounding_box(0).min.x(), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(outputs[0]->instance_bounding_box(0).max.x(), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(outputs[1]->instance_bounding_box(0).min.x(), Catch::Matchers::WithinAbs(30., 1e-5));
+    CHECK_THAT(outputs[1]->instance_bounding_box(0).max.x(), Catch::Matchers::WithinAbs(40., 1e-5));
+    CHECK(outputs[0]->config.extruder() == 2);
+    CHECK(outputs[1]->config.extruder() == 3);
+    CHECK_FALSE(outputs[0]->volumes.front()->config.has("extruder"));
+    CHECK_FALSE(outputs[1]->volumes.front()->config.has("extruder"));
+    CHECK(outputs[0]->volumes.front()->source.input_file.empty());
+    CHECK(outputs[1]->volumes.front()->source.input_file.empty());
+    CHECK(outputs[0]->volumes.front()->get_offset().isApprox(Vec3d::Zero(), 1e-6));
+    CHECK(outputs[1]->volumes.front()->get_offset().isApprox(Vec3d::Zero(), 1e-6));
+    CHECK(outputs[0]->volumes.front()->supported_facets.has_facets(
+        *outputs[0]->volumes.front(), EnforcerBlockerType::ENFORCER));
+    CHECK(outputs[0]->volumes.front()->seam_facets.has_facets(
+        *outputs[0]->volumes.front(), EnforcerBlockerType::BLOCKER));
+    CHECK(outputs[0]->volumes.front()->mmu_segmentation_facets.has_facets(
+        *outputs[0]->volumes.front(), EnforcerBlockerType::Extruder2));
+    CHECK(outputs[0]->volumes.front()->fuzzy_skin_facets.has_facets(
+        *outputs[0]->volumes.front(), EnforcerBlockerType::ENFORCER));
+    CHECK(outputs[1]->volumes.front()->supported_facets.has_facets(
+        *outputs[1]->volumes.front(), EnforcerBlockerType::ENFORCER));
+    CHECK(outputs[1]->volumes.front()->seam_facets.has_facets(
+        *outputs[1]->volumes.front(), EnforcerBlockerType::BLOCKER));
+    CHECK(outputs[1]->volumes.front()->mmu_segmentation_facets.has_facets(
+        *outputs[1]->volumes.front(), EnforcerBlockerType::Extruder3));
+    CHECK(outputs[1]->volumes.front()->fuzzy_skin_facets.has_facets(
+        *outputs[1]->volumes.front(), EnforcerBlockerType::ENFORCER));
+    CHECK_FALSE(outputs[0]->volumes.front()->mmu_segmentation_facets.has_facets(
+        *outputs[0]->volumes.front(), EnforcerBlockerType::Extruder3));
+    CHECK_FALSE(outputs[1]->volumes.front()->mmu_segmentation_facets.has_facets(
+        *outputs[1]->volumes.front(), EnforcerBlockerType::Extruder2));
+    // Each category uses different triangle indices on the two source volumes.
+    // Verify that copying keeps those indices paired with the correct geometry.
+    const std::array<const ModelVolume *, 2> originals{left, right};
+    for (size_t idx = 0; idx < originals.size(); ++idx) {
+        const ModelVolume &actual = *outputs[idx]->volumes.front();
+        const ModelVolume &expected = *originals[idx];
+        CHECK(actual.supported_facets.equals(expected.supported_facets));
+        CHECK(actual.seam_facets.equals(expected.seam_facets));
+        CHECK(actual.mmu_segmentation_facets.equals(expected.mmu_segmentation_facets));
+        CHECK(actual.fuzzy_skin_facets.equals(expected.fuzzy_skin_facets));
+    }
+}
+
+} // namespace model_split_paint_contracts

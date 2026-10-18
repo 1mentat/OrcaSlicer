@@ -29,6 +29,8 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Polygon.hpp"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -787,4 +789,148 @@ TEST_CASE("Benchmark caged overhang interior sampling", "[ExtrusionProcessor][!b
     {
         return caged_overhang_gcode(wall_generator);
     };
+}
+
+
+TEST_CASE("Curled lines reduce processed speed and overlap only above their projected coverage", "[ExtrusionProcessor][CurledLineInfluence]")
+{
+    // A small processed Print supplies a valid public Layer owner. The estimator inputs below then
+    // replace only public lower-layer geometry, curled lines, and the public ExtrusionPath.
+    DynamicPrintConfig config = caged_overhang_config("classic");
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"enable_overhang_speed", "1"},
+        {"slowdown_for_curled_perimeters", "0"},
+    });
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{make_cube(4., 4., 0.4)}, print, model, config, nullptr, false);
+    print.process();
+
+    PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE(object->layers().size() >= 2);
+    Layer *target = object->layers()[1];
+    REQUIRE(target != nullptr);
+    Layer *lower = target->lower_layer;
+    REQUIRE(lower != nullptr);
+
+    Polygon lower_contour;
+    lower_contour.points = {Point::new_scale(-20., -5.), Point::new_scale(20., -5.),
+                            Point::new_scale(20., 5.), Point::new_scale(-20., 5.)};
+    lower->lslices.clear();
+    lower->lslices.emplace_back(lower_contour);
+    lower->curled_lines.clear();
+
+    ExtrusionPath path(erExternalPerimeter, 0.08, 0.42f, 0.2f);
+    path.polyline.points = {Point3::new_scale(-10., 0., 0.), Point3::new_scale(10., 0., 0.)};
+
+    // The first section is at artificial distance zero and the second at 0.021 mm. A 0.042 mm
+    // artificial distance therefore reaches the explicit 50% speed section, while reducing
+    // overlap by 0.042 / 0.42 = 0.1.
+    const ConfigOptionPercents         overlaps({100, 95});
+    const ConfigOptionFloatsOrPercents speeds({FloatOrPercent{100, true}, FloatOrPercent{50, true}});
+    auto estimate = [&](const CurledLines &curled_lines, bool slowdown_for_curled_edges) {
+        lower->curled_lines = curled_lines;
+        ExtrusionQualityEstimator estimator;
+        estimator.prepare_for_new_layer(object, lower);
+        estimator.prepare_for_new_layer(object, target);
+        estimator.set_current_object(object);
+        return estimator.estimate_extrusion_quality(path, overlaps, speeds, 200.f, 200.f,
+                                                     slowdown_for_curled_edges, -1.f);
+    };
+
+    const CurledLine full_line{Point::new_scale(-10., 0.), Point::new_scale(10., 0.), 0.2f};
+    const CurledLine short_line{Point::new_scale(-3.5, 0.), Point::new_scale(3.5, 0.), 0.2f};
+    const CurledLine far_line{Point::new_scale(-10., 5.), Point::new_scale(10., 5.), 0.2f};
+    const CurledLine zero_height_line{Point::new_scale(-10., 0.), Point::new_scale(10., 0.), 0.0f};
+
+    // The disabled row deliberately uses the full line with slowdown=false, so it is the
+    // independent baseline for the curled-height and projected-coverage controls.
+    const std::vector<ProcessedPoint> disabled = estimate({full_line}, false);
+    const std::vector<ProcessedPoint> zero_height = estimate({zero_height_line}, true);
+    const std::vector<ProcessedPoint> below_coverage = estimate({short_line}, true);
+    const std::vector<ProcessedPoint> outside_radius = estimate({far_line}, true);
+    const std::vector<ProcessedPoint> above_coverage = estimate({full_line}, true);
+
+    REQUIRE(disabled.size() == 2);
+    auto check_same_as_disabled = [&](const std::vector<ProcessedPoint> &actual, const char *label) {
+        INFO(label);
+        REQUIRE(actual.size() == disabled.size());
+        for (size_t idx = 0; idx < disabled.size(); ++idx)
+            CHECK(same_point(actual[idx], disabled[idx]));
+    };
+    check_same_as_disabled(zero_height, "zero-height curled line");
+    check_same_as_disabled(below_coverage, "projected coverage below 40 percent");
+    check_same_as_disabled(outside_radius, "curled line beyond the 10-width radius");
+
+    REQUIRE(above_coverage.size() == disabled.size());
+    CHECK_THAT(disabled.front().speed, Catch::Matchers::WithinAbs(200., 1e-6));
+    CHECK_THAT(above_coverage.front().speed, Catch::Matchers::WithinAbs(100., 1e-6));
+    CHECK_THAT(above_coverage.front().overlap,
+               Catch::Matchers::WithinAbs(disabled.front().overlap - 0.1f, 1e-5));
+
+    bool speed_decreased = false;
+    bool overlap_decreased = false;
+    double processed_length = 0.;
+    for (size_t idx = 0; idx < disabled.size(); ++idx) {
+        const ProcessedPoint &base = disabled[idx];
+        const ProcessedPoint &curled = above_coverage[idx];
+        CHECK(curled.p == base.p);
+        CHECK(std::isfinite(base.speed));
+        CHECK(std::isfinite(curled.speed));
+        CHECK(std::isfinite(base.overlap));
+        CHECK(std::isfinite(curled.overlap));
+        CHECK_THAT(unscaled<double>(curled.p.y()), Catch::Matchers::WithinAbs(0., 1e-9));
+        if (curled.speed < base.speed - 0.5f)
+            speed_decreased = true;
+        if (curled.overlap < base.overlap - 1e-6f)
+            overlap_decreased = true;
+        if (idx > 0) {
+            const double dx = unscaled<double>(curled.p.x() - above_coverage[idx - 1].p.x());
+            const double dy = unscaled<double>(curled.p.y() - above_coverage[idx - 1].p.y());
+            processed_length += std::hypot(dx, dy);
+        }
+    }
+    INFO("processed path length in mm: " << processed_length);
+    CHECK_THAT(processed_length, Catch::Matchers::WithinAbs(20., 1e-6));
+    CHECK(speed_decreased);
+    CHECK(overlap_decreased);
+}
+
+TEST_CASE("A nonempty public point estimate honors its maximum segment length", "[ExtrusionProcessor][PointEstimatorMaxLength]")
+{
+    const AABBTreeLines::LinesDistancer<Linef> previous_layer(std::vector<Linef>{
+        {{0., 0.}, {12., 0.}}, {{12., 0.}, {12., -10.}},
+        {{12., -10.}, {0., -10.}}, {{0., -10.}, {0., 0.}}});
+    const Points wall{Point::new_scale(0., 5.), Point::new_scale(12., 5.)};
+    const std::vector<ExtendedPoint<2>> disabled =
+        estimate_points_properties<true, true, true, true>(wall, previous_layer, 0.4f, -1.f);
+    const std::vector<ExtendedPoint<2>> limited =
+        estimate_points_properties<true, true, true, true>(wall, previous_layer, 0.4f, 4.0f);
+
+    REQUIRE(disabled.size() == 2);
+    REQUIRE(limited.size() == 4);
+    CHECK_THAT(disabled.front().position.x(), Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(disabled.back().position.x(), Catch::Matchers::WithinAbs(12., 1e-9));
+    CHECK_THAT(limited.front().position.x(), Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(limited.back().position.x(), Catch::Matchers::WithinAbs(12., 1e-9));
+
+    double disabled_length = 0.;
+    double limited_length = 0.;
+    for (size_t idx = 0; idx < disabled.size(); ++idx)
+        CHECK_THAT(disabled[idx].position.y(), Catch::Matchers::WithinAbs(5., 1e-9));
+    for (size_t idx = 0; idx < limited.size(); ++idx)
+        CHECK_THAT(limited[idx].position.y(), Catch::Matchers::WithinAbs(5., 1e-9));
+    for (size_t idx = 1; idx < disabled.size(); ++idx)
+        disabled_length += (disabled[idx].position - disabled[idx - 1].position).norm();
+    for (size_t idx = 1; idx < limited.size(); ++idx) {
+        const double length = (limited[idx].position - limited[idx - 1].position).norm();
+        limited_length += length;
+        CHECK(std::isfinite(length));
+        CHECK(length <= 4.0 + 1e-6);
+    }
+    CHECK_THAT(disabled_length, Catch::Matchers::WithinAbs(12., 1e-9));
+    CHECK_THAT(limited_length, Catch::Matchers::WithinAbs(12., 1e-9));
 }

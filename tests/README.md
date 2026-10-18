@@ -216,6 +216,18 @@ and equivalent physical duration units over two complete rotation cycles.
 The path-direction oracle accounts for whole-degree rounding and axial wrap;
 its mutations are in `fill_rotation_templates.json`.
 
+`[CurledLineInfluence]` checks projected curled-edge coverage, height, and distance
+against disabled controls through the public extrusion-quality estimator. It
+asserts numeric speed and overlap changes while preserving the path. The fixture
+supplies layer geometry directly and does not claim complete print settings
+wiring. `[PointEstimatorMaxLength]` checks enabled and disabled segment limits.
+Their mutations are in `extrusion_quality_curled.json`.
+
+`[ModelSplit]` checks painted disconnected components and multiple painted
+volumes through public model splitting. Geometry, painting categories, per-volume
+configuration, and source metadata must remain paired after the split. Its
+mutations are in `model_split_painted.json`.
+
 `[PresetBundleSubscribedMultiType]` checks typed subscribed profiles, canonical
 inheritance, missing and unsupported types, and removal of obsolete printer files.
 Its mutations are in `preset_subscribed_multitype.json`.

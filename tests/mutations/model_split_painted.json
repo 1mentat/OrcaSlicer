@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "model-split-skips-single-volume-paint-save",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "            if (remap_paint) {",
+      "new": "            if (false) {",
+      "expected_matches": 1,
+      "test_filter": "^ModelSplit$",
+      "description": "Disable the public remap_paint save path; the painted disconnected single-volume row must lose its restored Extruder2 facet state.",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "ac7cee4fb52e12f88e7bc78a2f58a440f1dec49e765dcdea68bb4816017d4d0d"
+    },
+    {
+      "id": "model-split-omits-supported-facet-copy",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "                COPY_FACETS(supported_facets);",
+      "new": "                // COPY_FACETS(supported_facets);",
+      "expected_matches": 1,
+      "test_filter": "^ModelSplit$",
+      "description": "Skip supported-facet copying; the multi-volume output support annotation must fail its ordinary state assertion.",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "7f3761d09821283185ed228eabb01846e644a6e4cf0d300de126ec5e13d68d52"
+    },
+    {
+      "id": "model-split-omits-seam-facet-copy",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "                COPY_FACETS(seam_facets);",
+      "new": "                // COPY_FACETS(seam_facets);",
+      "expected_matches": 1,
+      "test_filter": "^ModelSplit$",
+      "description": "Skip seam-facet copying; the multi-volume output seam annotation must fail its ordinary state assertion.",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "5d08e9de8a21aca96f04a14cfe75a06c55b42898e625e8fbf235b138d715a656"
+    },
+    {
+      "id": "model-split-omits-multi-volume-mmu-copy",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "                COPY_FACETS(mmu_segmentation_facets);",
+      "new": "                // COPY_FACETS(mmu_segmentation_facets);",
+      "expected_matches": 1,
+      "test_filter": "^ModelSplit$",
+      "description": "Skip MMU facet copying; the two output rows must lose their distinct Extruder2 and Extruder3 states.",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "6bdaaf5439c2ac5f8bcf531b9ac76460a3e385050801a4abd6adc8593e2638d2"
+    },
+    {
+      "id": "model-split-omits-fuzzy-facet-copy",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "                COPY_FACETS(fuzzy_skin_facets);",
+      "new": "                // COPY_FACETS(fuzzy_skin_facets);",
+      "expected_matches": 1,
+      "test_filter": "^ModelSplit$",
+      "description": "Skip fuzzy-facet copying; the multi-volume output fuzzy annotation must fail its ordinary state assertion.",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "857138db468a8a3c028bd966522da1703464dca831e2ed247666b0ff9afa6496"
+    },
+    {
+      "id": "model-split-skips-single-volume-paint-restore",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "                new_vol->restore_painting(saved_painting);",
+      "new": "                new_vol->restore_painting(std::nullopt);",
+      "expected_matches": 1,
+      "test_filter": "^ModelSplit$",
+      "description": "Discard the saved painting during single-volume remap; the painted component assertion must fail through the ordinary output oracle.",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "369cea75a7eb40376ab5670d76e614ba47da7b92b5dd6285e6708708fe435038"
+    }
+  ],
+  "description": "Public model splitting preserves remapped and copied painting, geometry, configuration and source metadata."
+}
