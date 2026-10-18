@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "description": "Private ordinary-assertion mutation probes for cloud typed-preset loading and printer snapshot selection; native execution pending.",
+  "test_filter": "PresetCloudSelection",
+  "mutants": [
+    {
+      "id": "preset-cloud-two-pass-gate-reversed",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        if ((pass == 1) == (inherits_iter == value_map.end() || inherits_iter->second.empty()))\n            continue;",
+      "new": "        if ((pass == 1) != (inherits_iter == value_map.end() || inherits_iter->second.empty()))\n            continue;",
+      "expected_matches": 1,
+      "test_filter": "PresetCloudSelection",
+      "expected_result": "ordinary_assertion_kill",
+      "ordinary_assertion_only": true,
+      "description": "Reverse the root-versus-inherited pass predicate. The lexicographically child-first cloud fixture must still install both the root and inherited filament child.",
+      "source_anchor_sha256": "49bce86dbbebfe34b502d4b40b270a2529c26cb4a32af53ab5e6d3204bb09ebd"
+    },
+    {
+      "id": "preset-cloud-printer-dispatch-disabled",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "            else if (type_iter->second == PRESET_IOT_PRINTER_TYPE) {\n                preset_collection = &(this->printers);\n                machine_added |= preset_collection->load_user_preset(name, value_map, substitutions, substitution_rule, PresetOrigin(PresetOrigin::Kind::User));\n            }",
+      "new": "            else if (false) {\n                preset_collection = &(this->printers);\n                machine_added |= preset_collection->load_user_preset(name, value_map, substitutions, substitution_rule, PresetOrigin(PresetOrigin::Kind::User));\n            }",
+      "expected_matches": 1,
+      "test_filter": "PresetCloudSelection",
+      "expected_result": "ordinary_assertion_kill",
+      "ordinary_assertion_only": true,
+      "description": "Skip the public printer-type dispatch. The typed cloud printer payload must remain absent while print and filament payloads still load.",
+      "source_anchor_sha256": "41709f7aecf6e80b050ce0a1ad110e06e70a162d5e6fa5d2aa9813883c74fb44"
+    },
+    {
+      "id": "preset-selection-unavailable-filament-fallback-disabled",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        // iterates from m_num_default_presets, so the placeholder's is_compatible flag\n        // stays true and the not-found/visible/compatible predicate alone would miss it.\n        if (auto it = filaments.find_preset_internal(fp); fp == ORCA_DEFAULT_FILAMENT_PLACEHOLDER || it == filaments.end() || !it->is_visible || !it->is_compatible) {",
+      "new": "        // iterates from m_num_default_presets, so the placeholder's is_compatible flag\n        // stays true and the not-found/visible/compatible predicate alone would miss it.\n        if (false) {",
+      "expected_matches": 1,
+      "test_filter": "PresetCloudSelection",
+      "expected_result": "ordinary_assertion_kill",
+      "ordinary_assertion_only": true,
+      "description": "Disable replacement of missing, hidden, or placeholder filament names. The update_selections fixture must reject its unresolved slot names.",
+      "source_anchor_sha256": "74e2e80b991b6a6951a99a3b9bcb2860f045211442a738a4a6a3264f0d90ac7d"
+    },
+    {
+      "id": "preset-selection-nonempty-multicolor-branch-forced-to-default",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    update_filament_count();\n\n    std::vector<std::string> filament_colors;\n    auto f_colors = config.get_printer_setting(initial_printer_profile_name, \"filament_colors\");\n    if (!f_colors.empty()) {\n        boost::algorithm::split(filament_colors, f_colors, boost::algorithm::is_any_of(\",\"));\n    }\n    filament_colors.resize(filament_presets.size(), \"#26A69A\");\n    project_config.option<ConfigOptionStrings>(\"filament_colour\")->values = filament_colors;\n\n    std::vector<std::string> multi_filament_colors;\n    if (config.has_printer_setting(initial_printer_profile_name, \"filament_multi_colors\")) {\n        boost::algorithm::split(multi_filament_colors, config.get_printer_setting(initial_printer_profile_name, \"filament_multi_colors\"), boost::algorithm::is_any_of(\",\"));\n    }\n    if (multi_filament_colors.size() == 0) project_config.option<ConfigOptionStrings>(\"filament_multi_colour\")->values = filament_colors;\n    else project_config.option<ConfigOptionStrings>(\"filament_multi_colour\")->values = multi_filament_colors;\n",
+      "new": "    update_filament_count();\n\n    std::vector<std::string> filament_colors;\n    auto f_colors = config.get_printer_setting(initial_printer_profile_name, \"filament_colors\");\n    if (!f_colors.empty()) {\n        boost::algorithm::split(filament_colors, f_colors, boost::algorithm::is_any_of(\",\"));\n    }\n    filament_colors.resize(filament_presets.size(), \"#26A69A\");\n    project_config.option<ConfigOptionStrings>(\"filament_colour\")->values = filament_colors;\n\n    std::vector<std::string> multi_filament_colors;\n    if (config.has_printer_setting(initial_printer_profile_name, \"filament_multi_colors\")) {\n        boost::algorithm::split(multi_filament_colors, config.get_printer_setting(initial_printer_profile_name, \"filament_multi_colors\"), boost::algorithm::is_any_of(\",\"));\n    }\n    if (true) project_config.option<ConfigOptionStrings>(\"filament_multi_colour\")->values = filament_colors;\n    else project_config.option<ConfigOptionStrings>(\"filament_multi_colour\")->values = multi_filament_colors;\n",
+      "expected_matches": 1,
+      "test_filter": "PresetCloudSelection",
+      "expected_result": "ordinary_assertion_kill",
+      "ordinary_assertion_only": true,
+      "description": "Always take the empty multi-color fallback branch. The populated multi_filament_colors row must retain its distinct two-color payload.",
+      "source_anchor_sha256": "b2d06cc37f292aad6dea45c1b074cf5fc619e2d1cc1afc643a006cbe6e23004b"
+    }
+  ]
+}

@@ -26,6 +26,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode_settings_contracts.cpp
 	test_fan_mover_contracts.cpp
 	test_motion_flow_variance.cpp
+	test_pressure_equalizer.cpp
 	# Seam geometry and pipeline regressions share the existing Print fixtures.
 	test_precise_seam.cpp
 	test_print.cpp

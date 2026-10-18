@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "test_filter": "ColorUtilsStep3",
+  "mutants": [
+    {
+      "id": "colorutils-step3-area-weighting-removed",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "            sum_r += map_face_to_area[curr_fid] * map_face_to_rgb[curr_fid][0];\n            sum_g += map_face_to_area[curr_fid] * map_face_to_rgb[curr_fid][1];\n            sum_b += map_face_to_area[curr_fid] * map_face_to_rgb[curr_fid][2];",
+      "new": "            sum_r += map_face_to_rgb[curr_fid][0];\n            sum_g += map_face_to_rgb[curr_fid][1];\n            sum_b += map_face_to_rgb[curr_fid][2];",
+      "expected_matches": 1,
+      "test_filter": "ColorUtilsStep3",
+      "description": "The connected patch winner must use triangle area in all three weighted RGB sums; dropping the factors makes the unequal-area and swapped-area rows disagree with their independent red/blue expectations.",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "colorutils-step3-adjacent-distance-direction-inverted",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "            for (auto& [cluster_id, area] : map_cluster_id_to_adj_area) {\n                double dist = calc_rgb_color_difference_by_ciede2000(average_color, cluster_centers[cluster_id]);\n                if (dist < min_dist) {",
+      "new": "            for (auto& [cluster_id, area] : map_cluster_id_to_adj_area) {\n                double dist = calc_rgb_color_difference_by_ciede2000(average_color, cluster_centers[cluster_id]);\n                if (dist > min_dist) {",
+      "expected_matches": 1,
+      "test_filter": "ColorUtilsStep3",
+      "description": "Step 3 must choose the nearest adjacent cluster to the weighted average; reversing the comparison leaves the selected component on the wrong fallback assignment and fails the swapped-area blue row.",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "colorutils-step3-component-assignment-forced-first",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "            map_face_to_cluster_id[fid] = matched_cluster_id;",
+      "new": "            map_face_to_cluster_id[fid] = 0;",
+      "expected_matches": 1,
+      "test_filter": "ColorUtilsStep3",
+      "description": "Every face in the connected unclustered component must receive the selected Step 3 cluster; forcing cluster zero loses the swapped-area blue assignment.",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

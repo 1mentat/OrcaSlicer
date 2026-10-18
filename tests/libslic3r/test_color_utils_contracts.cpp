@@ -905,3 +905,135 @@ TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
     CHECK_THAT(calc_rgb_color_difference_by_ciede2000(mean_hue_wrap_b, mean_hue_wrap_a),
                Catch::Matchers::WithinAbs(mean_hue_wrap_expected, 1e-6));
 }
+
+namespace color_utils_step3_weighted_component {
+namespace {
+
+using Color = std::array<std::size_t, 3>;
+
+constexpr Color kRedCenter  {{220, 40, 40}};
+constexpr Color kBlueCenter {{40, 40, 220}};
+constexpr Color kThirdCenter{{130, 130, 130}};
+constexpr Color kPatchA     {{31, 113, 170}};
+constexpr Color kPatchB     {{196, 149, 45}};
+
+TriMesh weighted_component_mesh(const bool swap_patch_areas)
+{
+    // The four faces form a connected strip: red seed -> patch A -> patch B ->
+    // blue seed.  The two variants swap the patch areas (2/8 versus 8/2) while
+    // retaining the same face adjacency and seed colors.
+    TriVertices vertices;
+    if (!swap_patch_areas) {
+        vertices = {
+            TriVertex(0.f, 0.f, 0.f), TriVertex(2.f, 0.f, 0.f), TriVertex(0.f, 2.f, 0.f),
+            TriVertex(2.f, 2.f, 0.f), TriVertex(0.f, 10.f, 0.f), TriVertex(4.f, 10.f, 0.f)};
+    } else {
+        vertices = {
+            TriVertex(0.f, 0.f, 0.f), TriVertex(2.f, 0.f, 0.f), TriVertex(0.f, 2.f, 0.f),
+            TriVertex(2.f, 8.f, 0.f), TriVertex(0.f, 4.f, 0.f), TriVertex(4.f, 16.f, 0.f)};
+    }
+    return TriMesh(
+        TriFaces{TriFace(0, 1, 2), TriFace(1, 3, 2), TriFace(2, 3, 4), TriFace(3, 5, 4)},
+        std::move(vertices));
+}
+
+double triangle_area(const TriMesh &mesh, const std::size_t face_id)
+{
+    const auto &face = mesh.indices[face_id];
+    const auto &a = mesh.vertices[face[0]];
+    const auto &b = mesh.vertices[face[1]];
+    const auto &c = mesh.vertices[face[2]];
+    return std::abs(static_cast<double>(b.x() - a.x()) * static_cast<double>(c.y() - a.y())
+                  - static_cast<double>(b.y() - a.y()) * static_cast<double>(c.x() - a.x())) * 0.5;
+}
+
+} // namespace
+} // namespace color_utils_step3_weighted_component
+
+TEST_CASE("Mesh clustering weights an unresolved connected component by face area",
+          "[ColorUtils][ColorUtilsExtended][ColorUtilsStep3]")
+{
+    using namespace color_utils_step3_weighted_component;
+
+    const std::vector<Color> centers{kRedCenter, kBlueCenter, kThirdCenter};
+    const std::vector<Color> input_colors{kRedCenter, kPatchA, kPatchB, kBlueCenter};
+    REQUIRE(input_colors[0] == kRedCenter);
+    REQUIRE(input_colors[3] == kBlueCenter);
+
+    // Production CIEDE checks are route preconditions only. The fixed output
+    // expectations below use independently calculated weighted RGB colors.
+    const auto require_step3_patch = [&](const Color &patch) {
+        const double red_distance   = calc_rgb_color_difference_by_ciede2000(patch, kRedCenter);
+        const double blue_distance  = calc_rgb_color_difference_by_ciede2000(patch, kBlueCenter);
+        const double third_distance = calc_rgb_color_difference_by_ciede2000(patch, kThirdCenter);
+        const double second_distance = std::min(red_distance, blue_distance);
+        REQUIRE(third_distance < second_distance);
+        REQUIRE(second_distance - third_distance > 0.5);
+        REQUIRE(third_distance > 3.0);
+        REQUIRE(third_distance * 1.5 - second_distance > 2.0);
+    };
+    require_step3_patch(kPatchA);
+    require_step3_patch(kPatchB);
+
+    const auto weighted_average = [](const Color &a, const Color &b, const std::size_t area_a, const std::size_t area_b) {
+        const std::size_t total = area_a + area_b;
+        return Color{{(area_a * a[0] + area_b * b[0]) / total,
+                      (area_a * a[1] + area_b * b[1]) / total,
+                      (area_a * a[2] + area_b * b[2]) / total}};
+    };
+    const Color original_average = weighted_average(kPatchA, kPatchB, 2, 8);
+    const Color swapped_average = weighted_average(kPatchA, kPatchB, 8, 2);
+    // Independent oracle: (163,141,70) has red-vs-blue margin 29.0498;
+    // (64,120,145) has blue-vs-red margin 28.4872.
+    REQUIRE(original_average == Color{{163, 141, 70}});
+    REQUIRE(swapped_average == Color{{64, 120, 145}});
+    const double original_margin = calc_rgb_color_difference_by_ciede2000(original_average, kBlueCenter)
+                                 - calc_rgb_color_difference_by_ciede2000(original_average, kRedCenter);
+    const double swapped_margin = calc_rgb_color_difference_by_ciede2000(swapped_average, kRedCenter)
+                                - calc_rgb_color_difference_by_ciede2000(swapped_average, kBlueCenter);
+    CHECK_THAT(original_margin, Catch::Matchers::WithinAbs(29.0498, 0.25));
+    CHECK_THAT(swapped_margin, Catch::Matchers::WithinAbs(28.4872, 0.25));
+
+    for (const bool swap_patch_areas : {false, true}) {
+        const TriMesh mesh = weighted_component_mesh(swap_patch_areas);
+        REQUIRE(mesh.vertices.size() == 6);
+        REQUIRE(mesh.indices.size() == 4);
+        REQUIRE(triangle_area(mesh, 0) > 0.0);
+        REQUIRE(triangle_area(mesh, 1) > 0.0);
+        REQUIRE(triangle_area(mesh, 2) > 0.0);
+        REQUIRE(triangle_area(mesh, 3) > 0.0);
+        const double patch_a_area = triangle_area(mesh, 1);
+        const double patch_b_area = triangle_area(mesh, 2);
+        if (!swap_patch_areas) {
+            CHECK_THAT(patch_a_area, Catch::Matchers::WithinAbs(2.0, 1e-6));
+            CHECK_THAT(patch_b_area, Catch::Matchers::WithinAbs(8.0, 1e-6));
+        } else {
+            CHECK_THAT(patch_a_area, Catch::Matchers::WithinAbs(8.0, 1e-6));
+            CHECK_THAT(patch_b_area, Catch::Matchers::WithinAbs(2.0, 1e-6));
+        }
+
+        const TriMesh original_mesh = mesh;
+        std::vector<Color> face_colors = input_colors;
+        std::vector<std::size_t> face_ids;
+        REQUIRE(mesh_cluster(mesh, centers, face_colors, face_ids));
+        REQUIRE(face_ids.size() == mesh.indices.size());
+        REQUIRE(face_colors.size() == mesh.indices.size());
+        CHECK(face_ids[0] == 0);
+        CHECK(face_ids[3] == 1);
+        CHECK(face_colors[0] == kRedCenter);
+        CHECK(face_colors[3] == kBlueCenter);
+        if (!swap_patch_areas) {
+            CHECK(face_ids[1] == 0);
+            CHECK(face_ids[2] == 0);
+            CHECK(face_colors[1] == kRedCenter);
+            CHECK(face_colors[2] == kRedCenter);
+        } else {
+            CHECK(face_ids[1] == 1);
+            CHECK(face_ids[2] == 1);
+            CHECK(face_colors[1] == kBlueCenter);
+            CHECK(face_colors[2] == kBlueCenter);
+        }
+        CHECK(mesh.vertices == original_mesh.vertices);
+        CHECK(mesh.indices == original_mesh.indices);
+    }
+}

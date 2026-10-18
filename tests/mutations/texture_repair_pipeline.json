@@ -1,0 +1,36 @@
+{
+  "mutants": [
+    {
+      "description": "Bypass the public RepairAndImport decision. The positive row must invoke the callback and produce the fixed closed four-face output; the ordinary ImportWithoutRepair control remains distinct.",
+      "expected_matches": 1,
+      "id": "texture-repair-public-decision-bypassed",
+      "new": "if (false) {",
+      "old": "if (settings.mesh_repair_decision == MeshRepairDecision::RepairAndImport) {",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "test_filter": "TextureToColorRepair"
+    },
+    {
+      "description": "Discard centroid-based color resampling after repair. The four-face repaired output samples a red and a blue UV plateau, so the positive row must retain both independent expected colors.",
+      "expected_matches": 1,
+      "id": "texture-repair-resample-uses-first-color",
+      "new": "new_face_colors[fid] = face_colors.front();",
+      "old": "new_face_colors[fid] = face_colors[hit_idx];",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "test_filter": "TextureToColorRepair"
+    },
+    {
+      "description": "Ignore cancellation immediately after the public repair callback. The cancellation row must return false and must stop before the public Color clustering progress stage; removing this guard reaches that stage and fails the ordinary progress assertion.",
+      "expected_matches": 1,
+      "id": "texture-repair-post-callback-cancel-ignored",
+      "new": "                if (repaired) {\n                    if (false) return false;",
+      "old": "                if (repaired) {\n                    if (cancelled()) return false;",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "test_filter": "TextureToColorRepair"
+    }
+  ],
+  "schema_version": 1,
+  "test_filter": "TextureToColorRepair"
+}

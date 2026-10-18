@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Public PressureEqualizer output preserves endpoint extrusion while applying the external-only smoothing boundary to tagged roles, for both absolute and relative E. The fixture opens the adjustable-flow block with a G1 F600 ;_EXTRUDE_SET_SPEED line.",
+  "test_filter": "PressureEqualizer",
+  "mutants": [
+    {
+      "id": "pressure-equalizer-external-only-positive-bypass-disabled",
+      "path": "src/libslic3r/GCode/PressureEqualizer.cpp",
+      "old": "            if (!line.adjustable_flow || line.extrusion_role == ExtrusionRole::erBridgeInfill || line.extrusion_role == ExtrusionRole::erIroning ||\n                // Orca: Limit ERS to external perimeters and overhangs if option selected by user\n                (m_extrusion_rate_smoothing_external_perimeter_only && line.extrusion_role != ExtrusionRole::erOverhangPerimeter && line.extrusion_role != ExtrusionRole::erExternalPerimeter)) {\n                rate_start = line.volumetric_extrusion_rate_start;\n            } else if (iRole == size_t(line.extrusion_role) && rate_prec < rate_start)",
+      "new": "            if (!line.adjustable_flow || line.extrusion_role == ExtrusionRole::erBridgeInfill || line.extrusion_role == ExtrusionRole::erIroning ||\n                // Orca: Limit ERS to external perimeters and overhangs if option selected by user\n                (false && line.extrusion_role != ExtrusionRole::erOverhangPerimeter && line.extrusion_role != ExtrusionRole::erExternalPerimeter)) {\n                rate_start = line.volumetric_extrusion_rate_start;\n            } else if (iRole == size_t(line.extrusion_role) && rate_prec < rate_start)",
+      "expected_matches": 1,
+      "test_filter": "PressureEqualizer",
+      "ordinary_assertion_only": true,
+      "description": "Disable the positive-direction external-only bypass at its rate_start gate. The internal-perimeter control must then gain smoothing splits and fail its exact four-move/one-marker assertions.",
+      "source_anchor_sha256": "447eee98cabbaf9fe0452a60f86ac183b62a7a53d62658f2212ba93da50d9094"
+    },
+    {
+      "id": "pressure-equalizer-role-marker-forces-perimeter",
+      "path": "src/libslic3r/GCode/PressureEqualizer.cpp",
+      "old": "m_current_extrusion_role = ExtrusionRole(role);",
+      "new": "m_current_extrusion_role = ExtrusionRole::erPerimeter;",
+      "expected_matches": 1,
+      "test_filter": "PressureEqualizer",
+      "ordinary_assertion_only": true,
+      "description": "Discard the public extrusion-role marker and force every tagged segment to an internal perimeter. The external-only row must then lose its smoothing split, failing its positive physical output assertions."
+    }
+  ]
+}

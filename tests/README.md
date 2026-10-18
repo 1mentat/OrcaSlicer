@@ -194,6 +194,16 @@ control and conserved material. Its mutations are in `small_perimeter_speed.json
 cloud deletion, missing filament-slot repair, and retention of listed, syncing,
 unsaved and dirty presets. Its mutations are in `preset_cloud_removal.json`.
 
+`[PresetCloudSelection]` checks typed cloud-profile loading, inherited filament
+identity, and printer snapshot restoration, including missing and hidden
+filament slots, optional color arrays, and normalized flush volumes. Its
+mutations are in `preset_cloud_selection.json`.
+
+`[PressureEqualizer]` checks smoothing of tagged external-wall flow transitions
+against an internal-wall control in absolute and relative extrusion modes.
+The output must preserve total extrusion and its endpoint while introducing
+intermediate feedrates. Its mutations are in `pressure_equalizer.json`.
+
 `[PresetBundleImport]` imports an actual ZIP bundle with process, filament, and
 printer profiles, then checks metadata, canonical identities, typed settings,
 and persisted per-type files. Its mutations are in `preset_bundle_import.json`.
@@ -549,7 +559,17 @@ on a closed mesh. Its mutations are in `texture_to_color_extended.json`.
 output clearing. `[TextureToColorRepair]` checks independent boundary limits,
 face orientation, degenerate-face removal, topology, volume, and cancellation
 at each published stage. Its inline-header mutants require rebuilding every
-affected consumer before testing.
+affected consumer before testing. The repair pipeline cases check that
+oversampling precedes the callback, the callback's closed topology and both
+texture colors survive, and cancellation after repair prevents color clustering.
+Late cancellation may retain partial output. These pipeline mutations are in
+`texture_repair_pipeline.json`.
+
+`[ColorUtilsStep3]` uses a four-face strip with an unresolved two-face component.
+Swapping the component's face areas must reverse its selected neighboring color
+while preserving both seeds and mesh geometry. Independent weighted RGB values
+and large color-distance margins support the expected assignments. Its mutations
+are in `color_component_weighting.json`.
 
 `[CalibrationContracts]` checks PA command sequences, feedrates, bed extents,
 annotation geometry, layer heights, and coordinate offsets. `[PresetAmsSync]`

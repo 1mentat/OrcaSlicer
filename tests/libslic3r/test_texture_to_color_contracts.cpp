@@ -5,6 +5,8 @@
 #include <array>
 #include <admesh/stl.h>
 #include <cmath>
+#include <functional>
+#include <string>
 #include <cstddef>
 #include <memory>
 #include <opencv2/core.hpp>
@@ -112,6 +114,172 @@ void check_finite_and_valid(const TriMesh &mesh)
 }
 
 } // namespace
+
+namespace {
+TextureToColorSettings repair_import_settings(std::size_t &callback_calls,
+                                              std::size_t &callback_input_faces,
+                                              bool &callback_progress_seen,
+                                              bool &callback_saw_cancel_false,
+                                              bool *callback_finished = nullptr)
+{
+    TextureToColorSettings settings;
+    settings.target_colors_num = 1;
+    settings.smooth_weight = 0.0;
+    settings.oversampling_iters = 1;
+    settings.oversampling_max_face_count = 64;
+    settings.mesh_repair_decision = MeshRepairDecision::RepairAndImport;
+    settings.mesh_repair_callback = [&, callback_finished](const indexed_triangle_set &input,
+                                                            indexed_triangle_set &repaired,
+                                                            std::function<void(const char *, unsigned)> progress,
+                                                            std::function<bool()> cancelled,
+                                                            std::string *error) {
+        ++callback_calls;
+        callback_input_faces = input.indices.size();
+        callback_saw_cancel_false = !cancelled();
+        if (progress) {
+            progress("private repair callback", 37);
+            callback_progress_seen = true;
+        }
+        TriMesh fixed = closed_tetrahedron();
+        repaired = fixed;
+        if (callback_finished != nullptr)
+            *callback_finished = true;
+        (void) error;
+        return true;
+    };
+    return settings;
+}
+
+std::vector<std::vector<Vec2f>> two_tone_open_tetra_uvs()
+{
+    const std::vector<Vec2f> red_uv{{0.f, 0.f}, {0.f, 0.f}, {0.f, 0.f}};
+    // With TextureToColor's fractional UV addressing, 2/3 maps exactly to
+    // column 2 of a four-column image and remains on the blue plateau.
+    const std::vector<Vec2f> blue_uv{{2.f / 3.f, 0.f}, {2.f / 3.f, 0.f}, {2.f / 3.f, 0.f}};
+    return {red_uv, blue_uv, blue_uv};
+}
+
+cv::Mat two_tone_texture()
+{
+    cv::Mat texture(1, 4, CV_8UC3);
+    texture.at<cv::Vec3b>(0, 0) = cv::Vec3b(7, 19, 233);
+    texture.at<cv::Vec3b>(0, 1) = cv::Vec3b(7, 19, 233);
+    texture.at<cv::Vec3b>(0, 2) = cv::Vec3b(233, 19, 7);
+    texture.at<cv::Vec3b>(0, 3) = cv::Vec3b(233, 19, 7);
+    return texture;
+}
+
+} // namespace
+
+TEST_CASE("TextureToColor preserves repaired topology after pre-repair oversampling",
+          "[TextureToColor][TextureToColorPublic][TextureToColorRepair]")
+{
+    const TriMesh input = open_tetrahedron();
+    const auto uv_coords = two_tone_open_tetra_uvs();
+    const cv::Mat texture = two_tone_texture();
+
+    std::size_t callback_calls = 0;
+    std::size_t callback_input_faces = 0;
+    bool callback_progress_seen = false;
+    bool callback_saw_cancel_false = false;
+    TextureToColorSettings settings = repair_import_settings(
+        callback_calls, callback_input_faces, callback_progress_seen, callback_saw_cancel_false);
+    settings.target_colors_num = 2;
+
+    TriMesh repaired_output;
+    std::vector<Color> repaired_colors;
+    REQUIRE(TextureToColor(input, uv_coords, texture, repaired_output, repaired_colors,
+                           settings, nullptr, []() { return false; }));
+    CHECK(callback_calls == 1);
+    CHECK(callback_input_faces == input.indices.size() * 4);
+    CHECK(callback_progress_seen);
+    CHECK(callback_saw_cancel_false);
+    CHECK(repaired_output.indices.size() == 4);
+    CHECK(repaired_colors.size() == repaired_output.indices.size());
+    CHECK(color_utils::is_closed(repaired_output));
+    check_finite_and_valid(repaired_output);
+
+    const Color expected_red{{233, 19, 7}};
+    const Color expected_blue{{7, 19, 233}};
+    auto matches_color = [](const Color &actual, const Color &expected) {
+        for (std::size_t channel = 0; channel < expected.size(); ++channel) {
+            if (std::abs(static_cast<double>(actual[channel]) - static_cast<double>(expected[channel])) > 3.0)
+                return false;
+        }
+        return true;
+    };
+    std::size_t red_count = 0;
+    std::size_t blue_count = 0;
+    for (const Color &color : repaired_colors) {
+        if (matches_color(color, expected_red))
+            ++red_count;
+        if (matches_color(color, expected_blue))
+            ++blue_count;
+    }
+    CHECK(red_count > 0);
+    CHECK(blue_count > 0);
+
+    std::size_t control_callback_calls = 0;
+    std::size_t control_input_faces = 0;
+    bool control_progress_seen = false;
+    bool control_saw_cancel_false = false;
+    TextureToColorSettings control = repair_import_settings(
+        control_callback_calls, control_input_faces, control_progress_seen, control_saw_cancel_false);
+    control.mesh_repair_decision = MeshRepairDecision::ImportWithoutRepair;
+    TriMesh control_output;
+    std::vector<Color> control_colors;
+    REQUIRE(TextureToColor(input, uv_coords, texture, control_output, control_colors,
+                           control, nullptr, []() { return false; }));
+    CHECK(control_callback_calls == 0);
+    CHECK(control_output.indices.size() == input.indices.size() * 4);
+    CHECK_FALSE(color_utils::is_closed(control_output));
+    CHECK(control_colors.size() == control_output.indices.size());
+}
+
+TEST_CASE("TextureToColor reports cancellation after the mesh repair callback",
+          "[TextureToColor][TextureToColorPublic][TextureToColorRepair]")
+{
+    const TriMesh input = open_tetrahedron();
+    const auto uv_coords = two_tone_open_tetra_uvs();
+    const cv::Mat texture = two_tone_texture();
+    std::size_t callback_calls = 0;
+    std::size_t callback_input_faces = 0;
+    bool callback_progress_seen = false;
+    bool callback_saw_cancel_false = false;
+    bool callback_finished = false;
+    TextureToColorSettings settings = repair_import_settings(
+        callback_calls, callback_input_faces, callback_progress_seen, callback_saw_cancel_false, &callback_finished);
+
+    TriMesh output = input;
+    std::vector<Color> colors{{233, 19, 7}};
+    std::vector<std::string> progress_messages;
+    const auto record_progress = [&](AlgoProgress state) {
+        progress_messages.emplace_back(state.message ? state.message : "");
+    };
+    const auto cancel_after_repair = [&]() { return callback_finished; };
+    CHECK_FALSE(TextureToColor(input, uv_coords, texture, output, colors,
+                               settings, record_progress, cancel_after_repair));
+    CHECK(callback_calls == 1);
+    CHECK(callback_input_faces == input.indices.size() * 4);
+    CHECK(callback_progress_seen);
+    CHECK(callback_saw_cancel_false);
+    CHECK(callback_finished);
+
+    bool saw_repair_stage = false;
+    bool saw_callback_stage = false;
+    bool saw_color_clustering_stage = false;
+    for (const std::string &message : progress_messages) {
+        if (message == "Repairing mesh")
+            saw_repair_stage = true;
+        if (message == "private repair callback")
+            saw_callback_stage = true;
+        if (message == "Color clustering")
+            saw_color_clustering_stage = true;
+    }
+    CHECK(saw_repair_stage);
+    CHECK(saw_callback_stage);
+    CHECK_FALSE(saw_color_clustering_stage);
+}
 
 TEST_CASE("Texture-to-color rejects invalid texture inputs and clears outputs", "[TextureToColor]")
 {

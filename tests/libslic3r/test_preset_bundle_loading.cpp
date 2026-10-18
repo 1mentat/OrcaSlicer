@@ -12117,3 +12117,169 @@ TEST_CASE("External G-code config splits each filament slot into its own source 
 }
 
 } // namespace high_yield_preset_import_contracts
+
+
+TEST_CASE("Cloud user loading routes printer and filament profiles through typed collections",
+          "[PresetCloudSelection][PresetBundle]")
+{
+    PresetBundle bundle;
+    AppConfig app_config;
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+
+    auto process = cloud_values(PRESET_IOT_PRINT_TYPE, "cloud-process-id", "account-1");
+    process.emplace("layer_height", "0.26");
+    cloud.emplace("Cloud Process", std::move(process));
+
+    auto filament_root = cloud_values(PRESET_IOT_FILAMENT_TYPE, "cloud-filament-id", "account-1");
+    filament_root.emplace(BBL_JSON_KEY_FILAMENT_ID, "cloud-filament-family");
+    filament_root.emplace("filament_diameter", "1.75,2.85");
+    cloud.emplace("Cloud Filament Root", std::move(filament_root));
+
+    auto filament_child = cloud_values(PRESET_IOT_FILAMENT_TYPE, "cloud-filament-child-id", "account-1",
+                                       "Cloud Filament Root");
+    filament_child.emplace(BBL_JSON_KEY_FILAMENT_ID, "null");
+    cloud.emplace("Cloud Filament Child", std::move(filament_child));
+
+    auto printer = cloud_values(PRESET_IOT_PRINTER_TYPE, "cloud-printer-id", "account-1");
+    printer.emplace("printer_model", "Cloud Model");
+    printer.emplace("nozzle_diameter", "0.4,0.6");
+    cloud.emplace("Cloud Printer", std::move(printer));
+
+    // A supported type with incomplete identity metadata is ignored, as is an unknown type.
+    cloud.emplace("Incomplete Cloud", std::map<std::string, std::string>{
+        { BBL_JSON_KEY_TYPE, PRESET_IOT_PRINTER_TYPE },
+        { BBL_JSON_KEY_VERSION, "1.0.0" },
+        { BBL_JSON_KEY_SETTING_ID, "incomplete-id" },
+    });
+    cloud.emplace("Unsupported Cloud", cloud_values("future-profile", "future-id", "account-1"));
+
+    const PresetsConfigSubstitutions substitutions = bundle.load_user_presets(
+        app_config, cloud, ForwardCompatibilitySubstitutionRule::EnableSilent);
+
+    const Preset *loaded_process = bundle.prints.find_preset("Cloud Process");
+    const Preset *loaded_root = bundle.filaments.find_preset("Cloud Filament Root");
+    const Preset *loaded_child = bundle.filaments.find_preset("Cloud Filament Child");
+    const Preset *loaded_printer = bundle.printers.find_preset("Cloud Printer");
+    REQUIRE(loaded_process != nullptr);
+    REQUIRE(loaded_root != nullptr);
+    REQUIRE(loaded_child != nullptr);
+    REQUIRE(loaded_printer != nullptr);
+    CHECK_THAT(loaded_process->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.26, 1e-9));
+    CHECK(loaded_root->setting_id == "cloud-filament-id");
+    CHECK(loaded_child->base_id == "cloud-filament-id");
+    CHECK(loaded_child->filament_id == "cloud-filament-family");
+    REQUIRE(loaded_child->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
+    check_double_vector(loaded_child->config.option<ConfigOptionFloats>("filament_diameter")->values,
+                        {1.75, 2.85});
+    CHECK(loaded_printer->user_id == "account-1");
+    CHECK(loaded_printer->config.opt_string("printer_model") == "Cloud Model");
+    REQUIRE(loaded_printer->config.option<ConfigOptionFloats>("nozzle_diameter") != nullptr);
+    check_double_vector(loaded_printer->config.option<ConfigOptionFloats>("nozzle_diameter")->values,
+                        {0.4, 0.6});
+    CHECK(bundle.prints.find_preset("Incomplete Cloud") == nullptr);
+    CHECK(bundle.filaments.find_preset("Incomplete Cloud") == nullptr);
+    CHECK(bundle.printers.find_preset("Incomplete Cloud") == nullptr);
+    CHECK(bundle.prints.find_preset("Unsupported Cloud") == nullptr);
+    CHECK(bundle.filaments.find_preset("Unsupported Cloud") == nullptr);
+    CHECK(bundle.printers.find_preset("Unsupported Cloud") == nullptr);
+    CHECK(substitutions.empty());
+}
+
+TEST_CASE("Printer snapshot restores filament colors and replaces unavailable slots",
+          "[PresetCloudSelection][PresetBundle]")
+{
+    PresetBundle bundle;
+
+    DynamicPrintConfig printer_config = bundle.printers.default_preset().config;
+    printer_config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.4, 0.4};
+    bundle.printers.load_preset("", "Snapshot Printer", printer_config, false);
+    bundle.prints.load_preset("", "Snapshot Process", bundle.prints.default_preset().config, false);
+
+    DynamicPrintConfig filament_config = bundle.filaments.default_preset().config;
+    filament_config.option<ConfigOptionStrings>("compatible_printers", true)->values.clear();
+    bundle.filaments.load_preset("", "Visible PLA", filament_config, false);
+    Preset &hidden = bundle.filaments.load_preset("", "Hidden PLA", filament_config, false);
+    hidden.is_visible = false;
+    bundle.filaments.set_default_suppressed(true);
+
+    bundle.printers.select_preset_by_name("Snapshot Printer", true);
+    bundle.prints.select_preset_by_name("Snapshot Process", true);
+    bundle.filaments.select_preset_by_name("Visible PLA", true);
+
+    AppConfig app_config;
+    app_config.set_printer_setting("Snapshot Printer", PRESET_PRINT_NAME, "Snapshot Process");
+    app_config.set_printer_setting("Snapshot Printer", PRESET_FILAMENT_NAME, "Visible PLA");
+    app_config.set_printer_setting("Snapshot Printer", "filament_01", "Missing PLA");
+    app_config.set_printer_setting("Snapshot Printer", "filament_02", "Hidden PLA");
+    app_config.set_printer_setting("Snapshot Printer", "filament_colors", "#111111,#222222,#333333");
+    app_config.set_printer_setting("Snapshot Printer", "filament_multi_colors", "#AAAAAA,#BBBBBB");
+    app_config.set_printer_setting("Snapshot Printer", "filament_color_types", "2");
+    // Three nozzles and three filament slots use the public normalized shapes:
+    // 3*3*3 matrix entries, two vector entries per filament, and one multiplier per nozzle.
+    app_config.set_printer_setting("Snapshot Printer", "flush_volumes_matrix",
+                                   "10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31|32|33|34|35|36");
+    app_config.set_printer_setting("Snapshot Printer", "flush_volumes_vector", "100|101|102|103|104|105");
+    app_config.set_printer_setting("Snapshot Printer", "flush_multiplier", "0.5|0.75|1.0");
+
+    bundle.update_selections(app_config);
+
+    REQUIRE(bundle.filaments.find_preset("Visible PLA") != nullptr);
+    CHECK(bundle.filaments.find_preset("Visible PLA")->is_compatible);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Visible PLA", "Visible PLA", "Visible PLA"});
+    auto *snapshot_colours = bundle.project_config.option<ConfigOptionStrings>("filament_colour");
+    auto *snapshot_multi_colours = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour");
+    auto *snapshot_colour_types = bundle.project_config.option<ConfigOptionStrings>("filament_colour_type");
+    REQUIRE(snapshot_colours != nullptr);
+    REQUIRE(snapshot_multi_colours != nullptr);
+    REQUIRE(snapshot_colour_types != nullptr);
+    CHECK(snapshot_colours->values == std::vector<std::string>{"#111111", "#222222", "#333333"});
+    CHECK(snapshot_multi_colours->values == std::vector<std::string>{"#AAAAAA", "#BBBBBB"});
+    CHECK(snapshot_colour_types->values == std::vector<std::string>{"2", "1", "1"});
+    auto *flush_matrix = bundle.project_config.option<ConfigOptionFloats>("flush_volumes_matrix");
+    auto *flush_vector = bundle.project_config.option<ConfigOptionFloats>("flush_volumes_vector");
+    auto *flush_multiplier = bundle.project_config.option<ConfigOptionFloats>("flush_multiplier");
+    REQUIRE(flush_matrix != nullptr);
+    REQUIRE(flush_vector != nullptr);
+    REQUIRE(flush_multiplier != nullptr);
+    check_double_vector(flush_matrix->values,
+                        {10., 11., 12., 13., 14., 15., 16., 17., 18., 19., 20., 21., 22., 23., 24., 25., 26., 27., 28., 29., 30., 31., 32., 33., 34., 35., 36.});
+    check_double_vector(flush_vector->values,
+                        {100., 101., 102., 103., 104., 105.});
+    check_double_vector(flush_multiplier->values,
+                        {0.5, 0.75, 1.0});
+}
+
+TEST_CASE("Printer snapshot supplies defaults when optional filament arrays are absent",
+          "[PresetCloudSelection][PresetBundle]")
+{
+    PresetBundle bundle;
+    bundle.printers.load_preset("", "Fallback Printer", bundle.printers.default_preset().config, false);
+    bundle.prints.load_preset("", "Fallback Process", bundle.prints.default_preset().config, false);
+    bundle.filaments.load_preset("", "Fallback PLA", bundle.filaments.default_preset().config, false);
+    bundle.filaments.set_default_suppressed(true);
+    bundle.printers.select_preset_by_name("Fallback Printer", true);
+    bundle.prints.select_preset_by_name("Fallback Process", true);
+    bundle.filaments.select_preset_by_name("Fallback PLA", true);
+    bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour")->values = {"stale"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour_type")->values = {"stale"};
+
+    AppConfig app_config;
+    app_config.set_printer_setting("Fallback Printer", PRESET_PRINT_NAME, "Fallback Process");
+    app_config.set_printer_setting("Fallback Printer", PRESET_FILAMENT_NAME, "Fallback PLA");
+    app_config.set_printer_setting("Fallback Printer", "filament_01", "Ghost PLA");
+    // No filament_colors, filament_multi_colors, or filament_color_types keys: the public
+    // startup path must provide its documented per-slot defaults and resolve the missing slot.
+
+    bundle.update_selections(app_config);
+
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Fallback PLA", "Fallback PLA"});
+    auto *fallback_colours = bundle.project_config.option<ConfigOptionStrings>("filament_colour");
+    auto *fallback_multi_colours = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour");
+    auto *fallback_colour_types = bundle.project_config.option<ConfigOptionStrings>("filament_colour_type");
+    REQUIRE(fallback_colours != nullptr);
+    REQUIRE(fallback_multi_colours != nullptr);
+    REQUIRE(fallback_colour_types != nullptr);
+    CHECK(fallback_colours->values == std::vector<std::string>{"#26A69A", "#26A69A"});
+    CHECK(fallback_multi_colours->values == std::vector<std::string>{"#26A69A", "#26A69A"});
+    CHECK(fallback_colour_types->values == std::vector<std::string>{"1", "1"});
+}
