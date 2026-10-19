@@ -1,0 +1,24 @@
+{
+  "description": "Static ordinary-behavior probes for public painted shell clipping and multi-volume projection merging. Native mutation outcomes are pending.",
+  "mutants": [
+    {
+      "id": "painted-sink-skips-build-plane-clipping",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "if (!zs.empty() && is_volume_sinking(painted, volume_trafo)) {",
+      "new": "if (false) {",
+      "description": "Bypass the special z=0 slab path. The downward-facing painted bottom face below z=0 would then project onto the first printable plane, contradicting the test\u2019s empty bottom-state oracle.",
+      "test_filter": "^PaintedSinkingShellProjection$",
+      "expected_matches": 1
+    },
+    {
+      "id": "painted-same-state-volume-projection-not-appended",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "append(*it_dst, std::move(*it_src));",
+      "new": "it_dst->clear();",
+      "description": "Discard a later volume\u2019s nonempty projection when the target layer already contains geometry; the two-component source-boundary oracle should fail.",
+      "test_filter": "^PaintedVolumeMerge$",
+      "expected_matches": 1
+    }
+  ],
+  "schema": 1
+}

@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <libslic3r/Model.hpp>
 #include <libslic3r/PrintConfig.hpp>
 #include <libslic3r/TriangleMesh.hpp>
@@ -156,13 +157,8 @@ struct PaintedSegmentationFixture {
         REQUIRE(volume.mmu_segmentation_facets.set(selector));
     }
 
-    void paint_by_horizontal_facets()
+    void paint_by_horizontal_facets(ModelVolume &volume)
     {
-        REQUIRE(model.objects.size() == 1);
-        ModelObject &object = *model.objects.front();
-        REQUIRE(object.volumes.size() == 1);
-        ModelVolume &volume = *object.volumes.front();
-
         const TriangleMesh &mesh = volume.mesh();
         const BoundingBoxf3 bounds = mesh.bounding_box();
         constexpr float z_epsilon = 1e-4f;
@@ -187,6 +183,13 @@ struct PaintedSegmentationFixture {
         REQUIRE(bottom_facets > 0);
         REQUIRE(top_facets > 0);
         REQUIRE(volume.mmu_segmentation_facets.set(selector));
+    }
+
+    void paint_by_horizontal_facets()
+    {
+        REQUIRE(model.objects.size() == 1);
+        REQUIRE(model.objects.front()->volumes.size() == 1);
+        paint_by_horizontal_facets(*model.objects.front()->volumes.front());
     }
 
     void paint_all_facets(EnforcerBlockerType state)
@@ -709,4 +712,125 @@ TEST_CASE("Fuzzy painted top facets stay out of ordinary fuzzy regions", "[Fuzzy
         REQUIRE(layer.size() == 1);
         CHECK(layer[0].empty());
     }
+}
+
+TEST_CASE("sunk bottom paint stays clipped below the printable footprint", "[PaintedSegmentation][PaintedSegmentationGap][PaintedSinkingShellProjection]")
+{
+    PaintedSegmentationFixture fixture(2, 2, true);
+    ModelVolume &volume = *fixture.model.objects.front()->volumes.front();
+    volume.set_offset(volume.get_offset() + Vec3d(0., 0., -0.5));
+    fixture.apply_model_and_reslice();
+
+    const Transform3d volume_trafo = fixture.object().trafo_sliced() * volume.get_matrix();
+    const BoundingBoxf3 mesh_bounds = volume.mesh().bounding_box();
+    double bottom_face_max_z = -std::numeric_limits<double>::infinity();
+    size_t bottom_face_vertices = 0;
+    for (const stl_vertex &vertex : volume.mesh().its.vertices) {
+        if (std::abs(vertex.z() - mesh_bounds.min.z()) <= 1e-4f) {
+            bottom_face_max_z = std::max(bottom_face_max_z, (volume_trafo * vertex.cast<double>()).z());
+            ++bottom_face_vertices;
+        }
+    }
+    REQUIRE(bottom_face_vertices > 0);
+    REQUIRE(bottom_face_max_z < -0.1);
+
+    const auto segmented = segment(fixture);
+    REQUIRE(segmented.size() == fixture.object().layers().size());
+    REQUIRE(segmented.size() >= 4);
+    for (const auto &layer : segmented)
+        REQUIRE(layer.size() == PAINTED_STATES - 1);
+
+    const ExPolygons bottom_source = sliced_layer(*fixture.object().layers().front());
+    const ExPolygons top_source = sliced_layer(*fixture.object().layers().back());
+    const double bottom_source_area = polygon_area(bottom_source);
+    const double top_source_area = polygon_area(top_source);
+    REQUIRE(bottom_source_area > 0.);
+    REQUIRE(top_source_area > 0.);
+
+    const double top_tolerance = std::max(100.0, top_source_area * 1e-5);
+    // The only Extruder2 facets are the bottom face, which the translated
+    // transform places wholly below z=0. Public slicing clips that paint away;
+    // it must not invent a first-layer footprint from the unclipped model.
+    for (const auto &layer : segmented)
+        CHECK(layer[1].empty());
+    CHECK_THAT(polygon_area(segmented.back()[0]), Catch::Matchers::WithinAbs(top_source_area, top_tolerance));
+    CHECK(outside_area({ segmented.back()[0] }, top_source) <= top_tolerance);
+}
+
+TEST_CASE("painted top and bottom projections merge across model volumes", "[PaintedSegmentation][PaintedSegmentationGap][PaintedVolumeMerge]")
+{
+    PaintedSegmentationFixture fixture(1, 1, true);
+    ModelObject &object = *fixture.model.objects.front();
+    REQUIRE(object.volumes.size() == 1);
+    ModelVolume &first = *object.volumes.front();
+    ModelVolume *second = object.add_volume(first.mesh(), false);
+    REQUIRE(second != nullptr);
+    second->set_offset(first.get_offset() + Vec3d(30., 0., 0.));
+
+    fixture.paint_by_horizontal_facets(first);
+    fixture.paint_by_horizontal_facets(*second);
+    fixture.apply_model_and_reslice();
+
+    const auto segmented = segment(fixture);
+    REQUIRE(segmented.size() == fixture.object().layers().size());
+    REQUIRE(segmented.size() >= 2);
+    REQUIRE(object.volumes.size() == 2);
+    for (const auto &layer : segmented)
+        REQUIRE(layer.size() == PAINTED_STATES - 1);
+
+    const ExPolygons bottom_source = sliced_layer(*fixture.object().layers().front());
+    const ExPolygons top_source = sliced_layer(*fixture.object().layers().back());
+    const double bottom_area = polygon_area(bottom_source);
+    const double top_area = polygon_area(top_source);
+    REQUIRE(bottom_source.size() == 2);
+    REQUIRE(top_source.size() == 2);
+    CHECK(segmented.front()[1].size() == 2);
+    CHECK(segmented.back()[0].size() == 2);
+    CHECK_THAT(polygon_area(segmented.front()[1]), Catch::Matchers::WithinAbs(bottom_area, std::max(100.0, bottom_area * 1e-5)));
+    CHECK_THAT(polygon_area(segmented.back()[0]), Catch::Matchers::WithinAbs(top_area, std::max(100.0, top_area * 1e-5)));
+    CHECK(outside_area({ segmented.front()[1] }, bottom_source) <= std::max(100.0, bottom_area * 1e-5));
+    CHECK(outside_area({ segmented.back()[0] }, top_source) <= std::max(100.0, top_area * 1e-5));
+}
+
+TEST_CASE("painted segmentation preserves a cut cavity while assigning both sides", "[PaintedSegmentation][PaintedSegmentationGap][PaintedHoleTopology]")
+{
+    PaintedSegmentationFixture fixture;
+    ModelObject &object = *fixture.model.objects.front();
+    REQUIRE(object.volumes.size() == 1);
+    ModelVolume &part = *object.volumes.front();
+    ModelVolume *cavity = object.add_volume(make_cube(8., 8., 4.), ModelVolumeType::NEGATIVE_VOLUME);
+    REQUIRE(cavity != nullptr);
+    cavity->set_offset(part.get_offset());
+    fixture.apply_model_and_reslice();
+
+    const auto segmented = segment(fixture, 0.f, false, IncludeTopAndBottomLayers::No);
+    REQUIRE(segmented.size() == fixture.object().layers().size());
+    REQUIRE(segmented.size() >= 2);
+    const size_t layer_idx = segmented.size() / 2;
+    const ExPolygons source = sliced_layer(*fixture.object().layers()[layer_idx]);
+    REQUIRE(source.size() == 1);
+    REQUIRE(source.front().holes.size() == 1);
+    REQUIRE(segmented[layer_idx].size() == PAINTED_STATES - 1);
+
+    const BoundingBox bounds = get_extents(source);
+    const coord_t split_x = (bounds.min.x() + bounds.max.x()) / 2;
+    const coord_t min_x = bounds.min.x() - scale_(1.);
+    const coord_t max_x = bounds.max.x() + scale_(1.);
+    const coord_t min_y = bounds.min.y() - scale_(1.);
+    const coord_t max_y = bounds.max.y() + scale_(1.);
+    const Polygons left_clip{ Polygon(Points{ Point(min_x, min_y), Point(split_x, min_y), Point(split_x, max_y), Point(min_x, max_y) }) };
+    const Polygons right_clip{ Polygon(Points{ Point(split_x, min_y), Point(max_x, min_y), Point(max_x, max_y), Point(split_x, max_y) }) };
+    const ExPolygons expected_left = intersection_ex(source, left_clip);
+    const ExPolygons expected_right = intersection_ex(source, right_clip);
+    REQUIRE(expected_left.size() == 1);
+    REQUIRE(expected_right.size() == 1);
+
+    auto symmetric_difference_area = [](const ExPolygons &actual, const ExPolygons &expected) {
+        return polygon_area(diff_ex(actual, expected)) + polygon_area(diff_ex(expected, actual));
+    };
+    CHECK_THAT(area_mm2(symmetric_difference_area(segmented[layer_idx][0], expected_left)), Catch::Matchers::WithinAbs(0., 0.5));
+    CHECK_THAT(area_mm2(symmetric_difference_area(segmented[layer_idx][1], expected_right)), Catch::Matchers::WithinAbs(0., 0.5));
+    const double tolerance = std::max(100.0, polygon_area(source) * 1e-5);
+    CHECK(outside_area({ segmented[layer_idx][0] }, source) <= tolerance);
+    CHECK(outside_area({ segmented[layer_idx][1] }, source) <= tolerance);
 }
