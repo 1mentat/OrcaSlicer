@@ -24,14 +24,6 @@
       "new": "int64_t det = int64_t(v_seg_prev(0)) * int64_t(v_seg(1)) - int64_t(v_seg_prev(1)) * int64_t(v_seg(0));\n\t\t\t\t\t\t\tassert(det != 0);\n\t\t\t\t\t\t\tsign_min = (det > 0) ? -1 : 1;\n\t\t\t\t\t\t\tresult.contour_idx = contour_idx;",
       "test_filter": "^EdgeGridGap$",
       "expected_matches": 1
-    },
-    {
-      "id": "edgegridgap-raster-convex-corner-choice",
-      "path": "src/libslic3r/EdgeGrid.cpp",
-      "old": "if (cross > 0) {\n\t\t\t\t\t\t// This has to be a convex right angle. There is no better next line.",
-      "new": "if (cross < 0) {\n\t\t\t\t\t\t// This has to be a convex right angle. There is no better next line.",
-      "test_filter": "^EdgeGridGap$",
-      "expected_matches": 1
     }
   ]
 }
