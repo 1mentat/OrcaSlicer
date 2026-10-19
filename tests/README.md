@@ -696,9 +696,9 @@ gap, stable all-layer positions, and reinitialization with a different printable
 region. These boundary probes are in `timelapse_smooth_height.json`.
 
 `[PaintedSegmentationGap]` checks that sinking clips bottom paint below the
-build plane, shell projections retain both model volumes, and material regions
-preserve a through-hole. Expected regions come from independently sliced
-geometry and clipping. Build `fff_print_painted_segmentation_tests` for focused
+build plane and shell projections retain both model volumes. Expected regions
+come from independently sliced geometry. Build
+`fff_print_painted_segmentation_tests` for focused
 feedback; the cases also belong to the canonical FFF suite. The shell probes
 are in `painted_shell_projection_gaps.json`.
 
