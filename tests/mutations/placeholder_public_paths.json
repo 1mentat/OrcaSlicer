@@ -3,13 +3,13 @@
   "description": "Public behavior probes for PlaceholderParser output assignment, legacy filament indices, and string escape decoding.",
   "mutants": [
     {
-      "id": "placeholder-output-readonly-guard-inverted",
+      "id": "placeholder-output-readonly-guard-bypassed",
       "path": "src/libslic3r/PlaceholderParser.cpp",
       "old": "if (! opt.writable)",
-      "new": "if (opt.writable)",
+      "new": "if (false && ! opt.writable)",
       "expected_matches": 1,
       "test_filter": "^PlaceholderParserOutput$",
-      "description": "Invert output writability enforcement: valid DynamicConfig output writes would be rejected while parser-owned values would become mutable."
+      "description": "Bypass output writability enforcement so assigning a parser-owned value no longer throws. The read-only assertion must fail while valid DynamicConfig output writes still succeed."
     },
     {
       "id": "placeholder-repeat-output-shortened",
