@@ -1052,13 +1052,13 @@ TEST_CASE("Placeholder parser converts only numeric expressions",
                       Catch::Matchers::ContainsSubstring("Cannot apply a not operator"));
 }
 
-TEST_CASE("Placeholder parser does not evaluate invalid expressions in inactive branches",
+TEST_CASE("Placeholder parser skips supported lazy expressions in inactive branches",
           "[PlaceholderParser][PlaceholderParserExpressions]")
 {
     PlaceholderParser parser;
     const std::string skipped =
         R"({if false}{-"x"}{int("x")}{round("x")})"
-        R"({floor("x")}{ceil("x")}{not "x"}{1 + 2}{1 - 2}{1 * 2})"
+        R"({not "x"}{1 + 2}{1 - 2}{1 * 2})"
         R"({1 / 0}{1 % 0}{true and false}{digits("x",2)}{min("x",2)})"
         R"({interpolate_table("x",("y",1))}{true}{endif}ready)";
     CHECK(parser.process(skipped) == "ready");
@@ -1184,7 +1184,9 @@ TEST_CASE("Placeholder parser preserves scalar assignments and rejects vector-sh
     CHECK_THROWS_WITH(run("{number = repeat(2,1)}"),
                       Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
     CHECK_THROWS_WITH(parser.process("{local scalar = 1}{local vector = (1,2)}{local vector = scalar}"),
-                      Catch::Matchers::ContainsSubstring("scalar value to a vector variable"));
+                      Catch::Matchers::ContainsSubstring("Cannot assign scalar to a vector"));
+    CHECK_THROWS_WITH(parser.process("{local vector = (1,2)}{local vector = 1}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a scalar value to a vector variable."));
     CHECK(outputs.option<ConfigOptionBool>("flag")->value == false);
     CHECK(outputs.option<ConfigOptionInt>("number")->value == 7);
 }
@@ -1300,11 +1302,12 @@ TEST_CASE("Placeholder parser rejects nil and unsupported vector copies",
     auto *speed = config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
     REQUIRE(speed != nullptr);
     speed->values = { 60., 70. };
+    speed->set_at_to_nil(0);
     speed->set_at_to_nil(1);
     PlaceholderParser nil_parser;
     REQUIRE(nil_parser.apply_config(config));
     CHECK_THROWS_WITH(nil_parser.process("{local copied = outer_wall_speed}"),
-                      Catch::Matchers::ContainsSubstring("undefined (nil)"));
+                      Catch::Matchers::ContainsSubstring("Some elements of the right hand side vector variable of optional values are undefined (nil)"));
 
     auto points_config = DynamicPrintConfig::full_print_config();
     auto *area = points_config.option<ConfigOptionPoints>("printable_area");

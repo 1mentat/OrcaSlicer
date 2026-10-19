@@ -128,6 +128,30 @@ to replay the structural export and strict mapping checks. The
 required input hashes and provenance. Replay records stage timings and retains
 the raw integrity error; it cannot waive a warning or pass a coverage threshold.
 
+For feedback on one subsystem in an existing coverage build, run:
+
+```sh
+python3 scripts/slicer_module_feedback.py \
+  --root "$PWD" --build build --target libslic3r_tests \
+  --binary build/tests/libslic3r/libslic3r_tests \
+  --tag PlaceholderParser --expected-cases 49 \
+  --test-source tests/libslic3r/test_placeholder_parser.cpp \
+  --production-source src/libslic3r/PlaceholderParser.cpp \
+  --cmake "$(command -v cmake)" \
+  --llvm-profdata "$LLVM_PROFDATA" --llvm-cov "$LLVM_COV" \
+  --out build/evidence/parser-feedback
+```
+
+Create `build/evidence` first and choose a fresh output path for each run.
+The command builds the Release target with four jobs, verifies Catch's test
+identities and source file, runs the selected tag in random order with seed
+21907, and reports coverage for the specified production file. `run.json`
+records total and stage timings, source and executable hashes, and JUnit
+outcomes. Build and inventory profiles are kept separate from test profiles.
+An ordinary test failure still produces diagnostic coverage and returns a
+failure; missing tests, skips, timeouts, and changed inputs also fail the run.
+This file-scoped report cannot establish the overall coverage threshold.
+
 Coverage builds include Orca's source headers as ordinary project headers.
 Clang suppresses system-header mappings even when it emits profile counters;
 mixing those counters with unused inline mappings can silently remove executed
