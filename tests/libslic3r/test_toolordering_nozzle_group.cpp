@@ -1149,4 +1149,3 @@ TEST_CASE("ToolOrdering leaves all-placeholder layers unresolved when no tool ex
     CHECK(ordering.layer_tools()[1].extruders.empty());
     CHECK((ordering.layer_tools()[2].extruders == std::vector<unsigned int>{ 0 }));
 }
-
