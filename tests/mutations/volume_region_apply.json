@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "volume-region-nested-modifier-config-refresh-skipped",
+      "path": "src/libslic3r/PrintApply.cpp",
+      "old": "PrintRegionConfig cfg = region.parent == -1 ?\n                    region_config_from_model_volume(default_region_config, layer_range.config, **it_model_volume, num_extruders, variant_index) :\n                    region_config_from_model_volume(layer_range.volume_regions[region.parent].region->config(), nullptr, **it_model_volume, num_extruders, variant_index);\n                if (cfg != region.region->config()) {",
+      "new": "PrintRegionConfig cfg = region.parent == -1 ?\n                    region_config_from_model_volume(default_region_config, layer_range.config, **it_model_volume, num_extruders, variant_index) :\n                    region_config_from_model_volume(layer_range.volume_regions[region.parent].region->config(), nullptr, **it_model_volume, num_extruders, variant_index);\n                if (false) {",
+      "expected_matches": 1,
+      "test_filter": "^VolumeRegionApply$",
+      "killed_by": "Incremental slicing preserves nested modifier regions across settings and volume changes",
+      "description": "Skip refreshing the existing incremental PrintRegion when a model-volume modifier configuration changes. The test changes wall_loops and sparse_infill_density, then compares the processed incremental print with a fresh public Print::apply result."
+    },
+    {
+      "id": "volume-region-instance-transform-change-undetected",
+      "path": "src/libslic3r/PrintApply.cpp",
+      "old": "l->get_transformation().get_matrix().isApprox(r->get_transformation().get_matrix())",
+      "new": "l->get_transformation().get_matrix().isApprox(l->get_transformation().get_matrix())",
+      "expected_matches": 1,
+      "test_filter": "^VolumeRegionApply$",
+      "killed_by": "Incremental slicing synchronizes model membership and instance offsets",
+      "description": "Make the retained ModelInstance comparison ignore the new instance transform. After the public input moves the retained instance from (24,0) to (30,4), the generated PrintObject still exposes the stale offset and fails both the fresh-apply comparison and explicit coordinate assertions."
+    },
+    {
+      "id": "volume-region-model-volume-transform-change-undetected",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (! mv_old.get_matrix().isApprox(mv_new.get_matrix()))\n            return true;",
+      "new": "if (false)\n            return true;",
+      "expected_matches": 1,
+      "test_filter": "^VolumeRegionApply$",
+      "killed_by": "Incremental slicing preserves nested modifier regions across settings and volume changes",
+      "description": "Ignore a model volume transform delta when deciding whether Print::apply must resynchronize its internal model and regions. The test moves modifier B from (9,9) to (10,10); the incremental slice then retains old modifier geometry while a fresh apply uses the moved volume, and the path geometry/order snapshots diverge."
+    }
+  ]
+}
