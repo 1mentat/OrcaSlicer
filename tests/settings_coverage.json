@@ -4264,6 +4264,30 @@
         "pipeline_oracle"
       ],
       "reason": "The accepted ordinary full-suite case toggles only adaptive_pressure_advance_overhangs with pressure advance and adaptive pressure advance enabled. Parsed SET_PRESSURE_ADVANCE values on physical positive XY extrusion follow independently calibrated values in both rows, at least one paired interval changes pressure advance, and segment count/order, XYZ trajectory, and extrusion stay equal within tolerance. Both boolean values are covered for one filament; vector indexing, model extrapolation, and broader interactions remain unclaimed."
+    },
+    "extruder_clearance_radius": {
+      "test": "tests/fff_print/test_timelapse_pos_picker.cpp",
+      "tag": "[TimelapsePosPickerGap]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "Valid Print fixtures pass 2 mm and 6 mm clearances to the public TimelapsePosPicker consumer. The same X0 travel point changes from clear to blocked, and a point above the expanded obstacle remains clear. Numeric bounds, full Print.process timelapse emission, and independent setting interactions remain unclaimed."
+    },
+    "extruder_clearance_height_to_rod": {
+      "test": "tests/fff_print/test_timelapse_pos_picker.cpp",
+      "tag": "[TimelapsePosPickerGap]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "The public TimelapsePosPicker consumer receives valid Print fixtures at rod heights 1 mm and 2 mm. A prior object exactly at current print Z plus rod height blocks the travel band, raising the rod clears it, and another starting band has a safe corridor. This checks the inclusive geometric threshold, not the registered numeric range or complete Print.process timelapse emission."
+    },
+    "extruder_printable_area": {
+      "test": "tests/fff_print/test_timelapse_pos_picker.cpp",
+      "tag": "[TimelapsePosPickerGap]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "A valid two-extruder Print gives extruder 0 the full bed and selected picture extruder 1 only an x=[170,185] mm strip. The public TimelapsePosPicker result must lie inside that selected strip. Arbitrary polygon shapes, empty or invalid regions, other extruder counts, and full Print.process timelapse emission remain unclaimed."
     }
   }
 }
