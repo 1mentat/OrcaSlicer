@@ -959,3 +959,59 @@ TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuatio
     CHECK_THROWS_WITH(parser.process(continuation),
                       Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
 }
+
+TEST_CASE("Placeholder parser resolves dynamic legacy vector indices consistently",
+          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+
+    parser.set("index", 1);
+    CHECK(parser.process("[nozzle_temperature[index]]") == "359");
+    parser.set("index", 99);
+    CHECK(parser.process("[nozzle_temperature[index]]") == "357");
+    parser.set("index", "one");
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[index]]"),
+                      Catch::Matchers::ContainsSubstring("Indexing variable has to be integer"));
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[missing_index]]"),
+                      Catch::Matchers::ContainsSubstring("Variable does not exist"));
+    parser.set("scalar", 1);
+    parser.set("index", 0);
+    CHECK_THROWS_WITH(parser.process("[scalar[index]]"),
+                      Catch::Matchers::ContainsSubstring("Trying to index a scalar variable"));
+}
+
+TEST_CASE("Placeholder parser copies floating-point vectors independently",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    DynamicConfig external;
+    external.set_key_value("source_values", new ConfigOptionFloats({ 1., 2., 3. }));
+    PlaceholderParser parser(&external);
+
+    CHECK(parser.process(
+        "{local copied_values = source_values}{copied_values[1] = 1.5}"
+        "{copied_values[0]},{copied_values[1]},{copied_values[2]}|"
+        "{source_values[0]},{source_values[1]},{source_values[2]}") == "1,1.5,3|1,2,3");
+}
+
+TEST_CASE("Placeholder parser protects local and global variable scopes",
+          "[PlaceholderParser][PlaceholderParserVariables]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{global shared = 1}"),
+                      Catch::Matchers::ContainsSubstring("Global variables are not available"));
+
+    PlaceholderParser::ContextData context;
+    context.global_config = std::make_unique<DynamicConfig>();
+    context.global_config->set_key_value("shared", new ConfigOptionInt(5));
+    CHECK_THROWS_WITH(parser.process("{local shared = 2}", 0, nullptr, nullptr, &context),
+                      Catch::Matchers::ContainsSubstring("Variable name already defined in global scope"));
+    REQUIRE(context.global_config->option<ConfigOptionInt>("shared") != nullptr);
+    CHECK(context.global_config->option<ConfigOptionInt>("shared")->value == 5);
+
+    CHECK_THROWS_WITH(parser.process("{local scoped = 2}{global scoped = 3}", 0, nullptr, nullptr, &context),
+                      Catch::Matchers::ContainsSubstring("Variable name already defined in local scope"));
+    CHECK(context.global_config->option("scoped") == nullptr);
+}

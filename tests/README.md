@@ -191,7 +191,8 @@ Its mutations are in `placeholder_vectors.json`.
 `[PlaceholderParserConfig]`, `[PlaceholderParserLookup]`, `[PlaceholderParserOutput]`,
 `[PlaceholderParserVectors]`, `[PlaceholderParserLegacyIndex]`, and
 `[PlaceholderParserUnicode]` exercise configuration merge/precedence, typed output
-assignment, read-only values, legacy filament selection, escape decoding, and
+assignment and scope conflicts, read-only values, legacy filament selection,
+escape decoding, and
 invalid UTF-8 through the public parser. Their probes are in
 `placeholder_public_paths.json`. These parser checks do not establish print-pipeline
 settings variance.
