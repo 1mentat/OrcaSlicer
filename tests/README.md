@@ -707,6 +707,12 @@ acute external through-hole. It compares the affected painted area with an
 unholed control and a fixed geometric counterexample, so pruning geometry
 outside the paint bounding box must preserve the hole's miter influence.
 
+`[PrintObjectSharing]` checks independent layer geometry when mesh, transform,
+extruder, layer profile, layer-range settings, or material settings differ.
+The range and material cases use equal meshes with separate allocations and
+check both objects' actual perimeter paths. Build `fff_print_workflow_tests`
+for focused feedback without duplicate CTest registration.
+
 `[ToolOrderingDontCareSeed]` checks discovery of the first physical tool,
 inheritance across placeholder layers, and the no-tool case through public
 ToolOrdering methods. Its probes are in `toolordering_dontcare_seed.json`;

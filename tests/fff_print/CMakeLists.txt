@@ -83,3 +83,13 @@ target_link_libraries(fff_print_painted_segmentation_tests test_common libslic3r
 set_property(TARGET fff_print_painted_segmentation_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_painted_segmentation_tests)
 slicer_enable_llvm_source_coverage(fff_print_painted_segmentation_tests)
+
+# Explicitly built Print workflow tests, including object-sharing contracts; no duplicate CTest registration.
+add_executable(fff_print_workflow_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_print.cpp)
+target_link_libraries(fff_print_workflow_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_workflow_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_workflow_tests)
+slicer_enable_llvm_source_coverage(fff_print_workflow_tests)

@@ -1,5 +1,6 @@
 #include "libslic3r/ExPolygon.hpp"
 #include <functional>
+#include <iterator>
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Circle.hpp"
 #include "libslic3r/ArcFitter.hpp"
@@ -3900,6 +3901,8 @@ enum class ShareDifference {
     VolumeExtruder,
     LayerProfile,
     ObjectExtruder,
+    LayerConfigRange,
+    MaterialConfig,
 };
 
 DynamicPrintConfig sharing_config(ShareDifference difference)
@@ -3946,6 +3949,8 @@ struct ShareProbeResult {
     double              second_area = 0.;
     std::vector<double> first_print_z;
     std::vector<double> second_print_z;
+    std::vector<size_t> first_perimeters;
+    std::vector<size_t> second_perimeters;
 };
 
 double first_layer_area(const PrintObject &object)
@@ -3970,6 +3975,22 @@ std::vector<double> layer_print_zs(const PrintObject &object)
         result.emplace_back(layer->print_z);
     }
     return result;
+}
+
+std::vector<size_t> layer_perimeter_counts(const PrintObject &object)
+{
+    std::vector<size_t> result;
+    result.reserve(object.layer_count());
+    for (size_t layer = 0; layer < object.layer_count(); ++layer)
+        result.emplace_back(perimeter_items(object, layer));
+    return result;
+}
+
+size_t layer_index_matching(const std::vector<double> &print_zs, const std::function<bool(double)> &matches)
+{
+    const auto iter = std::find_if(print_zs.begin(), print_zs.end(), matches);
+    REQUIRE(iter != print_zs.end());
+    return static_cast<size_t>(std::distance(print_zs.begin(), iter));
 }
 
 ShareProbeResult run_nonsharing_probe(ShareDifference difference)
@@ -4009,6 +4030,55 @@ ShareProbeResult run_nonsharing_probe(ShareDifference difference)
         second->config.set_key_value("extruder", new ConfigOptionInt(2));
     }
 
+    if (difference == ShareDifference::LayerConfigRange || difference == ShareDifference::MaterialConfig)
+        second->volumes.front()->set_mesh(first->volumes.front()->mesh());
+
+    if (difference == ShareDifference::LayerConfigRange) {
+        ModelConfig range;
+        range.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+        range.set_key_value("wall_loops", new ConfigOptionInt(4));
+        second->layer_config_ranges[{0.4, 0.8}] = range;
+        REQUIRE(first->layer_config_ranges.empty());
+        REQUIRE(second->layer_config_ranges.size() == 1);
+    } else if (difference == ShareDifference::MaterialConfig) {
+        ModelMaterial *two_wall_material = model.add_material("two-wall-loops");
+        ModelMaterial *four_wall_material = model.add_material("four-wall-loops");
+        REQUIRE(two_wall_material != nullptr);
+        REQUIRE(four_wall_material != nullptr);
+        two_wall_material->config.set_key_value("wall_loops", new ConfigOptionInt(2));
+        four_wall_material->config.set_key_value("wall_loops", new ConfigOptionInt(4));
+        first->volumes.front()->set_material_id("two-wall-loops");
+        second->volumes.front()->set_material_id("four-wall-loops");
+        REQUIRE(first->volumes.front()->material_id() != second->volumes.front()->material_id());
+        REQUIRE(first->volumes.front()->material()->config.opt_int("wall_loops") == 2);
+        REQUIRE(second->volumes.front()->material()->config.opt_int("wall_loops") == 4);
+    }
+
+    if (difference == ShareDifference::LayerConfigRange || difference == ShareDifference::MaterialConfig) {
+        REQUIRE(first->volumes.front()->mesh_ptr() != second->volumes.front()->mesh_ptr());
+        const auto &first_vertices = first->volumes.front()->mesh().its.vertices;
+        const auto &second_vertices = second->volumes.front()->mesh().its.vertices;
+        REQUIRE(first_vertices.size() == second_vertices.size());
+        for (size_t vertex = 0; vertex < first_vertices.size(); ++vertex)
+            for (size_t axis = 0; axis < 3; ++axis)
+                CHECK_THAT(first_vertices[vertex][axis], Catch::Matchers::WithinAbs(second_vertices[vertex][axis], 0.));
+        REQUIRE(first->volumes.front()->mesh().its.indices == second->volumes.front()->mesh().its.indices);
+        const auto &first_properties = first->volumes.front()->mesh().its.properties;
+        const auto &second_properties = second->volumes.front()->mesh().its.properties;
+        REQUIRE(first_properties.size() == second_properties.size());
+        for (size_t face = 0; face < first_properties.size(); ++face) {
+            REQUIRE(first_properties[face].type == second_properties[face].type);
+            CHECK_THAT(first_properties[face].area, Catch::Matchers::WithinAbs(second_properties[face].area, 1e-9));
+        }
+        REQUIRE(first->config.get() == second->config.get());
+        REQUIRE(first->volumes.front()->config.get() == second->volumes.front()->config.get());
+        REQUIRE(first->volumes.front()->get_transformation() == second->volumes.front()->get_transformation());
+        if (difference == ShareDifference::LayerConfigRange) {
+            REQUIRE(first->layer_height_profile.empty());
+            REQUIRE(second->layer_height_profile.empty());
+        }
+    }
+
     for (ModelObject *object : model.objects) {
         object->ensure_on_bed();
         print.auto_assign_extruders(object);
@@ -4025,12 +4095,16 @@ ShareProbeResult run_nonsharing_probe(ShareDifference difference)
     const PrintObject *second_print_object = print.get_object(1);
     REQUIRE(first_print_object != nullptr);
     REQUIRE(second_print_object != nullptr);
+    if (difference == ShareDifference::LayerConfigRange || difference == ShareDifference::MaterialConfig)
+        REQUIRE(first_print_object->trafo().matrix().isApprox(second_print_object->trafo().matrix(), 0.));
     return {
         second_print_object->get_shared_object() != nullptr,
         first_layer_area(*first_print_object),
         first_layer_area(*second_print_object),
         layer_print_zs(*first_print_object),
         layer_print_zs(*second_print_object),
+        layer_perimeter_counts(*first_print_object),
+        layer_perimeter_counts(*second_print_object),
     };
 }
 
@@ -4080,6 +4154,53 @@ TEST_CASE("An object extruder difference prevents public Print layer sharing",
     CHECK_FALSE(result.shared);
     CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
     CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(64., 0.05));
+}
+
+
+TEST_CASE("Equal separately allocated meshes preserve per-object layer-range walls",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::LayerConfigRange);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(64., 0.05));
+    REQUIRE(result.first_print_z.size() == result.second_print_z.size());
+    for (size_t layer = 0; layer < result.first_print_z.size(); ++layer)
+        CHECK_THAT(result.first_print_z[layer], Catch::Matchers::WithinAbs(result.second_print_z[layer], 1e-6));
+    REQUIRE(result.first_perimeters.size() == result.first_print_z.size());
+    REQUIRE(result.second_perimeters.size() == result.second_print_z.size());
+
+    const size_t below = layer_index_matching(result.first_print_z, [](double z) { return z < 0.4 - 1e-4; });
+    const size_t inside = layer_index_matching(result.first_print_z, [](double z) { return z > 0.4 + 1e-4 && z < 0.8 - 1e-4; });
+    const size_t above = layer_index_matching(result.first_print_z, [](double z) { return z > 0.8 + 1e-4; });
+    CHECK(result.first_perimeters[below] == 2);
+    CHECK(result.second_perimeters[below] == 2);
+    CHECK(result.first_perimeters[inside] == 2);
+    CHECK(result.second_perimeters[inside] == 4);
+    CHECK(result.first_perimeters[above] == 2);
+    CHECK(result.second_perimeters[above] == 2);
+}
+
+TEST_CASE("Equal separately allocated meshes preserve material-specific wall paths",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::MaterialConfig);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(64., 0.05));
+    REQUIRE(result.first_print_z.size() == result.second_print_z.size());
+    for (size_t layer = 0; layer < result.first_print_z.size(); ++layer)
+        CHECK_THAT(result.first_print_z[layer], Catch::Matchers::WithinAbs(result.second_print_z[layer], 1e-6));
+    REQUIRE(result.first_perimeters.size() == result.first_print_z.size());
+    REQUIRE(result.second_perimeters.size() == result.second_print_z.size());
+
+    const size_t first_layer = layer_index_matching(result.first_print_z, [](double z) { return z > 0.2 - 1e-4; });
+    const size_t middle_layer = layer_index_matching(result.first_print_z, [](double z) { return z > 0.6 - 1e-4; });
+    const size_t upper_layer = layer_index_matching(result.first_print_z, [](double z) { return z > 1.0 - 1e-4; });
+    for (size_t layer : {first_layer, middle_layer, upper_layer}) {
+        CHECK(result.first_perimeters[layer] == 2);
+        CHECK(result.second_perimeters[layer] == 4);
+    }
 }
 
 TEST_CASE("A missing previous G-code file reports a failed public export lifecycle",
