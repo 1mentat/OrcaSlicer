@@ -82,6 +82,15 @@ in the launching shell does not set the service's environment. First run
 skips, keeping its coverage profiles separate from the full run. A skipped
 test leaves a confidence run incomplete even when CTest exits successfully.
 
+LLVM's [`%m` profile pooling](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#running-the-instrumented-program)
+updates shared profile files across test processes. Validate this on the chosen
+filesystem before a full run: execute two disjoint test filters and check that
+both contribute coverage after the second filter. On the confidence worker,
+the shared mount failed this check while ext4 retained both filters' hits.
+Generate active profiles on the validated local volume; copy them to shared
+storage with verified hashes after all test processes exit. Copying an already
+incomplete profile to another filesystem cannot recover its lost counts.
+
 ## Confidence runs
 
 The checked-in harnesses keep coverage and mutation evidence tied to the real
