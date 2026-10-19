@@ -19,6 +19,8 @@ import json, os, pathlib, subprocess, sys, time
 a = sys.argv[1:]
 mode = os.environ.get("FAKE_MODE", "ok")
 names = json.loads(os.environ["FAKE_NAMES"])
+with pathlib.Path(os.environ["FAKE_ARGV_LOG"]).open("a") as log:
+    log.write(json.dumps(a) + "\n")
 if "--build" in a:
     pathlib.Path(os.environ["FAKE_BUILD_MARKER"]).write_text("called")
     pattern = os.environ.get("LLVM_PROFILE_FILE", "")
@@ -38,7 +40,7 @@ if "--build" in a:
         subprocess.Popen([sys.executable, "-c", code])
         time.sleep(20)
 elif "--list-tests" in a:
-    print(os.environ["FAKE_INVENTORY"])
+    print("<MatchingTests/>" if mode == "empty-filter" else os.environ["FAKE_INVENTORY"])
     pattern = os.environ.get("LLVM_PROFILE_FILE", "")
     if pattern:
         pathlib.Path(pattern.replace("%m", "inventory-fake")).write_bytes(b"inventory-profile")
@@ -109,11 +111,13 @@ class ModuleFeedbackTests(unittest.TestCase):
         out = evidence / "run"
         marker = base / "late-child-marker"
         build_marker = evidence / "build-invoked"
+        argv_log = root / "fake-argv.jsonl"
         env = os.environ.copy()
         env.update({"FAKE_MODE": mode, "FAKE_NAMES": json.dumps(["Case A", "Case B"]),
                     "FAKE_INVENTORY": inventory, "FAKE_MARKER": str(marker),
                     "FAKE_BUILD_MARKER": str(build_marker),
-                    "FAKE_BINARY": str(binary), "FAKE_ESCAPE_TARGET": str(escape_target)})
+                    "FAKE_BINARY": str(binary), "FAKE_ESCAPE_TARGET": str(escape_target),
+                    "FAKE_ARGV_LOG": str(argv_log)})
         env["PYTHONPATH"] = os.pathsep.join(
             item for item in (str(REPO_ROOT / "scripts"), env.get("PYTHONPATH", "")) if item)
         args = [sys.executable, str(CLI), "--root", str(root), "--build", str(build),
@@ -138,6 +142,53 @@ class ModuleFeedbackTests(unittest.TestCase):
         self.assertIn("does not own test source", result.stderr)
         self.assertFalse((out.parent / "build-invoked").exists())
         self.assertFalse(out.exists())
+
+    def test_two_name_comma_filter_is_one_argv_item_for_inventory_and_tests(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        expression = "Case A,Case B"
+        tag_index = args.index("--tag")
+        args[tag_index:tag_index + 2] = ["--filter", expression]
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        invocations = [json.loads(line) for line in
+                       (Path(args[args.index("--root") + 1]) / "fake-argv.jsonl").read_text().splitlines()]
+        selected = [argv for argv in invocations if argv and argv[0] == expression]
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(sum("--list-tests" in argv for argv in selected), 1)
+        self.assertEqual(sum("--reporter" in argv and "junit" in argv for argv in selected), 1)
+        self.assertTrue(all(argv.count(expression) == 1 for argv in selected))
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertEqual(receipt["inventory_names"], ["Case A", "Case B"])
+
+    def test_tag_and_explicit_filter_are_mutually_exclusive(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        args.extend(["--filter", "Case A,Case B"])
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not allowed with argument", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
+
+    def test_explicit_filter_with_zero_matches_fails_before_test_stage(self):
+        tmp, env, args, out, _ = self.fixture(mode="empty-filter")
+        self.addCleanup(tmp.cleanup)
+        expression = "No match A,No match B"
+        tag_index = args.index("--tag")
+        args[tag_index:tag_index + 2] = ["--filter", expression]
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build", "inventory"])
+        self.assertIn("inventory has 0 cases", receipt["error"])
+        invocations = [json.loads(line) for line in
+                       (Path(args[args.index("--root") + 1]) / "fake-argv.jsonl").read_text().splitlines()]
+        selected = [argv for argv in invocations if argv and argv[0] == expression]
+        self.assertEqual(len(selected), 1)
+        self.assertIn("--list-tests", selected[0])
+        self.assertFalse(any("--reporter" in argv and "junit" in argv for argv in invocations))
 
     def test_canonical_and_thin_duplicate_records_accept_selected_owner(self):
         tmp, env, args, out, _ = self.fixture()

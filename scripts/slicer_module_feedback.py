@@ -203,7 +203,7 @@ def save_receipt(path: Path, receipt: dict) -> None:
     tmp.replace(path)
 
 
-def xml_names(xml_path: Path, tag: str, root_dir: Path, build_dir: Path,
+def xml_names(xml_path: Path, tag: str | None, root_dir: Path, build_dir: Path,
               source: Path, expected: int) -> list[str]:
     try:
         root = ET.parse(xml_path).getroot()
@@ -219,8 +219,10 @@ def xml_names(xml_path: Path, tag: str, root_dir: Path, build_dir: Path,
         filename = (case.findtext("SourceInfo/File") or "").strip()
         test_file = Path(filename)
         candidates = [test_file] if test_file.is_absolute() else [root_dir / test_file, build_dir / test_file]
-        if not name or tag not in re.findall(r"\[([^\]]+)\]", tags):
-            raise WorkflowError(f"inventory case has missing name or [{tag}] tag: {name!r}")
+        if not name:
+            raise WorkflowError("inventory case has a missing test name")
+        if tag is not None and tag not in re.findall(r"\[([^\]]+)\]", tags):
+            raise WorkflowError(f"inventory case {name!r} is missing [{tag}] tag")
         same_source = False
         for candidate in candidates:
             try:
@@ -278,7 +280,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                  "cmake", "llvm-profdata", "llvm-cov"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--target", required=True)
-    parser.add_argument("--tag", required=True)
+    selector = parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--tag")
+    selector.add_argument("--filter", dest="test_filter",
+                          help="one Catch2 test-spec expression, passed as a single argv item")
     parser.add_argument("--expected-cases", required=True, type=int)
     parser.add_argument("--compile-commands")
     parser.add_argument("--seed", type=int, default=21907)
@@ -312,9 +317,18 @@ def run(args: argparse.Namespace) -> int:
         binary.relative_to(build)
     except ValueError as exc:
         raise WorkflowError("test binary must resolve inside the build tree") from exc
-    tag = args.tag.strip("[]")
-    if not tag or "]" in tag or "[" in tag or args.expected_cases < 1:
-        raise WorkflowError("tag must be one plain Catch2 tag and expected-cases must be positive")
+    if args.tag is not None:
+        tag = args.tag.strip("[]")
+        if not tag or "]" in tag or "[" in tag:
+            raise WorkflowError("tag must be one plain Catch2 tag")
+        catch_filter = f"[{tag}]"
+    else:
+        tag = None
+        if not args.test_filter or not args.test_filter.strip():
+            raise WorkflowError("filter must be a nonempty Catch2 test-spec expression")
+        catch_filter = args.test_filter
+    if args.expected_cases < 1:
+        raise WorkflowError("expected-cases must be positive")
     test_source = Path(args.test_source)
     prod_source = Path(args.production_source)
     test_source = (root / test_source).resolve(strict=True) if not test_source.is_absolute() else test_source.resolve(strict=True)
@@ -418,14 +432,14 @@ def run(args: argparse.Namespace) -> int:
         hashes_after_build = {"elf": sha256(binary)}
         receipt["elf_after_build_sha256"] = hashes_after_build["elf"]
         save_receipt(receipt_path, receipt)
-        stage("inventory", [str(binary), f"[{tag}]", "--list-tests", "--reporter", "xml"],
+        stage("inventory", [str(binary), catch_filter, "--list-tests", "--reporter", "xml"],
               out / "inventory.stdout.xml", capture=True, stage_env=inventory_env)
         inventory_log = out / "inventory.stdout.xml"
         names = xml_names(inventory_log, tag, root, build, test_source, args.expected_cases)
         receipt["inventory_names"] = names
         save_receipt(receipt_path, receipt)
         junit = out / "tests.junit.xml"
-        test_result = stage("test", [str(binary), f"[{tag}]", "--order", "rand", "--rng-seed", str(args.seed),
+        test_result = stage("test", [str(binary), catch_filter, "--order", "rand", "--rng-seed", str(args.seed),
                                       "--reporter", "junit", "--out", str(junit)], out / "test.log",
                             stage_env=env, allow_failure=True)
         junit_counts = validate_junit(junit, set(names))

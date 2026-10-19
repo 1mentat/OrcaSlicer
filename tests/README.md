@@ -172,8 +172,11 @@ remain unchanged throughout its measured cycle.
 Before building, the runner checks that the compile database assigns the test
 source to the requested CMake target. Canonical and focused targets may both
 own the same source; selecting an unrelated target fails before compilation.
+Use `--filter 'Case A,Case B'` instead of `--tag` to select an explicit Catch
+expression. Keep the entire expression in one argument. The same source,
+expected-count, and JUnit checks apply.
 The command builds the Release target with four jobs, verifies Catch's test
-identities and source file, runs the selected tag in random order with seed
+identities and source file, runs the selected tests in random order with seed
 21907, and reports coverage for the specified production file. `run.json`
 records total and stage timings, source and executable hashes, and JUnit
 outcomes. Build and inventory profiles are kept separate from test profiles.
