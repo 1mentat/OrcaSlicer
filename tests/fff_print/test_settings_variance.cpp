@@ -25,6 +25,7 @@
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ObjectID.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
@@ -3420,6 +3421,242 @@ TEST_CASE("Staggered inner seams move internal perimeter starts while preserving
 }
 
 } // namespace reslice_settings_contracts
+
+namespace print_apply_volume_sync_contracts {
+
+DynamicPrintConfig apply_config()
+{
+    DynamicPrintConfig result = reslice_settings_contracts::config();
+    result.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", 0.4},
+        {"wall_loops", 2},
+        {"sparse_infill_density", "15%"},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+    });
+    return result;
+}
+
+void require_valid_and_processed(Print &print)
+{
+    const auto error = print.validate();
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+    print.set_status_silent();
+    print.process();
+    REQUIRE_FALSE(print.objects().empty());
+}
+
+void require_incremental_matches_fresh(Print &incremental, const Model &model,
+                                        const DynamicPrintConfig &config)
+{
+    const reslice_settings_contracts::Snapshot actual = reslice_settings_contracts::snapshot(incremental);
+    Print fresh;
+    Model fresh_model = model;
+    for (ModelObject *object : fresh_model.objects)
+        fresh.auto_assign_extruders(object);
+    fresh.apply(fresh_model, config);
+    const reslice_settings_contracts::Snapshot expected = reslice_settings_contracts::snapshot(fresh);
+    reslice_settings_contracts::same(expected, actual);
+}
+
+Model modifier_chain_model()
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(24., 24., 4.), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *modifier_a = object->add_volume(make_cube(14., 14., 4.), ModelVolumeType::PARAMETER_MODIFIER, false);
+    modifier_a->set_offset(Vec3d(5., 5., 0.));
+    modifier_a->config.set("wall_loops", 4);
+    ModelVolume *modifier_b = object->add_volume(make_cube(6., 6., 4.), ModelVolumeType::PARAMETER_MODIFIER, false);
+    modifier_b->set_offset(Vec3d(9., 9., 0.));
+    modifier_b->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(35.));
+    ModelVolume *negative = object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::NEGATIVE_VOLUME, false);
+    negative->set_offset(Vec3d(10., 10., 0.));
+    object->add_instance();
+    object->ensure_on_bed();
+    return model;
+}
+
+} // namespace print_apply_volume_sync_contracts
+
+TEST_CASE("Incremental slicing preserves nested modifier regions across settings and volume changes",
+          "[SettingsVariance][PrintApply][VolumeRegionApply]")
+{
+    using namespace print_apply_volume_sync_contracts;
+    DynamicPrintConfig config = apply_config();
+    Model model = modifier_chain_model();
+    Print incremental;
+    incremental.auto_assign_extruders(model.objects.front());
+    incremental.apply(model, config);
+    const auto base = reslice_settings_contracts::snapshot(incremental);
+    REQUIRE(incremental.objects().front()->num_printing_regions() >= 2);
+
+    model.objects.front()->volumes[1]->config.set("wall_loops", 3);
+    model.objects.front()->volumes[2]->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(45.));
+    const PrintBase::ApplyStatus settings_status = incremental.apply(model, config);
+    CHECK(settings_status != PrintBase::APPLY_STATUS_UNCHANGED);
+    CHECK_FALSE(incremental.objects().front()->is_step_done(posPerimeters));
+    CHECK_FALSE(incremental.objects().front()->is_step_done(posPrepareInfill));
+    require_incremental_matches_fresh(incremental, model, config);
+
+    model.objects.front()->volumes[2]->set_offset(Vec3d(10., 10., 0.));
+    const PrintBase::ApplyStatus transform_status = incremental.apply(model, config);
+    CHECK(transform_status != PrintBase::APPLY_STATUS_UNCHANGED);
+    CHECK_FALSE(incremental.objects().front()->is_step_done(posSlice));
+    require_incremental_matches_fresh(incremental, model, config);
+
+    ModelConfig range;
+    range.set_key_value("wall_loops", new ConfigOptionInt(5));
+    range.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    model.objects.front()->layer_config_ranges[{1., 3.}] = range;
+    const PrintBase::ApplyStatus range_status = incremental.apply(model, config);
+    CHECK(range_status != PrintBase::APPLY_STATUS_UNCHANGED);
+    CHECK_FALSE(incremental.objects().front()->is_step_done(posSlice));
+    require_incremental_matches_fresh(incremental, model, config);
+
+    model.objects.front()->delete_volume(2);
+    REQUIRE(model.objects.front()->volumes.size() == 3);
+    const PrintBase::ApplyStatus removal_status = incremental.apply(model, config);
+    CHECK(removal_status != PrintBase::APPLY_STATUS_UNCHANGED);
+    CHECK_FALSE(incremental.objects().front()->is_step_done(posSlice));
+    require_incremental_matches_fresh(incremental, model, config);
+    CHECK(incremental.objects().front()->model_object()->volumes.size() == 3);
+    CHECK(incremental.objects().front()->num_printing_regions() >= 2);
+    CHECK(reslice_settings_contracts::different(base, reslice_settings_contracts::snapshot(incremental)));
+}
+
+namespace print_apply_volume_sync_contracts {
+
+struct PublicApplyObjectState {
+    size_t model_id = 0;
+    size_t layers = 0;
+    size_t regions = 0;
+    double offset_x = 0.;
+    double offset_y = 0.;
+};
+
+std::vector<PublicApplyObjectState> public_apply_object_state(Print &print)
+{
+    print_apply_volume_sync_contracts::require_valid_and_processed(print);
+    std::vector<PublicApplyObjectState> result;
+    result.reserve(print.objects().size());
+    for (const PrintObject *object : print.objects()) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->model_object() != nullptr);
+        REQUIRE_FALSE(object->model_object()->instances.empty());
+        const Vec3d offset = object->model_object()->instances.front()->get_offset();
+        result.push_back({object->model_object()->id().id, object->layer_count(), object->num_printing_regions(), offset.x(), offset.y()});
+    }
+    return result;
+}
+
+void require_same_public_apply_state(const std::vector<PublicApplyObjectState> &actual,
+                                     const std::vector<PublicApplyObjectState> &expected)
+{
+    REQUIRE(actual.size() == expected.size());
+    for (size_t index = 0; index < actual.size(); ++index) {
+        CHECK(actual[index].model_id == expected[index].model_id);
+        CHECK(actual[index].layers == expected[index].layers);
+        CHECK(actual[index].regions == expected[index].regions);
+        CHECK_THAT(actual[index].offset_x, Catch::Matchers::WithinAbs(expected[index].offset_x, 1e-6));
+        CHECK_THAT(actual[index].offset_y, Catch::Matchers::WithinAbs(expected[index].offset_y, 1e-6));
+    }
+}
+
+std::vector<PublicApplyObjectState> fresh_public_apply_object_state(
+    const Model &model, const DynamicPrintConfig &config)
+{
+    Model fresh_model = model;
+    Print fresh;
+    for (ModelObject *object : fresh_model.objects)
+        fresh.auto_assign_extruders(object);
+    fresh.apply(fresh_model, config);
+    return public_apply_object_state(fresh);
+}
+
+} // namespace print_apply_volume_sync_contracts
+
+TEST_CASE("Incremental slicing synchronizes model membership and instance offsets",
+          "[SettingsVariance][PrintApply][VolumeRegionApply]")
+{
+    using namespace print_apply_volume_sync_contracts;
+    DynamicPrintConfig config = apply_config();
+    Model model;
+    ModelObject *first = model.add_object();
+    first->add_volume(make_cube(8., 8., 1.2));
+    first->add_instance();
+    first->instances.front()->set_offset(Vec3d(0., 0., 0.));
+    ModelObject *second = model.add_object();
+    second->add_volume(make_cube(10., 10., 1.2));
+    second->add_instance();
+    second->instances.front()->set_offset(Vec3d(24., 0., 0.));
+    first->ensure_on_bed();
+    second->ensure_on_bed();
+    const size_t deleted_id = first->id().id;
+    const size_t retained_id = second->id().id;
+
+    Print incremental;
+    for (ModelObject *object : model.objects)
+        incremental.auto_assign_extruders(object);
+    incremental.apply(model, config);
+    const std::vector<PublicApplyObjectState> initial = public_apply_object_state(incremental);
+    REQUIRE(initial.size() == 2);
+    CHECK(incremental.objects()[0]->is_step_done(posSlice));
+    CHECK(incremental.objects()[1]->is_step_done(posSlice));
+
+    std::swap(model.objects[0], model.objects[1]);
+    ModelObject *added = model.add_object();
+    added->add_volume(make_cube(6., 6., 1.2));
+    added->add_instance();
+    added->instances.front()->set_offset(Vec3d(48., 0., 0.));
+    added->ensure_on_bed();
+    const size_t added_id = added->id().id;
+    REQUIRE(model.delete_object(ObjectID(deleted_id)));
+    incremental.auto_assign_extruders(added);
+    const PrintBase::ApplyStatus membership_status = incremental.apply(model, config);
+    CHECK(membership_status != PrintBase::APPLY_STATUS_UNCHANGED);
+    REQUIRE(incremental.objects().size() == 2);
+    CHECK(incremental.objects()[0]->model_object()->id().id == retained_id);
+    CHECK(incremental.objects()[1]->model_object()->id().id == added_id);
+    CHECK(incremental.objects()[0]->is_step_done(posSlice));
+    CHECK_FALSE(incremental.objects()[1]->is_step_done(posSlice));
+    const std::vector<PublicApplyObjectState> membership = public_apply_object_state(incremental);
+    REQUIRE(membership.size() == 2);
+    require_same_public_apply_state(membership, fresh_public_apply_object_state(model, config));
+
+    ModelObject *retained = nullptr;
+    for (ModelObject *object : model.objects)
+        if (object->id().id == retained_id)
+            retained = object;
+    REQUIRE(retained != nullptr);
+    retained->instances.front()->set_offset(Vec3d(30., 4., 0.));
+    const PrintBase::ApplyStatus instance_status = incremental.apply(model, config);
+    CHECK(instance_status != PrintBase::APPLY_STATUS_UNCHANGED);
+    CHECK(incremental.objects().front()->is_step_done(posSlice));
+    const std::vector<PublicApplyObjectState> moved = public_apply_object_state(incremental);
+    require_same_public_apply_state(moved, fresh_public_apply_object_state(model, config));
+    const auto state_for = [](const std::vector<PublicApplyObjectState> &states, const size_t model_id) {
+        for (const PublicApplyObjectState &state : states)
+            if (state.model_id == model_id)
+                return &state;
+        return static_cast<const PublicApplyObjectState *>(nullptr);
+    };
+    const PublicApplyObjectState *moved_retained = state_for(moved, retained_id);
+    REQUIRE(moved_retained != nullptr);
+    CHECK_THAT(moved_retained->offset_x, Catch::Matchers::WithinAbs(30., 1e-6));
+    CHECK_THAT(moved_retained->offset_y, Catch::Matchers::WithinAbs(4., 1e-6));
+    const PublicApplyObjectState *moved_added = state_for(moved, added_id);
+    REQUIRE(moved_added != nullptr);
+    CHECK_THAT(moved_added->offset_x, Catch::Matchers::WithinAbs(48., 1e-6));
+    CHECK_THAT(moved_added->offset_y, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK(incremental.apply(model, config) == PrintBase::APPLY_STATUS_UNCHANGED);
+}
+
 namespace slicing_mode_hole_topology_followup {
 
 TEST_CASE("Close-holes slicing fills a real nested cavity while parity preserves it",

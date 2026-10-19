@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "polygon-densify-keeps-exact-threshold-edge-unchanged",
+      "path": "src/libslic3r/Polygon.cpp",
+      "old": "if (lengths[j] - lengths[j-1] > min_length) {",
+      "new": "if (lengths[j] - lengths[j-1] >= min_length) {",
+      "test_filter": "^PolygonFamilyGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "polygon-collection-duplicate-detection-scopes-each-contour",
+      "path": "src/libslic3r/Polygon.cpp",
+      "old": "#if 1\n    // Check globally.",
+      "new": "#if 0\n    // Check globally.",
+      "test_filter": "^PolygonFamilyGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "polygon-remove-small-excludes-contours-on-area-threshold",
+      "path": "src/libslic3r/Polygon.cpp",
+      "old": "if (std::abs(polys[i].area()) >= min_area) {",
+      "new": "if (std::abs(polys[i].area()) > min_area) {",
+      "test_filter": "^PolygonFamilyGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "polygon-affine-transform-offsets-y-coordinate",
+      "path": "src/libslic3r/Polygon.cpp",
+      "old": "dstpoly.points[i] = { dst(0,i),dst(1,i) };",
+      "new": "dstpoly.points[i] = { dst(0,i),dst(1,i) + 1 };",
+      "test_filter": "^PolygonFamilyGap$",
+      "expected_matches": 1
+    }
+  ]
+}
