@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "description": "Public behavior probes for PlaceholderParser output assignment, legacy filament indices, and string escape decoding.",
+  "mutants": [
+    {
+      "id": "placeholder-output-readonly-guard-inverted",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "if (! opt.writable)",
+      "new": "if (opt.writable)",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserOutput$",
+      "description": "Invert output writability enforcement: valid DynamicConfig output writes would be rejected while parser-owned values would become mutable."
+    },
+    {
+      "id": "placeholder-repeat-output-shortened",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "static_cast<ConfigOptionFloats*>(opt)->values.assign(count, rhs_value.as_d());",
+      "new": "static_cast<ConfigOptionFloats*>(opt)->values.assign(count ? count - 1 : 0, rhs_value.as_d());",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserVectors$",
+      "description": "Drop one element when repeat(count,value) assigns a float output vector; the three-element readback must fail."
+    },
+    {
+      "id": "placeholder-filament-change-ignored",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "context->current_extruder_id = param.as_i();",
+      "new": "context->current_extruder_id = 0;",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserLegacyIndex$",
+      "description": "Ignore the requested filament index; subsequent legacy vector lookup must still select slots 1 and 2."
+    },
+    {
+      "id": "placeholder-carriage-return-decoded-as-newline",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "c = '\\r';",
+      "new": "c = '\\n';",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserUnicode$",
+      "description": "Decode the public \\r escape as a newline; the escape round-trip oracle must distinguish carriage return from line feed."
+    }
+  ]
+}

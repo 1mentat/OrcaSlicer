@@ -808,3 +808,154 @@ TEST_CASE("Placeholder parser reports negative legacy vector indexes",
     parser.set("idx", 0);
     CHECK(parser.process("[nozzle_temperature[idx]]") == "357");
 }
+
+TEST_CASE("Placeholder parser merges an rvalue configuration",
+          "[PlaceholderParser][PlaceholderParserConfig]")
+{
+    DynamicPrintConfig moved_config = DynamicPrintConfig::full_print_config();
+    moved_config.set_deserialize_strict({
+        { "layer_height", "0.25" },
+        { "wall_loops", "3" }
+    });
+
+    PlaceholderParser parser;
+    parser.set("already_present", "keep");
+    parser.apply_config(std::move(moved_config));
+    CHECK(parser.process("{layer_height}") == "0.25");
+    CHECK(parser.process("{wall_loops}") == "3");
+    CHECK(parser.process("{already_present}") == "keep");
+}
+
+TEST_CASE("Placeholder parser resolves configuration overrides before stored and external values",
+          "[PlaceholderParser][PlaceholderParserLookup]")
+{
+    DynamicPrintConfig external = DynamicPrintConfig::full_print_config();
+    external.set_deserialize_strict({
+        { "layer_height", "0.1" },
+        { "wall_loops", "7" }
+    });
+    DynamicPrintConfig stored;
+    stored.set_deserialize_strict({ { "layer_height", "0.2" } });
+    DynamicPrintConfig override;
+    override.set_deserialize_strict({ { "layer_height", "0.3" } });
+
+    PlaceholderParser parser(&external);
+    REQUIRE(stored.option("wall_loops") == nullptr);
+    REQUIRE(parser.apply_config(stored));
+    CHECK(parser.process("{layer_height}") == "0.2");
+    CHECK(parser.process("{layer_height}", 0, &override) == "0.3");
+    CHECK(parser.process("{wall_loops}") == "7");
+}
+
+TEST_CASE("Placeholder parser writes scalar output values and reads them back",
+          "[PlaceholderParser][PlaceholderParserOutput]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("output_float", new ConfigOptionFloat(1.5));
+    outputs.set_key_value("output_int", new ConfigOptionInt(2));
+    outputs.set_key_value("output_string", new ConfigOptionString("before"));
+    outputs.set_key_value("output_bool", new ConfigOptionBool(false));
+
+    const std::string rendered = parser.process(
+        "{output_float = 2.75}{output_int = 7}{output_string = \"ready\"}{output_bool = true}"
+        "{output_float},{output_int},{output_string},{output_bool}",
+        0, nullptr, &outputs, nullptr);
+    CHECK(rendered == "2.75,7,ready,true");
+
+    const auto *float_value = outputs.option<ConfigOptionFloat>("output_float");
+    const auto *int_value = outputs.option<ConfigOptionInt>("output_int");
+    const auto *string_value = outputs.option<ConfigOptionString>("output_string");
+    const auto *bool_value = outputs.option<ConfigOptionBool>("output_bool");
+    REQUIRE(float_value != nullptr);
+    REQUIRE(int_value != nullptr);
+    REQUIRE(string_value != nullptr);
+    REQUIRE(bool_value != nullptr);
+    CHECK_THAT(float_value->value, Catch::Matchers::WithinAbs(2.75, 1e-12));
+    CHECK(int_value->value == 7);
+    CHECK(string_value->value == "ready");
+    CHECK(bool_value->value);
+}
+
+TEST_CASE("Placeholder parser assigns vectors by initializer list and repeat count",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("output_ints", new ConfigOptionInts({ 1, 2 }));
+    outputs.set_key_value("output_floats", new ConfigOptionFloats({ 0.5, 1.5 }));
+    outputs.set_key_value("output_strings", new ConfigOptionStrings({ "old" }));
+    outputs.set_key_value("output_bools", new ConfigOptionBools({ false, false }));
+
+    CHECK(parser.process(
+        "{output_ints = (7,8,9)}{output_floats = repeat(3,1.25)}"
+        "{output_strings = (\"new\",9)}{output_bools = (true,false)}",
+        0, nullptr, &outputs, nullptr).empty());
+
+    const auto *float_values = outputs.option<ConfigOptionFloats>("output_floats");
+    REQUIRE(float_values != nullptr);
+    REQUIRE(float_values->values.size() == 3);
+    for (double value : float_values->values)
+        CHECK_THAT(value, Catch::Matchers::WithinAbs(1.25, 1e-12));
+
+    CHECK(parser.process(
+        "{output_ints[0]},{output_ints[1]},{output_ints[2]}|"
+        "{output_floats[0]},{output_floats[1]},{output_floats[2]},{size(output_floats)}|"
+        "{output_strings[0]},{output_strings[1]}|"
+        "{output_bools[0]},{output_bools[1]}",
+        0, nullptr, &outputs, nullptr) == "7,8,9|1.25,1.25,1.25,3|new,9|true,false");
+}
+
+TEST_CASE("Placeholder parser rejects writes to read-only parser values",
+          "[PlaceholderParser][PlaceholderParserOutput]")
+{
+    PlaceholderParser parser;
+    parser.set("read_only", 4);
+    DynamicConfig outputs;
+    outputs.set_key_value("writable", new ConfigOptionInt(1));
+
+    CHECK_THROWS_WITH(parser.process("{read_only = 5}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("Cannot modify a read-only variable"));
+    CHECK(parser.process("{writable = 2}{writable}", 0, nullptr, &outputs, nullptr) == "2");
+}
+
+TEST_CASE("Placeholder parser changes the legacy vector index with filament_change",
+          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "200,210,220" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+
+    CHECK_THAT(parser.process("{filament_change(1)}temperature=[nozzle_temperature]"),
+               Catch::Matchers::EndsWith("temperature=210"));
+    CHECK_THAT(parser.process("{filament_change(2)}temperature=[nozzle_temperature]"),
+               Catch::Matchers::EndsWith("temperature=220"));
+    CHECK_THAT(parser.process("{filament_change(0)}temperature=[nozzle_temperature]"),
+               Catch::Matchers::EndsWith("temperature=200"));
+}
+
+TEST_CASE("Placeholder parser unescapes carriage returns, quotes, and backslashes",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    const std::string actual = parser.process(R"({"quote:\" slash:\\ line:\n carriage:\r"})");
+    CHECK(actual == std::string("quote:\" slash:\\ line:\n carriage:\r"));
+}
+
+TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuation bytes",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    std::string truncated = "{\"truncated ";
+    truncated.append("\xE2\x82", 2);
+    truncated += "\"}";
+    CHECK_THROWS_WITH(parser.process(truncated),
+                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+
+    std::string continuation = "{\"";
+    continuation.push_back(static_cast<char>(0x80));
+    continuation += "\"}";
+    CHECK_THROWS_WITH(parser.process(continuation),
+                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}

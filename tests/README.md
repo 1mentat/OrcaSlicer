@@ -188,6 +188,14 @@ expressions, literal/regex alternatives, and selective configuration updates.
 invalid writes to public output vectors without changing their contents.
 Its mutations are in `placeholder_vectors.json`.
 
+`[PlaceholderParserConfig]`, `[PlaceholderParserLookup]`, `[PlaceholderParserOutput]`,
+`[PlaceholderParserVectors]`, `[PlaceholderParserLegacyIndex]`, and
+`[PlaceholderParserUnicode]` exercise configuration merge/precedence, typed output
+assignment, read-only values, legacy filament selection, escape decoding, and
+invalid UTF-8 through the public parser. Their probes are in
+`placeholder_public_paths.json`. These parser checks do not establish print-pipeline
+settings variance.
+
 `[SettingsSpeedAccelVariance]` checks first-layer and role-specific feedrates,
 acceleration, and jerk against every eligible parsed move. Layer markers keep
 first-layer travel separate from later motion. Its direct firmware-writer
