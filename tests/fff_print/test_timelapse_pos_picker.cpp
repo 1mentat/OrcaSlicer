@@ -114,7 +114,7 @@ bool is_x0_clear(double clearance_radius, double current_y)
     return picker.get_is_clear_to_x0(ctx);
 }
 
-Point pick_by_object_at_rod_height(double rod_height)
+Point pick_by_object_at_rod_height(double rod_height, double current_y = 25.)
 {
     DynamicPrintConfig config = picker_config(2., rod_height);
     Print print;
@@ -127,9 +127,9 @@ Point pick_by_object_at_rod_height(double rod_height)
     TimelapsePosPicker picker;
     picker.init(&print, Point(0, 0));
     PosPickCtx ctx;
-    // The print objects have disjoint Y bands; this travel position tests
-    // the corridor through the previously printed object's band.
-    ctx.curr_pos = Point(scale_(105.), scale_(25.));
+    // Disjoint object Y bands keep the print valid; current_y can probe
+    // either the obstructed travel band or the free corridor.
+    ctx.curr_pos = Point(scale_(105.), scale_(current_y));
     ctx.curr_layer = context_layer(print.get_object(1), 1.0);
     ctx.picture_extruder_id = 0;
     ctx.curr_extruder_id = 0;
@@ -185,6 +185,16 @@ TEST_CASE("By-object timelapse parks only when a rod-height corridor exists",
     CHECK(clear.y() <= 220);
     CHECK(outside_xy_box(clear, 20., 20., 30., 30., 1.));
     CHECK(outside_xy_box(clear, 100., 100., 110., 110., 1.));
+
+    // Starting on the second object's layer still leaves the previous object's
+    // rod corridor available above its Y band plus the configured clearance.
+    const Point gap = pick_by_object_at_rod_height(1.0, 105.);
+    CHECK(gap != DefaultTimelapsePos);
+    CHECK(gap.x() >= 0);
+    CHECK(gap.x() <= 220);
+    CHECK(gap.y() >= 32);
+    CHECK(gap.y() <= 220);
+    CHECK(outside_xy_box(gap, 100., 100., 110., 110., 1.));
 }
 
 TEST_CASE("Timelapse parking honors the selected extruder printable region",
