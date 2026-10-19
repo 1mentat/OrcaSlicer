@@ -176,6 +176,11 @@ as `--target` and `--binary` in the command above. It is excluded from the
 default build and CTest discovery. The canonical `libslic3r_tests` image still
 retains every production object for the overall coverage denominator.
 
+For Model iteration, use `libslic3r_model_tests` and
+`build/tests/libslic3r/libslic3r_model_tests` with `--tag Model` and
+`--production-source src/libslic3r/Model.cpp`. This opt-in target compiles
+`test_model.cpp` and also stays outside default builds and CTest discovery.
+
 Coverage builds include Orca's source headers as ordinary project headers.
 Clang suppresses system-header mappings even when it emits profile counters;
 mixing those counters with unused inline mappings can silently remove executed
