@@ -2250,7 +2250,7 @@ TEST_CASE("Voronoi SVG limits rays and subdivides curved edges", "[VoronoiVisual
     Polygon outline{{Point(0, 0), Point(10, 0), Point(10, 4), Point(4, 4), Point(4, 8), Point(0, 8)}};
     for (Point &point : outline.points)
         point *= mm;
-    const Lines lines = to_lines(Polygons{outline});
+    Lines lines = to_lines(Polygons{outline});
 
     VD diagram;
     diagram.construct_voronoi(lines.begin(), lines.end());
