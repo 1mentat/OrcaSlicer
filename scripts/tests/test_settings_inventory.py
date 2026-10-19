@@ -75,12 +75,37 @@ class SettingsInventoryTests(unittest.TestCase):
         self.assertEqual(options["gcode_comments"]["status"], "declared_covered")
         self.assertEqual(options["printer_technology"]["status"], "declared_partial")
         self.assertIn("Missing required dimensions: enum_values.", options["printer_technology"]["reason"])
-        self.assertEqual(options["supports_enable"]["status"], "declared_partial")
-        self.assertIn("boolean_values", options["supports_enable"]["reason"])
+        self.assertEqual(options["supports_enable"]["status"], "declared_covered")
+        self.assertEqual(options["supports_enable"]["required_dimensions"],
+                         ["boolean_values", "pipeline_oracle"])
+        self.assertIn("boolean_values", options["supports_enable"]["evidence_dimensions"])
+        self.assertIn("pipeline_oracle", options["supports_enable"]["evidence_dimensions"])
         uncovered = [option for option in options.values() if option["status"] == "uncovered"]
         self.assertTrue(uncovered)
         self.assertTrue(all("do not establish behavior" in option["reason"] for option in uncovered))
         self.assertFalse(report["execution_verified"])
+
+    def test_boolean_settings_require_values_beyond_pipeline_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            evidence.write_text(json.dumps({"schema_version": 1, "entries": {
+                "supports_enable": {
+                    "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+                    "tag": "[SLAPrint][SLAFeatures][SLASupportsEnableVariance]",
+                    "dimensions": ["pipeline_oracle"],
+                    "reason": "Synthetic pipeline-only evidence.",
+                },
+            }}), encoding="utf-8")
+            partial = settings_inventory.build_report(
+                root=ROOT,
+                source_path=ROOT / "src/libslic3r/PrintConfig.cpp",
+                evidence_path=evidence,
+            )
+        supports_enable = next(item for item in partial["options"]
+                               if item["key"] == "supports_enable")
+        self.assertEqual(supports_enable["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: boolean_values.",
+                      supports_enable["reason"])
 
     def test_schema_roundtrip_is_an_explicit_non_pipeline_dimension(self):
         self.assertIn("schema_roundtrip", settings_inventory._DIMENSIONS)

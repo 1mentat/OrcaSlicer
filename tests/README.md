@@ -121,6 +121,13 @@ included when LLVM provides executable mappings for them; uncompiled headers
 and conditional platform sources are outside the target manifests. The report
 records the source root and manifests used.
 
+For an archived LLVM 18 run with profile-mapping warnings, use
+`python3 scripts/slicer_coverage_reconcile.py --manifest <run.json> --out <new-directory>`
+to replay the structural export and strict mapping checks. The
+[diagnostic replay contract](../scripts/coverage_replay/README.md) describes the
+required input hashes and provenance. Replay records stage timings and retains
+the raw integrity error; it cannot waive a warning or pass a coverage threshold.
+
 Coverage builds include Orca's source headers as ordinary project headers.
 Clang suppresses system-header mappings even when it emits profile counters;
 mixing those counters with unused inline mappings can silently remove executed
