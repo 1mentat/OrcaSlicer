@@ -1089,20 +1089,22 @@
       "reason": "External bridge widths 0.25 and 0.35 mm produce positive, distinct deposited volumes. Numeric representatives only; validation-boundary tests also exist under ValidationContracts in test_print.cpp."
     },
     "tree_support_tip_diameter": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportOrganicProfileSettings]",
       "dimensions": [
-        "representative_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Organic support dimensions are varied below the extrusion width, below twice that width, below the tip, and at a legal nominal pair; errors identify the responsible option. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Valid 0.4 and 1.6 mm tips with a fixed 2 mm branch diameter pass Print::validate and Print::process on the same cap overhang. Public support-slice XOR geometry differs and the larger tip grows the highest contact footprint; both rows emit positive physical support paths. Unsafe dimension rejection also remains covered by ValidationContracts in test_print.cpp. Numeric boundary completeness and broad setting interactions are not claimed."
     },
     "tree_support_branch_diameter_organic": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportOrganicProfileSettings]",
       "dimensions": [
-        "representative_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Organic support dimensions are varied below the extrusion width, below twice that width, below the tip, and at a legal nominal pair; errors identify the responsible option. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Valid 1 and 4 mm branch diameters with a fixed 0.8 mm tip pass Print::validate and Print::process on the same cap overhang. Lower public support-slice geometry must differ while both rows preserve support height and positive physical support paths. Branch merging can make total island area non-monotone. Unsafe dimension rejection also remains covered by ValidationContracts in test_print.cpp. Numeric boundary completeness and broad setting interactions are not claimed."
     },
     "support_base_pattern": {
       "test": "tests/fff_print/test_support_material.cpp",
