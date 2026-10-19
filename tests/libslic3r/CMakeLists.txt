@@ -61,6 +61,7 @@ add_executable(${_TEST_NAME}_tests
     test_slicing.cpp
     test_aabb_mesh.cpp
     test_filament_group.cpp
+    test_filament_group_utils.cpp
     test_filament_mixer.cpp
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
@@ -178,6 +179,28 @@ target_include_directories(libslic3r_edgegrid_tests PRIVATE ${CMAKE_SOURCE_DIR}/
 set_property(TARGET libslic3r_edgegrid_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_edgegrid_tests)
 slicer_enable_llvm_source_coverage(libslic3r_edgegrid_tests)
+
+# Explicitly built utility contracts, without duplicate CTest registration.
+add_executable(libslic3r_filament_group_utils_tests EXCLUDE_FROM_ALL
+    test_filament_group_utils.cpp
+    ../fff_print/fff_print_tests.cpp)
+target_link_libraries(libslic3r_filament_group_utils_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_filament_group_utils_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_filament_group_utils_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_filament_group_utils_tests)
+slicer_enable_llvm_source_coverage(libslic3r_filament_group_utils_tests)
+
+# Keep the shared polygon fixtures available to the focused geometry tests.
+add_executable(libslic3r_geometry_tests EXCLUDE_FROM_ALL
+    test_geometry.cpp
+    test_polygon.cpp
+    ../libnest2d/printer_parts.cpp
+    ../fff_print/fff_print_tests.cpp)
+target_link_libraries(libslic3r_geometry_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_geometry_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_geometry_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_geometry_tests)
+slicer_enable_llvm_source_coverage(libslic3r_geometry_tests)
 
 # Explicitly built by the inventory audit; it is not an extra Catch test.
 add_executable(slicer_settings_inventory EXCLUDE_FROM_ALL settings_inventory_main.cpp)
