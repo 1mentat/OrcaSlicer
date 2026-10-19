@@ -152,6 +152,13 @@ An ordinary test failure still produces diagnostic coverage and returns a
 failure; missing tests, skips, timeouts, and changed inputs also fail the run.
 This file-scoped report cannot establish the overall coverage threshold.
 
+For Parser iteration, the opt-in target `libslic3r_placeholder_parser_tests`
+compiles the same test file and links the production archive members it needs.
+Use that target name and `build/tests/libslic3r/libslic3r_placeholder_parser_tests`
+as `--target` and `--binary` in the command above. It is excluded from the
+default build and CTest discovery. The canonical `libslic3r_tests` image still
+retains every production object for the overall coverage denominator.
+
 Coverage builds include Orca's source headers as ordinary project headers.
 Clang suppresses system-header mappings even when it emits profile counters;
 mixing those counters with unused inline mappings can silently remove executed
@@ -226,6 +233,8 @@ uses an off-midpoint input to distinguish averaging from a linear blend for
 nearly coincident coordinates. Their probes are in
 `placeholder_public_paths.json`. These parser checks do not establish print-pipeline
 settings variance.
+The lazy-expression fixture omits `floor` and `ceil`: their handlers reject
+suppressed operands. Active valid and invalid arguments remain covered.
 
 `[SettingsSpeedAccelVariance]` checks first-layer and role-specific feedrates,
 acceleration, and jerk against every eligible parsed move. Layer markers keep

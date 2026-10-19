@@ -140,6 +140,14 @@ orcaslicer_copy_test_dlls()
 
 orcaslicer_discover_tests(${_TEST_NAME}_tests)
 
+# Explicitly built parser tests, without duplicate CTest registration.
+add_executable(libslic3r_placeholder_parser_tests EXCLUDE_FROM_ALL test_placeholder_parser.cpp)
+target_link_libraries(libslic3r_placeholder_parser_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_placeholder_parser_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_placeholder_parser_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_placeholder_parser_tests)
+slicer_enable_llvm_source_coverage(libslic3r_placeholder_parser_tests)
+
 # Explicitly built by the inventory audit; it is not an extra Catch test.
 add_executable(slicer_settings_inventory EXCLUDE_FROM_ALL settings_inventory_main.cpp)
 target_link_libraries(slicer_settings_inventory libslic3r nlohmann_json)
