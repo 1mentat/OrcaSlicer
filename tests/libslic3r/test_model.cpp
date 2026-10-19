@@ -2814,18 +2814,22 @@ TEST_CASE("Volume affine transformation updates mesh and convex hull geometry", 
 
     const BoundingBoxf3 source_bounds = volume->mesh().bounding_box();
     const ObjectID old_id = volume->id();
-    Transform3d affine = Transform3d::Identity();
-    affine.linear() << 1.5, 0.25, 0.0,
-                       0.0, 2.0, 0.5,
-                       0.0, 0.0, 1.25;
-    affine.translation() = Vec3d(3., -4., 2.);
-    const BoundingBoxf3 expected_bounds = source_bounds.transformed(affine);
+    ModelInstance *instance = object->add_instance();
+    REQUIRE(instance != nullptr);
+    instance->set_rotation(Vec3d(0.2, 0.3, 0.));
+    instance->set_scaling_factor(Vec3d(1.5, 2., 1.25));
+    const BoundingBoxf3 expected_bounds =
+        source_bounds.transformed(instance->get_transformation().get_matrix());
 
-    volume->transform_this_mesh(affine, false);
+    // Bake a non-quarter-turn, nonuniform instance transform through the public
+    // object API. The volume's transform_this_mesh overloads are protected.
+    object->bake_xy_rotation_into_meshes(0);
 
     check_bbox(volume->mesh().bounding_box(), expected_bounds);
     check_bbox(volume->get_convex_hull().bounding_box(), expected_bounds);
     CHECK(volume->id() != old_id);
+    check_vec3d(instance->get_scaling_factor(), Vec3d::Ones(), 1e-12);
+    check_vec3d(instance->get_rotation(), Vec3d::Zero(), 1e-12);
 }
 
 TEST_CASE("Direct meter conversion scales the volume and clears its offset", "[Model][ModelGapContracts]")
@@ -2902,7 +2906,7 @@ TEST_CASE("OBJ face colors leave unpainted facets in the default state", "[Model
     Model model;
     ModelObject *object = model.add_object();
     REQUIRE(object != nullptr);
-    ModelVolume *volume = object->add_volume(source, ModelVolumeType::MODEL_PART, false);
+    ModelVolume *volume = object->add_volume(TriangleMesh(source), ModelVolumeType::MODEL_PART, false);
     REQUIRE(volume != nullptr);
     std::vector<unsigned char> face_colors(source.its.indices.size(), 0);
     std::vector<Vec3d> expected_painted_centroids;

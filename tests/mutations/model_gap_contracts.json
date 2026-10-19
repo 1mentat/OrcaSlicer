@@ -14,11 +14,11 @@
     {
       "id": "model-volume-transform-convex-hull-update-omitted",
       "path": "src/libslic3r/Model.cpp",
-      "old": "    convex_hull.transform(mesh_trafo, fix_left_handed);",
-      "new": "    // Mutation probe: omit the affine transform of the cached convex hull.",
+      "old": "    convex_hull.transform(matrix, fix_left_handed);",
+      "new": "    // Mutation probe: omit the baked transform of the cached convex hull.",
       "expected_matches": 1,
       "test_filter": "^ModelGapContracts$",
-      "description": "Transform the volume mesh while leaving the cached convex hull unchanged; both public geometry bounds must follow the affine transform."
+      "description": "Bake an instance transform into the volume mesh while leaving the cached convex hull unchanged; both public geometry bounds must follow the transform."
     },
     {
       "id": "model-volume-meters-offset-reset-omitted",
