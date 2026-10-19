@@ -436,6 +436,132 @@ TEST_CASE("Skippable tags contribute only time inside the requested region", "[G
     CHECK(skipped->second < result.print_statistics.modes[0].time);
 }
 
+TEST_CASE("G1 retains tagged height at zero Z and classifies E-only recovery",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\n"
+        ";TYPE:Inner wall\n;HEIGHT:0.30\n"
+        "G1 X10 Y0 Z0 E1 F600\n"
+        "G1 X20 Y0 E-0.25\n"
+        "G1 X20 Y0 E0.25\n", result);
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    const auto travels = moves_of(result, EMoveType::Travel);
+    const auto unretracts = moves_of(result, EMoveType::Unretract);
+    REQUIRE(extrusions.size() == 1);
+    REQUIRE(travels.size() == 1);
+    REQUIRE(unretracts.size() == 1);
+    CHECK_THAT(extrusions.front()->position.z(), WithinAbs(0.30, 1e-4));
+    CHECK_THAT(travels.front()->position.x(), WithinAbs(20.0, 1e-4));
+    CHECK_THAT(travels.front()->delta_extruder, WithinAbs(-0.25, 1e-4));
+    CHECK_THAT(unretracts.front()->position.z(), WithinAbs(0.30, 1e-4));
+    CHECK_THAT(unretracts.front()->delta_extruder, WithinAbs(0.25, 1e-4));
+}
+
+TEST_CASE("VG1 relative motion advances the next saved move without recording virtual moves",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\n"
+        "VG1 X10 Y0 E1 F600\n"
+        "G91\n"
+        "VG1 X5 Y5 E0.5\n"
+        "G1 X5 Y5 E2 F600\n", result);
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 1);
+    CHECK_THAT(extrusions.front()->position.x(), WithinAbs(20.0, 1e-4));
+    CHECK_THAT(extrusions.front()->position.y(), WithinAbs(10.0, 1e-4));
+    CHECK_THAT(extrusions.front()->delta_extruder, WithinAbs(2.0, 1e-4));
+}
+
+TEST_CASE("IJ arcs accept a single center offset axis and preserve quarter-circle geometry",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    struct ArcFixture {
+        std::string gcode;
+        float end_x;
+        float end_y;
+    };
+    const std::vector<ArcFixture> fixtures{
+        { "M83\nG90\nG1 X10 Y0 Z0.2 F600\nG3 X0 Y10 I-10 E1 F600\n", 0.0f, 10.0f },
+        { "M83\nG90\nG1 X0 Y10 Z0.2 F600\nG3 X-10 Y0 J-10 E1 F600\n", -10.0f, 0.0f },
+    };
+
+    for (const ArcFixture &fixture : fixtures) {
+        INFO(fixture.gcode);
+        GCodeProcessorResult result;
+        process_buffer(fixture.gcode, result);
+        const auto extrusions = moves_of(result, EMoveType::Extrude);
+        REQUIRE(extrusions.size() > 2);
+        CHECK_THAT(extrusions.back()->position.x(), WithinAbs(fixture.end_x, 1e-3));
+        CHECK_THAT(extrusions.back()->position.y(), WithinAbs(fixture.end_y, 1e-3));
+
+        float total_extrusion = 0.0f;
+        for (const auto *move : extrusions) {
+            CHECK_THAT(std::hypot(double(move->position.x()), double(move->position.y())),
+                       WithinAbs(10.0, 1e-2));
+            total_extrusion += move->delta_extruder;
+        }
+        CHECK_THAT(total_extrusion, WithinAbs(1.0, 1e-3));
+    }
+}
+
+TEST_CASE("Full-circle IJ arcs in inch mode traverse the whole radius and retain extrusion",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\nG20\n"
+        "G1 X1 Y0 Z0.2 F600\n"
+        "G3 X1 Y0 I-1 J0 E0.1 F600\n", result);
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() > 20);
+    float min_x = extrusions.front()->position.x();
+    float max_x = min_x;
+    float min_y = extrusions.front()->position.y();
+    float max_y = min_y;
+    float total_extrusion = 0.0f;
+    for (const auto *move : extrusions) {
+        CHECK_THAT(std::hypot(double(move->position.x()), double(move->position.y())),
+                   WithinAbs(25.4, 0.05));
+        min_x = std::min(min_x, move->position.x());
+        max_x = std::max(max_x, move->position.x());
+        min_y = std::min(min_y, move->position.y());
+        max_y = std::max(max_y, move->position.y());
+        total_extrusion += move->delta_extruder;
+    }
+    CHECK(min_x < -24.5f);
+    CHECK(max_x > 24.5f);
+    CHECK(min_y < -24.5f);
+    CHECK(max_y > 24.5f);
+    CHECK_THAT(total_extrusion, WithinAbs(2.54, 1e-3));
+    CHECK_THAT(extrusions.back()->position.x(), WithinAbs(25.4, 1e-3));
+    CHECK_THAT(extrusions.back()->position.y(), WithinAbs(0.0, 1e-3));
+}
+
+TEST_CASE("Incomplete and malformed arcs leave the following linear move intact",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\nG1 X10 Y0 Z0.2 F600\n"
+        "G2 X0 Y10\n"
+        "G3 X0 Y10 Ibad J0\n"
+        "G3 X0 Y10 I-10 Jbad\n"
+        "G1 X20 Y0 E1 F600\n", result);
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 1);
+    CHECK_THAT(extrusions.front()->position.x(), WithinAbs(20.0, 1e-4));
+    CHECK_THAT(extrusions.front()->position.y(), WithinAbs(0.0, 1e-4));
+    CHECK_THAT(extrusions.front()->delta_extruder, WithinAbs(1.0, 1e-4));
+}
+
 } // namespace extended_command_contracts
 
 namespace gcode_processor_deep_contracts {
