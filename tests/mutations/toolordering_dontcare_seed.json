@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "toolordering-dontcare-seed-skips-tool-zero",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "                if (extruder_id > 0) {",
+      "new": "                if (extruder_id > 1) {",
+      "expected_matches": 1,
+      "test_filter": "^ToolOrderingDontCareSeed$",
+      "description": "The first physical tool is one-based id 1. The fixture leaves early layers empty/don't-care and requires that id 1 seed the no-prior-tool layer; skipping it changes the observed order and inherited tool."
+    },
+    {
+      "id": "toolordering-dontcare-singleton-ignores-running-tool",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "    for (LayerTools &lt : m_layer_tools) {\n        // Extruders in lt.extruders are already sorted.\n\n        if (lt.extruders.empty())\n            continue;\n        if (lt.extruders.size() == 1 && lt.extruders.front() == 0)\n            lt.extruders.front() = last_extruder_id;",
+      "new": "    for (LayerTools &lt : m_layer_tools) {\n        // Extruders in lt.extruders are already sorted.\n\n        if (lt.extruders.empty())\n            continue;\n        if (lt.extruders.size() == 1 && lt.extruders.front() == 0)\n            lt.extruders.front() = 1;",
+      "expected_matches": 1,
+      "test_filter": "^ToolOrderingDontCareSeed$",
+      "description": "A singleton don't-care layer inherits the previous layer's final tool. Replacing that stateful assignment with a fixed first tool breaks the later layer's independently checked zero-based sequence."
+    }
+  ]
+}

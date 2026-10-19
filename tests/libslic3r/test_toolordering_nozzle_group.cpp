@@ -19,6 +19,7 @@
 #include "libslic3r/GCode/ToolOrderUtils.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -1107,3 +1108,45 @@ TEST_CASE("parse_cyclic_order parses user cyclic toolchange sequences", "[ToolOr
         REQUIRE(parse_cyclic_order("3,1", 4) == std::vector<unsigned int>({2, 0}));
     }
 }
+
+TEST_CASE("ToolOrdering seeds don't-care layers from the first real tool", "[ToolOrdering][ToolOrderingDontCareSeed]")
+{
+    ToolOrdering ordering;
+    ordering.layer_tools().emplace_back(0.2);
+    ordering.layer_tools().emplace_back(0.4);
+    ordering.layer_tools().emplace_back(0.6);
+    ordering.layer_tools().emplace_back(0.8);
+
+    // Layer 0 has no physical tool yet. The first real 1-based tool on layer 1 seeds it;
+    // the later placeholder inherits the preceding layer's final tool, then layer 3
+    // rotates that inherited tool to the front of its local order.
+    ordering.layer_tools()[0].extruders = { 0 };
+    ordering.layer_tools()[1].extruders = { 1, 2 };
+    ordering.layer_tools()[2].extruders = { 0 };
+    ordering.layer_tools()[3].extruders = { 0, 1, 2 };
+
+    ordering.handle_dontcare_extruder(std::numeric_limits<unsigned int>::max());
+
+    CHECK((ordering.layer_tools()[0].extruders == std::vector<unsigned int>{ 0 }));
+    CHECK((ordering.layer_tools()[1].extruders == std::vector<unsigned int>{ 0, 1 }));
+    CHECK((ordering.layer_tools()[2].extruders == std::vector<unsigned int>{ 1 }));
+    CHECK((ordering.layer_tools()[3].extruders == std::vector<unsigned int>{ 1, 0 }));
+}
+
+TEST_CASE("ToolOrdering leaves all-placeholder layers unresolved when no tool exists", "[ToolOrdering][ToolOrderingDontCareSeed]")
+{
+    ToolOrdering ordering;
+    ordering.layer_tools().emplace_back(0.2);
+    ordering.layer_tools().emplace_back(0.4);
+    ordering.layer_tools().emplace_back(0.6);
+    ordering.layer_tools()[0].extruders = { 0 };
+    ordering.layer_tools()[1].extruders = {};
+    ordering.layer_tools()[2].extruders = { 0 };
+
+    ordering.handle_dontcare_extruder(std::numeric_limits<unsigned int>::max());
+
+    CHECK((ordering.layer_tools()[0].extruders == std::vector<unsigned int>{ 0 }));
+    CHECK(ordering.layer_tools()[1].extruders.empty());
+    CHECK((ordering.layer_tools()[2].extruders == std::vector<unsigned int>{ 0 }));
+}
+

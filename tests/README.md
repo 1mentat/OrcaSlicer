@@ -688,6 +688,11 @@ fixtures. Build `fff_print_timelapse_pos_picker_tests` for focused feedback;
 the same cases belong to the canonical FFF suite. Its mutation probes are in
 `timelapse_pos_picker.json`.
 
+`[ToolOrderingDontCareSeed]` checks discovery of the first physical tool,
+inheritance across placeholder layers, and the no-tool case through public
+ToolOrdering methods. Its probes are in `toolordering_dontcare_seed.json`;
+build `libslic3r_toolordering_tests` for focused feedback.
+
 `[MultimaterialWipe]` checks direct WipeTower2 purge matrices, wall geometry,
 ramming, cooling, stamping, loading, and delay commands. Independent cooling
 variants change one setting at a time, with feedrates read from executable
