@@ -2739,13 +2739,25 @@ TEST_CASE("OBJ vertex colors assign semantic regions to filament facets", "[Mode
         auto state = [&](EnforcerBlockerType type) {
             return facet_area_centroid(volume->mmu_segmentation_facets.get_facets(*volume, type));
         };
-        auto check_matches_corner = [&](unsigned char color, size_t corner) {
-            const auto color_state = state(static_cast<EnforcerBlockerType>(color));
+        auto check_region_corners = [&](unsigned char color) {
+            const indexed_triangle_set facets =
+                volume->mmu_segmentation_facets.get_facets(*volume, static_cast<EnforcerBlockerType>(color));
+            const auto color_state = facet_area_centroid(facets);
             REQUIRE(color_state.area > 0.);
-            const double own_distance = (color_state.centroid - points[corner].cast<double>()).norm();
-            for (size_t other = 0; other < 3; ++other)
-                if (other != corner)
-                    CHECK(own_distance < (color_state.centroid - points[other].cast<double>()).norm());
+            std::array<bool, 3> includes_corner{};
+            for (const Vec3i32 &triangle : facets.indices)
+                for (int index = 0; index < 3; ++index) {
+                    const Vec3d vertex = facets.vertices[triangle[index]].cast<double>();
+                    for (size_t corner = 0; corner < points.size(); ++corner)
+                        if ((vertex - points[corner].cast<double>()).norm() <= 1e-5)
+                            includes_corner[corner] = true;
+                }
+            for (size_t corner = 0; corner < points.size(); ++corner) {
+                if (colors[corner] == color)
+                    CHECK(includes_corner[corner]);
+                else
+                    CHECK_FALSE(includes_corner[corner]);
+            }
         };
 
         if (colors[0] == colors[1] && colors[1] == colors[2]) {
@@ -2764,7 +2776,7 @@ TEST_CASE("OBJ vertex colors assign semantic regions to filament facets", "[Mode
                 const auto color_state = state(static_cast<EnforcerBlockerType>(colors[corner]));
                 REQUIRE(color_state.area > 0.);
                 total.area += color_state.area;
-                check_matches_corner(colors[corner], corner);
+                check_region_corners(colors[corner]);
             }
             CHECK_THAT(total.area, Catch::Matchers::WithinAbs(source_area, 1e-5));
             return;
@@ -2780,7 +2792,8 @@ TEST_CASE("OBJ vertex colors assign semantic regions to filament facets", "[Mode
         const auto repeated = state(static_cast<EnforcerBlockerType>(repeated_color));
         REQUIRE(singleton.area > 0.);
         REQUIRE(repeated.area > 0.);
-        check_matches_corner(singleton_color, singleton_corner);
+        check_region_corners(singleton_color);
+        check_region_corners(repeated_color);
         CHECK(singleton.area < repeated.area);
         CHECK_THAT(singleton.area + repeated.area, Catch::Matchers::WithinAbs(source_area, 1e-5));
         CHECK_THAT(state(EnforcerBlockerType::Extruder4).area, Catch::Matchers::WithinAbs(0., 1e-9));
