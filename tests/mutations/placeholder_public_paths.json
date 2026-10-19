@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Public behavior probes for PlaceholderParser output assignment, legacy filament indices, and string escape decoding.",
+  "description": "Public PlaceholderParser probes for output assignment, legacy indices, string decoding, boolean repetition, and interpolation.",
   "mutants": [
     {
       "id": "placeholder-output-readonly-guard-bypassed",
@@ -37,6 +37,24 @@
       "expected_matches": 1,
       "test_filter": "^PlaceholderParserUnicode$",
       "description": "Decode the public \\r escape as a newline; the escape round-trip oracle must distinguish carriage return from line feed."
+    },
+    {
+      "id": "placeholder-bool-repeat-values-forced-false",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "static_cast<ConfigOptionBools*>(opt)->values.assign(count, rhs_value.b());",
+      "new": "static_cast<ConfigOptionBools*>(opt)->values.assign(count, false);",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserAssignmentGaps$",
+      "description": "Discard the boolean repeat value; the assignment case requires repeat(2,true) to retain two true values."
+    },
+    {
+      "id": "placeholder-near-coincident-interpolation-uses-linear-blend",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "out.set_d(0.5 * (y0 + y1));",
+      "new": "out.set_d(Slic3r::lerp(y0, y1, (x - x0) / (x1 - x0)));",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserInterpolation$",
+      "description": "Use linear interpolation for nearly coincident coordinates; the off-midpoint probe distinguishes the required average of 20 from a linear result of 15."
     }
   ]
 }

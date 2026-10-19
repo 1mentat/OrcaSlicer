@@ -192,8 +192,12 @@ Its mutations are in `placeholder_vectors.json`.
 `[PlaceholderParserVectors]`, `[PlaceholderParserLegacyIndex]`, and
 `[PlaceholderParserUnicode]` exercise configuration merge/precedence, typed output
 assignment and scope conflicts, read-only values, legacy filament selection,
-escape decoding, and
-invalid UTF-8 through the public parser. Their probes are in
+escape decoding, and invalid UTF-8 through the public parser.
+`[PlaceholderParserAssignmentGaps]` checks assignment conversions, invalid counts,
+nullable and incompatible vector copies, and preservation after rejected writes.
+The expression cases check type errors and skipped evaluation; interpolation
+uses an off-midpoint input to distinguish averaging from a linear blend for
+nearly coincident coordinates. Their probes are in
 `placeholder_public_paths.json`. These parser checks do not establish print-pipeline
 settings variance.
 

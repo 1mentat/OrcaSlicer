@@ -10,7 +10,9 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include "libslic3r/CommonDefs.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/Point.hpp"
 #include "libslic3r/libslic3r.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -947,9 +949,8 @@ TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuatio
           "[PlaceholderParser][PlaceholderParserUnicode]")
 {
     PlaceholderParser parser;
-    std::string truncated = "{\"truncated ";
+    std::string truncated = "truncated ";
     truncated.append("\xE2\x82", 2);
-    truncated += "\"}";
     CHECK_THROWS_WITH(parser.process(truncated),
                       Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
 
@@ -1014,4 +1015,337 @@ TEST_CASE("Placeholder parser protects local and global variable scopes",
     CHECK_THROWS_WITH(parser.process("{local scoped = 2}{global scoped = 3}", 0, nullptr, nullptr, &context),
                       Catch::Matchers::ContainsSubstring("Variable name already defined in local scope"));
     CHECK(context.global_config->option("scoped") == nullptr);
+}
+
+TEST_CASE("Placeholder parser preserves mixed numeric and string expression behavior",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process(R"({17 % 5}|{5 + 0.25}|{6.5 - 1.25}|{2 + "mm"}|{"size=" + 2})") ==
+          "2|5.25|5.25|2mm|size=2");
+    CHECK_THROWS_WITH(parser.process("{2 / 0}"),
+                      Catch::Matchers::ContainsSubstring("Division by zero"));
+    CHECK_THROWS_WITH(parser.process("{2.0 % 0.0}"),
+                      Catch::Matchers::ContainsSubstring("Division by zero"));
+    CHECK_THROWS_WITH(parser.process("{1 - \"two\"}"),
+                      Catch::Matchers::ContainsSubstring("Cannot subtract non-numeric types"));
+    CHECK_THROWS_WITH(parser.process("{1 * \"two\"}"),
+                      Catch::Matchers::ContainsSubstring("Cannot multiply with non-numeric type"));
+}
+
+TEST_CASE("Placeholder parser converts only numeric expressions",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{-(7)}|{int(7)}|{round(7)}|{floor(7)}|{ceil(7)}") == "-7|7|7|7|7");
+    CHECK_THROWS_WITH(parser.process("{-\"x\"}"),
+                      Catch::Matchers::ContainsSubstring("Cannot apply unary minus operator"));
+    CHECK_THROWS_WITH(parser.process("{int(\"x\")}"),
+                      Catch::Matchers::ContainsSubstring("Cannot convert to integer"));
+    CHECK_THROWS_WITH(parser.process("{round(\"x\")}"),
+                      Catch::Matchers::ContainsSubstring("Cannot round a non-numeric value"));
+    CHECK_THROWS_WITH(parser.process("{floor(\"x\")}"),
+                      Catch::Matchers::ContainsSubstring("Cannot floor a non-numeric value"));
+    CHECK_THROWS_WITH(parser.process("{ceil(\"x\")}"),
+                      Catch::Matchers::ContainsSubstring("Cannot ceil a non-numeric value"));
+    CHECK_THROWS_WITH(parser.process("{not \"x\"}"),
+                      Catch::Matchers::ContainsSubstring("Cannot apply a not operator"));
+}
+
+TEST_CASE("Placeholder parser does not evaluate invalid expressions in inactive branches",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    const std::string skipped =
+        R"({if false}{-"x"}{int("x")}{round("x")})"
+        R"({floor("x")}{ceil("x")}{not "x"}{1 + 2}{1 - 2}{1 * 2})"
+        R"({1 / 0}{1 % 0}{true and false}{digits("x",2)}{min("x",2)})"
+        R"({interpolate_table("x",("y",1))}{true}{endif}ready)";
+    CHECK(parser.process(skipped) == "ready");
+}
+
+TEST_CASE("Placeholder boolean expressions compare strings and reject incompatible operands",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    const auto evaluate = [&parser](const std::string &expression) {
+        return PlaceholderParser::evaluate_boolean_expression(expression, parser.config());
+    };
+    CHECK(evaluate(R"("alpha" < "beta")"));
+    CHECK(evaluate(R"("same" == "same")"));
+    CHECK(evaluate(R"("1" == 1)"));
+    CHECK(evaluate("true == true"));
+    CHECK_FALSE(evaluate("false == true"));
+    CHECK_THROWS_WITH(evaluate("true < false"),
+                      Catch::Matchers::ContainsSubstring("Cannot compare the types"));
+    CHECK_THROWS_WITH(evaluate("true == 1"),
+                      Catch::Matchers::ContainsSubstring("Cannot compare the types"));
+    CHECK_THROWS_WITH(evaluate("1 and 2"),
+                      Catch::Matchers::ContainsSubstring("Cannot apply logical operation to non-boolean operators"));
+    CHECK_THROWS_WITH(evaluate("1"),
+                      Catch::Matchers::ContainsSubstring("Not a boolean expression"));
+    CHECK_THROWS_WITH(parser.process("{if 1}never{endif}"),
+                      Catch::Matchers::ContainsSubstring("Not a boolean expression"));
+}
+
+TEST_CASE("Placeholder digit formatting rounds values and validates width arguments",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{digits(12.6,2)}|{zdigits(3.4,2)}") == "13|03");
+    CHECK_THROWS_WITH(parser.process("{digits(1,2.5)}"),
+                      Catch::Matchers::ContainsSubstring("digits: second parameter must be integer"));
+    CHECK_THROWS_WITH(parser.process("{digits(1,2,0.5)}"),
+                      Catch::Matchers::ContainsSubstring("digits: third parameter must be integer"));
+    CHECK_THROWS_WITH(parser.process("{digits(\"one\",2)}"),
+                      Catch::Matchers::ContainsSubstring("Not a numeric type"));
+}
+
+TEST_CASE("Placeholder interpolation averages nearly coincident table coordinates",
+          "[PlaceholderParser][PlaceholderParserInterpolation]")
+{
+    PlaceholderParser parser;
+    parser.set("probe", 0.0000025);
+    CHECK_THAT(std::stod(parser.process("{interpolate_table(probe,(0,10),(0.00001,30))}")),
+               Catch::Matchers::WithinAbs(20., 1e-9));
+}
+
+TEST_CASE("Placeholder parser validates legacy indexes and optional vector elements",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "200,210" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    parser.set("scalar", 1);
+    parser.set("index", 1);
+    CHECK_THROWS_WITH(parser.process("[scalar_0]"),
+                      Catch::Matchers::ContainsSubstring("Trying to index a scalar variable"));
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature_bad]"),
+                      Catch::Matchers::ContainsSubstring("Invalid vector index"));
+    CHECK(parser.process("[nozzle_temperature_[index]]") == "210");
+
+    auto empty_config = DynamicPrintConfig::full_print_config();
+    auto *empty_speed = empty_config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(empty_speed != nullptr);
+    empty_speed->values.clear();
+    PlaceholderParser empty_parser;
+    REQUIRE(empty_parser.apply_config(empty_config));
+    CHECK_THROWS_WITH(empty_parser.process("[outer_wall_speed_0]"),
+                      Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
+
+    auto nil_config = DynamicPrintConfig::full_print_config();
+    auto *nil_speed = nil_config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(nil_speed != nullptr);
+    nil_speed->values = { 60., 70. };
+    nil_speed->set_at_to_nil(1);
+    PlaceholderParser nil_parser;
+    REQUIRE(nil_parser.apply_config(nil_config));
+    CHECK_THROWS_WITH(nil_parser.process("[outer_wall_speed_1]"),
+                      Catch::Matchers::ContainsSubstring("undefined (nil)"));
+}
+
+TEST_CASE("Placeholder parser resolves point and enum vector elements",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    auto *area = config.option<ConfigOptionPoints>("printable_area");
+    REQUIRE(area != nullptr);
+    area->values = { Vec2d(3., 4.), Vec2d(5., 6.) };
+    auto *nozzle_type = config.option<ConfigOptionEnumsGenericNullable>("nozzle_type");
+    REQUIRE(nozzle_type != nullptr);
+    nozzle_type->values = { ntHardenedSteel };
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    CHECK(parser.process("{printable_area[0]}") == "[3, 4]");
+    CHECK(parser.process("{nozzle_type[0]}") == std::to_string(static_cast<int>(ntHardenedSteel)));
+    CHECK_THROWS_WITH(parser.process("{printable_area}"),
+                      Catch::Matchers::ContainsSubstring("vector variable when scalar is expected"));
+}
+
+TEST_CASE("Placeholder parser preserves scalar assignments and rejects vector-shaped values",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("percent", new ConfigOptionPercent(10.));
+    outputs.set_key_value("flag", new ConfigOptionBool(false));
+    outputs.set_key_value("number", new ConfigOptionInt(7));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{percent = 25}{percent}") == "25");
+    CHECK_THROWS_WITH(run("{flag = 1}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK_THROWS_WITH(run("{number = (1,2)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK_THROWS_WITH(run("{number = repeat(2,1)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK_THROWS_WITH(parser.process("{local scalar = 1}{local vector = (1,2)}{local vector = scalar}"),
+                      Catch::Matchers::ContainsSubstring("scalar value to a vector variable"));
+    CHECK(outputs.option<ConfigOptionBool>("flag")->value == false);
+    CHECK(outputs.option<ConfigOptionInt>("number")->value == 7);
+}
+
+TEST_CASE("Placeholder parser converts vector elements and preserves unsupported output vectors",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("floats", new ConfigOptionFloats({ 1., 2. }));
+    outputs.set_key_value("strings", new ConfigOptionStrings({ "old" }));
+    outputs.set_key_value("flags", new ConfigOptionBools({ false, true }));
+    outputs.set_key_value("points", new ConfigOptionPoints({ Vec2d(1., 2.) }));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{floats[1] = 3}{strings[0] = 9}").empty());
+    CHECK_THAT(outputs.option<ConfigOptionFloats>("floats")->values[1], Catch::Matchers::WithinAbs(3., 1e-12));
+    CHECK(outputs.option<ConfigOptionStrings>("strings")->values[0] == "9");
+    CHECK_THROWS_WITH(run("{flags[1] = 1}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK_THROWS_WITH(run("{points[0] = 1}"),
+                      Catch::Matchers::ContainsSubstring("Unsupported output vector variable type"));
+    CHECK_THAT(outputs.option<ConfigOptionPoints>("points")->values[0].x(),
+               Catch::Matchers::WithinAbs(1., 1e-12));
+    CHECK_THAT(outputs.option<ConfigOptionPoints>("points")->values[0].y(),
+               Catch::Matchers::WithinAbs(2., 1e-12));
+    CHECK(outputs.option<ConfigOptionBools>("flags")->values[1]);
+}
+
+TEST_CASE("Placeholder parser validates repeat counts and preserves vector values on errors",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("numbers", new ConfigOptionInts({ 1, 2 }));
+    outputs.set_key_value("flags", new ConfigOptionBools({ false }));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK_THROWS_WITH(run("{numbers = repeat(1.5, 9)}"),
+                      Catch::Matchers::ContainsSubstring("Expected number of elements"));
+    CHECK_THROWS_WITH(run("{numbers = repeat(-1, 9)}"),
+                      Catch::Matchers::ContainsSubstring("Negative number of elements"));
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 1, 2 });
+    CHECK(run("{numbers = repeat(0, 4)}").empty());
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values.empty());
+    CHECK_THROWS_WITH(run("{flags = repeat(2, 1)}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK(run("{flags = repeat(2, true)}").empty());
+    CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 1, 1 });
+    CHECK(run("{numbers = repeat(3, 4)}").empty());
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 4, 4, 4 });
+}
+
+TEST_CASE("Placeholder parser converts initializer lists and rejects incompatible booleans",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("numbers", new ConfigOptionInts({ 1 }));
+    outputs.set_key_value("strings", new ConfigOptionStrings({ "old" }));
+    outputs.set_key_value("flags", new ConfigOptionBools({ false, false }));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{numbers = (4,5)}{strings = (\"new\", 6)}").empty());
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 4, 5 });
+    CHECK(outputs.option<ConfigOptionStrings>("strings")->values == std::vector<std::string>{ "new", "6" });
+    CHECK_THROWS_WITH(run("{flags = (true, 1)}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 0, 0 });
+}
+
+TEST_CASE("Placeholder parser rejects incompatible vector copies with preserved targets",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    CHECK(PlaceholderParser{}.process("{local ints = (1,2)}{local copy = ints}{copy[0]},{copy[1]}") == "1,2");
+
+    DynamicConfig outputs;
+    outputs.set_key_value("floats", new ConfigOptionFloats({ 9., 8. }));
+    outputs.set_key_value("ints", new ConfigOptionInts({ 7, 6 }));
+    outputs.set_key_value("strings", new ConfigOptionStrings({ "old", "keep" }));
+    DynamicConfig inputs;
+    inputs.set_key_value("source_ints", new ConfigOptionInts({ 1, 2 }));
+    inputs.set_key_value("source_strings", new ConfigOptionStrings({ "x", "y" }));
+    PlaceholderParser parser;
+    auto run = [&parser, &inputs, &outputs](const std::string &script) {
+        return parser.process(script, 0, &inputs, &outputs, nullptr);
+    };
+
+    CHECK_THROWS_WITH(run("{floats = source_ints}"),
+                      Catch::Matchers::ContainsSubstring("Left hand side is a float vector"));
+    const auto &floats = outputs.option<ConfigOptionFloats>("floats")->values;
+    REQUIRE(floats.size() == 2);
+    CHECK_THAT(floats[0], Catch::Matchers::WithinAbs(9., 1e-12));
+    CHECK_THAT(floats[1], Catch::Matchers::WithinAbs(8., 1e-12));
+    CHECK_THROWS_WITH(run("{ints = source_strings}"),
+                      Catch::Matchers::ContainsSubstring("Left hand side is an int vector"));
+    CHECK(outputs.option<ConfigOptionInts>("ints")->values == std::vector<int>{ 7, 6 });
+    CHECK_THROWS_WITH(run("{strings = source_ints}"),
+                      Catch::Matchers::ContainsSubstring("Left hand side is a string vector"));
+    CHECK(outputs.option<ConfigOptionStrings>("strings")->values == std::vector<std::string>{ "old", "keep" });
+}
+
+TEST_CASE("Placeholder parser rejects nil and unsupported vector copies",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    auto *speed = config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(speed != nullptr);
+    speed->values = { 60., 70. };
+    speed->set_at_to_nil(1);
+    PlaceholderParser nil_parser;
+    REQUIRE(nil_parser.apply_config(config));
+    CHECK_THROWS_WITH(nil_parser.process("{local copied = outer_wall_speed}"),
+                      Catch::Matchers::ContainsSubstring("undefined (nil)"));
+
+    auto points_config = DynamicPrintConfig::full_print_config();
+    auto *area = points_config.option<ConfigOptionPoints>("printable_area");
+    REQUIRE(area != nullptr);
+    area->values = { Vec2d(1., 2.) };
+    PlaceholderParser points_parser;
+    REQUIRE(points_parser.apply_config(points_config));
+    CHECK_THROWS_WITH(points_parser.process("{local copied = printable_area}"),
+                      Catch::Matchers::ContainsSubstring("Duplicating this type of vector variable"));
+}
+
+TEST_CASE("Placeholder parser reports empty and size misuse without changing outputs",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("scalar", new ConfigOptionInt(4));
+    outputs.set_key_value("empty_values", new ConfigOptionInts({}));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK_THROWS_WITH(run("{empty(scalar)}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{size(scalar)}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{empty(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{size(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{is_nil(empty_values[0])}"), Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
+    CHECK(outputs.option<ConfigOptionInt>("scalar")->value == 4);
+}
+
+TEST_CASE("Placeholder parser rejects local names that shadow system and output symbols",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    CHECK_THROWS_WITH(parser.process("{local layer_height = 2}"),
+                      Catch::Matchers::ContainsSubstring("read-only system dictionary"));
+
+    DynamicConfig outputs;
+    outputs.set_key_value("output_value", new ConfigOptionInt(1));
+    CHECK_THROWS_WITH(parser.process("{local output_value = 2}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("system output variable"));
 }
