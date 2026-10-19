@@ -38,6 +38,9 @@ DynamicPrintConfig picker_config(double clearance_radius, double rod_height,
         {"skirt_loops", 0},
         {"raft_layers", 0},
         {"brim_type", "no_brim"},
+        {"use_relative_e_distances", true},
+        {"before_layer_change_gcode", ""},
+        {"layer_change_gcode", "G92 E0\n"},
     });
     if (two_nozzles) {
         config.set_num_extruders(2);
@@ -92,7 +95,7 @@ bool outside_xy_box(const Point &point, double min_x, double min_y,
 
 bool is_x0_clear(double clearance_radius, double current_y)
 {
-    DynamicPrintConfig config = picker_config(clearance_radius, 2.);
+    DynamicPrintConfig config = picker_config(clearance_radius, 20.);
     Print print;
     Model model;
     init_picker_print(print, model,
@@ -117,13 +120,15 @@ Point pick_by_object_at_rod_height(double rod_height)
     Print print;
     Model model;
     init_picker_print(print, model,
-                      {placed_cube(20., 20., 2.), placed_cube(100., 20., 1.)}, config);
+                      {placed_cube(20., 20., 2.), placed_cube(100., 100., 1.)}, config);
     const auto &objects = print.objects();
     REQUIRE(objects.size() == 2);
 
     TimelapsePosPicker picker;
     picker.init(&print, Point(0, 0));
     PosPickCtx ctx;
+    // The print objects have disjoint Y bands; this travel position tests
+    // the corridor through the previously printed object's band.
     ctx.curr_pos = Point(scale_(105.), scale_(25.));
     ctx.curr_layer = context_layer(print.get_object(1), 1.0);
     ctx.picture_extruder_id = 0;
@@ -179,7 +184,7 @@ TEST_CASE("By-object timelapse parks only when a rod-height corridor exists",
     CHECK(clear.y() >= 0);
     CHECK(clear.y() <= 220);
     CHECK(outside_xy_box(clear, 20., 20., 30., 30., 1.));
-    CHECK(outside_xy_box(clear, 100., 20., 110., 30., 1.));
+    CHECK(outside_xy_box(clear, 100., 100., 110., 110., 1.));
 }
 
 TEST_CASE("Timelapse parking honors the selected extruder printable region",
