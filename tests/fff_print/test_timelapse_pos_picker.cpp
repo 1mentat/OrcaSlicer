@@ -104,7 +104,7 @@ bool is_x0_clear(double clearance_radius, double current_y)
     picker.init(&print, Point(0, 0));
     PosPickCtx ctx;
     ctx.curr_pos = Point(scale_(100.), scale_(current_y));
-    ctx.curr_layer = context_layer(objects.back());
+    ctx.curr_layer = context_layer(print.get_object(1));
     ctx.picture_extruder_id = 0;
     ctx.curr_extruder_id = 0;
     ctx.printed_objects = std::vector<const PrintObject *>{objects[0], objects[1]};
@@ -125,7 +125,7 @@ Point pick_by_object_at_rod_height(double rod_height)
     picker.init(&print, Point(0, 0));
     PosPickCtx ctx;
     ctx.curr_pos = Point(scale_(105.), scale_(25.));
-    ctx.curr_layer = context_layer(objects.back(), 1.0);
+    ctx.curr_layer = context_layer(print.get_object(1), 1.0);
     ctx.picture_extruder_id = 0;
     ctx.curr_extruder_id = 0;
     ctx.printed_objects = std::vector<const PrintObject *>{objects[0], objects[1]};
@@ -155,7 +155,7 @@ TEST_CASE("Timelapse X0 clearance ignores the object currently being printed",
     picker.init(&print, Point(0, 0));
     PosPickCtx ctx;
     ctx.curr_pos = Point(scale_(25.), scale_(25.));
-    ctx.curr_layer = context_layer(objects.front());
+    ctx.curr_layer = context_layer(print.get_object(0));
     ctx.picture_extruder_id = 0;
     ctx.curr_extruder_id = 0;
     ctx.printed_objects = std::vector<const PrintObject *>{objects.front()};
@@ -203,7 +203,7 @@ TEST_CASE("Timelapse parking honors the selected extruder printable region",
     picker.init(&print, Point(0, 0));
     PosPickCtx ctx;
     ctx.curr_pos = Point(scale_(105.), scale_(105.));
-    ctx.curr_layer = context_layer(objects.front());
+    ctx.curr_layer = context_layer(print.get_object(0));
     ctx.picture_extruder_id = 1;
     ctx.curr_extruder_id = 0;
     const Point restricted_area = picker.pick_pos(ctx);
