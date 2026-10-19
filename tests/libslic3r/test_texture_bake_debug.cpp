@@ -156,22 +156,26 @@ TEST_CASE("Bake topology counts closed, open, non-manifold, and degenerate faces
 
     BakeStageMesh collapsed;
     collapsed.vertices = { Vec3f(0.f, 0.f, 0.f), Vec3f(1.f, 0.f, 0.f) };
-    collapsed.indices = { Vec3i32(0, 1, 1) };
+    collapsed.indices = { Vec3i32(0, 0, 1), Vec3i32(0, 1, 1), Vec3i32(0, 1, 0) };
     bake_stage_topology(collapsed, open, non_manifold, degenerate);
     CHECK(open == 0);
     CHECK(non_manifold == 0);
-    CHECK(degenerate == 1);
+    CHECK(degenerate == 3);
 }
 
 TEST_CASE("TriSoup stage capture welds repeated corners and drops collapsed faces", "[TextureBakeDebug]")
 {
     TriSoup soup;
     soup.pos = { Vec3f(0.f, 0.f, 0.f), Vec3f(1.f, 0.f, 0.f), Vec3f(0.f, 1.f, 0.f),
-                 Vec3f(0.000002f, 0.f, 0.f), Vec3f(1.f, 0.f, 0.f), Vec3f(0.f, 0.000002f, 0.f) };
+                 // Each pair of corners can collapse after welding, independently
+                 // of which corner starts the triangle.
+                 Vec3f(0.000002f, 0.f, 0.f), Vec3f(1.f, 0.f, 0.f), Vec3f(0.f, 0.000002f, 0.f),
+                 Vec3f(0.f, 0.f, 0.f), Vec3f(0.000002f, 0.f, 0.f), Vec3f(1.f, 0.f, 0.f),
+                 Vec3f(0.f, 0.f, 0.f), Vec3f(1.f, 0.f, 0.f), Vec3f(1.f, 0.000002f, 0.f) };
 
     BakeStageRecorder recorder;
     recorder.enable(true);
-    recorder.capture("weld", soup, 3.5, "two soup faces");
+    recorder.capture("weld", soup, 3.5, "one valid face and three collapsed faces");
     REQUIRE(recorder.stages().size() == 1);
     const BakeStageSnapshot &stage = recorder.stages().front();
     CHECK(stage.triangles == 1);

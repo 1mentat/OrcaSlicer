@@ -120,12 +120,21 @@ set_property(SOURCE test_color_utils_contracts.cpp test_texture_to_color_contrac
 if (SLIC3R_CAD)
     target_sources(${_TEST_NAME}_tests PRIVATE
         test_caddocument.cpp
+        test_sketchengine.cpp
         test_sketchconstraints.cpp
         test_sketchedit.cpp
         test_sketchprofile.cpp
         test_sketchimport.cpp
         test_sketchinference.cpp
         test_slvs_constraints.cpp)
+
+    # Explicitly built sketch-engine contracts, without duplicate CTest registration.
+    add_executable(libslic3r_sketch_engine_tests EXCLUDE_FROM_ALL test_sketchengine.cpp)
+    target_link_libraries(libslic3r_sketch_engine_tests test_common libslic3r Catch2::Catch2WithMain)
+    target_include_directories(libslic3r_sketch_engine_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    set_property(TARGET libslic3r_sketch_engine_tests PROPERTY FOLDER "tests")
+    orcaslicer_copy_test_dlls(libslic3r_sketch_engine_tests)
+    slicer_enable_llvm_source_coverage(libslic3r_sketch_engine_tests)
 endif ()
 
 if (TARGET OpenVDB::openvdb)
