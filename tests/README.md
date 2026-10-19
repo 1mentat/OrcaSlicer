@@ -781,6 +781,11 @@ through the encoded-image route used by model importers.
 face orderings, preserves oriented area, and verifies the adaptive palette limit
 on a closed mesh. Its mutations are in `texture_to_color_extended.json`.
 
+`[TextureToColorOptions]` checks repair decisions, declined repair callbacks,
+automatic subdivision thresholds, and adaptive vertex-color palette limits.
+Geometry oracles preserve volume, outward orientation, and signed area. Its
+mutations are in `texture_to_color_options.json`.
+
 `[TextureToColorPublic]` checks textured tetrahedron conversion and cancellation
 output clearing. `[TextureToColorRepair]` checks independent boundary limits,
 face orientation, degenerate-face removal, topology, volume, and cancellation

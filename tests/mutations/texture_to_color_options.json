@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "texture-to-color-auto-oversampling-boundary",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "while (color_mesh.facets_count() < settings.oversampling_min_face_count) {",
+      "new": "while (color_mesh.facets_count() <= settings.oversampling_min_face_count) {",
+      "expected_matches": 1,
+      "description": "The automatic oversampling threshold is already satisfied when the input face count equals the configured minimum.",
+      "test_filter": "^TextureToColorOptions$"
+    },
+    {
+      "id": "texture-to-color-ask-reports-required-decision",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "*settings.mesh_repair_decision_required = true;",
+      "new": "*settings.mesh_repair_decision_required = false;",
+      "expected_matches": 1,
+      "description": "An open mesh with Ask selected sets the public decision-required output before returning without colors.",
+      "test_filter": "^TextureToColorOptions$"
+    },
+    {
+      "id": "texture-to-color-incompatible-winding-is-repaired",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "if (!cgalutils::is_mesh_halfedge_compatible(mesh)) {",
+      "new": "if (cgalutils::is_mesh_halfedge_compatible(mesh)) {",
+      "expected_matches": 1,
+      "description": "A closed tetrahedron with one reversed face must pass through repair so the returned face normals point outward consistently.",
+      "test_filter": "^TextureToColorOptions$"
+    },
+    {
+      "id": "texture-to-color-declined-repair-falls-back-to-import",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "                } else {\n                    BOOST_LOG_TRIVIAL(warning) << log_prefix << \": Windows 3D mesh repair failed: \" << repair_error;\n                }",
+      "new": "                } else {\n                    BOOST_LOG_TRIVIAL(warning) << log_prefix << \": Windows 3D mesh repair failed: \" << repair_error;\n                    return false;\n                }",
+      "expected_matches": 1,
+      "description": "When the public repair callback declines an open mesh, the existing pipeline keeps the original open mesh and continues importing it.",
+      "test_filter": "^TextureToColorOptions$"
+    },
+    {
+      "id": "texture-to-color-adaptive-vertex-cluster-budget",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "        para.max_cluster_k      = settings.max_cluster_k;\n        out_centers = cluster_adaptive(vertex_rgb, para);",
+      "new": "        para.max_cluster_k      = 1;\n        out_centers = cluster_adaptive(vertex_rgb, para);",
+      "expected_matches": 1,
+      "description": "The low-poly adaptive vertex-color route respects max_cluster_k: one cluster keeps the triangle intact, while two separate colors split it into three faces.",
+      "test_filter": "^TextureToColorOptions$"
+    }
+  ]
+}
