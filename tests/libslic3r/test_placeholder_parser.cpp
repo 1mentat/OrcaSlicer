@@ -1352,3 +1352,30 @@ TEST_CASE("Placeholder parser rejects local names that shadow system and output 
     CHECK_THROWS_WITH(parser.process("{local output_value = 2}", 0, nullptr, &outputs, nullptr),
                       Catch::Matchers::ContainsSubstring("system output variable"));
 }
+
+TEST_CASE("Placeholder parser resolves vector percentages against the selected parent element",
+          "[PlaceholderParser][PlaceholderParserPercentParents]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("bridge_speed", new ConfigOptionFloats({ 20., 40. }));
+    config.set_key_value("internal_bridge_speed", new ConfigOptionFloatsOrPercents({
+        FloatOrPercent{ 150., true }, FloatOrPercent{ 50., true }
+    }));
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(30., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 1)), Catch::Matchers::WithinAbs(20., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[0]}")), Catch::Matchers::WithinAbs(30., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[1]}")), Catch::Matchers::WithinAbs(20., 1e-12));
+
+    // Single-element child and parent vectors use element zero for any extruder.
+    auto single_config = DynamicPrintConfig::full_print_config();
+    single_config.set_key_value("bridge_speed", new ConfigOptionFloats({ 25. }));
+    single_config.set_key_value("internal_bridge_speed",
+                                new ConfigOptionFloatsOrPercents({ FloatOrPercent{ 120., true } }));
+    PlaceholderParser single_parser;
+    REQUIRE(single_parser.apply_config(single_config));
+    CHECK_THAT(std::stod(single_parser.process("{bridge_speed}", 7)), Catch::Matchers::WithinAbs(25., 1e-12));
+    CHECK_THAT(std::stod(single_parser.process("{internal_bridge_speed}", 7)), Catch::Matchers::WithinAbs(30., 1e-12));
+}

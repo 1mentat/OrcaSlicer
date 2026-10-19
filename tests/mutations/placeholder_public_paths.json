@@ -55,6 +55,15 @@
       "expected_matches": 1,
       "test_filter": "^PlaceholderParserInterpolation$",
       "description": "Use linear interpolation for nearly coincident coordinates; the off-midpoint probe distinguishes the required average of 20 from a linear result of 15."
+    },
+    {
+      "id": "placeholder-percent-vector-parent-index-ignored",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "v *= (parent_vec->size() == 1) ? parent_vec->get_at(0) : parent_vec->get_at(elem_index);",
+      "new": "v *= parent_vec->get_at(0);",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserPercentParents$",
+      "description": "Resolve every non-nullable float-vector parent from element zero; the two-extruder and explicit-index percentage checks must retain their different parent values."
     }
   ]
 }

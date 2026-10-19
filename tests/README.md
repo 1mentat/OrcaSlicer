@@ -134,7 +134,7 @@ For feedback on one subsystem in an existing coverage build, run:
 python3 scripts/slicer_module_feedback.py \
   --root "$PWD" --build build --target libslic3r_tests \
   --binary build/tests/libslic3r/libslic3r_tests \
-  --tag PlaceholderParser --expected-cases 49 \
+  --tag PlaceholderParser --expected-cases 50 \
   --test-source tests/libslic3r/test_placeholder_parser.cpp \
   --production-source src/libslic3r/PlaceholderParser.cpp \
   --cmake "$(command -v cmake)" \
@@ -219,6 +219,8 @@ assignment and scope conflicts, read-only values, legacy filament selection,
 escape decoding, and invalid UTF-8 through the public parser.
 `[PlaceholderParserAssignmentGaps]` checks assignment conversions, invalid counts,
 nullable and incompatible vector copies, and preservation after rejected writes.
+`[PlaceholderParserPercentParents]` checks percentage resolution against indexed
+parent values and single-element vector fallback.
 The expression cases check type errors and skipped evaluation; interpolation
 uses an off-midpoint input to distinguish averaging from a linear blend for
 nearly coincident coordinates. Their probes are in
