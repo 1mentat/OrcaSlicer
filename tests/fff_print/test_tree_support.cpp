@@ -1407,7 +1407,7 @@ static ProfileEvidence observe(double branch_diameter_mm, double tip_diameter_mm
     Print print;
     Model model;
     std::vector<TriangleMesh> meshes;
-    meshes.emplace_back(cap_overhang_fixture());
+    meshes.emplace_back(organic_tree_density_contracts::cap_overhang_fixture());
     init_print(std::move(meshes), print, model, config, nullptr, false);
     const StringObjectException validation = print.validate();
     INFO(validation.string);
