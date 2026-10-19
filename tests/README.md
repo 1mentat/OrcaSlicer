@@ -799,6 +799,18 @@ Repeat `--mutants` to combine subsystem manifests in one configured build;
 The manifest filters are CTest labels; a test name is not a label unless it
 has explicitly been registered as one.
 
+For a dedicated worker checkout with an existing build, add
+`--reuse-detached-checkout` to keep the same source and build paths. This mode
+requires a clean detached HEAD and takes an exclusive lock in that checkout's
+Git directory. It cannot be combined with `--persistent-worktree` or
+`--work-root`. An existing lock stops the run for inspection. The default
+continues to use a disposable worktree.
+
+Both `--persistent-worktree` and `--reuse-detached-checkout` restore source
+bytes while retaining build outputs, which may still contain the last mutant.
+Explicitly rebuild the baseline before using those outputs for other tests or
+coverage; tracked source cleanliness alone does not prove binary restoration.
+
 The settings inventory keeps schema accounting separate from source coverage.
 It derives the effective `PrintConfigDef` option set from
 `src/libslic3r/PrintConfig.cpp`, including literal generated overrides and

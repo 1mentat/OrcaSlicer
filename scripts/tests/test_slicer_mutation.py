@@ -77,6 +77,254 @@ class MutationSelectionTests(unittest.TestCase):
                              [("first", "First"), ("second", "Second")])
 
 
+class MutationReuseCheckoutTests(unittest.TestCase):
+    def make_detached_repo(self, parent):
+        repo = Path(parent) / "repo"
+        repo.mkdir()
+
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        git("config", "user.name", "Mutation Test")
+        git("config", "user.email", "mutation@example.invalid")
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (repo / "source.cpp").write_text("before\n", encoding="utf-8")
+        git("add", ".gitignore", "source.cpp")
+        git("commit", "-m", "fixture")
+        git("checkout", "--detach", "-q", "HEAD")
+        return repo, git("rev-parse", "HEAD")
+
+    def test_reuse_requires_git_root_detached_exact_head_and_clean_tracked_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, commit = self.make_detached_repo(temp)
+            slicer_mutation._verify_reuse_checkout(repo, commit)
+
+            subprocess.run(["git", "-C", str(repo), "switch", "-c", "feature"],
+                           check=True, capture_output=True)
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "detached"):
+                slicer_mutation._verify_reuse_checkout(repo, commit)
+            subprocess.run(["git", "-C", str(repo), "checkout", "--detach", commit],
+                           check=True, capture_output=True)
+
+            (repo / "source.cpp").write_text("dirty\n", encoding="utf-8")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "dirty tracked"):
+                slicer_mutation._verify_reuse_checkout(repo, commit)
+            (repo / "source.cpp").write_text("before\n", encoding="utf-8")
+            (repo / "unexpected.tmp").write_text("untracked\n", encoding="utf-8")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "not empty"):
+                slicer_mutation.validate_clean_repo(repo)
+            (repo / "unexpected.tmp").unlink()
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "HEAD changed"):
+                slicer_mutation._verify_reuse_checkout(repo, "0" * len(commit))
+
+    def test_reuse_rejects_missing_git_metadata_and_existing_stale_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            missing_git = Path(temp) / "not-a-repository"
+            missing_git.mkdir()
+            with self.assertRaises(slicer_mutation.MutationError):
+                slicer_mutation._acquire_reuse_checkout(missing_git, "a" * 40)
+
+            repo, commit = self.make_detached_repo(temp)
+            git_dir = Path(subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"],
+                check=True, capture_output=True, text=True).stdout.strip())
+            lock = git_dir / slicer_mutation._REUSE_CHECKOUT_LOCK
+            lock.write_text("stale lock; do not clear automatically\n", encoding="utf-8")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "active or stale"):
+                slicer_mutation._acquire_reuse_checkout(repo, commit)
+            self.assertEqual(lock.read_text(encoding="utf-8"),
+                             "stale lock; do not clear automatically\n")
+
+    def test_reuse_lock_uses_linked_checkouts_private_git_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, commit = self.make_detached_repo(temp)
+            linked = Path(temp) / "linked"
+            subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach",
+                            str(linked), commit], check=True, capture_output=True)
+            lease = slicer_mutation._acquire_reuse_checkout(linked, commit)
+            self.assertEqual(lease.git_dir, Path(subprocess.run(
+                ["git", "-C", str(linked), "rev-parse", "--absolute-git-dir"],
+                check=True, capture_output=True, text=True).stdout.strip()).resolve())
+            self.assertNotEqual(lease.git_dir, (repo / ".git").resolve())
+            self.assertTrue(lease.lock.exists())
+            lease.release()
+            self.assertFalse(lease.lock.exists())
+
+    def test_reuse_lock_release_preserves_an_atomically_replaced_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, commit = self.make_detached_repo(temp)
+            lease = slicer_mutation._acquire_reuse_checkout(repo, commit)
+            original_identity = lease.lock_identity
+            replacement = lease.git_dir / "replacement-lock"
+            replacement.write_text("replacement lock owner\n", encoding="utf-8")
+            replacement.replace(lease.lock)
+            current = lease.lock.lstat()
+            self.assertNotEqual((current.st_dev, current.st_ino), original_identity)
+
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "lock changed"):
+                lease.release()
+            self.assertEqual(lease.lock.read_text(encoding="utf-8"), "replacement lock owner\n")
+            lease.lock.unlink()
+
+    def test_moved_detached_head_fails_postflight_without_resetting_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, original_commit = self.make_detached_repo(temp)
+            report_path = Path(temp) / "evidence" / "report.json"
+            report = {"status": "in_progress"}
+            git_dir = Path(subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"],
+                check=True, capture_output=True, text=True).stdout.strip())
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "HEAD changed"):
+                with slicer_mutation._mutation_worktree(
+                        repo, original_commit, None, None, report_path, report, True):
+                    subprocess.run([
+                        "git", "-C", str(repo), "-c", "user.name=Mutation Test",
+                        "-c", "user.email=mutation@example.invalid", "commit",
+                        "--allow-empty", "-m", "move detached HEAD",
+                    ], check=True, capture_output=True)
+
+            moved_head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                        check=True, capture_output=True, text=True).stdout.strip()
+            self.assertNotEqual(moved_head, original_commit)
+            branch = subprocess.run(["git", "-C", str(repo), "symbolic-ref", "--quiet", "HEAD"],
+                                    capture_output=True, text=True)
+            self.assertEqual(branch.returncode, 1)
+            self.assertFalse((git_dir / slicer_mutation._REUSE_CHECKOUT_LOCK).exists())
+            self.assertTrue(report["worktree"]["lock_released"])
+            self.assertEqual(report["status"], "postflight_dirty")
+
+    def test_reuse_lease_releases_on_success_error_and_keyboard_interrupt(self):
+        for failure in (None, RuntimeError("failed body"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__ if failure else "success"), \
+                    tempfile.TemporaryDirectory() as temp:
+                repo, commit = self.make_detached_repo(temp)
+                git_dir = Path(subprocess.run(
+                    ["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"],
+                    check=True, capture_output=True, text=True).stdout.strip())
+                report_path = Path(temp) / "evidence" / "report.json"
+                report = {"status": "in_progress"}
+                if failure is None:
+                    with slicer_mutation._mutation_worktree(
+                            repo, commit, None, None, report_path, report, True) as path:
+                        self.assertEqual(path.resolve(), repo.resolve())
+                else:
+                    with self.assertRaises(type(failure)):
+                        with slicer_mutation._mutation_worktree(
+                                repo, commit, None, None, report_path, report, True):
+                            raise failure
+                self.assertFalse((git_dir / slicer_mutation._REUSE_CHECKOUT_LOCK).exists())
+                self.assertTrue(report["worktree"]["lock_released"])
+
+    def test_run_reuses_detached_checkout_and_restores_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, commit = self.make_detached_repo(temp)
+            build = repo / "build"
+            build.mkdir()
+            (build / "preserve.txt").write_text("warm build", encoding="utf-8")
+            out = Path(temp) / "evidence"
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--build-dir", "build", "--out", str(out),
+                "--build-command", "fake-build {build}", "--test-command", "fake-test",
+                "--reuse-detached-checkout", "--max-mutants", "1",
+            ])
+            mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "")
+            calls = []
+            git_calls = []
+            real_git = slicer_mutation._git
+            real_run_command = slicer_mutation.run_command
+
+            def command(argv, *, cwd, timeout, output_file=None):
+                if argv[0] == "git":
+                    return real_run_command(argv, cwd=cwd, timeout=timeout, output_file=output_file)
+                calls.append((list(argv), Path(cwd)))
+                if argv[0] == "fake-test" and sum(call[0][0] == "fake-test" for call in calls) == 2:
+                    return slicer_mutation.CommandResult(list(argv), 1, .01,
+                        "test cases: 1 | 1 failed\nassertions: 1 | 1 failed\n", "")
+                output = "test cases: 1 | 1 passed\n" if argv[0] == "fake-test" else ""
+                return slicer_mutation.CommandResult(list(argv), 0, .01, output, "")
+
+            def recording_git(path, *git_args):
+                git_calls.append(git_args)
+                return real_git(path, *git_args)
+
+            with mock.patch.object(slicer_mutation, "_load_mutants", return_value=[mutant]), \
+                    mock.patch.object(slicer_mutation, "_git", side_effect=recording_git), \
+                    mock.patch.object(slicer_mutation, "run_command", side_effect=command):
+                self.assertEqual(slicer_mutation.run_mutation(args), 0)
+
+            report = json.loads((out / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["git"]["commit"], commit)
+            self.assertTrue(report["worktree"]["reused_detached_checkout"])
+            self.assertIn("explicitly rebuild the baseline", report["worktree"]["binary_warning"])
+            self.assertEqual((repo / "source.cpp").read_text(encoding="utf-8"), "before\n")
+            self.assertEqual((build / "preserve.txt").read_text(encoding="utf-8"), "warm build")
+            self.assertTrue(all(cwd.resolve() == repo.resolve() for _, cwd in calls))
+            self.assertFalse(any(args[0] in {"checkout", "reset", "worktree"} for args in git_calls))
+            self.assertFalse((repo / ".git" / slicer_mutation._REUSE_CHECKOUT_LOCK).exists())
+            self.assertEqual(subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True).stdout.strip(), commit)
+
+    def test_keyboard_interrupt_restores_source_and_releases_reuse_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, commit = self.make_detached_repo(temp)
+            out = Path(temp) / "evidence"
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--out", str(out),
+                "--build-command", "fake-build", "--test-command", "fake-test",
+                "--reuse-detached-checkout", "--max-mutants", "1",
+            ])
+            mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "")
+            git_dir = Path(subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"],
+                check=True, capture_output=True, text=True).stdout.strip())
+            real_run_command = slicer_mutation.run_command
+            command_count = 0
+
+            def command(argv, *, cwd, timeout, output_file=None):
+                nonlocal command_count
+                if argv[0] == "git":
+                    return real_run_command(argv, cwd=cwd, timeout=timeout, output_file=output_file)
+                command_count += 1
+                if command_count == 4:
+                    raise KeyboardInterrupt
+                output = "test cases: 1 | 1 passed\n" if argv[0] == "fake-test" else ""
+                return slicer_mutation.CommandResult(list(argv), 0, .01, output, "")
+
+            with mock.patch.object(slicer_mutation, "_load_mutants", return_value=[mutant]), \
+                    mock.patch.object(slicer_mutation, "run_command", side_effect=command):
+                with self.assertRaises(KeyboardInterrupt):
+                    slicer_mutation.run_mutation(args)
+
+            self.assertEqual((repo / "source.cpp").read_text(encoding="utf-8"), "before\n")
+            self.assertEqual(subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True).stdout.strip(), commit)
+            self.assertFalse((git_dir / slicer_mutation._REUSE_CHECKOUT_LOCK).exists())
+            checkpoint = json.loads((out / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(checkpoint["checkpoint"]["state"], "in_progress")
+
+    def test_reuse_options_cannot_mix_with_worktree_modes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            for extra, message in ((["--persistent-worktree", str(Path(temp) / "wt")],
+                                    "cannot be combined with --persistent-worktree"),
+                                   (["--work-root", str(Path(temp) / "work")],
+                                    "cannot be combined with --work-root")):
+                args = slicer_mutation._parser().parse_args([
+                    "run", "--root", temp, "--out", str(Path(temp) / "out"),
+                    "--build-command", "build", "--test-command", "test",
+                    "--reuse-detached-checkout", *extra,
+                ])
+                with self.assertRaisesRegex(slicer_mutation.MutationError, message):
+                    slicer_mutation.run_mutation(args)
+
+    def test_reuse_mode_is_opt_in(self):
+        args = slicer_mutation._parser().parse_args([
+            "run", "--build-command", "build", "--test-command", "test",
+        ])
+        self.assertFalse(args.reuse_detached_checkout)
+
+
 class MutationResultTests(unittest.TestCase):
     def result(self, returncode, *, output="1 tests passed", timed_out=False):
         return slicer_mutation.CommandResult(["runner"], returncode, 0.01, output, "", timed_out)

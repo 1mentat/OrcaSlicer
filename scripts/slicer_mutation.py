@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Run a small, reproducible mutation gate against production libslic3r tests.
 
-The harness validates a clean repository and a passing baseline, then uses an
-opt-in persistent detached worktree or a disposable one. It applies one exact byte
-replacement at a time, rebuilds and runs the selected tests, records the result,
-restores the source bytes, and verifies tracked cleanliness. No mutation is ever
-applied to the caller's checkout.
+The harness validates a clean repository and a passing baseline, then uses a
+disposable worktree by default or an opt-in retained worktree. The explicit
+--reuse-detached-checkout mode instead mutates one clean detached checkout in
+place, restores source bytes, and verifies HEAD and tracked cleanliness. Retained
+worktree and reuse modes may leave the last mutant in build artifacts; explicitly
+rebuild the baseline before using those artifacts.
 
 Commands are split with ``shlex`` and executed with ``shell=False``.  Use
 ``{root}``, ``{build}``, and ``{filter}`` placeholders in command strings.  A
@@ -562,6 +563,7 @@ _PERSISTENT_WORKTREE_SCHEMA = 1
 _PERSISTENT_HARNESS = "slicer_mutation"
 _PERSISTENT_MARKER = ".slicer-mutation-worktree.json"
 _PERSISTENT_LOCK_SUFFIX = ".slicer-mutation.lock"
+_REUSE_CHECKOUT_LOCK = ".slicer-mutation-reuse.lock"
 
 
 def _reject_symlink_components(path: Path, *, label: str) -> None:
@@ -677,6 +679,91 @@ def _write_exclusive_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 @dataclass
+class _ReuseCheckoutLease:
+    path: Path
+    git_dir: Path
+    lock: Path
+    commit: str
+    lock_identity: tuple[int, int]
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "persistent": False,
+            "reused_detached_checkout": True,
+            "path": str(self.path),
+            "git_dir": str(self.git_dir),
+            "lock": str(self.lock),
+            "commit": self.commit,
+            "binary_warning": "build artifacts may contain the last mutant; explicitly rebuild the baseline before use",
+        }
+
+    def release(self) -> None:
+        try:
+            stat = self.lock.lstat()
+            if (stat.st_dev, stat.st_ino) != self.lock_identity:
+                raise MutationError(f"reuse lock changed while held; refusing to remove: {self.lock}")
+            self.lock.unlink()
+        except OSError as exc:
+            raise MutationError(f"cannot release reused-checkout lock {self.lock}: {exc}") from exc
+
+
+def _verify_reuse_checkout(repo: Path, expected_head: str) -> None:
+    repo = _canonical_path(repo)
+    top = _git(repo, "rev-parse", "--show-toplevel")
+    if top.returncode != 0 or _canonical_git_path(repo, top.stdout) != repo:
+        raise MutationError("reuse path is not a git checkout root")
+    branch = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch.returncode == 0:
+        raise MutationError("reused checkout must be detached")
+    if branch.returncode != 1:
+        raise MutationError(f"cannot inspect reused checkout HEAD state: {_truncate(branch.stderr)}")
+    head = _git(repo, "rev-parse", "HEAD")
+    if head.returncode != 0 or head.stdout.strip() != expected_head:
+        raise MutationError("reused checkout HEAD changed")
+    status = _git(repo, "status", "--porcelain", "--untracked-files=no")
+    if status.returncode != 0:
+        raise MutationError(f"cannot inspect reused checkout: {_truncate(status.stderr)}")
+    if status.stdout.strip():
+        raise MutationError("reused checkout has dirty tracked files")
+
+
+def _acquire_reuse_checkout(repo: Path, commit: str) -> _ReuseCheckoutLease:
+    repo = _canonical_path(repo)
+    _verify_reuse_checkout(repo, commit)
+    result = _git(repo, "rev-parse", "--absolute-git-dir")
+    if result.returncode != 0:
+        raise MutationError(f"cannot resolve checkout git directory: {_truncate(result.stderr)}")
+    git_dir = Path(result.stdout.strip()).resolve(strict=True)
+    if not git_dir.is_dir():
+        raise MutationError(f"checkout git directory is not a directory: {git_dir}")
+    lock = git_dir / _REUSE_CHECKOUT_LOCK
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise MutationError(
+            f"reused-checkout lock exists (active or stale); inspect before removing: {lock}") from exc
+    stat = os.fstat(fd)
+    identity = (stat.st_dev, stat.st_ino)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"pid": os.getpid(), "path": str(repo), "commit": commit}, stream,
+                      sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        _verify_reuse_checkout(repo, commit)
+    except BaseException:
+        try:
+            current = lock.lstat()
+            if (current.st_dev, current.st_ino) == identity:
+                lock.unlink()
+        except OSError:
+            pass
+        raise
+    return _ReuseCheckoutLease(repo, git_dir, lock, commit, identity)
+
+
+@dataclass
 class _PersistentLease:
     repo: Path
     path: Path
@@ -696,6 +783,7 @@ class _PersistentLease:
             "previous_head": self.previous_head,
             "checkout": self.checkout,
             "retained_untracked_build_capability": "preserved by non-forcing detached checkout",
+            "binary_warning": "build artifacts may contain the last mutant; explicitly rebuild the baseline before use",
         }
 
     def release(self) -> None:
@@ -803,7 +891,40 @@ def _persistent_worktree(repo: Path, path: Path, commit: str) -> _PersistentLeas
 @contextmanager
 def _mutation_worktree(repo: Path, commit: str, work_parent: Path | None,
                        persistent_path: Path | None, report_path: Path,
-                       report: dict[str, Any]):
+                       report: dict[str, Any], reuse_detached_checkout: bool = False):
+    if reuse_detached_checkout:
+        lease = _acquire_reuse_checkout(repo, commit)
+        body_failed = False
+        try:
+            try:
+                report["worktree"] = lease.report()
+                _checkpoint(report_path, report, "reuse_detached_checkout_ready")
+                yield lease.path
+            except BaseException:
+                body_failed = True
+                raise
+        finally:
+            postflight_error: Exception | None = None
+            try:
+                _verify_reuse_checkout(repo, commit)
+                report["worktree"]["postflight_tracked_clean"] = True
+            except MutationError as exc:
+                postflight_error = exc
+                report.setdefault("worktree", {})["postflight_error"] = str(exc)
+                report["status"] = "postflight_dirty"
+            try:
+                lease.release()
+                report.setdefault("worktree", {})["lock_released"] = True
+                _checkpoint(report_path, report, "reuse_detached_checkout_released")
+            except Exception as exc:
+                report.setdefault("worktree", {})["release_error"] = str(exc)
+                report["cleanup_failed"] = True
+                report["status"] = "cleanup_failed"
+                if not body_failed and postflight_error is None:
+                    raise
+            if not body_failed and postflight_error is not None:
+                raise postflight_error
+        return
     if persistent_path is not None:
         lease = _persistent_worktree(repo, persistent_path, commit)
         body_failed = False
@@ -894,6 +1015,10 @@ def _command_log(log_root: Path, serial: int, phase: str, label: str = "") -> Pa
 
 
 def run_mutation(args: argparse.Namespace) -> int:
+    if args.reuse_detached_checkout and args.persistent_worktree is not None:
+        raise MutationError("--reuse-detached-checkout cannot be combined with --persistent-worktree")
+    if args.reuse_detached_checkout and args.work_root is not None:
+        raise MutationError("--reuse-detached-checkout cannot be combined with --work-root")
     repo = Path(args.root).resolve()
     if not repo.is_dir():
         raise MutationError(f"repository root does not exist: {repo}")
@@ -949,13 +1074,15 @@ def run_mutation(args: argparse.Namespace) -> int:
     persistent_path = (_persistent_worktree_path(repo, args.persistent_worktree)
                        if args.persistent_worktree else None)
     with _mutation_worktree(repo, commit, work_parent, persistent_path,
-                        report_path, report) as worktree:
+                        report_path, report, args.reuse_detached_checkout) as worktree:
         build_dir = (worktree / args.build_dir).resolve()
         if configure_argv:
             configure = run_command(_expand(configure_argv, root=worktree, build=build_dir),
                                     cwd=worktree, timeout=args.timeout,
                                     output_file=next_log("configure"))
             report["configure"] = configure.json()
+            if args.reuse_detached_checkout:
+                _verify_reuse_checkout(repo, commit)
             _checkpoint(report_path, report, "configure")
             if configure.timed_out or configure.returncode != 0:
                 report["status"] = "configure_timeout" if configure.timed_out else "configure_error"
@@ -965,6 +1092,8 @@ def run_mutation(args: argparse.Namespace) -> int:
         baseline_build = run_command(build, cwd=worktree, timeout=args.timeout,
                                      output_file=next_log("baseline-build"))
         report["baseline_build"] = baseline_build.json()
+        if args.reuse_detached_checkout:
+            _verify_reuse_checkout(repo, commit)
         _checkpoint(report_path, report, "baseline_build")
         if baseline_build.timed_out or baseline_build.returncode != 0:
             report["status"] = _classify_build(baseline_build)
@@ -983,6 +1112,8 @@ def run_mutation(args: argparse.Namespace) -> int:
                                                  build=(worktree / args.build_dir).resolve()),
                                         cwd=worktree, timeout=args.timeout,
                                         output_file=next_log("baseline-test", test_filter))
+            if args.reuse_detached_checkout:
+                _verify_reuse_checkout(repo, commit)
             log_evidence = _result_log_evidence(baseline_test)
             evidence = (log_evidence.test_count if log_evidence is not None
                         else test_evidence(baseline_test.stdout + baseline_test.stderr))
@@ -1062,9 +1193,12 @@ def run_mutation(args: argparse.Namespace) -> int:
                                             "sha256": hashlib.sha256(original).hexdigest()}
                     if not restored:
                         raise MutationError(f"failed to restore mutant source: {path}")
-                if persistent_path is not None or (worktree / ".git").exists():
+                if args.reuse_detached_checkout or persistent_path is not None or (worktree / ".git").exists():
                     try:
-                        _verify_persistent_worktree(repo, worktree, commit)
+                        if args.reuse_detached_checkout:
+                            _verify_reuse_checkout(repo, commit)
+                        else:
+                            _verify_persistent_worktree(repo, worktree, commit)
                         entry["postflight_tracked_clean"] = True
                     except MutationError as exc:
                         entry["postflight_tracked_clean"] = False
@@ -1099,7 +1233,7 @@ def _parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="validate baseline and run bounded mutants")
     run.add_argument("--root", default=".")
     run.add_argument("--build-dir", default="build")
-    run.add_argument("--configure-command", help="optional CMake configure argv for the fresh worktree")
+    run.add_argument("--configure-command", help="optional CMake configure argv before the baseline build")
     run.add_argument("--build-command", required=True)
     run.add_argument("--test-command", required=True)
     run.add_argument("--mutants", action="append",
@@ -1107,7 +1241,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-mutants", type=int, default=DEFAULT_MAX_MUTANTS)
     run.add_argument("--out", default="build/slicer-mutation")
     run.add_argument("--work-root", help="parent directory for disposable worktree")
-    run.add_argument("--persistent-worktree", help="opt-in harness-owned detached worktree retained between runs")
+    run.add_argument("--persistent-worktree",
+                     help="opt-in harness-owned detached worktree retained between runs; build may be mutant")
+    run.add_argument("--reuse-detached-checkout", action="store_true",
+                     help="reuse this clean detached checkout in place; build outputs may remain mutant")
     run.add_argument("--timeout", type=float, default=1800.0)
     return parser
 
