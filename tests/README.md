@@ -164,7 +164,11 @@ python3 scripts/slicer_module_feedback.py \
   --out build/evidence/parser-feedback
 ```
 
-Create `build/evidence` first and choose a fresh output path for each run.
+Choose a fresh output path inside the build tree for each run. Missing evidence
+parent directories are created after preflight; existing run directories are
+never reused. If a commit changes CMake inputs, regenerate the existing CMake
+configuration before this command: the runner requires the compile database to
+remain unchanged throughout its measured cycle.
 The command builds the Release target with four jobs, verifies Catch's test
 identities and source file, runs the selected tag in random order with seed
 21907, and reports coverage for the specified production file. `run.json`
@@ -185,6 +189,12 @@ For Model iteration, use `libslic3r_model_tests` and
 `build/tests/libslic3r/libslic3r_model_tests` with `--tag Model` and
 `--production-source src/libslic3r/Model.cpp`. This opt-in target compiles
 `test_model.cpp` and also stays outside default builds and CTest discovery.
+
+For texture-bake stage diagnostics, use `libslic3r_texture_bake_debug_tests` and
+`build/tests/libslic3r/libslic3r_texture_bake_debug_tests` with `--tag TextureBakeDebug`,
+`--test-source tests/libslic3r/test_texture_bake_debug.cpp`, and
+`--production-source src/libslic3r/TextureBake/TextureBakeDebug.cpp`.
+This target also stays outside default builds and CTest discovery.
 
 Coverage builds include Orca's source headers as ordinary project headers.
 Clang suppresses system-header mappings even when it emits profile counters;

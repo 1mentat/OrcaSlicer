@@ -158,8 +158,14 @@ def run(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve(strict=True)
     build_arg = Path(args.build)
     build = build_arg.resolve(strict=True)  # resolves the canonical build symlink
-    if not out.parent.is_dir() or not under(out.parent, build):
-        raise WorkflowError("output parent must already exist inside the resolved build tree")
+    try:
+        # Resolve existing symlinks before making any missing evidence parents.
+        out = out.resolve(strict=False)
+        out.parent.relative_to(build)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise WorkflowError("output must resolve inside the build tree") from exc
+    if out.exists() or out.is_symlink():
+        raise WorkflowError(f"output path must be new: {out}")
     binary_arg = Path(os.path.abspath(args.binary))
     binary_existed_before_build = os.path.lexists(binary_arg)
     try:
@@ -202,6 +208,9 @@ def run(args: argparse.Namespace) -> int:
     if binary_existed_before_build:
         files["elf_before_build"] = binary
     hashes_before = file_snapshot(files)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not under(out.parent, build):
+        raise WorkflowError("output parent no longer resolves inside the build tree")
     out.mkdir()
     profiles = out / "module-profiles"
     profiles.mkdir()

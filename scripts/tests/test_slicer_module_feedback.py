@@ -156,6 +156,47 @@ class ModuleFeedbackTests(unittest.TestCase):
         self.assertEqual([stage["name"] for stage in receipt["stages"]],
                          ["build", "inventory", "test", "profile_merge", "coverage_report", "coverage_lines"])
 
+    def test_nested_evidence_parents_are_created_for_a_fresh_run(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        nested = out.parent / "new family" / "new cycle" / "run"
+        args[args.index("--out") + 1] = str(nested)
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((nested / "run.json").read_text())["status"], "passed")
+        self.assertFalse(out.exists())
+
+    def test_missing_output_parents_cannot_escape_through_traversal_or_symlink(self):
+        for escape in ("traversal", "symlink"):
+            with self.subTest(escape=escape):
+                tmp, env, args, out, _ = self.fixture()
+                self.addCleanup(tmp.cleanup)
+                outside = out.parent.parent.parent / "outside"
+                if escape == "traversal":
+                    candidate = out.parent / ".." / ".." / "outside" / "new parent" / "run"
+                else:
+                    link = out.parent / "escape"
+                    link.symlink_to(outside, target_is_directory=True)
+                    candidate = link / "new parent" / "run"
+                args[args.index("--out") + 1] = str(candidate)
+                result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("inside the build tree", result.stderr)
+                self.assertFalse(outside.exists())
+                self.assertFalse(out.exists())
+
+    def test_existing_output_is_never_reused(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        out.mkdir()
+        sentinel = out / "retained.txt"
+        sentinel.write_text("prior evidence")
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("output path must be new", result.stderr)
+        self.assertEqual(list(out.iterdir()), [sentinel])
+        self.assertEqual(sentinel.read_text(), "prior evidence")
+
     def test_successful_build_without_binary_fails_before_inventory(self):
         tmp, result, out, _ = self.invoke(mode="missing-built-binary")
         self.addCleanup(tmp.cleanup)
