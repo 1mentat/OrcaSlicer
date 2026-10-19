@@ -64,6 +64,11 @@ leave enough room for the expected artifacts and check free storage before a
 run. Disable core dumps so an assertion failure cannot fill the worker's disk.
 Keep build trees, temporary files, profiles, and compiler caches on disk-backed
 storage; tmpfs retains these artifacts in RAM even after their processes exit.
+Use persistent paths outside `/dev/shm` for source checkouts and build trees.
+On Linux, `systemd-logind` can remove a user's shared-memory files after the
+last session closes; a disk-backed bind mount below `/dev/shm` does not protect
+its contents from this cleanup. Check free space on both the build volume and
+the root filesystem, which may still hold Git metadata and service logs.
 Verify parent-death, memory-limit, and timeout cleanup with small synthetic
 processes when adopting a new worker. Preserve failed logs and binaries before
 rebuilding; an interrupted run is incomplete evidence.
