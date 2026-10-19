@@ -8,6 +8,7 @@
 #include "test_helpers.hpp"
 
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Config.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Layer.hpp"
