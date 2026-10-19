@@ -1,0 +1,33 @@
+{
+  "description": "Three ordinary behavioral probes for TextureBake debug-stage diagnostics; production source is unchanged. Mutation anchors were checked against the current source bytes.",
+  "mutants": [
+    {
+      "id": "texture-bake-topology-misclassifies-two-face-edges",
+      "path": "src/libslic3r/TextureBake/TextureBakeDebug.cpp",
+      "old": "        else if (incident > 2)",
+      "new": "        else if (incident == 2)",
+      "expected_matches": 1,
+      "test_filter": "^TextureBakeDebug$",
+      "description": "Classify two-face manifold edges as non-manifold. The closed tetrahedron and three-face shared-edge fixtures distinguish the edge incidence counts with ordinary assertions."
+    },
+    {
+      "id": "texture-bake-cap-drops-at-equality",
+      "path": "src/libslic3r/TextureBake/TextureBakeDebug.cpp",
+      "old": "    if (s.triangles > m_mesh_cap) {",
+      "new": "    if (s.triangles >= m_mesh_cap) {",
+      "expected_matches": 1,
+      "test_filter": "^TextureBakeDebug$",
+      "description": "Drop geometry at the configured cap rather than only above it. The exact-cap one-triangle control must remain retained while the zero-cap capture drops geometry but keeps counts."
+    },
+    {
+      "id": "texture-bake-rebase-winding-flip-omitted",
+      "path": "src/libslic3r/TextureBake/TextureBakeDebug.cpp",
+      "old": "                std::swap(t[1], t[2]);",
+      "new": "                (void)t;",
+      "expected_matches": 1,
+      "test_filter": "^TextureBakeDebug$",
+      "description": "Omit the requested face winding reversal during rebase. The selected-stage test checks transformed vertices and the independent geometric face normal; an unchanged positive-Z winding fails the expected negative-Z normal."
+    }
+  ],
+  "schema": 1
+}
