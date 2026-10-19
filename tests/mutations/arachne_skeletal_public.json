@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "arachne-filter-outer-central-noop",
+      "path": "src/libslic3r/Arachne/SkeletalTrapezoidation.cpp",
+      "old": "    if (filter_outermost_central_edges)\n        filterOuterCentral();",
+      "new": "    if (false)\n        filterOuterCentral();",
+      "expected_matches": 1,
+      "test_filter": "^SkeletalPublicAPI$",
+      "description": "Disabling the public option must fail the acute-wedge oracle that outer-central filtering reduces open odd paths at sharp corners."
+    },
+    {
+      "id": "arachne-recursive-central-dissolves-local-maxima",
+      "path": "src/libslic3r/Arachne/SkeletalTrapezoidation.cpp",
+      "old": "    should_dissolve &= !starting_edge->to->isLocalMaximum(); // Don't filter central regions with a local maximum!",
+      "new": "    should_dissolve &= true;",
+      "expected_matches": 1,
+      "test_filter": "^SkeletalPublicAPI$",
+      "description": "A central region reaching a local maximum must not be dissolved; the concave variable-width output checks bounded, varying wall geometry under recursive propagation."
+    }
+  ]
+}

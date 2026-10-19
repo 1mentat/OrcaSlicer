@@ -37,6 +37,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
+#include <limits>
 #include <cstddef>
 #include "libslic3r/libslic3r.h"
 #include <vector>
@@ -595,4 +597,134 @@ TEST_CASE("Arachne wall resolution preserves a rounded wall while simplifying it
     CHECK_THAT(fine.length_mm, Catch::Matchers::WithinAbs(coarse.length_mm, length_budget_mm));
     REQUIRE(fine.width_area_mm2 > 0.);
     REQUIRE(coarse.width_area_mm2 > 0.);
+}
+
+namespace arachne_skeletal_public_contracts {
+
+Polygon polygon(std::initializer_list<std::pair<double, double>> coordinates)
+{
+    Polygon shape;
+    for (const auto &[x, y] : coordinates)
+        shape.points.emplace_back(Point::new_scale(x, y));
+    return shape;
+}
+
+struct Summary {
+    size_t paths = 0;
+    size_t open_odd_paths = 0;
+    size_t positive_width_junctions = 0;
+    size_t varying_width_paths = 0;
+    size_t witness_junctions = 0;
+    double length_mm = 0.;
+    bool finite = true;
+    bool inside_outline_or_margin = true;
+};
+
+bool inside_outline_or_margin(const Polygon &shape, const Point &point, coord_t margin)
+{
+    if (shape.contains(point))
+        return true;
+    const Point projection = shape.point_projection(point);
+    return (projection - point).cast<double>().norm() <= double(margin);
+}
+
+Summary generate(const Polygon &shape, bool filter_outermost_central_edges,
+                 const BoundingBox *witness_bounds = nullptr)
+{
+    const coord_t outer_width = scaled<coord_t>(0.42);
+    const coord_t inner_width = scaled<coord_t>(0.45);
+    const coord_t min_bead_width = scaled<coord_t>(0.20);
+    const coord_t min_feature_size = scaled<coord_t>(0.10);
+    const coord_t transition_length = scaled<coord_t>(0.40);
+    auto strategy = BeadingStrategyFactory::makeStrategy(
+        outer_width, inner_width, transition_length, float(M_PI / 4.), true,
+        min_bead_width, min_feature_size, 0.5, 0.5, 4, 0, 1);
+
+    SkeletalTrapezoidation trapezoidation(Polygons{shape}, *strategy,
+        strategy->getTransitioningAngle(), scaled<coord_t>(0.25),
+        scaled<coord_t>(0.40), scaled<coord_t>(0.10), transition_length);
+    std::vector<VariableWidthLines> paths;
+    trapezoidation.generateToolpaths(paths, filter_outermost_central_edges);
+
+    const coord_t margin = scaled<coord_t>(0.02);
+    Summary result;
+    for (const VariableWidthLines &inset : paths) {
+        for (const ExtrusionLine &line : inset) {
+            if (line.junctions.empty())
+                continue;
+            ++result.paths;
+            if (line.is_odd && line.front().p != line.back().p)
+                ++result.open_odd_paths;
+            double path_minimum_width_mm = std::numeric_limits<double>::infinity();
+            double path_maximum_width_mm = 0.;
+            for (size_t index = 0; index < line.junctions.size(); ++index) {
+                const ExtrusionJunction &junction = line.junctions[index];
+                const double x = unscaled<double>(junction.p.x());
+                const double y = unscaled<double>(junction.p.y());
+                const double width = unscaled<double>(junction.w);
+                result.finite &= std::isfinite(x) && std::isfinite(y) && std::isfinite(width);
+                result.inside_outline_or_margin &= inside_outline_or_margin(shape, junction.p, margin);
+                if (witness_bounds != nullptr && witness_bounds->contains(junction.p))
+                    ++result.witness_junctions;
+                if (junction.w > 0) {
+                    ++result.positive_width_junctions;
+                    path_minimum_width_mm = std::min(path_minimum_width_mm, width);
+                    path_maximum_width_mm = std::max(path_maximum_width_mm, width);
+                }
+                if (index > 0) {
+                    const double segment_mm = unscaled<double>(
+                        (junction.p - line.junctions[index - 1].p).cast<double>().norm());
+                    result.length_mm += segment_mm;
+                }
+            }
+            if (path_maximum_width_mm > path_minimum_width_mm + 0.01)
+                ++result.varying_width_paths;
+        }
+    }
+    return result;
+}
+
+} // namespace arachne_skeletal_public_contracts
+
+TEST_CASE("Arachne outer-central filtering loops sharp tapered walls", "[Arachne][SkeletalPublicAPI]")
+{
+    using namespace arachne_skeletal_public_contracts;
+    // A long wedge gives the public filter a real acute outer corner and a wide region
+    // where the beading strategy can emit multiple walls.
+    const Polygon wedge = polygon({{0., 0.}, {30., 0.}, {15., 40.}});
+    const Summary unfiltered = generate(wedge, false);
+    const Summary filtered = generate(wedge, true);
+
+    REQUIRE(unfiltered.paths > 0);
+    REQUIRE(filtered.paths > 0);
+    CHECK(unfiltered.finite);
+    CHECK(filtered.finite);
+    CHECK(unfiltered.inside_outline_or_margin);
+    CHECK(filtered.inside_outline_or_margin);
+    CHECK(unfiltered.open_odd_paths > filtered.open_odd_paths);
+}
+
+TEST_CASE("Arachne skeletal paths follow a concave variable-width outline", "[Arachne][SkeletalPublicAPI]")
+{
+    using namespace arachne_skeletal_public_contracts;
+    // Two broad lobes joined by a narrower central neck force beading to propagate
+    // through a concave branch while keeping the expected extent easy to check.
+    const Polygon necked = polygon({
+        {0., 0.}, {24., 0.}, {24., 8.}, {12.35, 8.}, {12.35, 16.}, {24., 16.},
+        {24., 24.}, {0., 24.}, {0., 16.}, {11.65, 16.}, {11.65, 8.}, {0., 8.}
+    });
+    const BoundingBox neck_bounds(Point::new_scale(11.60, 8.0), Point::new_scale(12.40, 16.0));
+    const Summary first = generate(necked, false, &neck_bounds);
+    const Summary repeated = generate(necked, false);
+
+    REQUIRE(first.paths > 0);
+    REQUIRE(first.positive_width_junctions > 0);
+    REQUIRE(first.varying_width_paths > 0);
+    REQUIRE(first.witness_junctions > 0);
+    CHECK(first.finite);
+    CHECK(first.inside_outline_or_margin);
+    CHECK_THAT(first.length_mm, Catch::Matchers::WithinAbs(repeated.length_mm, 0.001));
+    CHECK(first.paths == repeated.paths);
+    CHECK(first.positive_width_junctions == repeated.positive_width_junctions);
+    CHECK(first.varying_width_paths == repeated.varying_width_paths);
 }
