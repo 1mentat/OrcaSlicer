@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "organic-branch-diameter-setting-ignored",
+      "path": "src/libslic3r/Support/TreeSupportCommon.hpp",
+      "old": "        this->support_tree_branch_diameter = scaled<coord_t>(config.tree_support_branch_diameter_organic.value);",
+      "new": "        this->support_tree_branch_diameter = scaled<coord_t>(2.0);",
+      "expected_matches": 1,
+      "description": "The narrow and wide organic branch rows must produce different lower support cross-sections on the same cap fixture. Replacing the configured diameter with a constant makes those sections equal.",
+      "test_filter": "^TreeSupportOrganicProfileSettings$"
+    },
+    {
+      "id": "organic-tip-diameter-setting-ignored",
+      "path": "src/libslic3r/Support/TreeSupportCommon.hpp",
+      "old": "        this->support_tree_tip_diameter = std::clamp(scaled<coord_t>(config.tree_support_tip_diameter.value), (coord_t)0, this->support_tree_branch_diameter);",
+      "new": "        this->support_tree_tip_diameter = scaled<coord_t>(0.4);",
+      "expected_matches": 1,
+      "description": "The valid 0.4 mm and 1.6 mm tip rows must create different top support-slice footprints. Replacing the configured tip diameter with a fixed 0.4 mm removes that difference.",
+      "test_filter": "^TreeSupportOrganicProfileSettings$"
+    }
+  ]
+}

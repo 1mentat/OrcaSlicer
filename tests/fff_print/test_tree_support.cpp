@@ -1340,3 +1340,163 @@ TEST_CASE("Tree support independent layer height preserves a non-grid support in
     CHECK(synchronized.non_nominal_layers == 0);
     CHECK(synchronized.max_height_delta <= 0.02);
 }
+
+
+namespace tree_support_organic_profile_contracts {
+
+struct SupportSlice {
+    double print_z_mm = 0.0;
+    ExPolygons islands;
+};
+
+struct ProfileEvidence {
+    std::vector<SupportSlice> slices;
+    size_t physical_extrusion_paths = 0;
+    double highest_support_z = -std::numeric_limits<double>::infinity();
+    double top_contact_area_mm2 = 0.0;
+    double largest_lower_branch_area_mm2 = 0.0;
+    size_t active_layers = 0;
+};
+
+static double support_area_mm2(const ExPolygons &islands)
+{
+    double scaled_area = 0.0;
+    for (const ExPolygon &island : islands)
+        scaled_area += std::abs(island.area());
+    return unscale<double>(unscale<double>(scaled_area));
+}
+
+// Read public support slices on the existing cap-overhang fixture. The highest
+// island area is the contact footprint; lower islands expose the branch cross-section.
+// The branch comparison stays at least 1 mm below the cap's 5.8 mm bottom minus the
+// configured 0.2 mm contact gap, outside the region shaped by the tip diameter.
+static ProfileEvidence observe(double branch_diameter_mm, double tip_diameter_mm)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_support",                  1 },
+        { "support_type",                    "tree(auto)" },
+        { "support_style",                   "organic" },
+        { "support_on_build_plate_only",     0 },
+        { "support_top_z_distance",          0.2 },
+        { "support_line_width",              0.4 },
+        { "line_width",                      0.4 },
+        { "nozzle_diameter",                 "0.4" },
+        { "brim_type",                       "no_brim" },
+        { "brim_width",                      0.0 },
+        { "tree_support_brim_width",         0.0 },
+        { "tree_support_auto_brim",          false },
+        { "tree_support_top_rate",           "10%" },
+        { "tree_support_branch_distance_organic", 5.0 },
+        { "tree_support_branch_angle_organic", 40.0 },
+        { "tree_support_branch_diameter_organic", branch_diameter_mm },
+        { "tree_support_branch_diameter_angle", 5.0 },
+        { "tree_support_tip_diameter",       tip_diameter_mm },
+        { "tree_support_wall_count",         1 },
+        { "support_base_pattern",            "hollow" },
+        { "support_interface_top_layers",    0 },
+        { "support_interface_bottom_layers", 0 },
+        { "initial_layer_print_height",      0.2 },
+        { "layer_height",                   0.2 },
+        { "skirt_loops",                     0 },
+        { "enable_arc_fitting",              false },
+        { "resolution",                      0.01 },
+        { "raft_layers",                     0 },
+    });
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(cap_overhang_fixture());
+    init_print(std::move(meshes), print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    REQUIRE(print.objects().size() == 1);
+    ProfileEvidence result;
+    const double cap_bottom_z_mm = 5.8;
+    const double top_gap_mm = 0.2;
+    const double below_contact_margin_mm = 1.0;
+    const double lower_region_ceiling_mm = cap_bottom_z_mm - top_gap_mm - below_contact_margin_mm;
+    const auto layers = print.objects().front()->support_layers();
+    for (const SupportLayer *layer : layers) {
+        REQUIRE(layer != nullptr);
+        if (layer->support_islands.empty())
+            continue;
+        const double z = static_cast<double>(layer->print_z);
+        result.slices.push_back({z, layer->support_islands});
+        result.highest_support_z = std::max(result.highest_support_z, z);
+        ++result.active_layers;
+        if (z > 0.0 && z < lower_region_ceiling_mm)
+            result.largest_lower_branch_area_mm2 = std::max(
+                result.largest_lower_branch_area_mm2, support_area_mm2(layer->support_islands));
+        for_each_extrusion_path(layer->support_fills, [&result](const ExtrusionPath &path) {
+            if (path.length() > 0 && path.mm3_per_mm > 0.0)
+                ++result.physical_extrusion_paths;
+        });
+    }
+    std::stable_sort(result.slices.begin(), result.slices.end(), [](const SupportSlice &lhs, const SupportSlice &rhs) {
+        return lhs.print_z_mm < rhs.print_z_mm;
+    });
+    REQUIRE_FALSE(result.slices.empty());
+    result.top_contact_area_mm2 = support_area_mm2(result.slices.back().islands);
+    return result;
+}
+
+static double sliced_geometry_difference_mm2(const ProfileEvidence &lhs, const ProfileEvidence &rhs)
+{
+    REQUIRE(lhs.slices.size() == rhs.slices.size());
+    double total_difference_mm2 = 0.0;
+    for (size_t i = 0; i < lhs.slices.size(); ++i) {
+        REQUIRE_THAT(lhs.slices[i].print_z_mm,
+                     Catch::Matchers::WithinAbs(rhs.slices[i].print_z_mm, EPSILON));
+        total_difference_mm2 += support_area_mm2(xor_ex(lhs.slices[i].islands, rhs.slices[i].islands));
+    }
+    return total_difference_mm2;
+}
+
+} // namespace tree_support_organic_profile_contracts
+
+TEST_CASE("Organic branch diameter widens the public tree support trunk",
+          "[TreeSupport][TreeSupportOrganicProfileSettings][SupportSettingsVariance]")
+{
+    using namespace tree_support_organic_profile_contracts;
+    const ProfileEvidence narrow = observe(1.0, 0.8);
+    const ProfileEvidence wide   = observe(4.0, 0.8);
+
+    REQUIRE(narrow.active_layers > 0);
+    REQUIRE(narrow.physical_extrusion_paths > 0);
+    REQUIRE(narrow.top_contact_area_mm2 > 0.0);
+    REQUIRE(narrow.largest_lower_branch_area_mm2 > 0.0);
+    REQUIRE(wide.active_layers > 0);
+    REQUIRE(wide.physical_extrusion_paths > 0);
+    REQUIRE(wide.top_contact_area_mm2 > 0.0);
+    REQUIRE(wide.largest_lower_branch_area_mm2 > 0.0);
+    CHECK_THAT(narrow.highest_support_z, Catch::Matchers::WithinAbs(wide.highest_support_z, EPSILON));
+    // Keeping the 0.8 mm tip and 40-degree branch angle fixed isolates the configured
+    // branch diameter; lower support islands must contain a larger branch section.
+    REQUIRE(wide.largest_lower_branch_area_mm2 > narrow.largest_lower_branch_area_mm2 + 0.01);
+}
+
+TEST_CASE("Organic tip diameter changes valid public support contact geometry",
+          "[TreeSupport][TreeSupportOrganicProfileSettings][SupportSettingsVariance]")
+{
+    using namespace tree_support_organic_profile_contracts;
+    const ProfileEvidence narrow_tip = observe(2.0, 0.4);
+    const ProfileEvidence wide_tip   = observe(2.0, 1.6);
+
+    REQUIRE(narrow_tip.active_layers > 0);
+    REQUIRE(narrow_tip.physical_extrusion_paths > 0);
+    REQUIRE(narrow_tip.top_contact_area_mm2 > 0.0);
+    REQUIRE(wide_tip.active_layers > 0);
+    REQUIRE(wide_tip.physical_extrusion_paths > 0);
+    REQUIRE(wide_tip.top_contact_area_mm2 > 0.0);
+    CHECK_THAT(wide_tip.highest_support_z, Catch::Matchers::WithinAbs(narrow_tip.highest_support_z, EPSILON));
+    // Both rows pass print validation: the smaller tip equals the 0.4 mm extrusion width,
+    // and both tips remain below the 2 mm branch diameter. Compare matched public Z slices
+    // and their XOR geometry, then check the top contact footprint grows for the larger tip.
+    REQUIRE(sliced_geometry_difference_mm2(wide_tip, narrow_tip) > 0.01);
+    REQUIRE(wide_tip.top_contact_area_mm2 > narrow_tip.top_contact_area_mm2 + 0.01);
+}
