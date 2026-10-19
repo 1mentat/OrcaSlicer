@@ -769,7 +769,8 @@ TEST_CASE("painted top and bottom projections merge across model volumes", "[Pai
     REQUIRE(second != nullptr);
     second->set_offset(first.get_offset() + Vec3d(30., 0., 0.));
 
-    fixture.paint_by_horizontal_facets(first);
+    // The fixture already painted the first volume during construction.
+    // Paint only the newly added volume here.
     fixture.paint_by_horizontal_facets(*second);
     fixture.apply_model_and_reslice();
 
@@ -814,27 +815,53 @@ TEST_CASE("painted segmentation preserves a cut cavity while assigning both side
     REQUIRE(source.front().holes.size() == 1);
     REQUIRE(segmented[layer_idx].size() == PAINTED_STATES - 1);
 
+    const double source_area_mm2 = area_mm2(polygon_area(source));
+    const double hole_area_mm2 = std::abs(area_mm2(source.front().holes.front().area()));
+    CHECK_THAT(source_area_mm2, Catch::Matchers::WithinAbs(336., 0.5));
+    CHECK_THAT(hole_area_mm2, Catch::Matchers::WithinAbs(64., 0.5));
+
     const BoundingBox bounds = get_extents(source);
-    const coord_t split_x = (bounds.min.x() + bounds.max.x()) / 2;
-    const coord_t min_x = bounds.min.x() - scale_(1.);
-    const coord_t max_x = bounds.max.x() + scale_(1.);
-    const coord_t min_y = bounds.min.y() - scale_(1.);
-    const coord_t max_y = bounds.max.y() + scale_(1.);
-    const Polygons left_clip{ Polygon(Points{ Point(min_x, min_y), Point(split_x, min_y), Point(split_x, max_y), Point(min_x, max_y) }) };
-    const Polygons right_clip{ Polygon(Points{ Point(split_x, min_y), Point(max_x, min_y), Point(max_x, max_y), Point(split_x, max_y) }) };
-    const ExPolygons expected_left = intersection_ex(source, left_clip);
-    const ExPolygons expected_right = intersection_ex(source, right_clip);
-    REQUIRE(expected_left.size() == 1);
-    REQUIRE(expected_right.size() == 1);
+    const coord_t one_mm = scale_(1.);
+    const Polygons left_strip_clip{ Polygon(Points{
+        Point(bounds.min.x(), bounds.min.y()), Point(bounds.min.x() + one_mm, bounds.min.y()),
+        Point(bounds.min.x() + one_mm, bounds.max.y()), Point(bounds.min.x(), bounds.max.y()) }) };
+    const Polygons right_strip_clip{ Polygon(Points{
+        Point(bounds.max.x() - one_mm, bounds.min.y()), Point(bounds.max.x(), bounds.min.y()),
+        Point(bounds.max.x(), bounds.max.y()), Point(bounds.max.x() - one_mm, bounds.max.y()) }) };
+    const ExPolygons expected_left_strip = intersection_ex(source, left_strip_clip);
+    const ExPolygons expected_right_strip = intersection_ex(source, right_strip_clip);
+    REQUIRE(expected_left_strip.size() == 1);
+    REQUIRE(expected_right_strip.size() == 1);
+    CHECK_THAT(area_mm2(polygon_area(expected_left_strip)), Catch::Matchers::WithinAbs(20., 0.5));
+    CHECK_THAT(area_mm2(polygon_area(expected_right_strip)), Catch::Matchers::WithinAbs(20., 0.5));
 
     auto symmetric_difference_area = [](const ExPolygons &actual, const ExPolygons &expected) {
         return polygon_area(diff_ex(actual, expected)) + polygon_area(diff_ex(expected, actual));
     };
-    CHECK_THAT(area_mm2(symmetric_difference_area(segmented[layer_idx][0], expected_left)), Catch::Matchers::WithinAbs(0., 0.5));
-    CHECK_THAT(area_mm2(symmetric_difference_area(segmented[layer_idx][1], expected_right)), Catch::Matchers::WithinAbs(0., 0.5));
-    const double tolerance = std::max(100.0, polygon_area(source) * 1e-5);
-    CHECK(outside_area({ segmented[layer_idx][0] }, source) <= tolerance);
-    CHECK(outside_area({ segmented[layer_idx][1] }, source) <= tolerance);
+    const ExPolygons &left_state = segmented[layer_idx][0]; // Extruder1: facets left of the X split.
+    const ExPolygons &right_state = segmented[layer_idx][1]; // Extruder2: facets right of the X split.
+    REQUIRE(polygon_area(left_state) > 0.);
+    REQUIRE(polygon_area(right_state) > 0.);
+
+    ExPolygons combined_states = left_state;
+    combined_states.insert(combined_states.end(), right_state.begin(), right_state.end());
+    const ExPolygons combined_union = union_ex(combined_states);
+    CHECK_THAT(area_mm2(symmetric_difference_area(combined_union, source)), Catch::Matchers::WithinAbs(0., 0.5));
+    CHECK_THAT(area_mm2(polygon_area(intersection_ex(left_state, right_state))), Catch::Matchers::WithinAbs(0., 0.5));
+    CHECK_THAT(area_mm2(outside_area({ left_state }, source)), Catch::Matchers::WithinAbs(0., 0.5));
+    CHECK_THAT(area_mm2(outside_area({ right_state }, source)), Catch::Matchers::WithinAbs(0., 0.5));
+
+    // The exterior left/right one-millimeter bands are painted by consistently
+    // colored vertical cube faces; unlike the center, they do not depend on the
+    // diagonal triangulation of the top and bottom facets.
+    const ExPolygons left_owned = intersection_ex(left_state, left_strip_clip);
+    const ExPolygons left_misassigned = intersection_ex(right_state, left_strip_clip);
+    const ExPolygons right_owned = intersection_ex(right_state, right_strip_clip);
+    const ExPolygons right_misassigned = intersection_ex(left_state, right_strip_clip);
+    CHECK_THAT(area_mm2(symmetric_difference_area(left_owned, expected_left_strip)), Catch::Matchers::WithinAbs(0., 0.5));
+    CHECK_THAT(area_mm2(polygon_area(left_misassigned)), Catch::Matchers::WithinAbs(0., 0.5));
+    CHECK_THAT(area_mm2(symmetric_difference_area(right_owned, expected_right_strip)), Catch::Matchers::WithinAbs(0., 0.5));
+    CHECK_THAT(area_mm2(polygon_area(right_misassigned)), Catch::Matchers::WithinAbs(0., 0.5));
 }
 
 namespace {

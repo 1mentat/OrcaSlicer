@@ -3982,7 +3982,7 @@ std::vector<size_t> layer_perimeter_counts(const PrintObject &object)
     std::vector<size_t> result;
     result.reserve(object.layer_count());
     for (size_t layer = 0; layer < object.layer_count(); ++layer)
-        result.emplace_back(perimeter_items(object, layer));
+        result.emplace_back(print_workflow_contracts::perimeter_items(object, layer));
     return result;
 }
 
