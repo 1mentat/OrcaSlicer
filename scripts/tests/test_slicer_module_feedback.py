@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ a = sys.argv[1:]
 mode = os.environ.get("FAKE_MODE", "ok")
 names = json.loads(os.environ["FAKE_NAMES"])
 if "--build" in a:
+    pathlib.Path(os.environ["FAKE_BUILD_MARKER"]).write_text("called")
     pattern = os.environ.get("LLVM_PROFILE_FILE", "")
     if pattern:
         pathlib.Path(pattern.replace("%m", "build-fake")).write_bytes(b"build-profile")
@@ -71,13 +73,18 @@ class ModuleFeedbackTests(unittest.TestCase):
         evidence = build / "evidence"
         (root / "tests").mkdir(parents=True)
         evidence.mkdir(parents=True)
-        source = root / "tests" / "module_tests.cpp"
+        source = root / "tests" / "module tests.cpp"
         prod = root / "src" / "module.cpp"
         prod.parent.mkdir()
         source.write_text("// test source\n")
         prod.write_text("// production source\n")
         compile_db = build / "compile_commands.json"
-        compile_db.write_text("[]\n")
+        object_path = "CMakeFiles/module-tests.dir/tests/module tests.cpp.o"
+        compile_db.write_text(json.dumps([{
+            "directory": str(build), "file": str(source),
+            "arguments": ["clang++", "-c", str(source), "-o", object_path],
+            "output": object_path,
+        }]) + "\n")
         fake = build / "fake-tool"
         fake.write_text(FAKE.replace("{python}", sys.executable))
         fake.chmod(0o755)
@@ -89,7 +96,7 @@ class ModuleFeedbackTests(unittest.TestCase):
         escape_target = root / "outside-module-tests"
         escape_target.write_text(fake_script)
         escape_target.chmod(0o755)
-        xml_file = "tests/other.cpp" if bad_source else "tests/module_tests.cpp"
+        xml_file = "tests/other.cpp" if bad_source else "tests/module tests.cpp"
         inventory = (f'<MatchingTests>'
                      f'<TestCase><Name>Case A</Name><Tags>[ModuleTag]</Tags><SourceInfo><File>{xml_file}</File><Line>1</Line></SourceInfo></TestCase>'
                      f'<TestCase><Name>Case B</Name><Tags>[ModuleTag]</Tags><SourceInfo><File>{xml_file}</File><Line>2</Line></SourceInfo></TestCase>'
@@ -97,13 +104,15 @@ class ModuleFeedbackTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
         subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
-        subprocess.run(["git", "-C", str(root), "add", "tests/module_tests.cpp", "src/module.cpp", "build/compile_commands.json"], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "tests/module tests.cpp", "src/module.cpp"], check=True)
         subprocess.run(["git", "-C", str(root), "commit", "-qm", "test fixture"], check=True)
         out = evidence / "run"
         marker = base / "late-child-marker"
+        build_marker = evidence / "build-invoked"
         env = os.environ.copy()
         env.update({"FAKE_MODE": mode, "FAKE_NAMES": json.dumps(["Case A", "Case B"]),
                     "FAKE_INVENTORY": inventory, "FAKE_MARKER": str(marker),
+                    "FAKE_BUILD_MARKER": str(build_marker),
                     "FAKE_BINARY": str(binary), "FAKE_ESCAPE_TARGET": str(escape_target)})
         env["PYTHONPATH"] = os.pathsep.join(
             item for item in (str(REPO_ROOT / "scripts"), env.get("PYTHONPATH", "")) if item)
@@ -119,6 +128,76 @@ class ModuleFeedbackTests(unittest.TestCase):
         completed = subprocess.run(args, env=env, text=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, timeout=process_timeout, check=False)
         return tmp, completed, out, marker
+
+    def test_wrong_target_is_rejected_before_build_or_output_creation(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        args[args.index("--target") + 1] = "other-tests"
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not own test source", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
+
+    def test_canonical_and_thin_duplicate_records_accept_selected_owner(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        build = Path(args[args.index("--build") + 1])
+        source = Path(args[args.index("--test-source") + 1])
+        compile_db = Path(args[args.index("--compile-commands") + 1])
+        canonical_output = "CMakeFiles/fff_print_tests.dir/tests/module tests.cpp.o"
+        thin_output = r"CMakeFiles\thin-module-tests.dir\tests\module tests.cpp.o"
+        compile_db.write_text(json.dumps([
+            {"directory": str(build), "file": str(source),
+             "command": shlex.join(["clang++", "-c", str(source), "-o", canonical_output])},
+            {"directory": str(build), "file": str(source),
+             "arguments": ["clang++", "-c", str(source)], "output": thin_output},
+        ]) + "\n")
+        args[args.index("--target") + 1] = "thin-module-tests"
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        membership = json.loads((out / "run.json").read_text())["compile_target_preflight"]
+        self.assertEqual(membership["owners"], ["fff_print_tests", "thin-module-tests"])
+        self.assertEqual(len(membership["matching_records"]), 2)
+        self.assertEqual(membership["requested_target"], "thin-module-tests")
+        self.assertTrue((out.parent / "build-invoked").is_file())
+
+    def test_missing_test_source_record_is_rejected_before_build(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        compile_db = Path(args[args.index("--compile-commands") + 1])
+        rows = json.loads(compile_db.read_text())
+        rows[0]["file"] = str(Path(args[args.index("--root") + 1]) / "tests" / "absent.cpp")
+        compile_db.write_text(json.dumps(rows) + "\n")
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no record for requested test source", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
+
+    def test_malformed_compile_database_is_rejected_before_build(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        Path(args[args.index("--compile-commands") + 1]).write_text("{not json\n")
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read compile database", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
+
+    def test_unrecognized_output_ownership_is_rejected_before_build(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        compile_db = Path(args[args.index("--compile-commands") + 1])
+        rows = json.loads(compile_db.read_text())
+        rows[0]["arguments"] = ["clang++", "-c", rows[0]["file"], "-o", "objects/module_tests.cpp.o"]
+        rows[0]["output"] = "objects/module_tests.cpp.o"
+        compile_db.write_text(json.dumps(rows) + "\n")
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported CMake output ownership", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
 
     def test_success_records_complete_scoped_cycle_and_duplicate_junit_rows(self):
         tmp, result, out, _ = self.invoke()

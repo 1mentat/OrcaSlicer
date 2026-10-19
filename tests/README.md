@@ -169,6 +169,9 @@ parent directories are created after preflight; existing run directories are
 never reused. If a commit changes CMake inputs, regenerate the existing CMake
 configuration before this command: the runner requires the compile database to
 remain unchanged throughout its measured cycle.
+Before building, the runner checks that the compile database assigns the test
+source to the requested CMake target. Canonical and focused targets may both
+own the same source; selecting an unrelated target fails before compilation.
 The command builds the Release target with four jobs, verifies Catch's test
 identities and source file, runs the selected tag in random order with seed
 21907, and reports coverage for the specified production file. `run.json`

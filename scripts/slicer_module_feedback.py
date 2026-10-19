@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -59,6 +60,141 @@ def git_snapshot(root: Path) -> dict:
 
 def file_snapshot(paths: dict[str, Path]) -> dict[str, str]:
     return {name: sha256(path) for name, path in paths.items()}
+
+
+def _record_output_path(value: str, directory: Path, build: Path) -> tuple[Path, str]:
+    if not isinstance(value, str) or not value.strip():
+        raise WorkflowError("compile database record has an empty output path")
+    # CMake output metadata and MSVC command records may use Windows separators.
+    normalized = value.strip().strip('"').replace("\\", os.sep)
+    output = Path(normalized)
+    if not output.is_absolute():
+        output = directory / output
+    try:
+        resolved = output.resolve(strict=False)
+        resolved.relative_to(build.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise WorkflowError(f"compile output is outside the build tree: {value!r}") from exc
+    owner_match = re.search(r"(?:^|[/\\])CMakeFiles[/\\]([^/\\]+)\.dir(?:[/\\]|$)", value)
+    if owner_match is None:
+        raise WorkflowError(f"unsupported CMake output ownership: {value!r}")
+    return resolved, owner_match.group(1)
+
+
+def _command_output(tokens: list[str]) -> str | None:
+    found: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index].strip('"')
+        if token in {"-o", "--output", "/Fo", "/fo"}:
+            if index + 1 >= len(tokens):
+                raise WorkflowError("compile command has an output option without a path")
+            found.append(tokens[index + 1].strip('"'))
+            index += 2
+            continue
+        if token.startswith("--output="):
+            found.append(token.split("=", 1)[1].strip('"'))
+        elif token.startswith(("/Fo", "/fo")) and len(token) > 3:
+            found.append(token[3:].strip('"'))
+        elif token.startswith("-o") and len(token) > 2:
+            # Avoid treating unrelated flags such as -openmp as output paths.
+            candidate = token[2:].strip('"')
+            if "/" in candidate or "\\" in candidate or candidate.endswith((".o", ".obj")):
+                found.append(candidate)
+        index += 1
+    if len(found) > 1:
+        raise WorkflowError("compile command has ambiguous output paths")
+    return found[0] if found else None
+
+
+def _entry_command_tokens(entry: dict, label: str) -> list[list[str]]:
+    representations: list[list[str]] = []
+    if "arguments" in entry:
+        arguments = entry["arguments"]
+        if not isinstance(arguments, list) or not arguments or not all(isinstance(item, str) for item in arguments):
+            raise WorkflowError(f"compile database {label} has invalid arguments")
+        representations.append(arguments)
+    if "command" in entry:
+        command = entry["command"]
+        if not isinstance(command, str) or not command.strip():
+            raise WorkflowError(f"compile database {label} has invalid command")
+        try:
+            # CMake's command field is a quoted command string; tokenize only,
+            # never execute it. POSIX shlex also preserves quoted Windows paths.
+            representations.append(shlex.split(command, posix=True))
+        except ValueError as exc:
+            raise WorkflowError(f"compile database {label} command cannot be parsed: {exc}") from exc
+    if not representations:
+        raise WorkflowError(f"compile database {label} has neither command nor arguments")
+    return representations
+
+
+def validate_compile_target_membership(path: Path, build: Path, source: Path,
+                                       target: str) -> dict:
+    """Require CMake's compile database to show the requested TU in this target."""
+    try:
+        records = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise WorkflowError(f"cannot read compile database: {exc}") from exc
+    if not isinstance(records, list) or not records:
+        raise WorkflowError("compile database must contain a nonempty array of records")
+    try:
+        build_real = build.resolve(strict=True)
+        source_real = source.resolve(strict=True)
+    except OSError as exc:
+        raise WorkflowError(f"cannot resolve build/source for compile database: {exc}") from exc
+
+    source_rows: list[dict] = []
+    for index, entry in enumerate(records):
+        label = f"record {index}"
+        if not isinstance(entry, dict):
+            raise WorkflowError(f"compile database {label} is not an object")
+        directory_value, file_value = entry.get("directory"), entry.get("file")
+        if not isinstance(directory_value, str) or not directory_value.strip():
+            raise WorkflowError(f"compile database {label} has no valid directory")
+        if not isinstance(file_value, str) or not file_value.strip():
+            raise WorkflowError(f"compile database {label} has no valid source file")
+        directory = Path(directory_value)
+        if not directory.is_absolute():
+            directory = build_real / directory
+        try:
+            directory = directory.resolve(strict=True)
+            record_source = Path(file_value)
+            if not record_source.is_absolute():
+                record_source = directory / record_source
+            record_source = record_source.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise WorkflowError(f"compile database {label} has an unresolvable source/directory: {exc}") from exc
+        if record_source != source_real:
+            continue
+
+        representations = _entry_command_tokens(entry, label)
+        output_values: list[str] = []
+        if "output" in entry:
+            if not isinstance(entry["output"], str) or not entry["output"].strip():
+                raise WorkflowError(f"compile database {label} has invalid output metadata")
+            output_values.append(entry["output"])
+        command_outputs = [_command_output(tokens) for tokens in representations]
+        output_values.extend(value for value in command_outputs if value is not None)
+        if not output_values:
+            raise WorkflowError(f"unsupported target ownership: {label} has no CMake output path")
+        resolved_outputs: list[tuple[Path, str]] = []
+        for value in output_values:
+            resolved_outputs.append(_record_output_path(value, directory, build_real))
+        distinct = {resolved for resolved, _ in resolved_outputs}
+        owners = {owner for _, owner in resolved_outputs}
+        if len(distinct) != 1 or len(owners) != 1:
+            raise WorkflowError(f"compile database {label} has conflicting output ownership")
+        source_rows.append({"owner": next(iter(owners)), "output": str(next(iter(distinct)))})
+
+    if not source_rows:
+        raise WorkflowError(f"compile database has no record for requested test source: {source_real}")
+    owners = sorted({row["owner"] for row in source_rows})
+    if target not in owners:
+        raise WorkflowError(
+            f"requested target {target!r} does not own test source; compile database owners={owners}")
+    return {"requested_target": target, "test_source": str(source_real),
+            "matching_records": source_rows, "owners": owners}
 
 
 def save_receipt(path: Path, receipt: dict) -> None:
@@ -191,6 +327,8 @@ def run(args: argparse.Namespace) -> int:
     compile_commands = compile_commands.resolve(strict=True)
     if not under(compile_commands, build):
         raise WorkflowError("compile_commands.json must resolve inside the build tree")
+    compile_membership = validate_compile_target_membership(
+        compile_commands, build, test_source, args.target)
     for key in ("cmake", "llvm_profdata", "llvm_cov"):
         tool = Path(getattr(args, key)).resolve(strict=True)
         if not tool.is_file() or not os.access(tool, os.X_OK):
@@ -221,6 +359,7 @@ def run(args: argparse.Namespace) -> int:
     receipt = {"status": "running", "started_utc": utc_now(), "arguments": vars(args),
                "root": str(root), "build_arg": str(build_arg), "build_resolved": str(build),
                "binary": str(binary), "binary_exists_before_build": binary_existed_before_build,
+               "compile_target_preflight": compile_membership,
                "tracked_before": tracked_before,
                "hashes_before": hashes_before, "stages": [],
                "coverage_scope": "production_source_only", "global_threshold_claim": False}
