@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "voronoi-parabola-tolerance-square-omitted",
+      "path": "src/libslic3r/Geometry/VoronoiVisualUtils.hpp",
+      "old": "const CT max_dist_transformed = max_dist * max_dist * sqr_segment_length;",
+      "new": "const CT max_dist_transformed = max_dist * sqr_segment_length;",
+      "test_filter": "^VoronoiVisualUtils$",
+      "expected_matches": 1,
+      "description": "Dropping the squared tolerance permits chords whose analytic parabola deviation exceeds the requested maximum."
+    },
+    {
+      "id": "voronoi-parabola-height-doubled",
+      "path": "src/libslic3r/Geometry/VoronoiVisualUtils.hpp",
+      "old": "return ((x - a) * (x - a) + b * b) / (b + b);",
+      "new": "return ((x - a) * (x - a) + b * b) / b;",
+      "test_filter": "^VoronoiVisualUtils$",
+      "expected_matches": 1,
+      "description": "Changing the parabola denominator moves emitted points off the focus/directrix equidistance locus."
+    }
+  ]
+}

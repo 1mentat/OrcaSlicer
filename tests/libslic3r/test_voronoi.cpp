@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "test_utils.hpp"
 
 #include "libslic3r/Geometry/Voronoi.hpp"
@@ -8,6 +9,11 @@
 #include "libslic3r/Line.hpp"
 #include <cmath>
 #include <cstddef>
+#include <array>
+#include <fstream>
+#include <ios>
+#include <boost/polygon/point_data.hpp>
+#include <boost/polygon/segment_data.hpp>
 #include "libslic3r/BoundingBox.hpp"
 #include <libslic3r/Polygon.hpp>
 #include <libslic3r/Polyline.hpp>
@@ -21,6 +27,9 @@
 #include <math.h>
 #include <numeric>
 #include <random>
+#include <iterator>
+#include <regex>
+#include <string>
 #include <vector>
 
 // #define VORONOI_DEBUG_OUT
@@ -33,6 +42,7 @@ using namespace Slic3r;
 
 using VD = Geometry::VoronoiDiagram;
 using BoostVD = boost::polygon::voronoi_diagram<double>;
+using Catch::Matchers::WithinAbs;
 
 // https://svn.boost.org/trac10/ticket/12067
 // This bug seems to be confirmed.
@@ -2167,4 +2177,137 @@ TEST_CASE("Intersecting Voronoi edges", "[Voronoi]")
     };
 
 //    REQUIRE(!has_intersecting_edges(poly, vd));
+}
+
+namespace {
+
+std::vector<std::array<double, 4>> svg_line_coordinates(const std::string &svg)
+{
+    static const std::regex line_pattern(R"(<line\b[^>]*>)");
+    static const std::array<std::regex, 4> attributes{
+        std::regex(R"re(\bx1\s*=\s*["']([^"']+)["'])re"),
+        std::regex(R"re(\by1\s*=\s*["']([^"']+)["'])re"),
+        std::regex(R"re(\bx2\s*=\s*["']([^"']+)["'])re"),
+        std::regex(R"re(\by2\s*=\s*["']([^"']+)["'])re"),
+    };
+    std::vector<std::array<double, 4>> result;
+    for (std::sregex_iterator it(svg.begin(), svg.end(), line_pattern), end; it != end; ++it) {
+        const std::string line = it->str();
+        std::array<double, 4> coordinates{};
+        for (size_t i = 0; i < attributes.size(); ++i) {
+            std::smatch match;
+            REQUIRE(std::regex_search(line, match, attributes[i]));
+            coordinates[i] = std::stod(match[1].str());
+        }
+        result.push_back(coordinates);
+    }
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Voronoi curved-edge discretization respects its analytic deviation bound", "[VoronoiVisualUtils][Voronoi]")
+{
+    using VisualPoint = boost::polygon::point_data<double>;
+    using VisualSegment = boost::polygon::segment_data<double>;
+
+    const VisualPoint focus(5.0, 6.0);
+    const VisualSegment directrix(VisualPoint(0.0, 0.0), VisualPoint(10.0, 0.0));
+    const double max_distance = 0.05;
+    std::vector<VisualPoint> samples{VisualPoint(-1.0, 6.0), VisualPoint(11.0, 6.0)};
+    boost::polygon::voronoi_visual_utils<double>::discretize(focus, directrix, max_distance, &samples);
+
+    REQUIRE(samples.size() > 2);
+    CHECK_THAT(samples.front().x(), WithinAbs(-1.0, 1e-10));
+    CHECK_THAT(samples.front().y(), WithinAbs(6.0, 1e-10));
+    CHECK_THAT(samples.back().x(), WithinAbs(11.0, 1e-10));
+    CHECK_THAT(samples.back().y(), WithinAbs(6.0, 1e-10));
+
+    for (const VisualPoint &sample : samples) {
+        const double x = sample.x();
+        const double y = sample.y();
+        const double expected_y = 3.0 + (x - 5.0) * (x - 5.0) / 12.0;
+        CHECK_THAT(y, WithinAbs(expected_y, 1e-9));
+        CHECK_THAT(std::hypot(x - 5.0, y - 6.0), WithinAbs(y, 1e-9));
+    }
+
+    for (size_t i = 1; i < samples.size(); ++i) {
+        const double x0 = samples[i - 1].x();
+        const double x1 = samples[i].x();
+        const double dx = x1 - x0;
+        REQUIRE(dx > 0.0);
+        const double chord_slope = (x0 + x1 - 10.0) / 12.0;
+        const double maximum_chord_error = (dx * dx / 48.0) / std::hypot(1.0, chord_slope);
+        CHECK(maximum_chord_error <= max_distance + 1e-9);
+    }
+}
+
+TEST_CASE("Voronoi SVG limits rays and subdivides curved edges", "[VoronoiVisualUtils][Voronoi]")
+{
+    const coord_t mm = coord_t(scale_(1.0));
+    // The reflex corner competes with the nonadjacent bottom segment, creating
+    // a finite parabolic edge. A convex rectangle has only straight bisectors.
+    Polygon outline{{Point(0, 0), Point(10, 0), Point(10, 4), Point(4, 4), Point(4, 8), Point(0, 8)}};
+    for (Point &point : outline.points)
+        point *= mm;
+    const Lines lines = to_lines(Polygons{outline});
+
+    VD diagram;
+    diagram.construct_voronoi(lines.begin(), lines.end());
+    size_t finite_edge_pairs = 0;
+    size_t infinite_edge_pairs = 0;
+    size_t curved_edge_pairs = 0;
+    for (const VD::edge_type &edge : diagram.edges()) {
+        if (&edge > edge.twin())
+            continue;
+        if (edge.is_finite())
+            ++finite_edge_pairs;
+        if (edge.is_infinite())
+            ++infinite_edge_pairs;
+        if (edge.is_curved())
+            ++curved_edge_pairs;
+    }
+    REQUIRE(finite_edge_pairs > 0);
+    REQUIRE(infinite_edge_pairs > 0);
+    REQUIRE(curved_edge_pairs > 0);
+
+    ScopedTemporaryFile output(".svg");
+    dump_voronoi_to_svg(output.string().c_str(), diagram, Points(), lines);
+    std::ifstream input(output.string(), std::ios::binary);
+    const std::string svg((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(input.bad());
+    REQUIRE_FALSE(svg.empty());
+    REQUIRE(svg.find("</svg>") != std::string::npos);
+
+    std::smatch dimensions;
+    const std::regex root_pattern(R"re(<svg height="([^"]+)" width="([^"]+)")re");
+    REQUIRE(std::regex_search(svg, dimensions, root_pattern));
+    const double height = std::stod(dimensions[1].str());
+    const double width = std::stod(dimensions[2].str());
+    REQUIRE(std::isfinite(width));
+    REQUIRE(std::isfinite(height));
+    REQUIRE(width > 0.0);
+    REQUIRE(height > 0.0);
+
+    const std::vector<std::array<double, 4>> serialized_lines = svg_line_coordinates(svg);
+    REQUIRE(serialized_lines.size() > lines.size() + diagram.num_edges());
+
+    BoundingBox diagram_bounds;
+    diagram_bounds.merge(get_extents(lines));
+    for (const VD::vertex_type &vertex : diagram.vertices())
+        diagram_bounds.merge(Point(coord_t(vertex.x()), coord_t(vertex.y())));
+    const double max_clipped_extension = 1.05 * std::max(
+        unscale<double>(diagram_bounds.size().x()), unscale<double>(diagram_bounds.size().y())) * 10.0;
+    for (const std::array<double, 4> &line : serialized_lines) {
+        for (double coordinate : line)
+            CHECK(std::isfinite(coordinate));
+        CHECK(line[0] >= -max_clipped_extension - 1.0);
+        CHECK(line[0] <= width + max_clipped_extension + 1.0);
+        CHECK(line[2] >= -max_clipped_extension - 1.0);
+        CHECK(line[2] <= width + max_clipped_extension + 1.0);
+        CHECK(line[1] >= -max_clipped_extension - 1.0);
+        CHECK(line[1] <= height + max_clipped_extension + 1.0);
+        CHECK(line[3] >= -max_clipped_extension - 1.0);
+        CHECK(line[3] <= height + max_clipped_extension + 1.0);
+    }
 }
