@@ -3,6 +3,23 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
+    "ooze_prevention": {
+      "test": "tests/fff_print/test_gcodeprocessor.cpp",
+      "tag": "[GCodeProcessor]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The exported-G-code line-end case explicitly generates ooze_prevention false and true on a two-filament non-SEMM print with preheat_time 30; the emitted preheat T marker must match the configured boolean. Both values passed in the accepted native full run."
+    },
+    "enable_prime_tower": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTower]",
+      "dimensions": [
+        "pipeline_oracle"
+      ],
+      "reason": "A single-filament plate begins with the option enabled: ordinary and raft configurations normalize it off and reserve zero tower depth, while smooth timelapse retains a tower with positive depth. This checks resolved Print behavior; explicit configured-false versus configured-true variance is not claimed by this case."
+    },
     "sparse_infill_pattern": {
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SettingsVariance]",
