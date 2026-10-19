@@ -702,6 +702,11 @@ geometry and clipping. Build `fff_print_painted_segmentation_tests` for focused
 feedback; the cases also belong to the canonical FFF suite. The shell probes
 are in `painted_shell_projection_gaps.json`.
 
+`[PaintedHoleProjection]` checks top and bottom shell propagation beside an
+acute external through-hole. It compares the affected painted area with an
+unholed control and a fixed geometric counterexample, so pruning geometry
+outside the paint bounding box must preserve the hole's miter influence.
+
 `[ToolOrderingDontCareSeed]` checks discovery of the first physical tool,
 inheritance across placeholder layers, and the no-tool case through public
 ToolOrdering methods. Its probes are in `toolordering_dontcare_seed.json`;

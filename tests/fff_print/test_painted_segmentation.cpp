@@ -28,6 +28,7 @@
 #include <libslic3r/Point.hpp>
 #include <libslic3r/Surface.hpp>
 #include <vector>
+#include <utility>
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
@@ -157,7 +158,7 @@ struct PaintedSegmentationFixture {
         REQUIRE(volume.mmu_segmentation_facets.set(selector));
     }
 
-    void paint_by_horizontal_facets(ModelVolume &volume)
+    static void paint_by_horizontal_facets(ModelVolume &volume)
     {
         const TriangleMesh &mesh = volume.mesh();
         const BoundingBoxf3 bounds = mesh.bounding_box();
@@ -833,4 +834,162 @@ TEST_CASE("painted segmentation preserves a cut cavity while assigning both side
     const double tolerance = std::max(100.0, polygon_area(source) * 1e-5);
     CHECK(outside_area({ segmented[layer_idx][0] }, source) <= tolerance);
     CHECK(outside_area({ segmented[layer_idx][1] }, source) <= tolerance);
+}
+
+namespace {
+
+TriangleMesh acute_through_hole_prism(float z_min, float z_max)
+{
+    // The clockwise triangle's tip lies 4.3 mm from the painted square's
+    // right edge and points toward the centered 2 x 2 mm patch.
+    std::vector<Vec3f> vertices{
+        { 5.3f,  0.0f, z_min }, { 20.0f,  5.5f, z_min }, { 20.0f, -5.5f, z_min },
+        { 5.3f,  0.0f, z_max }, { 20.0f,  5.5f, z_max }, { 20.0f, -5.5f, z_max },
+    };
+    // Closed triangular prism. Cap normals point out of the prism; each side
+    // quad is split into two triangles with consistent winding.
+    std::vector<Vec3i32> faces{
+        { 0, 1, 2 }, { 3, 5, 4 },
+        { 0, 3, 4 }, { 0, 4, 1 },
+        { 1, 4, 5 }, { 1, 5, 2 },
+        { 2, 5, 3 }, { 2, 3, 0 },
+    };
+    return TriangleMesh(std::move(vertices), std::move(faces));
+}
+
+struct AcuteHolePaintedShellFixture {
+    Model              model;
+    Print              print;
+    DynamicPrintConfig config;
+    ModelVolume       *paint_volume = nullptr;
+
+    explicit AcuteHolePaintedShellFixture(bool with_hole)
+    {
+        config = multifilament_config(2, {
+            { "layer_height",                0.2 },
+            { "initial_layer_print_height",  0.2 },
+            { "wall_loops",                  1 },
+            { "top_shell_layers",            4 },
+            { "bottom_shell_layers",         4 },
+            { "sparse_infill_density",       "0%" },
+            { "raft_layers",                 0 },
+            { "outer_wall_line_width",       0.42 },
+        });
+        // Resolve the morphology threshold through the documented enabled-gap-fill path.
+        config.set_key_value("gap_infill_speed", new ConfigOptionFloatsNullable({ 30.0, 30.0 }));
+
+        init_print({ make_cube(100.0, 100.0, 2.0) }, print, model, config, nullptr, false);
+        REQUIRE(model.objects.size() == 1);
+        ModelObject &object = *model.objects.front();
+        REQUIRE(object.volumes.size() == 1);
+        ModelVolume &plate = *object.volumes.front();
+
+        // A coincident model-part volume contributes only the small painted
+        // top/bottom facet patch; its union with the plate leaves slice shape unchanged.
+        TriangleMesh patch_mesh = make_cube(2.0, 2.0, 2.0);
+        patch_mesh.translate(Vec3f(-1.f, -1.f, -1.f)); // center its local coordinates on the plate.
+        paint_volume = object.add_volume(std::move(patch_mesh), ModelVolumeType::MODEL_PART, false);
+        REQUIRE(paint_volume != nullptr);
+        paint_volume->set_offset(plate.get_offset());
+        PaintedSegmentationFixture::paint_by_horizontal_facets(*paint_volume);
+
+        if (with_hole) {
+            ModelVolume *hole = object.add_volume(acute_through_hole_prism(-1.0f, 1.0f),
+                                                  ModelVolumeType::NEGATIVE_VOLUME, false);
+            REQUIRE(hole != nullptr);
+            hole->set_offset(plate.get_offset());
+        }
+
+        print.apply(model, config);
+        REQUIRE(print.objects().size() == 1);
+        PrintObject &print_object = *print.get_object(0);
+        print_object.slice();
+        REQUIRE(print_object.layers().size() >= 8);
+    }
+
+    PrintObject &object() { return *print.get_object(0); }
+
+    ExPolygon analytic_paint_patch()
+    {
+        const Transform3d volume_trafo = object().trafo_sliced() * paint_volume->get_matrix();
+        const BoundingBoxf3 bounds = paint_volume->mesh().transformed_bounding_box(volume_trafo);
+        return ExPolygon({
+            Point::new_scale(bounds.min.x(), bounds.min.y()),
+            Point::new_scale(bounds.max.x(), bounds.min.y()),
+            Point::new_scale(bounds.max.x(), bounds.max.y()),
+            Point::new_scale(bounds.min.x(), bounds.max.y()),
+        });
+    }
+
+    std::vector<std::vector<ExPolygons>> segments()
+    {
+        return segmentation_by_painting(
+            object(),
+            [](const ModelVolume &volume) -> ModelVolumeFacetsInfo {
+                return { volume.mmu_segmentation_facets, !volume.mmu_segmentation_facets.empty(), false };
+            },
+            PAINTED_STATES,
+            0.f,
+            0.f,
+            false,
+            IncludeTopAndBottomLayers::Yes,
+            [] {});
+    }
+};
+
+} // namespace
+
+TEST_CASE("acute through-holes remain visible in painted shell projections", "[PaintedSegmentation][PaintedHoleProjection]")
+{
+    AcuteHolePaintedShellFixture control(false);
+    AcuteHolePaintedShellFixture with_hole(true);
+    const auto control_regions = control.segments();
+    const auto hole_regions = with_hole.segments();
+    REQUIRE(control_regions.size() == control.object().layers().size());
+    REQUIRE(hole_regions.size() == with_hole.object().layers().size());
+    REQUIRE(control_regions.size() == hole_regions.size());
+    REQUIRE(control_regions.size() >= 8);
+
+    const ExPolygons expected_patch{ with_hole.analytic_paint_patch() };
+    CHECK_THAT(area_mm2(polygon_area(expected_patch)), Catch::Matchers::WithinAbs(4.0, 0.01));
+
+    for (const bool from_bottom : { false, true }) {
+        CAPTURE(from_bottom);
+        const size_t target_layer = from_bottom ? 3 : hole_regions.size() - 4;
+        const size_t painted_state = from_bottom ? 1 : 0; // bottom uses Extruder2; top uses Extruder1.
+        REQUIRE(hole_regions[target_layer].size() == PAINTED_STATES - 1);
+        REQUIRE(control_regions[target_layer].size() == PAINTED_STATES - 1);
+
+        const ExPolygons source_slice = sliced_layer(*with_hole.object().layers()[target_layer]);
+        REQUIRE(source_slice.size() == 1);
+        REQUIRE(source_slice.front().holes.size() == 1);
+        CHECK_THAT(std::abs(area_mm2(source_slice.front().holes.front().area())),
+                   Catch::Matchers::WithinAbs(80.85, 0.1));
+        CHECK_THAT(area_mm2(polygon_area(intersection_ex(source_slice, expected_patch))),
+                   Catch::Matchers::WithinAbs(4.0, 0.01));
+
+        const ExPolygons control_projection = union_ex(control_regions[target_layer][painted_state]);
+        const ExPolygons hole_projection = union_ex(hole_regions[target_layer][painted_state]);
+        REQUIRE_FALSE(control_projection.empty());
+        REQUIRE_FALSE(hole_projection.empty());
+        CHECK_THAT(area_mm2(polygon_area(control_projection)),
+                   Catch::Matchers::WithinAbs(4.0, 0.05));
+        CHECK_THAT(area_mm2(polygon_area(diff_ex(control_projection, expected_patch))),
+                   Catch::Matchers::WithinAbs(0.0, 0.01));
+
+        const double outside_patch_mm2 = area_mm2(polygon_area(diff_ex(hole_projection, expected_patch)));
+        const double symmetric_difference_mm2 = area_mm2(
+            polygon_area(diff_ex(expected_patch, hole_projection)) +
+            polygon_area(diff_ex(hole_projection, expected_patch)));
+        CHECK_THAT(outside_patch_mm2, Catch::Matchers::WithinAbs(0.0, 0.01));
+        CHECK_THAT(area_mm2(polygon_area(diff_ex(hole_projection, source_slice))),
+                   Catch::Matchers::WithinAbs(0.0, 0.01));
+        // At depth three the accumulated shrink is about 2.39124 mm.
+        // The acute hole's miter reaches into the patch, leaving about
+        // 1.64273 mm2 after the 0.105 mm morphological opening. Discarding
+        // that external hole instead retains all 4 mm2 of the patch.
+        CHECK_THAT(area_mm2(polygon_area(hole_projection)),
+                   Catch::Matchers::WithinAbs(1.64273, 0.1));
+        CHECK_THAT(symmetric_difference_mm2, Catch::Matchers::WithinAbs(2.35727, 0.1));
+    }
 }
