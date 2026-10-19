@@ -74,6 +74,14 @@ storage and the shared slice's memory use between runs. Archive successful
 artifacts with verified hashes before pruning them, and retain failures for
 diagnosis. An OOM termination is an infrastructure failure, never a mutation kill.
 
+On Linux, run permission tests as a non-root user and provide a `de_DE.UTF-8`
+locale for `[LocalesUtils]`. If the locale was generated in a private directory,
+pass `--setenv="LOCPATH=/absolute/path/to/locales"` to `systemd-run`; an export
+in the launching shell does not set the service's environment. First run
+`[LocalesUtils]` under the same user and service environment and require zero
+skips, keeping its coverage profiles separate from the full run. A skipped
+test leaves a confidence run incomplete even when CTest exits successfully.
+
 ## Confidence runs
 
 The checked-in harnesses keep coverage and mutation evidence tied to the real
