@@ -154,3 +154,85 @@ SCENARIO("Remove collinear points from Polygon", "[Polygon]") {
         }
     }
 }
+
+namespace math_gap_contracts {
+
+Polygon concave_notch()
+{
+    return Polygon{{0, 0}, {100, 0}, {100, 20}, {20, 20},
+                   {20, 80}, {100, 80}, {100, 100}, {0, 100}};
+}
+
+TEST_CASE("Polygon first intersection returns the closest crossing from the line start", "[Polygon][PolygonGap][MathGap]")
+{
+    const Polygon polygon = concave_notch();
+    Point from_right;
+    REQUIRE(polygon.first_intersection(Line(Point(50, 50), Point(-10, 50)), &from_right));
+    CHECK(from_right == Point(20, 50));
+
+    Point from_left;
+    REQUIRE(polygon.first_intersection(Line(Point(-10, 50), Point(50, 50)), &from_left));
+    CHECK(from_left == Point(0, 50));
+}
+
+TEST_CASE("Polygon first intersection preserves output on a miss", "[Polygon][PolygonGap][MathGap]")
+{
+    const Polygon polygon = concave_notch();
+    const Point sentinel(7, 9);
+    Point intersection = sentinel;
+
+    CHECK_FALSE(polygon.first_intersection(Line(Point(30, 50), Point(90, 50)), &intersection));
+    CHECK(intersection == sentinel);
+}
+
+TEST_CASE("Polygon intersections append every crossing", "[Polygon][PolygonGap][MathGap]")
+{
+    const Polygon polygon = concave_notch();
+    const Line line(Point(50, 50), Point(-10, 50));
+    const Point sentinel(-7, -9);
+    Points intersections{sentinel};
+
+    REQUIRE(polygon.intersections(line, &intersections));
+    REQUIRE(intersections.size() == 3);
+    CHECK(intersections.front() == sentinel);
+    CHECK(std::find(intersections.begin(), intersections.end(), Point(0, 50)) != intersections.end());
+    CHECK(std::find(intersections.begin(), intersections.end(), Point(20, 50)) != intersections.end());
+}
+
+TEST_CASE("Polygon intersection queries handle short inputs and misses", "[Polygon][PolygonGap][MathGap]")
+{
+    const Polygon polygon = concave_notch();
+    const Line miss(Point(30, 50), Point(90, 50));
+    const Point sentinel(7, 9);
+    Point first = sentinel;
+    Points all{sentinel};
+
+    CHECK_FALSE(polygon.first_intersection(miss, &first));
+    CHECK(first == sentinel);
+    CHECK_FALSE(polygon.intersections(miss, &all));
+    CHECK(all == Points{sentinel});
+
+    const Polygon empty;
+    const Polygon one_point{{0, 0}};
+    CHECK_FALSE(empty.first_intersection(miss, &first));
+    CHECK_FALSE(one_point.first_intersection(miss, &first));
+    CHECK_FALSE(empty.intersections(miss, &all));
+    CHECK_FALSE(one_point.intersections(miss, &all));
+    CHECK(first == sentinel);
+    CHECK(all == Points{sentinel});
+}
+
+TEST_CASE("Polygon overlap includes containment without boundary crossings", "[Polygon][PolygonGap][MathGap]")
+{
+    const Polygon outer{{0, 0}, {100, 0}, {100, 100}, {0, 100}};
+    const Polygon inner{{20, 20}, {30, 20}, {30, 30}, {20, 30}};
+    const Polygon disjoint{{120, 120}, {130, 120}, {130, 130}, {120, 130}};
+    const Polygon empty;
+
+    CHECK(inner.overlaps(Polygons{outer}));
+    CHECK_FALSE(outer.overlaps(Polygons{disjoint}));
+    CHECK_FALSE(empty.overlaps(Polygons{inner}));
+}
+
+} // namespace math_gap_contracts
+

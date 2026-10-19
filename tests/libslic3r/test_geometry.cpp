@@ -3,6 +3,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <Eigen/Geometry>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -758,3 +760,120 @@ TEST_CASE("Convex polygon intersection test prusa polygons", "[Geometry][Rotcali
         REQUIRE(res == ref);
     }
 }
+
+namespace math_gap_contracts {
+
+using Catch::Matchers::WithinAbs;
+
+void check_linear_and_offset(const Transform3d &actual, const Matrix3d &expected_linear, const Vec3d &expected_offset)
+{
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column)
+            CHECK_THAT(actual.linear()(row, column), WithinAbs(expected_linear(row, column), 1e-12));
+        CHECK_THAT(actual.translation()[row], WithinAbs(expected_offset[row], 1e-12));
+    }
+}
+
+TEST_CASE("Transformation SVD recognizes axis-aligned anisotropic scale", "[Geometry][GeometryGap][MathGap]")
+{
+    Transform3d matrix = Transform3d::Identity();
+    matrix.linear() = Vec3d(2., 1., 3.).asDiagonal();
+
+    const Geometry::TransformationSVD svd(matrix);
+    CHECK(svd.anisotropic_scale);
+    CHECK(svd.rotation_90_degrees);
+    CHECK_FALSE(svd.skew);
+    CHECK_FALSE(svd.mirror);
+
+    Transform3d uniform_matrix = Transform3d::Identity();
+    uniform_matrix.linear() = 2. * Matrix3d::Identity();
+    const Geometry::TransformationSVD uniform_svd(uniform_matrix);
+    CHECK_FALSE(uniform_svd.anisotropic_scale);
+    CHECK_FALSE(uniform_svd.skew);
+}
+
+TEST_CASE("Transformation SVD distinguishes rotated anisotropic skew", "[Geometry][GeometryGap][MathGap]")
+{
+    const Matrix3d axis_scale = Vec3d(2., 1., 1.).asDiagonal();
+    const Matrix3d rotation = Eigen::AngleAxisd(PI / 4., Vec3d::UnitZ()).toRotationMatrix();
+    Transform3d matrix = Transform3d::Identity();
+    matrix.linear() = axis_scale * rotation;
+
+    const Geometry::TransformationSVD svd(matrix);
+    CHECK(svd.anisotropic_scale);
+    CHECK_FALSE(svd.rotation_90_degrees);
+    CHECK(svd.skew);
+}
+
+TEST_CASE("Transformation vector mirror inputs normalize and preserve scale and offset", "[Geometry][GeometryGap][MathGap]")
+{
+    const Vec3d scale(2., 3., 4.);
+    const Vec3d expected_offset(5., -6., 7.);
+    Geometry::Transformation transform;
+    transform.set_scaling_factor(scale);
+    transform.set_offset(expected_offset);
+
+    transform.set_mirror(Vec3d(0., 2., -0.5));
+
+    Matrix3d expected_linear = scale.asDiagonal();
+    expected_linear(2, 2) = -expected_linear(2, 2);
+    check_linear_and_offset(transform.get_matrix(), expected_linear, expected_offset);
+    const Vec3d absolute_scale = transform.get_scaling_factor();
+    for (int axis = 0; axis < 3; ++axis)
+        CHECK_THAT(absolute_scale[axis], WithinAbs(scale[axis], 1e-12));
+    const Vec3d offset = transform.get_offset();
+    for (int axis = 0; axis < 3; ++axis)
+        CHECK_THAT(offset[axis], WithinAbs(expected_offset[axis], 1e-12));
+}
+
+TEST_CASE("Transformation axis mirror inputs normalize independently", "[Geometry][GeometryGap][MathGap]")
+{
+    Geometry::Transformation zero_x;
+    zero_x.set_mirror(X, 0.);
+    check_linear_and_offset(zero_x.get_matrix(), Matrix3d::Identity(), Vec3d::Zero());
+
+    Geometry::Transformation negative_y;
+    negative_y.set_mirror(Y, -2.);
+    check_linear_and_offset(negative_y.get_matrix(), Vec3d(1., -1., 1.).asDiagonal(), Vec3d::Zero());
+
+    Geometry::Transformation positive_z;
+    positive_z.set_mirror(Z, 0.5);
+    check_linear_and_offset(positive_z.get_matrix(), Matrix3d::Identity(), Vec3d::Zero());
+}
+
+TEST_CASE("Point nearest-index query accepts mutable point pointers", "[Geometry][GeometryGap][MathGap]")
+{
+    Point first(0, 0);
+    Point second(100, 0);
+    Point query(90, 0);
+    const PointPtrs candidates{&first, &second};
+
+    CHECK(query.nearest_point_index(candidates) == 1);
+    CHECK(query.nearest_point_index(PointPtrs{}) == -1);
+}
+
+TEST_CASE("Point3 nearest query uses XY distance and preserves query Z", "[Geometry][GeometryGap][MathGap]")
+{
+    const Point3 query(12, 1, 77);
+    const Points candidates{Point(0, 0), Point(10, 0)};
+    Point3 nearest(0, 0, -1);
+
+    REQUIRE(query.nearest_point(candidates, &nearest));
+    CHECK(nearest.x() == 10);
+    CHECK(nearest.y() == 0);
+    CHECK(nearest.z() == 77);
+}
+
+TEST_CASE("Point3 nearest query leaves output unchanged when there are no candidates", "[Geometry][GeometryGap][MathGap]")
+{
+    const Point3 query(12, 1, 77);
+    Point3 nearest(4, 5, 6);
+
+    CHECK_FALSE(query.nearest_point(Points{}, &nearest));
+    CHECK(nearest.x() == 4);
+    CHECK(nearest.y() == 5);
+    CHECK(nearest.z() == 6);
+}
+
+} // namespace math_gap_contracts
+
