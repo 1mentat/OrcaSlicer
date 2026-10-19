@@ -235,4 +235,3 @@ TEST_CASE("Polygon overlap includes containment without boundary crossings", "[P
 }
 
 } // namespace math_gap_contracts
-

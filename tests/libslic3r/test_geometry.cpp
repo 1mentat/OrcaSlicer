@@ -876,4 +876,3 @@ TEST_CASE("Point3 nearest query leaves output unchanged when there are no candid
 }
 
 } // namespace math_gap_contracts
-
