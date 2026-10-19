@@ -1361,21 +1361,23 @@ TEST_CASE("Placeholder parser resolves vector percentages against the selected p
     config.set_key_value("internal_bridge_speed", new ConfigOptionFloatsOrPercents({
         FloatOrPercent{ 150., true }, FloatOrPercent{ 50., true }
     }));
-    PlaceholderParser parser;
+    DynamicConfig external;
+    external.set_key_value("filament_map", new ConfigOptionInts({ 1, 0 }));
+    PlaceholderParser parser(&external);
     REQUIRE(parser.apply_config(config));
 
-    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(30., 1e-12));
-    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 1)), Catch::Matchers::WithinAbs(20., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(20., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 1)), Catch::Matchers::WithinAbs(30., 1e-12));
     CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[0]}")), Catch::Matchers::WithinAbs(30., 1e-12));
     CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[1]}")), Catch::Matchers::WithinAbs(20., 1e-12));
 
-    // Single-element child and parent vectors use element zero for any extruder.
+    // Single-element vectors use element zero even when the filament maps to extruder one.
     auto single_config = DynamicPrintConfig::full_print_config();
     single_config.set_key_value("bridge_speed", new ConfigOptionFloats({ 25. }));
     single_config.set_key_value("internal_bridge_speed",
                                 new ConfigOptionFloatsOrPercents({ FloatOrPercent{ 120., true } }));
-    PlaceholderParser single_parser;
+    PlaceholderParser single_parser(&external);
     REQUIRE(single_parser.apply_config(single_config));
-    CHECK_THAT(std::stod(single_parser.process("{bridge_speed}", 7)), Catch::Matchers::WithinAbs(25., 1e-12));
-    CHECK_THAT(std::stod(single_parser.process("{internal_bridge_speed}", 7)), Catch::Matchers::WithinAbs(30., 1e-12));
+    CHECK_THAT(std::stod(single_parser.process("{bridge_speed}", 0)), Catch::Matchers::WithinAbs(25., 1e-12));
+    CHECK_THAT(std::stod(single_parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(30., 1e-12));
 }
