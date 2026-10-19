@@ -11,6 +11,7 @@
 #include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "libslic3r/Line.hpp"
 #include "libslic3r/EdgeGrid.hpp"
 
 
@@ -201,4 +202,146 @@ TEST_CASE("EdgeGrid handles mixed polygons and polylines", "[EdgeGrid]")
     CHECK(grid.contours()[1].closed());
     CHECK(grid.contours()[0].num_segments() == 1);
     CHECK(grid.contours()[1].num_segments() == 4);
+}
+
+TEST_CASE("EdgeGrid reports convex vertex distance and segment status", "[EdgeGrid][EdgeGridGap]")
+{
+    const Polygon outer = rectangle(0, 0, 100, 100);
+    const Polygons contours{outer};
+    EdgeGrid::Grid grid;
+    grid.create(contours, 10);
+
+    const Point near_vertex(-3, -3);
+    const double expected = std::sqrt(18.0);
+    coordf_t edge_distance = 0.;
+    bool on_segment = true;
+    REQUIRE(grid.signed_distance_edges(near_vertex, 20, edge_distance, &on_segment));
+    CHECK_THAT(edge_distance, WithinAbs(expected, 1e-6));
+    CHECK_FALSE(on_segment);
+
+    const auto closest = grid.closest_point_signed_distance(near_vertex, 20);
+    REQUIRE(closest.valid());
+    REQUIRE(closest.contour_idx < grid.contours().size());
+    const auto &contour = grid.contours()[closest.contour_idx];
+    REQUIRE(closest.start_point_idx < contour.num_segments());
+    CHECK(closest.t >= 0.);
+    CHECK(closest.t <= 1.);
+    const Line segment = contour.get_segment(closest.start_point_idx);
+    const Vec2d nearest_point = segment.a.cast<double>() * (1. - closest.t) +
+                                segment.b.cast<double>() * closest.t;
+    CHECK_THAT(nearest_point(0), WithinAbs(0., 1e-6));
+    CHECK_THAT(nearest_point(1), WithinAbs(0., 1e-6));
+    CHECK_THAT(closest.distance, WithinAbs(expected, 1e-6));
+}
+
+TEST_CASE("EdgeGrid extrapolates positive SDF values beyond each grid boundary", "[EdgeGrid][EdgeGridGap]")
+{
+    const Polygon outer = rectangle(0, 0, 100, 100);
+    const Polygons contours{outer};
+    EdgeGrid::Grid grid;
+    grid.create(contours, 10);
+    grid.calculate_sdf();
+
+    const BoundingBox &box = grid.bbox();
+    const coord_t width = grid.resolution() * coord_t(grid.cols());
+    const coord_t height = grid.resolution() * coord_t(grid.rows());
+    const coord_t center_x = box.min(0) + width / 2;
+    const coord_t center_y = box.min(1) + height / 2;
+
+    const float left_boundary = grid.signed_distance_bilinear(Point(box.min(0), center_y));
+    const float left_outside = grid.signed_distance_bilinear(Point(box.min(0) - 10, center_y));
+    CHECK_THAT(left_outside - left_boundary, WithinAbs(10., 1e-5));
+
+    const float right_boundary = grid.signed_distance_bilinear(Point(box.min(0) + width - 1, center_y));
+    const float right_outside = grid.signed_distance_bilinear(Point(box.min(0) + width + 9, center_y));
+    CHECK_THAT(right_outside - right_boundary, WithinAbs(10., 1e-5));
+
+    const float bottom_boundary = grid.signed_distance_bilinear(Point(center_x, box.min(1)));
+    const float bottom_outside = grid.signed_distance_bilinear(Point(center_x, box.min(1) - 10));
+    CHECK_THAT(bottom_outside - bottom_boundary, WithinAbs(10., 1e-5));
+
+    const float top_boundary = grid.signed_distance_bilinear(Point(center_x, box.min(1) + height - 1));
+    const float top_outside = grid.signed_distance_bilinear(Point(center_x, box.min(1) + height + 9));
+    CHECK_THAT(top_outside - top_boundary, WithinAbs(10., 1e-5));
+}
+
+TEST_CASE("EdgeGrid ignores empty and degenerate contours across create overloads", "[EdgeGrid][EdgeGridGap]")
+{
+    const Polygon outer = rectangle(0, 0, 100, 100);
+    const Polygon empty;
+
+    EdgeGrid::Grid grid;
+    const Polygons polygons{empty, outer};
+    grid.create(polygons, 10);
+    REQUIRE(grid.contours().size() == 1);
+    CHECK(grid.contours().front().num_segments() == 4);
+
+    const std::vector<const Polygon *> polygon_ptrs{&empty, &outer};
+    grid.create(polygon_ptrs, 10);
+    REQUIRE(grid.contours().size() == 1);
+    CHECK(grid.contours().front().num_segments() == 4);
+
+    const std::vector<Points> points{{}, outer.points, {Point(1, 1)}};
+    grid.create(points, 10);
+    REQUIRE(grid.contours().size() == 1);
+    CHECK(grid.contours().front().num_segments() == 4);
+}
+
+TEST_CASE("EdgeGrid simplifies a concave contour into one nonempty region", "[EdgeGrid][EdgeGridGap]")
+{
+    const Polygon l_shape(Points{Point(0, 0), Point(60, 0), Point(60, 20),
+                                 Point(20, 20), Point(20, 60), Point(0, 60)});
+    const Polygons contours{l_shape};
+    EdgeGrid::Grid grid;
+    grid.create(contours, 10);
+    grid.calculate_sdf();
+
+    const Polygons simplified = grid.contours_simplified(1, false);
+    REQUIRE(simplified.size() == 1);
+    REQUIRE(simplified.front().is_valid());
+    CHECK(absolute_area(simplified) > 1000.);
+    CHECK(simplified.front().contains(Point(10, 10)));
+    CHECK(simplified.front().contains(Point(50, 10)));
+    CHECK(simplified.front().contains(Point(10, 50)));
+    CHECK_FALSE(simplified.front().contains(Point(50, 50)));
+}
+
+TEST_CASE("EdgeGrid keeps diagonally separated raster contours independent", "[EdgeGrid][EdgeGridGap]")
+{
+    const Polygon lower = rectangle(0, 0, 10, 10);
+    const Polygon upper = rectangle(20, 20, 30, 30);
+    const Polygons source{lower, upper};
+    EdgeGrid::Grid grid;
+    grid.create(source, 10);
+    grid.calculate_sdf();
+
+    const Polygons simplified = grid.contours_simplified(0, false);
+    REQUIRE(simplified.size() == 2);
+    for (const Polygon &polygon : simplified) {
+        CHECK(polygon.is_valid());
+        const Lines edges = polygon.lines();
+        bool self_intersects = false;
+        for (size_t i = 0; i < edges.size(); ++i) {
+            for (size_t j = i + 1; j < edges.size(); ++j) {
+                if (j == i + 1)
+                    continue;
+                if (i == 0 && j + 1 == edges.size())
+                    continue;
+                Point intersection;
+                if (edges[i].intersection(edges[j], &intersection))
+                    self_intersects = true;
+            }
+        }
+        CHECK_FALSE(self_intersects);
+    }
+    CHECK_FALSE(simplified[0].overlaps(Polygons{simplified[1]}));
+    CHECK(std::count_if(simplified.begin(), simplified.end(), [](const Polygon &polygon) {
+        return polygon.contains(Point(5, 5));
+    }) == 1);
+    CHECK(std::count_if(simplified.begin(), simplified.end(), [](const Polygon &polygon) {
+        return polygon.contains(Point(25, 25));
+    }) == 1);
+    CHECK(std::count_if(simplified.begin(), simplified.end(), [](const Polygon &polygon) {
+        return polygon.contains(Point(15, 15));
+    }) == 0);
 }
