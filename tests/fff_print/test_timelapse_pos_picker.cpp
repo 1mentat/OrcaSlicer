@@ -53,6 +53,17 @@ DynamicPrintConfig picker_config(double clearance_radius, double rod_height,
     return config;
 }
 
+DynamicPrintConfig smooth_height_gap_config(const std::vector<Vec2ds> &extruder_areas = {})
+{
+    DynamicPrintConfig config = picker_config(2., 2., extruder_areas, true);
+    config.set_deserialize_strict({
+        {"print_sequence", "by layer"},
+        {"timelapse_type", "1"},
+        {"extruder_printable_height", "200,205"},
+    });
+    return config;
+}
+
 void init_picker_print(Print &print, Model &model, std::vector<TriangleMesh> meshes,
                        const DynamicPrintConfig &config)
 {
@@ -85,9 +96,29 @@ TriangleMesh placed_cube(double x, double y, double height)
     return mesh;
 }
 
-Layer *context_layer(PrintObject *object, double print_z = 0.2)
+Layer *context_layer(PrintObject *object, double print_z = 0.2, int layer_id = 0)
 {
-    return object->add_layer(0, print_z, print_z, print_z / 2.);
+    return object->add_layer(layer_id, print_z, print_z, print_z / 2.);
+}
+
+PosPickCtx smooth_context(PrintObject *object, int layer_id, double print_z,
+                          int picture_extruder_id, int curr_extruder_id)
+{
+    PosPickCtx ctx;
+    ctx.curr_pos = Point(scale_(105.), scale_(105.));
+    ctx.curr_layer = context_layer(object, print_z, layer_id);
+    ctx.picture_extruder_id = picture_extruder_id;
+    ctx.curr_extruder_id = curr_extruder_id;
+    return ctx;
+}
+
+std::vector<Vec2ds> smooth_extruder_areas(double min_x, double max_x)
+{
+    const Vec2ds full_bed{Vec2d(0., 0.), Vec2d(220., 0.),
+                          Vec2d(220., 220.), Vec2d(0., 220.)};
+    const Vec2ds restricted{Vec2d(min_x, 180.), Vec2d(max_x, 180.),
+                            Vec2d(max_x, 210.), Vec2d(min_x, 210.)};
+    return {full_bed, restricted};
 }
 
 bool outside_xy_box(const Point &point, double min_x, double min_y,
@@ -199,6 +230,81 @@ TEST_CASE("By-object timelapse parks only when a rod-height corridor exists",
     CHECK(gap.y() >= 32);
     CHECK(gap.y() <= 220);
     CHECK(outside_xy_box(gap, 100., 100., 110., 110., 1.));
+}
+
+TEST_CASE("Smooth timelapse waits until the non-liftable picture extruder clears its height gap",
+          "[GCode][TimelapsePosPickerGap]")
+{
+    DynamicPrintConfig config = smooth_height_gap_config();
+    Print print;
+    Model model;
+    init_picker_print(print, model, {placed_cube(100., 100., 10.)}, config);
+    REQUIRE(print.objects().size() == 1);
+
+    TimelapsePosPicker picker;
+    picker.init(&print, Point(0, 0));
+    PosPickCtx ctx = smooth_context(print.get_object(0), 0, 4., 1, 0);
+    CHECK(picker.pick_pos(ctx) == DefaultTimelapsePos);
+
+    ctx.curr_layer = context_layer(print.get_object(0), 6., 1);
+    const Point safe = picker.pick_pos(ctx);
+    CHECK(safe != DefaultTimelapsePos);
+    CHECK(safe.x() >= 0);
+    CHECK(safe.x() <= 220);
+    CHECK(safe.y() >= 0);
+    CHECK(safe.y() <= 220);
+}
+
+TEST_CASE("Smooth timelapse accepts the exact height gap and keeps its all-layer position",
+          "[GCode][TimelapsePosPickerGap]")
+{
+    DynamicPrintConfig config = smooth_height_gap_config();
+    Print print;
+    Model model;
+    init_picker_print(print, model, {placed_cube(100., 100., 10.)}, config);
+    REQUIRE(print.objects().size() == 1);
+
+    TimelapsePosPicker picker;
+    picker.init(&print, Point(0, 0));
+    PosPickCtx ctx = smooth_context(print.get_object(0), 0, 5., 1, 0);
+    const Point at_gap = picker.pick_pos(ctx);
+    CHECK(at_gap != DefaultTimelapsePos);
+
+    ctx.curr_pos = Point(scale_(30.), scale_(40.));
+    ctx.curr_layer = context_layer(print.get_object(0), 6., 1);
+    CHECK(picker.pick_pos(ctx) == at_gap);
+}
+
+TEST_CASE("Smooth timelapse resets cached positions and does not wait for the liftable picture extruder",
+          "[GCode][TimelapsePosPickerGap]")
+{
+    TimelapsePosPicker picker;
+
+    DynamicPrintConfig first_config = smooth_height_gap_config(smooth_extruder_areas(10., 25.));
+    Print first_print;
+    Model first_model;
+    init_picker_print(first_print, first_model, {placed_cube(100., 100., 10.)}, first_config);
+    picker.init(&first_print, Point(0, 0));
+    PosPickCtx first_ctx = smooth_context(first_print.get_object(0), 0, 6., 1, 0);
+    const Point first_position = picker.pick_pos(first_ctx);
+    REQUIRE(first_position != DefaultTimelapsePos);
+    CHECK(first_position.x() >= 10);
+    CHECK(first_position.x() <= 25);
+    CHECK(first_position.y() >= 180);
+    CHECK(first_position.y() <= 210);
+
+    DynamicPrintConfig second_config = smooth_height_gap_config(smooth_extruder_areas(170., 185.));
+    Print second_print;
+    Model second_model;
+    init_picker_print(second_print, second_model, {placed_cube(100., 100., 10.)}, second_config);
+    picker.init(&second_print, Point(0, 0));
+    PosPickCtx second_ctx = smooth_context(second_print.get_object(0), 0, 4., 0, 1);
+    const Point second_position = picker.pick_pos(second_ctx);
+    CHECK(second_position != DefaultTimelapsePos);
+    CHECK(second_position.x() >= 170);
+    CHECK(second_position.x() <= 185);
+    CHECK(second_position.y() >= 180);
+    CHECK(second_position.y() <= 210);
 }
 
 TEST_CASE("Timelapse parking honors the selected extruder printable region",

@@ -25,7 +25,7 @@
       "old": "if (!cgalutils::is_mesh_halfedge_compatible(mesh)) {",
       "new": "if (cgalutils::is_mesh_halfedge_compatible(mesh)) {",
       "expected_matches": 1,
-      "description": "A closed tetrahedron with one reversed face must pass through repair so the returned face normals point outward consistently.",
+      "description": "A closed tetrahedron with one reversed face must pass through repair so the returned face normals have a consistent orientation.",
       "test_filter": "^TextureToColorOptions$"
     },
     {

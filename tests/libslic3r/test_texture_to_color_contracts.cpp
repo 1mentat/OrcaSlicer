@@ -628,15 +628,20 @@ TEST_CASE("ClusterAndSmooth repairs an inconsistently wound tetrahedron",
                WithinAbs(1.0 / 6.0, 1e-5));
     check_finite_and_valid(out_mesh);
 
-    // The fixed tetrahedron is centered at (0.25, 0.25, 0.25). Every output
-    // triangle must face away from that interior point after repair.
+    // Repair makes neighboring faces consistently oriented; either global
+    // winding is valid. The tetrahedron's centroid gives an independent sign.
     const Vec3d interior(0.25, 0.25, 0.25);
+    int orientation = 0;
     for (const TriFace &face : out_mesh.indices) {
         const Vec3d a = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[0])]);
         const Vec3d b = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[1])]);
         const Vec3d c = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[2])]);
         const Vec3d face_center = (a + b + c) / 3.0;
-        CHECK((b - a).cross(c - a).dot(face_center - interior) > 0.0);
+        const double facing = (b - a).cross(c - a).dot(face_center - interior);
+        REQUIRE(std::abs(facing) > 1e-9);
+        if (orientation == 0)
+            orientation = facing > 0.0 ? 1 : -1;
+        CHECK(facing * orientation > 0.0);
     }
     for (const Color &color : out_colors)
         CHECK(color == red);

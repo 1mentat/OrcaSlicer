@@ -688,6 +688,10 @@ fixtures. Build `fff_print_timelapse_pos_picker_tests` for focused feedback;
 the same cases belong to the canonical FFF suite. Its mutation probes are in
 `timelapse_pos_picker.json`.
 
+The same tag checks smooth snapshots below, at, and above a dual-nozzle height
+gap, stable all-layer positions, and reinitialization with a different printable
+region. These boundary probes are in `timelapse_smooth_height.json`.
+
 `[ToolOrderingDontCareSeed]` checks discovery of the first physical tool,
 inheritance across placeholder layers, and the no-tool case through public
 ToolOrdering methods. Its probes are in `toolordering_dontcare_seed.json`;
@@ -783,7 +787,7 @@ on a closed mesh. Its mutations are in `texture_to_color_extended.json`.
 
 `[TextureToColorOptions]` checks repair decisions, declined repair callbacks,
 automatic subdivision thresholds, and adaptive vertex-color palette limits.
-Geometry oracles preserve volume, outward orientation, and signed area. Its
+Geometry oracles preserve volume, consistent orientation, and signed area. Its
 mutations are in `texture_to_color_options.json`.
 
 `[TextureToColorPublic]` checks textured tetrahedron conversion and cancellation

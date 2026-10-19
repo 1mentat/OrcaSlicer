@@ -3,6 +3,15 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
+    "silent_mode": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[SilentModeVariance]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public G-code importer processes the same timed extrusion with silent_mode explicitly false and true in Orca headers; both retain equal positive normal time and zero stealth time because the legacy-key filter discards this obsolete registered option. Both controls passed in the accepted native full run."
+    },
     "ooze_prevention": {
       "test": "tests/fff_print/test_gcodeprocessor.cpp",
       "tag": "[GCodeProcessor]",
