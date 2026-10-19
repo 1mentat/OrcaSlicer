@@ -22,6 +22,15 @@ if "--build" in a:
     pattern = os.environ.get("LLVM_PROFILE_FILE", "")
     if pattern:
         pathlib.Path(pattern.replace("%m", "build-fake")).write_bytes(b"build-profile")
+    if mode == "creates-binary":
+        binary = pathlib.Path(os.environ["FAKE_BINARY"])
+        binary.write_text(pathlib.Path(__file__).read_text())
+        binary.chmod(0o755)
+    elif mode in {"escaped-built-binary", "escaped-replaced-binary"}:
+        binary = pathlib.Path(os.environ["FAKE_BINARY"])
+        if binary.exists() or binary.is_symlink():
+            binary.unlink()
+        binary.symlink_to(os.environ["FAKE_ESCAPE_TARGET"])
     if mode == "timeout-build":
         code = "import os,time,pathlib; time.sleep(.7); pathlib.Path(os.environ['FAKE_MARKER']).write_text('survived')"
         subprocess.Popen([sys.executable, "-c", code])
@@ -73,8 +82,13 @@ class ModuleFeedbackTests(unittest.TestCase):
         fake.write_text(FAKE.replace("{python}", sys.executable))
         fake.chmod(0o755)
         binary = build / "module-tests"
-        binary.write_text(FAKE.replace("{python}", sys.executable))
-        binary.chmod(0o755)
+        fake_script = FAKE.replace("{python}", sys.executable)
+        if mode not in {"creates-binary", "missing-built-binary", "escaped-built-binary"}:
+            binary.write_text(fake_script)
+            binary.chmod(0o755)
+        escape_target = root / "outside-module-tests"
+        escape_target.write_text(fake_script)
+        escape_target.chmod(0o755)
         xml_file = "tests/other.cpp" if bad_source else "tests/module_tests.cpp"
         inventory = (f'<MatchingTests>'
                      f'<TestCase><Name>Case A</Name><Tags>[ModuleTag]</Tags><SourceInfo><File>{xml_file}</File><Line>1</Line></SourceInfo></TestCase>'
@@ -89,7 +103,8 @@ class ModuleFeedbackTests(unittest.TestCase):
         marker = base / "late-child-marker"
         env = os.environ.copy()
         env.update({"FAKE_MODE": mode, "FAKE_NAMES": json.dumps(["Case A", "Case B"]),
-                    "FAKE_INVENTORY": inventory, "FAKE_MARKER": str(marker)})
+                    "FAKE_INVENTORY": inventory, "FAKE_MARKER": str(marker),
+                    "FAKE_BINARY": str(binary), "FAKE_ESCAPE_TARGET": str(escape_target)})
         env["PYTHONPATH"] = os.pathsep.join(
             item for item in (str(REPO_ROOT / "scripts"), env.get("PYTHONPATH", "")) if item)
         args = [sys.executable, str(CLI), "--root", str(root), "--build", str(build),
@@ -111,6 +126,8 @@ class ModuleFeedbackTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         receipt = json.loads((out / "run.json").read_text())
         self.assertEqual(receipt["status"], "passed")
+        self.assertTrue(receipt["binary_exists_before_build"])
+        self.assertIn("elf_before_build", receipt["hashes_before"])
         self.assertEqual([s["name"] for s in receipt["stages"]],
                          ["build", "inventory", "test", "profile_merge", "coverage_report", "coverage_lines"])
         self.assertEqual(len(receipt["inventory_names"]), 2)
@@ -127,6 +144,52 @@ class ModuleFeedbackTests(unittest.TestCase):
         self.assertTrue(all("module-profiles" in arg for arg in merge_argv[5:]))
         self.assertTrue(list((out / "build-profiles").glob("*.profraw")))
         self.assertTrue(list((out / "inventory-profiles").glob("*.profraw")))
+
+    def test_build_can_create_missing_test_binary_before_inventory(self):
+        tmp, result, out, _ = self.invoke(mode="creates-binary")
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertFalse(receipt["binary_exists_before_build"])
+        self.assertNotIn("elf_before_build", receipt["hashes_before"])
+        self.assertEqual(receipt["status"], "passed")
+        self.assertEqual([stage["name"] for stage in receipt["stages"]],
+                         ["build", "inventory", "test", "profile_merge", "coverage_report", "coverage_lines"])
+
+    def test_successful_build_without_binary_fails_before_inventory(self):
+        tmp, result, out, _ = self.invoke(mode="missing-built-binary")
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertFalse(receipt["binary_exists_before_build"])
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("build did not produce test binary", receipt["error"])
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build"])
+        self.assertFalse((out / "inventory.stdout.xml").exists())
+
+    def test_built_binary_symlink_escape_fails_before_inventory(self):
+        tmp, result, out, _ = self.invoke(mode="escaped-built-binary")
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertFalse(receipt["binary_exists_before_build"])
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("outside the build tree", receipt["error"])
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build"])
+        self.assertFalse((out / "inventory.stdout.xml").exists())
+
+    def test_preexisting_binary_replaced_with_symlink_escape_fails_before_inventory(self):
+        tmp, result, out, _ = self.invoke(mode="escaped-replaced-binary")
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertTrue(receipt["binary_exists_before_build"])
+        self.assertIn("elf_before_build", receipt["hashes_before"])
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("outside the build tree", receipt["error"])
+        self.assertNotIn("elf_after_failure_sha256", receipt)
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build"])
+        self.assertFalse((out / "inventory.stdout.xml").exists())
 
     def test_wrong_inventory_count_stops_before_tests(self):
         tmp, result, out, _ = self.invoke(expected=3)

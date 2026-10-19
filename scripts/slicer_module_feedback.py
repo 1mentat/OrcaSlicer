@@ -160,7 +160,16 @@ def run(args: argparse.Namespace) -> int:
     build = build_arg.resolve(strict=True)  # resolves the canonical build symlink
     if not out.parent.is_dir() or not under(out.parent, build):
         raise WorkflowError("output parent must already exist inside the resolved build tree")
-    binary = Path(args.binary).resolve(strict=True)
+    binary_arg = Path(os.path.abspath(args.binary))
+    binary_existed_before_build = os.path.lexists(binary_arg)
+    try:
+        binary = binary_arg.resolve(strict=binary_existed_before_build)
+    except OSError as exc:
+        raise WorkflowError(f"cannot resolve test binary path before build: {binary_arg}: {exc}") from exc
+    try:
+        binary.relative_to(build)
+    except ValueError as exc:
+        raise WorkflowError("test binary must resolve inside the build tree") from exc
     tag = args.tag.strip("[]")
     if not tag or "]" in tag or "[" in tag or args.expected_cases < 1:
         raise WorkflowError("tag must be one plain Catch2 tag and expected-cases must be positive")
@@ -168,8 +177,8 @@ def run(args: argparse.Namespace) -> int:
     prod_source = Path(args.production_source)
     test_source = (root / test_source).resolve(strict=True) if not test_source.is_absolute() else test_source.resolve(strict=True)
     prod_source = (root / prod_source).resolve(strict=True) if not prod_source.is_absolute() else prod_source.resolve(strict=True)
-    if not under(test_source, root) or not under(prod_source, root) or not under(binary, build):
-        raise WorkflowError("test/production source must be inside root and binary inside resolved build")
+    if not under(test_source, root) or not under(prod_source, root):
+        raise WorkflowError("test/production source must be inside root")
     compile_commands = Path(args.compile_commands) if args.compile_commands else build / "compile_commands.json"
     if not compile_commands.is_absolute():
         compile_commands = root / compile_commands
@@ -181,7 +190,7 @@ def run(args: argparse.Namespace) -> int:
         if not tool.is_file() or not os.access(tool, os.X_OK):
             raise WorkflowError(f"tool is not an executable file: {tool}")
         setattr(args, key, str(tool))
-    if not binary.is_file() or not os.access(binary, os.X_OK):
+    if binary_existed_before_build and (not binary.is_file() or not os.access(binary, os.X_OK)):
         raise WorkflowError(f"test binary is not executable: {binary}")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise WorkflowError("timeout must be finite and positive")
@@ -189,7 +198,9 @@ def run(args: argparse.Namespace) -> int:
     if tracked_before["tracked_status"]:
         raise WorkflowError("tracked checkout is dirty before the workflow")
     files = {"test_source": test_source, "production_source": prod_source,
-             "compile_commands": compile_commands, "elf_before_build": binary}
+             "compile_commands": compile_commands}
+    if binary_existed_before_build:
+        files["elf_before_build"] = binary
     hashes_before = file_snapshot(files)
     out.mkdir()
     profiles = out / "module-profiles"
@@ -200,7 +211,8 @@ def run(args: argparse.Namespace) -> int:
     inventory_profiles.mkdir()
     receipt = {"status": "running", "started_utc": utc_now(), "arguments": vars(args),
                "root": str(root), "build_arg": str(build_arg), "build_resolved": str(build),
-               "binary": str(binary), "tracked_before": tracked_before,
+               "binary": str(binary), "binary_exists_before_build": binary_existed_before_build,
+               "tracked_before": tracked_before,
                "hashes_before": hashes_before, "stages": [],
                "coverage_scope": "production_source_only", "global_threshold_claim": False}
     receipt_path = out / "run.json"
@@ -246,6 +258,15 @@ def run(args: argparse.Namespace) -> int:
     try:
         stage("build", [args.cmake, "--build", str(build), "--config", "Release", "--target", args.target, "--parallel", "4"],
               out / "build.log", stage_env=build_env)
+        try:
+            binary = binary_arg.resolve(strict=True)
+        except OSError as exc:
+            raise WorkflowError(f"build did not produce test binary: {binary_arg}") from exc
+        if not under(binary, build):
+            raise WorkflowError("built test binary resolves outside the build tree")
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise WorkflowError(f"build did not produce an executable test binary: {binary}")
+        receipt["binary"] = str(binary)
         hashes_after_build = {"elf": sha256(binary)}
         receipt["elf_after_build_sha256"] = hashes_after_build["elf"]
         save_receipt(receipt_path, receipt)
@@ -312,7 +333,8 @@ def run(args: argparse.Namespace) -> int:
             receipt["hashes_after_failure"] = file_snapshot({"test_source": test_source,
                                                                "production_source": prod_source,
                                                                "compile_commands": compile_commands})
-            receipt["elf_after_failure_sha256"] = sha256(binary)
+            if binary.is_file() and under(binary, build):
+                receipt["elf_after_failure_sha256"] = sha256(binary)
             receipt["profiles_after_failure"] = [
                 {"path": str(p), "sha256": sha256(p), "size": p.stat().st_size}
                 for p in sorted(profiles.glob("*.profraw"))]
