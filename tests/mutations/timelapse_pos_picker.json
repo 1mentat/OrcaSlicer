@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "description": "Public timelapse clearance and parking geometry contracts.",
+  "mutants": [
+    {
+      "id": "timelapse-x0-clearance-radius-ignored",
+      "path": "src/libslic3r/GCode/TimelapsePosPicker.cpp",
+      "old": "radius = scale_(print->config().extruder_clearance_radius.value);",
+      "new": "radius = 0;",
+      "test_filter": "^TimelapsePosPickerGap$",
+      "expected_matches": 1,
+      "description": "The same Y=14 point is blocked at 6 mm configured clearance and clear at 2 mm; ignoring expansion makes the blocked assertion fail."
+    },
+    {
+      "id": "timelapse-x0-upper-y-bound-ignored",
+      "path": "src/libslic3r/GCode/TimelapsePosPicker.cpp",
+      "old": "if (curr_pos_in_plate.y() < bbox.min.y() || curr_pos_in_plate.y() > bbox.max.y()) continue;",
+      "new": "if (curr_pos_in_plate.y() < bbox.min.y()) continue;",
+      "test_filter": "^TimelapsePosPickerGap$",
+      "expected_matches": 1,
+      "description": "The positive control above the expanded obstacle must remain clear; omitting the upper-Y rejection incorrectly blocks X0."
+    },
+    {
+      "id": "timelapse-rod-height-threshold-exclusive",
+      "path": "src/libslic3r/GCode/TimelapsePosPicker.cpp",
+      "old": "if(bbox.max.z() >= rod_limit_height)",
+      "new": "if(bbox.max.z() > rod_limit_height)",
+      "test_filter": "^TimelapsePosPickerGap$",
+      "expected_matches": 1,
+      "description": "A 2 mm object at current print_z 1 mm exactly meets the 1 mm rod threshold; the inclusive comparison must add it and force the no-corridor fallback."
+    },
+    {
+      "id": "timelapse-extruder-printable-area-not-applied",
+      "path": "src/libslic3r/GCode/TimelapsePosPicker.cpp",
+      "old": "if (idx < config.extruder_printable_area.size()) {",
+      "new": "if (false) {",
+      "test_filter": "^TimelapsePosPickerGap$",
+      "expected_matches": 1,
+      "description": "The second extruder has only the narrow x=[170,185] mm strip; the selected parking point must remain within those configured bounds."
+    }
+  ]
+}

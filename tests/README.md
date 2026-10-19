@@ -681,6 +681,13 @@ zero/one/two support-wall settings through public slicing. It checks closed
 support loops with an explicit rectilinear base pattern; its mutations are in
 `tree_support_interactions.json`.
 
+`[TimelapsePosPickerGap]` checks X0 clearance with two configured radii,
+the inclusive rod-height collision boundary, and parking inside the selected
+extruder's printable region. It uses public picker calls and validated Print
+fixtures. Build `fff_print_timelapse_pos_picker_tests` for focused feedback;
+the same cases belong to the canonical FFF suite. Its mutation probes are in
+`timelapse_pos_picker.json`.
+
 `[MultimaterialWipe]` checks direct WipeTower2 purge matrices, wall geometry,
 ramming, cooling, stamping, loading, and delay commands. Independent cooling
 variants change one setting at a time, with feedrates read from executable

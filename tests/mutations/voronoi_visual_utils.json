@@ -11,13 +11,13 @@
       "description": "Dropping the squared tolerance permits chords whose analytic parabola deviation exceeds the requested maximum."
     },
     {
-      "id": "voronoi-parabola-height-doubled",
+      "id": "voronoi-parabola-output-y-doubled",
       "path": "src/libslic3r/Geometry/VoronoiVisualUtils.hpp",
-      "old": "return ((x - a) * (x - a) + b * b) / (b + b);",
-      "new": "return ((x - a) * (x - a) + b * b) / b;",
-      "test_filter": "^VoronoiVisualUtils$",
+      "old": "CT inter_y = (segm_vec_x * new_y + segm_vec_y * new_x) /\n            sqr_segment_length + cast(y(low(segment)));",
+      "new": "CT inter_y = (2 * segm_vec_x * new_y + segm_vec_y * new_x) /\n            sqr_segment_length + cast(y(low(segment)));",
       "expected_matches": 1,
-      "description": "Changing the parabola denominator moves emitted points off the focus/directrix equidistance locus."
+      "description": "The horizontal directrix fixture has analytically positive parabola heights. Every inserted sample is serialized through inter_y and the test independently checks y=3+(x-5)^2/12 within 1e-9; doubling only emitted Y violates that equation while keeping subdivision control and termination unchanged.",
+      "test_filter": "^VoronoiVisualUtils$"
     }
   ]
 }
