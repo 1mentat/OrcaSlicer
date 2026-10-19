@@ -2669,3 +2669,280 @@ TEST_CASE("Splitting a multi-volume model copies per-volume facet state and conf
 }
 
 } // namespace model_split_paint_contracts
+
+namespace model_gap_contracts {
+using namespace Slic3r;
+
+namespace {
+
+struct FacetAreaCentroid {
+    double area { 0. };
+    Vec3d  centroid { Vec3d::Zero() };
+};
+
+FacetAreaCentroid facet_area_centroid(const indexed_triangle_set &its)
+{
+    FacetAreaCentroid result;
+    for (const Vec3i32 &face : its.indices) {
+        const Vec3d a = its.vertices[face[0]].cast<double>();
+        const Vec3d b = its.vertices[face[1]].cast<double>();
+        const Vec3d c = its.vertices[face[2]].cast<double>();
+        const double area = (b - a).cross(c - a).norm() * 0.5;
+        result.area += area;
+        result.centroid += area * (a + b + c) / 3.;
+    }
+    if (result.area > 0.)
+        result.centroid /= result.area;
+    return result;
+}
+
+double triangle_area(const std::array<Vec3f, 3> &points)
+{
+    return (points[1] - points[0]).cross(points[2] - points[0]).norm() * 0.5;
+}
+
+void check_bbox(const BoundingBoxf3 &actual, const BoundingBoxf3 &expected, double epsilon = 1e-5)
+{
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK_THAT(actual.min[axis], Catch::Matchers::WithinAbs(expected.min[axis], epsilon));
+        CHECK_THAT(actual.max[axis], Catch::Matchers::WithinAbs(expected.max[axis], epsilon));
+    }
+}
+
+} // namespace
+
+TEST_CASE("OBJ vertex colors assign semantic regions to filament facets", "[Model][ModelGapContracts]")
+{
+    auto check_triangle = [](const std::array<Vec3f, 3> &points, const std::array<unsigned char, 3> &colors) {
+        CAPTURE(colors[0], colors[1], colors[2]);
+        indexed_triangle_set its;
+        its.vertices.assign(points.begin(), points.end());
+        its.indices.emplace_back(0, 1, 2);
+        std::vector<unsigned char> vertex_colors(colors.begin(), colors.end());
+
+        Model model;
+        ModelObject *object = model.add_object();
+        REQUIRE(object != nullptr);
+        ModelVolume *volume = object->add_volume(TriangleMesh(std::move(its)), ModelVolumeType::MODEL_PART, false);
+        REQUIRE(volume != nullptr);
+        REQUIRE(Model::obj_import_vertex_color_deal(vertex_colors, 1, &model));
+        CHECK(object->config.extruder() == 1);
+        CHECK(volume->config.extruder() == 1);
+
+        if (colors[0] <= 1 && colors[1] <= 1 && colors[2] <= 1) {
+            CHECK_FALSE(volume->is_mm_painted());
+            CHECK(volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder2).indices.empty());
+            return;
+        }
+
+        const double source_area = triangle_area(points);
+        auto state = [&](EnforcerBlockerType type) {
+            return facet_area_centroid(volume->mmu_segmentation_facets.get_facets(*volume, type));
+        };
+        auto check_matches_corner = [&](unsigned char color, size_t corner) {
+            const auto color_state = state(static_cast<EnforcerBlockerType>(color));
+            REQUIRE(color_state.area > 0.);
+            const double own_distance = (color_state.centroid - points[corner].cast<double>()).norm();
+            for (size_t other = 0; other < 3; ++other)
+                if (other != corner)
+                    CHECK(own_distance < (color_state.centroid - points[other].cast<double>()).norm());
+        };
+
+        if (colors[0] == colors[1] && colors[1] == colors[2]) {
+            const auto colored = state(static_cast<EnforcerBlockerType>(colors[0]));
+            CHECK_THAT(colored.area, Catch::Matchers::WithinAbs(source_area, 1e-5));
+            for (int extruder = 2; extruder <= 4; ++extruder)
+                if (extruder != colors[0])
+                    CHECK_THAT(state(static_cast<EnforcerBlockerType>(extruder)).area,
+                               Catch::Matchers::WithinAbs(0., 1e-9));
+            return;
+        }
+
+        if (colors[0] != colors[1] && colors[1] != colors[2] && colors[0] != colors[2]) {
+            FacetAreaCentroid total;
+            for (size_t corner = 0; corner < 3; ++corner) {
+                const auto color_state = state(static_cast<EnforcerBlockerType>(colors[corner]));
+                REQUIRE(color_state.area > 0.);
+                total.area += color_state.area;
+                check_matches_corner(colors[corner], corner);
+            }
+            CHECK_THAT(total.area, Catch::Matchers::WithinAbs(source_area, 1e-5));
+            return;
+        }
+
+        size_t singleton_corner = 0;
+        if (colors[0] == colors[1]) singleton_corner = 2;
+        else if (colors[1] == colors[2]) singleton_corner = 0;
+        else singleton_corner = 1;
+        unsigned char singleton_color = colors[singleton_corner];
+        unsigned char repeated_color = colors[(singleton_corner + 1) % 3];
+        const auto singleton = state(static_cast<EnforcerBlockerType>(singleton_color));
+        const auto repeated = state(static_cast<EnforcerBlockerType>(repeated_color));
+        REQUIRE(singleton.area > 0.);
+        REQUIRE(repeated.area > 0.);
+        check_matches_corner(singleton_color, singleton_corner);
+        CHECK(singleton.area < repeated.area);
+        CHECK_THAT(singleton.area + repeated.area, Catch::Matchers::WithinAbs(source_area, 1e-5));
+        CHECK_THAT(state(EnforcerBlockerType::Extruder4).area, Catch::Matchers::WithinAbs(0., 1e-9));
+    };
+
+    const std::array<Vec3f, 3> acute_triangle{ Vec3f(0.f, 0.f, 0.f), Vec3f(2.f, 0.f, 0.f), Vec3f(0.4f, 1.4f, 0.f) };
+    check_triangle(acute_triangle, { 1, 1, 1 });
+    check_triangle(acute_triangle, { 0, 0, 0 });
+    check_triangle(acute_triangle, { 4, 4, 4 });
+    check_triangle(acute_triangle, { 3, 2, 2 });
+    check_triangle(acute_triangle, { 2, 3, 2 });
+    check_triangle(acute_triangle, { 2, 2, 3 });
+
+    const std::array<std::array<Vec3f, 3>, 3> distinct_shapes{{
+        { Vec3f(0.f, 0.f, 0.f), Vec3f(2.f, 0.f, 0.f), Vec3f(-0.2f, 1.5f, 0.f) },
+        { Vec3f(0.f, 0.f, 0.f), Vec3f(2.f, 0.f, 0.f), Vec3f(2.2f, 1.5f, 0.f) },
+        { Vec3f(0.f, 0.f, 0.f), Vec3f(2.f, 0.f, 0.f), Vec3f(1.f, -0.8f, 0.f) }
+    }};
+    // The three fixtures put the obtuse corner at indices 0, 1, and 2 respectively.
+    for (const auto &shape : distinct_shapes)
+        check_triangle(shape, { 2, 3, 4 });
+}
+
+TEST_CASE("Volume affine transformation updates mesh and convex hull geometry", "[Model][ModelGapContracts]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(make_cube(2., 4., 6.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+
+    const BoundingBoxf3 source_bounds = volume->mesh().bounding_box();
+    const ObjectID old_id = volume->id();
+    Transform3d affine = Transform3d::Identity();
+    affine.linear() << 1.5, 0.25, 0.0,
+                       0.0, 2.0, 0.5,
+                       0.0, 0.0, 1.25;
+    affine.translation() = Vec3d(3., -4., 2.);
+    const BoundingBoxf3 expected_bounds = source_bounds.transformed(affine);
+
+    volume->transform_this_mesh(affine, false);
+
+    check_bbox(volume->mesh().bounding_box(), expected_bounds);
+    check_bbox(volume->get_convex_hull().bounding_box(), expected_bounds);
+    CHECK(volume->id() != old_id);
+}
+
+TEST_CASE("Direct meter conversion scales the volume and clears its offset", "[Model][ModelGapContracts]")
+{
+    Model model;
+    CHECK_FALSE(model.looks_like_saved_in_meters());
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(make_cube(0.1, 0.2, 0.3), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+    volume->set_offset(Vec3d(1., 2., 3.));
+    CHECK(model.looks_like_saved_in_meters());
+    const BoundingBoxf3 source_bounds = volume->mesh().bounding_box();
+    Transform3d meter_scale = Transform3d::Identity();
+    meter_scale.scale(Vec3d::Constant(1000.));
+    const BoundingBoxf3 expected_bounds = source_bounds.transformed(meter_scale);
+
+    volume->convert_from_meters();
+
+    check_bbox(volume->mesh().bounding_box(), expected_bounds, 1e-4);
+    check_bbox(volume->get_convex_hull().bounding_box(), expected_bounds, 1e-4);
+    check_vec3d(volume->get_offset(), Vec3d::Zero(), 1e-12);
+    CHECK(volume->source.is_converted_from_meters);
+    CHECK_FALSE(volume->source.is_converted_from_inches);
+}
+
+TEST_CASE("Model fuzzy-skin query follows painted volume state", "[Model][ModelGapContracts]")
+{
+    Model model;
+    ModelObject *plain = model.add_object();
+    ModelObject *painted = model.add_object();
+    REQUIRE(plain != nullptr);
+    REQUIRE(painted != nullptr);
+    plain->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *painted_volume = painted->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(painted_volume != nullptr);
+
+    CHECK_FALSE(model.is_fuzzy_skin_painted());
+    TriangleSelector selector(painted_volume->mesh());
+    selector.set_facet(0, EnforcerBlockerType::FUZZY_SKIN);
+    REQUIRE(painted_volume->fuzzy_skin_facets.set(selector));
+    CHECK(painted->is_fuzzy_skin_painted());
+    CHECK(model.is_fuzzy_skin_painted());
+
+    painted_volume->reset_extra_facets();
+    CHECK_FALSE(painted->is_fuzzy_skin_painted());
+    CHECK_FALSE(model.is_fuzzy_skin_painted());
+}
+
+TEST_CASE("Cut connector query distinguishes connector volumes", "[Model][ModelGapContracts]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    object->cut_id = CutObjectBase(ObjectID(91001), 1, 0);
+    ModelVolume *part = object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *connector = object->add_volume(make_cube(1., 1., 1.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(part != nullptr);
+    REQUIRE(connector != nullptr);
+
+    CHECK_FALSE(object->has_connectors());
+    connector->cut_info.is_connector = true;
+    CHECK(object->has_connectors());
+    connector->cut_info.is_connector = false;
+    part->cut_info.is_connector = true;
+    CHECK(object->has_connectors());
+    part->cut_info.is_connector = false;
+    CHECK_FALSE(object->has_connectors());
+}
+
+TEST_CASE("OBJ face colors leave unpainted facets in the default state", "[Model][ModelGapContracts]")
+{
+    TriangleMesh source = make_cube(2., 2., 2.);
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(source, ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+    std::vector<unsigned char> face_colors(source.its.indices.size(), 0);
+    std::vector<Vec3d> expected_painted_centroids;
+    double expected_painted_area = 0.;
+    for (size_t face_idx = 0; face_idx < face_colors.size(); face_idx += 2) {
+        face_colors[face_idx] = 2;
+        const Vec3i32 face = source.its.indices[face_idx];
+        const Vec3d a = source.its.vertices[face[0]].cast<double>();
+        const Vec3d b = source.its.vertices[face[1]].cast<double>();
+        const Vec3d c = source.its.vertices[face[2]].cast<double>();
+        expected_painted_area += (b - a).cross(c - a).norm() * 0.5;
+        expected_painted_centroids.emplace_back((a + b + c) / 3.);
+    }
+
+    REQUIRE(Model::obj_import_face_color_deal(face_colors, 1, &model));
+
+    const indexed_triangle_set painted_facets =
+        volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder2);
+    const auto painted = facet_area_centroid(painted_facets);
+    CHECK_THAT(painted.area, Catch::Matchers::WithinAbs(expected_painted_area, 1e-5));
+    CHECK(painted.area < facet_area_centroid(source.its).area);
+    std::vector<bool> matched(expected_painted_centroids.size(), false);
+    for (const Vec3i32 &face : painted_facets.indices) {
+        const Vec3d a = painted_facets.vertices[face[0]].cast<double>();
+        const Vec3d b = painted_facets.vertices[face[1]].cast<double>();
+        const Vec3d c = painted_facets.vertices[face[2]].cast<double>();
+        const Vec3d center = (a + b + c) / 3.;
+        size_t matched_index = expected_painted_centroids.size();
+        for (size_t i = 0; i < expected_painted_centroids.size(); ++i)
+            if ((center - expected_painted_centroids[i]).norm() < 1e-5) {
+                matched_index = i;
+                break;
+            }
+        REQUIRE(matched_index < expected_painted_centroids.size());
+        CHECK_FALSE(matched[matched_index]);
+        matched[matched_index] = true;
+    }
+    CHECK(std::all_of(matched.begin(), matched.end(), [](bool value) { return value; }));
+    CHECK(object->config.extruder() == 1);
+    CHECK(volume->config.extruder() == 1);
+}
+
+} // namespace model_gap_contracts

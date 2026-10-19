@@ -303,6 +303,11 @@ volumes through public model splitting. Geometry, painting categories, per-volum
 configuration, and source metadata must remain paired after the split. Its
 mutations are in `model_split_painted.json`.
 
+`[ModelGapContracts]` checks OBJ face and vertex painting through reconstructed
+facet geometry, affine mesh and convex-hull transforms, direct meter conversion,
+fuzzy-paint aggregation, and cut-connector detection. Its mutation probes are in
+`model_gap_contracts.json`.
+
 `[TimelapseAllLayers]` checks smooth timelapse through public BBL G-code export
 with objects of different heights. Snapshot positions must stay fixed across
 layers, inside the bed, and clear of both object projections with the configured

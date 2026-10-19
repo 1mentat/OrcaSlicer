@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "description": "Public Model facet-import and direct geometry contracts. Mutation outcomes must be validated against the exact ModelGapContracts baseline before credit.",
+  "mutants": [
+    {
+      "id": "model-obj-vertex-color-dominant-corner-assignment",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "set_triangle_from_string(i, result0 + result1 + result2 + (result1 + result2 + \"5\" )+ \"3\")",
+      "new": "set_triangle_from_string(i, result1 + result1 + result2 + (result1 + result2 + \"5\" )+ \"3\")",
+      "expected_matches": 1,
+      "test_filter": "^ModelGapContracts$",
+      "description": "Assign the dominant-angle corner to the next filament; reconstructed facets must retain every input color at its geometric corner."
+    },
+    {
+      "id": "model-volume-transform-convex-hull-update-omitted",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "    convex_hull.transform(mesh_trafo, fix_left_handed);",
+      "new": "    // Mutation probe: omit the affine transform of the cached convex hull.",
+      "expected_matches": 1,
+      "test_filter": "^ModelGapContracts$",
+      "description": "Transform the volume mesh while leaving the cached convex hull unchanged; both public geometry bounds must follow the affine transform."
+    },
+    {
+      "id": "model-volume-meters-offset-reset-omitted",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "void ModelVolume::convert_from_meters()\n{\n    assert(! this->source.is_converted_from_inches);\n    this->scale_geometry_after_creation(1000.f);\n    this->set_offset(Vec3d(0, 0, 0));\n    this->source.is_converted_from_meters = true;\n}",
+      "new": "void ModelVolume::convert_from_meters()\n{\n    assert(! this->source.is_converted_from_inches);\n    this->scale_geometry_after_creation(1000.f);\n    this->source.is_converted_from_meters = true;\n}",
+      "expected_matches": 1,
+      "test_filter": "^ModelGapContracts$",
+      "description": "Keep the pre-conversion offset after scaling meter geometry; direct conversion must clear the offset as well as scaling mesh and hull."
+    }
+  ]
+}
