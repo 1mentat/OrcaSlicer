@@ -159,6 +159,16 @@ set_property(TARGET libslic3r_model_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_model_tests)
 slicer_enable_llvm_source_coverage(libslic3r_model_tests)
 
+# Explicitly built ExPolygon contract tests, without duplicate CTest registration.
+add_executable(libslic3r_expolygon_tests EXCLUDE_FROM_ALL
+    test_expolygon_contracts.cpp
+    ../fff_print/fff_print_tests.cpp)
+target_link_libraries(libslic3r_expolygon_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_expolygon_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_expolygon_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_expolygon_tests)
+slicer_enable_llvm_source_coverage(libslic3r_expolygon_tests)
+
 # Explicitly built by the inventory audit; it is not an extra Catch test.
 add_executable(slicer_settings_inventory EXCLUDE_FROM_ALL settings_inventory_main.cpp)
 target_link_libraries(slicer_settings_inventory libslic3r nlohmann_json)
