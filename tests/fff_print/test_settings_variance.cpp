@@ -27,6 +27,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 #include "test_helpers.hpp"
