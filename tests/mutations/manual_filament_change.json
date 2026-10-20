@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "test_filter": "GCodeManualFilamentChange",
+  "mutants": [
+    {
+      "id": "manual-filament-bbl-command-ignores-manual-mode",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "if (m_is_bbl_printers && !config.manual_filament_change)",
+      "new": "if (m_is_bbl_printers)",
+      "test_filter": "GCodeManualFilamentChange",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Emit the BBL M1020 tool-change command even in manual filament-change mode; the explicit manual-mode output assertions require that command to be absent."
+    },
+    {
+      "id": "manual-filament-first-custom-block-not-suppressed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (!change_filament_gcode.empty() && !(m_config.manual_filament_change.value && m_toolchange_count == 1)) {",
+      "new": "if (!change_filament_gcode.empty()) {",
+      "test_filter": "GCodeManualFilamentChange",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Run the custom change-filament block on the first manual tool change; manual output must contain exactly one fewer complete route marker than automatic output while retaining later markers."
+    }
+  ]
+}

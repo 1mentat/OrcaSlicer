@@ -5969,7 +5969,7 @@ struct RoutePoints
     double p3_y = 0.;
 };
 
-DynamicPrintConfig route_config(double end_x, double end_y)
+DynamicPrintConfig route_config(double end_x, double end_y, bool manual_filament_change = false)
 {
     // This is the validated fff_print helper: it sizes registered filament
     // vectors and the filament-by-filament flush matrix before export.  The
@@ -5981,7 +5981,7 @@ DynamicPrintConfig route_config(double end_x, double end_y)
     // production writer decides whether a tool change is possible from the
     // effective zero-based filament IDs, not this flag alone.
     config.set_key_value("single_extruder_multi_material", new ConfigOptionBool(false));
-    config.set_key_value("manual_filament_change", new ConfigOptionBool(false));
+    config.set_key_value("manual_filament_change", new ConfigOptionBool(manual_filament_change));
     config.set_key_value("gcode_comments", new ConfigOptionBool(true));
     config.set_key_value("emit_machine_limits_to_gcode", new ConfigOptionBool(false));
     config.set_key_value("machine_start_gcode", new ConfigOptionString(""));
@@ -6046,9 +6046,11 @@ DynamicPrintConfig route_config(double end_x, double end_y)
     return config;
 }
 
-std::string export_with_object_rows(double object_y, double end_x, double end_y, GCodeProcessorResult *result = nullptr)
+std::string export_with_object_rows(double object_y, double end_x, double end_y,
+                                   GCodeProcessorResult *result = nullptr,
+                                   bool manual_filament_change = false)
 {
-    DynamicPrintConfig config = route_config(end_x, end_y);
+    DynamicPrintConfig config = route_config(end_x, end_y, manual_filament_change);
     Model model;
 
     ModelObject *first = model.add_object();
@@ -6191,6 +6193,18 @@ std::optional<RoutePoints> route_marker(const std::string &gcode)
     return std::nullopt;
 }
 
+std::size_t complete_route_marker_count(const std::string &gcode)
+{
+    std::istringstream lines(gcode);
+    std::string line;
+    std::size_t count = 0;
+    while (std::getline(lines, line)) {
+        if (route_marker(line).has_value())
+            ++count;
+    }
+    return count;
+}
+
 void require_finite(const RoutePoints &points)
 {
     const bool finite = std::isfinite(points.p1_x);
@@ -6208,6 +6222,26 @@ void require_finite(const RoutePoints &points)
 }
 
 } // namespace
+
+TEST_CASE("Manual filament change mode selects the exported BBL tool-change contract",
+          "[GCode][GCodeManualFilamentChange][GCodeExportWorkflows]")
+{
+    const std::string automatic = export_with_object_rows(10., 30., 180., nullptr, false);
+    const std::string manual = export_with_object_rows(10., 30., 180., nullptr, true);
+
+    // In automatic mode the first tool change runs the configured custom block and BBL command.
+    REQUIRE(route_marker(automatic).has_value());
+    CHECK(automatic.find("M1020 S1 H0") != std::string::npos);
+    // Manual mode emits the tagged manual T command and skips that first custom block.
+    const std::string manual_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Manual_Tool_Change);
+    CHECK(manual.find(manual_tag) != std::string::npos);
+    CHECK(manual.find("M1020 S1 H0") == std::string::npos);
+    const std::size_t automatic_markers = complete_route_marker_count(automatic);
+    const std::size_t manual_markers = complete_route_marker_count(manual);
+    REQUIRE(automatic_markers > 1);
+    CHECK(manual_markers == automatic_markers - 1);
+    CHECK(manual_markers > 0);
+}
 
 TEST_CASE("Filament change placeholders expose a bounded obstacle route",
           "[GCodeTravelPointReachable][GCodeExportWorkflows]")
