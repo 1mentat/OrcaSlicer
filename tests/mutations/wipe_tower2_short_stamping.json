@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "short-stamping-return-path-lost",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "            extrude_explicit(old_x, y(), e_dist/(2.f*n), x_speed * 60.f, false, false);",
+      "new": "            extrude_explicit(end_point, y(), e_dist/(2.f*n), x_speed * 60.f, false, false);",
+      "expected_matches": 1,
+      "test_filter": "WipeTower2 short stamping spreads the configured filament load over a bounded return path",
+      "ordinary_assertion_only": true,
+      "description": "The positive-E stamping stroke must return to its starting X; changing the return destination to the outbound endpoint removes the observable out-and-back geometry."
+    },
+    {
+      "id": "short-stamping-travel-budget-truncated",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "        float r = 2*n*x_max_dist / x_dist;                   // actual/required dist if the move is not shortened",
+      "new": "        float r = 2*n*x_max_dist / x_dist + 1.f;             // intentionally incorrect shortening",
+      "expected_matches": 1,
+      "test_filter": "WipeTower2 short stamping spreads the configured filament load over a bounded return path",
+      "ordinary_assertion_only": true,
+      "description": "The independently derived 12 mm X-travel budget for 4 mm loaded at 20 mm/s and travel speed 60 mm/s must be preserved; excessive shortening violates that emitted path-length contract."
+    }
+  ]
+}

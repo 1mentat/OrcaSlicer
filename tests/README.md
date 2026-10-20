@@ -827,6 +827,12 @@ inheritance across placeholder layers, and the no-tool case through public
 ToolOrdering methods. Its probes are in `toolordering_dontcare_seed.json`;
 build `libslic3r_toolordering_tests` for focused feedback.
 
+`[Producer]` checks public G-code file import with unregistered producer headers,
+compatible role tags, ignored legacy Simplify3D metadata, and active Orca config
+and feature metadata. Build `fff_print_gcodeprocessor_tests` for focused feedback;
+it includes both processor test files. Its probes are in
+`gcodeprocessor_producer_import.json`.
+
 `[MultimaterialWipe]` checks direct WipeTower2 purge matrices, wall geometry,
 ramming, cooling, stamping, loading, and delay commands. Independent cooling
 variants change one setting at a time, with feedrates read from executable
@@ -839,6 +845,12 @@ sparse-grid extrusion at caps of 10, 40, and 200 mm/s with a 160 mm/s region
 speed. It checks both limits while retaining geometry and material invariants;
 the production probes are in `wipe_tower_purge_speed.json`. This direct
 WipeTower2 fixture does not claim legacy WipeTower or full Print coverage.
+The short-stamping case in `[WipeTowerVariance]` checks positive-extrusion return
+strokes and derives total filament loading and X travel from the configured
+speeds and distances. Build `fff_print_wipe_tower_tests` for focused feedback;
+the same cases run in the canonical FFF suite without duplicate registration.
+Its probes are in `wipe_tower2_short_stamping.json`.
+
 `[CompactedTower]` checks pre-slice collision diagnostics for zero, one, and two
 objects in the rod's clearance band, plus the disabled-setting control. It
 checks the reported height and selected object without slicing; its mutations
@@ -1036,6 +1048,12 @@ python3 scripts/slicer_mutation.py run \
   --mutants tests/mutations/slicer.json --max-mutants 7 \
   --out build/slicer-mutation
 ```
+
+Automated launchers can use `--build-argv-file` and `--test-argv-file` instead
+of command strings. Each file contains a JSON array of literal arguments; paths
+are relative to `--root` unless absolute. The same `{root}`, `{build}`, and
+`{filter}` placeholders apply. Empty arguments after the executable are retained,
+and the preflight report records each argument file's path and SHA-256.
 
 `mutation-report.json` records the commit, worktree commands, exact source
 match and replacement, build/test commands, and separate statuses for build

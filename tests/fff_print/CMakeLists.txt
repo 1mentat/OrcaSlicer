@@ -59,7 +59,8 @@ orcaslicer_discover_tests(${_TEST_NAME}_tests)
 add_executable(fff_print_gcodeprocessor_tests EXCLUDE_FROM_ALL
     fff_print_tests.cpp
     test_helpers.cpp
-    test_gcodeprocessor.cpp)
+    test_gcodeprocessor.cpp
+    test_gcode_processor.cpp)
 target_link_libraries(fff_print_gcodeprocessor_tests test_common libslic3r Catch2::Catch2WithMain)
 set_property(TARGET fff_print_gcodeprocessor_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_gcodeprocessor_tests)
@@ -124,3 +125,13 @@ target_link_libraries(fff_print_tree_support_tests test_common libslic3r Catch2:
 set_property(TARGET fff_print_tree_support_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_tree_support_tests)
 slicer_enable_llvm_source_coverage(fff_print_tree_support_tests)
+
+# Focused WipeTower contracts, without duplicate CTest registration.
+add_executable(fff_print_wipe_tower_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_wipe_tower.cpp)
+target_link_libraries(fff_print_wipe_tower_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_wipe_tower_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_wipe_tower_tests)
+slicer_enable_llvm_source_coverage(fff_print_wipe_tower_tests)

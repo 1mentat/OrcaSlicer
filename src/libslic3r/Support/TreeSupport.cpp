@@ -1646,26 +1646,6 @@ void TreeSupport::generate()
     BOOST_LOG_TRIVIAL(info) << "tree support time " << profiler.report();
 }
 
-coordf_t TreeSupport::calc_branch_radius(coordf_t base_radius, size_t layers_to_top, size_t tip_layers, double diameter_angle_scale_factor)
-{
-    double radius;
-    if (!is_slim) {
-        if ((layers_to_top + 1) > tip_layers) {
-            radius = base_radius + base_radius * (layers_to_top + 1) * diameter_angle_scale_factor;
-        } else {
-            radius = base_radius * (layers_to_top + 1) / tip_layers;
-        }
-    } else {
-        if ((layers_to_top + 1) > tip_layers * 2) {
-            radius = base_radius + base_radius * (layers_to_top + 1) * diameter_angle_scale_factor;
-        } else {
-            radius = base_radius * (layers_to_top + 1) / (tip_layers * 2);
-        }
-    }
-    radius = std::clamp(radius, MIN_BRANCH_RADIUS, MAX_BRANCH_RADIUS);
-    return radius;
-}
-
 coordf_t TreeSupport::calc_branch_radius(coordf_t base_radius, coordf_t mm_to_top,  double diameter_angle_scale_factor, bool use_min_distance)
 {
     double radius;

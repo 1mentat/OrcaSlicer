@@ -3225,33 +3225,6 @@ std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Pri
     return instances;
 }
 
-enum BambuBedType {
-    bbtUnknown = 0,
-    bbtCoolPlate = 1,
-    bbtEngineeringPlate = 2,
-    bbtHighTemperaturePlate = 3,
-    bbtTexturedPEIPlate         = 4,
-    bbtSuperTackPlate = 5,
-};
-
-static BambuBedType to_bambu_bed_type(BedType type)
-{
-    BambuBedType bambu_bed_type = bbtUnknown;
-    if (type == btPC)
-        bambu_bed_type = bbtCoolPlate;
-    else if (type == btEP)
-        bambu_bed_type = bbtEngineeringPlate;
-    else if (type == btPEI)
-        bambu_bed_type = bbtHighTemperaturePlate;
-    else if (type == btPTE)
-        bambu_bed_type = bbtTexturedPEIPlate;
-    else if (type == btPCT)
-        bambu_bed_type = bbtCoolPlate;
-    else if (type == btSuperTack)
-        bambu_bed_type = bbtSuperTackPlate;
-
-    return bambu_bed_type;
-}
 
 void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGeneratorCallback thumbnail_cb)
 {
@@ -8005,27 +7978,6 @@ std::string GCode::change_layer(coordf_t print_z)
 
 
 
-static std::unique_ptr<EdgeGrid::Grid> calculate_layer_edge_grid(const Layer& layer)
-{
-    auto out = make_unique<EdgeGrid::Grid>();
-
-    // Create the distance field for a layer below.
-    const coord_t distance_field_resolution = coord_t(scale_(1.) + 0.5);
-    out->create(layer.lslices, distance_field_resolution);
-    out->calculate_sdf();
-#if 0
-        {
-            static int iRun = 0;
-            BoundingBox bbox = (*lower_layer_edge_grid)->bbox();
-            bbox.min(0) -= scale_(5.f);
-            bbox.min(1) -= scale_(5.f);
-            bbox.max(0) += scale_(5.f);
-            bbox.max(1) += scale_(5.f);
-            EdgeGrid::save_png(*(*lower_layer_edge_grid), bbox, scale_(0.1f), debug_out_path("GCode_extrude_loop_edge_grid-%d.png", iRun++));
-        }
-#endif
-    return out;
-}
 
 std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_ref,
                                 const std::string&                         description,

@@ -530,8 +530,6 @@ private:
     void insert_dropped_node(std::vector<SupportNode*>& nodes_layer, SupportNode* node);
     void create_tree_support_layers();
     void generate_toolpaths();
-    // get unscaled radius of node
-    coordf_t calc_branch_radius(coordf_t base_radius, size_t layers_to_top, size_t tip_layers, double diameter_angle_scale_factor);
     // get unscaled radius(mm) of node based on the distance mm to top
     coordf_t calc_branch_radius(coordf_t base_radius, coordf_t mm_to_top, double diameter_angle_scale_factor, bool use_min_distance=true);
     coordf_t   calc_radius(coordf_t mm_to_top);

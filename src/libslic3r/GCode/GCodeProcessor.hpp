@@ -1392,19 +1392,12 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
     private:
         void register_commands();
         void apply_config(const DynamicPrintConfig& config);
-        void apply_config_simplify3d(const std::string& filename);
-        void apply_config_superslicer(const std::string& filename);
         void process_gcode_line(const GCodeReader::GCodeLine& line, bool producers_enabled);
 
         // Process tags embedded into comments
         void process_tags(const std::string_view comment, bool producers_enabled);
         bool process_producers_tags(const std::string_view comment);
         bool process_bambuslicer_tags(const std::string_view comment);
-        bool process_cura_tags(const std::string_view comment);
-        bool process_simplify3d_tags(const std::string_view comment);
-        bool process_craftware_tags(const std::string_view comment);
-        bool process_ideamaker_tags(const std::string_view comment);
-        bool process_kissslicer_tags(const std::string_view comment);
 
         bool detect_producer(const std::string_view comment);
 

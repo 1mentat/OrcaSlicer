@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "description": "If Orca is removed from producer detection, its config footer and Bambu FEATURE role are no longer imported through process_file.",
+      "expected_matches": 1,
+      "id": "gcodeprocessor-orca-producer-detection-disabled",
+      "new": "if (pos != comment.npos && id != EProducer::OrcaSlicer) {\n            m_producer = id;",
+      "old": "if (pos != comment.npos) {\n            m_producer = id;",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "test_filter": "Orca file import keeps its config footer and Bambu feature roles"
+    },
+    {
+      "description": "Gating the compatible TYPE role parser on producer detection breaks valid role comments in files with unknown producer headers.",
+      "expected_matches": 1,
+      "id": "gcodeprocessor-compatible-role-requires-known-producer",
+      "new": "    if (m_producer != EProducer::Unknown && boost::starts_with(comment, reserved_tag(ETags::Role))) {",
+      "old": "    if (boost::starts_with(comment, reserved_tag(ETags::Role))) {",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "test_filter": "Unregistered producer headers leave dialect tags inactive while compatible tags still work"
+    }
+  ]
+}

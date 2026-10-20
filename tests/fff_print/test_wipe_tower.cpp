@@ -2436,6 +2436,138 @@ TEST_CASE("WipeTower2 cooling moves, rates and stamping settings alter emitted c
     CHECK(feedrates(cooling_motion(enabled)).count(240) == 1);
 }
 
+TEST_CASE("WipeTower2 short stamping spreads the configured filament load over a bounded return path",
+          "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 60.f}};
+    const DynamicPrintConfig active = tower_dynamic({
+        {"enable_filament_ramming", true},
+        {"filament_ramming_parameters", "100 100 30 30 30 30"},
+        {"filament_cooling_moves", "2,2"},
+        {"filament_cooling_initial_speed", "2,2"},
+        {"filament_cooling_final_speed", "6,6"},
+        {"filament_stamping_distance", "2,2"},
+        {"filament_stamping_loading_speed", "20,20"},
+        {"travel_speed", "60,60"},
+        {"cooling_tube_length", 4},
+        {"cooling_tube_retraction", 20},
+    });
+    DynamicPrintConfig unstamped_config = active;
+    unstamped_config.set_deserialize_strict({{"filament_stamping_distance", "0,0"}});
+    const DirectRun stamped = run_tower(active, plan);
+    const DirectRun unstamped = run_tower(unstamped_config, plan);
+    require_finite(stamped);
+    require_finite(unstamped);
+
+    struct PositiveXMove {
+        double from_x;
+        double to_x;
+        double filament_mm;
+    };
+    struct ReturnPathEvidence {
+        std::size_t pairs = 0;
+        double filament_mm = 0.;
+        double x_path_mm = 0.;
+        bool finite = true;
+    };
+    const auto return_path = [](const DirectRun &run) {
+        struct MotionEvent {
+            std::optional<PositiveXMove> positive_x_move;
+        };
+
+        std::vector<MotionEvent> events;
+        ReturnPathEvidence evidence;
+        bool in_cooling = false;
+        GCodeReader reader;
+        reader.parse_buffer(run.gcode, [&events, &evidence, &in_cooling](GCodeReader &self,
+                                                                          const GCodeReader::GCodeLine &line) {
+            const std::string_view comment = line.comment();
+            if (comment.rfind(" Cooling park", 0) == 0) {
+                in_cooling = false;
+                events.push_back({std::nullopt});
+                return;
+            }
+            if (comment.rfind(" Cooling", 0) == 0) {
+                in_cooling = true;
+                events.push_back({std::nullopt});
+                return;
+            }
+            if (!in_cooling)
+                return;
+
+            // Feedrate-only commands do not interrupt a physical pair. Any other
+            // motion or extrusion is an event, and only a positive-E X-only leg
+            // can participate in an out-and-back stamping pair.
+            const bool has_position = line.has_x() || line.has_y() || line.has_z();
+            const bool has_extrusion = line.has_e();
+            if (!has_position && !has_extrusion) {
+                if (line.cmd().empty())
+                    return;
+
+                const bool feedrate_only_command =
+                    (line.cmd_is("G0") || line.cmd_is("G1")) && line.has_f() &&
+                    !line.has_i() && !line.has_j() && !line.has_p() && !line.has_unknown_axis();
+                if (feedrate_only_command)
+                    return;
+
+                // Non-motion commands between strokes also end physical adjacency;
+                // only a feedrate-only G0/G1 is transparent to the pair.
+                events.push_back({std::nullopt});
+                return;
+            }
+
+            if (line.cmd_is("G1") && line.has_x() && line.has_e() &&
+                !line.has_y() && !line.has_z()) {
+                const double from_x = self.x();
+                const double to_x = line.new_X(self);
+                const double filament_mm = line.e(); // WipeTower2 emits relative E for this sequence.
+                if (!std::isfinite(from_x) || !std::isfinite(to_x) || !std::isfinite(filament_mm)) {
+                    evidence.finite = false;
+                    events.push_back({std::nullopt});
+                    return;
+                }
+                if (filament_mm > 0. && std::abs(to_x - from_x) > 1e-4) {
+                    events.push_back({PositiveXMove{from_x, to_x, filament_mm}});
+                    return;
+                }
+            }
+
+            // Negative-E returns, travel moves, zero-E moves, and non-X extrusion
+            // all break adjacency between positive stamping legs.
+            events.push_back({std::nullopt});
+        });
+
+        for (std::size_t i = 0; i + 1 < events.size(); ++i) {
+            if (!events[i].positive_x_move || !events[i + 1].positive_x_move)
+                continue;
+            const PositiveXMove &out = *events[i].positive_x_move;
+            const PositiveXMove &back = *events[i + 1].positive_x_move;
+            if (std::abs(out.to_x - back.from_x) > 0.002 ||
+                std::abs(out.from_x - back.to_x) > 0.002)
+                continue;
+            ++evidence.pairs;
+            evidence.filament_mm += out.filament_mm + back.filament_mm;
+            evidence.x_path_mm += std::abs(out.to_x - out.from_x) + std::abs(back.to_x - back.from_x);
+            ++i;
+        }
+        return evidence;
+    };
+
+    const ReturnPathEvidence stamped_path = return_path(stamped);
+    const ReturnPathEvidence unstamped_path = return_path(unstamped);
+    REQUIRE(stamped_path.finite);
+    REQUIRE(unstamped_path.finite);
+    REQUIRE(stamped_path.pairs > 0);
+    CHECK(unstamped_path.pairs == 0);
+
+    // The tube contributes 2 mm and stamping contributes 2 mm of filament
+    // travel. At 20 mm/s that takes 0.2 s; 60 mm/s of X travel yields 12 mm
+    // of total horizontal out-and-back motion, independent of loop subdivision.
+    CHECK_THAT(stamped_path.filament_mm, WithinAbs(4., 0.02));
+    CHECK_THAT(stamped_path.x_path_mm, WithinAbs(12., 0.03));
+}
+
 TEST_CASE("WipeTower2 multi-tool flow is observed with fixed purge volume",
           "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
 {

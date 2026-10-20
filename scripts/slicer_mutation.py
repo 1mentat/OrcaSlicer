@@ -86,6 +86,41 @@ def split_command(command: str | Sequence[str]) -> list[str]:
     return argv
 
 
+def _load_argv_file(argument: str | os.PathLike[str], root: Path,
+                    command_name: str) -> tuple[list[str], dict[str, str]]:
+    """Load one exact argv vector and bind its source bytes for preflight."""
+    path = Path(argument)
+    if not path.is_absolute():
+        path = root / path
+    path = path.resolve()
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise MutationError(f"cannot read {command_name} argv file {path}: {exc}") from exc
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise MutationError(f"invalid JSON in {command_name} argv file {path}: {exc}") from exc
+    if not isinstance(value, list) or not value:
+        raise MutationError(f"{command_name} argv file must contain a nonempty JSON array of strings: {path}")
+    if any(not isinstance(item, str) for item in value):
+        raise MutationError(f"{command_name} argv file must contain only strings: {path}")
+    if not value[0]:
+        raise MutationError(f"{command_name} argv file executable (argv[0]) must not be empty: {path}")
+    if any("\0" in item for item in value):
+        raise MutationError(f"{command_name} argv file arguments must not contain NUL: {path}")
+    return split_command(value), {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _command_arguments(command: str | None, argv_file: str | None, *, root: Path,
+                       command_name: str) -> tuple[list[str], dict[str, str] | None]:
+    if argv_file is not None:
+        return _load_argv_file(argv_file, root, command_name)
+    if command is None:
+        raise MutationError(f"missing {command_name} command")
+    return split_command(command), None
+
+
 def _expand(argv: Sequence[str], *, root: Path, build: Path, test_filter: str = "") -> list[str]:
     values = {"root": str(root), "build": str(build), "filter": test_filter}
     return [value.replace("{root}", values["root"])
@@ -1026,6 +1061,10 @@ def run_mutation(args: argparse.Namespace) -> int:
         raise MutationError("--max-mutants must be positive")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise MutationError("--timeout must be finite and positive")
+    build_argv, build_argv_file = _command_arguments(
+        args.build_command, args.build_argv_file, root=repo, command_name="build")
+    test_argv, test_argv_file = _command_arguments(
+        args.test_command, args.test_argv_file, root=repo, command_name="test")
     temp_preflight = _preflight_temp_environment()
     out_lexical = _lexical_output_path(repo, args.out)
     _output_available(out_lexical)
@@ -1039,8 +1078,6 @@ def run_mutation(args: argparse.Namespace) -> int:
     ids = [mutant.id for mutant in mutants]
     if len(set(ids)) != len(ids):
         raise MutationError("mutant ids must be unique")
-    build_argv = split_command(args.build_command)
-    test_argv = split_command(args.test_command)
     configure_argv = split_command(args.configure_command) if args.configure_command else None
     work_parent_arg = Path(args.work_root) if args.work_root else None
     work_parent = ((repo / work_parent_arg) if work_parent_arg is not None and not work_parent_arg.is_absolute()
@@ -1050,13 +1087,19 @@ def run_mutation(args: argparse.Namespace) -> int:
     if work_parent:
         work_parent.mkdir(parents=True, exist_ok=True)
 
+    preflight: dict[str, Any] = {"explicit_temp_directories": temp_preflight}
+    argv_files = {name: source for name, source in
+                  (("build", build_argv_file), ("test", test_argv_file))
+                  if source is not None}
+    if argv_files:
+        preflight["argv_files"] = argv_files
     report: dict[str, Any] = {
         "schema_version": 1,
         "status": "infrastructure_error",
         "git": {"commit": commit, "root": str(repo)},
         "limits": {"max_mutants": args.max_mutants, "timeout_seconds": args.timeout},
         "commands": {"configure": configure_argv, "build": build_argv, "test": test_argv},
-        "preflight": {"explicit_temp_directories": temp_preflight},
+        "preflight": preflight,
         "mutants": [],
     }
     report_path = out / "mutation-report.json"
@@ -1234,8 +1277,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--root", default=".")
     run.add_argument("--build-dir", default="build")
     run.add_argument("--configure-command", help="optional CMake configure argv before the baseline build")
-    run.add_argument("--build-command", required=True)
-    run.add_argument("--test-command", required=True)
+    build_command = run.add_mutually_exclusive_group(required=True)
+    build_command.add_argument("--build-command", help="build argv as a shell-like command string")
+    build_command.add_argument("--build-argv-file",
+                               help="JSON argv array file, relative to --root unless absolute")
+    test_command = run.add_mutually_exclusive_group(required=True)
+    test_command.add_argument("--test-command", help="test argv as a shell-like command string")
+    test_command.add_argument("--test-argv-file",
+                              help="JSON argv array file, relative to --root unless absolute")
     run.add_argument("--mutants", action="append",
                      help="JSON mutant manifest; repeat to share one build across manifests (default: three Flow smoke mutants)")
     run.add_argument("--max-mutants", type=int, default=DEFAULT_MAX_MUTANTS)

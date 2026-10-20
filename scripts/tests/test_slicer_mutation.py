@@ -77,6 +77,186 @@ class MutationSelectionTests(unittest.TestCase):
                              [("first", "First"), ("second", "Second")])
 
 
+class MutationArgvFileTests(unittest.TestCase):
+    def make_detached_repo(self, parent):
+        repo = Path(parent) / "repo"
+        repo.mkdir()
+
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        git("config", "user.name", "Mutation Test")
+        git("config", "user.email", "mutation@example.invalid")
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (repo / "source.cpp").write_text("before\n", encoding="utf-8")
+        git("add", ".gitignore", "source.cpp")
+        git("commit", "-m", "fixture")
+        git("checkout", "--detach", "-q", "HEAD")
+        (repo / "build").mkdir()
+        return repo
+
+    def test_argv_files_preserve_tokens_expand_placeholders_and_bind_raw_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = self.make_detached_repo(temp)
+            outside = Path(temp) / "commands"
+            outside.mkdir()
+            probe = repo / "argv_probe.py"
+            probe.write_text(
+                "import json, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "pathlib.Path(args[0]).write_text(json.dumps(args[1:]), encoding='utf-8')\n"
+                "if '--report-test-evidence' in args[1:]:\n"
+                "    root = next(value.split('=', 1)[1] for value in args if value.startswith('--root='))\n"
+                "    if (pathlib.Path(root) / 'source.cpp').read_text(encoding='utf-8') == 'after\\n':\n"
+                "        print('test cases: 1 | 1 failed\\nassertions: 1 | 1 failed')\n"
+                "        sys.exit(1)\n"
+                "    print('test cases: 1 | 1 passed')\n",
+                encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "argv_probe.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "probe"],
+                           check=True, capture_output=True, text=True)
+            build_file = repo / "build" / "commands" / "build.json"
+            build_file.parent.mkdir()
+            build_tokens = [
+                sys.executable, "{root}/argv_probe.py", "{build}/build-argv-seen.json",
+                "build value with spaces", "-leading-option", "literal;touch {build}/semicolon-marker",
+                "$(touch {build}/substitution-marker)", "",
+            ]
+            build_bytes = (json.dumps(build_tokens, ensure_ascii=False) + "\n").encode("utf-8")
+            build_file.write_bytes(build_bytes)
+            test_file = outside / "test.json"
+            test_tokens = [
+                sys.executable, "{root}/argv_probe.py", "{build}/test-argv-seen.json",
+                "--report-test-evidence", "--filter={filter}", "--root={root}",
+                "--build={build}", "test value with spaces", "-another-leading-option",
+                "literal;touch {build}/test-marker", "$(touch {build}/test-substitution-marker)", "",
+            ]
+            test_bytes = json.dumps(test_tokens, ensure_ascii=False).encode("utf-8")
+            test_file.write_bytes(test_bytes)
+            output = Path(temp) / "evidence"
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--out", str(output), "--build-dir", "build",
+                "--build-argv-file", "build/commands/build.json", "--test-argv-file", str(test_file),
+                "--reuse-detached-checkout", "--max-mutants", "1",
+            ])
+            mutant = slicer_mutation.Mutant(
+                "one", "source.cpp", "before", "after", "", "Flow with spaces")
+            real_run_command = slicer_mutation.run_command
+            read_counts = {build_file.resolve(): 0, test_file.resolve(): 0}
+            real_read_bytes = Path.read_bytes
+
+            def counted_read_bytes(path):
+                resolved = path.resolve()
+                if resolved in read_counts:
+                    read_counts[resolved] += 1
+                return real_read_bytes(path)
+
+            with mock.patch.object(slicer_mutation, "_load_mutants", return_value=[mutant]), \
+                    mock.patch.object(Path, "read_bytes", counted_read_bytes), \
+                    mock.patch.object(slicer_mutation, "run_command", wraps=real_run_command):
+                self.assertEqual(slicer_mutation.run_mutation(args), 0)
+
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            root_token = str(repo.resolve())
+            build_token = str((repo / "build").resolve())
+            expected_build = [
+                sys.executable, f"{root_token}/argv_probe.py", f"{build_token}/build-argv-seen.json",
+                "build value with spaces", "-leading-option", f"literal;touch {build_token}/semicolon-marker",
+                f"$(touch {build_token}/substitution-marker)", "",
+            ]
+            expected_test = [
+                sys.executable, f"{root_token}/argv_probe.py", f"{build_token}/test-argv-seen.json",
+                "--report-test-evidence", "--filter=Flow with spaces", f"--root={root_token}",
+                f"--build={build_token}", "test value with spaces", "-another-leading-option",
+                f"literal;touch {build_token}/test-marker",
+                f"$(touch {build_token}/test-substitution-marker)", "",
+            ]
+            self.assertEqual(read_counts, {build_file.resolve(): 1, test_file.resolve(): 1})
+            self.assertEqual(report["preflight"]["argv_files"], {
+                "build": {"path": str(build_file.resolve()),
+                          "sha256": hashlib.sha256(build_bytes).hexdigest()},
+                "test": {"path": str(test_file.resolve()),
+                         "sha256": hashlib.sha256(test_bytes).hexdigest()},
+            })
+            self.assertEqual(report["baseline_build"]["argv"], expected_build)
+            self.assertEqual(report["mutants"][0]["build"]["argv"], expected_build)
+            self.assertEqual(report["baseline_tests"][0]["result"]["argv"], expected_test)
+            self.assertEqual(report["mutants"][0]["test"]["argv"], expected_test)
+            self.assertEqual(json.loads((repo / "build" / "build-argv-seen.json").read_text()),
+                             expected_build[3:])
+            self.assertEqual(json.loads((repo / "build" / "test-argv-seen.json").read_text()),
+                             expected_test[3:])
+            for marker in ("semicolon-marker", "substitution-marker", "test-marker",
+                           "test-substitution-marker"):
+                self.assertFalse((repo / "build" / marker).exists())
+
+    def test_legacy_command_flags_remain_exclusive_and_supported(self):
+        args = slicer_mutation._parser().parse_args([
+            "run", "--build-command", "cmake --build {build}",
+            "--test-command", "ctest --test-dir {build}",
+        ])
+        self.assertEqual(slicer_mutation.split_command(args.build_command),
+                         ["cmake", "--build", "{build}"])
+        self.assertEqual(slicer_mutation.split_command(args.test_command),
+                         ["ctest", "--test-dir", "{build}"])
+        self.assertIsNone(args.build_argv_file)
+        self.assertIsNone(args.test_argv_file)
+        with self.assertRaises(SystemExit):
+            slicer_mutation._parser().parse_args([
+                "run", "--build-command", "build", "--build-argv-file", "build.json",
+                "--test-command", "test",
+            ])
+
+    def test_invalid_argv_files_fail_before_repository_or_build_work(self):
+        invalid = {
+            "malformed": b"[\n",
+            "object": b'{"argv": ["tool"]}',
+            "empty": b"[]",
+            "nested": b'["tool", ["nested"]]',
+            "nonstring": b'["tool", 1]',
+            "empty-executable": b'["", "argument"]',
+            "nul": b'["tool", "bad\\u0000argument"]',
+        }
+        for name, payload in invalid.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp) / "repo"
+                root.mkdir()
+                argv_file = root / "bad.json"
+                argv_file.write_bytes(payload)
+                output = root / "evidence"
+                with mock.patch.object(slicer_mutation, "validate_clean_repo") as validate, \
+                        mock.patch.object(slicer_mutation, "_mutation_worktree") as worktree, \
+                        mock.patch.object(slicer_mutation, "run_command") as command:
+                    code = slicer_mutation.main([
+                        "run", "--root", str(root), "--out", str(output),
+                        "--build-argv-file", "bad.json", "--test-command", "test",
+                    ])
+                self.assertEqual(code, 2)
+                validate.assert_not_called()
+                worktree.assert_not_called()
+                command.assert_not_called()
+                self.assertFalse((root / "build").exists())
+                self.assertEqual({path.name for path in output.iterdir()}, {"mutation-report.json"})
+                error = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+                self.assertEqual(error["status"], "infrastructure_error")
+
+    def test_invalid_test_argv_file_is_rejected_before_repository_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            argv_file = root / "bad-test.json"
+            argv_file.write_text('["tool", null]', encoding="utf-8")
+            with mock.patch.object(slicer_mutation, "validate_clean_repo") as validate:
+                with self.assertRaisesRegex(slicer_mutation.MutationError, "only strings"):
+                    slicer_mutation.run_mutation(slicer_mutation._parser().parse_args([
+                        "run", "--root", str(root), "--out", str(root / "evidence"),
+                        "--build-command", "build", "--test-argv-file", str(argv_file),
+                    ]))
+            validate.assert_not_called()
+            self.assertFalse((root / "evidence").exists())
+
+
 class MutationReuseCheckoutTests(unittest.TestCase):
     def make_detached_repo(self, parent):
         repo = Path(parent) / "repo"
@@ -665,6 +845,7 @@ class MutationEvidenceHardeningTests(unittest.TestCase):
                              [{"phase": "preflight", "state": "in_progress"}])
             final_report = json.loads((out / "mutation-report.json").read_text())
             self.assertEqual(final_report["checkpoint"]["state"], "complete")
+            self.assertNotIn("argv_files", final_report["preflight"])
             self.assertEqual([entry["status"] for entry in final_report["mutants"]],
                              ["mutation_error", "mutation_error"])
             self.assertEqual(len(final_report["mutants"]), 2)
