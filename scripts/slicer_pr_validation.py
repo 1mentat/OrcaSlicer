@@ -12,8 +12,10 @@ The selected patch is applied with ``git apply --3way --index``; conflicts
 are recorded and never guessed at or auto-resolved.
 
 The caller's checkout is read only.  The temporary worktree is reset between
-heads and removed in a ``finally`` block.  Every command, tested commit/tree,
-duration, log path, JUnit path, and status is written to ``report.json``.
+heads and removed in a ``finally`` block by default.  ``--keep-worktree``
+preserves it and its build at the reported path for inspection.  Every command,
+tested commit/tree, duration, log path, JUnit path, and status is written to
+``report.json``.
 
 Example::
 
@@ -1485,6 +1487,7 @@ def run_validation(args: argparse.Namespace) -> int:
             "build_dir": args.build_dir, "exclude_labels": args.exclude_labels,
             "targets": list(args.targets), "timeout_seconds": args.timeout,
             "test_timeout_seconds": getattr(args, "test_timeout", DEFAULT_TEST_TIMEOUT),
+            "keep_worktree": bool(getattr(args, "keep_worktree", False)),
             "minimum_tests": args.minimum_tests,
             "timeout_provenance": {
                 "phase_timeout_seconds": args.timeout,
@@ -1809,24 +1812,33 @@ def run_validation(args: argparse.Namespace) -> int:
                 _write_json(output / "report.json", report)
     finally:
         if worktree is not None:
-            remove = _git(repo, "worktree", "remove", "--force", str(worktree), timeout=300)
-            cleanup["remove"] = remove.json()
-            cleanup["removed"] = remove.returncode == 0
-            parent = worktree.parent
-            if remove.returncode == 0:
-                try:
-                    parent.rmdir()
-                    cleanup["parent_removed"] = True
-                except OSError as exc:
-                    cleanup["parent_removed"] = False
-                    cleanup["parent_remove_error"] = str(exc)
+            worktree_added = report.get("worktree", {}).get("add", {}).get("returncode") == 0
+            if getattr(args, "keep_worktree", False) and worktree_added:
+                cleanup = {
+                    "preserved": True,
+                    "path": str(worktree),
+                    "parent_path": str(worktree.parent),
+                    "reason": "--keep-worktree",
+                }
             else:
-                try:
-                    parent.rmdir()
-                    cleanup["parent_removed"] = True
-                except OSError as exc:
-                    cleanup["parent_removed"] = False
-                    cleanup["parent_remove_error"] = str(exc)
+                remove = _git(repo, "worktree", "remove", "--force", str(worktree), timeout=300)
+                cleanup["remove"] = remove.json()
+                cleanup["removed"] = remove.returncode == 0
+                parent = worktree.parent
+                if remove.returncode == 0:
+                    try:
+                        parent.rmdir()
+                        cleanup["parent_removed"] = True
+                    except OSError as exc:
+                        cleanup["parent_removed"] = False
+                        cleanup["parent_remove_error"] = str(exc)
+                else:
+                    try:
+                        parent.rmdir()
+                        cleanup["parent_removed"] = True
+                    except OSError as exc:
+                        cleanup["parent_removed"] = False
+                        cleanup["parent_remove_error"] = str(exc)
             report["cleanup"] = cleanup
         report["elapsed_seconds"] = time.monotonic() - started
         report["finished_at_epoch"] = time.time()
@@ -1851,7 +1863,7 @@ def run_validation(args: argparse.Namespace) -> int:
             }
             report["status"] = "original_checkout_changed_during_run"
             return_code = 2
-        elif cleanup and not cleanup.get("removed", False):
+        elif cleanup and not cleanup.get("preserved", False) and not cleanup.get("removed", False):
             report["status"] = "cleanup_failed"
             return_code = 2
         else:
@@ -1878,6 +1890,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--numbers", action="append", nargs="+",
                         help="PR numbers, space/comma-separated; may be repeated")
     parser.add_argument("--build-dir", default="build")
+    parser.add_argument("--keep-worktree", action="store_true",
+                        help="preserve the temporary validation worktree and its build at the reported path")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--test-timeout", type=float, default=DEFAULT_TEST_TIMEOUT,
                         help="per-CTest-case timeout in seconds (default: 180)")

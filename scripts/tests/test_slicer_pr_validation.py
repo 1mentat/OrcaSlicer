@@ -2043,6 +2043,76 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             worktree = Path(report["worktree"]["path"])
             self._git(repo, "worktree", "remove", "--force", str(worktree))
 
+    def test_keep_worktree_preserves_registered_worktree_and_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.keep_worktree = True
+
+            def run_with_build_marker(worktree, *run_args, **run_kwargs):
+                build = worktree / "build"
+                build.mkdir(exist_ok=True)
+                (build / "kept.txt").write_text("existing build output\n", encoding="utf-8")
+                return self._fake_run_tree(worktree, *run_args, **run_kwargs)
+
+            worktree = None
+            try:
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=run_with_build_marker):
+                    result = slicer_pr_validation.run_validation(args)
+                report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+                worktree = Path(report["worktree"]["path"])
+                self.assertEqual(result, 0)
+                self.assertEqual(report["configuration"]["keep_worktree"], True)
+                self.assertEqual(report["cleanup"], {
+                    "preserved": True,
+                    "path": str(worktree),
+                    "parent_path": str(worktree.parent),
+                    "reason": "--keep-worktree",
+                })
+                self.assertTrue(worktree.is_dir())
+                self.assertTrue((worktree / "build/kept.txt").is_file())
+                registered = self._git(repo, "worktree", "list", "--porcelain").stdout
+                self.assertIn(str(worktree), registered)
+                self.assertNotEqual(report["status"], "cleanup_failed")
+            finally:
+                if worktree is not None and worktree.exists():
+                    self._git(repo, "worktree", "remove", "--force", str(worktree))
+                    worktree.parent.rmdir()
+
+    def test_default_cleanup_still_removes_worktree_and_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+
+            def run_with_build_marker(worktree, *run_args, **run_kwargs):
+                build = worktree / "build"
+                build.mkdir(exist_ok=True)
+                (build / "kept.txt").write_text("temporary build output\n", encoding="utf-8")
+                return self._fake_run_tree(worktree, *run_args, **run_kwargs)
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=run_with_build_marker):
+                result = slicer_pr_validation.run_validation(args)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            worktree = Path(report["worktree"]["path"])
+            self.assertEqual(result, 0)
+            self.assertEqual(report["configuration"]["keep_worktree"], False)
+            self.assertTrue(report["cleanup"]["removed"])
+            self.assertTrue(report["cleanup"]["parent_removed"])
+            self.assertFalse(worktree.exists())
+            self.assertFalse(worktree.parent.exists())
+
 
 class OverlayResolutionTests(unittest.TestCase):
     @staticmethod

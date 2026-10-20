@@ -1040,6 +1040,10 @@ automatically. The runner does not write the original checkout; if its observed
 state changes during a run, the report records that fact without attributing
 who changed it and exits nonzero.
 
+Use `--keep-worktree` to preserve the validation checkout and its native build
+after the run. The retained location is recorded in `report.json` under
+`cleanup.path`.
+
 Use a new or empty output directory for every run. Before building, the runner
 records the snapshot SHA-256 and verifies every selected head and base resolves
 to its exact commit. Configure, build, and test output goes directly to log files;
