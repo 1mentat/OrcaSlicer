@@ -6231,11 +6231,11 @@ TEST_CASE("Manual filament change mode selects the exported BBL tool-change cont
 
     // In automatic mode the first tool change runs the configured custom block and BBL command.
     REQUIRE(route_marker(automatic).has_value());
-    CHECK(automatic.find("M1020 S1 H0") != std::string::npos);
+    CHECK(automatic.find("M1020 S1") != std::string::npos);
     // Manual mode emits the tagged manual T command and skips that first custom block.
     const std::string manual_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Manual_Tool_Change);
     CHECK(manual.find(manual_tag) != std::string::npos);
-    CHECK(manual.find("M1020 S1 H0") == std::string::npos);
+    CHECK(manual.find("M1020 S1") == std::string::npos);
     const std::size_t automatic_markers = complete_route_marker_count(automatic);
     const std::size_t manual_markers = complete_route_marker_count(manual);
     REQUIRE(automatic_markers > 1);
