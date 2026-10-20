@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Match-mode load balancing and blocked-extruder fallback. These filters are full Catch names; use an exact CTest name selector (-R), not labels.",
+  "mutants": [
+    {
+      "id": "filament-match-balance-includes-incoming-filament",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "int new_gap = std::abs(extruder_filament_count[new_extruder_id] + 1 - extruder_filament_count[1 - new_extruder_id]);",
+      "new": "int new_gap = std::abs(extruder_filament_count[new_extruder_id] - extruder_filament_count[1 - new_extruder_id]);",
+      "description": "Balance against the projected load after placing the candidate filament. Omitting the incoming filament biases identical AMS choices toward one extruder, violating the public one-per-extruder result.",
+      "test_filter": "Filament match mode spreads identical AMS options across extruders",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "filament-match-type-fallback-preserves-extruder-ban-captureless",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "auto unlink_limits = build_unlink_limits(l_nodes, r_nodes, [&machine_filament_list, is_extruder_filament_compatible](int used_filament_idx, int machine_filament_idx) {\n                return is_extruder_filament_compatible(used_filament_idx, machine_filament_list[machine_filament_idx].extruder_id);\n                });",
+      "new": "auto unlink_limits = build_unlink_limits(l_nodes, r_nodes, [](int, int) {\n                return true;\n                });",
+      "description": "Replacing the type-relaxed pass compatibility callback with unconditional true admits the physically excluded best-color extruder; the independent group-map oracle requires the only permitted extruder.",
+      "test_filter": "Filament match fallback respects blocked extruder",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

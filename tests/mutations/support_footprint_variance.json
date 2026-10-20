@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Support overlap units and expansion sign, validated with normal-code baselines and ordinary assertion failures.",
+  "mutants": [
+    {
+      "id": "support-threshold-overlap-percent-as-mm",
+      "path": "src/libslic3r/Support/SupportMaterial.cpp",
+      "old": "object_config.support_threshold_overlap.get_abs_value(unscale_(fw))",
+      "new": "object_config.support_threshold_overlap.value",
+      "description": "Treating a percentage as millimeters breaks the public 50% versus 0.2 mm equivalence on a 0.4 mm wall.",
+      "test_filter": "SupportThresholdOverlapUnits",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "support-expansion-sign-reversed",
+      "path": "src/libslic3r/Support/SupportMaterial.cpp",
+      "old": "expand(diff_polygons, xy_expansion, SUPPORT_SURFACES_OFFSET_PARAMETERS)",
+      "new": "expand(diff_polygons, -xy_expansion, SUPPORT_SURFACES_OFFSET_PARAMETERS)",
+      "description": "Reversing expansion contracts the 2 mm ledges at the +0.2 mm case, shrinking the eligible 1.6 mm support strip instead of growing its footprint and emitted path with normal(auto) snug support.",
+      "test_filter": "SupportExpansionSignVariance",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

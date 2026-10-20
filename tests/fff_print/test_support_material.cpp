@@ -2332,22 +2332,24 @@ TriangleMesh symmetric_ledges(double overhang)
     return lower;
 }
 
-DynamicPrintConfig small_overhang_config(bool remove_small_overhang)
+DynamicPrintConfig small_overhang_config(bool remove_small_overhang, double support_expansion,
+                                         const char *threshold_overlap,
+                                         const char *support_style = "default")
 {
     DynamicPrintConfig config = support_settings_variance_contracts::support_config();
     config.set_deserialize_strict({
         { "support_type",                 "normal(auto)" },
-        { "support_style",                "default" },
+        { "support_style",                support_style },
         { "support_remove_small_overhang", remove_small_overhang },
         { "support_threshold_angle",      0.0 },
-        { "support_threshold_overlap",    0.0 },
+        { "support_threshold_overlap",    threshold_overlap },
         { "support_on_build_plate_only",  true },
         { "support_object_xy_distance",   0.1 },
         { "support_top_z_distance",       0.2 },
         { "support_bottom_z_distance",    0.2 },
         { "support_interface_top_layers", 0 },
         { "support_interface_bottom_layers", 0 },
-        { "support_expansion",            0.0 },
+        { "support_expansion",            support_expansion },
         { "outer_wall_line_width",         0.4 },
         { "inner_wall_line_width",         0.4 },
         { "support_line_width",             0.4 },
@@ -2368,11 +2370,15 @@ DynamicPrintConfig small_overhang_config(bool remove_small_overhang)
     return config;
 }
 
-SupportRemovalRun run_symmetric_ledges(double overhang, bool remove_small_overhang)
+SupportRemovalRun run_symmetric_ledges(double overhang, bool remove_small_overhang,
+                                       double support_expansion = 0.0,
+                                       const char *threshold_overlap = "0%",
+                                       const char *support_style = "default")
 {
     Print print;
     Model model;
-    DynamicPrintConfig config = small_overhang_config(remove_small_overhang);
+    DynamicPrintConfig config = small_overhang_config(remove_small_overhang, support_expansion,
+                                                       threshold_overlap, support_style);
     init_print({symmetric_ledges(overhang)}, print, model, config, nullptr, false);
     const StringObjectException validation = print.validate();
     INFO("small-overhang validation: " << validation.string);
@@ -2434,6 +2440,68 @@ TEST_CASE("Support removal setting drops only small non-cantilever overhangs",
     REQUIRE(kept_large.support_path_length_mm > 0.1);
 }
 
+TEST_CASE("Overlap thresholds cover percentage and literal millimeter units",
+          "[SupportMaterial][SupportSettingsVariance][SupportThresholdOverlapUnits]")
+{
+    // External-wall width is pinned at 0.4 mm. The 0.3 mm ledge distinguishes
+    // the percentage endpoints. Its support-island area is the eligibility
+    // oracle; a strip narrower than the 0.4 mm support path may be filtered
+    // before extrusion, so positive path output is not required here.
+    const auto percent_min = support_remove_small_overhang_followup::run_symmetric_ledges(
+        0.3, false, 0.0, "0%");
+    const auto percent_max = support_remove_small_overhang_followup::run_symmetric_ledges(
+        0.3, false, 0.0, "100%");
+    const auto literal_min = support_remove_small_overhang_followup::run_symmetric_ledges(
+        0.3, false, 0.0, "0");
+    const auto literal_max = support_remove_small_overhang_followup::run_symmetric_ledges(
+        0.3, false, 0.0, "0.5");
+    const auto half_width_percent = support_remove_small_overhang_followup::run_symmetric_ledges(
+        0.3, false, 0.0, "50%");
+    const auto half_width_literal = support_remove_small_overhang_followup::run_symmetric_ledges(
+        0.3, false, 0.0, "0.2");
+
+    for (const auto *run : {&percent_min, &percent_max, &literal_min, &literal_max,
+                             &half_width_percent, &half_width_literal})
+        REQUIRE(run->finite);
+
+    CHECK_THAT(percent_min.support_area_mm2, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(literal_min.support_area_mm2, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    REQUIRE(percent_max.support_area_mm2 > 0.1);
+    REQUIRE(literal_max.support_area_mm2 > 0.1);
+    REQUIRE(half_width_percent.support_area_mm2 > 0.1);
+    CHECK_THAT(half_width_percent.support_area_mm2,
+               Catch::Matchers::WithinAbs(half_width_literal.support_area_mm2, 0.02));
+    CHECK_THAT(half_width_percent.support_path_length_mm,
+               Catch::Matchers::WithinAbs(half_width_literal.support_path_length_mm, 0.01));
+}
+
+TEST_CASE("Normal support expansion removes and grows overhang footprints",
+          "[SupportMaterial][SupportSettingsVariance][SupportExpansionSignVariance]")
+{
+    // Normal(auto) with snug support isolates the footprint without default grid
+    // reduction. At a 0% overlap threshold and 0.4 mm external-wall width, these
+    // 2 mm ledges expose an eligible 1.6 mm strip outside the lower slice. A
+    // -1.1 mm expansion erases it, 0.0 mm is neutral, and +0.2 mm grows the
+    // generated footprint and path. These values are representative, not extrema.
+    const auto contracted = support_remove_small_overhang_followup::run_symmetric_ledges(
+        2.0, false, -1.1, "0%", "snug");
+    const auto neutral = support_remove_small_overhang_followup::run_symmetric_ledges(
+        2.0, false, 0.0, "0%", "snug");
+    const auto expanded = support_remove_small_overhang_followup::run_symmetric_ledges(
+        2.0, false, 0.2, "0%", "snug");
+
+    REQUIRE(contracted.finite);
+    REQUIRE(neutral.finite);
+    REQUIRE(expanded.finite);
+    CHECK_THAT(contracted.support_area_mm2, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK(contracted.support_paths == 0);
+    CHECK_THAT(contracted.support_path_length_mm, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    REQUIRE(neutral.support_area_mm2 > 0.1);
+    REQUIRE(neutral.support_paths > 0);
+    REQUIRE(neutral.support_path_length_mm > 0.1);
+    CHECK(neutral.support_area_mm2 < expanded.support_area_mm2);
+    CHECK(neutral.support_path_length_mm < expanded.support_path_length_mm);
+}
 
 namespace gcode_process_layer_support_contracts {
 namespace {

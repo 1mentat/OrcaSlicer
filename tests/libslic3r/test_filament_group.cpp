@@ -7,6 +7,7 @@
 #include <initializer_list>
 #include <map>
 #include <set>
+#include <string>
 #include <vector>
 
 #include "libslic3r/FilamentGroup.hpp"
@@ -57,6 +58,31 @@ void require_layer_membership(const FilamentPlanRes &result, const std::vector<T
 void require_layer_membership(const FilamentPlanRes &result, std::initializer_list<int> requested, const int filament_count, const int nozzle_count)
 {
     require_layer_membership(result, std::vector<int>(requested), filament_count, nozzle_count);
+}
+
+
+FilamentGroupContext match_context(const int filament_count)
+{
+    auto c = context(filament_count, 2);
+    c.group_info.mode = FGMode::MatchMode;
+    c.group_info.total_filament_num = filament_count;
+    c.machine_info.master_extruder_id = 0;
+    c.machine_info.prefer_non_model_filament = {false, false};
+    return c;
+}
+
+FilamentGroupUtils::MachineFilamentInfo match_candidate(const std::string &type,
+                                                         const FilamentGroupUtils::Color &color,
+                                                         const bool is_support,
+                                                         const int extruder_id)
+{
+    FilamentGroupUtils::MachineFilamentInfo candidate;
+    candidate.type = type;
+    candidate.color = color;
+    candidate.is_support = is_support;
+    candidate.extruder_id = extruder_id;
+    candidate.is_extended = false;
+    return candidate;
 }
 
 } // namespace
@@ -414,4 +440,54 @@ TEST_CASE("TPU grouping honors physical extruder and nozzle-volume restrictions"
     c.model_info.unprintable_volumes[3].insert(nvtStandard);
     FilamentGroup restricted(c);
     CHECK(restricted.calc_filament_group_for_tpu() == std::vector<int>{1, 0, 1, 1, 1});
+}
+
+TEST_CASE("Filament match mode spreads identical AMS options across extruders",
+          "[FilamentGroup][FilamentMatchContracts]")
+{
+    auto c = match_context(2);
+    c.model_info.layer_filaments = {{0, 1}};
+    const FilamentGroupUtils::Color color(180, 40, 20);
+    for (auto &filament : c.model_info.filament_info) {
+        filament.color = color;
+        filament.type = "PLA";
+        filament.is_support = false;
+    }
+
+    c.machine_info.machine_filament_info.resize(2);
+    for (int extruder_id = 0; extruder_id < 2; ++extruder_id)
+        c.machine_info.machine_filament_info[extruder_id].push_back(
+            match_candidate("PLA", color, false, extruder_id));
+
+    FilamentGroup group(c);
+    auto actual = group.calc_filament_group();
+    REQUIRE(actual.size() == 2);
+    std::sort(actual.begin(), actual.end());
+    CHECK(actual == std::vector<int>{0, 1});
+}
+
+TEST_CASE("Filament match fallback respects blocked extruder",
+          "[FilamentGroup][FilamentMatchContracts]")
+{
+    auto c = match_context(1);
+    c.model_info.layer_filaments = {{0}};
+    c.model_info.filament_info[0].color = FilamentGroupUtils::Color(180, 40, 20);
+    c.model_info.filament_info[0].type = "PETG";
+    c.model_info.filament_info[0].is_support = false;
+
+    // The exact-color PLA candidate is unavailable to this filament. The only
+    // usable AMS candidate has another type, so MatchMode may relax type after
+    // its exact pass but must retain the extruder restriction.
+    c.model_info.unprintable_filaments.resize(2);
+    c.model_info.unprintable_filaments[0].insert(0);
+    c.machine_info.machine_filament_info.resize(2);
+    c.machine_info.machine_filament_info[0].push_back(
+        match_candidate("PLA", FilamentGroupUtils::Color(180, 40, 20), false, 0));
+    c.machine_info.machine_filament_info[1].push_back(
+        match_candidate("ABS", FilamentGroupUtils::Color(20, 40, 180), false, 1));
+
+    FilamentGroup group(c);
+    const auto actual = group.calc_filament_group();
+    REQUIRE(actual.size() == 1);
+    CHECK(actual[0] == 1);
 }

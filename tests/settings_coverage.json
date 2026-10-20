@@ -4332,6 +4332,25 @@
         "pipeline_oracle"
       ],
       "reason": "The same two-object, two-filament BBL print explicitly exports manual_filament_change false and true. Automatic mode emits M1020 S1 and custom route markers; manual mode emits its reserved T-command tag, omits M1020 S1, and suppresses exactly the first custom change block while retaining later blocks."
+    },
+    "support_expansion": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportExpansionSignVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig declares no numeric min/max for support_expansion. On the same 2 mm symmetric ledges, normal(auto) support with the public snug style bypasses the default support-grid reduction. A 0% overlap threshold and 0.4 mm external-wall width leave a 1.6 mm eligible strip outside the lower slice. A -1.1 mm expansion erases the strip, zero is neutral, and +0.2 mm grows the generated footprint and path. These representative sign classes do not claim to exhaust the unbounded setting domain."
+    },
+    "support_threshold_overlap": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportThresholdOverlapUnits]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The 0% and 100% percentage endpoints and 0 mm and 0.5 mm literal endpoints are sliced on a 0.3 mm ledge; zero values produce no support footprint and the larger thresholds produce positive support-island area. With external-wall width fixed at 0.4 mm, 50% and 0.2 mm are also required to produce matching support-island area and support path length. This checks selected endpoints and unit equivalence; the narrow ledge uses support-area eligibility because support extrusion may be filtered below its configured 0.4 mm path width."
     }
   }
 }
