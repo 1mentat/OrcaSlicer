@@ -4,6 +4,7 @@
 #include "test_utils.hpp"
 
 #include <cstddef>
+#include <cmath>
 #include <iterator>
 #include <libslic3r/BoundingBox.hpp>
 #include "libslic3r/TriangleMesh.hpp"
@@ -114,9 +115,18 @@ TEST_CASE("Overhanging edge should be supported", "[SupGen]") {
 }
 
 TEST_CASE("Hollowed cube should be supported from the inside", "[SupGen][Hollowed]") {
-    TriangleMesh mesh = make_cube(20., 20., 20.);
+    constexpr float outer_size = 20.f;
+    constexpr float wall_thickness = 2.5f;
+    constexpr float cavity_size = outer_size - 2.f * wall_thickness;
+    TriangleMesh mesh = make_cube(outer_size, outer_size, outer_size);
 
-    hollow_mesh(mesh, HollowingConfig{});
+    // Use an explicit 2.5 mm wall shell for a meaningful cavity fixture.
+    // The separate hollowing contract tests cover voxel generation; this test
+    // exercises support placement on the resulting cavity ceiling.
+    TriangleMesh cavity = make_cube(cavity_size, cavity_size, cavity_size);
+    cavity.translate(wall_thickness, wall_thickness, wall_thickness);
+    sla::swap_normals(cavity.its);
+    mesh.merge(cavity);
 
     write_debug_obj("sla_supptgen/cube_hollowed.obj", mesh);
 
@@ -129,7 +139,19 @@ TEST_CASE("Hollowed cube should be supported from the inside", "[SupGen][Hollowe
     sla::SupportPoints pts = calc_support_pts(mesh, cfg);
     sla::remove_bottom_points(pts, mesh.bounding_box().min.z() + EPSILON);
 
-    REQUIRE(!pts.empty());
+    constexpr float cavity_min_xy = -cavity_size / 2.f;
+    constexpr float cavity_max_xy =  cavity_size / 2.f;
+    constexpr float cavity_ceiling_z = outer_size - wall_thickness;
+    const bool has_inside_ceiling_support = std::any_of(
+        pts.begin(), pts.end(), [](const sla::SupportPoint &pt) {
+            return pt.pos.x() > cavity_min_xy && pt.pos.x() < cavity_max_xy &&
+                   pt.pos.y() > cavity_min_xy && pt.pos.y() < cavity_max_xy &&
+                   std::abs(pt.pos.z() - cavity_ceiling_z) < 0.1f;
+        });
+
+    // The witness must be projected onto the ceiling inside the cavity, rather
+    // than merely accepting any point on the cube's exterior or bottom.
+    REQUIRE(has_inside_ceiling_support);
 }
 
 TEST_CASE("Two parallel plates should be supported", "[SupGen][Hollowed]")
