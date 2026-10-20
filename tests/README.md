@@ -163,6 +163,13 @@ to replay the structural export and strict mapping checks. The
 required input hashes and provenance. Replay records stage timings and retains
 the raw integrity error; it cannot waive a warning or pass a coverage threshold.
 
+For an offline physical-line union across multiple executables, use the
+[pair-aware collector](../scripts/slicer_coverage_pair_collector.md). It exports
+each executable with its own hash-bound raw profiles before combining LCOV
+tracefiles. This avoids cross-executable profile collisions and preserves
+zero-hit source mappings. It does not run tests or attest a passing threshold;
+mapping warnings still fail its integrity check.
+
 For feedback on one subsystem in an existing coverage build, run:
 
 ```sh
