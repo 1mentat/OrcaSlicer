@@ -341,6 +341,45 @@ def _validate_identity_manifest(repo: Path, manifest: dict[str, Any], *,
         missing = sorted(set(snapshot_by_number) - set(by_number))
         stale = sorted(set(by_number) - set(snapshot_by_number))
         raise ValidationError(f"identity manifest head set mismatch; missing={missing}, stale={stale}")
+
+    # A snapshot base may predate an approved group of harness-base tests.  Bind
+    # that source absence to the exact pinned base OID so reference gates only
+    # adjust for gaps already documented by this identity manifest.
+    group_source_names = {
+        name: {case["source"]["name"] for case in cases.values()}
+        for name, cases in group_cases.items()
+    }
+    reference_bases: dict[str, dict[str, Any]] = {}
+    snapshot_base_values = [item.get("baseRefOid") for item in snapshot_records]
+    if any(not isinstance(base_sha, str) or not _HEX40.fullmatch(base_sha)
+           for base_sha in snapshot_base_values):
+        raise ValidationError("snapshot contains an invalid exact reference base OID")
+    for base_sha in sorted(set(snapshot_base_values)):
+        reference_declarations = _git_test_declarations(repo, base_sha)
+        reference_names = _declaration_names(reference_declarations)
+        missing_original_names = base_names - reference_names
+        exception_group = None
+        exception_cases: dict[str, dict[str, Any]] = {}
+        if missing_original_names:
+            matching_groups = sorted(
+                name for name, source_names in group_source_names.items()
+                if source_names and source_names == missing_original_names)
+            if len(matching_groups) != 1:
+                raise ValidationError(
+                    f"snapshot base {base_sha} original test-source gaps do not match "
+                    "one exact approved exception group: "
+                    f"missing={sorted(missing_original_names)}, matching={matching_groups}")
+            exception_group = matching_groups[0]
+            exception_cases = group_cases[exception_group]
+        reference_bases[base_sha] = {
+            "base_sha": base_sha,
+            "exception_group": exception_group,
+            "exception_cases": exception_cases,
+            "exception_runtime_ids": sorted(exception_cases),
+            "missing_original_source_names": sorted(missing_original_names),
+            "required_original_source_names": sorted(base_names - missing_original_names),
+        }
+
     selected_numbers = {int(item["number"]) for item in selected_records}
     policies: dict[int, dict[str, Any]] = {}
     for number in sorted(selected_numbers):
@@ -354,6 +393,7 @@ def _validate_identity_manifest(repo: Path, manifest: dict[str, Any], *,
         "required_harness_cases": required_cases,
         "required_harness_runtime_ids": sorted(required_ids),
         "groups": group_cases,
+        "reference_bases": reference_bases,
         "heads": policies,
         "selected_heads_validated": sorted(selected_numbers),
         "selected_head_count": len(selected_numbers),
@@ -386,6 +426,42 @@ def _validate_identity_overlay(worktree: Path, policy: dict[str, Any],
         "required_harness_runtime_count": len(required_harness_cases),
         "required_head_runtime_count": len(policy["required_head_cases"]),
         "exception_runtime_count": len(policy["exception_cases"]),
+        "overlay_test_name_count": len(names),
+    }
+
+
+def _validate_reference_identity_overlay(
+        worktree: Path, policy: dict[str, Any],
+        required_harness_cases: dict[str, dict[str, Any]], *, base_sha: str) -> dict[str, Any]:
+    """Check a reference overlay against source identities pinned to its exact base."""
+    if policy.get("base_sha") != base_sha:
+        raise ValidationError(
+            f"reference identity policy is stale for exact base {base_sha}: "
+            f"policy_base={policy.get('base_sha')!r}")
+    declarations = _git_test_declarations(worktree, None)
+    names = _declaration_names(declarations)
+    required_harness_names = {
+        case["source"]["name"] for case in required_harness_cases.values()
+    }
+    required_original_names = set(policy.get("required_original_source_names", []))
+    exception_cases = policy.get("exception_cases") or {}
+    missing_original = sorted(required_original_names - names)
+    present_exceptions = sorted(
+        case["source"]["name"] for case in exception_cases.values()
+        if case["source"]["name"] in names)
+    missing_required = sorted(required_harness_names - names)
+    if missing_required or missing_original or present_exceptions:
+        raise ValidationError(
+            "reference identity overlay contradicts its exact-base policy: "
+            f"missing_required={missing_required}, missing_original={missing_original}, "
+            f"present_exceptions={present_exceptions}")
+    return {
+        "checked": True,
+        "reference_base_sha": base_sha,
+        "exception_group": policy.get("exception_group"),
+        "required_harness_runtime_count": len(required_harness_cases),
+        "required_original_source_count": len(required_original_names),
+        "exception_runtime_count": len(exception_cases),
         "overlay_test_name_count": len(names),
     }
 
@@ -2228,7 +2304,9 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
                         allowed_staged_paths: Sequence[str] | None = None,
                         reuse_lock: _PrValidationReuseLock | None = None,
                         applied_paths: Sequence[str] | None = None,
-                        previous_run: dict[str, Any] | None = None) -> dict[str, Any]:
+                        previous_run: dict[str, Any] | None = None,
+                        identity_policy: dict[str, Any] | None = None,
+                        required_harness_cases: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Run one exact snapshot base with the same guarded tests-only overlay."""
     reference: dict[str, Any] = {
         "name": reference_name,
@@ -2284,6 +2362,23 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
         reference["status"] = "tracked_source_index_changed"
         record_mtime_state("tracked_source_index_gate_failed")
         return reference
+    reference_overlay_identity = None
+    if identity_policy is not None:
+        try:
+            reference_overlay_identity = _validate_reference_identity_overlay(
+                worktree, identity_policy, required_harness_cases or {}, base_sha=base_sha)
+        except ValidationError as exc:
+            reference["status"] = "identity_manifest_invalid"
+            reference["identity_gate"] = {
+                "applied": False,
+                "reference_base_sha": base_sha,
+                "exception_group": identity_policy.get("exception_group"),
+                "exception_runtime_ids": list(identity_policy.get("exception_runtime_ids", [])),
+                "validation_error": str(exc),
+            }
+            reference["harness_patch_applied"] = bool(patch)
+            record_mtime_state("identity_gate_failed")
+            return reference
     tree, tree_result = _tree_sha(worktree)
     reference["tree_resolution"] = tree_result.json()
     if tree is None:
@@ -2300,8 +2395,30 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
     run = _run_tree(worktree, output, reference_name, args, configure_args, build_args,
                     commit_sha=base_sha, tree_sha=tree)
     reference.update(run)
-    _apply_minimum_test_gate(reference, minimum_tests=args.minimum_tests,
-                              baseline_cases=baseline_passed_cases)
+    gate_minimum_tests = args.minimum_tests
+    gate_baseline_cases = baseline_passed_cases
+    if identity_policy is not None:
+        exception_ids = set(identity_policy.get("exception_runtime_ids", []))
+        gate_baseline_cases = {
+            name: status for name, status in baseline_passed_cases.items()
+            if name not in exception_ids
+        }
+        gate_minimum_tests = max(1, args.minimum_tests - len(exception_ids))
+        reference["identity_gate"] = {
+            "applied": True,
+            "reference_base_sha": base_sha,
+            "exception_group": identity_policy.get("exception_group"),
+            "exception_runtime_ids": sorted(exception_ids),
+            "exception_count": len(exception_ids),
+            "minimum_tests_requested": args.minimum_tests,
+            "minimum_tests_adjustment": -len(exception_ids),
+            "minimum_tests_adjusted": gate_minimum_tests,
+            "required_baseline_identity_count": len(gate_baseline_cases),
+            "required_harness_runtime_count": len(required_harness_cases or {}),
+            "overlay_identity": reference_overlay_identity,
+        }
+    _apply_minimum_test_gate(reference, minimum_tests=gate_minimum_tests,
+                              baseline_cases=gate_baseline_cases)
     reference["harness_patch_applied"] = bool(patch)
     return reference
 
@@ -2596,6 +2713,14 @@ def run_validation(args: argparse.Namespace) -> int:
                             reference_for_head["reference_base_sha"] = requested_base_oid
                             reference_for_head["reused_from_head_number"] = previous_head.get("number")
                         else:
+                            reference_identity_policy = None
+                            if identity_policy is not None:
+                                reference_identity_policy = identity_policy["reference_bases"].get(
+                                    requested_base_oid)
+                                if reference_identity_policy is None:
+                                    raise ValidationError(
+                                        "identity manifest has no policy for exact snapshot base "
+                                        f"{requested_base_oid}")
                             reference_name = (
                                 "reference"
                                 if len(reference_base_oids) == 1 and requested_base_oid == harness_base
@@ -2608,7 +2733,10 @@ def run_validation(args: argparse.Namespace) -> int:
                                 allowed_staged_paths=applied_paths if reuse_mode else None,
                                 reuse_lock=reuse_lock if reuse_mode else None,
                                 applied_paths=applied_paths if reuse_mode else None,
-                                previous_run=last_tree_run)
+                                previous_run=last_tree_run,
+                                identity_policy=reference_identity_policy,
+                                required_harness_cases=(identity_policy["required_harness_cases"]
+                                                        if identity_policy is not None else None))
                             last_tree_run = reference_for_head
                         report["references"][requested_base_oid] = reference_for_head
                         if (identity_policy is None and
