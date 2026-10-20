@@ -244,6 +244,10 @@ and both registered surface-density bounds through emitted extrusion roles.
 against bounded obstacle geometry and configured endpoints.
 `[ValidationContracts]` exercises rejected configurations and warning gates;
 that evidence is declared separately from sliced-output coverage.
+`[PrintValidationPublicBoundary]` checks printable-height and spiral-copy
+boundaries, prime-tower layer agreement, unused support enforcers, and belt-brim
+warnings with valid controls. Build `fff_print_workflow_tests` for focused
+feedback; its mutation probes are in `print_validation_public_boundary.json`.
 
 `[RelativeBridgeAngle]` compares automatic, absolute, and relative internal
 bridge directions. `[PaintedCutWidth]` checks bounded painted-region areas,

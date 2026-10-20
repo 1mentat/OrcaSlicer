@@ -4673,3 +4673,223 @@ TEST_CASE("Print validation compares custom layer profiles across prime-tower ob
 }
 
 } // namespace print_validation_followup_contracts
+
+TEST_CASE("Print validation distinguishes a last-layer overrun from a fitting height boundary",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    struct HeightCase {
+        double printable_height;
+        bool   expects_last_layer_error;
+    };
+    const HeightCase part = GENERATE(HeightCase{9.9, true}, HeightCase{10.0, false});
+    CAPTURE(part.printable_height, part.expects_last_layer_error);
+
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_key_value("printable_height", new ConfigOptionFloat(part.printable_height));
+    Print print;
+    Model model;
+    init_print({cube(10.0)}, print, model, config);
+
+    const StringObjectException error = print.validate();
+    if (!part.expects_last_layer_error) {
+        CHECK(error.string.empty());
+        CHECK(error.opt_key.empty());
+        return;
+    }
+
+    REQUIRE_FALSE(error.string.empty());
+    CHECK(error.string.find("its last layer exceeds the maximum build volume height.") != std::string::npos);
+    CHECK(error.object == model.objects.front());
+    CHECK(error.opt_key.empty());
+    CHECK_FALSE(error.is_warning);
+}
+
+TEST_CASE("Print validation rejects spiral vase with two by-layer copies at the copy-count boundary",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    const size_t copies = GENERATE(size_t(1), size_t(2));
+    CAPTURE(copies);
+
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_deserialize_strict({
+        {"spiral_mode", true},
+        {"print_sequence", "by layer"},
+    });
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{cube(10.0)}, print, model, config, nullptr, true, copies);
+
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->instances().size() == copies);
+    const StringObjectException error = print.validate();
+    if (copies == 1) {
+        CHECK(error.string.empty());
+        CHECK(error.opt_key.empty());
+    } else {
+        CHECK(error.string == "Please select \"By object\" print sequence to print multiple objects in spiral vase mode.");
+        CHECK(error.opt_key == "spiral_mode");
+        CHECK(error.object == nullptr);
+        CHECK_FALSE(error.is_warning);
+    }
+}
+
+TEST_CASE("Print validation requires prime-tower objects to share their layer-height contract",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    const bool change_second_layer_height = GENERATE(false, true);
+    CAPTURE(change_second_layer_height);
+
+    const DynamicPrintConfig config = multifilament_config(2, {
+        {"enable_prime_tower", true},
+        {"belt_printer", false},
+        {"spiral_mode", false},
+        {"print_sequence", "by layer"},
+        {"timelapse_type", "0"},
+        {"enable_wrapping_detection", false},
+        {"wipe_tower_type", "type2"},
+        {"wipe_tower_wall_type", "rectangle"},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+        {"wipe_tower_x", 50.0},
+        {"wipe_tower_y", 50.0},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    Model model;
+    Print print;
+    build_two_filament_wipe_print(config, model, print);
+    REQUIRE(print.objects().size() == 2);
+
+    if (change_second_layer_height)
+        model.objects[1]->config.set_key_value("layer_height", new ConfigOptionFloat(0.3));
+    print.apply(model, config);
+    REQUIRE(print.has_wipe_tower());
+
+    const StringObjectException error = print.validate();
+    if (!change_second_layer_height) {
+        CHECK(error.string.empty());
+        CHECK(error.opt_key.empty());
+        return;
+    }
+
+    CHECK(error.string == "A prime tower requires that all objects have the same layer height.");
+    CHECK(error.opt_key == "initial_layer_print_height");
+    CHECK(error.object == print.objects()[1]);
+    CHECK_FALSE(error.is_warning);
+}
+
+TEST_CASE("Print validation warns about unused support enforcers but ignores blockers and enabled support",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    struct EnforcerCase {
+        ModelVolumeType volume_type;
+        bool            support_enabled;
+        bool            expects_warning;
+    };
+    const EnforcerCase part = GENERATE(
+        EnforcerCase{ModelVolumeType::SUPPORT_ENFORCER, false, true},
+        EnforcerCase{ModelVolumeType::SUPPORT_ENFORCER, true, false},
+        EnforcerCase{ModelVolumeType::SUPPORT_BLOCKER, false, false});
+    CAPTURE(static_cast<int>(part.volume_type), part.support_enabled, part.expects_warning);
+
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_deserialize_strict({
+        {"enable_support", part.support_enabled},
+        {"support_type", "normal(auto)"},
+    });
+    Print print;
+    Model model;
+    init_print({cube(10.0)}, print, model, config);
+    ModelVolume *modifier = model.objects.front()->add_volume(cube(4.0), part.volume_type);
+    REQUIRE(modifier != nullptr);
+    print.apply(model, config);
+
+    REQUIRE(print.objects().size() == 1);
+    CHECK(print.objects().front()->has_support() == part.support_enabled);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
+        return entry.string.find("Support enforcers are used but support is not enabled.") != std::string::npos;
+    });
+    if (!part.expects_warning) {
+        CHECK(warning == warnings.end());
+        return;
+    }
+
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->opt_key.empty());
+    CHECK(warning->is_warning);
+    CHECK(warning->object == print.objects().front());
+}
+
+TEST_CASE("Print validation reports belt-only brim settings with stable warning keys",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    struct BrimCase {
+        const char *name;
+        bool        belt_printer;
+        const char *brim_type;
+        double      belt_angle;
+        double      brim_width;
+        double      leading_brim_length;
+        double      brim_object_gap;
+        int         object_count;
+        const char *expected_key;
+        const char *expected_message;
+        bool        expected_model_object;
+    };
+    const BrimCase part = GENERATE(
+        BrimCase{"flat belt with outer brim", true, "outer_only", 0.0, 5.0, 0.0, 0.0, 1,
+                 "brim_type", "A brim is only generated when the belt is tilted", true},
+        BrimCase{"steep belt with outer brim", true, "outer_only", 90.0, 5.0, 0.0, 0.0, 1,
+                 "brim_width", "The belt is too steep for a brim", true},
+        BrimCase{"tilted belt with automatic brim", true, "auto_brim", 45.0, 5.0, 0.0, 0.0, 1,
+                 "brim_type", "Belt printers support outer and inner brim only", true},
+        BrimCase{"leading brim separated from the object", true, "outer_only", 45.0, 5.0, 10.0, 2.0, 1,
+                 "brim_object_gap", "Brim-object gap separates the leading brim", true},
+        BrimCase{"multiple belt objects with leading brim", true, "outer_only", 45.0, 0.0, 10.0, 0.0, 2,
+                 "leading_brim_length", "Arrange does not reserve that space", false},
+        BrimCase{"leading-edge-only brim on a fixed bed", false, "leading_edge_only", 0.0, 0.0, 0.0, 0.0, 1,
+                 "brim_type", "applies to belt printers", true},
+        BrimCase{"ordinary brim on a properly tilted belt", true, "outer_only", 45.0, 5.0, 0.0, 0.0, 1,
+                 "", "", false});
+    CAPTURE(part.name, part.belt_printer, part.brim_type, part.belt_angle,
+            part.brim_width, part.leading_brim_length, part.brim_object_gap, part.object_count);
+
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_deserialize_strict({
+        {"belt_printer", part.belt_printer},
+        {"belt_slice_rotation", "x"},
+        {"belt_slice_rotation_angle", part.belt_angle},
+        {"brim_type", part.brim_type},
+        {"brim_width", part.brim_width},
+        {"leading_brim_length", part.leading_brim_length},
+        {"brim_object_gap", part.brim_object_gap},
+    });
+
+    Print print;
+    Model model;
+    build_cubes(model, print, config, part.object_count, false);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+
+    if (part.expected_key[0] == '\0') {
+        CHECK(std::none_of(warnings.begin(), warnings.end(), [](const StringObjectException &warning) {
+            return warning.opt_key == "brim_type" || warning.opt_key == "brim_width" ||
+                   warning.opt_key == "brim_object_gap" || warning.opt_key == "leading_brim_length";
+        }));
+        return;
+    }
+
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [&part](const StringObjectException &entry) {
+        return entry.opt_key == part.expected_key;
+    });
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->is_warning);
+    CHECK(warning->string.find(part.expected_message) != std::string::npos);
+    CHECK((warning->object != nullptr) == part.expected_model_object);
+    if (part.expected_model_object)
+        CHECK(warning->object == model.objects.front());
+}
