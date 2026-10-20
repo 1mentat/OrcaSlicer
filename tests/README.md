@@ -189,6 +189,11 @@ parent directories are created after preflight; existing run directories are
 never reused. If a commit changes CMake inputs, regenerate the existing CMake
 configuration before this command: the runner requires the compile database to
 remain unchanged throughout its measured cycle.
+Use the configured CMake executable and the original source/build path spellings
+recorded in the retained Ninja configuration. Resolving a symlink alias or changing
+CMake versions can invalidate otherwise unchanged objects. Inspect a Ninja dry run
+before compiling: adding a focused test target should compile its test/support
+sources and link, without recompiling production objects.
 Before building, the runner checks that the compile database assigns the test
 source to the requested CMake target. Canonical and focused targets may both
 own the same source; selecting an unrelated target fails before compilation.
@@ -240,6 +245,32 @@ Rebuild all instrumented objects and collect fresh
 profiles when changing this flag. Do not merge profiles from non-atomic builds
 into an atomic coverage measurement. See Clang's
 [profile update modes](https://releases.llvm.org/18.1.6/tools/clang/docs/UsersManual.html#cmdoption-fprofile-update).
+
+For opt-in instrumentation-cost experiments, configure with both
+`-DSLICER_ENABLE_LLVM_SOURCE_COVERAGE=ON` and
+`-DSLICER_COVERAGE_PROJECT_FUNCTIONS_ONLY=ON`. The latter defaults to `OFF`
+and has no effect unless LLVM source coverage is enabled. It writes
+`build/slicer-coverage/project-functions-only.profiler-list` with an allow rule
+for the exact configured `${CMAKE_SOURCE_DIR}/src/*` source path and a forbid
+default, then adds `-fprofile-list=<file>` only to targets that already opt into
+coverage. CMake passes that path as one compiler argument, including when the
+build directory contains spaces; the profile rule preserves the configured
+`CMAKE_SOURCE_DIR` spelling instead of resolving symlink aliases.
+The helper rewrites the list only when its bytes change, since Clang tracks it as
+a compile input and touching it would make Ninja rebuild the instrumented TUs.
+
+This experiment leaves `-fprofile-update=atomic`, coverage mappings, target
+source manifests, and the normal coverage flags in place. Source files under
+`src/` remain eligible for counters; test definitions and external definitions
+outside that source path, including dependency-header inline functions, do not
+receive counters. That changes instrumentation overhead and can remove
+non-production mappings. It is a diagnostic mode, not
+a replacement for the normal all-functions coverage run or a basis for claiming
+a smaller production denominator. Before comparing results, require identical
+production mapping identities and runtime-hit identities between the normal and
+filtered runs, and report any difference as an evidence-integrity failure.
+Reconfigure, rebuild all instrumented objects, and collect fresh profiles when
+switching this option.
 It invokes `llvm-cov export --summary-only -instr-profile <merged profile>` on
 each instrumented object (including with LLVM 18): an object with no coverage map is reported as a
 `mapping_free_translation_unit` (for example an include-only PCH source),

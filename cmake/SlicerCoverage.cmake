@@ -17,6 +17,9 @@ include_guard(GLOBAL)
 option(SLICER_ENABLE_LLVM_SOURCE_COVERAGE
        "Instrument selected OrcaSlicer targets with LLVM source coverage" OFF)
 
+option(SLICER_COVERAGE_PROJECT_FUNCTIONS_ONLY
+       "Instrument only function definitions under CMAKE_SOURCE_DIR/src in LLVM coverage targets" OFF)
+
 if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
     # Object-level compiler evidence distinguishes mapping-free translation
     # units from executable code that was accidentally omitted from the link.
@@ -72,6 +75,29 @@ function(slicer_enable_llvm_source_coverage TARGET_NAME)
 
     set(_manifest_dir "${CMAKE_BINARY_DIR}/slicer-coverage")
     file(MAKE_DIRECTORY "${_manifest_dir}")
+    # This optional profile list changes only which functions receive counters;
+    # the target's source manifest and normal coverage flags remain active. Keep
+    # CMAKE_SOURCE_DIR's configured spelling (including a
+    # symlink alias) so it matches the paths clang sees in this build.
+    if (SLICER_COVERAGE_PROJECT_FUNCTIONS_ONLY)
+        set(_profile_list "${_manifest_dir}/project-functions-only.profiler-list")
+        set(_profile_list_contents
+            "[clang]\nsource:${CMAKE_SOURCE_DIR}/src/*=allow\ndefault:forbid\n")
+        if (EXISTS "${_profile_list}")
+            file(READ "${_profile_list}" _profile_list_existing_contents)
+        else()
+            set(_profile_list_existing_contents "")
+        endif()
+        # Clang records this file as an input dependency. Preserve its mtime on
+        # an identical configure so Ninja does not rebuild every instrumented TU.
+        if (NOT "${_profile_list_existing_contents}" STREQUAL "${_profile_list_contents}")
+            file(WRITE "${_profile_list}" "${_profile_list_contents}")
+        endif()
+        # One CMake argument preserves the profile-list path if the build path
+        # contains spaces.
+        target_compile_options(${TARGET_NAME} PRIVATE "-fprofile-list=${_profile_list}")
+    endif()
+
     set(_manifest "${_manifest_dir}/${TARGET_NAME}.sources.txt")
     file(WRITE "${_manifest}" "# Sources compiled into ${TARGET_NAME}\n")
     foreach(_source IN LISTS _sources)
