@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Semantic probes for role-specific speed selection and PWM-floor boundaries. Role assertions inspect carried fan state at positive-XY feature extrusion moves.",
+  "mutants": [
+    {
+      "id": "cooling-boundaries-support-interface-wrong-speed",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "set_fan(supp_interface_fan_speed);",
+      "new": "set_fan(ironing_fan_speed);",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Cooling role fan arrays cover their endpoints through cached and fresh prints",
+      "description": "Real support-interface extrusion moves must carry the support setting's 1, 99, or 100 percent PWM after the selected floor, not the independently configured ironing value."
+    },
+    {
+      "id": "cooling-boundaries-pwm-floor-reversed-comparator",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "speed < part_cooling_fan_min_pwm",
+      "new": "speed > part_cooling_fan_min_pwm",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Minimum part cooling fan PWM covers input endpoints and their nearest integer neighbors",
+      "description": "Reversing the clamp predicate breaks the explicit 0/1/99/100 input cases and the 39/40/41 samples around the configured 40 percent floor."
+    }
+  ]
+}

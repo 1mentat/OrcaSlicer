@@ -724,6 +724,21 @@ emit cooling without scheduling a later heating command or heating block.
 The preheating mutation manifest challenges the usage-block gates, temperature
 branches, extruder selectors, and generated command markers.
 
+`[RoleFanBoundaries]` checks fan state on real internal-bridge, support-interface
+and ironing extrusion across selected endpoint values, cached settings changes,
+fresh prints and restored settings. The fixture keeps both role-generating mesh
+groups in one object and pins `seam_position=back`, so fan checks do not repeat
+visibility-based seam ray tracing. Path counts, XY length and deposited filament
+must remain stable. `[FanPwmBoundaryValues]` checks the writer's off behavior,
+rounding and minimum-PWM clamp with explicit endpoint and adjacent values.
+Their probes are in `cooling_role_fans.json`.
+
+The partial-free cooling case varies the cooling rate against a configured
+190 C target and requires preheating and nozzle-map commands before optional
+motion. Its probes are in `gcode_processor_partial_free_cooling.json`; the
+separate heat-only branch probe remains a documented survivor because this
+fixture does not reach it.
+
 `[SettingsFamilyVariance]` connects support speeds, bridge flow, overhang
 speed bands, ironing overrides, and infill connection limits to emitted
 motion or geometry. Its mutation manifest retains two `known_survivors`

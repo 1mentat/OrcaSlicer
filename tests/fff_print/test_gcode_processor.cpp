@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <sstream>
 #include "libslic3r/Print.hpp"
 #include "libslic3r/CustomGCode.hpp"
@@ -1967,6 +1968,131 @@ TEST_CASE("A slower target cooler retains more heat during the same idle window"
     CHECK_THAT(cooling_temperature(unchanged_commands), WithinAbs(fast_temperature, 1e-6f));
     CHECK_THAT(heating_command(slow_commands, 220.f).tool, WithinAbs(1.f, 1e-6f));
     CHECK_THAT(heating_command(fast_commands, 220.f).tool, WithinAbs(1.f, 1e-6f));
+}
+
+
+
+std::vector<float> post_extrusion_cooling_temperatures(const std::string &output)
+{
+    std::vector<float> temperatures;
+    GCodeReader reader;
+    reader.parse_buffer(output, [&temperatures](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("M104") || line.raw().find("pre cooling in post extrusion") == std::string::npos)
+            return;
+        float temperature = 0.f;
+        if (line.has_value('S', temperature))
+            temperatures.push_back(temperature);
+    });
+    return temperatures;
+}
+
+TEST_CASE("Partial free cooling respects its target and preheating avoids skippable motion",
+          "[GCodeProcessor][GcpPreheat][GcpPreheatVariance][GCodeProcessorSkippable]")
+{
+    std::string gcode =
+        "; MACHINE_START_GCODE_END\n"
+        "G90\nM83\nT0\nG1 X10 Y0 Z0.2 E0.1 F60\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "; CP_TOOLCHANGE_WIPE CT0 FL0\nG1 X20 Y0 E0.1 F60\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "T1\nG1 X30 Y0 E0.1 F60\n"
+        "; NOZZLE_CHANGE_START OF1 NF0 ON1 NN0\n"
+        "; CP_TOOLCHANGE_WIPE CT0 FL0\nG1 X90 Y0 E0.1 F60\n"
+        "; NOZZLE_CHANGE_END OF1 NF0 ON1 NN0\n"
+        "T0\nG1 X150 Y0 E0.1 F60\n"
+        "; SKIPPABLE_START\n; SKIPTYPE: timelapse\n";
+    for (int x = 151; x <= 210; ++x)
+        gcode += "G1 X" + std::to_string(x) + " Y0 E0.1 F60\n";
+    gcode +=
+        "; SKIPPABLE_END\nG1 X215 Y0 E0.1 F600\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n"
+        "; CP_TOOLCHANGE_WIPE CT0 FL0\nG1 X220 Y0 E0.1 F600\n"
+        "; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "T1\nG1 X225 Y0 E0.1 F60\n"
+        "; MACHINE_END_GCODE_START\n";
+
+    auto fast_cooling = preheat_config();
+    fast_cooling.filament_pre_cooling_temperature.values = {0, 190};
+    fast_cooling.hotend_cooling_rate.values = {4., 4.};
+    const auto fast = process_post(gcode, fast_cooling, true);
+
+    auto slow_cooling = fast_cooling;
+    slow_cooling.hotend_cooling_rate.values = {4., 0.1};
+    const auto slow = process_post(gcode, slow_cooling, true);
+
+    const auto fast_partial = post_extrusion_cooling_temperatures(fast.output);
+    const auto slow_partial = post_extrusion_cooling_temperatures(slow.output);
+    REQUIRE(fast_partial.size() == 1);
+    REQUIRE(slow_partial.size() == 1);
+    CHECK_THAT(fast_partial.front(), WithinAbs(190.f, 1e-3f));
+    CHECK(slow_partial.front() > fast_partial.front());
+    CHECK(slow_partial.front() < 230.f);
+
+    const size_t skip_start = fast.output.find("; SKIPPABLE_START");
+    const size_t skip_end = fast.output.find("; SKIPPABLE_END");
+    std::vector<size_t> preheat_positions;
+    std::vector<size_t> nozzle_map_start_positions;
+    std::vector<size_t> nozzle_map_end_positions;
+    std::vector<size_t> skipped_move_positions;
+    size_t search_offset = 0;
+    GCodeReader reader;
+    reader.parse_buffer(fast.output, [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.raw().empty())
+            return;
+        const size_t line_position = fast.output.find(line.raw(), search_offset);
+        if (line_position == std::string::npos)
+            return;
+        search_offset = line_position + line.raw().size();
+
+        if (line.cmd_is("M104")) {
+            float tool = 0.f;
+            float temperature = 0.f;
+            float generated = -1.f;
+            if (line.has_value('T', tool) && line.has_value('S', temperature) &&
+                line.has_value('N', generated) && std::abs(tool - 1.f) < 1e-4f &&
+                std::abs(temperature - 220.f) < 1e-4f && std::abs(generated) < 1e-4f &&
+                line.comment().find("Multi extruder pre heating") != std::string_view::npos)
+                preheat_positions.push_back(line_position);
+        } else if (line.cmd_is("M632")) {
+            float next_filament = 0.f;
+            if (line.has_value('S', next_filament) && std::abs(next_filament - 1.f) < 1e-4f && line.has('W'))
+                nozzle_map_start_positions.push_back(line_position);
+        } else if (line.cmd_is("M633")) {
+            nozzle_map_end_positions.push_back(line_position);
+        }
+        if (line.cmd_is("G1")) {
+            float x = 0.f;
+            float y = 0.f;
+            float extrusion = 0.f;
+            float feedrate = 0.f;
+            if (line.has_value('X', x) && line.has_value('Y', y) && line.has_value('E', extrusion) &&
+                line.has_value('F', feedrate) && std::abs(x - 200.f) < 1e-4f &&
+                std::abs(y) < 1e-4f && std::abs(extrusion - 0.1f) < 1e-4f &&
+                std::abs(feedrate - 60.f) < 1e-4f)
+                skipped_move_positions.push_back(line_position);
+        }
+    });
+    REQUIRE(skip_start != std::string::npos);
+    REQUIRE(skip_end != std::string::npos);
+    REQUIRE(preheat_positions.size() == 1);
+    REQUIRE(skipped_move_positions.size() == 1);
+    const size_t heat = preheat_positions.front();
+    const size_t skipped_move = skipped_move_positions.front();
+    const auto nozzle_map_start_it = std::find_if(nozzle_map_start_positions.rbegin(), nozzle_map_start_positions.rend(),
+        [heat](size_t position) { return position < heat; });
+    const auto nozzle_map_end_it = std::find_if(nozzle_map_end_positions.begin(), nozzle_map_end_positions.end(),
+        [heat](size_t position) { return position > heat; });
+    REQUIRE(nozzle_map_start_it != nozzle_map_start_positions.rend());
+    REQUIRE(nozzle_map_end_it != nozzle_map_end_positions.end());
+    const size_t nozzle_map_start = *nozzle_map_start_it;
+    const size_t nozzle_map_end = *nozzle_map_end_it;
+    CHECK(nozzle_map_start < heat);
+    CHECK(heat < nozzle_map_end);
+    CHECK(heat < skip_start);
+    CHECK(nozzle_map_start < skip_start);
+    CHECK(nozzle_map_end < skip_start);
+    CHECK(skip_start < skipped_move);
+    CHECK(skipped_move < skip_end);
 }
 
 } // namespace preheat_variance_contracts

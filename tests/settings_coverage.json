@@ -3902,6 +3902,24 @@
       ],
       "reason": "Accepted703 \"Preheating is a gate for inserted temperature commands\" processes the same public GCodeProcessor input with enable_pre_heating=false and true. The disabled output contains neither multi-extruder pre-heating nor pre-cooling commands; the enabled output contains both, with the parsed motion/result path still valid. Other preheat timing and filament-marker combinations remain unclaimed."
     },
+    "hotend_cooling_rate": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GCodeProcessor][GcpPreheat][GcpPreheatVariance][GCodeProcessorSkippable]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public GCodeProcessor post-processing fixture varies the active tool-1 cooling rate from 4.0 to 0.1 while tool 0 remains at 4.0. The configured 190 C partial-cooling target is emitted at the fast rate; the slower rate emits a temperature above 190 C but below the normal 230 C target. Parsed preheat/nozzle-map commands remain ordered around preserved skippable motion. These are representative synthetic-input values, not the numeric range, all filament indexes or a sliced Print interaction matrix."
+    },
+    "filament_pre_cooling_temperature": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GCodeProcessor][GcpPreheat][GcpPreheatVariance][GCodeProcessorSkippable]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public GCodeProcessor post-processing fixture uses a 190 C pre-cooling target for the active second tool (the first tool remains at the disabled 0 value). The fast-cooling output must contain a post-extrusion cooling command at exactly 190 C; the slower-rate row must stay above that target while remaining below the normal 230 C temperature. Preheating order and the skippable-motion boundary are also parsed. This is one target and tool index on synthetic G-code; the numeric range and Print-slicing behavior remain unclaimed."
+    },
     "seam_slope_inner_walls": {
       "test": "tests/fff_print/test_precise_seam.cpp",
       "tag": "[SeamScopeSettings]",
@@ -4209,6 +4227,42 @@
         "pipeline_oracle"
       ],
       "reason": "The same stepped base/stem/cap mesh and pinned cooling/ironing configuration are sliced with fan_speedup_overhangs=false and true. Both rows require finite positive motion, ordinary PWM=51 and overhang PWM=255 witnesses, then compare the first rising non-overhang ironing PWM=102 event. The false (unrestricted) row must advance that event in signed physical distance and elapsed time relative to the true row while path length and filament remain conserved. This covers both boolean states with a scheduling/material oracle; ironing settings and other fan numeric domains remain pinned/unclaimed."
+    },
+    "internal_bridge_fan_speed": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][CoolingSettings][RoleFanBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The role-aware public Print fixture covers internal_bridge_fan_speed selected values 0, 1, 99 and 100 near the off and maximum-speed boundaries; a separate role settings row covers 40 and the -1 fallback sentinel. Parsed positive-XY internal-bridge extrusion must carry the independently mapped PWM, and changing the role setting or minimum PWM preserves paths, deposited filament and XY length across incremental, fresh and restored prints. This is selected single-extruder evidence; other indexes, firmware mappings and the full numeric domain remain unclaimed."
+    },
+    "support_material_interface_fan_speed": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][CoolingSettings][RoleFanBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The role-aware public Print fixture covers support_material_interface_fan_speed selected values 0, 1, 99 and 100 near the off and maximum-speed boundaries; the role settings row also checks 60. Parsed positive-XY support-interface extrusion must carry the independently mapped PWM, while path counts, deposited filament and XY length remain stable across incremental, fresh and restored prints. This is selected single-extruder evidence; other indexes, firmware mappings and the full numeric domain remain unclaimed."
+    },
+    "ironing_fan_speed": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][CoolingSettings][RoleFanBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The role-aware public Print fixture covers ironing_fan_speed selected values 0, 1, 99 and 100 near the off and maximum-speed boundaries; the role settings row also checks 80. Parsed positive-XY ironing extrusion must carry the independently mapped PWM, while path counts, deposited filament and XY length remain stable across incremental, fresh and restored prints. This is selected single-extruder evidence; other indexes, firmware mappings and the full numeric domain remain unclaimed."
+    },
+    "part_cooling_fan_min_pwm": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][CoolingSettings][FanPwmBoundaryValues]",
+      "dimensions": [
+        "boundary_values",
+        "fixture_only"
+      ],
+      "reason": "The direct GCodeWriter::set_fan case covers minimum PWM floors 0, 1, 99 and 100 at the registered endpoints and adjacent integer values, plus 40 with requested fan values 39, 40 and 41. Parsed output from the Marlin-compatible M106 writer path must preserve an exact zero-off command and produce the expected rounded/clamped PWM. This isolates the writer contract; full Print-pipeline interactions and other firmware fan commands remain unclaimed."
     },
     "top_bottom_infill_wall_overlap": {
       "test": "tests/fff_print/test_settings_variance.cpp",

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Configured partial-cooling target and preheat placement around optional motion through the public GCodeProcessor post-processing path.",
+  "mutants": [
+    {
+      "id": "remove-partial-cooling-target-cap",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "float max_cooling_temp = std::min(curr_temp, std::min(get_partial_free_cooling_thres(block.last_filament_id), partial_free_time_gap * ext_cooling_rate));",
+      "new": "float max_cooling_temp = std::min(curr_temp, partial_free_time_gap * ext_cooling_rate);",
+      "expected_matches": 1,
+      "test_filter": "Partial free cooling respects its target and preheating avoids skippable motion",
+      "description": "Remove the configured filament pre-cooling threshold from the partial-cooling cap.",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "advance-combined-cooling-preheat-past-skippable-region",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    --heating_move_iter;\n    heating_move_iter = adjust_iter(heating_move_iter, move_iter_lower, move_iter_upper, false);\n\n    // get the insert pos of heat cmd and recalculate time gap and delta temp",
+      "new": "    --heating_move_iter;\n    heating_move_iter = adjust_iter(heating_move_iter, move_iter_lower, move_iter_upper, true);\n\n    // get the insert pos of heat cmd and recalculate time gap and delta temp",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Partial free cooling respects its target and preheating avoids skippable motion",
+      "description": "The combined partial-cooling/reheating path must move preheat ahead of optional motion, preserving required heat even if that motion is skipped; forward adjustment should violate the public heat/map-before-SKIPPABLE_START oracle."
+    }
+  ],
+  "known_survivors": [
+    {
+      "id": "advance-preheat-past-skippable-region",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            --heating_move_iter;\n            heating_move_iter = adjust_iter(heating_move_iter, move_iter_lower, move_iter_upper, false);\n            add_M104_lines(heating_move_iter->gcode_id, extruder_id, target_temp, block.next_filament_id, true, block.next_filament_id, block.next_nozzle_id, TimeProcessor::InsertLineType::PreHeating, \"Multi extruder pre heating\");",
+      "new": "            --heating_move_iter;\n            heating_move_iter = adjust_iter(heating_move_iter, move_iter_lower, move_iter_upper, true);\n            add_M104_lines(heating_move_iter->gcode_id, extruder_id, target_temp, block.next_filament_id, true, block.next_filament_id, block.next_nozzle_id, TimeProcessor::InsertLineType::PreHeating, \"Multi extruder pre heating\");",
+      "expected_matches": 1,
+      "test_filter": "Partial free cooling respects its target and preheating avoids skippable motion",
+      "description": "Advance the preheating insertion iterator past the skippable-region boundary.",
+      "classification": "unreached_by_current_fixture",
+      "reason": "The current public post-processing caller enables pre-cooling, so this fixture does not enter the separate heat-only branch. Retained as a survivor; no global equivalence or dead-code claim."
+    }
+  ]
+}

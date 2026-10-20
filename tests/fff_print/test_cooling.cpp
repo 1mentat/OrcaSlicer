@@ -7,13 +7,23 @@
 #include "test_helpers.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cstddef>
+#include <iterator>
 #include <cmath>
+#include <string_view>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCodeWriter.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include <sstream>
 #include <string>
 #include <utility>
@@ -412,6 +422,489 @@ TEST_CASE("Keeping the cooling fan running preserves a positive fan during depos
     CHECK(std::all_of(stop.part_fan_states.begin(), stop.part_fan_states.end(), [](int pwm) { return pwm == 0; }));
     CHECK(std::all_of(keep.part_fan_states.begin(), keep.part_fan_states.end(), [](int pwm) { return pwm > 0; }));
     CHECK_THAT(minimum(keep.inner_feeds), Catch::Matchers::WithinAbs(minimum(stop.inner_feeds), 0.25));
+}
+
+
+namespace cooling_role_fan_settings_contracts {
+
+struct RolePaths {
+    size_t internal_bridge = 0;
+    size_t support_interface = 0;
+    size_t ironing = 0;
+};
+
+TriangleMesh support_fixture()
+{
+    // Same real support-producing base/stem/cap shape used by the public G-code support test.
+    TriangleMesh base = make_cube(40., 40., 2.);
+    TriangleMesh stem = make_cube(8., 8., 12.);
+    stem.translate(Vec3f(16.f, 16.f, 1.f));
+    TriangleMesh cap = make_cube(40., 40., 2.);
+    cap.translate(Vec3f(0.f, 0.f, 12.f));
+    base.merge(stem);
+    base.merge(cap);
+    return base;
+}
+
+TriangleMesh internal_bridge_fixture()
+{
+    // Same stepped solid whose public bridge test observes erInternalBridgeInfill paths.
+    TriangleMesh mesh = make_cube(30., 24., 3.);
+    TriangleMesh tower = make_cube(14., 10., 1.);
+    tower.translate(Vec3f(8.f, 7.f, 3.f));
+    mesh.merge(tower);
+    return mesh;
+}
+
+TriangleMesh role_fixture()
+{
+    TriangleMesh mesh = support_fixture();
+    TriangleMesh bridge = internal_bridge_fixture();
+    // Two separated islands in one object retain all fan roles without introducing
+    // unrelated cross-object collision checks into every fan-settings export.
+    bridge.translate(Vec3f(60.f, 0.f, 0.f));
+    mesh.merge(bridge);
+    return mesh;
+}
+
+DynamicPrintConfig config_for_roles(const int internal_bridge_speed,
+                                   const int support_interface_speed,
+                                   const int ironing_speed,
+                                   const int minimum_pwm)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"bridge_no_support", false},
+        {"bridge_speed", 21.0},
+        {"close_fan_the_first_x_layers", 0},
+        {"enable_arc_fitting", false},
+        {"enable_overhang_bridge_fan", true},
+        {"enable_support", true},
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"fan_cooling_layer_time", 0.0},
+        {"fan_kickstart", 0.0},
+        {"fan_speedup_time", 0.0},
+        {"fan_speedup_overhangs", false},
+        {"full_fan_speed_layer", 0},
+        {"initial_layer_fan_speed", -1},
+        {"initial_layer_print_height", 0.3},
+        {"ironing_flow", "10%"},
+        {"ironing_inset", 0.0},
+        {"ironing_pattern", "rectilinear"},
+        {"ironing_spacing", 0.2},
+        {"ironing_speed", 20.0},
+        {"ironing_type", "top"},
+        {"layer_height", 0.3},
+        {"minimum_sparse_infill_area", 0.0},
+        {"part_cooling_fan_min_pwm", minimum_pwm},
+        {"reduce_fan_stop_start_freq", true},
+        // Fan-role checks do not depend on visibility-based seam placement.
+        {"seam_position", "back"},
+        {"slow_down_for_layer_cooling", false},
+        {"slowdown_for_curled_perimeters", false},
+        {"sparse_infill_density", "15%"},
+        {"support_base_pattern", "rectilinear"},
+        {"support_interface_bottom_layers", 2},
+        {"support_interface_pattern", "rectilinear"},
+        {"support_interface_top_layers", 2},
+        {"support_on_build_plate_only", false},
+        {"support_type", "normal(auto)"},
+        {"thick_internal_bridges", false},
+        {"top_shell_layers", 3},
+        {"wall_loops", 1},
+    });
+    // Fan option arrays are per filament. Zero is a deliberate off control; the three
+    // role speeds are independently observed in the emitted part-fan commands.
+    config.set_key_value("fan_min_speed", new ConfigOptionFloats{0.0});
+    config.set_key_value("fan_max_speed", new ConfigOptionFloats{0.0});
+    config.set_key_value("overhang_fan_speed", new ConfigOptionInts{0});
+    config.set_key_value("internal_bridge_fan_speed", new ConfigOptionInts{internal_bridge_speed});
+    config.set_key_value("support_material_interface_fan_speed", new ConfigOptionInts{support_interface_speed});
+    config.set_key_value("ironing_fan_speed", new ConfigOptionInts{ironing_speed});
+    return config;
+}
+
+RolePaths count_role_paths(const Print &print)
+{
+    RolePaths paths;
+    const auto count = [&paths](const ExtrusionPath &path) {
+        if (path.role() == erInternalBridgeInfill)
+            ++paths.internal_bridge;
+        else if (path.role() == erSupportMaterialInterface)
+            ++paths.support_interface;
+        else if (path.role() == erIroning)
+            ++paths.ironing;
+    };
+    for (const PrintObject *object : print.objects()) {
+        for (const Layer *layer : object->layers()) {
+            for (const LayerRegion *region : layer->regions()) {
+                for_each_extrusion_path(region->perimeters, count);
+                for_each_extrusion_path(region->fills, count);
+            }
+        }
+        for (const SupportLayer *layer : object->support_layers())
+            for_each_extrusion_path(layer->support_fills, count);
+    }
+    return paths;
+}
+
+struct RoleExport {
+    std::string gcode;
+    RolePaths paths;
+};
+
+RoleExport export_role_fixture(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{role_fixture()},
+                     print, model, config, nullptr, true);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    // Test::gcode calls Print::process once before export. Export first so this helper
+    // captures the processed paths without doing a redundant second process pass.
+    std::string output = Test::gcode(print);
+    const RolePaths paths = count_role_paths(print);
+    // Assert that all three user-visible feature roles exist in the sliced geometry before
+    // interpreting any emitted fan PWM as evidence for a role-specific setting.
+    REQUIRE(paths.internal_bridge > 0);
+    REQUIRE(paths.support_interface > 0);
+    REQUIRE(paths.ironing > 0);
+    return {std::move(output), paths};
+}
+
+template <class ConfigType>
+std::vector<int> part_fan_commands(const std::string &gcode, const ConfigType &config)
+{
+    std::vector<int> commands;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&commands](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("M107") && !line.has_p()) {
+            commands.emplace_back(0);
+            return;
+        }
+        if (!line.cmd_is("M106") || line.has_p())
+            return;
+        float pwm = 0.0f;
+        REQUIRE(line.has_value('S', pwm));
+        REQUIRE(std::isfinite(pwm));
+        REQUIRE(pwm >= 0.0f);
+        REQUIRE(pwm <= 255.0f);
+        CHECK_THAT(pwm, Catch::Matchers::WithinAbs(std::round(pwm), 1e-6f));
+        commands.emplace_back(static_cast<int>(std::lround(pwm)));
+    });
+    return commands;
+}
+
+void require_role_pwm_then_off(const std::vector<int> &commands, const int pwm)
+{
+    const auto target = std::find(commands.begin(), commands.end(), pwm);
+    REQUIRE(target != commands.end());
+    const auto after = std::next(target);
+    REQUIRE(after != commands.end());
+    CHECK(*after == 0);
+}
+
+} // namespace cooling_role_fan_settings_contracts
+
+TEST_CASE("Cooling role fan settings follow their printed path roles",
+          "[Cooling][CoolingSettings][RoleFanSettings]")
+{
+    using namespace cooling_role_fan_settings_contracts;
+    const DynamicPrintConfig disabled_config = config_for_roles(-1, -1, -1, 0);
+    const DynamicPrintConfig active_config = config_for_roles(40, 60, 80, 0);
+    const DynamicPrintConfig floored_config = config_for_roles(40, 60, 80, 50);
+
+    const RoleExport disabled = export_role_fixture(disabled_config);
+    const RoleExport active = export_role_fixture(active_config);
+    const RoleExport floored = export_role_fixture(floored_config);
+    const std::vector<int> disabled_fan = part_fan_commands(disabled.gcode, disabled_config);
+    const std::vector<int> active_fan = part_fan_commands(active.gcode, active_config);
+    const std::vector<int> floored_fan = part_fan_commands(floored.gcode, floored_config);
+
+    REQUIRE_FALSE(active_fan.empty());
+    REQUIRE_FALSE(floored_fan.empty());
+    CHECK(std::none_of(disabled_fan.begin(), disabled_fan.end(), [](int pwm) { return pwm > 0; }));
+    // 40/60/80 percent role targets map to S102/S153/S204. Each target must be
+    // followed by the configured off state after its role marker ends.
+    require_role_pwm_then_off(active_fan, 102);
+    require_role_pwm_then_off(active_fan, 153);
+    require_role_pwm_then_off(active_fan, 204);
+    // A 50 percent floor clamps only the 40 percent internal-bridge request; zero
+    // remains off, while the 60 and 80 percent roles remain above the floor.
+    require_role_pwm_then_off(floored_fan, 127);
+    require_role_pwm_then_off(floored_fan, 153);
+    require_role_pwm_then_off(floored_fan, 204);
+    CHECK(std::find(floored_fan.begin(), floored_fan.end(), 102) == floored_fan.end());
+
+    CHECK(active.paths.internal_bridge == disabled.paths.internal_bridge);
+    CHECK(active.paths.support_interface == disabled.paths.support_interface);
+    CHECK(active.paths.ironing == disabled.paths.ironing);
+    CHECK(floored.paths.internal_bridge == active.paths.internal_bridge);
+    CHECK(floored.paths.support_interface == active.paths.support_interface);
+    CHECK(floored.paths.ironing == active.paths.ironing);
+
+    const auto disabled_material = cooling_slowdown_contracts::inspect_feed_evidence(disabled.gcode, disabled_config);
+    const auto active_material = cooling_slowdown_contracts::inspect_feed_evidence(active.gcode, active_config);
+    const auto floored_material = cooling_slowdown_contracts::inspect_feed_evidence(floored.gcode, floored_config);
+    REQUIRE(disabled_material.finite);
+    REQUIRE(active_material.finite);
+    REQUIRE(floored_material.finite);
+    REQUIRE_FALSE(disabled_material.feeds.empty());
+    CHECK_THAT(active_material.path_length, Catch::Matchers::WithinRel(disabled_material.path_length, 1e-6));
+    CHECK_THAT(active_material.filament_length, Catch::Matchers::WithinAbs(disabled_material.filament_length, 1e-3));
+    CHECK_THAT(floored_material.path_length, Catch::Matchers::WithinRel(active_material.path_length, 1e-6));
+    CHECK_THAT(floored_material.filament_length, Catch::Matchers::WithinAbs(active_material.filament_length, 1e-3));
+}
+
+namespace cooling_role_fan_boundary_contracts {
+
+using namespace cooling_role_fan_settings_contracts;
+
+enum class RoleChannel { other, internal_bridge, support_interface, ironing };
+
+struct RoleFanSamples {
+    std::vector<int> internal_bridge;
+    std::vector<int> support_interface;
+    std::vector<int> ironing;
+};
+
+struct RoleFixture {
+    Print print;
+    Model model;
+    bool initialized = false;
+
+    RoleExport export_config(const DynamicPrintConfig &config)
+    {
+        if (!initialized) {
+            Test::init_print(std::vector<TriangleMesh>{role_fixture()},
+                             print, model, config, nullptr, true);
+            initialized = true;
+        } else {
+            print.apply(model, config);
+        }
+        const auto validation = print.validate();
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+
+        // This helper performs exactly one Print::process call. These settings only
+        // affect cooling/G-code output, so subsequent calls reuse the same sliced model.
+        std::string output = Test::gcode(print);
+        const RolePaths paths = count_role_paths(print);
+        REQUIRE(paths.internal_bridge > 0);
+        REQUIRE(paths.support_interface > 0);
+        REQUIRE(paths.ironing > 0);
+        return {std::move(output), paths};
+    }
+};
+
+DynamicPrintConfig config_for_boundaries(const int internal_bridge_speed,
+                                         const int support_interface_speed,
+                                         const int ironing_speed,
+                                         const int minimum_pwm)
+{
+    DynamicPrintConfig config = config_for_roles(internal_bridge_speed, support_interface_speed,
+                                                 ironing_speed, minimum_pwm);
+    // A positive base and overhang speed make the -1 sentinels observably distinct from 0.
+    config.set_key_value("fan_min_speed", new ConfigOptionFloats{20.0});
+    config.set_key_value("fan_max_speed", new ConfigOptionFloats{20.0});
+    config.set_key_value("overhang_fan_speed", new ConfigOptionInts{30});
+    return config;
+}
+
+RoleFanSamples role_fan_samples(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    RoleFanSamples samples;
+    RoleChannel active_role = RoleChannel::other;
+    int part_fan_pwm = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&samples, &active_role, &part_fan_pwm](GCodeReader &self,
+                                                                       const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("TYPE:") != std::string_view::npos ||
+            comment.find("FEATURE:") != std::string_view::npos) {
+            std::string normalized(comment);
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            active_role = RoleChannel::other;
+            if (normalized.find("internal bridge") != std::string::npos)
+                active_role = RoleChannel::internal_bridge;
+            else if (normalized.find("support interface") != std::string::npos ||
+                     normalized.find("support material interface") != std::string::npos)
+                active_role = RoleChannel::support_interface;
+            else if (normalized.find("ironing") != std::string::npos)
+                active_role = RoleChannel::ironing;
+        }
+
+        if (line.cmd_is("M107") && !line.has_p()) {
+            part_fan_pwm = 0;
+        } else if (line.cmd_is("M106") && !line.has_p()) {
+            float pwm = 0.0f;
+            REQUIRE(line.has_value('S', pwm));
+            REQUIRE(std::isfinite(pwm));
+            REQUIRE(pwm >= 0.0f);
+            REQUIRE(pwm <= 255.0f);
+            part_fan_pwm = static_cast<int>(std::lround(pwm));
+            CHECK_THAT(pwm, Catch::Matchers::WithinAbs(static_cast<float>(part_fan_pwm), 1e-6f));
+        }
+
+        // Observe the effective state at the toolpath, rather than associating a fan
+        // command with whichever role comment happened to precede it. This includes
+        // values carried forward when CoolingBuffer suppresses a redundant M106 and
+        // keeps role-end resets from being mistaken for that role's extrusion speed.
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        if (active_role == RoleChannel::internal_bridge)
+            samples.internal_bridge.push_back(part_fan_pwm);
+        else if (active_role == RoleChannel::support_interface)
+            samples.support_interface.push_back(part_fan_pwm);
+        else if (active_role == RoleChannel::ironing)
+            samples.ironing.push_back(part_fan_pwm);
+    });
+    return samples;
+}
+
+int expected_pwm(const int speed, const int floor)
+{
+    const int effective = speed == 0 ? 0 : std::max(speed, floor);
+    switch (effective) {
+    case 0:   return 0;
+    case 1:   return 2;
+    case 20:  return 51;
+    case 30:  return 76;
+    case 99:  return 252;
+    case 100: return 255;
+    default:  FAIL("the fan boundary table only uses independently enumerated PWM points");
+    }
+    return -1;
+}
+
+void require_pwm_samples(const std::vector<int> &samples, const int expected)
+{
+    INFO("Expected every positive-XY role extrusion to use part-fan PWM S" << expected);
+    REQUIRE_FALSE(samples.empty());
+    CHECK(std::all_of(samples.begin(), samples.end(), [expected](const int pwm) { return pwm == expected; }));
+}
+
+void require_same_paths(const RolePaths &expected, const RolePaths &actual)
+{
+    CHECK(actual.internal_bridge == expected.internal_bridge);
+    CHECK(actual.support_interface == expected.support_interface);
+    CHECK(actual.ironing == expected.ironing);
+}
+
+void require_same_role_samples(const RoleFanSamples &expected, const RoleFanSamples &actual)
+{
+    CHECK(actual.internal_bridge == expected.internal_bridge);
+    CHECK(actual.support_interface == expected.support_interface);
+    CHECK(actual.ironing == expected.ironing);
+}
+
+} // namespace cooling_role_fan_boundary_contracts
+
+TEST_CASE("Cooling role fan arrays cover their endpoints through cached and fresh prints",
+          "[Cooling][CoolingSettings][RoleFanBoundaries]")
+{
+    using namespace cooling_role_fan_boundary_contracts;
+
+    struct Row {
+        int internal_bridge;
+        int support_interface;
+        int ironing;
+        int minimum_pwm;
+    };
+    constexpr std::array<Row, 6> active_rows{{
+        {0,   1,  99,   0},
+        {1,  99, 100,   1},
+        {99, 100,  0,   0},
+        {100,  0,  1,   0},
+        {0,   1,  99,  99},
+        {0,   1,  99, 100},
+    }};
+
+    RoleFixture incremental;
+    const DynamicPrintConfig defaults = config_for_boundaries(-1, -1, -1, 0);
+    const RoleExport baseline = incremental.export_config(defaults);
+    const RoleFanSamples baseline_roles = role_fan_samples(baseline.gcode, defaults);
+    const std::vector<int> baseline_all_fans = part_fan_commands(baseline.gcode, defaults);
+    REQUIRE(std::find(baseline_all_fans.begin(), baseline_all_fans.end(), 51) != baseline_all_fans.end());
+    // Internal-bridge -1 falls back to the positive overhang speed. The other -1 roles
+    // leave the ordinary 20% fan command in effect instead of forcing an explicit off.
+    require_pwm_samples(baseline_roles.internal_bridge, 76);
+    require_pwm_samples(baseline_roles.support_interface, 51);
+    require_pwm_samples(baseline_roles.ironing, 51);
+
+    const auto baseline_material = cooling_slowdown_contracts::inspect_feed_evidence(baseline.gcode, defaults);
+    REQUIRE(baseline_material.finite);
+    REQUIRE_FALSE(baseline_material.feeds.empty());
+
+    RoleFanSamples fresh_control_roles;
+    DynamicPrintConfig fresh_control_config = config_for_boundaries(1, 99, 100, 1);
+    for (size_t i = 0; i < active_rows.size(); ++i) {
+        const Row &row = active_rows[i];
+        CAPTURE(i, row.internal_bridge, row.support_interface, row.ironing, row.minimum_pwm);
+        const DynamicPrintConfig config = config_for_boundaries(row.internal_bridge, row.support_interface,
+                                                                row.ironing, row.minimum_pwm);
+        const RoleExport current = incremental.export_config(config);
+        const RoleFanSamples observed = role_fan_samples(current.gcode, config);
+        require_same_paths(baseline.paths, current.paths);
+        const auto material = cooling_slowdown_contracts::inspect_feed_evidence(current.gcode, config);
+        cooling_slowdown_contracts::require_same_deposition(baseline_material, material);
+
+        require_pwm_samples(observed.internal_bridge, expected_pwm(row.internal_bridge, row.minimum_pwm));
+        require_pwm_samples(observed.support_interface, expected_pwm(row.support_interface, row.minimum_pwm));
+        require_pwm_samples(observed.ironing, expected_pwm(row.ironing, row.minimum_pwm));
+        if (i == 1) {
+            fresh_control_roles = observed;
+        }
+    }
+
+    // The endpoint row is also generated from a new Print; this checks that apply()'s
+    // cached G-code-only invalidation agrees with a clean process for the same settings.
+    RoleFixture fresh;
+    const RoleExport fresh_control = fresh.export_config(fresh_control_config);
+    require_same_paths(baseline.paths, fresh_control.paths);
+    require_same_role_samples(fresh_control_roles,
+                              role_fan_samples(fresh_control.gcode, fresh_control_config));
+    const auto fresh_material = cooling_slowdown_contracts::inspect_feed_evidence(fresh_control.gcode,
+                                                                                   fresh_control_config);
+    cooling_slowdown_contracts::require_same_deposition(baseline_material, fresh_material);
+
+    const RoleExport restored = incremental.export_config(defaults);
+    require_same_paths(baseline.paths, restored.paths);
+    require_same_role_samples(baseline_roles, role_fan_samples(restored.gcode, defaults));
+    const auto restored_material = cooling_slowdown_contracts::inspect_feed_evidence(restored.gcode, defaults);
+    cooling_slowdown_contracts::require_same_deposition(baseline_material, restored_material);
+}
+
+TEST_CASE("Minimum part cooling fan PWM covers input endpoints and their nearest integer neighbors",
+          "[Cooling][CoolingSettings][FanPwmBoundaryValues]")
+{
+    GCodeWriter writer;
+    writer.config.gcode_flavor.value = gcfMarlinFirmware;
+    struct Case { unsigned int floor; unsigned int request; int expected_pwm; };
+    constexpr std::array<Case, 19> cases{{
+        {0,   0,   0}, {0,   1,   2}, {0,  99, 252}, {0, 100, 255},
+        {1,   0,   0}, {1,   1,   2}, {1,   2,   5},
+        {99,  0,   0}, {99,  1, 252}, {99, 98, 252}, {99, 99, 252}, {99, 100, 255},
+        {100, 0,   0}, {100, 1, 255}, {100, 99, 255}, {100, 100, 255},
+        {40, 39, 102}, {40, 40, 102}, {40, 41, 104},
+    }};
+    for (const Case &test : cases) {
+        CAPTURE(test.floor, test.request, test.expected_pwm);
+        writer.config.part_cooling_fan_min_pwm.value = static_cast<int>(test.floor);
+        const std::vector<int> observed = cooling_role_fan_settings_contracts::part_fan_commands(
+            writer.set_fan(test.request), writer.config);
+        REQUIRE(observed.size() == 1);
+        CHECK(observed.front() == test.expected_pwm);
+    }
 }
 
 
