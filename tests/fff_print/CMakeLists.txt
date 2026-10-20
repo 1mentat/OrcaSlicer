@@ -93,3 +93,13 @@ target_link_libraries(fff_print_workflow_tests test_common libslic3r Catch2::Cat
 set_property(TARGET fff_print_workflow_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_workflow_tests)
 slicer_enable_llvm_source_coverage(fff_print_workflow_tests)
+
+# Explicit G-code export contracts, without duplicate CTest registration.
+add_executable(fff_print_gcode_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_gcode.cpp)
+target_link_libraries(fff_print_gcode_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_gcode_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_gcode_tests)
+slicer_enable_llvm_source_coverage(fff_print_gcode_tests)
