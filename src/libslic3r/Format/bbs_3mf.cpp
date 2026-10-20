@@ -4209,22 +4209,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         using VerticalAlignToName = boost::bimap<FontProp::VerticalAlign, std::string_view>;
         static const VerticalAlignToName vertical_align_to_name;
         
-        static EmbossStyle::Type get_type(std::string_view type) {
-            const auto& to_type = TextConfigurationSerialization::type_to_name.right;
-            auto type_item = to_type.find(type);
-            assert(type_item != to_type.end());
-            if (type_item == to_type.end()) return EmbossStyle::Type::undefined;
-            return type_item->second;        
-        }
-
-        static std::string_view get_name(EmbossStyle::Type type) {
-            const auto& to_name = TextConfigurationSerialization::type_to_name.left;
-            auto type_name = to_name.find(type);
-            assert(type_name != to_name.end());
-            if (type_name == to_name.end()) return "unknown type";
-            return type_name->second;
-        }
-
         static void to_xml(std::stringstream &stream, const TextConfiguration &tc);
         static std::optional<TextConfiguration> read(const char **attributes, unsigned int num_attributes);
         static EmbossShape read_old(const char **attributes, unsigned int num_attributes);
@@ -6192,19 +6176,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig* config);
         bool _add_auxiliary_dir_to_archive(mz_zip_archive &archive, const std::string &aux_dir, PackingTemporaryData &data);
 
-        static int convert_instance_id_to_resource_id(const Model& model, int obj_id, int instance_id)
-        {
-            int resource_id = 1;
-
-            for (int i = 0; i < obj_id; ++i)
-            {
-                resource_id += model.objects[i]->volumes.size() + 1;
-            }
-
-            resource_id += model.objects[obj_id]->volumes.size();
-
-            return resource_id;
-        }
     };
 
     bool _BBS_3MF_Exporter::save_model_to_file(StoreParams& store_params)
@@ -8978,19 +8949,6 @@ bool _BBS_3MF_Exporter::_add_auxiliary_dir_to_archive(mz_zip_archive &archive, c
     return result;
 }
 
-// Perform conversions based on the config values available.
-//FIXME provide a version of PrusaSlicer that stored the project file (3MF).
-static void handle_legacy_project_loaded(unsigned int version_project_file, DynamicPrintConfig& config)
-{
-    if (! config.has("brim_object_gap")) {
-        if (auto *opt_elephant_foot   = config.option<ConfigOptionFloat>("elefant_foot_compensation", false); opt_elephant_foot) {
-            // Conversion from older PrusaSlicer which applied brim separation equal to elephant foot compensation.
-            auto *opt_brim_separation = config.option<ConfigOptionFloat>("brim_object_gap", true);
-            opt_brim_separation->value = opt_elephant_foot->value;
-        }
-    }
-}
-
 // backup backgroud thread to dispatch tasks and coperate with ui thread
 class _BBS_Backup_Manager
 {
@@ -9365,7 +9323,6 @@ bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstituti
     bool res = importer.load_model_from_file(path, *model, *plate_data_list, *project_presets, *config, *config_substitutions, strategy, is_bbl_3mf, is_orca_3mf, *file_version, proFn, project, plate_id);
     importer.log_errors();
     //BBS: remove legacy project logic currently
-    //handle_legacy_project_loaded(importer.version(), *config);
     return res;
 }
 
