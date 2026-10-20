@@ -4597,22 +4597,63 @@ TEST_CASE("GCode pressure advance settings add a firmware-specific command", "[G
 
 TEST_CASE("GCode firmware flavor changes command dialect without changing deposited path", "[GCode][GCodeBroad]")
 {
-    const std::vector<std::string> flavors = {"marlin", "marlin2", "klipper", "reprapfirmware", "repetier"};
-    const Exported reference               = export_cube(base_config());
-    const Motion expected                  = motion(reference.text, base_config());
-    REQUIRE(expected.extrusion_moves > 0);
-    for (const std::string& flavor : flavors) {
-        INFO("flavor " << flavor);
-        DynamicPrintConfig config = base_config();
-        config.set_deserialize_strict("gcode_flavor", flavor);
-        if (flavor == "reprapfirmware" || flavor == "repetier")
+    struct FlavorDialect {
+        std::string_view flavor;
+        std::string_view acceleration;
+        std::string_view pressure_advance;
+    };
+    constexpr std::array<FlavorDialect, 5> flavors{{
+        {"marlin",         "M204 S300",                    "M900 K0.55"},
+        {"marlin2",        "M204 P300",                    "M900 K0.55"},
+        {"klipper",        "SET_VELOCITY_LIMIT ACCEL=300", "SET_PRESSURE_ADVANCE ADVANCE=0.55"},
+        {"reprapfirmware", "M204 P300",                    "M572 D0 S0.55"},
+        {"repetier",       "M201 X300 Y300",               "M233 X0.55 Y0.55"},
+    }};
+
+    DynamicPrintConfig common = base_config();
+    common.set_deserialize_strict({
+        {"default_acceleration", 1200},
+        {"initial_layer_acceleration", 300},
+        {"travel_acceleration", 4000},
+        {"default_jerk", 10},
+        {"travel_jerk", 12},
+        {"enable_pressure_advance", true},
+        {"pressure_advance", 0.55},
+    });
+
+    std::optional<Motion> reference_motion;
+    for (const FlavorDialect& dialect : flavors) {
+        INFO("flavor " << dialect.flavor);
+        DynamicPrintConfig config = common;
+        config.set_deserialize_strict("gcode_flavor", std::string(dialect.flavor));
+        if (dialect.flavor == "reprapfirmware" || dialect.flavor == "repetier")
             config.set_deserialize_strict("layer_change_gcode", "");
-        const Exported out  = export_cube(config);
-        const Motion actual = motion(out.text, config);
+
+        Print print;
+        Model model;
+        TriangleMesh mesh = Test::mesh(TestMesh::A);
+        const double original_height = mesh.bounding_box().size().z();
+        REQUIRE(original_height > 0.0);
+        mesh.scale(Vec3f(1.f, 1.f, static_cast<float>(1.2 / original_height)));
+        init_print({std::move(mesh)}, print, model, config);
+        require_valid(print);
+        const std::string text = gcode(print);
+        REQUIRE_FALSE(text.empty());
+        CHECK(count_substring(text, ";LAYER_CHANGE") >= 6);
+
+        const Motion actual = motion(text, config);
         REQUIRE(actual.extrusion_moves > 0);
-        CHECK_THAT(actual.xy_path, Catch::Matchers::WithinRel(expected.xy_path, 1e-6));
-        CHECK_THAT(actual.filament, Catch::Matchers::WithinRel(expected.filament, 1e-6));
-        CHECK(out.text.find("G1") != std::string::npos);
+        CHECK(text.find("G1") != std::string::npos);
+        CHECK(text.find(dialect.acceleration) != std::string::npos);
+        CHECK(text.find(dialect.pressure_advance) != std::string::npos);
+
+        if (reference_motion.has_value()) {
+            CHECK(actual.extrusion_moves == reference_motion->extrusion_moves);
+            CHECK_THAT(actual.xy_path, Catch::Matchers::WithinRel(reference_motion->xy_path, 1e-6));
+            CHECK_THAT(actual.filament, Catch::Matchers::WithinRel(reference_motion->filament, 1e-6));
+        } else {
+            reference_motion = actual;
+        }
     }
 }
 

@@ -689,6 +689,16 @@ survivor; that process-layer gate is unclaimed. `[PresetBundleContracts]` checks
 complete per-nozzle purge matrices, selected profiles, inheritance, and the
 ownership of embedded preset files.
 
+The firmware dialect case retains the model's XY geometry in a six-layer
+fixture. It compares deposited paths across five firmware flavors and checks
+their configured acceleration and pressure-advance commands. Its probes are in
+`firmware_flavor_dialect.json`. That catalog uses the full Catch case name;
+pass `{filter}` without tag brackets in the test command:
+
+```sh
+--test-command '{build}/tests/fff_print/fff_print_gcode_tests {filter} --order rand --rng-seed 21907 --reporter compact'
+```
+
 `[GCodeTimingCentripetal]` checks virtual-move timing at shallow turns, with
 straight, opposite-turn, wide-turn, and low-speed controls. Its mutations are
 in `gcode_timing_centripetal.json`.
