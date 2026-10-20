@@ -2420,9 +2420,13 @@ TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior densi
             return std::vector<std::pair<std::string, double>>{{"lobes", 0.5}, {"smooth_blend", 0.6}};
         return std::vector<std::pair<std::string, double>>{{"lobes", 0.5}, {"stepped_shells", 0.6}};
     }();
-    // A 60 mm cube in 0.4 mm layers, centered on the origin in XY. Its center is 30 mm from every face.
-    auto slice = [&pattern](const std::string &adaptive, Print &print) {
-        Slic3r::Test::init_and_process_print({Slic3r::Test::cube(60)}, print,
+    // A 40 mm cube retains the same relative core and shell windows with fewer layers and paths.
+    constexpr double side = 40.;
+    constexpr double half = side / 2.;
+    constexpr double z_min = side * 5. / 12.;
+    constexpr double z_max = side * 7. / 12.;
+    auto slice = [&pattern, side](const std::string &adaptive, Print &print) {
+        Slic3r::Test::init_and_process_print({Slic3r::Test::cube(side)}, print,
                                             {{"sparse_infill_pattern", pattern},
                                              {"sparse_infill_density", "25%"},
                                              {"tpms_adaptive", adaptive},
@@ -2438,16 +2442,16 @@ TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior densi
         Print adaptive;
         slice(mode, adaptive);
 
-        // The middle of the cube, at most 10 mm from the center: at most 5% + 20% * 10 / 30 = 11.7% dense.
-        const Polygons core = centered_square(10.);
-        // Along the sides at mid height, 24 to 28 mm from the center: at least 5% + 20% * 24 / 30 = 21% dense.
-        const Polygons shell = diff(centered_square(28.), centered_square(24.));
-        const double core_uniform = sparse_infill_length(uniform, 25., 35., core);
-        const double shell_uniform = sparse_infill_length(uniform, 25., 35., shell);
+        // The core lies within one third of the half-width: its target density is at most 11.7%.
+        const Polygons core = centered_square(half / 3.);
+        // The shell begins at 80% of the half-width: its target density is at least 21%.
+        const Polygons shell = diff(centered_square(half * 14. / 15.), centered_square(half * 4. / 5.));
+        const double core_uniform = sparse_infill_length(uniform, z_min, z_max, core);
+        const double shell_uniform = sparse_infill_length(uniform, z_min, z_max, shell);
         REQUIRE(core_uniform > 0.);
         REQUIRE(shell_uniform > 0.);
-        CHECK(sparse_infill_length(adaptive, 25., 35., core) < max_core * core_uniform);
-        CHECK(sparse_infill_length(adaptive, 25., 35., shell) > 0.75 * shell_uniform);
+        CHECK(sparse_infill_length(adaptive, z_min, z_max, core) < max_core * core_uniform);
+        CHECK(sparse_infill_length(adaptive, z_min, z_max, shell) > 0.75 * shell_uniform);
     }
 }
 
