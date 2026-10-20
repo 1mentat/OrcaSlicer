@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "description": "Analytic line clipping, source-index provenance, wave growth and source-bearing region merge contracts. Each probe must fail through an ordinary geometry assertion.",
+  "mutants": [
+    {
+      "id": "algorithm-line-split-end-junction-is-outside",
+      "path": "src/libslic3r/Algorithm/LineSplit.cpp",
+      "old": "                result.back().clipped = false; // Mark the end of the clipped line",
+      "new": "                result.back().clipped = true; // Mark the end of the clipped line",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Line splitting clips the path around expolygon holes",
+      "description": "Keep the final junction of a clipped interval marked as clipped. The diagonal-through-hole oracle then incorrectly includes the interval across the hole and fails its expected clipped endpoints."
+    },
+    {
+      "id": "algorithm-line-split-retains-closed-duplicate-endpoint",
+      "path": "src/libslic3r/Algorithm/LineSplit.cpp",
+      "old": "    if (closed) {\n        // Remove last point which was duplicated\n        result.pop_back();\n    }",
+      "new": "    if (!closed) {\n        // Remove last point which was duplicated\n        result.pop_back();\n    }",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Closed line splitting omits the duplicate endpoint",
+      "description": "Invert the closed-path guard so the duplicated start junction remains. The closed rectangle fixture requires an open storage cycle with the duplicate removed and fails as an ordinary assertion."
+    },
+    {
+      "id": "algorithm-line-split-negative-source-index-off-by-one",
+      "path": "src/libslic3r/Algorithm/LineSplit.hpp",
+      "old": "            return -src_idx - 1;",
+      "new": "            return -src_idx;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Line splitting keeps source indices for boundary-overlap runs",
+      "description": "Break the negative-index encoding for generated intersection junctions. The boundary-overlap fixture requires the entry and exit junctions to map to source edges 0 and 4."
+    },
+    {
+      "id": "region-expansion-fallback-selects-first-detached-component",
+      "path": "src/libslic3r/Algorithm/RegionExpansion.cpp",
+      "old": "            int id = sample_in_expolygons(aabb_tree, merged, sample);",
+      "new": "            int id = 0;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Region merge selects the source-bearing component among detached expansion fragments",
+      "description": "Select the first merged component instead of the one containing the original source sample. The detached expansion is deliberately left of the source-bearing merged component; bounds and area assertions detect the wrong selection."
+    },
+    {
+      "id": "region-expansion-omits-one-offset-wave",
+      "path": "src/libslic3r/Algorithm/RegionExpansion.cpp",
+      "old": "out.num_other_steps      = nsteps - 1;",
+      "new": "out.num_other_steps      = nsteps > 1 ? nsteps - 2 : 0;",
+      "test_filter": "Wave expansion grows a closed seed and clips it to its boundary",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Use one fewer subsequent offset wave when nsteps > 1; the case's public bounds must no longer reach the expected 10 mm expansion."
+    }
+  ]
+}

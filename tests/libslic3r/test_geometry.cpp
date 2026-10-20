@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <Eigen/Geometry>
@@ -18,6 +19,8 @@
 #include "libslic3r/Geometry/MedialAxis.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ShortestPath.hpp"
+#include "libslic3r/Algorithm/LineSplit.hpp"
+#include "libslic3r/Algorithm/RegionExpansion.hpp"
 
 //#include <random>
 //#include "libnest2d/tools/benchmark.h"
@@ -33,6 +36,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <utility>
 #include "libnest2d/backends/libslic3r/geometries.hpp"
 
 using namespace Slic3r;
@@ -977,3 +981,347 @@ TEST_CASE("Medial axis extraction emits bounded paths for a rectangular region",
 }
 
 } // namespace geometry_contract_family
+
+
+TEST_CASE("Line splitting clips the path around expolygon holes", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{
+        {{0, 0}, {20 * mm, 0}, {20 * mm, 20 * mm}, {0, 20 * mm}},
+        {{8 * mm, 8 * mm}, {8 * mm, 12 * mm}, {12 * mm, 12 * mm}, {12 * mm, 8 * mm}}
+    };
+    const Polyline path{Point(-5 * mm, -5 * mm), Point(25 * mm, 25 * mm)};
+
+    const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, false);
+    REQUIRE(split.size() >= 4);
+    CHECK(split.front().p == path.points.front());
+    CHECK(split.front().is_src());
+    CHECK(split.front().get_src_index() == 0);
+    CHECK(split.back().p == path.points.back());
+    CHECK(split.back().is_src());
+    CHECK(split.back().get_src_index() == 1);
+
+    std::vector<Point> clipped_endpoints;
+    for (size_t i = 0; i + 1 < split.size(); ++i) {
+        if (!split[i].clipped)
+            continue;
+        CHECK(split[i].p.x() == split[i].p.y());
+        CHECK(split[i + 1].p.x() == split[i + 1].p.y());
+        CHECK_FALSE(split[i].is_src());
+        CHECK_FALSE(split[i + 1].is_src());
+        CHECK(split[i].get_src_index() == 0);
+        CHECK(split[i + 1].get_src_index() == 0);
+        clipped_endpoints.emplace_back(split[i].p);
+        clipped_endpoints.emplace_back(split[i + 1].p);
+    }
+    const std::vector<Point> expected_endpoints{
+        Point(0, 0), Point(8 * mm, 8 * mm), Point(12 * mm, 12 * mm), Point(20 * mm, 20 * mm)
+    };
+    CHECK(clipped_endpoints == expected_endpoints);
+}
+
+TEST_CASE("Closed line splitting omits the duplicate endpoint", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    const Polyline path{
+        Point(-5 * mm, 2 * mm), Point(15 * mm, 2 * mm),
+        Point(15 * mm, 8 * mm), Point(-5 * mm, 8 * mm)
+    };
+
+    const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, true);
+    REQUIRE(split.size() >= path.points.size());
+    CHECK(split.front().p != split.back().p);
+
+    coord_t clipped_length = 0;
+    for (size_t i = 0; i + 1 < split.size(); ++i) {
+        if (!split[i].clipped)
+            continue;
+        CHECK(split[i].p.y() == split[i + 1].p.y());
+        size_t source_edge = 2;
+        if (split[i].p.y() == 2 * mm) {
+            CHECK(split[i + 1].p.y() == 2 * mm);
+            source_edge = 0;
+        } else {
+            CHECK(split[i].p.y() == 8 * mm);
+            CHECK(split[i + 1].p.y() == 8 * mm);
+        }
+        CHECK_FALSE(split[i].is_src());
+        CHECK_FALSE(split[i + 1].is_src());
+        CHECK(split[i].get_src_index() == source_edge);
+        CHECK(split[i + 1].get_src_index() == source_edge);
+        CHECK(split[i].p.x() >= 0);
+        CHECK(split[i].p.x() <= 10 * mm);
+        CHECK(split[i + 1].p.x() >= 0);
+        CHECK(split[i + 1].p.x() <= 10 * mm);
+        const coord_t dx = split[i + 1].p.x() - split[i].p.x();
+        clipped_length += dx < 0 ? -dx : dx;
+    }
+    CHECK(clipped_length == 20 * mm);
+}
+
+
+TEST_CASE("Wave expansion grows a closed seed and clips it to its boundary", "[Geometry][GeometryContract][RegionExpansion]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygons source{
+        ExPolygon{{{20 * mm, 20 * mm}, {40 * mm, 20 * mm},
+                   {40 * mm, 40 * mm}, {20 * mm, 40 * mm}}}
+    };
+    const ExPolygons boundary{
+        ExPolygon{{{0, 0}, {45 * mm, 0}, {45 * mm, 60 * mm}, {0, 60 * mm}}}
+    };
+    const float full_expansion = static_cast<float>(10 * mm);
+    const float expansion_step = static_cast<float>(4 * mm);
+
+    const std::vector<Polygons> by_source =
+        Algorithm::expand_expolygons(source, boundary, full_expansion, expansion_step, 4);
+    REQUIRE(by_source.size() == 1);
+    REQUIRE_FALSE(by_source.front().empty());
+    const BoundingBox grouped_bounds = get_extents(by_source.front());
+    constexpr double coord_rounding_tolerance = 10.;
+    CHECK_THAT(double(grouped_bounds.min.x()),
+               Catch::Matchers::WithinAbs(double(10 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(grouped_bounds.min.y()),
+               Catch::Matchers::WithinAbs(double(10 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(grouped_bounds.max.x()),
+               Catch::Matchers::WithinAbs(double(45 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(grouped_bounds.max.y()),
+               Catch::Matchers::WithinAbs(double(50 * mm), coord_rounding_tolerance));
+
+    const std::vector<Algorithm::RegionExpansionEx> detailed =
+        Algorithm::propagate_waves_ex(source, boundary, full_expansion, expansion_step, 4);
+    REQUIRE_FALSE(detailed.empty());
+    BoundingBox detailed_bounds;
+    for (const Algorithm::RegionExpansionEx &region : detailed) {
+        CHECK(region.src_id == 0);
+        CHECK(region.boundary_id == 0);
+        detailed_bounds.merge(get_extents(region.expolygon));
+    }
+    CHECK_THAT(double(detailed_bounds.min.x()),
+               Catch::Matchers::WithinAbs(double(10 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(detailed_bounds.min.y()),
+               Catch::Matchers::WithinAbs(double(10 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(detailed_bounds.max.x()),
+               Catch::Matchers::WithinAbs(double(45 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(detailed_bounds.max.y()),
+               Catch::Matchers::WithinAbs(double(50 * mm), coord_rounding_tolerance));
+}
+
+TEST_CASE("Line splitting keeps source indices for boundary-overlap runs", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const bool vertical = GENERATE(false, true);
+    const auto point_on_axis = [vertical](coord_t along, coord_t offset) {
+        return vertical ? Point(offset, along) : Point(along, offset);
+    };
+    Polygon clip_polygon{
+        point_on_axis(0, 0), point_on_axis(5 * mm, 0), point_on_axis(10 * mm, 0),
+        point_on_axis(10 * mm, 10 * mm), point_on_axis(0, 10 * mm)
+    };
+    clip_polygon.make_counter_clockwise();
+    const ExPolygon clip{std::move(clip_polygon)};
+    const Polyline path{
+        point_on_axis(-5 * mm, 5 * mm), point_on_axis(2 * mm, 5 * mm),
+        point_on_axis(2 * mm, 0), point_on_axis(8 * mm, 0),
+        point_on_axis(8 * mm, 5 * mm), point_on_axis(15 * mm, 5 * mm)
+    };
+
+    const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, false);
+    REQUIRE(split.size() >= 3);
+
+    const Point left_cut = point_on_axis(0, 5 * mm);
+    const Point right_cut = point_on_axis(10 * mm, 5 * mm);
+    bool saw_left_cut = false;
+    bool saw_source_1 = false;
+    bool saw_source_2 = false;
+    bool saw_source_3 = false;
+    bool saw_source_4 = false;
+    bool saw_right_cut = false;
+    for (const Algorithm::SplitLineJunction &junction : split) {
+        if (junction.p == left_cut) {
+            saw_left_cut = true;
+            CHECK_FALSE(junction.is_src());
+            CHECK(junction.get_src_index() == 0);
+        }
+        if (junction.p == path[1]) {
+            saw_source_1 = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 1);
+        }
+        if (junction.p == path[2]) {
+            saw_source_2 = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 2);
+        }
+        if (junction.p == path[3]) {
+            saw_source_3 = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 3);
+        }
+        if (junction.p == path[4]) {
+            saw_source_4 = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 4);
+        }
+        if (junction.p == right_cut) {
+            saw_right_cut = true;
+            CHECK_FALSE(junction.is_src());
+            CHECK(junction.get_src_index() == 4);
+        }
+    }
+    REQUIRE(saw_left_cut);
+    REQUIRE(saw_source_1);
+    REQUIRE(saw_source_2);
+    REQUIRE(saw_source_3);
+    REQUIRE(saw_source_4);
+    REQUIRE(saw_right_cut);
+
+    coord_t clipped_length = 0;
+    for (size_t i = 0; i + 1 < split.size(); ++i) {
+        if (!split[i].clipped)
+            continue;
+        const Point &a = split[i].p;
+        const Point &b = split[i + 1].p;
+        const coord_t offset_a = vertical ? a.x() : a.y();
+        const coord_t offset_b = vertical ? b.x() : b.y();
+        const coord_t along_a = vertical ? a.y() : a.x();
+        const coord_t along_b = vertical ? b.y() : b.x();
+        CHECK(offset_a >= 0);
+        CHECK(offset_a <= 10 * mm);
+        CHECK(offset_b >= 0);
+        CHECK(offset_b <= 10 * mm);
+        CHECK(along_a >= 0);
+        CHECK(along_a <= 10 * mm);
+        CHECK(along_b >= 0);
+        CHECK(along_b <= 10 * mm);
+        if (offset_a != offset_b)
+            CHECK(along_a == along_b);
+        const coord_t along_delta = along_b >= along_a ? along_b - along_a : along_a - along_b;
+        const coord_t offset_delta = offset_b >= offset_a ? offset_b - offset_a : offset_a - offset_b;
+        clipped_length += along_delta + offset_delta;
+    }
+    CHECK(clipped_length == 20 * mm);
+}
+
+TEST_CASE("Line splitting preserves source vertices coincident with clip corners", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    const Polyline path{
+        Point(-5 * mm, -5 * mm), Point(0, 0), Point(5 * mm, 5 * mm),
+        Point(10 * mm, 10 * mm), Point(15 * mm, 15 * mm)
+    };
+
+    const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, false);
+    REQUIRE(split.size() >= 3);
+
+    bool saw_entry_vertex = false;
+    bool saw_exit_vertex = false;
+    coord_t clipped_diagonal_length = 0;
+    for (const Algorithm::SplitLineJunction &junction : split) {
+        if (junction.p == Point(0, 0)) {
+            saw_entry_vertex = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 1);
+        }
+        if (junction.p == Point(10 * mm, 10 * mm)) {
+            saw_exit_vertex = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 3);
+        }
+    }
+    for (size_t i = 0; i + 1 < split.size(); ++i) {
+        if (!split[i].clipped)
+            continue;
+        CHECK(split[i].p.x() == split[i].p.y());
+        CHECK(split[i + 1].p.x() == split[i + 1].p.y());
+        CHECK(split[i].p.x() >= 0);
+        CHECK(split[i].p.x() <= 10 * mm);
+        CHECK(split[i + 1].p.x() >= 0);
+        CHECK(split[i + 1].p.x() <= 10 * mm);
+        const coord_t delta = split[i + 1].p.x() - split[i].p.x();
+        CHECK(delta >= 0);
+        clipped_diagonal_length += delta;
+    }
+    REQUIRE(saw_entry_vertex);
+    REQUIRE(saw_exit_vertex);
+    CHECK(clipped_diagonal_length == 10 * mm);
+}
+
+TEST_CASE("Region merge preserves leading and trailing sources around one expansion", "[Geometry][GeometryContract][RegionExpansion]")
+{
+    const coord_t mm = scale_(1.0);
+    const auto rectangle = [mm](int x0, int y0, int x1, int y1) {
+        return ExPolygon{{{x0 * mm, y0 * mm}, {x1 * mm, y0 * mm},
+                          {x1 * mm, y1 * mm}, {x0 * mm, y1 * mm}}};
+    };
+    ExPolygons source{
+        rectangle(0, 0, 10, 10), rectangle(30, 0, 40, 10), rectangle(60, 0, 70, 10)
+    };
+    const ExPolygons boundary{rectangle(40, 0, 55, 10)};
+    const Algorithm::RegionExpansionParameters params =
+        Algorithm::RegionExpansionParameters::build(float(10 * mm), float(4 * mm), 4);
+
+    const std::vector<ExPolygon> merged =
+        Algorithm::expand_merge_expolygons(std::move(source), boundary, params);
+    REQUIRE(merged.size() == 3);
+
+    const BoundingBox first = get_extents(merged[0]);
+    CHECK(first.min.x() == 0);
+    CHECK(first.min.y() == 0);
+    CHECK(first.max.x() == 10 * mm);
+    CHECK(first.max.y() == 10 * mm);
+    const BoundingBox middle = get_extents(merged[1]);
+    // Allow 0.000025 mm for the union safety expansion and coordinate rounding.
+    CHECK_THAT(double(middle.min.x()), Catch::Matchers::WithinAbs(double(30 * mm), 25.));
+    CHECK_THAT(double(middle.min.y()), Catch::Matchers::WithinAbs(0., 25.));
+    CHECK_THAT(double(middle.max.x()), Catch::Matchers::WithinAbs(double(50 * mm), 25.));
+    CHECK_THAT(double(middle.max.y()), Catch::Matchers::WithinAbs(double(10 * mm), 25.));
+    const BoundingBox last = get_extents(merged[2]);
+    CHECK(last.min.x() == 60 * mm);
+    CHECK(last.min.y() == 0);
+    CHECK(last.max.x() == 70 * mm);
+    CHECK(last.max.y() == 10 * mm);
+
+    const double square_millimeters = double(mm) * double(mm);
+    CHECK_THAT(merged[0].area() / square_millimeters, Catch::Matchers::WithinAbs(100., 0.01));
+    CHECK_THAT(merged[1].area() / square_millimeters, Catch::Matchers::WithinAbs(200., 0.01));
+    CHECK_THAT(merged[2].area() / square_millimeters, Catch::Matchers::WithinAbs(100., 0.01));
+}
+
+TEST_CASE("Region merge selects the source-bearing component among detached expansion fragments", "[Geometry][GeometryContract][RegionExpansion]")
+{
+    const coord_t mm = scale_(1.0);
+    const auto rectangle = [mm](int x0, int y0, int x1, int y1) {
+        return ExPolygon{{{x0 * mm, y0 * mm}, {x1 * mm, y0 * mm},
+                          {x1 * mm, y1 * mm}, {x0 * mm, y1 * mm}}};
+    };
+    ExPolygon attached = rectangle(40, 0, 45, 10);
+    ExPolygon detached = rectangle(15, 0, 20, 10);
+    ExPolygons source{
+        rectangle(0, 0, 10, 10), rectangle(30, 0, 40, 10), rectangle(60, 0, 70, 10)
+    };
+    std::vector<Algorithm::RegionExpansion> fragments{
+        {attached.contour, 1, 0}, {detached.contour, 1, 0}
+    };
+
+    const std::vector<ExPolygon> merged =
+        Algorithm::merge_expansions_into_expolygons(std::move(source), std::move(fragments));
+    REQUIRE(merged.size() == 3);
+    const BoundingBox first = get_extents(merged[0]);
+    CHECK(first.min.x() == 0);
+    CHECK(first.max.x() == 10 * mm);
+    const BoundingBox selected = get_extents(merged[1]);
+    // Allow 0.000025 mm for the union safety expansion and coordinate rounding.
+    CHECK_THAT(double(selected.min.x()), Catch::Matchers::WithinAbs(double(30 * mm), 25.));
+    CHECK_THAT(double(selected.max.x()), Catch::Matchers::WithinAbs(double(45 * mm), 25.));
+    const BoundingBox last = get_extents(merged[2]);
+    CHECK(last.min.x() == 60 * mm);
+    CHECK(last.max.x() == 70 * mm);
+
+    const double square_millimeters = double(mm) * double(mm);
+    CHECK_THAT(merged[0].area() / square_millimeters, Catch::Matchers::WithinAbs(100., 0.01));
+    CHECK_THAT(merged[1].area() / square_millimeters, Catch::Matchers::WithinAbs(150., 0.01));
+    CHECK_THAT(merged[2].area() / square_millimeters, Catch::Matchers::WithinAbs(100., 0.01));
+}

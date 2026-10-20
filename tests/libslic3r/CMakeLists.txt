@@ -278,6 +278,7 @@ slicer_enable_llvm_source_coverage(libslic3r_filament_group_utils_tests)
 add_executable(libslic3r_geometry_tests EXCLUDE_FROM_ALL
     test_geometry.cpp
     test_polygon.cpp
+    test_trianglemesh_slicer.cpp
     ../libnest2d/printer_parts.cpp
     ../fff_print/fff_print_tests.cpp)
 target_link_libraries(libslic3r_geometry_tests test_common libslic3r Catch2::Catch2WithMain)

@@ -513,6 +513,15 @@ independent top/bottom projections. Their mutation manifests are
 `transform_gcode.json`, `wipetower_prime_public.json` and
 `trianglemesh_slicer_contracts.json`.
 
+`[LineSplit]` checks clipping through holes, closed endpoints, boundary overlap
+and source-index provenance. `[RegionExpansion]` checks bounded wave growth and
+selection of the source-bearing merged component against analytic bounds and
+areas. Their probes are in `algorithm_region_expansion.json`.
+`[TriangleMeshCutMesh]` requires watertight halves with analytic volumes when a
+cut follows existing edges or passes through vertices; its probes are in
+`trianglemesh_slicer_contracts.json`. These cases also run in the focused
+`libslic3r_geometry_tests` executable.
+
 `[WipeTowerSparsePipeline]` compares ordinary and skipped sparse tower layers
 through public slicing and G-code export. Tower deposition must decrease while
 the object's deposition segments remain unchanged. Its mutations are in

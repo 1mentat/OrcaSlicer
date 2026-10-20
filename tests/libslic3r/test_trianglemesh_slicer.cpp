@@ -264,3 +264,74 @@ TEST_CASE("Single-plane slicing preserves hole orientation and applies the selec
     const unsigned int expected_holes = mode == Mode::Regular || mode == Mode::EvenOdd ? 1u : 0u;
     CHECK(holes == expected_holes);
 }
+
+namespace cut_mesh_plane_contracts {
+
+TriangleMesh box_with_middle_edge_ring()
+{
+    std::vector<Vec3f> vertices;
+    vertices.reserve(12);
+    for (int layer = 0; layer < 3; ++layer) {
+        const float z = 10.f * float(layer);
+        vertices.emplace_back(0.f, 0.f, z);
+        vertices.emplace_back(20.f, 0.f, z);
+        vertices.emplace_back(20.f, 20.f, z);
+        vertices.emplace_back(0.f, 20.f, z);
+    }
+
+    std::vector<Vec3i32> facets { { 0, 2, 1 }, { 0, 3, 2 }, { 8, 9, 10 }, { 8, 10, 11 } };
+    for (int layer = 0; layer < 2; ++layer) {
+        const int lower = 4 * layer;
+        const int upper = lower + 4;
+        for (int edge = 0; edge < 4; ++edge) {
+            const int next = (edge + 1) % 4;
+            facets.emplace_back(lower + edge, lower + next, upper + next);
+            facets.emplace_back(lower + edge, upper + next, upper + edge);
+        }
+    }
+    return TriangleMesh(vertices, facets);
+}
+
+} // namespace cut_mesh_plane_contracts
+
+TEST_CASE("The cut keeps both halves watertight when the plane follows an existing mesh edge",
+          "[TriangleMeshSlicer][TriangleMeshCutMesh]")
+{
+    const TriangleMesh mesh = cut_mesh_plane_contracts::box_with_middle_edge_ring();
+    indexed_triangle_set upper;
+    indexed_triangle_set lower;
+
+    cut_mesh(mesh.its, 10.f, &upper, &lower);
+
+    CHECK(its_num_open_edges(upper) == 0);
+    CHECK(its_num_open_edges(lower) == 0);
+    CHECK_THAT(std::abs(its_volume(upper)), Catch::Matchers::WithinAbs(4000.f, 1e-2f));
+    CHECK_THAT(std::abs(its_volume(lower)), Catch::Matchers::WithinAbs(4000.f, 1e-2f));
+}
+
+TEST_CASE("The cut preserves a plane vertex when adjacent facets cross the plane",
+          "[TriangleMeshSlicer][TriangleMeshCutMesh]")
+{
+    const TriangleMesh tetrahedron(
+        std::vector<Vec3f> { { 0.f, 0.f, 10.f }, { 0.f, 10.f, 0.f }, { 10.f, 0.f, 20.f }, { 0.f, 0.f, 20.f } },
+        std::vector<Vec3i32> { { 0, 1, 2 }, { 0, 2, 3 }, { 0, 3, 1 }, { 1, 3, 2 } });
+    indexed_triangle_set upper;
+    indexed_triangle_set lower;
+
+    cut_mesh(tetrahedron.its, 10.f, &upper, &lower);
+
+    CHECK(its_num_open_edges(upper) == 0);
+    CHECK(its_num_open_edges(lower) == 0);
+    CHECK_THAT(std::abs(its_volume(upper)), Catch::Matchers::WithinAbs(125.f, 1e-2f));
+    CHECK_THAT(std::abs(its_volume(lower)), Catch::Matchers::WithinAbs(125.f / 3.f, 1e-2f));
+
+    indexed_triangle_set upper_only;
+    cut_mesh(tetrahedron.its, 10.f, &upper_only, nullptr);
+    CHECK(its_num_open_edges(upper_only) == 0);
+    CHECK_THAT(std::abs(its_volume(upper_only)), Catch::Matchers::WithinAbs(125.f, 1e-2f));
+
+    indexed_triangle_set lower_only;
+    cut_mesh(tetrahedron.its, 10.f, nullptr, &lower_only);
+    CHECK(its_num_open_edges(lower_only) == 0);
+    CHECK_THAT(std::abs(its_volume(lower_only)), Catch::Matchers::WithinAbs(125.f / 3.f, 1e-2f));
+}

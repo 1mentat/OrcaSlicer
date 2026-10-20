@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Vertical faces, coplanar slab ownership, reflected surfaces, and independent mesh projections.",
+  "description": "Vertical faces, coplanar slab ownership, reflected surfaces, independent mesh projections, and watertight cuts through existing edges and plane vertices.",
   "mutants": [
     {
       "id": "trianglemesh-slicer-vertical-point-omitted",
@@ -37,6 +37,26 @@
       "expected_failure": "top/bottom occupancy or mirrored bounds fail ordinary assertions; no invalid memory access is introduced.",
       "anchor_occurrences": 1,
       "description": "Reverses the determinant correction, causing a reflected upward/downward pair to swap surface roles while preserving bounded geometry."
+    },
+    {
+      "id": "trianglemesh-cut-plane-vertex-half-ownership",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "} else if (is_new_vertex_v0v1) {\n                if (v0.z() > z) {",
+      "new": "} else if (is_new_vertex_v0v1) {\n                if (v0.z() < z) {",
+      "test_filter": "The cut preserves a plane vertex when adjacent facets cross the plane",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Reverse half ownership only for a facet with one new intersection and one existing plane vertex. Both output indices remain valid, but the analytic tetrahedron half volumes or closed topology must fail."
+    },
+    {
+      "id": "trianglemesh-cut-plane-edge-wrong-cap-channel",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "                bool third_below = c->z() < slice_z;\n                // Two vertices on the cutting plane, the third vertex is below the plane. Consider the edge to be part of the slice\n                // only if it is the upper edge.\n                // (the bottom most edge resp. vertex of a triangle is not owned by the triangle, but the top most edge resp. vertex is part of the triangle\n                // in respect to the cutting plane).\n                result = third_below ? FacetSliceType::Slicing : FacetSliceType::Cutting;\n                if (third_below) {\n                    line_out.edge_type = IntersectionLine::FacetEdgeType::Top;\n",
+      "new": "                bool third_below = c->z() < slice_z;\n                // Two vertices on the cutting plane, the third vertex is below the plane. Consider the edge to be part of the slice\n                // only if it is the upper edge.\n                // (the bottom most edge resp. vertex of a triangle is not owned by the triangle, but the top most edge resp. vertex is part of the triangle\n                // in respect to the cutting plane).\n                result = third_below ? FacetSliceType::Slicing : FacetSliceType::Cutting;\n                if (third_below) {\n                    line_out.edge_type = IntersectionLine::FacetEdgeType::Bottom;\n",
+      "test_filter": "The cut keeps both halves watertight when the plane follows an existing mesh edge",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Assign a below-plane facet exact edge to the upper cap channel instead of the lower channel. The public closed-mesh cut must preserve both closed halves and analytic volume."
     }
   ]
 }
