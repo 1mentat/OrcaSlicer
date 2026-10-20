@@ -1,0 +1,23 @@
+{
+  "mutants": [
+    {
+      "id": "voronoi-point-point-skeleton-uses-sine-for-tan-threshold",
+      "path": "src/libslic3r/Geometry/VoronoiOffset.cpp",
+      "old": "const double            threshold_tan_alpha_half = tan(0.5 * threshold_alpha);",
+      "new": "const double            threshold_tan_alpha_half = sin(0.5 * threshold_alpha);",
+      "test_filter": "Voronoi skeleton clips an inside point-point edge at its corner threshold",
+      "expected_matches": 1,
+      "description": "Replacing tan(alpha/2) with sin(alpha/2) shifts the analytic skeleton clipping point away from the expected bisector position."
+    },
+    {
+      "id": "voronoi-point-point-skeleton-reverses-endpoint-ordering",
+      "path": "src/libslic3r/Geometry/VoronoiOffset.cpp",
+      "old": "double t2 = (voronoi_point2 - cntr).dot(dir_x);\n        if (t1 > t2) {\n            t1 = -t1;\n            t2 = -t2;\n            dir_x = - dir_x;\n        }\n        auto x  = 0.5 * dir_y.norm() * threshold_tan_alpha_half;",
+      "new": "double t2 = (voronoi_point2 - cntr).dot(dir_x);\n        if (t1 < t2) {\n            t1 = -t1;\n            t2 = -t2;\n            dir_x = - dir_x;\n        }\n        auto x  = 0.5 * dir_y.norm() * threshold_tan_alpha_half;",
+      "test_filter": "Voronoi skeleton clips an inside point-point edge at its corner threshold",
+      "expected_matches": 1,
+      "description": "Reversing the segment endpoint normalization leaves this edge interval misordered; the point-point skeleton extractor must emit no valid clipped interval."
+    }
+  ],
+  "schema_version": 1
+}
