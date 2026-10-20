@@ -451,6 +451,13 @@ for the currently inactive automatic TPU dispatch.
 printer profiles, then checks metadata, canonical identities, typed settings,
 and persisted per-type files. Its mutations are in `preset_bundle_import.json`.
 
+`[Bbs3mfMetadata][LayerProfile]` imports a four-object archive containing valid,
+malformed, and duplicate layer-height profiles. Invalid rows must not prevent
+later valid rows from loading, the first duplicate wins, and one-based profile
+IDs must reach the correct objects. Its probes are in
+`bbs_layer_profile_validation.json`. Build `libslic3r_3mf_tests` for focused
+feedback without duplicate CTest registration.
+
 `[CutSurfaceTopology]` checks projected depth selection, disconnected components
 within one mesh, and multiple holes using contour validity and geometric area.
 `[TpmsAdaptiveNormalY]` checks density invariance along Y and compares shell and

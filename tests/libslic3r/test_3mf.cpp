@@ -6990,6 +6990,75 @@ TEST_CASE("Generic 3MF writes height profiles only when they contain complete pa
 
 } // namespace generic_3mf_public_gap_contracts
 
+namespace bbs_3mf_profile_validation_contracts {
+
+using namespace Slic3r;
+
+TEST_CASE("BBS 3MF skips malformed layer height profile records",
+          "[3MF][Bbs3mfMetadata][LayerProfile]")
+{
+    Model source;
+    for (size_t i = 0; i < 4; ++i) {
+        ModelObject *object = source.add_object();
+        object->name = "profile-object-" + std::to_string(i + 1);
+        object->add_volume(make_cube(10. + double(i), 10., 2.));
+        object->add_instance();
+    }
+    source.objects[1]->layer_height_profile.set({0., 0.12, 0.8, 0.2, 1.6, 0.28});
+
+    ScopedTemporaryDir backup_dir("orca_bbs_profile_record_store");
+    source.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile archive(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path = archive.string();
+    store_params.model = &source;
+    store_params.config = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    const std::string profile_records =
+        "malformed-row\n"
+        "not_an_id|0;0.12;0.8;0.2;1.6;0.28\n"
+        "object_id=0|0;0.12;0.8;0.2;1.6;0.28\n"
+        "object_id=2|0;0.12;0.8;0.2;1.6;0.28\n"
+        "object_id=2|0;0.22;0.8;0.3;1.6;0.38\n"
+        "object_id=4|0;0.42;0.8;0.5;1.6;0.58\n"
+        "object_id=1|0;0.1;0.2;0.3\n"
+        "object_id=3|0;0.1;0.2;0.3;0.4\n";
+    bool replaced_profile = false;
+    REQUIRE(rewrite_3mf_entries(archive.string(), [&](std::string &name, std::string &data) {
+        if (name != "Metadata/layer_heights_profile.txt")
+            return false;
+        data = profile_records;
+        replaced_profile = true;
+        return true;
+    }));
+    REQUIRE(replaced_profile);
+
+    Model loaded_model;
+    archive_variant_contracts::BbsLoaded loaded_project;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded_model, loaded_project));
+    REQUIRE(loaded_model.objects.size() == 4);
+
+    const std::array<std::vector<double>, 4> expected_profiles = {{
+        {},
+        {0., 0.12, 0.8, 0.2, 1.6, 0.28},
+        {},
+        {0., 0.42, 0.8, 0.5, 1.6, 0.58},
+    }};
+    for (size_t i = 0; i < expected_profiles.size(); ++i) {
+        REQUIRE(loaded_model.objects[i] != nullptr);
+        CHECK(loaded_model.objects[i]->name == source.objects[i]->name);
+        const auto &actual = loaded_model.objects[i]->layer_height_profile.get();
+        REQUIRE(actual.size() == expected_profiles[i].size());
+        for (size_t j = 0; j < actual.size(); ++j)
+            CHECK_THAT(actual[j], Catch::Matchers::WithinAbs(expected_profiles[i][j], 1e-6));
+    }
+}
+
+} // namespace bbs_3mf_profile_validation_contracts
+
 
 namespace bbs_backup_contracts {
 
