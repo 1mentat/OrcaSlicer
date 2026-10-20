@@ -1,0 +1,14 @@
+{
+  "mutants": [
+    {
+      "id": "circle-taubin-radius-divisor-plus-one",
+      "path": "src/libslic3r/Geometry/Circle.cpp",
+      "old": "out.radius /= double(input.size());",
+      "new": "out.radius /= double(input.size() + 1);",
+      "description": "Use n+1 instead of n when averaging the fitted point-to-center distances. This underestimates an exact four-point radius of 5 to 4, which violates the analytic radius assertion.",
+      "test_filter": "Circle fit APIs reject underdetermined samples and recover an exact circle",
+      "expected_matches": 1
+    }
+  ],
+  "schema_version": 1
+}

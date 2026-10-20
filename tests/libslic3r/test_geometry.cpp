@@ -282,6 +282,29 @@ SCENARIO("Circle Fit, TaubinFit with Newton's method", "[Geometry]") {
     }
 }
 
+TEST_CASE("Circle fit APIs reject underdetermined samples and recover an exact circle", "[Geometry][CircleFit]")
+{
+    const Vec2ds underdetermined{Vec2d(9., -3.), Vec2d(4., 2.)};
+    CHECK(Geometry::circle_taubin_newton(underdetermined).invalid());
+    CHECK(Geometry::circle_ransac(underdetermined).invalid());
+
+    // Four axis points provide an exact, non-vacuous fit oracle for center and radius.
+    const Vec2ds exact_circle{Vec2d(9., -3.), Vec2d(4., 2.), Vec2d(-1., -3.), Vec2d(4., -8.)};
+    const Geometry::Circled taubin = Geometry::circle_taubin_newton(exact_circle);
+    REQUIRE(taubin.valid());
+    CHECK_THAT(taubin.center.x(), Catch::Matchers::WithinAbs(4., 1e-8));
+    CHECK_THAT(taubin.center.y(), Catch::Matchers::WithinAbs(-3., 1e-8));
+    CHECK_THAT(taubin.radius, Catch::Matchers::WithinAbs(5., 1e-8));
+
+    double ransac_error = -1.;
+    const Geometry::Circled ransac = Geometry::circle_ransac(exact_circle, 16, &ransac_error);
+    REQUIRE(ransac.valid());
+    CHECK_THAT(ransac.center.x(), Catch::Matchers::WithinAbs(4., 1e-8));
+    CHECK_THAT(ransac.center.y(), Catch::Matchers::WithinAbs(-3., 1e-8));
+    CHECK_THAT(ransac.radius, Catch::Matchers::WithinAbs(5., 1e-8));
+    CHECK_THAT(ransac_error, Catch::Matchers::WithinAbs(0., 1e-8));
+}
+
 TEST_CASE("smallest_enclosing_circle_welzl", "[Geometry]") {
     // Some random points in plane.
     Points pts { 
