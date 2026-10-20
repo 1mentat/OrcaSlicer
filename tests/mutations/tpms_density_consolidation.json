@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "test_filter": "TpmsAdaptiveDensity",
+  "mutants": [
+    {
+      "id": "tpms-d-interior-density-ignored",
+      "path": "src/libslic3r/Fill/FillTpmsD.cpp",
+      "old": "frequency(params.tpms_interior_density)",
+      "new": "frequency(params.density)",
+      "expected_matches": 1,
+      "test_filter": "TpmsAdaptiveDensity",
+      "ordinary_assertion_only": true,
+      "description": "Use surface density in the TPMS-D interior; the retained full-Print core-to-uniform contrast must fail."
+    }
+  ]
+}

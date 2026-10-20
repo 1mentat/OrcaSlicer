@@ -2407,7 +2407,7 @@ static Polygons centered_square(double half)
     return {Polygon({Point::new_scale(-half, -half), Point::new_scale(half, -half), Point::new_scale(half, half), Point::new_scale(-half, half)})};
 }
 
-TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior density", "[Fill]")
+TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior density", "[Fill][TpmsAdaptiveDensity]")
 {
     // The modes following the distance print more lines than their target where its levels meet: along the shells, or
     // where the patterns blend.
