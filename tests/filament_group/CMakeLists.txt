@@ -16,6 +16,9 @@ target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_SOURCE_DIR}/src $
 target_compile_definitions(${_TEST_NAME}_tests PRIVATE
     FG_TEST_GOLDEN_DIR=R"\(${FG_GOLDEN_DIR}\)"
     )
+if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+    target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY=1)
+endif()
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 orcaslicer_copy_test_dlls()

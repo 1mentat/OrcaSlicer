@@ -143,6 +143,19 @@ included when LLVM provides executable mappings for them; uncompiled headers
 and conditional platform sources are outside the target manifests. The report
 records the source root and manifests used.
 
+FilamentGroup's elapsed-time ceilings are enforced by ordinary Release tests.
+Coverage builds retain its score, constraint, and property checks, but report
+instrumented timings as diagnostics; the run's CTest timeout remains the hang
+guard. Validate both configurations before accepting this suite's coverage
+evidence. In a separate Release build configured with
+`SLICER_ENABLE_LLVM_SOURCE_COVERAGE=OFF`, run all three cases with their original
+timing ceilings:
+
+```sh
+ctest --test-dir build-release/tests/filament_group -C Release \
+  --output-on-failure --no-tests=error
+```
+
 For an archived LLVM 18 run with profile-mapping warnings, use
 `python3 scripts/slicer_coverage_reconcile.py --manifest <run.json> --out <new-directory>`
 to replay the structural export and strict mapping checks. The
