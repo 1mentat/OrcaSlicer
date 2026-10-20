@@ -2557,6 +2557,15 @@
       ],
       "reason": "Destination floors 3, 7, and 17 are checked against zero diagonals and against scaled nonzero flush entries. Full numeric-domain and Print pipeline coverage remain unclaimed."
     },
+    "wipe_tower_max_purge_speed": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerPurgeSpeedVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Caps of 10, 40, and 200 mm/s produce measured positive-extrusion maxima of 10, 40, and 160 mm/s in later-layer WipeTower2 purge and sparse-grid regions configured at 160 mm/s. Geometry and material totals remain invariant. Scope is the direct WipeTower2 consumer; legacy WipeTower, first-layer exceptions, independent region-speed variations, and full numeric-domain coverage remain unclaimed."
+    },
     "wipe_tower_extra_spacing": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[MultimaterialWipe]",

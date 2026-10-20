@@ -771,6 +771,11 @@ G-code. These direct-consumer checks do not establish complete Print pipeline
 coverage; joint variations and numeric-domain gaps remain explicit in the
 settings map. `[WipeTowerBroad]` covers tower estimators, sparse-layer folding,
 role-specific filament selection, and object/support wiping eligibility.
+`[WipeTowerPurgeSpeedVariance]` parses modal feedrates in positive purge and
+sparse-grid extrusion at caps of 10, 40, and 200 mm/s with a 160 mm/s region
+speed. It checks both limits while retaining geometry and material invariants;
+the production probes are in `wipe_tower_purge_speed.json`. This direct
+WipeTower2 fixture does not claim legacy WipeTower or full Print coverage.
 `[CompactedTower]` checks pre-slice collision diagnostics for zero, one, and two
 objects in the rod's clearance band, plus the disabled-setting control. It
 checks the reported height and selected object without slicing; its mutations

@@ -2535,11 +2535,14 @@ namespace wipe_tower_solid_finish_contracts {
 namespace {
 
 struct GridTrace {
-    bool saw_grid = false;
+    bool saw_begin = false;
+    bool saw_end = false;
     std::size_t extrusion_moves = 0;
     std::size_t invalid_motion = 0;
+    std::size_t invalid_feedrate_moves = 0;
     double path_length = 0.;
     double extrusion_delta = 0.;
+    double max_feedrate_mm_min = 0.;
 };
 
 static std::string layer_gcode(const std::vector<WipeTower::ToolChangeResult> &layer)
@@ -2550,25 +2553,33 @@ static std::string layer_gcode(const std::vector<WipeTower::ToolChangeResult> &l
     return out;
 }
 
-static GridTrace trace_empty_grid(const std::vector<WipeTower::ToolChangeResult> &layer,
-                                  const DynamicPrintConfig &config)
+static GridTrace trace_feedrate_region(const std::vector<WipeTower::ToolChangeResult> &layer,
+                                       const DynamicPrintConfig &config,
+                                       const std::string_view begin_marker,
+                                       const std::string_view end_marker)
 {
     GridTrace trace;
-    bool in_grid = false;
+    bool in_region = false;
+    double active_feedrate_mm_min = std::numeric_limits<double>::quiet_NaN();
     GCodeReader reader;
     reader.apply_config(config);
-    reader.parse_buffer(layer_gcode(layer), [&trace, &in_grid](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+    reader.parse_buffer(layer_gcode(layer),
+                        [&trace, &in_region, &active_feedrate_mm_min, begin_marker, end_marker](
+                            GCodeReader &self, const GCodeReader::GCodeLine &line) {
         const std::string_view comment = line.comment();
-        if (comment.find("CP EMPTY GRID START") != std::string_view::npos) {
-            in_grid = true;
-            trace.saw_grid = true;
+        if (comment.find(begin_marker) != std::string_view::npos) {
+            in_region = true;
+            trace.saw_begin = true;
             return;
         }
-        if (comment.find("CP EMPTY GRID END") != std::string_view::npos) {
-            in_grid = false;
+        if (in_region && comment.find(end_marker) != std::string_view::npos) {
+            in_region = false;
+            trace.saw_end = true;
             return;
         }
-        if (!in_grid || !line.cmd_is("G1") || !line.has_e() || (!line.has_x() && !line.has_y()))
+        if (line.has_f())
+            active_feedrate_mm_min = line.f();
+        if (!in_region || !line.cmd_is("G1") || !line.has_e() || (!line.has_x() && !line.has_y()))
             return;
         const float distance = line.dist_XY(self);
         const float extrusion = line.dist_E(self);
@@ -2581,13 +2592,17 @@ static GridTrace trace_empty_grid(const std::vector<WipeTower::ToolChangeResult>
         ++trace.extrusion_moves;
         trace.path_length += double(distance);
         trace.extrusion_delta += double(extrusion);
+        if (!std::isfinite(active_feedrate_mm_min) || active_feedrate_mm_min <= 0.)
+            ++trace.invalid_feedrate_moves;
+        else
+            trace.max_feedrate_mm_min = std::max(trace.max_feedrate_mm_min, active_feedrate_mm_min);
     });
     return trace;
 }
 
-static void require_positive_grid(const GridTrace &trace)
+static void require_positive_region(const GridTrace &trace)
 {
-    REQUIRE(trace.saw_grid);
+    REQUIRE(trace.saw_begin);
     REQUIRE(trace.invalid_motion == 0);
     REQUIRE(trace.extrusion_moves > 0);
     REQUIRE(trace.path_length > 0.);
@@ -2597,6 +2612,74 @@ static void require_positive_grid(const GridTrace &trace)
 }
 
 } // namespace
+
+TEST_CASE("WipeTower2 purge and sparse extrusion respect cap and region speed limits",
+          "[WipeTower][MultimaterialWipe][WipeTowerPurgeSpeedVariance]")
+{
+    const std::vector<double> caps_mm_s{10., 40., 200.};
+    const std::vector<double> expected_region_speeds_mm_s{10., 40., 160.};
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f},   // first-layer transition; excluded from the speed oracle
+        {0.4f, 0.2f, 1, 1, 0.f},    // empty plan layer emits later-layer sparse finish paths
+        {0.6f, 0.2f, 1, 0, 300.f},  // fixed high-volume purge lets the ramp reach its ceiling
+    };
+    std::vector<DirectRun> runs;
+    std::vector<GridTrace> purge_traces;
+    std::vector<GridTrace> sparse_traces;
+    for (std::size_t i = 0; i < caps_mm_s.size(); ++i) {
+        const DynamicPrintConfig config = tower_dynamic({
+            {"enable_filament_ramming", false},
+            {"wipe_tower_no_sparse_layers", false},
+            {"wipe_tower_max_purge_speed", caps_mm_s[i]},
+            {"sparse_infill_speed", 160},
+            {"inner_wall_speed", 160},
+            {"initial_layer_speed", 160},
+            {"filament_max_volumetric_speed", "200,200"},
+            {"enable_tower_interface_features", false},
+        });
+        DirectRun run = run_tower(config, plan);
+        require_finite(run);
+        REQUIRE(run.layers.size() == plan.size());
+        REQUIRE_FALSE(run.layers.at(0).empty());
+        REQUIRE_FALSE(run.layers.at(2).empty());
+        CHECK(run.layers.at(0).front().initial_tool == 0);
+        CHECK(run.layers.at(0).front().new_tool == 1);
+        CHECK(run.layers.at(2).front().initial_tool == 1);
+        CHECK(run.layers.at(2).front().new_tool == 0);
+
+        GridTrace purge = trace_feedrate_region(
+            run.layers.at(2), config, "CP TOOLCHANGE WIPE", "CP TOOLCHANGE END");
+        GridTrace sparse = trace_feedrate_region(
+            run.layers.at(1), config, "CP EMPTY GRID START", "CP EMPTY GRID END");
+        require_positive_region(purge);
+        require_positive_region(sparse);
+        REQUIRE(purge.saw_end);
+        REQUIRE(sparse.saw_end);
+        CHECK(purge.invalid_feedrate_moves == 0);
+        CHECK(sparse.invalid_feedrate_moves == 0);
+        CHECK_THAT(purge.max_feedrate_mm_min,
+                   WithinAbs(expected_region_speeds_mm_s[i] * 60., 1.));
+        CHECK_THAT(sparse.max_feedrate_mm_min,
+                   WithinAbs(expected_region_speeds_mm_s[i] * 60., 1.));
+        runs.push_back(std::move(run));
+        purge_traces.push_back(purge);
+        sparse_traces.push_back(sparse);
+    }
+
+    CHECK_THAT(purge_traces[1].max_feedrate_mm_min - purge_traces[0].max_feedrate_mm_min,
+               WithinAbs((expected_region_speeds_mm_s[1] - expected_region_speeds_mm_s[0]) * 60., 1.));
+    CHECK_THAT(purge_traces[2].max_feedrate_mm_min - purge_traces[1].max_feedrate_mm_min,
+               WithinAbs((expected_region_speeds_mm_s[2] - expected_region_speeds_mm_s[1]) * 60., 1.));
+    CHECK_THAT(sparse_traces[1].max_feedrate_mm_min - sparse_traces[0].max_feedrate_mm_min,
+               WithinAbs((expected_region_speeds_mm_s[1] - expected_region_speeds_mm_s[0]) * 60., 1.));
+    CHECK_THAT(sparse_traces[2].max_feedrate_mm_min - sparse_traces[1].max_feedrate_mm_min,
+               WithinAbs((expected_region_speeds_mm_s[2] - expected_region_speeds_mm_s[1]) * 60., 1.));
+    for (std::size_t i = 1; i < runs.size(); ++i) {
+        CHECK_THAT(double(runs[i].depth), WithinAbs(double(runs[0].depth), 1e-4));
+        CHECK(runs[i].extrusion_count == runs[0].extrusion_count);
+        CHECK_THAT(runs[i].extrusion_length, WithinAbs(runs[0].extrusion_length, 1e-3));
+    }
+}
 
 TEST_CASE("Soluble toolchanges on the next layer produce denser wipe-tower finish infill",
           "[WipeTower][WipeTowerSolidInfill][MultimaterialWipe]")
@@ -2632,14 +2715,18 @@ TEST_CASE("Soluble toolchanges on the next layer produce denser wipe-tower finis
     REQUIRE(soluble.layers.size() == plan.size());
     REQUIRE(control.layers.size() == plan.size());
 
-    const GridTrace soluble_new_only = trace_empty_grid(soluble.layers[1], soluble_config);
-    const GridTrace soluble_old_only = trace_empty_grid(soluble.layers[2], soluble_config);
-    const GridTrace control_new_only = trace_empty_grid(control.layers[1], control_config);
-    const GridTrace control_old_only = trace_empty_grid(control.layers[2], control_config);
-    require_positive_grid(soluble_new_only);
-    require_positive_grid(soluble_old_only);
-    require_positive_grid(control_new_only);
-    require_positive_grid(control_old_only);
+    const GridTrace soluble_new_only = trace_feedrate_region(
+        soluble.layers[1], soluble_config, "CP EMPTY GRID START", "CP EMPTY GRID END");
+    const GridTrace soluble_old_only = trace_feedrate_region(
+        soluble.layers[2], soluble_config, "CP EMPTY GRID START", "CP EMPTY GRID END");
+    const GridTrace control_new_only = trace_feedrate_region(
+        control.layers[1], control_config, "CP EMPTY GRID START", "CP EMPTY GRID END");
+    const GridTrace control_old_only = trace_feedrate_region(
+        control.layers[2], control_config, "CP EMPTY GRID START", "CP EMPTY GRID END");
+    require_positive_region(soluble_new_only);
+    require_positive_region(soluble_old_only);
+    require_positive_region(control_new_only);
+    require_positive_region(control_old_only);
 
     // Solid infill uses repeated long rows while the all-insoluble control uses
     // the inverse-U and sparse zig-zag. These are emitted geometry/material
