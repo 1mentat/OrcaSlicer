@@ -6,10 +6,16 @@
 #include "test_utils.hpp"
 
 #include "libslic3r/Geometry/Voronoi.hpp"
+#include "libslic3r/Arachne/utils/PolygonsSegmentIndex.hpp"
+#include "libslic3r/Arachne/utils/PolygonsPointIndex.hpp"
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/Geometry/VoronoiUtils.hpp"
+#include "libslic3r/Geometry/VoronoiUtilsCgal.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Line.hpp"
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <array>
 #include <fstream>
 #include <ios>
@@ -2377,4 +2383,139 @@ TEST_CASE("Voronoi SVG limits rays and subdivides curved edges", "[VoronoiVisual
         CHECK(line[3] >= -max_clipped_extension - 1.0);
         CHECK(line[3] <= height + max_clipped_extension + 1.0);
     }
+}
+
+
+TEST_CASE("Voronoi construction states distinguish validation and clearing", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygon outline{{Point(0, 0), Point(100, 0), Point(100, 60), Point(0, 60)}};
+    Lines lines = to_lines(outline);
+
+    VD validated;
+    validated.construct_voronoi(lines.begin(), lines.end());
+    REQUIRE(validated.num_edges() > 0);
+    CHECK(validated.get_state() == VD::State::REPAIR_NOT_NEEDED);
+    CHECK(validated.get_issue_type() == VD::IssueType::NO_ISSUE_DETECTED);
+
+    validated.clear();
+    REQUIRE(validated.num_edges() == 0);
+    CHECK(validated.num_vertices() == 0);
+    CHECK(validated.num_cells() == 0);
+    CHECK(validated.get_state() == VD::State::UNKNOWN);
+    CHECK(validated.get_issue_type() == VD::IssueType::UNKNOWN);
+
+    VD unchecked;
+    unchecked.construct_voronoi(lines.begin(), lines.end(), false);
+    REQUIRE(unchecked.num_edges() > 0);
+    CHECK(unchecked.get_state() == VD::State::UNKNOWN);
+    CHECK(unchecked.get_issue_type() == VD::IssueType::UNKNOWN);
+}
+
+TEST_CASE("Voronoi repair restores a vertex at a split polygon edge", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Point split_point(-12412500, -25000000);
+    const Polygon outline{
+        {25000000, 25000000}, {-25000000, 25000000}, {-25000000, -25000000},
+        {split_point.x(), split_point.y()}, {25000000, -25000000}
+    };
+    Lines lines = to_lines(outline);
+
+    VD diagram;
+    diagram.construct_voronoi(lines.begin(), lines.end());
+    REQUIRE(diagram.get_state() == VD::State::REPAIR_SUCCESSFUL);
+    CHECK(diagram.is_valid());
+    REQUIRE(diagram.num_vertices() > 0);
+
+    bool has_split_vertex = false;
+    for (const VD::vertex_type &vertex : diagram.vertices()) {
+        if (Geometry::VoronoiUtils::is_finite(vertex) &&
+            Geometry::VoronoiUtils::to_point(vertex) == split_point.cast<int64_t>()) {
+            has_split_vertex = true;
+            break;
+        }
+    }
+    CHECK(has_split_vertex);
+
+    diagram.clear();
+    CHECK(diagram.num_vertices() == 0);
+    CHECK(diagram.num_edges() == 0);
+    CHECK(diagram.num_cells() == 0);
+    CHECK(diagram.get_state() == VD::State::UNKNOWN);
+    CHECK(diagram.get_issue_type() == VD::IssueType::UNKNOWN);
+}
+
+TEST_CASE("Voronoi planar intersection validation preserves edge annotations", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygon outline{{Point(0, 0), Point(100, 0), Point(100, 60), Point(0, 60)}};
+    Lines lines = to_lines(outline);
+    VD diagram;
+    diagram.construct_voronoi(lines.begin(), lines.end(), false);
+    REQUIRE(diagram.num_edges() > 0);
+
+    CHECK(Geometry::VoronoiUtilsCgal::is_voronoi_diagram_planar_intersection(diagram));
+    for (const VD::edge_type &edge : diagram.edges())
+        REQUIRE(edge.color() == 0);
+    CHECK(Geometry::VoronoiUtilsCgal::is_voronoi_diagram_planar_intersection(diagram));
+    for (const VD::edge_type &edge : diagram.edges())
+        REQUIRE(edge.color() == 0);
+
+    const Points sites{Point(0, 0), Point(100, 0), Point(0, 100)};
+    VD point_diagram;
+    point_diagram.construct_voronoi(sites.begin(), sites.end());
+    CHECK(Geometry::VoronoiUtilsCgal::is_voronoi_diagram_planar_intersection(point_diagram));
+}
+
+TEST_CASE("Voronoi source lookups preserve polygon endpoints and reject mismatched cells", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygon outline{{Point(0, 0), Point(100, 0), Point(100, 60), Point(0, 60)}};
+    const Polygons polygons{outline};
+    std::vector<Arachne::PolygonsSegmentIndex> segments;
+    for (size_t index = 0; index < outline.size(); ++index)
+        segments.emplace_back(&polygons, 0, static_cast<unsigned int>(index));
+
+    VD diagram;
+    diagram.construct_voronoi(segments.cbegin(), segments.cend(), false);
+    REQUIRE(diagram.num_cells() > 0);
+
+    const VD::cell_type *point_cell = nullptr;
+    const VD::cell_type *segment_cell = nullptr;
+    for (const VD::cell_type &cell : diagram.cells()) {
+        if (cell.contains_point() && point_cell == nullptr)
+            point_cell = &cell;
+        if (cell.contains_segment() && segment_cell == nullptr)
+            segment_cell = &cell;
+    }
+    REQUIRE(point_cell != nullptr);
+    REQUIRE(segment_cell != nullptr);
+
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_segment(*point_cell, segments.cbegin(), segments.cend()), InvalidArgument);
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_segment(*segment_cell, segments.cbegin(), segments.cbegin()), OutOfRange);
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_point(*segment_cell, segments.cbegin(), segments.cend()), InvalidArgument);
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_point_index(*segment_cell, segments.cbegin(), segments.cend()), InvalidArgument);
+
+    size_t point_cells_checked = 0;
+    for (const VD::cell_type &cell : diagram.cells()) {
+        if (!cell.contains_point())
+            continue;
+        const Point source_point = Geometry::VoronoiUtils::get_source_point(cell, segments.cbegin(), segments.cend());
+        const Arachne::PolygonsPointIndex source_point_index =
+            Geometry::VoronoiUtils::get_source_point_index(cell, segments.cbegin(), segments.cend());
+        CHECK(source_point_index.p() == source_point);
+        CHECK(std::find(outline.points.begin(), outline.points.end(), source_point) != outline.points.end());
+        ++point_cells_checked;
+    }
+    REQUIRE(point_cells_checked > 0);
+}
+
+TEST_CASE("Parabola discretization returns its endpoints when the focus lies on the directrix", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygons polygons{Polygon{{Point(0, 0), Point(100, 0), Point(100, 100), Point(0, 100)}}};
+    const Arachne::PolygonsSegmentIndex directrix(&polygons, 0, 0);
+    const Point start(25, 0);
+    const Point end(75, 0);
+
+    const Points samples = Geometry::VoronoiUtils::discretize_parabola(Point(50, 0), directrix, start, end, 10, 0.5f);
+    REQUIRE(samples.size() == 2);
+    CHECK(samples.front() == start);
+    CHECK(samples.back() == end);
 }

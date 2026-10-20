@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "base_commit": "eba4618804a3c28ce2562a4c3318da8b62773522",
+  "status": "static_proposal_native_validation_pending",
+  "description": "Public geometry behavior contracts with branch-focused analytic, degenerate, topology, and repair fixtures. No native build or test was run.",
+  "mutants": [
+    {
+      "id": "geometry-chain-lower-boundary-stays-inside",
+      "path": "src/libslic3r/Geometry/ConvexHull.cpp",
+      "old": "    if (det < 0)\n        return false;",
+      "new": "    if (det <= 0)\n        return false;",
+      "expected_matches": 1,
+      "test_filter": "[GeometryContract]",
+      "description": "Treating a point on the lower convex chain as outside violates the boundary-inclusive point-classification contract."
+    },
+    {
+      "id": "voronoi-clear-drops-the-unmodified-boost-diagram",
+      "path": "src/libslic3r/Geometry/Voronoi.cpp",
+      "old": "    if (m_is_modified) {",
+      "new": "    if (true) {",
+      "expected_matches": 1,
+      "test_filter": "[VoronoiGeometryContracts]",
+      "description": "Skip clearing the underlying Boost diagram for unmodified storage; the public clear contract requires the constructed diagram to become empty."
+    },
+    {
+      "id": "voronoi-parabola-degenerate-output-keeps-both-endpoints",
+      "path": "src/libslic3r/Geometry/VoronoiUtils.cpp",
+      "old": "    if (d == 0) {\n        discretized.emplace_back(start);\n        discretized.emplace_back(end);\n        return discretized;\n    }",
+      "new": "    if (d == 0) {\n        discretized.emplace_back(end);\n        discretized.emplace_back(end);\n        return discretized;\n    }",
+      "expected_matches": 1,
+      "test_filter": "[VoronoiGeometryContracts]",
+      "description": "Duplicate the end point in the zero-distance parabola case; the endpoint-preservation assertion must fail as a normal Catch assertion."
+    }
+  ]
+}

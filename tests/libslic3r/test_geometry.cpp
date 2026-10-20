@@ -14,6 +14,8 @@
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Geometry/Circle.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Geometry/MedialAxis.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ShortestPath.hpp"
 
@@ -900,3 +902,78 @@ TEST_CASE("Point3 nearest query leaves output unchanged when there are no candid
 }
 
 } // namespace math_gap_contracts
+
+namespace geometry_contract_family {
+
+TEST_CASE("Convex hull combines the extreme points of open polylines", "[Geometry][GeometryContract]")
+{
+    const Polylines paths{
+        Polyline{{Point(0, 0), Point(10, 0), Point(5, 5)}},
+        Polyline{{Point(0, 10), Point(10, 10)}}
+    };
+
+    const Polygon hull = Geometry::convex_hulll(paths);
+    const Points expected_corners{Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10)};
+    REQUIRE(hull.points.size() == expected_corners.size());
+    for (const Point &corner : expected_corners)
+        CHECK(std::find(hull.points.begin(), hull.points.end(), corner) != hull.points.end());
+    CHECK(hull.contains(Point(5, 5)));
+}
+
+TEST_CASE("Convex polygon chains classify boundaries and reject exterior points", "[Geometry][GeometryContract]")
+{
+    const std::vector<Vec2d> contour{
+        Vec2d(0., 0.), Vec2d(3., 0.), Vec2d(4., 2.),
+        Vec2d(4., 5.), Vec2d(2., 6.), Vec2d(0., 4.)
+    };
+    const auto chains = Geometry::decompose_convex_polygon_top_bottom(contour);
+    REQUIRE(chains.first.size() >= 2);
+    REQUIRE(chains.second.size() >= 2);
+
+    CHECK(Geometry::inside_convex_polygon(chains, Vec2d(0., 2.)));
+    CHECK(Geometry::inside_convex_polygon(chains, Vec2d(2., 0.)));
+    CHECK(Geometry::inside_convex_polygon(chains, Vec2d(2., 3.)));
+    CHECK(Geometry::inside_convex_polygon(chains, Vec2d(4., 3.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(chains, Vec2d(-1., 2.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(chains, Vec2d(5., 2.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(chains, Vec2d(2., -1.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(chains, Vec2d(2., 7.)));
+
+    std::vector<Vec2d> cyclic_start = contour;
+    std::rotate(cyclic_start.begin(), cyclic_start.begin() + 3, cyclic_start.end());
+    const auto rotated_chains = Geometry::decompose_convex_polygon_top_bottom(cyclic_start);
+    REQUIRE(rotated_chains.first.size() >= 2);
+    REQUIRE(rotated_chains.second.size() >= 2);
+    CHECK(Geometry::inside_convex_polygon(rotated_chains, Vec2d(2., 3.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(rotated_chains, Vec2d(2., 7.)));
+
+    const std::vector<Vec2d> vertical_points{Vec2d(2., 0.), Vec2d(2., 1.), Vec2d(2., 2.)};
+    const auto degenerate_chains = Geometry::decompose_convex_polygon_top_bottom(vertical_points);
+    CHECK(degenerate_chains.first.empty());
+    CHECK(degenerate_chains.second.empty());
+    CHECK_FALSE(Geometry::inside_convex_polygon(degenerate_chains, Vec2d(2., 1.)));
+}
+
+TEST_CASE("Medial axis extraction emits bounded paths for a rectangular region", "[Geometry][GeometryContract][MedialAxis]")
+{
+    const coord_t millimeter = scale_(1.0);
+    const Polygon contour{{Point(0, 0), Point(20 * millimeter, 0),
+                           Point(20 * millimeter, 4 * millimeter), Point(0, 4 * millimeter)}};
+    const ExPolygon region(contour);
+    Geometry::MedialAxis medial_axis(0.0, double(20 * millimeter), region);
+    Polylines centerlines;
+
+    medial_axis.build(&centerlines);
+    REQUIRE_FALSE(centerlines.empty());
+    for (const Polyline &centerline : centerlines) {
+        REQUIRE(centerline.points.size() >= 2);
+        for (const Point &point : centerline.points) {
+            CHECK(point.x() >= 0);
+            CHECK(point.x() <= 20 * millimeter);
+            CHECK(point.y() >= 0);
+            CHECK(point.y() <= 4 * millimeter);
+        }
+    }
+}
+
+} // namespace geometry_contract_family
