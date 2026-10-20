@@ -1,0 +1,36 @@
+{
+  "mutants": [
+    {
+      "description": "Reverse the public clamp direction. The below-bottom input corner must reach the bed plane and its incident triangle normal must be refreshed; the reversed predicate leaves that corner below the plane.",
+      "expected_matches": 1,
+      "id": "texture-bake-bottom-clamp-direction-reversed",
+      "new": "            if (geometry.pos[t + size_t(k)].z() > bottom_z) {",
+      "old": "            if (geometry.pos[t + size_t(k)].z() < bottom_z) {",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/TextureBake/TextureBakePipeline.cpp",
+      "test_filter": "TextureBakePipelineGap"
+    },
+    {
+      "description": "Bypass rejection of zero-area snapped triangles. The symmetric triangle fixture is nondegenerate before the move and collapses exactly onto a line at the bed plane, so the no-snap/zero-dirty-result oracle fails.",
+      "expected_matches": 1,
+      "id": "texture-bake-bottom-snap-collapse-guard-bypassed",
+      "new": "            if (false) { ok = false; break; }  // would collapse to zero area",
+      "old": "            if (n2 < 1e-20) { ok = false; break; }  // would collapse to zero area",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/TextureBake/TextureBakePipeline.cpp",
+      "test_filter": "TextureBakePipelineGap"
+    },
+    {
+      "description": "Remove the maximum-fold-angle guard while keeping the opposite-winding guard. The skinny positive-orientation face remains nonzero-area after flattening but rotates by about 88.9 degrees, so its position must remain unchanged.",
+      "expected_matches": 1,
+      "id": "texture-bake-bottom-snap-fold-guard-bypassed",
+      "new": "            if (dot < 0.0)",
+      "old": "            if (dot < 0.0 || dot * dot < fold_cos * fold_cos * o2 * n2)",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/TextureBake/TextureBakePipeline.cpp",
+      "test_filter": "TextureBakePipelineGap"
+    }
+  ],
+  "schema_version": 1,
+  "test_filter": "TextureBakePipelineGap"
+}

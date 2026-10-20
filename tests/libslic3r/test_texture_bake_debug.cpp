@@ -17,6 +17,7 @@
 #include "libslic3r/Point.hpp"
 #include <libslic3r/TextureBake/TextureBakeDebug.hpp>
 #include <libslic3r/TextureBake/TextureBakeIndex.hpp>
+#include <libslic3r/TextureBake/TextureBakePipeline.hpp>
 
 using namespace Slic3r;
 using namespace Slic3r::TextureBake;
@@ -307,4 +308,77 @@ TEST_CASE("Bake stage dumps write sanitized OBJ geometry and an honest summary",
     CHECK(boost::filesystem::is_directory(blocked / obj_path.filename()));
     CHECK(boost::filesystem::is_directory(blocked / "stages.txt"));
     require_unit_triangle_obj(read_text(blocked / "01_Plain.obj"));
+}
+
+TEST_CASE("Texture bake clamps below-bottom corners and refreshes dirty normals", "[TextureBake][TextureBakePipelineGap]")
+{
+    TriSoup soup;
+    soup.pos = { Vec3f(0.f, 0.f, -0.25f), Vec3f(1.f, 0.f, 0.f), Vec3f(0.f, 1.f, 0.f),
+                 Vec3f(2.f, 0.f, 1.f), Vec3f(3.f, 0.f, 1.f), Vec3f(2.f, 1.f, 1.f),
+                 Vec3f(4.f, 0.f, -0.25f), Vec3f(5.f, 0.f, 0.f), Vec3f(6.f, 0.f, 0.f) };
+    soup.nrm.assign(soup.pos.size(), Vec3f(1.f, 0.f, 0.f));
+
+    clamp_below_bottom(soup, 0.f);
+
+    CHECK_THAT(soup.pos[0].z(), WithinAbs(0.f, 1e-7));
+    CHECK_THAT(soup.pos[1].z(), WithinAbs(0.f, 1e-7));
+    CHECK_THAT(soup.pos[2].z(), WithinAbs(0.f, 1e-7));
+    for (size_t i = 0; i < 3; ++i)
+        CHECK_THAT((soup.nrm[i] - Vec3f(0.f, 0.f, 1.f)).norm(), WithinAbs(0.f, 1e-6));
+
+    CHECK_THAT(soup.pos[3].z(), WithinAbs(1.f, 1e-7));
+    for (size_t i = 3; i < 6; ++i)
+        CHECK_THAT((soup.nrm[i] - Vec3f(1.f, 0.f, 0.f)).norm(), WithinAbs(0.f, 1e-6));
+
+    CHECK_THAT(soup.pos[6].z(), WithinAbs(0.f, 1e-7));
+    for (size_t i = 6; i < 9; ++i)
+        CHECK_THAT((soup.nrm[i] - Vec3f(0.f, 0.f, 1.f)).norm(), WithinAbs(0.f, 1e-6));
+}
+
+TEST_CASE("Texture bake snaps shared near-bottom corners but preserves out-of-band geometry", "[TextureBake][TextureBakePipelineGap]")
+{
+    const Vec3f shared(0.f, 0.f, 0.05f);
+    TriSoup soup;
+    soup.pos = { shared, Vec3f(1.f, 0.f, 0.f), Vec3f(0.f, 1.f, 0.f),
+                 shared, Vec3f(-1.f, 0.f, 0.f), Vec3f(0.f, -1.f, 0.f),
+                 Vec3f(2.f, 0.f, 0.2f), Vec3f(3.f, 0.f, 0.f), Vec3f(2.f, 1.f, 0.f) };
+    soup.nrm.assign(soup.pos.size(), Vec3f(1.f, 0.f, 0.f));
+
+    TriSoup empty;
+    CHECK(snap_bottom_to_flat(empty, 0.f, 0.1) == 0);
+    CHECK(snap_bottom_to_flat(soup, 0.f, 0.0) == 0);
+    CHECK_THAT(soup.pos[0].z(), WithinAbs(0.05f, 1e-7));
+    CHECK(snap_bottom_to_flat(soup, 0.f, 0.1) == 2);
+
+    CHECK_THAT(soup.pos[0].z(), WithinAbs(0.f, 1e-7));
+    CHECK_THAT(soup.pos[3].z(), WithinAbs(0.f, 1e-7));
+    for (size_t i = 0; i < 6; ++i)
+        CHECK_THAT((soup.nrm[i] - Vec3f(0.f, 0.f, 1.f)).norm(), WithinAbs(0.f, 1e-6));
+    CHECK_THAT(soup.pos[6].z(), WithinAbs(0.2f, 1e-7));
+    for (size_t i = 6; i < 9; ++i)
+        CHECK_THAT((soup.nrm[i] - Vec3f(1.f, 0.f, 0.f)).norm(), WithinAbs(0.f, 1e-6));
+}
+
+TEST_CASE("Texture bake rejects a bottom snap that collapses an incident face", "[TextureBake][TextureBakePipelineGap]")
+{
+    TriSoup soup;
+    soup.pos = { Vec3f(0.f, 0.f, 0.05f), Vec3f(-1.f, 0.f, 0.f), Vec3f(1.f, 0.f, 0.f) };
+    soup.nrm.assign(soup.pos.size(), Vec3f(1.f, 2.f, 3.f));
+
+    CHECK(snap_bottom_to_flat(soup, 0.f, 0.1) == 0);
+    CHECK_THAT(soup.pos[0].z(), WithinAbs(0.05f, 1e-7));
+    for (const Vec3f &normal : soup.nrm)
+        CHECK_THAT((normal - Vec3f(1.f, 2.f, 3.f)).norm(), WithinAbs(0.f, 1e-6));
+}
+
+TEST_CASE("Texture bake rejects a bottom snap that folds an incident face too far", "[TextureBake][TextureBakePipelineGap]")
+{
+    TriSoup soup;
+    soup.pos = { Vec3f(0.f, 0.f, 0.05f), Vec3f(1.f, 0.f, 0.f), Vec3f(0.f, 0.001f, 0.f) };
+    soup.nrm.assign(soup.pos.size(), Vec3f(1.f, 2.f, 3.f));
+
+    CHECK(snap_bottom_to_flat(soup, 0.f, 0.1) == 0);
+    CHECK_THAT(soup.pos[0].z(), WithinAbs(0.05f, 1e-7));
+    for (const Vec3f &normal : soup.nrm)
+        CHECK_THAT((normal - Vec3f(1.f, 2.f, 3.f)).norm(), WithinAbs(0.f, 1e-6));
 }
