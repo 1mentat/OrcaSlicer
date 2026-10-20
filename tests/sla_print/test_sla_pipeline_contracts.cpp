@@ -18,6 +18,7 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <math.h>
 #include <cmath>
 #include <cstddef>
 #include <libslic3r/Config.hpp>
@@ -34,6 +35,10 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/SLA/SupportPoint.hpp"
+#include "libslic3r/SLA/SupportTree.hpp"
+#include "libslic3r/SLA/SupportTreeBuilder.hpp"
+#include "libslic3r/SLA/SupportTreeBuildsteps.hpp"
+#include "libslic3r/TriangleMeshSlicer.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -389,6 +394,107 @@ TEST_CASE("SLA manual supports elevate the object and emit support slices", "[SL
     CHECK(support_mesh.volume() > 0.f);
     CHECK(object->support_mesh().bounding_box().min.z() < -EPSILON);
     CHECK(support_slice_area(*object) > 0.);
+}
+
+
+TEST_CASE("SLA blocked model-facing supports anchor to the intervening body",
+          "[SLASupportRouting][ModelFacingSupport]")
+{
+    // The lower block occupies x/y=[0,10] and ends at z=5. A second component
+    // has an underside at z=12. The support head fits in the 7 mm gap, but its
+    // bridge limit is too short to move outside the lower block and reach ground.
+    TriangleMesh model = make_cube(10.0, 10.0, 5.0);
+    TriangleMesh ceiling = make_cube(6.0, 6.0, 2.0);
+    ceiling.translate(Vec3f(2.f, 2.f, 12.f));
+    model.merge(ceiling);
+
+    sla::SupportTreeConfig config;
+    config.object_elevation_mm = 0.0;
+    config.ground_facing_only = false;
+    config.bridge_slope = M_PI / 4.0;
+    config.max_bridge_length_mm = 0.5;
+    config.head_front_radius_mm = 0.5;
+    config.head_back_radius_mm = 0.5;
+    config.head_fallback_radius_mm = 0.25;
+    config.head_width_mm = 1.0;
+    config.head_penetration_mm = 0.2;
+    config.base_radius_mm = 1.0;
+    config.base_height_mm = 1.0;
+
+    const sla::SupportPoints points{sla::SupportPoint(5.f, 5.f, 12.f, 0.5f, true)};
+    const sla::SupportableMesh input(model.its, points, config);
+    sla::SupportTreeBuilder tree;
+    // false means normal completion; true means the support-tree build aborted.
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, input));
+    REQUIRE(tree.heads().size() == 1);
+
+    const sla::Head &head = tree.heads().front();
+    REQUIRE(head.is_valid());
+    REQUIRE(head.pillar_id >= 0);
+    CHECK(head.bridge_id == sla::SupportTreeNode::ID_UNSET);
+    const sla::Pillar &anchor_pillar = tree.pillars().at(size_t(head.pillar_id));
+
+    // The configured head spans 2.8 mm: two 0.5 mm end radii at each end,
+    // a 1 mm shaft, less 0.2 mm penetration. Its 45-degree tail rises about
+    // 2 mm. From the junction near z=9.7, the downward ray meets the lower
+    // block at z=5, placing the anchor-pillar endpoint near z=7.
+    CHECK(anchor_pillar.endpoint().z() > 6.5);
+    CHECK(anchor_pillar.endpoint().z() < 7.5);
+
+    TriangleMesh support{tree.retrieve_mesh(sla::MeshType::Support)};
+    REQUIRE_FALSE(support.empty());
+    const auto support_bounds = support.bounding_box();
+    CHECK(support_bounds.min.z() > 4.0f);
+    CHECK(support_bounds.min.z() < 5.5f);
+
+    // A positive mesh cross-section just above the independently known z=5
+    // contact confirms that the anchor reaches the intervening model surface.
+    const Polygons contact_slice = slice_mesh(support.its, 5.1f, MeshSlicingParams{});
+    REQUIRE_FALSE(contact_slice.empty());
+    double contact_area = 0.0;
+    for (const Polygon &polygon : contact_slice)
+        contact_area += std::abs(double(polygon.area()));
+    CHECK(contact_area > 0.0);
+}
+
+TEST_CASE("SLA tall isolated pillars acquire two printable neighbors",
+          "[SLASupportRouting][TallPillarBracing]")
+{
+    // A 1 mm-wide model leaves the two bracing locations clear. Elevation 50
+    // makes the primary pillar exceed the public 35 mm dual-support threshold.
+    const TriangleMesh model = make_cube(1.0, 1.0, 1.0);
+    sla::SupportTreeConfig config;
+    config.object_elevation_mm = 50.0;
+    config.bridge_slope = M_PI / 4.0;
+    config.head_front_radius_mm = 0.5;
+    config.head_back_radius_mm = 0.5;
+    config.head_fallback_radius_mm = 0.25;
+    config.head_width_mm = 1.0;
+    config.head_penetration_mm = 0.2;
+    config.base_radius_mm = 1.0;
+    config.base_height_mm = 1.0;
+    config.max_pillar_link_distance_mm = 10.0;
+    config.pillar_connection_mode = sla::PillarConnectionMode::dynamic;
+
+    const sla::SupportPoints points{sla::SupportPoint(0.5f, 0.5f, 0.f, 0.5f, true)};
+    const sla::SupportableMesh input(model.its, points, config);
+    sla::SupportTreeBuilder tree;
+    // false means normal completion; true means the support-tree build aborted.
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, input));
+    REQUIRE(tree.pillars().size() >= 3);
+
+    const sla::Pillar &primary = tree.pillars().front();
+    CHECK(primary.height > sla::SupportTreeConfig::max_dual_pillar_height_mm);
+    CHECK(primary.links >= 2);
+    size_t ground_anchored_pillars = 0;
+    for (const sla::Pillar &pillar : tree.pillars())
+        if (std::abs(pillar.endpoint().z() + 50.0) < 0.1)
+            ++ground_anchored_pillars;
+    CHECK(ground_anchored_pillars >= 3);
+
+    TriangleMesh support{tree.retrieve_mesh(sla::MeshType::Support)};
+    REQUIRE_FALSE(support.empty());
+    CHECK(support.bounding_box().min.z() < -49.9f);
 }
 
 namespace sla_lifecycle_contracts {

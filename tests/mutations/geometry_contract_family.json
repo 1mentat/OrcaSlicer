@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "base_commit": "eba4618804a3c28ce2562a4c3318da8b62773522",
-  "status": "static_proposal_native_validation_pending",
-  "description": "Public geometry behavior contracts with branch-focused analytic, degenerate, topology, and repair fixtures. No native build or test was run.",
+  "status": "native_validation_passed",
+  "description": "Public geometry contracts checked with ordinary mutation kills and rebuilt pristine/restored controls; fixtures cover analytic, degenerate, topology, and repair behavior.",
   "mutants": [
     {
       "id": "geometry-chain-lower-boundary-stays-inside",

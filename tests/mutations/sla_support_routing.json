@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "description": "SLA support routing and bracing contracts validated with three ordinary assertion kills, passing pristine/restored controls, and original-base clang-tidy.",
+  "mutants": [
+    {
+      "id": "sla-model-facing-anchor-fallback-skipped",
+      "path": "src/libslic3r/SLA/SupportTreeBuildsteps.cpp",
+      "old": "if (connect_to_model_body(head)) { return; }",
+      "new": "if (false && connect_to_model_body(head)) { return; }",
+      "description": "Skip the last-resort model-body anchor for a blocked underside head; the required short anchor pillar and positive contact cross-section should disappear.",
+      "test_filter": "SLA blocked model-facing supports anchor to the intervening body",
+      "expected_matches": 1
+    },
+    {
+      "id": "sla-model-anchor-tail-offset-dropped",
+      "path": "src/libslic3r/SLA/SupportTreeBuildsteps.cpp",
+      "old": "Vec3d endp{hjp(X), hjp(Y), hjp(Z) - hit.distance() + h};",
+      "new": "Vec3d endp{hjp(X), hjp(Y), hjp(Z) - hit.distance()};",
+      "description": "Drop the head-width tail rise from the model anchor pillar; the independent contact at z=5 and endpoint-near-z=7 geometry contract detects the shortened pillar.",
+      "test_filter": "SLA blocked model-facing supports anchor to the intervening body",
+      "expected_matches": 1
+    },
+    {
+      "id": "sla-tall-pillar-dual-brace-threshold-reversed",
+      "path": "src/libslic3r/SLA/SupportTreeBuildsteps.cpp",
+      "old": "else if (pillar().links < 2 && pillar().height > H2) {",
+      "new": "else if (pillar().links < 2 && pillar().height < H2) {",
+      "description": "Stop requesting the required second neighbor for a pillar longer than the dual-support height; the test requires two links and at least three ground-anchored pillars.",
+      "test_filter": "SLA tall isolated pillars acquire two printable neighbors",
+      "expected_matches": 1
+    }
+  ]
+}
