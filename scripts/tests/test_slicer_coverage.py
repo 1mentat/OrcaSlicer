@@ -119,6 +119,35 @@ class CoverageExportTests(unittest.TestCase):
                         slicer_coverage.run_coverage(args)
                     run.assert_not_called()
 
+    def test_preflight_rejects_manifests_outside_production_scope_before_tests(self):
+        for relative in ("tests/fff_print/fixture.cpp", "src/libslic3r-shadow/fixture.cpp"):
+            with self.subTest(source=relative), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source = root / relative
+                source.parent.mkdir(parents=True)
+                source.touch()
+                binary = root / "fixture-tests"
+                binary.touch()
+                manifest = root / "sources.txt"
+                manifest.write_text(str(source) + "\n", encoding="utf-8")
+                commands = root / "compile_commands.json"
+                commands.write_text(json.dumps([{
+                    "directory": str(root), "file": str(source), "arguments": [
+                        "clang", "-fprofile-instr-generate", "-fcoverage-mapping",
+                        "-fprofile-update=atomic", "-c", str(source),
+                    ],
+                }]), encoding="utf-8")
+                args = slicer_coverage._parser().parse_args([
+                    "run", "--root", str(root), "--object", str(binary),
+                    "--manifest", str(manifest), "--compile-commands", str(commands),
+                    "--test-command", "expensive-tests",
+                ])
+                with mock.patch.object(slicer_coverage, "_which", side_effect=lambda name, explicit: name), \
+                     mock.patch.object(slicer_coverage, "_run", side_effect=AssertionError("test command launched")) as run:
+                    with self.assertRaisesRegex(slicer_coverage.CoverageError, "no sources under.*source-root"):
+                        slicer_coverage.run_coverage(args)
+                    run.assert_not_called()
+
     def test_empty_indexed_profile_generation_fails_closed(self):
         for returncode, reason in ((1, "failed"), (0, "missing")):
             with self.subTest(returncode=returncode, reason=reason), tempfile.TemporaryDirectory() as temp:

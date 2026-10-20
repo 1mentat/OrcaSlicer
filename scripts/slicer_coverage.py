@@ -841,6 +841,11 @@ def run_coverage(args: argparse.Namespace) -> int:
         manifest.extend(_read_manifest(manifest_path, root))
     if manifest_files:
         manifest = sorted(set(manifest), key=lambda value: str(value))
+    if manifest and not any(_under(source, source_root) for source in manifest):
+        raise CoverageError(
+            f"source manifests contain no sources under --source-root {source_root}; "
+            "supply production target manifests rather than test target manifests"
+        )
     _require_atomic_profile_commands(manifest, compile_commands)
 
     command = split_command(args.test_command)
