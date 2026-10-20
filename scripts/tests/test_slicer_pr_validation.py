@@ -16,6 +16,15 @@ import slicer_pr_validation  # noqa: E402
 
 
 class ParsingTests(unittest.TestCase):
+    def test_keep_and_reuse_worktree_options_are_mutually_exclusive(self):
+        with mock.patch("sys.stderr"):
+            with self.assertRaises(SystemExit):
+                slicer_pr_validation._parser().parse_args([
+                    "--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused", "--keep-worktree",
+                    "--reuse-worktree-from-report", "prior-report.json",
+                ])
+
     def test_nonpositive_test_jobs_fail_before_validation(self):
         for jobs in ("0", "-1"):
             with self.subTest(jobs=jobs), \
@@ -1375,6 +1384,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         self._git(repo, "config", "user.name", "Test")
         (repo / "tests").mkdir()
         (repo / "src").mkdir()
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
         (repo / "tests/harness.txt").write_text("base\n", encoding="utf-8")
         (repo / "src/production.cpp").write_text("production\n", encoding="utf-8")
         self._git(repo, "add", ".")
@@ -2080,6 +2090,391 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                 registered = self._git(repo, "worktree", "list", "--porcelain").stdout
                 self.assertIn(str(worktree), registered)
                 self.assertNotEqual(report["status"], "cleanup_failed")
+            finally:
+                if worktree is not None and worktree.exists():
+                    self._git(repo, "worktree", "remove", "--force", str(worktree))
+                    worktree.parent.rmdir()
+
+    def test_reuse_report_keeps_build_and_reexecutes_all_selected_trees(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            first_output = root / "first-evidence"
+            first_args = self._args(repo, snapshot, first_output)
+            first_args.harness_base = base
+            first_args.harness_ref = harness_ref
+            first_args.keep_worktree = True
+
+            def first_run_tree(worktree, root_output, name, *args, **kwargs):
+                build = worktree / "build"
+                build.mkdir(exist_ok=True)
+                (build / "cache.marker").write_text("warm build\n", encoding="utf-8")
+                result = self._fake_run_tree(worktree, root_output, name, *args, **kwargs)
+                if name == "pr-1":
+                    result["status"] = "test_timeout"
+                    result["junit_case_statuses"] = {"suite::base regression": "timeout"}
+                    result["timed_out_test_names"] = ["suite::base regression"]
+                    result["junit_reference_usable"] = False
+                return result
+
+            worktree = None
+            try:
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=first_run_tree) as first_run:
+                    self.assertEqual(slicer_pr_validation.run_validation(first_args), 2)
+                prior = json.loads((first_output / "report.json").read_text(encoding="utf-8"))
+                worktree = Path(prior["worktree"]["path"])
+                self.assertEqual(first_run.call_count, 3)
+                self.assertEqual(prior["status"], "infrastructure_error")
+                self.assertEqual(prior["heads"][-1]["status"], "test_timeout")
+                self.assertTrue(prior["cleanup"]["preserved"])
+                self.assertEqual(prior["worktree"]["final_state"]["untracked_count"], 0)
+
+                legacy = json.loads(json.dumps(prior))
+                legacy["worktree"].pop("final_state")
+                legacy_path = root / "legacy-report.json"
+                legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+                ambiguous = json.loads(json.dumps(legacy))
+                ambiguous["heads"][-1].pop("tested_tree_sha")
+                ambiguous_path = root / "ambiguous-report.json"
+                ambiguous_path.write_text(json.dumps(ambiguous), encoding="utf-8")
+                ambiguous_args = self._args(repo, snapshot, root / "ambiguous-evidence")
+                ambiguous_args.harness_base = base
+                ambiguous_args.harness_ref = harness_ref
+                ambiguous_args.reuse_worktree_from_report = str(ambiguous_path)
+                with mock.patch.object(slicer_pr_validation, "_run_tree") as run_tree:
+                    with self.assertRaisesRegex(
+                            slicer_pr_validation.ValidationError,
+                            "last-run index-tree binding"):
+                        slicer_pr_validation.run_validation(ambiguous_args)
+                run_tree.assert_not_called()
+                self.assertTrue((worktree / "build/cache.marker").is_file())
+
+                second_output = root / "second-evidence"
+                second_args = self._args(repo, snapshot, second_output)
+                second_args.harness_base = base
+                second_args.harness_ref = harness_ref
+                second_args.reuse_worktree_from_report = str(legacy_path)
+                observed = []
+
+                def reused_run_tree(actual_worktree, root_output, name, *args, **kwargs):
+                    observed.append((actual_worktree.resolve(), name))
+                    self.assertEqual(actual_worktree.resolve(), worktree.resolve())
+                    self.assertEqual(
+                        (actual_worktree / "build/cache.marker").read_text(encoding="utf-8"),
+                        "warm build\n")
+                    return self._fake_run_tree(
+                        actual_worktree, root_output, name, *args, **kwargs)
+
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=reused_run_tree) as second_run:
+                    self.assertEqual(slicer_pr_validation.run_validation(second_args), 0)
+                report = json.loads((second_output / "report.json").read_text(encoding="utf-8"))
+                self.assertEqual(second_run.call_count, 3)
+                self.assertEqual([name for _, name in observed], ["baseline", "reference", "pr-1"])
+                self.assertTrue(all(path == worktree.resolve() for path, _ in observed))
+                self.assertEqual(report["worktree"]["path"], str(worktree))
+                self.assertTrue(report["worktree"]["reused"])
+                self.assertTrue(report["cleanup"]["preserved"])
+                self.assertTrue(report["cleanup"]["lock_acquired"])
+                self.assertTrue(report["cleanup"]["lock_released"])
+                self.assertEqual(report["worktree"]["prior_state_binding"]["source"], "last_head")
+                self.assertTrue((worktree / "build/cache.marker").is_file())
+            finally:
+                if worktree is not None and worktree.exists():
+                    self._git(repo, "worktree", "remove", "--force", str(worktree))
+                    worktree.parent.rmdir()
+
+    def test_reuse_rejects_untracked_change_before_running_and_preserves_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            first_output = root / "first-evidence"
+            first_args = self._args(repo, snapshot, first_output)
+            first_args.harness_base = base
+            first_args.harness_ref = harness_ref
+            first_args.keep_worktree = True
+            worktree = None
+            try:
+                def first_run_tree(worktree, root_output, name, *args, **kwargs):
+                    build = worktree / "build"
+                    build.mkdir(exist_ok=True)
+                    (build / "cache.marker").write_text("warm build\n", encoding="utf-8")
+                    return self._fake_run_tree(worktree, root_output, name, *args, **kwargs)
+
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=first_run_tree):
+                    self.assertEqual(slicer_pr_validation.run_validation(first_args), 0)
+                prior = json.loads((first_output / "report.json").read_text(encoding="utf-8"))
+                worktree = Path(prior["worktree"]["path"])
+                unexpected = worktree / "unexpected.txt"
+                unexpected.write_text("keep me\n", encoding="utf-8")
+
+                second_args = self._args(repo, snapshot, root / "second-evidence")
+                second_args.harness_base = base
+                second_args.harness_ref = harness_ref
+                second_args.reuse_worktree_from_report = str(first_output / "report.json")
+                with mock.patch.object(slicer_pr_validation, "_run_tree") as run_tree:
+                    with self.assertRaisesRegex(
+                            slicer_pr_validation.ValidationError,
+                            "tracked tree/status differs"):
+                        slicer_pr_validation.run_validation(second_args)
+                run_tree.assert_not_called()
+                self.assertEqual(unexpected.read_text(encoding="utf-8"), "keep me\n")
+                self.assertTrue((worktree / "build/cache.marker").is_file())
+                git_dir = Path(self._git(
+                    worktree, "rev-parse", "--absolute-git-dir").stdout.strip())
+                self.assertFalse((git_dir / slicer_pr_validation._PR_REUSE_LOCK).exists())
+                failed = json.loads(
+                    (root / "second-evidence/report.json").read_text(encoding="utf-8"))
+                self.assertTrue(failed["cleanup"]["preserved"])
+                self.assertTrue(failed["cleanup"]["lock_released"])
+
+                unexpected.unlink()
+                (repo / ".git/info/exclude").write_text("ignored-extra/\n", encoding="utf-8")
+                ignored_extra = worktree / "ignored-extra/cache.bin"
+                ignored_extra.parent.mkdir()
+                ignored_extra.write_bytes(b"ignored but outside the retained build")
+                third_args = self._args(repo, snapshot, root / "third-evidence")
+                third_args.harness_base = base
+                third_args.harness_ref = harness_ref
+                third_args.reuse_worktree_from_report = str(first_output / "report.json")
+                with mock.patch.object(slicer_pr_validation, "_run_tree") as run_tree:
+                    with self.assertRaisesRegex(
+                            slicer_pr_validation.ValidationError,
+                            "unexpected ignored files outside retained build"):
+                        slicer_pr_validation.run_validation(third_args)
+                run_tree.assert_not_called()
+                self.assertEqual(ignored_extra.read_bytes(), b"ignored but outside the retained build")
+                failed = json.loads(
+                    (root / "third-evidence/report.json").read_text(encoding="utf-8"))
+                self.assertTrue(failed["cleanup"]["preserved"])
+                self.assertTrue(failed["cleanup"]["lock_released"])
+            finally:
+                if worktree is not None and worktree.exists():
+                    self._git(repo, "worktree", "remove", "--force", str(worktree))
+                    worktree.parent.rmdir()
+
+    def test_reuse_rejects_tracked_change_before_running_and_preserves_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            first_output = root / "first-evidence"
+            first_args = self._args(repo, snapshot, first_output)
+            first_args.harness_base = base
+            first_args.harness_ref = harness_ref
+            first_args.keep_worktree = True
+            worktree = None
+            try:
+                def first_run_tree(worktree, root_output, name, *args, **kwargs):
+                    build = worktree / "build"
+                    build.mkdir(exist_ok=True)
+                    (build / "cache.marker").write_text("warm build\n", encoding="utf-8")
+                    return self._fake_run_tree(worktree, root_output, name, *args, **kwargs)
+
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=first_run_tree):
+                    self.assertEqual(slicer_pr_validation.run_validation(first_args), 0)
+                prior = json.loads((first_output / "report.json").read_text(encoding="utf-8"))
+                worktree = Path(prior["worktree"]["path"])
+                tracked = worktree / "tests/harness.txt"
+                original = tracked.read_text(encoding="utf-8")
+                tracked.write_text(original + "changed outside runner\n", encoding="utf-8")
+
+                second_args = self._args(repo, snapshot, root / "second-evidence")
+                second_args.harness_base = base
+                second_args.harness_ref = harness_ref
+                second_args.reuse_worktree_from_report = str(first_output / "report.json")
+                with mock.patch.object(slicer_pr_validation, "_run_tree") as run_tree:
+                    with self.assertRaisesRegex(
+                            slicer_pr_validation.ValidationError,
+                            "tracked tree/status differs"):
+                        slicer_pr_validation.run_validation(second_args)
+                run_tree.assert_not_called()
+                self.assertEqual(tracked.read_text(encoding="utf-8"),
+                                 original + "changed outside runner\n")
+                self.assertTrue((worktree / "build/cache.marker").is_file())
+                failed = json.loads(
+                    (root / "second-evidence/report.json").read_text(encoding="utf-8"))
+                self.assertTrue(failed["cleanup"]["preserved"])
+                self.assertTrue(failed["cleanup"]["lock_released"])
+            finally:
+                if worktree is not None and worktree.exists():
+                    self._git(repo, "worktree", "remove", "--force", str(worktree))
+                    worktree.parent.rmdir()
+
+    def test_reuse_rejects_existing_lock_without_modifying_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            first_output = root / "first-evidence"
+            first_args = self._args(repo, snapshot, first_output)
+            first_args.harness_base = base
+            first_args.harness_ref = harness_ref
+            first_args.keep_worktree = True
+            worktree = None
+            try:
+                def first_run_tree(worktree, root_output, name, *args, **kwargs):
+                    build = worktree / "build"
+                    build.mkdir(exist_ok=True)
+                    (build / "cache.marker").write_text("warm build\n", encoding="utf-8")
+                    return self._fake_run_tree(worktree, root_output, name, *args, **kwargs)
+
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=first_run_tree):
+                    self.assertEqual(slicer_pr_validation.run_validation(first_args), 0)
+                prior = json.loads((first_output / "report.json").read_text(encoding="utf-8"))
+                worktree = Path(prior["worktree"]["path"])
+                git_dir = Path(self._git(worktree, "rev-parse", "--absolute-git-dir").stdout.strip())
+                lock = git_dir / slicer_pr_validation._PR_REUSE_LOCK
+                lock.write_text("existing owner\n", encoding="utf-8")
+
+                second_args = self._args(repo, snapshot, root / "second-evidence")
+                second_args.harness_base = base
+                second_args.harness_ref = harness_ref
+                second_args.reuse_worktree_from_report = str(first_output / "report.json")
+                with mock.patch.object(slicer_pr_validation, "_run_tree") as run_tree:
+                    with self.assertRaisesRegex(
+                            slicer_pr_validation.ValidationError, "lock exists"):
+                        slicer_pr_validation.run_validation(second_args)
+                run_tree.assert_not_called()
+                self.assertEqual(lock.read_text(encoding="utf-8"), "existing owner\n")
+                self.assertTrue((worktree / "build/cache.marker").is_file())
+            finally:
+                if worktree is not None and worktree.exists():
+                    lock = Path(self._git(worktree, "rev-parse", "--absolute-git-dir").stdout.strip()) \
+                        / slicer_pr_validation._PR_REUSE_LOCK
+                    if lock.exists():
+                        lock.unlink()
+                    self._git(repo, "worktree", "remove", "--force", str(worktree))
+                    worktree.parent.rmdir()
+
+    def test_reuse_rejects_tracked_build_collision_before_reset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            first_output = root / "first-evidence"
+            first_args = self._args(repo, snapshot, first_output)
+            first_args.harness_base = base
+            first_args.harness_ref = harness_ref
+            first_args.keep_worktree = True
+            worktree = None
+            try:
+                def first_run_tree(worktree, root_output, name, *args, **kwargs):
+                    build = worktree / "build"
+                    build.mkdir(exist_ok=True)
+                    (build / "cache.marker").write_text("warm build\n", encoding="utf-8")
+                    return self._fake_run_tree(worktree, root_output, name, *args, **kwargs)
+
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=first_run_tree):
+                    self.assertEqual(slicer_pr_validation.run_validation(first_args), 0)
+                prior = json.loads((first_output / "report.json").read_text(encoding="utf-8"))
+                worktree = Path(prior["worktree"]["path"])
+
+                self._git(repo, "checkout", "-q", "-b", "collision-harness", harness_ref)
+                tracked_build_file = repo / "build/tracked.txt"
+                tracked_build_file.parent.mkdir(exist_ok=True)
+                tracked_build_file.write_text("tracked path collision\n", encoding="utf-8")
+                self._git(repo, "add", "-f", "build/tracked.txt")
+                self._git(repo, "commit", "-qm", "tracked build path")
+                collision_harness = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+                self._git(repo, "checkout", "-q", "head")
+
+                second_args = self._args(repo, snapshot, root / "collision-evidence")
+                second_args.harness_base = base
+                second_args.harness_ref = collision_harness
+                second_args.reuse_worktree_from_report = str(first_output / "report.json")
+                with mock.patch.object(slicer_pr_validation, "_run_tree") as run_tree:
+                    with self.assertRaisesRegex(
+                            slicer_pr_validation.ValidationError,
+                            "collide with retained build"):
+                        slicer_pr_validation.run_validation(second_args)
+                run_tree.assert_not_called()
+                self.assertEqual((worktree / "build/cache.marker").read_text(encoding="utf-8"),
+                                 "warm build\n")
+                self.assertFalse((worktree / "build/tracked.txt").exists())
+                failed = json.loads(
+                    (root / "collision-evidence/report.json").read_text(encoding="utf-8"))
+                self.assertTrue(failed["cleanup"]["preserved"])
+                self.assertTrue(failed["cleanup"]["lock_released"])
+            finally:
+                if worktree is not None and worktree.exists():
+                    self._git(repo, "worktree", "remove", "--force", str(worktree))
+                    worktree.parent.rmdir()
+
+    def test_reuse_preserves_build_when_heads_stop_ignoring_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, original_head = self._fixture(root)
+            prior_snapshot = self._write_snapshot(root, original_head, base)
+            prior_output = root / "prior-evidence"
+            prior_args = self._args(repo, prior_snapshot, prior_output)
+            prior_args.harness_base = base
+            prior_args.harness_ref = harness_ref
+            prior_args.keep_worktree = True
+            worktree = None
+            try:
+                def seed_build(worktree, root_output, name, *args, **kwargs):
+                    build = worktree / "build"
+                    build.mkdir(exist_ok=True)
+                    marker = build / "cache.marker"
+                    if not marker.exists():
+                        marker.write_text("preserve through resets\n", encoding="utf-8")
+                    return self._fake_run_tree(worktree, root_output, name, *args, **kwargs)
+
+                with mock.patch.object(slicer_pr_validation, "_run_tree", side_effect=seed_build):
+                    self.assertEqual(slicer_pr_validation.run_validation(prior_args), 0)
+                prior = json.loads((prior_output / "report.json").read_text(encoding="utf-8"))
+                worktree = Path(prior["worktree"]["path"])
+                marker = worktree / "build/cache.marker"
+                self.assertEqual(marker.read_text(encoding="utf-8"), "preserve through resets\n")
+
+                heads = []
+                for branch, filename in (("head-unignores-build-one", "one.txt"),
+                                         ("head-unignores-build-two", "two.txt")):
+                    self._git(repo, "checkout", "-q", "-b", branch, base)
+                    (repo / ".gitignore").write_text("# build is no longer ignored\n",
+                                                      encoding="utf-8")
+                    (repo / filename).write_text(f"{filename}\n", encoding="utf-8")
+                    self._git(repo, "add", ".gitignore", filename)
+                    self._git(repo, "commit", "-qm", branch)
+                    heads.append(self._git(repo, "rev-parse", "HEAD").stdout.strip())
+                self._git(repo, "checkout", "-q", "head")
+                snapshot = root / "unignored-heads.json"
+                snapshot.write_text(json.dumps([
+                    {"number": index, "headRefName": f"unignored-{index}",
+                     "headRefOid": head, "baseRefOid": base}
+                    for index, head in enumerate(heads, 1)
+                ]), encoding="utf-8")
+
+                reuse_args = self._args(repo, snapshot, root / "reuse-evidence")
+                reuse_args.harness_base = base
+                reuse_args.harness_ref = harness_ref
+                reuse_args.reuse_worktree_from_report = str(prior_output / "report.json")
+                observed = []
+
+                def verify_build_survives(worktree, root_output, name, *args, **kwargs):
+                    observed.append(name)
+                    self.assertEqual(marker.read_text(encoding="utf-8"),
+                                     "preserve through resets\n")
+                    return self._fake_run_tree(worktree, root_output, name, *args, **kwargs)
+
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=verify_build_survives):
+                    self.assertEqual(slicer_pr_validation.run_validation(reuse_args), 0)
+                report = json.loads(
+                    (root / "reuse-evidence/report.json").read_text(encoding="utf-8"))
+                self.assertEqual(observed, ["baseline", "reference", "pr-1", "pr-2"])
+                self.assertTrue(all(len(item["reset"]) == 1 for item in report["heads"]))
+                self.assertTrue(marker.is_file())
+                self.assertEqual(report["worktree"]["final_state"]["untracked_count"], 0)
+                self.assertNotIn("?? build/", report["worktree"]["final_state"]["status"])
             finally:
                 if worktree is not None and worktree.exists():
                     self._git(repo, "worktree", "remove", "--force", str(worktree))

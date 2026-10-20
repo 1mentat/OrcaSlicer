@@ -1044,6 +1044,13 @@ Use `--keep-worktree` to preserve the validation checkout and its native build
 after the run. The retained location is recorded in `report.json` under
 `cleanup.path`.
 
+Use `--reuse-worktree-from-report prior/report.json` with a new output directory
+to continue with that build. The runner verifies the retained checkout against
+the terminal report, locks it, and rejects unexpected edits or tracked paths
+that would overwrite the build. It preserves build outputs through every tree
+change, including changes to ignore rules. Baseline, reference, and head tests
+run again; previous JUnit results do not satisfy the new run.
+
 Use a new or empty output directory for every run. Before building, the runner
 records the snapshot SHA-256 and verifies every selected head and base resolves
 to its exact commit. Configure, build, and test output goes directly to log files;

@@ -13,9 +13,11 @@ are recorded and never guessed at or auto-resolved.
 
 The caller's checkout is read only.  The temporary worktree is reset between
 heads and removed in a ``finally`` block by default.  ``--keep-worktree``
-preserves it and its build at the reported path for inspection.  Every command,
-tested commit/tree, duration, log path, JUnit path, and status is written to
-``report.json``.
+preserves it and its build at the reported path.  A later invocation may use
+``--reuse-worktree-from-report`` to validate and reset that linked worktree,
+retaining its ignored build outputs while rerunning every selected test.
+Every command, tested commit/tree, duration, log path, JUnit path, and status is
+written to ``report.json``.
 
 Example::
 
@@ -1104,14 +1106,429 @@ def _tracked_source_index_hash(repo: Path) -> tuple[str | None, CommandResult]:
     return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest(), result
 
 
-def _reset_worktree(worktree: Path, commit: str) -> list[dict[str, Any]]:
+def _reset_worktree(worktree: Path, commit: str, *, preserve_build_dir: str | None = None,
+                    allowed_staged_paths: Sequence[str] | None = None) -> list[dict[str, Any]]:
     operations: list[dict[str, Any]] = []
+    if preserve_build_dir is not None:
+        _check_reused_reset_preconditions(worktree, preserve_build_dir, allowed_staged_paths)
     reset = _git(worktree, "reset", "--hard", commit)
     operations.append(reset.json())
-    if reset.returncode == 0:
+    if reset.returncode == 0 and preserve_build_dir is None:
         clean = _git(worktree, "clean", "-fd")
         operations.append(clean.json())
+    elif reset.returncode == 0:
+        _check_build_directory(worktree, preserve_build_dir)
+        _check_no_untracked_files_outside_build(worktree, preserve_build_dir)
+        _check_no_ignored_files_outside_build(worktree, preserve_build_dir)
     return operations
+
+
+_PR_REUSE_LOCK = ".slicer-pr-validation-reuse.lock"
+
+
+def _canonical_git_path(repo: Path, value: str) -> Path:
+    candidate = Path(value.strip())
+    if not candidate.is_absolute():
+        candidate = repo / candidate
+    return Path(os.path.realpath(candidate))
+
+
+def _tracked_worktree_state(worktree: Path, *, build_dir: str | None = None) -> dict[str, Any]:
+    """Capture tracked content and status without hashing ignored build outputs."""
+    head, head_result = resolve_commit(worktree, "HEAD")
+    head_tree = _git(worktree, "rev-parse", "HEAD^{tree}")
+    index_tree, index_result = _tree_sha(worktree)
+    status_args = ("status", "--short", "--untracked-files=no") if build_dir else (
+        "status", "--short", "--untracked-files=all")
+    status = _git(worktree, *status_args)
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=str(worktree), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=120, check=False)
+    tracked_diff = subprocess.run(
+        ["git", "diff", "--binary", "HEAD", "--"],
+        cwd=str(worktree), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=120, check=False)
+    if (head is None or head_tree.returncode != 0 or index_tree is None or
+            status.returncode != 0 or untracked.returncode != 0 or tracked_diff.returncode != 0):
+        raise ValidationError(f"cannot capture reusable worktree state at {worktree}")
+    untracked_paths = [part for part in untracked.stdout.split(b"\0") if part]
+    if build_dir:
+        relative_build = _build_relative_path(worktree, build_dir).encode("utf-8", "surrogateescape")
+        untracked_paths = [path for path in untracked_paths
+                           if path != relative_build and not path.startswith(relative_build + b"/")]
+    filtered_untracked = b"\0".join(untracked_paths) + (b"\0" if untracked_paths else b"")
+    return {
+        "available": True,
+        "head_sha": head,
+        "head_tree_sha": head_tree.stdout.strip(),
+        "index_tree_sha": index_tree,
+        "tracked_diff_sha256": hashlib.sha256(tracked_diff.stdout).hexdigest(),
+        "status": status.stdout,
+        "untracked_count": len(untracked_paths),
+        "untracked_paths_sha256": hashlib.sha256(filtered_untracked).hexdigest(),
+        "head_resolution": head_result.returncode,
+        "index_resolution": index_result.returncode,
+    }
+
+
+def _legacy_last_tree_binding(previous: dict[str, Any]) -> dict[str, str]:
+    heads = previous.get("heads")
+    references = previous.get("references")
+    if isinstance(heads, list) and heads and all(
+            isinstance(item, dict) and item.get("status") == "baseline_failed" for item in heads):
+        if isinstance(references, dict) and references:
+            raise ValidationError("legacy report has ambiguous last tree after baseline failure")
+        last_run = previous.get("baseline")
+        label = "baseline"
+    elif isinstance(heads, list) and heads:
+        last_run = heads[-1]
+        label = "last_head"
+    else:
+        if isinstance(references, dict) and len(references) == 1:
+            last_run = next(iter(references.values()))
+            label = "last_reference"
+        elif isinstance(references, dict) and len(references) > 1:
+            raise ValidationError("legacy report does not order its multiple reference trees")
+        else:
+            last_run = previous.get("baseline")
+            label = "baseline"
+    if not isinstance(last_run, dict):
+        raise ValidationError("legacy report does not identify its last materialized tree")
+    commit = last_run.get("commit_sha")
+    tree = last_run.get("tested_tree_sha") or last_run.get("tree_sha")
+    if not isinstance(commit, str) or not _HEX40.fullmatch(commit):
+        raise ValidationError("legacy report lacks an exact last-run commit binding")
+    if not isinstance(tree, str) or not _HEX40.fullmatch(tree):
+        raise ValidationError("legacy report lacks an exact last-run index-tree binding")
+    return {"source": label, "commit_sha": commit, "tree_sha": tree}
+
+
+def _derive_legacy_final_state(worktree: Path, binding: dict[str, str],
+                               build_dir: str | None = None) -> dict[str, Any]:
+    head, head_result = resolve_commit(worktree, "HEAD")
+    index_tree, index_result = _tree_sha(worktree)
+    unstaged = _git(worktree, "diff", "--quiet", "--")
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=str(worktree), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=120, check=False)
+    if (head != binding["commit_sha"] or index_tree != binding["tree_sha"] or
+            unstaged.returncode != 0 or untracked.returncode != 0 or untracked.stdout):
+        raise ValidationError(
+            "legacy report tree is ambiguous: current detached HEAD, index, or worktree "
+            "does not match its last recorded commit/tree")
+    state = _tracked_worktree_state(worktree, build_dir=build_dir)
+    if (state["head_sha"] != binding["commit_sha"] or
+            state["index_tree_sha"] != binding["tree_sha"] or state["untracked_count"] != 0):
+        raise ValidationError("legacy report does not bind the current tracked worktree state")
+    return state
+
+
+def _load_reusable_worktree(report_path: Path, repo: Path) -> tuple[dict[str, Any], str, Path]:
+    try:
+        report_path = report_path.expanduser().resolve(strict=True)
+        raw = report_path.read_bytes()
+        previous = json.loads(raw)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValidationError(f"cannot load prior PR validation report: {exc}") from exc
+    if not isinstance(previous, dict) or previous.get("schema_version") != 1:
+        raise ValidationError("prior PR validation report has an unsupported schema")
+    finished = previous.get("finished_at_epoch")
+    if (not isinstance(previous.get("status"), str) or not previous.get("status") or
+            not isinstance(finished, (int, float)) or isinstance(finished, bool) or
+            not math.isfinite(finished)):
+        raise ValidationError("prior PR validation report is not a completed terminal run")
+    worktree_record = previous.get("worktree")
+    cleanup = previous.get("cleanup")
+    if (not isinstance(worktree_record, dict) or not isinstance(cleanup, dict)
+            or not cleanup.get("preserved")):
+        raise ValidationError("prior report does not attest a preserved validation worktree")
+    raw_path = worktree_record.get("path")
+    if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+        raise ValidationError("prior report lacks an absolute worktree path")
+    worktree = Path(raw_path).resolve(strict=True)
+    if str(worktree) != raw_path or cleanup.get("path") != raw_path:
+        raise ValidationError("prior report worktree path is not the exact preserved path")
+    if not worktree.is_dir() or worktree == repo:
+        raise ValidationError("reported worktree is missing or is the caller checkout")
+    try:
+        worktree.relative_to(repo)
+    except ValueError:
+        pass
+    else:
+        raise ValidationError("reported validation worktree is inside the caller checkout")
+    if cleanup.get("parent_path") != str(worktree.parent):
+        raise ValidationError("prior report worktree parent path does not match")
+    add = worktree_record.get("add") or {}
+    if ((not isinstance(add, dict) or add.get("returncode") != 0)
+            and not worktree_record.get("reused_from_report")):
+        raise ValidationError("prior report does not identify a runner-owned linked worktree")
+    final_state = worktree_record.get("final_state")
+    if isinstance(final_state, dict) and final_state.get("available") is True:
+        if final_state.get("untracked_count") != 0:
+            raise ValidationError("prior retained worktree contains untracked files")
+        expected_head = final_state.get("head_sha")
+        if not isinstance(expected_head, str) or not _HEX40.fullmatch(expected_head):
+            raise ValidationError("prior report has no exact final HEAD binding")
+    else:
+        binding = _legacy_last_tree_binding(previous)
+        expected_head = binding["commit_sha"]
+        worktree_record["legacy_state_binding"] = binding
+    if previous.get("configuration", {}).get("build_dir") is None:
+        raise ValidationError("prior report does not identify its retained build directory")
+    return previous, hashlib.sha256(raw).hexdigest(), worktree
+
+
+def _git_common_dir(repo: Path) -> Path:
+    result = _git(repo, "rev-parse", "--git-common-dir")
+    if result.returncode != 0:
+        raise ValidationError(f"cannot resolve git common directory: {result.stderr.strip()}")
+    return _canonical_git_path(repo, result.stdout)
+
+
+def _registered_detached_worktree(repo: Path, worktree: Path, expected_head: str) -> None:
+    listing = _git(repo, "worktree", "list", "--porcelain")
+    if listing.returncode != 0:
+        raise ValidationError(f"cannot inspect linked worktrees: {listing.stderr.strip()}")
+    records: list[dict[str, str]] = []
+    record: dict[str, str] = {}
+    for line in listing.stdout.splitlines() + [""]:
+        if not line.strip():
+            if record:
+                records.append(record)
+                record = {}
+            continue
+        key, _, value = line.partition(" ")
+        record[key] = value
+    expected = Path(os.path.realpath(worktree))
+    for item in records:
+        value = item.get("worktree")
+        if value and Path(os.path.realpath(value)) == expected:
+            if item.get("HEAD") != expected_head or "detached" not in item:
+                raise ValidationError(
+                    "reported linked worktree is not detached at its recorded HEAD")
+            return
+    raise ValidationError("reported path is not registered as a linked worktree")
+
+
+def _validate_reusable_worktree_registration(
+        repo: Path, worktree: Path, expected_head: str) -> Path:
+    top = _git(worktree, "rev-parse", "--show-toplevel")
+    if top.returncode != 0 or _canonical_git_path(worktree, top.stdout) != worktree:
+        raise ValidationError("reported path is not a worktree root")
+    common_dir = _git_common_dir(repo)
+    if _git_common_dir(worktree) != common_dir:
+        raise ValidationError("reusable worktree belongs to a different git common directory")
+    git_dir_result = _git(worktree, "rev-parse", "--absolute-git-dir")
+    if git_dir_result.returncode != 0:
+        raise ValidationError("cannot resolve linked worktree git directory")
+    git_dir = Path(git_dir_result.stdout.strip()).resolve(strict=True)
+    if git_dir == common_dir or not git_dir.is_dir():
+        raise ValidationError("reported path is not a linked worktree")
+    branch = _git(worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch.returncode != 1:
+        raise ValidationError("reusable worktree must be detached")
+    _registered_detached_worktree(repo, worktree, expected_head)
+    return git_dir
+
+
+def _check_build_path_collisions(
+        worktree: Path, build_dir: str, refs: Sequence[tuple[str, str]]) -> dict[str, Any]:
+    build = _resolve_build_path(worktree, build_dir)
+    relative_build = build.relative_to(worktree).as_posix().rstrip("/")
+    if not relative_build or relative_build == ".":
+        raise ValidationError("--build-dir must be a directory inside the reused worktree")
+    parts = relative_build.split("/")
+    prefixes = ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
+    checked = []
+    inspected: set[str] = set()
+    for label, ref in refs:
+        resolved, resolution = resolve_commit(worktree, ref)
+        if resolved is None or resolved != ref:
+            raise ValidationError(
+                f"cannot bind requested {label} in reused worktree: {resolution.stderr.strip()}")
+        if resolved not in inspected:
+            collisions: set[str] = set()
+            for prefix in prefixes:
+                result = subprocess.run(
+                    ["git", "ls-tree", "-r", "--name-only", "-z", resolved, "--",
+                     f":(top,literal){prefix}"],
+                    cwd=str(worktree), shell=False, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, timeout=120, check=False)
+                if result.returncode != 0:
+                    detail = result.stderr.decode("utf-8", "replace")
+                    raise ValidationError(f"cannot inspect tracked paths for {label}: {detail}")
+                for raw_path in result.stdout.split(b"\0"):
+                    if not raw_path:
+                        continue
+                    path = os.fsdecode(raw_path)
+                    if (path == relative_build or path.startswith(relative_build + "/") or
+                            relative_build.startswith(path + "/")):
+                        collisions.add(path)
+            if collisions:
+                shown = ", ".join(repr(path) for path in sorted(collisions)[:8])
+                raise ValidationError(
+                    f"requested {label} tracks paths that collide with retained build "
+                    f"{relative_build!r}: {shown}")
+            inspected.add(resolved)
+        checked.append({"label": label, "commit_sha": resolved})
+    return {"build_path": relative_build, "checked_refs": checked, "collisions": []}
+
+
+@dataclass
+class _PrValidationReuseLock:
+    path: Path
+    identity: tuple[int, int]
+
+    def release(self) -> None:
+        try:
+            current = self.path.lstat()
+            if (current.st_dev, current.st_ino) != self.identity:
+                raise ValidationError(f"reuse lock changed while held; refusing to remove: {self.path}")
+            self.path.unlink()
+        except OSError as exc:
+            raise ValidationError(
+                f"cannot release reusable worktree lock {self.path}: {exc}") from exc
+
+
+def _acquire_pr_validation_reuse_lock(
+        repo: Path, worktree: Path, expected_head: str) -> _PrValidationReuseLock:
+    git_dir = _validate_reusable_worktree_registration(repo, worktree, expected_head)
+    lock_path = git_dir / _PR_REUSE_LOCK
+    try:
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise ValidationError(f"reusable worktree lock exists (active or stale): {lock_path}") from exc
+    stat = os.fstat(fd)
+    identity = (stat.st_dev, stat.st_ino)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"pid": os.getpid(), "path": str(worktree)}, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        try:
+            current = lock_path.lstat()
+            if (current.st_dev, current.st_ino) == identity:
+                lock_path.unlink()
+        except OSError:
+            pass
+        raise
+    return _PrValidationReuseLock(lock_path, identity)
+
+
+def _build_relative_path(worktree: Path, build_dir: str) -> str:
+    build = _resolve_build_path(worktree, build_dir)
+    if not build.is_dir():
+        raise ValidationError(f"retained build directory is missing: {build}")
+    try:
+        relative = build.relative_to(worktree).as_posix()
+    except ValueError as exc:
+        raise ValidationError("retained build directory escapes its worktree") from exc
+    if relative == ".":
+        raise ValidationError("retained build directory must be inside the worktree")
+    return relative
+
+
+def _check_build_directory(worktree: Path, build_dir: str) -> Path:
+    _build_relative_path(worktree, build_dir)
+    return _resolve_build_path(worktree, build_dir)
+
+
+def _check_ignored_build(worktree: Path, build_dir: str) -> Path:
+    build = _check_build_directory(worktree, build_dir)
+    relative = build.relative_to(worktree).as_posix()
+    ignored = _git(worktree, "check-ignore", "--quiet", "--no-index", "--", relative)
+    if ignored.returncode != 0:
+        raise ValidationError("retained build directory is not ignored by the requested harness")
+    return build
+
+
+def _check_no_ignored_files_outside_build(worktree: Path, build_dir: str) -> None:
+    relative_build = _build_relative_path(worktree, build_dir).rstrip("/")
+    ignored = subprocess.run(
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+        cwd=str(worktree), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=120, check=False)
+    if ignored.returncode != 0:
+        error = ignored.stderr.decode("utf-8", "replace")
+        raise ValidationError(f"cannot inspect ignored worktree files: {error}")
+    unexpected = []
+    for raw_path in ignored.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        path = raw_path.decode("utf-8", "surrogateescape").rstrip("/")
+        if path != relative_build and not path.startswith(relative_build + "/"):
+            unexpected.append(path)
+    if unexpected:
+        preview = ", ".join(repr(path) for path in unexpected[:5])
+        raise ValidationError(f"unexpected ignored files outside retained build: {preview}")
+
+
+def _check_no_untracked_files_outside_build(worktree: Path, build_dir: str) -> None:
+    relative_build = _build_relative_path(worktree, build_dir).rstrip("/")
+    result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "--directory", "-z"],
+        cwd=str(worktree), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=120, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace")
+        raise ValidationError(f"cannot inspect untracked worktree files: {detail}")
+    unexpected = []
+    for raw_path in result.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        path = raw_path.decode("utf-8", "surrogateescape").rstrip("/")
+        if path != relative_build and not path.startswith(relative_build + "/"):
+            unexpected.append(path)
+    if unexpected:
+        preview = ", ".join(repr(path) for path in unexpected[:5])
+        raise ValidationError(f"unexpected untracked files outside retained build: {preview}")
+
+
+def _check_reused_reset_preconditions(worktree: Path, build_dir: str,
+                                      allowed_staged_paths: Sequence[str] | None) -> None:
+    _check_build_directory(worktree, build_dir)
+    unstaged = _git(worktree, "diff", "--quiet", "--")
+    if unstaged.returncode != 0:
+        raise ValidationError("refusing reused-worktree reset with unstaged tracked changes")
+    if allowed_staged_paths is not None:
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "-z", "HEAD", "--"],
+            cwd=str(worktree), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=120, check=False)
+        if staged.returncode != 0:
+            detail = staged.stderr.decode("utf-8", "replace")
+            raise ValidationError(f"cannot inspect staged harness overlay before reset: {detail}")
+        actual = {os.fsdecode(path) for path in staged.stdout.split(b"\0") if path}
+        unexpected = actual - set(allowed_staged_paths)
+        if unexpected:
+            preview = ", ".join(repr(path) for path in sorted(unexpected)[:5])
+            raise ValidationError(f"staged changes before reset are outside the harness overlay: {preview}")
+    _check_no_untracked_files_outside_build(worktree, build_dir)
+    _check_no_ignored_files_outside_build(worktree, build_dir)
+
+
+def _validate_reusable_worktree(repo: Path, worktree: Path, previous: dict[str, Any],
+                                build_dir: str, output: Path) -> dict[str, Any]:
+    expected_state = previous["worktree"]["final_state"]
+    current_state = _tracked_worktree_state(worktree, build_dir=build_dir)
+    if current_state != expected_state:
+        raise ValidationError("reusable worktree tracked tree/status differs from the prior report")
+    if current_state["untracked_count"] != 0:
+        raise ValidationError("reusable worktree has unexpected untracked files")
+    _validate_reusable_worktree_registration(repo, worktree, current_state["head_sha"])
+    _check_no_untracked_files_outside_build(worktree, build_dir)
+    _check_no_ignored_files_outside_build(worktree, build_dir)
+    try:
+        output.relative_to(worktree)
+    except ValueError:
+        pass
+    else:
+        raise ValidationError("new output directory must be outside the reused worktree")
+    return current_state
 
 
 def _run_phase(argv: Sequence[str], *, cwd: Path, timeout: float, log: Path) -> CommandResult:
@@ -1353,7 +1770,9 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
                         configure_args: Sequence[str], build_args: Sequence[str],
                         patch_path: Path, patch: bytes, patch_sha256: str,
                         resolution_manifest: dict[str, Any] | None,
-                        baseline_passed_cases: dict[str, str]) -> dict[str, Any]:
+                        baseline_passed_cases: dict[str, str], *,
+                        preserve_build_dir: str | None = None,
+                        allowed_staged_paths: Sequence[str] | None = None) -> dict[str, Any]:
     """Run one exact snapshot base with the same guarded tests-only overlay."""
     reference: dict[str, Any] = {
         "name": reference_name,
@@ -1362,7 +1781,9 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
         "status": "infrastructure_error",
         "harness_patch_applied": False,
     }
-    reset = _reset_worktree(worktree, base_sha)
+    reset = _reset_worktree(
+        worktree, base_sha, preserve_build_dir=preserve_build_dir,
+        allowed_staged_paths=allowed_staged_paths)
     reference["reset"] = reset
     if any(item.get("returncode") != 0 for item in reset):
         reference["status"] = "reset_failed"
@@ -1406,6 +1827,8 @@ def run_validation(args: argparse.Namespace) -> int:
     output = Path(args.output_dir).resolve()
     if output.exists() and any(output.iterdir()):
         raise ValidationError(f"output directory must be new or empty: {output}")
+    if getattr(args, "keep_worktree", False) and getattr(args, "reuse_worktree_from_report", None):
+        raise ValidationError("--keep-worktree cannot be combined with --reuse-worktree-from-report")
     output.mkdir(parents=True, exist_ok=True)
     numbers = parse_numbers(args.numbers)
     snapshot_bytes = snapshot_path.read_bytes()
@@ -1488,6 +1911,8 @@ def run_validation(args: argparse.Namespace) -> int:
             "targets": list(args.targets), "timeout_seconds": args.timeout,
             "test_timeout_seconds": getattr(args, "test_timeout", DEFAULT_TEST_TIMEOUT),
             "keep_worktree": bool(getattr(args, "keep_worktree", False)),
+            "reuse_worktree_from_report": (str(Path(args.reuse_worktree_from_report).expanduser())
+                                            if getattr(args, "reuse_worktree_from_report", None) else None),
             "minimum_tests": args.minimum_tests,
             "timeout_provenance": {
                 "phase_timeout_seconds": args.timeout,
@@ -1512,6 +1937,8 @@ def run_validation(args: argparse.Namespace) -> int:
         "heads": [],
     }
     worktree: Path | None = None
+    reuse_lock: _PrValidationReuseLock | None = None
+    reuse_mode = bool(getattr(args, "reuse_worktree_from_report", None))
     cleanup: dict[str, Any] = {}
     started = time.monotonic()
     try:
@@ -1532,14 +1959,65 @@ def run_validation(args: argparse.Namespace) -> int:
                     for item in report["preflight_bases"])):
             report["baseline"] = {"status": "invalid_ref"}
             raise ValidationError("snapshot contains unavailable exact head or base commits")
-        parent = Path(tempfile.mkdtemp(prefix="slicer-pr-validation-", dir=str(output.parent)))
-        worktree = parent / "repo"
-        add = _git(repo, "worktree", "add", "--detach", str(worktree), harness_ref, timeout=300)
-        report["worktree"] = {"path": str(worktree), "add": add.json()}
-        if add.returncode != 0:
-            raise ValidationError(f"cannot create validation worktree: {add.stderr.strip()}")
-
-        build_path = _resolve_build_path(worktree, args.build_dir)
+        if reuse_mode:
+            previous, previous_sha, worktree = _load_reusable_worktree(
+                Path(args.reuse_worktree_from_report), repo)
+            report["worktree"] = {
+                "path": str(worktree),
+                "reused_from_report": str(Path(args.reuse_worktree_from_report).expanduser().resolve()),
+                "reuse_report_sha256": previous_sha,
+                "reused": True,
+                "prior_state_binding": previous["worktree"].get(
+                    "legacy_state_binding", {"source": "reported_final_state"}),
+            }
+            if previous.get("configuration", {}).get("build_dir") != args.build_dir:
+                raise ValidationError("requested --build-dir differs from the retained build directory")
+            prior_state = previous["worktree"].get("final_state")
+            if isinstance(prior_state, dict) and prior_state.get("available") is True:
+                expected_head = prior_state["head_sha"]
+            else:
+                expected_head = previous["worktree"]["legacy_state_binding"]["commit_sha"]
+            reuse_lock = _acquire_pr_validation_reuse_lock(
+                repo, worktree, expected_head)
+            report["worktree"]["reuse_lock"] = str(reuse_lock.path)
+            if "final_state" not in previous["worktree"]:
+                previous["worktree"]["final_state"] = _derive_legacy_final_state(
+                    worktree, previous["worktree"]["legacy_state_binding"], args.build_dir)
+            _validate_reusable_worktree(repo, worktree, previous, args.build_dir, output)
+            requested_refs = [("harness-base", harness_base), ("harness-ref", harness_ref)]
+            requested_refs.extend(
+                (f"snapshot-base-{item['number']}", item["resolved_oid"])
+                for item in report["preflight_bases"])
+            requested_refs.extend(
+                (f"snapshot-head-{item['number']}", item["resolved_oid"])
+                for item in report["preflight_heads"])
+            report["worktree"]["build_collision_preflight"] = _check_build_path_collisions(
+                worktree, args.build_dir, requested_refs)
+            # Only reset tracked state. Preflight rejects unexpected untracked files,
+            # and omitting git clean prevents a changed ignore rule from deleting
+            # the retained build while switching to the requested harness.
+            _check_reused_reset_preconditions(worktree, args.build_dir, None)
+            reset = _git(worktree, "reset", "--hard", harness_ref)
+            report["worktree"]["reset_to_harness"] = reset.json()
+            if reset.returncode != 0:
+                raise ValidationError(f"cannot reset reused worktree to harness: {reset.stderr.strip()}")
+            build_path = _check_build_directory(worktree, args.build_dir)
+            _check_no_untracked_files_outside_build(worktree, args.build_dir)
+            _check_no_ignored_files_outside_build(worktree, args.build_dir)
+            reset_state = _tracked_worktree_state(worktree, build_dir=args.build_dir)
+            if (reset_state["head_sha"] != harness_ref or reset_state["status"] or
+                    reset_state["untracked_count"] != 0 or
+                    reset_state["index_tree_sha"] != reset_state["head_tree_sha"]):
+                raise ValidationError("reused worktree did not become clean at the requested harness")
+            report["worktree"]["reset_state"] = reset_state
+        else:
+            parent = Path(tempfile.mkdtemp(prefix="slicer-pr-validation-", dir=str(output.parent)))
+            worktree = parent / "repo"
+            add = _git(repo, "worktree", "add", "--detach", str(worktree), harness_ref, timeout=300)
+            report["worktree"] = {"path": str(worktree), "add": add.json()}
+            if add.returncode != 0:
+                raise ValidationError(f"cannot create validation worktree: {add.stderr.strip()}")
+            build_path = _resolve_build_path(worktree, args.build_dir)
         configure_args = _default_configure(worktree, build_path, args.deps_prefix, uv)
         configure_args.extend(_format_args(args.cmake_arg, root=worktree, build=build_path,
                                            deps_prefix=args.deps_prefix, uv=uv, jobs=args.jobs))
@@ -1640,7 +2118,9 @@ def run_validation(args: argparse.Namespace) -> int:
                             reference_for_head = _run_reference_entry(
                                 worktree, output, reference_name, requested_base_oid, args,
                                 configure_args, build_args, patch_path, patch, patch_sha,
-                                resolution_manifest, baseline_passed_cases)
+                                resolution_manifest, baseline_passed_cases,
+                                preserve_build_dir=args.build_dir if reuse_mode else None,
+                                allowed_staged_paths=applied_paths if reuse_mode else None)
                         report["references"][requested_base_oid] = reference_for_head
                         if (identity_policy is None and
                                 reference_for_head.get("commit_sha") and
@@ -1698,7 +2178,10 @@ def run_validation(args: argparse.Namespace) -> int:
                                                                    "build_timeout"} else 2
                     _write_json(output / "report.json", report)
                     continue
-                reset_ops = _reset_worktree(worktree, resolved)
+                reset_ops = _reset_worktree(
+                    worktree, resolved,
+                    preserve_build_dir=args.build_dir if reuse_mode else None,
+                    allowed_staged_paths=applied_paths if reuse_mode else None)
                 entry["reset"] = reset_ops
                 if any(item.get("returncode") != 0 for item in reset_ops):
                     entry["status"] = "reset_failed"
@@ -1812,33 +2295,60 @@ def run_validation(args: argparse.Namespace) -> int:
                 _write_json(output / "report.json", report)
     finally:
         if worktree is not None:
-            worktree_added = report.get("worktree", {}).get("add", {}).get("returncode") == 0
-            if getattr(args, "keep_worktree", False) and worktree_added:
+            preserve_worktree = reuse_mode or (
+                getattr(args, "keep_worktree", False) and
+                report.get("worktree", {}).get("add", {}).get("returncode") == 0)
+            if preserve_worktree and worktree.is_dir():
+                try:
+                    report.setdefault("worktree", {})["final_state"] = _tracked_worktree_state(
+                        worktree, build_dir=args.build_dir if reuse_mode else None)
+                except (OSError, ValidationError, subprocess.TimeoutExpired) as exc:
+                    report.setdefault("worktree", {})["final_state"] = {
+                        "available": False, "error": str(exc),
+                    }
+            if reuse_mode:
                 cleanup = {
                     "preserved": True,
                     "path": str(worktree),
                     "parent_path": str(worktree.parent),
-                    "reason": "--keep-worktree",
+                    "reason": "--reuse-worktree-from-report",
+                    "lock_acquired": reuse_lock is not None,
                 }
+                if reuse_lock is not None:
+                    try:
+                        reuse_lock.release()
+                        cleanup["lock_released"] = True
+                    except ValidationError as exc:
+                        cleanup["lock_released"] = False
+                        cleanup["lock_release_error"] = str(exc)
             else:
-                remove = _git(repo, "worktree", "remove", "--force", str(worktree), timeout=300)
-                cleanup["remove"] = remove.json()
-                cleanup["removed"] = remove.returncode == 0
-                parent = worktree.parent
-                if remove.returncode == 0:
-                    try:
-                        parent.rmdir()
-                        cleanup["parent_removed"] = True
-                    except OSError as exc:
-                        cleanup["parent_removed"] = False
-                        cleanup["parent_remove_error"] = str(exc)
+                worktree_added = report.get("worktree", {}).get("add", {}).get("returncode") == 0
+                if getattr(args, "keep_worktree", False) and worktree_added:
+                    cleanup = {
+                        "preserved": True,
+                        "path": str(worktree),
+                        "parent_path": str(worktree.parent),
+                        "reason": "--keep-worktree",
+                    }
                 else:
-                    try:
-                        parent.rmdir()
-                        cleanup["parent_removed"] = True
-                    except OSError as exc:
-                        cleanup["parent_removed"] = False
-                        cleanup["parent_remove_error"] = str(exc)
+                    remove = _git(repo, "worktree", "remove", "--force", str(worktree), timeout=300)
+                    cleanup["remove"] = remove.json()
+                    cleanup["removed"] = remove.returncode == 0
+                    parent = worktree.parent
+                    if remove.returncode == 0:
+                        try:
+                            parent.rmdir()
+                            cleanup["parent_removed"] = True
+                        except OSError as exc:
+                            cleanup["parent_removed"] = False
+                            cleanup["parent_remove_error"] = str(exc)
+                    else:
+                        try:
+                            parent.rmdir()
+                            cleanup["parent_removed"] = True
+                        except OSError as exc:
+                            cleanup["parent_removed"] = False
+                            cleanup["parent_remove_error"] = str(exc)
             report["cleanup"] = cleanup
         report["elapsed_seconds"] = time.monotonic() - started
         report["finished_at_epoch"] = time.time()
@@ -1862,6 +2372,9 @@ def run_validation(args: argparse.Namespace) -> int:
                 "status_after": checkout_after.get("status"),
             }
             report["status"] = "original_checkout_changed_during_run"
+            return_code = 2
+        elif cleanup and cleanup.get("lock_released") is False:
+            report["status"] = "cleanup_failed"
             return_code = 2
         elif cleanup and not cleanup.get("preserved", False) and not cleanup.get("removed", False):
             report["status"] = "cleanup_failed"
@@ -1890,8 +2403,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--numbers", action="append", nargs="+",
                         help="PR numbers, space/comma-separated; may be repeated")
     parser.add_argument("--build-dir", default="build")
-    parser.add_argument("--keep-worktree", action="store_true",
-                        help="preserve the temporary validation worktree and its build at the reported path")
+    worktree_options = parser.add_mutually_exclusive_group()
+    worktree_options.add_argument("--keep-worktree", action="store_true",
+                                  help="preserve the temporary validation worktree and its build at the reported path")
+    worktree_options.add_argument("--reuse-worktree-from-report", metavar="REPORT",
+                                  help="reuse a completed report's preserved linked worktree and ignored build")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--test-timeout", type=float, default=DEFAULT_TEST_TIMEOUT,
                         help="per-CTest-case timeout in seconds (default: 180)")
