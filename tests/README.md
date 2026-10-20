@@ -880,6 +880,21 @@ identical, empty, and unequal-length integer groups. Header mutations require
 recompiling consumers; an isolated header check must avoid archived weak inline
 definitions masking the changed implementation.
 
+`[ConfigVariantRestore]` checks mapped vector slots, insertion, clamped removal,
+short source vectors, and invalid inputs. `[ConfigSerialization]` checks escaped
+strings and trailing empty vector entries. `[ConfigSubstitution]` checks typed
+fallback values and recorded substitutions; `[ConfigMigration]` also checks a
+minimal ConfigDef-backed alias through public deserialization. Build
+`libslic3r_config_tests` for focused feedback. Its probes are in
+`config_public_contracts.json`.
+
+`[TreeSupportPaintedEnforcer]` checks support extrusion near an independently
+located painted vertical facet, with an unpainted control.
+`[TreeSupportBottomInterface]` checks emitted base/interface roles and alternating
+directions above a lower model surface. Build `fff_print_tree_support_tests` for
+focused feedback; the same cases run in the canonical FFF suite without duplicate
+CTest registration. Its probes are in `tree_support_contacts.json`.
+
 `[ToolOrderUtils]` checks constrained flow capacities, group requirements,
 minimum flush costs, and filament ordering. Small path instances use exhaustive
 permutation oracles, including transitions into the next layer; large instances

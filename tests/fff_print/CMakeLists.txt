@@ -114,3 +114,13 @@ target_link_libraries(fff_print_fill_tests test_common libslic3r Catch2::Catch2W
 set_property(TARGET fff_print_fill_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_fill_tests)
 slicer_enable_llvm_source_coverage(fff_print_fill_tests)
+
+# Focused TreeSupport pipeline tests, without duplicate CTest registration.
+add_executable(fff_print_tree_support_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_tree_support.cpp)
+target_link_libraries(fff_print_tree_support_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_tree_support_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_tree_support_tests)
+slicer_enable_llvm_source_coverage(fff_print_tree_support_tests)

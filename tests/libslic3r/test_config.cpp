@@ -4,7 +4,6 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/libslic3r.h"
 #include <string>
-#include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
@@ -4358,3 +4357,187 @@ TEST_CASE("PrintConfig legacy migrations normalize bed and wall-order spellings"
 }
 
 } // namespace print_config_active_followup_contracts
+
+
+TEST_CASE("Variant vector replacement restores mapped slots and imports fallback values",
+          "[Config][ConfigVariantRestore]")
+{
+    ConfigOptionInts destination({10, 20, 30, 40});
+    ConfigOptionInts source({100, 200, 300});
+    std::vector<int> restore_index{3, -1, 99};
+
+    destination.set_with_restore_2(&source, restore_index, 1, 2);
+
+    CHECK(destination.values == std::vector<int>{10, 40, 200, 300, 40});
+    CHECK(source.values == std::vector<int>{100, 200, 300});
+}
+
+TEST_CASE("Variant vector replacement handles a short range and missing source values",
+          "[Config][ConfigVariantRestore]")
+{
+    SECTION("the requested removal is clamped at the vector end") {
+        ConfigOptionInts destination({1, 2, 3});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 2, 8);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 9});
+    }
+
+    SECTION("a zero-length replacement inserts without deleting the following slot") {
+        ConfigOptionInts destination({1, 2});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 1, 0);
+
+        CHECK(destination.values == std::vector<int>{1, 9, 2});
+    }
+
+    SECTION("a short source supplies its first value for unmatched variant slots") {
+        ConfigOptionInts destination({1, 2, 3, 4, 5});
+        ConfigOptionInts source({8});
+        std::vector<int> restore_index{1, -1, -1};
+
+        destination.set_with_restore_2(&source, restore_index, 1, 2, true);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 8, 8, 4, 5});
+    }
+}
+
+TEST_CASE("Variant vector replacement reports invalid start, type, and restore-map shapes",
+          "[Config][ConfigVariantRestore]")
+{
+    ConfigOptionInts destination({1, 2});
+    ConfigOptionInts integer_source({9});
+    ConfigOptionFloats float_source({9.0});
+    std::vector<int> one_slot{-1};
+
+    CHECK_THROWS_WITH(destination.set_with_restore_2(&integer_source, one_slot, 3, 0),
+                      Catch::Matchers::ContainsSubstring("invalid size found"));
+    CHECK_THROWS_WITH(destination.set_with_restore_2(&float_source, one_slot, 0, 0),
+                      Catch::Matchers::ContainsSubstring("incompatible type"));
+
+    std::vector<int> wrong_shape{-1, -1};
+    CHECK_THROWS_WITH(destination.set_with_restore_2(&integer_source, wrong_shape, 0, 1),
+                      Catch::Matchers::ContainsSubstring("invalid restore_index size"));
+}
+
+TEST_CASE("String settings preserve escaped scalar and delimited vector content",
+          "[Config][ConfigSerialization]")
+{
+    const std::string scalar_value = "quote\" slash\\ carriage\r newline\n";
+    ConfigOptionString scalar(scalar_value);
+    const std::string scalar_serialized = scalar.serialize();
+    ConfigOptionString scalar_decoded;
+    REQUIRE(scalar_decoded.deserialize(scalar_serialized));
+    CHECK(scalar_decoded.value == scalar_value);
+
+    const std::vector<std::string> source_values{
+        "plain", "", "semi;colon", "quote\" and slash\\", "tab\t line\n carriage\r"
+    };
+    ConfigOptionStrings source(source_values);
+    const std::string serialized = source.serialize();
+    ConfigOptionStrings decoded;
+    REQUIRE(decoded.deserialize(serialized));
+    CHECK(decoded.values == source_values);
+
+    std::vector<std::string> trailing_empty;
+    REQUIRE(unescape_strings_cstyle("last;", trailing_empty));
+    CHECK(trailing_empty == std::vector<std::string>{"last", ""});
+
+    std::vector<std::string> whitespace_only;
+    REQUIRE(unescape_strings_cstyle(" \t", whitespace_only));
+    CHECK(whitespace_only.empty());
+    std::vector<std::string> quoted_then_spaces;
+    REQUIRE(unescape_strings_cstyle("\"value\" \t", quoted_then_spaces));
+    CHECK(quoted_then_spaces == std::vector<std::string>{"value"});
+
+    std::vector<std::string> unterminated_quote;
+    CHECK_FALSE(unescape_strings_cstyle("\"unfinished", unterminated_quote));
+    std::vector<std::string> trailing_escape;
+    CHECK_FALSE(unescape_strings_cstyle("\"unfinished\\", trailing_escape));
+    std::vector<std::string> malformed_quoted_tail;
+    CHECK_FALSE(unescape_strings_cstyle("\"value\"unexpected", malformed_quoted_tail));
+    CHECK_FALSE(scalar_decoded.deserialize("dangling\\"));
+}
+
+TEST_CASE("Forward-compatible settings import substitutes typed defaults and records changes",
+          "[Config][ConfigSubstitution]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const ConfigOption *flavor_before = config.option("gcode_flavor");
+    REQUIRE(flavor_before != nullptr);
+    const std::string default_flavor = flavor_before->serialize();
+
+    ConfigSubstitutionContext enum_context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("gcode_flavor", "future_flavor", enum_context);
+    REQUIRE(enum_context.substitutions.size() == 1);
+    CHECK(enum_context.substitutions.front().old_value == "future_flavor");
+    REQUIRE(enum_context.substitutions.front().new_value != nullptr);
+    CHECK(enum_context.substitutions.front().new_value->serialize() == default_flavor);
+    CHECK(config.option("gcode_flavor")->serialize() == default_flavor);
+
+    ConfigSubstitutionContext bool_context(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(config.set_deserialize_nothrow("gcode_comments", "on", bool_context));
+    CHECK(config.opt<ConfigOptionBool>("gcode_comments")->value);
+    CHECK(bool_context.substitutions.empty());
+
+    ConfigSubstitutionContext default_true_context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("enable_overhang_bridge_fan", "future_cooling_value", default_true_context);
+    CHECK(config.opt<ConfigOptionBools>("enable_overhang_bridge_fan")->values == std::vector<unsigned char>{1});
+    REQUIRE(default_true_context.substitutions.size() == 1);
+    CHECK(default_true_context.substitutions.front().new_value->serialize() == "1");
+
+    ConfigSubstitutionContext default_false_context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("filament_soluble", "future_material_value", default_false_context);
+    CHECK(config.opt<ConfigOptionBools>("filament_soluble")->values == std::vector<unsigned char>{0});
+    REQUIRE(default_false_context.substitutions.size() == 1);
+    CHECK(default_false_context.substitutions.front().new_value->serialize() == "0");
+
+    ConfigSubstitutionContext numeric_context(ForwardCompatibilitySubstitutionRule::Enable);
+    CHECK_FALSE(config.set_deserialize_nothrow("layer_height", "not-a-number", numeric_context));
+    CHECK(numeric_context.substitutions.empty());
+
+    ConfigSubstitutionContext nil_context(ForwardCompatibilitySubstitutionRule::Enable);
+    CHECK_THROWS_AS(config.set_deserialize("filament_soluble", "nil", nil_context), ConfigurationError);
+
+    DynamicConfig no_definition;
+    ConfigSubstitutionContext no_definition_context(ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK_THROWS_AS(no_definition.set_deserialize("some_option", "1", no_definition_context), NoDefinitionException);
+}
+
+namespace {
+
+struct AliasContractDefinition : ConfigDef {
+    AliasContractDefinition()
+    {
+        ConfigOptionDef *canonical = add("canonical_int", coInt);
+        canonical->set_default_value(new ConfigOptionInt(0));
+        canonical->aliases.emplace_back("legacy_int_alias");
+    }
+};
+
+struct AliasContractConfig : DynamicConfig {
+    AliasContractDefinition definition;
+
+    const ConfigDef *def() const override { return &definition; }
+};
+
+} // namespace
+
+TEST_CASE("Config aliases deserialize into their canonical setting",
+          "[Config][ConfigMigration]")
+{
+    AliasContractConfig config;
+    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+    config.set_deserialize("legacy_int_alias", "42", substitutions);
+
+    const ConfigOptionInt *canonical = config.opt<ConfigOptionInt>("canonical_int");
+    REQUIRE(canonical != nullptr);
+    CHECK(canonical->value == 42);
+    CHECK(config.opt<ConfigOptionInt>("legacy_int_alias") == nullptr);
+    CHECK_THROWS_AS(config.set_deserialize("unknown_config_contract_key", "1", substitutions), UnknownOptionException);
+    CHECK(canonical->value == 42);
+}

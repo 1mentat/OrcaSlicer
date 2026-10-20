@@ -1,4 +1,3 @@
-#include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -9,6 +8,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <sstream>
 #include <utility>
 #include <vector>
 #include "libslic3r/Config.hpp"
@@ -36,6 +36,7 @@
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/Slicing.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -1516,4 +1517,292 @@ TEST_CASE("Organic tip diameter changes valid public support contact geometry",
     // contact footprint grows for the larger tip.
     REQUIRE(sliced_geometry_difference_mm2(wide_tip, narrow_tip) > 0.01);
     REQUIRE(wide_tip.top_contact_area_mm2 > narrow_tip.top_contact_area_mm2 + 0.01);
+}
+
+
+namespace tree_support_vertical_enforcer_contracts {
+
+struct Evidence {
+    size_t local_paths = 0;
+    size_t support_paths_near_target_z = 0;
+    double expected_x_mm = 0.0;
+    double expected_y_mm = 0.0;
+    double expected_z_mm = 0.0;
+};
+
+static Evidence observe(bool paint_vertical_facet)
+{
+    Model model = Slic3r::Test::model("tree-vertical-enforcer", make_cube(20.0, 20.0, 20.0));
+    REQUIRE(model.objects.size() == 1);
+    ModelObject *model_object = model.objects.front();
+    REQUIRE(model_object->volumes.size() == 1);
+    REQUIRE(model_object->instances.size() == 1);
+    ModelVolume *volume = model_object->volumes.front();
+
+    const indexed_triangle_set &mesh = volume->mesh().its;
+    const BoundingBoxf3 mesh_bounds = volume->mesh().bounding_box();
+    const Transform3d model_trafo = model_object->instances.front()->get_matrix() * volume->get_matrix();
+    int selected_facet = -1;
+    Vec3d expected_point = Vec3d::Zero();
+    for (size_t facet = 0; facet < mesh.indices.size(); ++facet) {
+        const stl_triangle_vertex_indices &tri = mesh.indices[facet];
+        const Vec3f &a = mesh.vertices[tri(0)];
+        const Vec3f &b = mesh.vertices[tri(1)];
+        const Vec3f &c = mesh.vertices[tri(2)];
+        const Vec3f normal = (b - a).cross(c - a);
+        const bool on_left_face = std::abs(a.x() - mesh_bounds.min.x()) < 1e-5f &&
+                                  std::abs(b.x() - mesh_bounds.min.x()) < 1e-5f &&
+                                  std::abs(c.x() - mesh_bounds.min.x()) < 1e-5f;
+        if (!on_left_face || std::abs(normal.x()) < 1e-5f ||
+            std::abs(normal.y()) > 1e-5f || std::abs(normal.z()) > 1e-5f)
+            continue;
+
+        const Vec3d centroid = ((a + b + c) / 3.f).cast<double>();
+        const Vec3d world = model_trafo * centroid;
+        if (world.z() < 5.0 || world.z() > 9.0)
+            continue;
+        selected_facet = int(facet);
+        expected_point = world;
+        break;
+    }
+    REQUIRE(selected_facet >= 0);
+    if (paint_vertical_facet) {
+        TriangleSelector selector(volume->mesh());
+        selector.set_facet(selected_facet, EnforcerBlockerType::ENFORCER);
+        REQUIRE(volume->supported_facets.set(selector));
+    }
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "printable_area",               "-100x-100,200x-100,200x200,-100x200" },
+        { "enable_support",                1 },
+        { "support_type",                  "tree(auto)" },
+        { "support_style",                 "tree_slim" },
+        { "support_on_build_plate_only",   0 },
+        { "support_threshold_angle",       30 },
+        { "support_remove_small_overhang", 0 },
+        { "support_top_z_distance",        0.2 },
+        { "support_interface_top_layers",  0 },
+        { "support_interface_bottom_layers", 0 },
+        { "tree_support_branch_distance",  5.0 },
+        { "tree_support_branch_diameter",  2.0 },
+        { "tree_support_branch_angle",     40.0 },
+        { "support_line_width",            0.4 },
+        { "line_width",                    0.4 },
+        { "nozzle_diameter",               "0.4" },
+        { "initial_layer_print_height",    0.2 },
+        { "layer_height",                  0.2 },
+        { "use_relative_e_distances",        true },
+        { "layer_change_gcode",              "G92 E0\n" },
+        { "raft_layers",                   0 },
+        { "brim_type",                     "no_brim" },
+        { "brim_width",                    0.0 },
+        { "skirt_loops",                   0 },
+    });
+
+    Print print;
+    model_object->ensure_on_bed();
+    print.auto_assign_extruders(model_object);
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    print.process();
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &print_object = *print.objects().front();
+    Evidence result;
+    result.expected_x_mm = expected_point.x();
+    result.expected_y_mm = expected_point.y();
+    result.expected_z_mm = expected_point.z();
+    const Point &center_offset = print_object.center_offset();
+    for (const SupportLayer *layer : print_object.support_layers()) {
+        if (std::abs(double(layer->print_z) - result.expected_z_mm) > 1.0)
+            continue;
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            ++result.support_paths_near_target_z;
+            for (size_t idx = 1; idx < path.polyline.points.size(); ++idx) {
+                const Point3 &a = path.polyline.points[idx - 1];
+                const Point3 &b = path.polyline.points[idx];
+                const double segment_z = double(layer->print_z) + unscale<double>(a.z());
+                if (std::abs(segment_z - result.expected_z_mm) <= 1.0 &&
+                    tree_support_critical_regions_contracts::segment_intersects_xy_window(
+                        a, b, center_offset,
+                        result.expected_x_mm - 2.0, result.expected_x_mm + 2.0,
+                        result.expected_y_mm - 2.0, result.expected_y_mm + 2.0)) {
+                    ++result.local_paths;
+                    break;
+                }
+            }
+        });
+    }
+    return result;
+}
+
+} // namespace tree_support_vertical_enforcer_contracts
+
+TEST_CASE("Painted vertical enforcers create support at the selected facet",
+          "[TreeSupport][TreeSupportPaintedEnforcer]")
+{
+    using namespace tree_support_vertical_enforcer_contracts;
+    const Evidence plain = observe(false);
+    const Evidence painted = observe(true);
+
+    REQUIRE(plain.local_paths == 0);
+    REQUIRE(painted.support_paths_near_target_z > 0);
+    REQUIRE(painted.local_paths > 0);
+    CHECK_THAT(painted.expected_x_mm, Catch::Matchers::WithinAbs(0.0, 1e-4));
+    CHECK(painted.expected_z_mm > 5.0);
+    CHECK(painted.expected_z_mm < 9.0);
+}
+
+namespace tree_support_bottom_interface_contracts {
+
+struct ContactRow {
+    double bottom_z_mm = 0.0;
+    size_t base_role_paths = 0;
+    size_t interface_role_paths = 0;
+    double longest_interface_segment_mm = 0.0;
+    double interface_angle_radians = 0.0;
+    bool has_interface_angle = false;
+};
+
+struct Evidence {
+    size_t contact_interface_rows = 0;
+    size_t alternating_direction_pairs = 0;
+    size_t last_base_interface_paths = 0;
+    std::vector<ContactRow> rows;
+};
+
+static Evidence observe()
+{
+    DynamicPrintConfig config = Slic3r::Test::multifilament_config(3, {
+        { "printable_area",                 "-100x-100,200x-100,200x200,-100x200" },
+        { "enable_support",                 1 },
+        { "support_type",                   "tree(auto)" },
+        { "support_style",                  "tree_slim" },
+        { "support_on_build_plate_only",    0 },
+        { "independent_support_layer_height", false },
+        { "support_threshold_angle",        30 },
+        { "support_remove_small_overhang",  0 },
+        { "support_top_z_distance",         0.2 },
+        { "support_bottom_z_distance",      0.2 },
+        { "support_interface_top_layers",   0 },
+        { "support_interface_bottom_layers", 4 },
+        { "support_bottom_interface_spacing", 0.0 },
+        { "support_interface_pattern",      "rectilinear_interlaced" },
+        { "support_base_pattern",           "default" },
+        { "support_filament",               1 },
+        { "support_interface_filament",     2 },
+        { "tree_support_branch_distance",   5.0 },
+        { "tree_support_branch_diameter",   2.0 },
+        { "tree_support_branch_angle",      40.0 },
+        { "support_line_width",             0.4 },
+        { "line_width",                     0.4 },
+        { "initial_layer_print_height",     0.2 },
+        { "layer_height",                   0.2 },
+        { "use_relative_e_distances",         true },
+        { "layer_change_gcode",               "G92 E0\n" },
+        { "raft_layers",                    0 },
+        { "brim_type",                      "no_brim" },
+        { "brim_width",                     0.0 },
+        { "skirt_loops",                    0 },
+    });
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(two_tier_mesh());
+    init_print(std::move(meshes), print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    print.process();
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const Point &center_offset = object.center_offset();
+    Evidence result;
+    for (const SupportLayer *layer : object.support_layers()) {
+        ContactRow row;
+        row.bottom_z_mm = double(layer->bottom_z());
+        if (row.bottom_z_mm < 3.15 || row.bottom_z_mm >= 4.0)
+            continue;
+
+        double angle_x = 0.0;
+        double angle_y = 0.0;
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            bool touches_lower_plate = false;
+            for (size_t idx = 1; idx < path.polyline.points.size(); ++idx) {
+                const Point3 &a = path.polyline.points[idx - 1];
+                const Point3 &b = path.polyline.points[idx];
+                if (!tree_support_critical_regions_contracts::segment_intersects_xy_window(
+                        a, b, center_offset, 1.0, 29.0, 1.0, 29.0))
+                    continue;
+                const double dx = unscale<double>(b.x() - a.x());
+                const double dy = unscale<double>(b.y() - a.y());
+                const double length = std::hypot(dx, dy);
+                if (length < 0.5)
+                    continue;
+                touches_lower_plate = true;
+                if (path.role() != erSupportMaterialInterface)
+                    continue;
+                const double angle = std::atan2(dy, dx);
+                angle_x += length * std::cos(2.0 * angle);
+                angle_y += length * std::sin(2.0 * angle);
+                row.longest_interface_segment_mm = std::max(row.longest_interface_segment_mm, length);
+            }
+            if (!touches_lower_plate)
+                return;
+            if (path.role() == erSupportMaterial)
+                ++row.base_role_paths;
+            else if (path.role() == erSupportMaterialInterface)
+                ++row.interface_role_paths;
+        });
+        if (row.interface_role_paths > 0) {
+            row.has_interface_angle = row.longest_interface_segment_mm > 0.0;
+            row.interface_angle_radians = 0.5 * std::atan2(angle_y, angle_x);
+            if (row.interface_angle_radians < 0.0)
+                row.interface_angle_radians += PI;
+            ++result.contact_interface_rows;
+        }
+        if (row.bottom_z_mm >= 3.75 && row.bottom_z_mm < 4.0)
+            result.last_base_interface_paths += row.base_role_paths;
+        result.rows.push_back(row);
+    }
+
+    std::vector<double> interface_angles;
+    for (const ContactRow &row : result.rows)
+        if (row.interface_role_paths > 0 && row.has_interface_angle)
+            interface_angles.push_back(row.interface_angle_radians);
+    for (size_t idx = 1; idx < interface_angles.size(); ++idx) {
+        double delta = std::fmod(std::abs(interface_angles[idx] - interface_angles[idx - 1]), double(PI));
+        delta = std::min(delta, double(PI) - delta);
+        if (delta > double(PI) / 3.0)
+            ++result.alternating_direction_pairs;
+    }
+    return result;
+}
+
+} // namespace tree_support_bottom_interface_contracts
+
+TEST_CASE("Tree support floor contacts keep base-interface roles and interlace direction",
+          "[TreeSupport][TreeSupportBottomInterface]")
+{
+    using namespace tree_support_bottom_interface_contracts;
+    const Evidence evidence = observe();
+
+    std::ostringstream contact_rows;
+    for (const ContactRow &row : evidence.rows)
+        contact_rows << " z=" << row.bottom_z_mm << "(base=" << row.base_role_paths
+                     << ",interface=" << row.interface_role_paths << ")";
+    INFO("contact-interface rows=" << evidence.contact_interface_rows
+         << ", last-band base-role paths=" << evidence.last_base_interface_paths
+         << ", alternating direction pairs=" << evidence.alternating_direction_pairs
+         << "; observed contact rows:" << contact_rows.str());
+    REQUIRE(evidence.contact_interface_rows >= 2);
+    REQUIRE(evidence.last_base_interface_paths > 0);
+    REQUIRE(evidence.alternating_direction_pairs > 0);
 }

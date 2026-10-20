@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Semantic mutations for public Config string parsing and forward-compatible boolean import.",
+  "mutants": [
+    {
+      "id": "config-forward-compatibility-boolean-fallback-disabled",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "(optdef->type == coEnum || optdef->type == coEnums || optdef->type == coBool) /*&& ConfigHelpers::looks_like_enum_value(value)*/",
+      "new": "(optdef->type == coEnum || optdef->type == coEnums) /*&& ConfigHelpers::looks_like_enum_value(value)*/",
+      "expected_matches": 1,
+      "description": "Disabling scalar bool fallback must make the public nonthrowing setter reject the future bool spelling instead of mapping it to true.",
+      "test_filter": "Forward-compatible settings import substitutes typed defaults and records changes"
+    },
+    {
+      "id": "config-delimited-string-trailing-empty-preserved",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "out.push_back(std::string());",
+      "new": "out.emplace_back(\" \");",
+      "expected_matches": 1,
+      "description": "Replacing the trailing empty vector item with a space must fail the public delimiter parser's expected final empty value.",
+      "test_filter": "String settings preserve escaped scalar and delimited vector content"
+    }
+  ]
+}
