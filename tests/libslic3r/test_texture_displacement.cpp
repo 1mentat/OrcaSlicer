@@ -913,6 +913,35 @@ TEST_CASE("TextureDisplacement: feature-adaptive subdivision follows curvature, 
     }
 }
 
+TEST_CASE("Step-aware subdivision leaves sharp multi-crossing edges for the cutter",
+          "[TextureDisplacement][TextureStepMultiCrossings]")
+{
+    // The only triangle has one low edge and one edge that crosses two raised bands. Its third vertex
+    // samples the high side, so the field range and mid-level are present at the input vertices too.
+    indexed_triangle_set mesh;
+    mesh.vertices = { { 0.f, 0.f, 0.f }, { 1.f, 0.f, 0.f }, { 0.5f, 0.7f, 0.f } };
+    mesh.indices  = { { 0, 1, 2 } };
+    const HeightFieldSampler bands = [](const Vec3f &p, const Vec3f &) {
+        const bool raised = (p.y() > 0.15f && p.y() < 0.25f) || (p.y() > 0.65f && p.y() < 0.75f);
+        return raised ? 0.4f : 0.f;
+    };
+    const std::vector<uint8_t> region(mesh.indices.size(), 1);
+
+    const indexed_triangle_set ordinary = subdivide_mesh_adaptive(
+        mesh, region, /*max edge*/ 0.f, /*budget*/ 500, nullptr, bands, /*chord tolerance*/ 0.02f,
+        /*resolution floor*/ 0.03f);
+    const indexed_triangle_set step_aware = subdivide_mesh_adaptive(
+        mesh, region, /*max edge*/ 0.f, /*budget*/ 500, nullptr, bands, /*chord tolerance*/ 0.02f,
+        /*resolution floor*/ 0.03f, /*border*/ 0.f, nullptr, nullptr, /*colour edge*/ 0.f,
+        /*split multi-crossings*/ true);
+
+    // Ordinary chord refinement sees the raised bands and subdivides the face. Step mode leaves its
+    // sharp multi-crossing edge for cut_mesh_at_steps(), avoiding a carpet of small triangles there.
+    CHECK(ordinary.indices.size() > mesh.indices.size());
+    CHECK(step_aware.indices.size() == mesh.indices.size());
+    CHECK(step_aware.vertices.size() == mesh.vertices.size());
+}
+
 // A 2x2 truecolour PNG: red, green / blue, white. Written out as bytes rather than encoded here
 // because libslic3r only *writes* grayscale PNGs (png::write_gray_to_file) - which is also exactly
 // why the colour path exists: the GUI importer stores colour images through wxImage instead.
@@ -1432,6 +1461,79 @@ TEST_CASE("TextureDisplacement: the step cutter turns a stepped field into walls
     }
     CHECK(walls > 0);
     CHECK(ramps == 0);
+}
+
+TEST_CASE("The step cutter moves blended source vertices clear of a sharp relief boundary",
+          "[TextureDisplacement][TextureStepVertexNudge]")
+{
+    constexpr float SIZE = 4.f, EDGE = 0.2f, STEP_WIDTH = 0.05f, SEAM_GAP = 0.075f;
+    constexpr float LOW = 0.f, HIGH = 0.4f;
+    const HeightFieldSampler stripe = [](const Vec3f &p, const Vec3f &) {
+        return 0.4f * std::clamp((p.x() - 1.969f) / 0.05f, 0.f, 1.f);
+    };
+    const indexed_triangle_set sheet = make_flat_sheet(SIZE, EDGE);
+    const std::vector<uint8_t> region(sheet.indices.size(), 1);
+
+    // The source grid has a row of vertices just to the high side of the midpoint of a half-texel-wide
+    // transition. The field still has broad low and high plateaus, so it is a sharp, printable step.
+    REQUIRE(texture_has_steps_to_cut(sheet, region, stripe, STEP_WIDTH, SEAM_GAP));
+    size_t cuts = 0;
+    const indexed_triangle_set cut = cut_mesh_at_steps(sheet, region, stripe, STEP_WIDTH, SEAM_GAP, 0.f, nullptr, &cuts);
+    REQUIRE(cuts > 0);
+    CHECK(sheet_is_manifold(cut, SIZE));
+
+    // Mark output vertices referenced by triangles so only actual output geometry can witness a move.
+    std::vector<uint8_t> referenced(cut.vertices.size(), 0);
+    for (const auto &tri : cut.indices)
+        for (int k = 0; k < 3; ++k) {
+            const int vi = tri[k];
+            REQUIRE(vi >= 0);
+            REQUIRE(size_t(vi) < cut.vertices.size());
+            referenced[size_t(vi)] = 1;
+        }
+    size_t active_vertices = 0;
+    for (size_t vi = 0; vi < referenced.size(); ++vi)
+        active_vertices += referenced[vi] != 0;
+    REQUIRE(active_vertices > 0);
+
+    // The cutter may leave generated contour fallback vertices blended when it cannot form a seam.
+    // The source-vertex contract is narrower: each blended input grid vertex must move out of that
+    // position and have nearby referenced output geometry on its original side's pure plateau.
+    constexpr float PLATEAU_TOLERANCE = 1e-6f;
+    constexpr float POSITION_TOLERANCE = 1e-6f;
+    constexpr float SOURCE_SEARCH_RADIUS = 0.5f * EDGE;
+    size_t blended_source_vertices = 0, blended_source_witnesses = 0;
+    for (const Vec3f &source_vertex : sheet.vertices) {
+        const float source_height = stripe(source_vertex, Vec3f::UnitZ());
+        const float low_error = std::abs(source_height - LOW);
+        const float high_error = std::abs(source_height - HIGH);
+        if (std::min(low_error, high_error) <= PLATEAU_TOLERANCE)
+            continue;
+        ++blended_source_vertices;
+        const float expected_plateau = low_error <= high_error ? LOW : HIGH;
+        CAPTURE(source_vertex.x(), source_vertex.y(), source_vertex.z(), source_height, expected_plateau);
+
+        bool referenced_at_source_position = false;
+        bool has_source_side_witness = false;
+        for (size_t vi = 0; vi < referenced.size(); ++vi) {
+            if (!referenced[vi])
+                continue;
+            const Vec3f &output_vertex = cut.vertices[vi];
+            referenced_at_source_position |= (output_vertex - source_vertex).norm() <= POSITION_TOLERANCE;
+            const bool same_yz = std::abs(output_vertex.y() - source_vertex.y()) <= POSITION_TOLERANCE &&
+                                 std::abs(output_vertex.z() - source_vertex.z()) <= POSITION_TOLERANCE;
+            const bool within_source_spacing = std::abs(output_vertex.x() - source_vertex.x()) <=
+                                               SOURCE_SEARCH_RADIUS + POSITION_TOLERANCE;
+            const bool on_source_side_plateau = std::abs(stripe(output_vertex, Vec3f::UnitZ()) - expected_plateau) <=
+                                                PLATEAU_TOLERANCE;
+            has_source_side_witness |= same_yz && within_source_spacing && on_source_side_plateau;
+        }
+        CHECK_FALSE(referenced_at_source_position);
+        CHECK(has_source_side_witness);
+        blended_source_witnesses += has_source_side_witness;
+    }
+    REQUIRE(blended_source_vertices > 0);
+    REQUIRE(blended_source_witnesses > 0);
 }
 
 TEST_CASE("TextureDisplacement: the step cutter passes a smooth field through untouched", "[TextureDisplacement]")
