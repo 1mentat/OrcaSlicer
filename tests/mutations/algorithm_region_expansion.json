@@ -51,6 +51,16 @@
       "expected_matches": 1,
       "ordinary_assertion_only": true,
       "description": "Use one fewer subsequent offset wave when nsteps > 1; the case's public bounds must no longer reach the expected 10 mm expansion."
+    },
+    {
+      "id": "region-expansion-shared-vertex-source-id-origin-off-by-one",
+      "path": "src/libslic3r/Algorithm/RegionExpansion.cpp",
+      "old": "uint32_t src_id = uint32_t(src_z - idx_boundary_end);",
+      "new": "uint32_t src_id = uint32_t(src_z - idx_boundary_begin);",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Wave seeds retain source IDs across shared boundary vertices",
+      "description": "Subtract the boundary sequence origin rather than the source sequence origin. The decoy source makes the target source ID nonzero, so the provenance CHECK must fail normally."
     }
   ]
 }

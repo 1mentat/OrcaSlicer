@@ -8,7 +8,6 @@
 #include <CGAL/centroid.h>
 #include <CGAL/Named_function_parameters.h>
 #include <CGAL/boost/graph/helpers.h>
-#include <Eigen/Eigenvalues>
 #include <CGAL/Polygon_mesh_processing/measure.h>
 #include <algorithm>
 #include <array>
@@ -124,41 +123,6 @@ static double get_angle_between_vectors(const CGALKernel::Vector_3& v1, const CG
         return 180.0;
     }
     return std::acos(product_dot) / M_PI * 180.0;
-}
-
-static void calc_face_normals(const CGALMesh& mesh, std::vector<Eigen::Vector3d>& face_normals) {
-    std::size_t fcnt = mesh.number_of_faces();
-    face_normals.resize(fcnt);
-    for (auto face : mesh.faces()) {
-        std::vector<CGALKernel::Point_3> points;
-        for (auto vtx : mesh.vertices_around_face(mesh.halfedge(face))) {
-            points.push_back(mesh.point(vtx));
-        }
-        Eigen::Vector3d pos1(points[0].x(), points[0].y(), points[0].z());
-        Eigen::Vector3d pos2(points[1].x(), points[1].y(), points[1].z());
-        Eigen::Vector3d pos3(points[2].x(), points[2].y(), points[2].z());
-        face_normals[face] = (pos3 - pos2).cross(pos1 - pos2);
-        face_normals[face].normalize();
-    }
-    return;
-}
-
-static bool check_and_repair_self_intersect(CGALMesh& mesh, bool* is_self_intersect_status = nullptr) {
-    // true means the mesh is no self intersect now
-    // false means the mesh is still self intersect
-    auto is_self_intersect = PMP::does_self_intersect(mesh);
-    if (is_self_intersect_status != nullptr) {
-        *is_self_intersect_status = is_self_intersect;
-    }
-    if (is_self_intersect) {
-        bool repair = PMP::experimental::remove_self_intersections(mesh);
-        if (repair) {
-            return true;
-        } else {
-            return false;
-        }
-    }
-    return true;
 }
 
 static bool save_polylines(const std::string& file_name, const std::vector<std::vector<CGALKernel::Point_3>>& polylines) {
@@ -364,100 +328,11 @@ static bool smooth_region_geom_boundary(CGALMesh& mesh, std::vector<std::size_t>
     return true;
 }
 
-// HSV, XYZ, and LAB are only used internally for computing color differences, so they are declared in this cpp file only.
-typedef std::array<double, 3> HSV;
+// XYZ and LAB are only used internally for computing color differences.
 typedef std::array<double, 3> XYZ;  // Intermediate space for converting between LAB and RGB
 typedef std::array<double, 3> LAB;  // CIELAB was designed to match human visual perception; the standard method for perceptual color difference
 // Common white points
 const XYZ D65_WHITE = {0.95047, 1.0, 1.08883};
-
-/**
- * @brief Convert an RGB color to the HSV color space.
- *
- * @param rgb Input RGB color [R, G, B], range 0~255.
- * @return HSV output [H, S, V], H in 0~360, S and V in 0~1.
- */
-static HSV convert_rgb_to_hsv(const RGB& rgb) {
-    // Normalize to [0, 1]
-    double r = rgb[0] / 255.0;
-    double g = rgb[1] / 255.0;
-    double b = rgb[2] / 255.0;
-
-    double max = std::max({r, g, b});
-    double min = std::min({r, g, b});
-    double delta = max - min;
-
-    // Compute hue H
-    double h = 0;
-    if (delta == 0) {
-        h = 0;  // Gray; hue is undefined
-    } else {
-        if (max == r) {
-            h = 60.0 * fmod((g - b) / delta, 6.0);
-        } else if (max == g) {
-            h = 60.0 * ((b - r) / delta + 2.0);
-        } else {  // max == b
-            h = 60.0 * ((r - g) / delta + 4.0);
-        }
-        if (h < 0) {
-            h += 360.0;
-        }
-    }
-
-    // Compute saturation S
-    double s = (max == 0) ? 0 : (delta / max);
-
-    // Compute value V
-    double v = max;
-
-    return {h, s, v};
-}
-
-/**
- * @brief Convert an HSV color to the RGB color space.
- *
- * @param hsv Input HSV color [H, S, V], H in 0~360, S and V in 0~1.
- * @return RGB output [R, G, B], range 0~255.
- */
-static RGB convert_hsv_to_rgb(const HSV& hsv) {
-    double h = hsv[0];
-    double s = hsv[1];
-    double v = hsv[2];
-
-    double c = v * s;
-    double x = c * (1 - std::abs(fmod(h / 60.0, 2.0) - 1));
-    double m = v - c;
-
-    double r, g, b;
-
-    if (h < 60) {
-        r = c;
-        g = x;
-        b = 0;
-    } else if (h < 120) {
-        r = x;
-        g = c;
-        b = 0;
-    } else if (h < 180) {
-        r = 0;
-        g = c;
-        b = x;
-    } else if (h < 240) {
-        r = 0;
-        g = x;
-        b = c;
-    } else if (h < 300) {
-        r = x;
-        g = 0;
-        b = c;
-    } else {
-        r = c;
-        g = 0;
-        b = x;
-    }
-
-    return {static_cast<std::size_t>((r + m) * 255 + 0.5), static_cast<std::size_t>((g + m) * 255 + 0.5), static_cast<std::size_t>((b + m) * 255 + 0.5)};
-}
 
 static XYZ convert_rgb_to_xyz(const RGB& color_rgb) {
     ColorDouble rgb{static_cast<double>(color_rgb[0]), static_cast<double>(color_rgb[1]), static_cast<double>(color_rgb[2])};
@@ -1157,94 +1032,6 @@ std::vector<Color> cluster_to_specified_colors(const std::vector<Color>& colors,
     });
 
     return cluster_colors;
-}
-
-// Color PCA struct
-struct ColorPCA {
-    std::size_t color_idx;  // Index of the original color in ColorList
-    double pca_value;  // Projection value onto the first principal component
-
-    ColorPCA(std::size_t c_idx, double pca_val)
-        : color_idx(c_idx),
-          pca_value(pca_val) {}
-
-    // Comparison operator (ascending order)
-    bool operator<(const ColorPCA& other) const { return pca_value < other.pca_value; }
-
-    // Equality check
-    bool operator==(const ColorPCA& other) const { return color_idx == other.color_idx; }
-};
-
-[[maybe_unused]] static std::vector<ColorPCA> sort_colors_by_pca(const std::vector<Color>& colors) {
-    const std::size_t n = colors.size();
-
-    if (n == 0) {
-        return {};
-    }
-
-    if (n == 1) {
-        return {{0, 0.0}};
-    }
-
-    // Step 1: Data preprocessing - normalize to [0, 1]
-    Eigen::MatrixXd data(n, 3);
-
-    for (std::size_t i = 0; i < n; ++i) {
-        data(i, 0) = static_cast<double>(colors[i][0]) / 255.0;  // R
-        data(i, 1) = static_cast<double>(colors[i][1]) / 255.0;  // G
-        data(i, 2) = static_cast<double>(colors[i][2]) / 255.0;  // B
-    }
-
-    // Step 2: Compute mean and center the data
-    Eigen::RowVector3d mean = data.colwise().mean();
-    Eigen::MatrixXd centered = data.rowwise() - mean;
-
-    // Step 3: Compute covariance matrix (3x3)
-    Eigen::Matrix3d cov = (centered.adjoint() * centered) / static_cast<double>(n - 1);
-
-    // Step 4: Eigenvalue decomposition
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
-
-    if (solver.info() != Eigen::Success) {
-#ifdef DEBUG_FLAG
-        std::cerr << "PCA: Eigenvalue decomposition failed" << std::endl;
-#endif  // DEBUG_FLAG
-        // Fallback: return an approximate result sorted by luminance.
-        // Luminance is a key perceptual feature; convert RGB to grayscale (L = 0.299R + 0.587G + 0.114B) and sort in ascending order.
-        std::vector<ColorPCA> result;
-        result.reserve(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            double luminance = 0.299 * colors[i][0] + 0.587 * colors[i][1] + 0.114 * colors[i][2];
-            result.push_back({i, luminance});
-        }
-        std::sort(result.begin(), result.end());
-        return result;
-    }
-
-    // Get eigenvalues and eigenvectors (sorted by eigenvalue in descending order)
-    Eigen::Vector3d eigenvalues = solver.eigenvalues();
-    Eigen::Matrix3d eigenvectors = solver.eigenvectors();
-
-    // Step 5: Find the eigenvector corresponding to the largest eigenvalue (first principal component)
-    Eigen::MatrixXd::Index max_eigenvalue_idx;
-    eigenvalues.maxCoeff(&max_eigenvalue_idx);
-
-    Eigen::Vector3d first_principal_component = eigenvectors.col(max_eigenvalue_idx);
-
-    // Step 6: Project centered data onto the first principal component
-    Eigen::VectorXd projections = centered * first_principal_component;
-
-    // Step 7: Build result and sort
-    std::vector<ColorPCA> result;
-    result.reserve(n);
-
-    for (std::size_t i = 0; i < n; ++i) {
-        result.push_back({i, projections(i)});
-    }
-
-    std::sort(result.begin(), result.end());
-
-    return result;
 }
 
 std::vector<Color> cluster_adaptive(const std::vector<Color>& colors, const ClusterParameters& cluster_parameters) {

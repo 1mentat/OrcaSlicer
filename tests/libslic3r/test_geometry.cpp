@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -1061,6 +1062,16 @@ TEST_CASE("Closed line splitting omits the duplicate endpoint", "[Geometry][Geom
 }
 
 
+TEST_CASE("Line splitting returns no junctions for an empty path", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    const Polyline empty_path;
+
+    CHECK(Algorithm::split_line(empty_path, ExPolygons{clip}, false).empty());
+    CHECK(Algorithm::split_line(empty_path, ExPolygons{clip}, true).empty());
+}
+
 TEST_CASE("Wave expansion grows a closed seed and clips it to its boundary", "[Geometry][GeometryContract][RegionExpansion]")
 {
     const coord_t mm = scale_(1.0);
@@ -1106,6 +1117,70 @@ TEST_CASE("Wave expansion grows a closed seed and clips it to its boundary", "[G
                Catch::Matchers::WithinAbs(double(45 * mm), coord_rounding_tolerance));
     CHECK_THAT(double(detailed_bounds.max.y()),
                Catch::Matchers::WithinAbs(double(50 * mm), coord_rounding_tolerance));
+}
+
+TEST_CASE("Wave seeds retain source IDs across shared boundary vertices", "[Geometry][GeometryContract][RegionExpansion]")
+{
+    const coord_t mm = scale_(1.0);
+    const coord_t crossing_y = scale_(9.05);
+    const float tiny_expansion = static_cast<float>(scale_(0.05));
+    const auto rectangle = [mm](int x0, int y0, int x1, int y1) {
+        return ExPolygon{{{x0 * mm, y0 * mm}, {x1 * mm, y0 * mm},
+                          {x1 * mm, y1 * mm}, {x0 * mm, y1 * mm}}};
+    };
+
+    // The first source and boundary are disjoint decoys. The target square is
+    // contained by the second boundary except for a notch crossing its expanded
+    // top edge at two existing, non-collinear boundary vertices.
+    const ExPolygons sources{
+        rectangle(-80, -80, -70, -70),
+        rectangle(1, 1, 9, 9)
+    };
+    Polygon boundary_contour{
+        Point(-10 * mm, -10 * mm), Point(20 * mm, -10 * mm),
+        Point(20 * mm, 20 * mm), Point(7 * mm, 20 * mm),
+        Point(7 * mm, crossing_y), Point(6 * mm, 8 * mm),
+        Point(4 * mm, 8 * mm), Point(3 * mm, crossing_y),
+        Point(3 * mm, 20 * mm), Point(-10 * mm, 20 * mm)
+    };
+    boundary_contour.make_counter_clockwise();
+    const ExPolygons boundaries{
+        rectangle(-100, -100, -90, -90),
+        ExPolygon{std::move(boundary_contour)}
+    };
+
+    const std::vector<Algorithm::WaveSeed> seeds =
+        Algorithm::wave_seeds(sources, boundaries, tiny_expansion, true);
+    REQUIRE(seeds.size() == 1);
+
+    const Algorithm::WaveSeed &seed = seeds.front();
+    CHECK(seed.src == 1);
+    CHECK(seed.boundary == 1);
+    REQUIRE(seed.path.size() >= 2);
+    const Point left_crossing(3 * mm, crossing_y);
+    const Point right_crossing(7 * mm, crossing_y);
+    const Point &front = seed.path.front();
+    const Point &back = seed.path.back();
+    CAPTURE(front.x(), front.y(), back.x(), back.y(),
+            left_crossing.x(), left_crossing.y(), right_crossing.x(), right_crossing.y());
+    const bool endpoints_match =
+        (front == left_crossing && back == right_crossing) ||
+        (front == right_crossing && back == left_crossing);
+    REQUIRE(endpoints_match);
+
+    // The retained source arc has the square-join perimeter, less the four-mm
+    // notch. Its bounds and perimeter are derived from the specified rectangle.
+    const BoundingBox actual_bounds = get_extents(seed.path);
+    CHECK_THAT(double(actual_bounds.min.x()), Catch::Matchers::WithinAbs(double(scale_(0.95)), 20.));
+    CHECK_THAT(double(actual_bounds.min.y()), Catch::Matchers::WithinAbs(double(scale_(0.95)), 20.));
+    CHECK_THAT(double(actual_bounds.max.x()), Catch::Matchers::WithinAbs(double(scale_(9.05)), 20.));
+    CHECK_THAT(double(actual_bounds.max.y()), Catch::Matchers::WithinAbs(double(scale_(9.05)), 20.));
+    const double delta = double(scale_(0.05));
+    const double expanded_square_perimeter = 4. * (8. * double(mm)) +
+        16. * delta * (std::sqrt(2.) - 1.);
+    const double expected_length = expanded_square_perimeter - 4. * double(mm);
+    CHECK_THAT(Polyline(seed.path).length(),
+               Catch::Matchers::WithinAbs(expected_length, 20.));
 }
 
 TEST_CASE("Line splitting keeps source indices for boundary-overlap runs", "[Geometry][GeometryContract][LineSplit]")

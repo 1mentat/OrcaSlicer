@@ -514,9 +514,10 @@ independent top/bottom projections. Their mutation manifests are
 `trianglemesh_slicer_contracts.json`.
 
 `[LineSplit]` checks clipping through holes, closed endpoints, boundary overlap
-and source-index provenance. `[RegionExpansion]` checks bounded wave growth and
-selection of the source-bearing merged component against analytic bounds and
-areas. Their probes are in `algorithm_region_expansion.json`.
+and source-index provenance, including empty paths. `[RegionExpansion]` checks
+bounded wave growth, source and boundary IDs at shared vertices, and selection
+of the source-bearing merged component against analytic bounds and areas.
+Their probes are in `algorithm_region_expansion.json`.
 `[TriangleMeshCutMesh]` requires watertight halves with analytic volumes when a
 cut follows existing edges or passes through vertices; its probes are in
 `trianglemesh_slicer_contracts.json`. These cases also run in the focused
