@@ -4,9 +4,13 @@ from pathlib import Path
 from argparse import Namespace
 import hashlib
 import json
+import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -2463,7 +2467,12 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                     observed.append(name)
                     self.assertEqual(marker.read_text(encoding="utf-8"),
                                      "preserve through resets\n")
-                    return self._fake_run_tree(worktree, root_output, name, *args, **kwargs)
+                    result = self._fake_run_tree(worktree, root_output, name, *args, **kwargs)
+                    result["commands"] = {
+                        "configure": {"returncode": 0, "timed_out": False},
+                        "build": {"returncode": 0, "timed_out": False},
+                    }
+                    return result
 
                 with mock.patch.object(slicer_pr_validation, "_run_tree",
                                        side_effect=verify_build_survives):
@@ -2472,6 +2481,12 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                     (root / "reuse-evidence/report.json").read_text(encoding="utf-8"))
                 self.assertEqual(observed, ["baseline", "reference", "pr-1", "pr-2"])
                 self.assertTrue(all(len(item["reset"]) == 1 for item in report["heads"]))
+                for transition in [report["reference"], *report["heads"]]:
+                    mtime = transition["build_input_mtime_preservation"]
+                    self.assertEqual(mtime["scope"],
+                                     "exact_applied_paths_regular_tracked_files_only")
+                    self.assertIn(mtime["snapshot"]["status"], {"captured", "no_eligible_files"})
+                    self.assertIn("status", mtime["restore"])
                 self.assertTrue(marker.is_file())
                 self.assertEqual(report["worktree"]["final_state"]["untracked_count"], 0)
                 self.assertNotIn("?? build/", report["worktree"]["final_state"]["status"])
@@ -2729,6 +2744,406 @@ class OverlayResolutionTests(unittest.TestCase):
             self.assertEqual(self._git(repo, "diff", "--name-only", "--diff-filter=U").stdout.decode().strip(),
                              "tests/overlay.txt")
             self.assertEqual((repo / "tests/overlay.txt").read_bytes(), b"<<<<<<< ours\nvalue=pr\n=======\nvalue=harness\n>>>>>>> theirs\n")
+
+
+class OverlayMtimePreservationTests(unittest.TestCase):
+    def _git(self, repo, *args, check=True):
+        result = subprocess.run(["git", *args], cwd=repo, shell=False,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, check=False)
+        if check and result.returncode != 0:
+            self.fail(f"git {' '.join(args)} failed: {result.stderr}")
+        return result
+
+    def _fixture(self, root):
+        repo = root / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "mtime-test@example.invalid")
+        self._git(repo, "config", "user.name", "mtime test")
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (repo / "input.txt").write_text("stable\n", encoding="utf-8")
+        (repo / "nested").mkdir()
+        (repo / "nested/leaf.txt").write_text("nested\n", encoding="utf-8")
+        (repo / "copy.py").write_text(
+            "import pathlib, sys\n"
+            "source = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')\n"
+            "generated = pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')\n"
+            "if source.strip() == 'fail':\n"
+            "    raise SystemExit(7)\n"
+            "pathlib.Path(sys.argv[3]).write_text(source + generated, encoding='utf-8')\n",
+            encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "seed")
+        head = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        worktree = root / "reuse"
+        self._git(repo, "worktree", "add", "--detach", str(worktree), head)
+        repo = repo.resolve()
+        worktree = worktree.resolve()
+        build = worktree / "build"
+        build.mkdir()
+        (build / "generated_config.hpp").write_text("config-v1\n", encoding="utf-8")
+        self._write_ninja(build)
+        lock = slicer_pr_validation._acquire_pr_validation_reuse_lock(repo, worktree, head)
+        return repo, worktree, build, lock
+
+    def _git_reset_overlay_fixture(self, root):
+        repo = root / "git-cycle-repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "mtime-test@example.invalid")
+        self._git(repo, "config", "user.name", "mtime test")
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (repo / "input.txt").write_text("stable\n", encoding="utf-8")
+        (repo / "copy.py").write_text(
+            "import pathlib, sys\n"
+            "source = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')\n"
+            "generated = pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')\n"
+            "pathlib.Path(sys.argv[3]).write_text(source + generated, encoding='utf-8')\n",
+            encoding="utf-8")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-qm", "base")
+        base = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        primary_branch = self._git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
+        (repo / "harness.txt").write_text("harness-only\n", encoding="utf-8")
+        self._git(repo, "add", "harness.txt")
+        self._git(repo, "commit", "-qm", "harness head")
+        harness = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        self._git(repo, "switch", "-qc", "mtime-pr", base)
+        (repo / "input.txt").write_text("pr-overlay\n", encoding="utf-8")
+        self._git(repo, "add", "input.txt")
+        self._git(repo, "commit", "-qm", "PR overlay")
+        head = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        patch_result = self._git(repo, "diff", "--binary", base, head, "--", "input.txt")
+        patch_path = root / "actual-overlay.patch"
+        patch_path.write_bytes(patch_result.stdout.encode("utf-8"))
+        self._git(repo, "switch", "-q", primary_branch)
+        worktree = root / "git-cycle-reuse"
+        self._git(repo, "worktree", "add", "--detach", str(worktree), head)
+        repo = repo.resolve()
+        worktree = worktree.resolve()
+        build = worktree / "build"
+        build.mkdir()
+        (build / "generated_config.hpp").write_text("config-v1\n", encoding="utf-8")
+        self._write_ninja(build)
+        lock = slicer_pr_validation._acquire_pr_validation_reuse_lock(repo, worktree, head)
+        return repo.resolve(), worktree.resolve(), build, lock, base, harness, head, patch_path
+
+    def _write_ninja(self, build):
+        script = shlex.quote(sys.executable)
+        (build / "build.ninja").write_text(
+            "rule tiny_copy\n"
+            f"  command = {script} ../copy.py ../input.txt generated_config.hpp output.txt\n"
+            "  description = Write tiny output\n\n"
+            "build output.txt: tiny_copy ../input.txt generated_config.hpp ../copy.py\n"
+            "default output.txt\n", encoding="utf-8")
+
+    def _ninja(self, build, *args, check=True):
+        result = subprocess.run([shutil.which("ninja") or "ninja", "-C", str(build), *args],
+                                shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, check=False)
+        if check and result.returncode != 0:
+            self.fail(f"ninja {' '.join(args)} failed: {result.stdout}")
+        return result
+
+    def _successful_run(self):
+        command = {"returncode": 0, "timed_out": False}
+        return {"commands": {"configure": dict(command), "build": dict(command)}}
+
+    def _mtime(self, path, future_of=()):
+        current = path.stat()
+        later_than = [item.stat().st_mtime_ns for item in future_of if item.exists()]
+        target = max([time.time_ns(), current.st_mtime_ns + 5_000_000_000,
+                      *(stamp + 5_000_000_000 for stamp in later_than)])
+        os.utime(path, ns=(current.st_atime_ns, target))
+        return target
+
+    def _snapshot(self, worktree, lock, paths=("input.txt",), previous_run=None):
+        if previous_run is None:
+            previous_run = self._successful_run()
+        return slicer_pr_validation._snapshot_overlay_mtimes(
+            worktree, list(paths), "build", previous_run, lock)
+
+    def test_restored_timestamp_preserves_real_ninja_dirty_relation(self):
+        if not shutil.which("ninja"):
+            self.skipTest("Ninja is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            _, worktree, build, lock = self._fixture(Path(temp))
+            output = build / "output.txt"
+            self._ninja(build)
+            self.assertEqual(output.read_text(encoding="utf-8"), "stable\nconfig-v1\n")
+
+            snapshot, captured = self._snapshot(worktree, lock)
+            self.assertEqual(captured["status"], "captured")
+            self.assertEqual(captured["snapshot_file_count"], 1)
+            original_mtime = (worktree / "input.txt").stat().st_mtime_ns
+            fresh_mtime = self._mtime(worktree / "input.txt", future_of=(output,))
+            self.assertGreater(fresh_mtime, output.stat().st_mtime_ns)
+            before_restore = self._ninja(build, "-n")
+            self.assertNotIn("no work to do", before_restore.stdout.lower())
+            status_before_restore = self._git(worktree, "status", "--porcelain").stdout
+
+            restored = slicer_pr_validation._restore_overlay_mtimes(worktree, snapshot, lock)
+            self.assertEqual(restored["restored_file_count"], 1)
+            self.assertEqual((worktree / "input.txt").stat().st_mtime_ns, original_mtime)
+            self.assertEqual(self._git(worktree, "status", "--porcelain").stdout,
+                             status_before_restore)
+            after_restore = self._ninja(build, "-n")
+            self.assertIn("no work to do", after_restore.stdout.lower())
+            self._ninja(build)
+            self.assertEqual(output.read_text(encoding="utf-8"), "stable\nconfig-v1\n")
+
+            # A changed generated configuration header remains a legitimate Ninja input.
+            config = build / "generated_config.hpp"
+            config.write_text("config-v2\n", encoding="utf-8")
+            self._mtime(config, future_of=(output,))
+            changed_header = self._ninja(build, "-n")
+            self.assertNotIn("no work to do", changed_header.stdout.lower())
+            self._ninja(build)
+            self.assertEqual(output.read_text(encoding="utf-8"), "stable\nconfig-v2\n")
+
+    def test_git_reset_and_overlay_inode_replacement_preserves_ninja_dirty_relation(self):
+        if not shutil.which("ninja"):
+            self.skipTest("Ninja is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (repo, worktree, build, lock, base, harness, head,
+             patch_path) = self._git_reset_overlay_fixture(root)
+            output = build / "output.txt"
+            self._ninja(build)
+            self.assertEqual(output.read_text(encoding="utf-8"), "pr-overlay\nconfig-v1\n")
+            snapshot, captured = self._snapshot(worktree, lock, paths=("input.txt",))
+            self.assertEqual(captured["status"], "captured")
+            self.assertEqual(captured["snapshot_file_count"], 1)
+            source = worktree / "input.txt"
+            original_mtime = source.stat().st_mtime_ns
+            old_fd = os.open(source, os.O_RDONLY)
+            try:
+                old_identity = os.fstat(old_fd).st_dev, os.fstat(old_fd).st_ino
+                reset = slicer_pr_validation._reset_worktree(
+                    worktree, harness, preserve_build_dir="build", allowed_staged_paths=())
+                self.assertTrue(all(row["returncode"] == 0 for row in reset), reset)
+                patch_bytes = patch_path.read_bytes()
+                applied = slicer_pr_validation._apply_overlay_patch(
+                    worktree, patch_path, patch_sha256=hashlib.sha256(patch_bytes).hexdigest(),
+                    base_sha=base, head_sha=harness, resolution_manifest=None)
+                self.assertTrue(applied["applied"], applied)
+                self.assertEqual(source.read_text(encoding="utf-8"), "pr-overlay\n")
+                current = source.stat()
+                self.assertNotEqual((current.st_dev, current.st_ino), old_identity)
+                self.assertEqual(self._git(worktree, "status", "--porcelain").stdout.strip(),
+                                 "M  input.txt")
+
+                self._mtime(source, future_of=(output,))
+                before_restore = self._ninja(build, "-n")
+                self.assertNotIn("no work to do", before_restore.stdout.lower())
+                status_before_restore = self._git(worktree, "status", "--porcelain").stdout
+                restored = slicer_pr_validation._restore_overlay_mtimes(
+                    worktree, snapshot, lock)
+                self.assertEqual(restored["restored_file_count"], 1, restored)
+                self.assertEqual(source.stat().st_mtime_ns, original_mtime)
+                self.assertEqual(self._git(worktree, "status", "--porcelain").stdout,
+                                 status_before_restore)
+                after_restore = self._ninja(build, "-n")
+                self.assertIn("no work to do", after_restore.stdout.lower())
+                self._ninja(build)
+                self.assertEqual(output.read_text(encoding="utf-8"),
+                                 "pr-overlay\nconfig-v1\n")
+            finally:
+                os.close(old_fd)
+
+    def test_changed_content_and_mode_are_never_restored(self):
+        if not shutil.which("ninja"):
+            self.skipTest("Ninja is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            _, worktree, build, lock = self._fixture(Path(temp))
+            self._ninja(build)
+            snapshot, captured = self._snapshot(worktree, lock)
+            self.assertEqual(captured["status"], "captured")
+            source = worktree / "input.txt"
+            source.write_text("change\n", encoding="utf-8")
+            changed_mtime = self._mtime(source, future_of=(build / "output.txt",))
+            result = slicer_pr_validation._restore_overlay_mtimes(worktree, snapshot, lock)
+            self.assertEqual(result["restored_file_count"], 0)
+            self.assertEqual(result["skipped_reasons"], {"content_changed": 1})
+            self.assertEqual(source.stat().st_mtime_ns, changed_mtime)
+            self._ninja(build)
+            self.assertTrue((build / "output.txt").read_text().startswith("change\n"))
+
+            snapshot, captured = self._snapshot(worktree, lock)
+            self.assertEqual(captured["status"], "captured")
+            before = source.stat()
+            source.chmod(0o600)
+            changed_mtime = self._mtime(source, future_of=(build / "output.txt",))
+            result = slicer_pr_validation._restore_overlay_mtimes(worktree, snapshot, lock)
+            self.assertEqual(result["restored_file_count"], 0)
+            self.assertEqual(result["skipped_reasons"], {"mode_changed": 1})
+            self.assertEqual(source.stat().st_mtime_ns, changed_mtime)
+            self.assertEqual(source.stat().st_mode & 0o777, 0o600)
+            source.chmod(before.st_mode & 0o777)
+
+    def test_parent_symlink_and_escaping_paths_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, worktree, _build, lock = self._fixture(root)
+            snapshot, captured = self._snapshot(worktree, lock, paths=("nested/leaf.txt",))
+            self.assertEqual(captured["snapshot_file_count"], 1)
+            external = root / "external"
+            external.mkdir()
+            target = external / "leaf.txt"
+            target.write_text("outside\n", encoding="utf-8")
+            before = target.stat()
+            (worktree / "nested").rename(worktree / "nested-old")
+            (worktree / "nested").symlink_to(external, target_is_directory=True)
+            result = slicer_pr_validation._restore_overlay_mtimes(worktree, snapshot, lock)
+            self.assertEqual(result["restored_file_count"], 0)
+            self.assertTrue(result["skipped_reasons"])
+            after = target.stat()
+            self.assertEqual((after.st_dev, after.st_ino, after.st_mtime_ns),
+                             (before.st_dev, before.st_ino, before.st_mtime_ns))
+
+            unsafe_snapshot, unsafe_stats = self._snapshot(
+                worktree, lock, paths=("../external/leaf.txt",))
+            self.assertEqual(unsafe_snapshot["entries"], {})
+            self.assertEqual(unsafe_stats["skipped_reasons"], {"unsafe_path": 1})
+
+    def test_external_hardlink_disables_mtime_restoration(self):
+        if not shutil.which("ninja"):
+            self.skipTest("Ninja is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, worktree, build, lock = self._fixture(root)
+            self._ninja(build)
+            snapshot, captured = self._snapshot(worktree, lock)
+            self.assertEqual(captured["snapshot_file_count"], 1)
+            source = worktree / "input.txt"
+            original_mtime = source.stat().st_mtime_ns
+            external_link = root / "outside-hardlink.txt"
+            os.link(source, external_link)
+            future_mtime = self._mtime(source, future_of=(build / "output.txt",))
+            result = slicer_pr_validation._restore_overlay_mtimes(worktree, snapshot, lock)
+            self.assertEqual(result["restored_file_count"], 0)
+            self.assertEqual(result["skipped_reasons"], {"not_single_link_regular_file": 1})
+            self.assertEqual(source.stat().st_mtime_ns, future_mtime)
+            self.assertEqual(external_link.stat().st_mtime_ns, future_mtime)
+            self.assertNotEqual(future_mtime, original_mtime)
+
+    def test_untracked_deleted_and_build_paths_are_excluded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            _, worktree, _build, lock = self._fixture(Path(temp))
+            (worktree / "new.txt").write_text("new\n", encoding="utf-8")
+            (worktree / "nested/leaf.txt").unlink()
+            snapshot, captured = self._snapshot(
+                worktree, lock,
+                paths=("input.txt", "new.txt", "nested/leaf.txt", "build/generated.hpp"))
+            self.assertEqual(set(snapshot["entries"]), {"input.txt"})
+            self.assertEqual(captured["skipped_reasons"].get("build_path"), 1)
+            self.assertEqual(captured["skipped_reasons"].get("not_single_stage_zero_tracked_file"), 1)
+            self.assertEqual(captured["skipped_reasons"].get("FileNotFoundError"), 1)
+
+    def test_failed_build_keeps_old_stale_output_and_disables_restoration(self):
+        if not shutil.which("ninja"):
+            self.skipTest("Ninja is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            _, worktree, build, lock = self._fixture(Path(temp))
+            output = build / "output.txt"
+            self._ninja(build)
+            stale_output_mtime = output.stat().st_mtime_ns
+
+            source = worktree / "input.txt"
+            source.write_text("fail\n", encoding="utf-8")
+            self._mtime(source, future_of=(output,))
+            failed = self._ninja(build, check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(output.read_text(encoding="utf-8"), "stable\nconfig-v1\n")
+            self.assertEqual(output.stat().st_mtime_ns, stale_output_mtime)
+            self.assertLess(output.stat().st_mtime_ns, source.stat().st_mtime_ns)
+
+            failed_run = {"commands": {
+                "configure": {"returncode": 0, "timed_out": False},
+                "build": {"returncode": failed.returncode, "timed_out": False},
+            }}
+            snapshot, captured = self._snapshot(worktree, lock, previous_run=failed_run)
+            self.assertEqual(snapshot["entries"], {})
+            self.assertEqual(captured["reason"], "previous_configure_or_build_not_successful")
+
+            source.write_text("stable\n", encoding="utf-8")
+            fresh_mtime = self._mtime(source, future_of=(output,))
+            self.assertGreater(fresh_mtime, output.stat().st_mtime_ns)
+            dirty = self._ninja(build, "-n")
+            self.assertNotIn("no work to do", dirty.stdout.lower())
+            self._ninja(build)
+            self.assertGreater(output.stat().st_mtime_ns, stale_output_mtime)
+            self.assertEqual(output.read_text(encoding="utf-8"), "stable\nconfig-v1\n")
+
+    def test_current_reuse_lock_identity_is_required(self):
+        with tempfile.TemporaryDirectory() as temp:
+            _, worktree, _build, lock = self._fixture(Path(temp))
+            lock_ok, reason = slicer_pr_validation._validated_reuse_lock(worktree, lock)
+            self.assertTrue(lock_ok, reason)
+            snapshot, stats = self._snapshot(worktree, None)
+            self.assertEqual(snapshot["entries"], {})
+            self.assertEqual(stats["reason"], "reuse_lock_object_unavailable")
+            valid_snapshot, valid_stats = self._snapshot(worktree, lock)
+            self.assertEqual(valid_stats["status"], "captured")
+            source = worktree / "input.txt"
+            fresh_mtime = self._mtime(source)
+
+            old_fd = os.open(lock.path, os.O_RDONLY)
+            try:
+                lock.path.unlink()
+                lock.path.write_text(json.dumps({"pid": os.getpid(), "path": str(worktree)}),
+                                     encoding="utf-8")
+                replaced, reason = slicer_pr_validation._validated_reuse_lock(worktree, lock)
+                self.assertFalse(replaced)
+                self.assertEqual(reason, "reuse_lock_identity_changed")
+                result = slicer_pr_validation._restore_overlay_mtimes(
+                    worktree, valid_snapshot, lock)
+                self.assertEqual(result["restored_file_count"], 0)
+                self.assertEqual(result["reason"], "reuse_lock_identity_changed")
+                self.assertEqual(source.stat().st_mtime_ns, fresh_mtime)
+            finally:
+                os.close(old_fd)
+
+    def test_non_object_lock_json_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            _, worktree, _build, lock = self._fixture(Path(temp))
+            lock.path.write_text("[]\n", encoding="utf-8")
+            lock_ok, reason = slicer_pr_validation._validated_reuse_lock(worktree, lock)
+            self.assertFalse(lock_ok)
+            self.assertEqual(reason, "reuse_lock_owner_mismatch")
+
+    def test_fifo_paths_and_lock_are_rejected_without_blocking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            _, worktree, _build, lock = self._fixture(Path(temp))
+            os.mkfifo(worktree / "fifo")
+            lock.path.unlink()
+            os.mkfifo(lock.path)
+            script_dir = Path(slicer_pr_validation.__file__).resolve().parent
+            code = (
+                "import os, sys\n"
+                "from pathlib import Path\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "import slicer_pr_validation as s\n"
+                "worktree = Path(sys.argv[2])\n"
+                "try:\n"
+                "    s._open_worktree_file(worktree, 'fifo')\n"
+                "except ValueError as exc:\n"
+                "    assert str(exc) == 'not_single_link_regular_file', str(exc)\n"
+                "else:\n"
+                "    raise AssertionError('FIFO unexpectedly opened as a regular file')\n"
+                "git_dir = Path(s._git(worktree, 'rev-parse', '--absolute-git-dir').stdout.strip())\n"
+                "lock_path = git_dir / s._PR_REUSE_LOCK\n"
+                "identity = lock_path.lstat()\n"
+                "lock = s._PrValidationReuseLock(lock_path, (identity.st_dev, identity.st_ino))\n"
+                "ok, reason = s._validated_reuse_lock(worktree, lock)\n"
+                "assert not ok and reason == 'reuse_lock_identity_changed', (ok, reason)\n"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(script_dir), str(worktree)],
+                shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=5, check=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

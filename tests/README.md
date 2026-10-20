@@ -1094,6 +1094,12 @@ that would overwrite the build. It preserves build outputs through every tree
 change, including changes to ignore rules. Baseline, reference, and head tests
 run again; previous JUnit results do not satisfy the new run.
 
+After a successful configure and build, locked reuse also preserves timestamps
+for tracked overlay files whose bytes, size, and permissions still match after
+reapplication. Changed files retain their new timestamps. The report records
+eligibility, skipped paths, and restored file/byte counts under
+`build_input_mtime_preservation`. Configure, build, and tests still execute.
+
 Use a new or empty output directory for every run. Before building, the runner
 records the snapshot SHA-256 and verifies every selected head and base resolves
 to its exact commit. Configure, build, and test output goes directly to log files;

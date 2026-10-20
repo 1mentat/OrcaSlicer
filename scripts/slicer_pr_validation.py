@@ -42,6 +42,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1432,6 +1433,458 @@ def _build_relative_path(worktree: Path, build_dir: str) -> str:
     return relative
 
 
+@dataclass(frozen=True)
+class _OverlayFileMtime:
+    path: str
+    sha256: str
+    size: int
+    mode: int
+    mtime_ns: int
+
+
+def _successful_configure_and_build(run: dict[str, Any] | None) -> bool:
+    """Only reuse mtimes after both phases of the immediately prior tree passed."""
+    if not isinstance(run, dict):
+        return False
+    commands = run.get("commands")
+    if not isinstance(commands, dict):
+        return False
+    for phase in ("configure", "build"):
+        result = commands.get(phase)
+        if (not isinstance(result, dict) or result.get("returncode") != 0
+                or result.get("timed_out") is not False):
+            return False
+    return True
+
+
+def _open_validated_reuse_lock(
+        worktree: Path, lock: _PrValidationReuseLock | None) -> tuple[int, int, str | None]:
+    """Open and prove the acquired lock; returned descriptors stay anchored to its git dir."""
+    if not isinstance(lock, _PrValidationReuseLock):
+        return -1, -1, "reuse_lock_object_unavailable"
+    if (os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
+            or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NONBLOCK")
+            or os.open not in os.supports_dir_fd):
+        return -1, -1, "safe_lock_fd_verification_unavailable"
+    if lock.path.name != _PR_REUSE_LOCK:
+        return -1, -1, "reuse_lock_name_mismatch"
+    git_dir_result = _git(worktree, "rev-parse", "--absolute-git-dir")
+    if git_dir_result.returncode != 0:
+        return -1, -1, "git_dir_unavailable"
+    git_dir_fd = lock_fd = -1
+    try:
+        git_dir = Path(git_dir_result.stdout.strip()).resolve(strict=True)
+        if lock.path.parent.resolve(strict=True) != git_dir:
+            return -1, -1, "reuse_lock_not_in_worktree_git_dir"
+        flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        dir_fd = os.open(git_dir, dir_flags)
+        git_dir_fd = dir_fd
+        lock_fd = os.open(lock.path.name, flags, dir_fd=git_dir_fd)
+        current = os.fstat(lock_fd)
+        named = os.stat(lock.path.name, dir_fd=git_dir_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+                or (current.st_dev, current.st_ino) != lock.identity
+                or (named.st_dev, named.st_ino) != lock.identity):
+            raise ValueError("reuse_lock_identity_changed")
+        payload = bytearray()
+        while len(payload) <= 4096:
+            part = os.read(lock_fd, 4097 - len(payload))
+            if not part:
+                break
+            payload.extend(part)
+        if len(payload) > 4096:
+            raise ValueError("reuse_lock_payload_too_large")
+        owner = json.loads(payload.decode("utf-8"))
+        if (not isinstance(owner, dict) or owner.get("pid") != os.getpid()
+                or Path(owner.get("path", "")).resolve() != worktree.resolve()):
+            raise ValueError("reuse_lock_owner_mismatch")
+        after = os.fstat(lock_fd)
+        if (after.st_dev, after.st_ino) != lock.identity:
+            raise ValueError("reuse_lock_identity_changed")
+        return git_dir_fd, lock_fd, None
+    except ValueError as exc:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        if git_dir_fd >= 0:
+            os.close(git_dir_fd)
+        return -1, -1, str(exc)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        if git_dir_fd >= 0:
+            os.close(git_dir_fd)
+        return -1, -1, "reuse_lock_unavailable_or_invalid"
+
+
+def _reuse_lock_path_matches(lock: _PrValidationReuseLock, git_dir_fd: int,
+                             lock_fd: int) -> bool:
+    try:
+        opened = os.fstat(lock_fd)
+        named = os.stat(lock.path.name, dir_fd=git_dir_fd, follow_symlinks=False)
+        return (stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
+                and (opened.st_dev, opened.st_ino) == lock.identity
+                and (named.st_dev, named.st_ino) == lock.identity)
+    except OSError:
+        return False
+
+
+def _validated_reuse_lock(worktree: Path, lock: _PrValidationReuseLock | None) -> tuple[bool, str | None]:
+    """Prove the acquired reuse-lock file is still ours and in this worktree's git dir."""
+    git_dir_fd, lock_fd, reason = _open_validated_reuse_lock(worktree, lock)
+    if reason is not None:
+        return False, reason
+    os.close(lock_fd)
+    os.close(git_dir_fd)
+    return True, None
+
+
+def _safe_relative_parts(value: str) -> tuple[str, ...] | None:
+    if not value or value.startswith("/") or "\\" in value or "\0" in value:
+        return None
+    parts = tuple(value.split("/"))
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    return parts
+
+
+def _open_worktree_file(worktree: Path, relative_path: str) -> tuple[int, int, str]:
+    """Open a singly-linked regular file and its parent using no-follow descriptors."""
+    parts = _safe_relative_parts(relative_path)
+    if parts is None:
+        raise ValueError("unsafe_relative_path")
+    if (os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
+            or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NONBLOCK")
+            or os.open not in os.supports_dir_fd):
+        raise NotImplementedError("safe_directory_fd_open_unavailable")
+    root = worktree.resolve(strict=True)
+    root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    current_fd = os.open(root, root_flags)
+    result_fd = -1
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, root_flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        file_flags = (os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                      | getattr(os, "O_NONBLOCK", 0))
+        result_fd = os.open(parts[-1], file_flags, dir_fd=current_fd)
+        opened = os.fstat(result_fd)
+        named = os.stat(parts[-1], dir_fd=current_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+            raise ValueError("not_single_link_regular_file")
+        parent_fd = current_fd
+        current_fd = -1
+        opened_fd, result_fd = result_fd, -1
+        return opened_fd, parent_fd, parts[-1]
+    finally:
+        if result_fd >= 0:
+            os.close(result_fd)
+        if current_fd >= 0:
+            os.close(current_fd)
+
+
+def _worktree_entry_matches_fd(worktree: Path, relative_path: str, fd: int,
+                               parent_fd: int, basename: str) -> bool:
+    """Check the open file still names the same safe worktree entry and parent."""
+    current_fd = current_parent_fd = -1
+    try:
+        opened = os.fstat(fd)
+        named = os.stat(basename, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+            return False
+        current_fd, current_parent_fd, _ = _open_worktree_file(worktree, relative_path)
+        current = os.fstat(current_fd)
+        anchored_parent = os.fstat(parent_fd)
+        current_parent = os.fstat(current_parent_fd)
+        return ((opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
+                and (anchored_parent.st_dev, anchored_parent.st_ino)
+                    == (current_parent.st_dev, current_parent.st_ino))
+    except (OSError, ValueError, NotImplementedError):
+        return False
+    finally:
+        if current_fd >= 0:
+            os.close(current_fd)
+        if current_parent_fd >= 0:
+            os.close(current_parent_fd)
+
+
+def _hash_fd(fd: int) -> str:
+    os.lseek(fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        block = os.read(fd, 1024 * 1024)
+        if not block:
+            break
+        digest.update(block)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return digest.hexdigest()
+
+
+def _stable_file_stat(before: os.stat_result, after: os.stat_result) -> bool:
+    return (before.st_dev == after.st_dev and before.st_ino == after.st_ino
+            and before.st_size == after.st_size
+            and before.st_mtime_ns == after.st_mtime_ns
+            and before.st_ctime_ns == after.st_ctime_ns
+            and before.st_nlink == after.st_nlink == 1
+            and stat.S_IMODE(before.st_mode) == stat.S_IMODE(after.st_mode)
+            and stat.S_ISREG(after.st_mode))
+
+
+def _path_overlaps_build(path: str, build_relative: str) -> bool:
+    return (path == build_relative or path.startswith(build_relative + "/")
+            or build_relative.startswith(path + "/"))
+
+
+def _tracked_regular_overlay_paths(worktree: Path, paths: Sequence[str],
+                                   build_relative: str) -> tuple[list[tuple[str, int]], dict[str, int], float]:
+    """Return stage-zero regular-file overlay paths; never trust Git pathspec magic."""
+    started = time.monotonic()
+    candidates: list[str] = []
+    skipped: dict[str, int] = {}
+    for path in paths:
+        if _safe_relative_parts(path) is None:
+            skipped["unsafe_path"] = skipped.get("unsafe_path", 0) + 1
+        elif _path_overlaps_build(path, build_relative):
+            skipped["build_path"] = skipped.get("build_path", 0) + 1
+        else:
+            candidates.append(path)
+    result_paths: list[tuple[str, int]] = []
+    for start in range(0, len(candidates), 96):
+        batch = candidates[start:start + 96]
+        command = ["git", "ls-files", "--stage", "-z", "--",
+                   *(f":(top,literal){path}" for path in batch)]
+        try:
+            result = subprocess.run(command, cwd=str(worktree), shell=False,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=120, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            skipped["git_inventory_error"] = skipped.get("git_inventory_error", 0) + len(batch)
+            continue
+        if result.returncode != 0:
+            skipped["git_inventory_error"] = skipped.get("git_inventory_error", 0) + len(batch)
+            continue
+        seen: dict[str, list[tuple[int, int]]] = {}
+        for record in result.stdout.split(b"\0"):
+            if not record:
+                continue
+            metadata, separator, raw_path = record.partition(b"\t")
+            fields = metadata.split()
+            if not separator or len(fields) != 3:
+                skipped["git_inventory_parse_error"] = skipped.get("git_inventory_parse_error", 0) + 1
+                continue
+            try:
+                path = os.fsdecode(raw_path)
+                mode = int(fields[0], 8)
+                stage = int(fields[2])
+            except (UnicodeDecodeError, ValueError):
+                skipped["git_inventory_parse_error"] = skipped.get("git_inventory_parse_error", 0) + 1
+                continue
+            seen.setdefault(path, []).append((mode, stage))
+        for path in batch:
+            stages = seen.get(path, [])
+            if len(stages) != 1 or stages[0][1] != 0:
+                skipped["not_single_stage_zero_tracked_file"] = skipped.get(
+                    "not_single_stage_zero_tracked_file", 0) + 1
+            elif stages[0][0] not in {0o100644, 0o100755}:
+                skipped["git_mode_not_regular_file"] = skipped.get(
+                    "git_mode_not_regular_file", 0) + 1
+            else:
+                result_paths.append((path, stages[0][0]))
+    return result_paths, skipped, time.monotonic() - started
+
+
+def _snapshot_overlay_mtimes(worktree: Path, applied_paths: Sequence[str], build_dir: str,
+                             previous_run: dict[str, Any] | None,
+                             reuse_lock: _PrValidationReuseLock | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Capture exact prior build inputs before a reset; only for a proven locked reuse run."""
+    started = time.monotonic()
+    snapshot: dict[str, Any] = {"entries": {}, "root_identity": None}
+    stats: dict[str, Any] = {
+        "status": "disabled", "reason": None, "applied_path_count": len(applied_paths),
+        "tracked_candidate_count": 0, "snapshot_file_count": 0, "hashed_bytes": 0,
+        "git_inventory_seconds": 0.0, "elapsed_seconds": 0.0, "skipped_reasons": {},
+    }
+    if not _successful_configure_and_build(previous_run):
+        stats["reason"] = "previous_configure_or_build_not_successful"
+        stats["elapsed_seconds"] = time.monotonic() - started
+        return snapshot, stats
+    lock_ok, lock_reason = _validated_reuse_lock(worktree, reuse_lock)
+    if not lock_ok:
+        stats["reason"] = lock_reason
+        stats["elapsed_seconds"] = time.monotonic() - started
+        return snapshot, stats
+    try:
+        build_relative = _build_relative_path(worktree, build_dir)
+    except (OSError, ValidationError) as exc:
+        stats["reason"] = f"build_dir_unavailable:{type(exc).__name__}"
+        stats["elapsed_seconds"] = time.monotonic() - started
+        return snapshot, stats
+    tracked, skipped, inventory_seconds = _tracked_regular_overlay_paths(
+        worktree, applied_paths, build_relative)
+    stats["git_inventory_seconds"] = inventory_seconds
+    stats["tracked_candidate_count"] = len(tracked)
+    try:
+        root_stat = worktree.resolve(strict=True).stat()
+        snapshot["root_identity"] = (root_stat.st_dev, root_stat.st_ino)
+    except OSError:
+        stats["reason"] = "worktree_unavailable"
+        stats["elapsed_seconds"] = time.monotonic() - started
+        return snapshot, stats
+    bytes_hashed = 0
+    for path, _git_mode in tracked:
+        fd = -1
+        parent_fd = -1
+        try:
+            fd, parent_fd, basename = _open_worktree_file(worktree, path)
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                skipped["not_single_link_regular_file"] = skipped.get(
+                    "not_single_link_regular_file", 0) + 1
+                continue
+            if not _worktree_entry_matches_fd(worktree, path, fd, parent_fd, basename):
+                skipped["file_path_changed_during_snapshot"] = skipped.get(
+                    "file_path_changed_during_snapshot", 0) + 1
+                continue
+            digest = _hash_fd(fd)
+            after = os.fstat(fd)
+            bytes_hashed += after.st_size
+            if (not _stable_file_stat(before, after)
+                    or not _worktree_entry_matches_fd(worktree, path, fd, parent_fd, basename)):
+                skipped["file_changed_during_snapshot"] = skipped.get(
+                    "file_changed_during_snapshot", 0) + 1
+                continue
+            snapshot["entries"][path] = _OverlayFileMtime(
+                path, digest, after.st_size, stat.S_IMODE(after.st_mode), after.st_mtime_ns)
+        except (OSError, ValueError, NotImplementedError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+            skipped[reason] = skipped.get(reason, 0) + 1
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if parent_fd >= 0:
+                os.close(parent_fd)
+    stats.update({
+        "status": "captured" if snapshot["entries"] else "no_eligible_files",
+        "snapshot_file_count": len(snapshot["entries"]),
+        "hashed_bytes": bytes_hashed,
+        "skipped_reasons": skipped,
+        "elapsed_seconds": time.monotonic() - started,
+    })
+    return snapshot, stats
+
+
+def _restore_overlay_mtimes(worktree: Path, snapshot: dict[str, Any],
+                            reuse_lock: _PrValidationReuseLock | None) -> dict[str, Any]:
+    """Restore mtime through verified file descriptors only; never alter content or mode."""
+    started = time.monotonic()
+    entries = snapshot.get("entries", {})
+    stats: dict[str, Any] = {
+        "status": "skipped", "reason": None, "checked_file_count": 0,
+        "restored_file_count": 0, "checked_bytes": 0, "restored_bytes": 0,
+        "elapsed_seconds": 0.0, "skipped_reasons": {},
+    }
+    if not entries:
+        stats.update({"reason": "snapshot_has_no_eligible_files",
+                      "elapsed_seconds": time.monotonic() - started})
+        return stats
+    git_dir_fd, lock_fd, lock_reason = _open_validated_reuse_lock(worktree, reuse_lock)
+    if lock_reason is not None:
+        stats.update({"reason": lock_reason, "elapsed_seconds": time.monotonic() - started})
+        return stats
+    try:
+        try:
+            root_stat = worktree.resolve(strict=True).stat()
+        except OSError:
+            stats["reason"] = "worktree_unavailable"
+            stats["elapsed_seconds"] = time.monotonic() - started
+            return stats
+        if (root_stat.st_dev, root_stat.st_ino) != snapshot.get("root_identity"):
+            stats["reason"] = "worktree_identity_changed"
+            stats["elapsed_seconds"] = time.monotonic() - started
+            return stats
+        if os.utime not in os.supports_fd:
+            stats["reason"] = "fd_utime_unavailable"
+            stats["elapsed_seconds"] = time.monotonic() - started
+            return stats
+        assert reuse_lock is not None
+        for path, item in entries.items():
+            fd = -1
+            parent_fd = -1
+            reason = None
+            try:
+                fd, parent_fd, basename = _open_worktree_file(worktree, path)
+                before = os.fstat(fd)
+                if not _worktree_entry_matches_fd(worktree, path, fd, parent_fd, basename):
+                    reason = "file_path_changed"
+                elif not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                    reason = "not_single_link_regular_file"
+                elif stat.S_IMODE(before.st_mode) != item.mode:
+                    reason = "mode_changed"
+                elif before.st_size != item.size:
+                    reason = "size_changed"
+                else:
+                    digest = _hash_fd(fd)
+                    after_hash = os.fstat(fd)
+                    stats["checked_file_count"] += 1
+                    stats["checked_bytes"] += after_hash.st_size
+                    if (not _stable_file_stat(before, after_hash)
+                            or not _worktree_entry_matches_fd(
+                                worktree, path, fd, parent_fd, basename)):
+                        reason = "file_changed_during_restore_check"
+                    elif digest != item.sha256:
+                        reason = "content_changed"
+                    elif not _reuse_lock_path_matches(reuse_lock, git_dir_fd, lock_fd):
+                        reason = "reuse_lock_identity_changed"
+                    else:
+                        if not _worktree_entry_matches_fd(
+                                worktree, path, fd, parent_fd, basename):
+                            reason = "file_path_changed_before_restore"
+                        else:
+                            os.utime(fd, ns=(after_hash.st_atime_ns, item.mtime_ns))
+                        final = os.fstat(fd)
+                        if (reason is None and (stat.S_IMODE(final.st_mode) != item.mode
+                                or final.st_mtime_ns != item.mtime_ns)):
+                            reason = "post_restore_verification_failed"
+                        elif (reason is None and not _worktree_entry_matches_fd(
+                                worktree, path, fd, parent_fd, basename)):
+                            reason = "file_path_changed_after_restore"
+                        elif reason is None:
+                            stats["restored_file_count"] += 1
+                            stats["restored_bytes"] += final.st_size
+                            reason = None
+            except (OSError, ValueError, NotImplementedError) as exc:
+                reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                if parent_fd >= 0:
+                    os.close(parent_fd)
+            if reason is not None:
+                skips = stats["skipped_reasons"]
+                skips[reason] = skips.get(reason, 0) + 1
+    finally:
+        os.close(lock_fd)
+        os.close(git_dir_fd)
+    stats["status"] = "restored" if stats["restored_file_count"] else "no_files_restored"
+    stats["elapsed_seconds"] = time.monotonic() - started
+    return stats
+
+
+def _mtime_transition_report(snapshot_stats: dict[str, Any], restore_stats: dict[str, Any] | None,
+                             *, reason: str | None = None) -> dict[str, Any]:
+    if restore_stats is None:
+        restore_stats = {"status": "not_attempted", "reason": reason}
+    return {
+        "scope": "exact_applied_paths_regular_tracked_files_only",
+        "snapshot": snapshot_stats,
+        "restore": restore_stats,
+    }
+
+
 def _check_build_directory(worktree: Path, build_dir: str) -> Path:
     _build_relative_path(worktree, build_dir)
     return _resolve_build_path(worktree, build_dir)
@@ -1772,7 +2225,10 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
                         resolution_manifest: dict[str, Any] | None,
                         baseline_passed_cases: dict[str, str], *,
                         preserve_build_dir: str | None = None,
-                        allowed_staged_paths: Sequence[str] | None = None) -> dict[str, Any]:
+                        allowed_staged_paths: Sequence[str] | None = None,
+                        reuse_lock: _PrValidationReuseLock | None = None,
+                        applied_paths: Sequence[str] | None = None,
+                        previous_run: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run one exact snapshot base with the same guarded tests-only overlay."""
     reference: dict[str, Any] = {
         "name": reference_name,
@@ -1781,16 +2237,34 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
         "status": "infrastructure_error",
         "harness_patch_applied": False,
     }
+    mtime_snapshot: dict[str, Any] | None = None
+    mtime_snapshot_stats: dict[str, Any] | None = None
+    mtime_restore_stats: dict[str, Any] | None = None
+    if (preserve_build_dir is not None and reuse_lock is not None
+            and applied_paths is not None):
+        mtime_snapshot, mtime_snapshot_stats = _snapshot_overlay_mtimes(
+            worktree, applied_paths, preserve_build_dir, previous_run, reuse_lock)
+
+    def record_mtime_state(reason: str | None = None) -> None:
+        if mtime_snapshot_stats is not None:
+            reference["build_input_mtime_preservation"] = _mtime_transition_report(
+                mtime_snapshot_stats, mtime_restore_stats, reason=reason)
+
     reset = _reset_worktree(
         worktree, base_sha, preserve_build_dir=preserve_build_dir,
         allowed_staged_paths=allowed_staged_paths)
     reference["reset"] = reset
     if any(item.get("returncode") != 0 for item in reset):
         reference["status"] = "reset_failed"
+        record_mtime_state("reset_failed")
         return reference
     before, before_result = _tracked_source_index_hash(worktree)
     reference["tracked_source_index_hash_before_overlay"] = before
     reference["tracked_source_index_resolution_before"] = before_result.json()
+    if before is None:
+        reference["status"] = "tracked_source_index_resolution_failed"
+        record_mtime_state("tracked_source_index_resolution_failed")
+        return reference
     if patch:
         overlay = _apply_overlay_patch(
             worktree, patch_path, patch_sha256=patch_sha256, base_sha=base_sha,
@@ -1799,6 +2273,7 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
         if not overlay.get("applied", False):
             reference["status"] = overlay.get("status", "patch_conflict")
             reference["conflict_status"] = _status(worktree)
+            record_mtime_state("overlay_not_applied")
             return reference
     after, after_result = _tracked_source_index_hash(worktree)
     reference["tracked_source_index_hash_after_overlay"] = after
@@ -1807,12 +2282,21 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
     if (args.patch_scope == "test-only" and
             (after is None or not reference["tracked_source_index_unchanged"])):
         reference["status"] = "tracked_source_index_changed"
+        record_mtime_state("tracked_source_index_gate_failed")
         return reference
     tree, tree_result = _tree_sha(worktree)
     reference["tree_resolution"] = tree_result.json()
     if tree is None:
         reference["status"] = "tree_resolution_failed"
+        record_mtime_state("tree_resolution_failed")
         return reference
+    if (mtime_snapshot is not None and mtime_snapshot_stats is not None
+            and mtime_snapshot_stats.get("status") == "captured"):
+        mtime_restore_stats = _restore_overlay_mtimes(worktree, mtime_snapshot, reuse_lock)
+    mtime_reason = None
+    if mtime_restore_stats is None and mtime_snapshot_stats is not None:
+        mtime_reason = mtime_snapshot_stats.get("reason") or "snapshot_had_no_eligible_files"
+    record_mtime_state(mtime_reason)
     run = _run_tree(worktree, output, reference_name, args, configure_args, build_args,
                     commit_sha=base_sha, tree_sha=tree)
     reference.update(run)
@@ -2063,6 +2547,7 @@ def run_validation(args: argparse.Namespace) -> int:
         baseline["tracked_source_index_resolution"] = baseline_prod_result.json()
         baseline["harness_patch_applied"] = False
         report["baseline"] = baseline
+        last_tree_run: dict[str, Any] | None = baseline
         _write_json(output / "report.json", report)
 
         if baseline["status"] != "pass":
@@ -2120,7 +2605,11 @@ def run_validation(args: argparse.Namespace) -> int:
                                 configure_args, build_args, patch_path, patch, patch_sha,
                                 resolution_manifest, baseline_passed_cases,
                                 preserve_build_dir=args.build_dir if reuse_mode else None,
-                                allowed_staged_paths=applied_paths if reuse_mode else None)
+                                allowed_staged_paths=applied_paths if reuse_mode else None,
+                                reuse_lock=reuse_lock if reuse_mode else None,
+                                applied_paths=applied_paths if reuse_mode else None,
+                                previous_run=last_tree_run)
+                            last_tree_run = reference_for_head
                         report["references"][requested_base_oid] = reference_for_head
                         if (identity_policy is None and
                                 reference_for_head.get("commit_sha") and
@@ -2178,13 +2667,27 @@ def run_validation(args: argparse.Namespace) -> int:
                                                                    "build_timeout"} else 2
                     _write_json(output / "report.json", report)
                     continue
+                mtime_snapshot: dict[str, Any] | None = None
+                mtime_snapshot_stats: dict[str, Any] | None = None
+                mtime_restore_stats: dict[str, Any] | None = None
+                if reuse_mode:
+                    mtime_snapshot, mtime_snapshot_stats = _snapshot_overlay_mtimes(
+                        worktree, applied_paths, args.build_dir, last_tree_run, reuse_lock)
+
+                def record_head_mtime_state(reason: str | None = None) -> None:
+                    if mtime_snapshot_stats is not None:
+                        entry["build_input_mtime_preservation"] = _mtime_transition_report(
+                            mtime_snapshot_stats, mtime_restore_stats, reason=reason)
+
                 reset_ops = _reset_worktree(
                     worktree, resolved,
                     preserve_build_dir=args.build_dir if reuse_mode else None,
                     allowed_staged_paths=applied_paths if reuse_mode else None)
                 entry["reset"] = reset_ops
+                last_tree_run = None
                 if any(item.get("returncode") != 0 for item in reset_ops):
                     entry["status"] = "reset_failed"
+                    record_head_mtime_state("reset_failed")
                     report["heads"].append(entry)
                     return_code = 2
                     continue
@@ -2193,6 +2696,7 @@ def run_validation(args: argparse.Namespace) -> int:
                 entry["tracked_source_index_resolution_before"] = production_before_result.json()
                 if production_before is None:
                     entry["status"] = "tracked_source_index_resolution_failed"
+                    record_head_mtime_state("tracked_source_index_resolution_failed")
                     report["heads"].append(entry)
                     return_code = 2
                     continue
@@ -2204,6 +2708,7 @@ def run_validation(args: argparse.Namespace) -> int:
                     if not overlay.get("applied", False):
                         entry["status"] = overlay.get("status", "patch_conflict")
                         entry["conflict_status"] = _status(worktree)
+                        record_head_mtime_state("overlay_not_applied")
                         report["heads"].append(entry)
                         return_code = 2
                         continue
@@ -2221,6 +2726,7 @@ def run_validation(args: argparse.Namespace) -> int:
                             "exception_group": policy["exception_group"],
                         }
                         entry["harness_patch_applied"] = bool(patch)
+                        record_head_mtime_state("identity_gate_failed")
                         report["heads"].append(entry)
                         return_code = 2
                         _write_json(output / "report.json", report)
@@ -2232,6 +2738,7 @@ def run_validation(args: argparse.Namespace) -> int:
                 if (args.patch_scope == "test-only" and
                         (production_after is None or not entry["tracked_source_index_unchanged"])):
                     entry["status"] = "tracked_source_index_changed"
+                    record_head_mtime_state("tracked_source_index_gate_failed")
                     report["heads"].append(entry)
                     return_code = 2
                     continue
@@ -2240,11 +2747,21 @@ def run_validation(args: argparse.Namespace) -> int:
                 entry["tested_tree_sha"] = tree
                 if tree is None:
                     entry["status"] = "tree_resolution_failed"
+                    record_head_mtime_state("tree_resolution_failed")
                     report["heads"].append(entry)
                     return_code = 2
                     continue
+                if (mtime_snapshot is not None and mtime_snapshot_stats is not None
+                        and mtime_snapshot_stats.get("status") == "captured"):
+                    mtime_restore_stats = _restore_overlay_mtimes(
+                        worktree, mtime_snapshot, reuse_lock)
+                mtime_reason = None
+                if mtime_restore_stats is None and mtime_snapshot_stats is not None:
+                    mtime_reason = mtime_snapshot_stats.get("reason") or "snapshot_had_no_eligible_files"
+                record_head_mtime_state(mtime_reason)
                 run = _run_tree(worktree, output, f"pr-{number}", args, configure_args, build_args,
                                 commit_sha=resolved, tree_sha=tree)
+                last_tree_run = run
                 entry.update(run)
                 gate_minimum_tests = args.minimum_tests
                 gate_baseline_cases = baseline_passed_cases
