@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "description": "GUI-consumed PresetUtils printer asset resolution from installed and bundled vendor roots, including generic hotend fallback.",
+  "test_filter": "PresetAssetResolution",
+  "mutants": [
+    {
+      "id": "preset-bed-model-ignores-installed-asset",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "out = Slic3r::data_dir() + \"/vendor/\" + preset.vendor->id + \"/\" + pm->bed_model;\n            if (!boost::filesystem::exists(boost::filesystem::path(out)))\n                out = Slic3r::resources_dir() + \"/profiles/\" + preset.vendor->id + \"/\" + pm->bed_model;",
+      "new": "out = Slic3r::data_dir() + \"/vendor/\" + preset.vendor->id + \"/\" + pm->bed_model;\n            if (boost::filesystem::exists(boost::filesystem::path(out)))\n                out = Slic3r::resources_dir() + \"/profiles/\" + preset.vendor->id + \"/\" + pm->bed_model;",
+      "expected_matches": 1,
+      "test_filter": "PresetAssetResolution",
+      "description": "Installed assets must win over bundled copies, then bundled copies must be returned after removing the installed file."
+    },
+    {
+      "id": "preset-hotend-missing-vendor-asset-skips-generic-fallback",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (out.empty() ||!boost::filesystem::exists(boost::filesystem::path(out)))\n            out = Slic3r::resources_dir() + \"/profiles/hotend.stl\";",
+      "new": "if (out.empty())\n            out = Slic3r::resources_dir() + \"/profiles/hotend.stl\";",
+      "expected_matches": 1,
+      "test_filter": "PresetAssetResolution",
+      "description": "A configured but absent hotend asset must fall back to the generic bundled hotend when the requested vendor-specific file is absent."
+    }
+  ]
+}

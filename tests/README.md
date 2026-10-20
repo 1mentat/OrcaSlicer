@@ -751,6 +751,11 @@ named enum lists before and after public deserialization. Its mutation is in
 `static_enum_defaults.json`; default-name assertions precede parsing so missing
 metadata produces an assertion failure instead of a crash.
 
+`[PresetAssetResolution]` checks installed printer assets taking precedence over
+bundled copies, bundled and generic hotend fallbacks, and unresolved printer
+models through the public `PresetUtils` getters. Temporary data and resource
+roots are restored after each case. Its probes are in `preset_asset_resolution.json`.
+
 `public_gap_contracts.json` challenges public behavior across geometry, model
 ownership and import cancellation, nullable setting migration, filament
 temperature validation, tool ordering, wipe-tower finish paths, and G-code
