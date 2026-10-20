@@ -2425,7 +2425,7 @@ TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior densi
     constexpr double half = side / 2.;
     constexpr double z_min = side * 5. / 12.;
     constexpr double z_max = side * 7. / 12.;
-    auto slice = [&pattern, side](const std::string &adaptive, Print &print) {
+    auto slice = [&pattern](const std::string &adaptive, Print &print) {
         Slic3r::Test::init_and_process_print({Slic3r::Test::cube(side)}, print,
                                             {{"sparse_infill_pattern", pattern},
                                              {"sparse_infill_density", "25%"},
