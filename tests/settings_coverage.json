@@ -429,6 +429,15 @@
       ],
       "reason": "A perpendicular sub-nozzle fin is sliced with thin-wall detection disabled and enabled; the enabled result must add external-perimeter medial-axis paths extending beyond the body edge."
     },
+    "fuzzy_skin_noise_type": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[FuzzySkinNoisePipeline]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered-noise pipeline case verifies the six-value enum domain and slices classic, perlin, billow, ridgedmulti, voronoi, and ripple with external fuzzy skin and a disabled reference. Every value adds finite sampled perimeter points; the five non-ripple values require positive interior displacement, and a separate ripple pipeline case requires a positive offset. These cases passed in the selected 3927-test native run. Complete interactions among noise parameters and fuzzy-skin styles remain unclaimed."
+    },
     "fuzzy_skin_first_layer": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsBooleanVariance]",
