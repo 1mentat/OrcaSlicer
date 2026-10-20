@@ -1559,9 +1559,11 @@ std::string motion(GCodeWriter &writer, const std::string &preamble)
 {
     // GCodeWriter updates internal E state while emitting each move. The
     // caller supplies both the preamble and two equal-length deposits.
-    return preamble + writer.set_speed(30.)
-        + writer.extrude_to_xy({ 10., 0. }, 1.)
-        + writer.extrude_to_xy({ 20., 0. }, 1.);
+    std::string gcode = preamble;
+    gcode += writer.set_speed(30.);
+    gcode += writer.extrude_to_xy({ 10., 0. }, 1.);
+    gcode += writer.extrude_to_xy({ 20., 0. }, 1.);
+    return gcode;
 }
 
 std::string temperature_command(GCodeFlavor flavor)
