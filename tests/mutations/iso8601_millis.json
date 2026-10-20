@@ -1,0 +1,26 @@
+{
+  "mutants": [
+    {
+      "description": "Break zero-padding of one- and two-digit fractional seconds; independently specified 100 ms and 120 ms expectations must fail.",
+      "expected_matches": 1,
+      "id": "iso8601-millis-short-fraction-padding",
+      "new": "while (digits < 3) { ms /= 10; digits++; }",
+      "old": "while (digits < 3) { ms *= 10; digits++; }",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Time.cpp",
+      "test_filter": "Iso8601MillisGap"
+    },
+    {
+      "description": "Break truncation to milliseconds for four- and six-digit fractions; independently specified 123 ms expectations must fail.",
+      "expected_matches": 1,
+      "id": "iso8601-millis-long-fraction-truncation",
+      "new": "while (digits > 3) { ms *= 10; digits--; }",
+      "old": "while (digits > 3) { ms /= 10; digits--; }",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Time.cpp",
+      "test_filter": "Iso8601MillisGap"
+    }
+  ],
+  "schema_version": 1,
+  "test_filter": "Iso8601MillisGap"
+}
