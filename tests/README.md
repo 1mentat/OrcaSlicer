@@ -755,6 +755,8 @@ metadata produces an assertion failure instead of a crash.
 bundled copies, bundled and generic hotend fallbacks, and unresolved printer
 models through the public `PresetUtils` getters. Temporary data and resource
 roots are restored after each case. Its probes are in `preset_asset_resolution.json`.
+Build `libslic3r_preset_bundle_tests` for focused feedback without duplicate CTest
+registration or compilation of unrelated core test files.
 
 `public_gap_contracts.json` challenges public behavior across geometry, model
 ownership and import cancellation, nullable setting migration, filament
