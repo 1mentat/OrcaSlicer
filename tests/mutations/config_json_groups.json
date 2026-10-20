@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Semantic probes for flat and nested grouped point arrays loaded through the generic ConfigBase JSON contract.",
+  "mutants": [
+    {
+      "id": "config-json-array-parser-preserves-nested-group-arrays",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "            if (iter.value().is_array()) {",
+      "new": "            if (false) {",
+      "expected_matches": 1,
+      "test_filter": "Config JSON loading honors grouped geometry and declared vector aliases",
+      "description": "Rejecting the explicitly supported depth-two array form leaves the two polygon groups absent for the nested GENERATE row; the public coordinate/group oracle must fail."
+    },
+    {
+      "id": "config-json-points-groups-retain-group-boundary",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "                        case coPointsGroups:\n                            single_sep = '#';",
+      "new": "                        case coPointsGroups:\n                            single_sep = ',';",
+      "expected_matches": 1,
+      "test_filter": "Config JSON loading honors grouped geometry and declared vector aliases",
+      "description": "Flattening flat-array point groups into one comma-separated group changes the independently specified per-extruder polygons; the flat GENERATE row must fail the group/vertex oracle."
+    }
+  ]
+}

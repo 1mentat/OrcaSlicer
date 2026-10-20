@@ -343,18 +343,11 @@ struct SurfacePatch
 };
 using SurfacePatches = std::vector<SurfacePatch>;
 
-struct ModelCutId
-{
-    // index of model
-    uint32_t model_index;
-    // index of cut inside model
-    uint32_t cut_index;
-};
 
 /// <summary>
-/// Keep conversion from VCutAOIs to Index and vice versa
-/// Model_index .. contour(or hole) poin from ExPolygons
-/// Index       .. continous number
+/// Store model-cut offsets in a flattened sequence.
+/// The offsets and total count bound each model's cut segment.
+/// The accessors are used by model intersection checks.
 /// </summary>
 class ModelCut2index
 {
@@ -364,8 +357,6 @@ class ModelCut2index
 
 public:
     ModelCut2index(const VCutAOIs &cuts);
-    uint32_t   calc_index(const ModelCutId &id) const;
-    ModelCutId calc_id(uint32_t index) const;
     uint32_t                     get_count() const { return m_count; };
     const std::vector<uint32_t> &get_offsets() const { return m_offsets; }
 };
@@ -1109,28 +1100,6 @@ priv::ModelCut2index::ModelCut2index(const VCutAOIs &cuts)
     m_count = offset;
 }
 
-uint32_t priv::ModelCut2index::calc_index(const ModelCutId &id) const
-{
-    assert(id.model_index < m_offsets.size());
-    uint32_t offset = m_offsets[id.model_index];
-    uint32_t res = offset + id.cut_index;
-    assert(((id.model_index+1) < m_offsets.size() && res < m_offsets[id.model_index+1]) ||
-           ((id.model_index+1) == m_offsets.size() && res < m_count));
-    return res;
-}
-
-priv::ModelCutId priv::ModelCut2index::calc_id(uint32_t index) const
-{
-    assert(index < m_count);
-    ModelCutId result{0,0};
-    // find shape index
-    for (size_t model_index = 1; model_index < m_offsets.size(); ++model_index) {
-        if (m_offsets[model_index] > index) break;
-        result.model_index = model_index;
-    }
-    result.cut_index = index - m_offsets[result.model_index];
-    return result;
-}
 
 // cut_from_model help functions
 namespace priv {
@@ -1932,8 +1901,6 @@ void fill_polygon_distances(const ProjectionDistance &pd, uint32_t index, const 
 // choose correct cut by source point
 void fill_shape_distances(uint32_t start_index, const ProjectionDistance *start_pd, ProjectionDistances &result, const ExPolygonsIndices &s2i, const ExPolygon &shape, const VDistances &distances);
 
-// find close points between finished and unfinished ExPolygons
-ClosePoint find_close_point(const Point &p, ProjectionDistances &result, std::vector<bool>& finished_shapes,const ExPolygonsIndices &s2i, const ExPolygons &shapes);
 
 }
 
@@ -2291,43 +2258,6 @@ void priv::fill_shape_distances(uint32_t                  start_index,
     } while (start_index != std::numeric_limits<uint32_t>::max());
 }
 
-priv::ClosePoint priv::find_close_point(const Point         &p,
-                                        ProjectionDistances &result,
-                                        std::vector<bool>   &finished_shapes,
-                                        const ExPolygonsIndices &s2i,
-                                        const ExPolygons       &shapes)
-{
-    // result
-    ClosePoint cp;
-    // for all finished points
-    for (uint32_t shape_index = 0; shape_index < shapes.size(); ++shape_index) {
-        if (!finished_shapes[shape_index]) continue;
-        const ExPolygon &shape = shapes[shape_index];
-        uint32_t index = s2i.cvt({shape_index, 0, 0});
-        auto find_close_point_in_points = [&p, &cp, &index, &result]
-        (const Points &pts){
-            for (const Point &p_ : pts) {
-                // Exist result (is finished) ?
-                if (result[index].aoi_index ==
-                    std::numeric_limits<uint32_t>::max()) {
-                    ++index;
-                    continue;
-                }
-                float distance_sq = calc_size_sq(p - p_);
-                if (cp.dist_sq > distance_sq) { 
-                    cp.dist_sq = distance_sq;
-                    cp.index = index;
-                }
-                ++index;
-            }
-        };
-        find_close_point_in_points(shape.contour.points);
-        // shape could be inside of another shape's hole
-        for (const Polygon& h:shape.holes)
-            find_close_point_in_points(h.points);
-    }
-    return cp;
-}
 
 // IMPROVE: when select distance fill in all distances from Patch
 priv::ProjectionDistances priv::choose_best_distance(
@@ -2435,116 +2365,7 @@ priv::ProjectionDistances priv::choose_best_distance(
 
 // functions to help 'diff_model'
 namespace priv {
-const VI default_vi(std::numeric_limits<uint32_t>::max());
 
-// Keep info about intersection source
-struct Source{ HI  hi; int sdim=0;};
-using Sources                            = std::vector<Source>;
-const std::string vertex_source_map_name = "v:SourceIntersecting";
-using VertexSourceMap                    = CutMesh::Property_map<VI, Source>;
-
-/// <summary>
-/// Corefine visitor
-/// Store intersection source for vertices of constrained edge of tm1
-/// Must be used with corefine flag no modification of tm2
-/// </summary>
-struct IntersectionSources
-{
-    const CutMesh *patch; // patch
-    const CutMesh *model; // const model
-
-    VertexSourceMap vmap;
-
-    // keep sources from call intersection_point_detected
-    // until call new_vertex_added
-    Sources* sources;
-
-    // count intersections
-    void intersection_point_detected(std::size_t    i_id,
-                                     int            sdim,
-                                     HI             h_f,
-                                     HI             h_e,
-                                     const CutMesh &tm_f,
-                                     const CutMesh &tm_e,
-                                     bool           is_target_coplanar,
-                                     bool           is_source_coplanar)
-    {
-        Source source;
-        if (&tm_e == model) {
-            source = {h_e, sdim};
-            // check other CGAL model that is patch
-            assert(&tm_f == patch);
-            if (is_target_coplanar) {
-                assert(sdim == 0);
-                vmap[tm_f.source(h_f)] = source;
-            }
-            if (is_source_coplanar) {
-                assert(sdim == 0);
-                vmap[tm_f.target(h_f)] = source;
-            }
-
-            // clear source to be able check that this intersection source is
-            // not used any more
-            if (is_source_coplanar || is_target_coplanar) source = {};
-        } else {
-            source = {h_f, sdim};
-            assert(&tm_f == model && &tm_e == patch);
-            assert(!is_target_coplanar);
-            assert(!is_source_coplanar);
-            // if (is_target_coplanar) vmap[tm_e.source(h_e)] = source;
-            // if (is_source_coplanar) vmap[tm_e.target(h_e)] = source;
-            // if (sdim == 0)
-            //     vmap[tm_e.target(h_e)] = source;
-        }
-
-        // By documentation i_id is consecutive.
-        // check id goes in a row, without skips
-        assert(sources->size() == i_id);
-        // add source of intersection
-        sources->push_back(source);
-    }
-
-    /// <summary>
-    /// Store VI to intersections by i_id
-    /// </summary>
-    /// <param name="i_id">Order number of intersection point</param>
-    /// <param name="v">New added vertex</param>
-    /// <param name="tm">Affected mesh</param>
-    void new_vertex_added(std::size_t i_id, VI v, const CutMesh &tm)
-    {
-        // check that it is first insertation into item of vmap
-        assert(!vmap[v].hi.is_valid());
-        // check valid addresing into sources
-        assert(i_id < sources->size());
-        // check that source has value
-        assert(sources->at(i_id).hi.is_valid());
-        vmap[v] = sources->at(i_id);
-    }
-
-    // Not used visitor functions
-    void before_subface_creations(FI /* f_old */, CutMesh & /* mesh */) {}
-    void after_subface_created(FI /* f_new */, CutMesh & /* mesh */) {}
-    void after_subface_creations(CutMesh &) {}
-    void before_subface_created(CutMesh &) {}
-    void before_edge_split(HI /* h */, CutMesh & /* tm */) {}
-    void edge_split(HI /* hnew */, CutMesh & /* tm */) {}
-    void after_edge_split() {}
-    void add_retriangulation_edge(HI /* h */, CutMesh & /* tm */) {}
-};
-
-/// <summary>
-/// Create map1 and map2
-/// </summary>
-/// <param name="map">Convert tm1.face to type</param>
-/// <param name="tm1">Corefined mesh</param>
-/// <param name="tm2">Source of intersection</param>
-/// <param name="ecm1">Identify constrainde edge</param>
-/// <param name="sources">Convert tm1.face to type</param>
-void create_face_types(FaceTypeMap           &map,
-                       const CutMesh         &tm1,
-                       const CutMesh         &tm2,
-                       const EdgeBoolMap         &ecm,
-                       const VertexSourceMap &sources);
 
 /// <summary>
 /// Implement 'cut' Minus 'clipper', where clipper is reverse input Volume
@@ -2574,100 +2395,6 @@ SurfacePatch create_surface_patch(const std::vector<FI> &fis,
 
 } // namespace priv
 
-void priv::create_face_types(FaceTypeMap           &map,
-                             const CutMesh         &tm1,
-                             const CutMesh         &tm2,
-                             const EdgeBoolMap         &ecm,
-                             const VertexSourceMap &sources)
-{
-    auto get_intersection_source = [&tm2](const Source& s1, const Source& s2)->FI{        
-        // when one of sources is face than return it
-        FI fi1 = tm2.face(s1.hi);
-        if (s1.sdim == 2) return fi1;
-        FI fi2 = tm2.face(s2.hi);
-        if (s2.sdim == 2) return fi2;
-        // both vertices are made by same source triangle
-        if (fi1 == fi2) return fi1;
-
-        // when one from sources is edge second one decide side of triangle triangle
-        HI hi1_opposit = tm2.opposite(s1.hi);
-        FI fi1_opposit;
-        if (hi1_opposit.is_valid())
-            fi1_opposit = tm2.face(hi1_opposit);
-        if (fi2 == fi1_opposit) return fi2;
-
-        HI hi2_opposit = tm2.opposite(s2.hi);
-        FI fi2_opposit;
-        if (hi2_opposit.is_valid())
-            fi2_opposit = tm2.face(hi2_opposit);
-        if (fi1 == fi2_opposit) return fi1;
-        if (fi1_opposit.is_valid() && fi1_opposit == fi2_opposit)
-            return fi1_opposit;
-
-        // when intersection is vertex need loop over neighbor
-        for (FI fi_around_hi1 : tm2.faces_around_target(s1.hi)) {
-            for (FI fi_around_hi2 : tm2.faces_around_target(s2.hi)) { 
-                if (fi_around_hi1 == fi_around_hi2) 
-                    return fi_around_hi1;
-            }
-        }
-
-        // should never rich it
-        // Exist case when do not know source triangle for decide side of intersection
-        assert(false);
-        return FI();
-    };
-
-    for (FI fi : tm1.faces()) map[fi] = FaceType::not_constrained;
-    for (EI ei1 : tm1.edges()) {
-        if (!get(ecm, ei1)) continue;
-
-        // get faces from tm1 (f1a + f1b)
-        HI hi1 = tm1.halfedge(ei1);
-        assert(hi1.is_valid());
-        FI f1a = tm1.face(hi1);
-        assert(f1a.is_valid());
-        HI hi_op = tm1.opposite(hi1);
-        assert(hi_op.is_valid());
-        FI f1b = tm1.face(hi_op);
-        assert(f1b.is_valid());
-
-        // get faces from tm2 (f2a + f2b)
-        VI vi1_source = tm1.source(hi1);
-        assert(vi1_source.is_valid());
-        VI vi1_target = tm1.target(hi1);
-        assert(vi1_target.is_valid());
-
-        const Source &s_s = sources[vi1_source];
-        const Source &s_t = sources[vi1_target];
-        FI fi2 = get_intersection_source(s_s, s_t);
-
-        // in release solve situation that face was NOT deduced
-        if (!fi2.is_valid()) continue;
-
-        HI hi2 = tm2.halfedge(fi2);
-        std::array<const P3 *, 3> t;
-        size_t ti =0;
-        for (VI vi2 : tm2.vertices_around_face(hi2))
-            t[ti++] = &tm2.point(vi2);
-
-        // triangle tip from face f1a
-        VI vi1a_tip = tm1.target(tm1.next(hi1));
-        assert(vi1a_tip.is_valid());
-        const P3 &p = tm1.point(vi1a_tip);
-
-        // check if f1a is behinde f2a
-        // inside mean it will be used
-        // outside will be discarded
-        if (CGAL::orientation(*t[0], *t[1], *t[2], p) == CGAL::POSITIVE) {
-            map[f1a] = FaceType::inside;
-            map[f1b] = FaceType::outside;
-        } else {
-            map[f1a] = FaceType::outside;
-            map[f1b] = FaceType::inside;
-        }
-    }
-}
 
 #include <CGAL/Polygon_mesh_processing/clip.h>
 bool priv::clip_cut(SurfacePatch &cut, CutMesh clipper)

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Semantic probes for sheared transforms with positive and negative determinants.",
+  "mutants": [
+    {
+      "id": "transform-positive-determinant-skew-discarded",
+      "path": "src/libslic3r/Geometry.cpp",
+      "old": "if (scale.determinant() >= 0.0)\n      return true;",
+      "new": "if (scale.determinant() >= 0.0)\n      return false;",
+      "test_filter": "Sheared transform axes report skew with either determinant sign",
+      "expected_matches": 1
+    },
+    {
+      "id": "transform-mirrored-skew-discarded",
+      "path": "src/libslic3r/Geometry.cpp",
+      "old": "skew |= std::abs(ratio(i, j) * ratio(j, i) - 1.0) > EPSILON;",
+      "new": "skew |= false;",
+      "test_filter": "Sheared transform axes report skew with either determinant sign",
+      "expected_matches": 1
+    }
+  ]
+}

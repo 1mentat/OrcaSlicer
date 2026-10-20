@@ -1400,3 +1400,45 @@ TEST_CASE("Region merge selects the source-bearing component among detached expa
     CHECK_THAT(merged[1].area() / square_millimeters, Catch::Matchers::WithinAbs(150., 0.01));
     CHECK_THAT(merged[2].area() / square_millimeters, Catch::Matchers::WithinAbs(100., 0.01));
 }
+
+
+TEST_CASE("Orthogonal transform axes remain free of skew after rotation and reflection",
+          "[Geometry][Transformation][Skew]")
+{
+    const int mirror_axis = GENERATE(-1, 0, 1, 2);
+    const double angle = GENERATE(0., PI / 7.);
+    const Matrix3d rotation = Eigen::AngleAxisd(angle, Vec3d::UnitZ()).toRotationMatrix();
+    Transform3d matrix = Transform3d::Identity();
+    Vec3d scale(2., 3., 4.);
+    if (mirror_axis >= 0)
+        scale[mirror_axis] = -scale[mirror_axis];
+    matrix.linear() = rotation * scale.asDiagonal();
+    matrix.translation() = Vec3d(5., -6., 7.);
+
+    // Independent geometric witness: nonuniform scaling and reflection keep the
+    // transformed coordinate axes perpendicular.
+    for (int a = 0; a < 3; ++a)
+        for (int b = a + 1; b < 3; ++b)
+            REQUIRE_THAT(matrix.linear().col(a).dot(matrix.linear().col(b)), Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK_FALSE(Geometry::Transformation(matrix).has_skew());
+}
+
+TEST_CASE("Sheared transform axes report skew with either determinant sign",
+          "[Geometry][Transformation][Skew]")
+{
+    const int mirror_axis = GENERATE(-1, 0, 1, 2);
+    const int first_axis = GENERATE(0, 1, 2);
+    const int second_axis = (first_axis + 1) % 3;
+    Transform3d matrix = Transform3d::Identity();
+    Vec3d scale(2., 3., 4.);
+    if (mirror_axis >= 0)
+        scale[mirror_axis] = -scale[mirror_axis];
+    matrix.linear() = scale.asDiagonal();
+    matrix.linear()(first_axis, second_axis) = 0.75;
+    matrix.translation() = Vec3d(-3., 8., 2.);
+
+    // A shear makes these two transformed axes nonorthogonal, regardless of a
+    // reflected axis or a translation of the object.
+    REQUIRE(std::abs(matrix.linear().col(first_axis).dot(matrix.linear().col(second_axis))) > 1.);
+    CHECK(Geometry::Transformation(matrix).has_skew());
+}

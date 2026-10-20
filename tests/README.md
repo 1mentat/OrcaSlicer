@@ -900,6 +900,16 @@ minimal ConfigDef-backed alias through public deserialization. Build
 `libslic3r_config_tests` for focused feedback. Its probes are in
 `config_public_contracts.json`.
 
+The Config JSON loading case checks flat and nested polygon groups and declared
+vector aliases using the print setting schema with generic ConfigBase loading.
+The fixture preserves each group and vertex and checks both aliased values.
+Its probes are in `config_json_groups.json`.
+
+`[Transformation][Skew]` checks perpendicular axes after scaling, rotation, and
+reflection, and nonorthogonal axes under shear with either determinant sign.
+Build `libslic3r_geometry_tests` for focused feedback; its probes are in
+`geometry_transform_skew.json`.
+
 `[TreeSupportPaintedEnforcer]` checks support extrusion near an independently
 located painted vertical facet, with an unpainted control.
 `[TreeSupportBottomInterface]` checks emitted base/interface roles and alternating

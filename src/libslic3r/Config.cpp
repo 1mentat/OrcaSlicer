@@ -1332,71 +1332,6 @@ size_t ConfigBase::load_from_gcode_string_legacy(ConfigBase& config, const char*
     return num_key_value_pairs;
 }
 
-// Reading a config from G-code back to front for performance reasons: We don't want to scan
-// hundreds of MB file for a short config block, which we expect to find at the end of the G-code.
-class ReverseLineReader
-{
-public:
-    using pos_type = boost::nowide::ifstream::pos_type;
-
-    // Stop at file_start
-    ReverseLineReader(boost::nowide::ifstream &ifs, pos_type file_start) : m_ifs(ifs), m_file_start(file_start)
-    {
-        m_ifs.seekg(0, m_ifs.end);
-        m_file_pos = m_ifs.tellg();
-        m_block.assign(m_block_size, 0);
-    }
-
-    bool getline(std::string &out) {
-        out.clear();
-        for (;;) {
-            if (m_block_len == 0) {
-                // Read the next block.
-                m_block_len = size_t(std::min<std::fstream::pos_type>(m_block_size, m_file_pos - m_file_start));
-                if (m_block_len == 0)
-                    return false;
-                m_file_pos -= m_block_len;
-                m_ifs.seekg(m_file_pos, m_ifs.beg);
-                if (! m_ifs.read(m_block.data(), m_block_len))
-                    return false;
-            }
-
-            assert(m_block_len > 0);
-            // Non-empty buffer. Find another LF.
-            int i = int(m_block_len) - 1;
-            for (; i >= 0; -- i)
-                if (m_block[i] == '\n')
-                    break;
-            // i is position of LF or -1 if not found.
-            if (i == -1) {
-                // LF not found. Just make a backup of the buffer and continue.
-                out.insert(out.begin(), m_block.begin(), m_block.begin() + m_block_len);
-                m_block_len = 0;
-            } else {
-                assert(i >= 0);
-                // Copy new line to the output. It may be empty.
-                out.insert(out.begin(), m_block.begin() + i + 1, m_block.begin() + m_block_len);
-                // Block length without the newline.
-                m_block_len = i;
-                // Remove CRLF from the end of the block.
-                if (m_block_len > 0 && m_block[m_block_len - 1] == '\r')
-                    -- m_block_len;
-                return true;
-            }
-        }
-        assert(false);
-        return false;
-    }
-
-private:
-    boost::nowide::ifstream &m_ifs;
-    std::vector<char>        m_block;
-    size_t                   m_block_size = 65536;
-    size_t                   m_block_len  = 0;
-    pos_type                 m_file_start;
-    pos_type                 m_file_pos   = 0;
-};
-
 // Load the config keys from the tail of a G-code file.
 ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, ForwardCompatibilitySubstitutionRule compatibility_rule)
 {
@@ -1406,7 +1341,6 @@ ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, Fo
     // Look for Slic3r or OrcaSlicer header.
     // Look for the header across the whole file as the G-code may have been extended at the start by a post-processing script or the user.
     //BBS
-    bool has_delimiters = true;
     {
         //BBS
         std::string bambuslicer_gcode_header = "; OrcaSlicer";
@@ -1441,7 +1375,6 @@ ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, Fo
     ConfigSubstitutionContext substitutions_ctxt(compatibility_rule);
     size_t                    key_value_pairs = 0;
 
-    if (has_delimiters)
     {
         //BBS
         // PrusaSlicer starting with 2.4.0-alpha0 delimits the config section stored into G-code with
@@ -1485,20 +1418,6 @@ ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, Fo
             //BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << format("Configuration block opening tag \"; CONFIG_BLOCK_END\" not found when reading %1%", file);
             throw Slic3r::RuntimeError(format("Config tag \"; CONFIG_BLOCK_END\" not found"));
         }
-    }
-    else
-    {
-        auto                      header_end_pos = ifs.tellg();
-        // Slicer older than 2.4.0-alpha0 do not emit any delimiter.
-        // Try a heuristics reading the G-code from back.
-        ifs.seekg(0, ifs.end);
-        auto file_length = ifs.tellg();
-    	auto data_length = std::min<std::fstream::pos_type>(65535, file_length - header_end_pos);
-    	ifs.seekg(file_length - data_length, ifs.beg);
-        std::vector<char> data(size_t(data_length) + 1, 0);
-        ifs.read(data.data(), data_length);
-        ifs.close();
-        key_value_pairs = load_from_gcode_string_legacy(*this, data.data(), substitutions_ctxt);
     }
 
     if (key_value_pairs < 80) {
