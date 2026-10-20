@@ -211,7 +211,16 @@ project-header classification exposes existing fields that normal system-header
 classification hides. Other warning categories retain their existing policy.
 
 The runner uses `compile_commands.json` as compiler evidence for every
-manifest source. It invokes `llvm-cov export --summary-only -instr-profile <merged profile>` on
+manifest source. Coverage targets require `-fprofile-update=atomic` because
+slicing uses concurrent workers. Non-atomic updates can corrupt LLVM's derived
+counts and credit branches that never executed. The runner rejects missing or
+overridden atomic flags and unresolved compiler response files before running
+tests. A non-empty compiled-source manifest and compile database are required.
+Rebuild all instrumented objects and collect fresh
+profiles when changing this flag. Do not merge profiles from non-atomic builds
+into an atomic coverage measurement. See Clang's
+[profile update modes](https://releases.llvm.org/18.1.6/tools/clang/docs/UsersManual.html#cmdoption-fprofile-update).
+It invokes `llvm-cov export --summary-only -instr-profile <merged profile>` on
 each instrumented object (including with LLVM 18): an object with no coverage map is reported as a
 `mapping_free_translation_unit` (for example an include-only PCH source),
 whereas an object whose mappings come only from an inline or generated header

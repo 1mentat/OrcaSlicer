@@ -44,8 +44,10 @@ function(slicer_enable_llvm_source_coverage TARGET_NAME)
     # LLVM's source-based mapping is supported by clang-cl too, but the linker
     # flags differ from MSVC's normal options only for the whole-archive helper
     # below.  Keep the flags target-local so dependencies are not instrumented.
+    # Slicing runs concurrently: lost non-atomic increments can make LLVM's
+    # derived counters credit branches that never executed.
     target_compile_options(${TARGET_NAME} PRIVATE
-        -fprofile-instr-generate -fcoverage-mapping)
+        -fprofile-instr-generate -fcoverage-mapping -fprofile-update=atomic)
     # Coverage includes Orca headers as project headers to retain their inline
     # mappings. This exposes existing unused private fields that normal SYSTEM
     # includes hide. Keep these diagnostics visible without blocking test-only

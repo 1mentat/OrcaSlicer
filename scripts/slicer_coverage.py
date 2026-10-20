@@ -472,14 +472,20 @@ def _compile_command_output(arguments: Sequence[str], directory: Path) -> Path |
 
 
 def _coverage_compile_flags(arguments: Sequence[str]) -> bool:
-    flags = set(arguments)
-    mapping = "-fcoverage-mapping" in flags or any(
-        "-fcoverage-mapping" in value for value in arguments if value.startswith("/clang:")
-    )
-    profile = "-fprofile-instr-generate" in flags or any(
-        "-fprofile-instr-generate" in value for value in arguments if value.startswith("/clang:")
-    )
+    flags = {value.removeprefix("/clang:") for value in arguments}
+    mapping = "-fcoverage-mapping" in flags
+    profile = "-fprofile-instr-generate" in flags
     return mapping and profile
+
+
+def _atomic_profile_updates(arguments: Sequence[str]) -> bool:
+    # Clang uses the last setting. Missing/default and prefer-atomic are not
+    # sufficient evidence that concurrent increments are always atomic.
+    if any(value.removeprefix("/clang:").startswith("@") for value in arguments):
+        return False  # An unresolved response file could override visible flags.
+    updates = [value.removeprefix("/clang:") for value in arguments
+               if value.removeprefix("/clang:").startswith("-fprofile-update=")]
+    return bool(updates) and updates[-1] == "-fprofile-update=atomic"
 
 
 def _load_compile_commands(path: Path) -> dict[str, list[dict[str, Any]]]:
@@ -506,9 +512,21 @@ def _load_compile_commands(path: Path) -> dict[str, list[dict[str, Any]]]:
             "object": output,
             "arguments": arguments,
             "coverage_flags": _coverage_compile_flags(arguments),
+            "atomic_profile_updates": _atomic_profile_updates(arguments),
         }
         by_source.setdefault(_path_key(source), []).append(record)
     return by_source
+
+
+def _require_atomic_profile_commands(manifest: Sequence[Path], compile_commands: Path) -> None:
+    """Reject unsafe/stale builds before starting an expensive test run."""
+    if not manifest:
+        raise CoverageError("coverage requires a non-empty compiled-source manifest")
+    by_source = _load_compile_commands(compile_commands)
+    for source in manifest:
+        candidates = [item for item in by_source.get(_path_key(source), []) if item["coverage_flags"]]
+        if not candidates or any(not item["atomic_profile_updates"] for item in candidates):
+            raise CoverageError(f"coverage requires explicit atomic LLVM compile commands for {source}")
 
 
 def _exported_paths(export: dict[str, Any], *, path_base: Path) -> set[str]:
@@ -662,6 +680,11 @@ def _compiler_source_evidence(llvm_cov: str, manifest: Sequence[Path],
         if not coverage_candidates:
             errors.append({"source": source_name, "reason": "compile_command_missing_llvm_flags"})
             records.append({"source": source_name, "classification": "unprofiled_translation_unit", "objects": []})
+            continue
+
+        if any(not item["atomic_profile_updates"] for item in coverage_candidates):
+            errors.append({"source": source_name, "reason": "compile_command_missing_atomic_profile_updates"})
+            records.append({"source": source_name, "classification": "unsafe_profile_counters", "objects": []})
             continue
 
         object_records: list[dict[str, Any]] = []
@@ -818,6 +841,7 @@ def run_coverage(args: argparse.Namespace) -> int:
         manifest.extend(_read_manifest(manifest_path, root))
     if manifest_files:
         manifest = sorted(set(manifest), key=lambda value: str(value))
+    _require_atomic_profile_commands(manifest, compile_commands)
 
     command = split_command(args.test_command)
     command = _expand_command(command, root=root, build=build_dir)

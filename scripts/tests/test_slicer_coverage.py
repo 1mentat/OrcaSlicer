@@ -44,6 +44,81 @@ class CoverageEvidenceTests(unittest.TestCase):
 
 
 class CoverageExportTests(unittest.TestCase):
+    def test_compiler_audit_requires_effective_atomic_updates_before_object_export(self):
+        for options, accepted in (
+            ([], False),
+            (["-fprofile-update=single"], False),
+            (["-fprofile-update=prefer-atomic"], False),
+            (["-fprofile-update=atomic", "-fprofile-update=single"], False),
+            (["-fprofile-update=atomic-invalid"], False),
+            (["-fprofile-update=atomic", "@hidden-options.rsp"], False),
+            (["-fprofile-update=single", "-fprofile-update=atomic"], True),
+            (["/clang:-fprofile-update=atomic"], True),
+            (["/clang:-fprofile-update=atomic", "/clang:-fprofile-update=single"], False),
+        ):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source = root / "concurrent.cpp"
+                source.write_text("int concurrent() { return 1; }\n")
+                obj = root / "concurrent.o"
+                obj.touch()
+                profile = root / "inventory.profdata"
+                profile.write_bytes(b"indexed inventory")
+                commands = root / "compile_commands.json"
+                commands.write_text(json.dumps([{
+                    "directory": str(root), "file": str(source), "arguments": [
+                        "clang-cl", "/clang:-fprofile-instr-generate",
+                        "/clang:-fcoverage-mapping", *options, "-c", str(source), "-o", str(obj),
+                    ],
+                }]))
+                export = {"data": [{"files": [{
+                    "filename": str(source), "summary": {"lines": {"count": 1, "covered": 0}},
+                }]}]}
+                with mock.patch.object(slicer_coverage, "_run", return_value=
+                                       slicer_coverage.subprocess.CompletedProcess(
+                                           [], 0, json.dumps(export), "")) as run:
+                    evidence = slicer_coverage._compiler_source_evidence(
+                        "llvm-cov", [source], commands, timeout=5, inventory_profile=profile,
+                    )
+                if accepted:
+                    self.assertEqual(evidence["status"], "ok")
+                    run.assert_called_once()
+                else:
+                    run.assert_not_called()
+                    self.assertEqual(evidence["errors"], [{
+                        "source": str(source),
+                        "reason": "compile_command_missing_atomic_profile_updates",
+                    }])
+                    self.assertEqual(evidence["sources"][0]["classification"], "unsafe_profile_counters")
+
+    def test_preflight_rejects_missing_or_mixed_evidence_before_running_tests(self):
+        for kind in ("no_manifest", "no_commands", "mixed_commands"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source = root / "concurrent.cpp"
+                source.touch()
+                binary = root / "tests"
+                binary.touch()
+                manifest = root / "sources.txt"
+                manifest.write_text(str(source) + "\n")
+                commands = root / "compile_commands.json"
+                if kind == "mixed_commands":
+                    commands.write_text(json.dumps([
+                        {"directory": str(root), "file": str(source), "command":
+                         f"clang -fprofile-instr-generate -fcoverage-mapping -fprofile-update={mode} -c concurrent.cpp"}
+                        for mode in ("atomic", "single")
+                    ]))
+                args = slicer_coverage._parser().parse_args([
+                    "run", "--root", str(root), "--object", str(binary),
+                    "--compile-commands", str(commands), "--test-command", "expensive-tests",
+                    *([] if kind == "no_manifest" else ["--manifest", str(manifest)]),
+                ])
+                with mock.patch.object(slicer_coverage, "_which", side_effect=lambda name, explicit: name), \
+                     mock.patch.object(slicer_coverage, "_run") as run:
+                    with self.assertRaises(slicer_coverage.CoverageError):
+                        slicer_coverage.run_coverage(args)
+                    run.assert_not_called()
+
     def test_empty_indexed_profile_generation_fails_closed(self):
         for returncode, reason in ((1, "failed"), (0, "missing")):
             with self.subTest(returncode=returncode, reason=reason), tempfile.TemporaryDirectory() as temp:
@@ -114,7 +189,8 @@ class CoverageExportTests(unittest.TestCase):
                 "directory": str(root),
                 "file": str(source),
                 "arguments": [
-                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping",
+                    "-fprofile-update=atomic", "-c",
                     str(source), "-o", str(obj),
                 ],
             }]), encoding="utf-8")
@@ -201,7 +277,8 @@ class CoverageExportTests(unittest.TestCase):
             commands = root / "compile_commands.json"
             commands.write_text(json.dumps([{
                 "directory": str(root), "file": str(source), "arguments": [
-                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping",
+                    "-fprofile-update=atomic", "-c",
                     str(source), "-o", str(obj),
                 ],
             }]))
@@ -244,15 +321,18 @@ class CoverageExportTests(unittest.TestCase):
             compile_commands = root / "compile_commands.json"
             compile_commands.write_text(json.dumps([
                 {"directory": str(root), "file": str(mapped), "arguments": [
-                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping",
+                    "-fprofile-update=atomic", "-c",
                     str(mapped), "-o", str(mapped_object),
                 ]},
                 {"directory": str(root), "file": str(mapping_free), "arguments": [
-                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping",
+                    "-fprofile-update=atomic", "-c",
                     str(mapping_free), "-o", str(mapping_free_object),
                 ]},
                 {"directory": str(root), "file": str(header_only), "arguments": [
-                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping",
+                    "-fprofile-update=atomic", "-c",
                     str(header_only), "-o", str(header_only_object),
                 ]},
             ]), encoding="utf-8")
@@ -301,7 +381,8 @@ class CoverageExportTests(unittest.TestCase):
                 "directory": str(root),
                 "file": str(source),
                 "arguments": [
-                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping",
+                    "-fprofile-update=atomic", "-c",
                     str(source), "-o", str(obj),
                 ],
             }]), encoding="utf-8")
@@ -442,6 +523,17 @@ class CoverageDiagnosticTests(unittest.TestCase):
             source.write_text("int fixture() { return 1; }\n")
             binary = root / "fixture-tests"
             binary.touch()
+            obj = root / "fixture.o"
+            obj.touch()
+            manifest = root / "sources.txt"
+            manifest.write_text(str(source) + "\n")
+            commands = root / "compile_commands.json"
+            commands.write_text(json.dumps([{
+                "directory": str(root), "file": str(source), "arguments": [
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping",
+                    "-fprofile-update=atomic", "-c", str(source), "-o", str(obj),
+                ],
+            }]))
             metric = {"covered": 1, "count": 1, "percent": 100.0}
             exported = {"data": [{"files": [{"filename": str(source), "summary": {
                 "lines": metric, "functions": metric, "branches": metric,
@@ -454,6 +546,7 @@ class CoverageDiagnosticTests(unittest.TestCase):
                     Path(profile).write_bytes(b"profile")
                     stdout = "100% tests passed, 0 tests failed out of 1\n"
                 elif "merge" in argv:
+                    Path(argv[argv.index("-o") + 1]).write_bytes(b"indexed profile")
                     stdout = "profile merge notice\n"
                     stderr = "profile merge diagnostic\n"
                 elif "export" in argv:
@@ -470,6 +563,7 @@ class CoverageDiagnosticTests(unittest.TestCase):
                  mock.patch.object(slicer_coverage, "_run", side_effect=run):
                 status = slicer_coverage.main([
                     "run", "--root", str(root), "--object", str(binary),
+                    "--manifest", str(manifest), "--compile-commands", str(commands),
                     "--test-command", "fixture-tests", "--out", "report",
                 ])
             self.assertEqual(status, 1)
@@ -500,7 +594,8 @@ class CoverageDiagnosticTests(unittest.TestCase):
             commands = root / "compile_commands.json"
             commands.write_text(json.dumps([{
                 "directory": str(root), "file": str(source), "arguments": [
-                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping", "-c",
+                    "clang", "-fprofile-instr-generate", "-fcoverage-mapping",
+                    "-fprofile-update=atomic", "-c",
                     str(source), "-o", str(obj),
                 ],
             }]))
