@@ -4314,6 +4314,15 @@
         "representative_values"
       ],
       "reason": "A valid two-extruder Print gives extruder 0 the full bed and selected picture extruder 1 only an x=[170,185] mm strip. The public TimelapsePosPicker result must lie inside that selected strip. Arbitrary polygon shapes, empty or invalid regions, other extruder counts, and full Print.process timelapse emission remain unclaimed."
+    },
+    "manual_filament_change": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeManualFilamentChange]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The same two-object, two-filament BBL print explicitly exports manual_filament_change false and true. Automatic mode emits M1020 S1 and custom route markers; manual mode emits its reserved T-command tag, omits M1020 S1, and suppresses exactly the first custom change block while retaining later blocks."
     }
   }
 }
