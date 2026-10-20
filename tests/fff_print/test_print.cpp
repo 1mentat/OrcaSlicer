@@ -4689,6 +4689,7 @@ TEST_CASE("Print validation distinguishes a last-layer overrun from a fitting he
     Print print;
     Model model;
     init_print({cube(10.0)}, print, model, config);
+    REQUIRE(print.objects().size() == 1);
 
     const StringObjectException error = print.validate();
     if (!part.expects_last_layer_error) {
@@ -4699,7 +4700,7 @@ TEST_CASE("Print validation distinguishes a last-layer overrun from a fitting he
 
     REQUIRE_FALSE(error.string.empty());
     CHECK(error.string.find("its last layer exceeds the maximum build volume height.") != std::string::npos);
-    CHECK(error.object == model.objects.front());
+    CHECK(error.object == print.objects().front()->model_object());
     CHECK(error.opt_key.empty());
     CHECK_FALSE(error.is_warning);
 }
@@ -4871,6 +4872,7 @@ TEST_CASE("Print validation reports belt-only brim settings with stable warning 
     Print print;
     Model model;
     build_cubes(model, print, config, part.object_count, false);
+    REQUIRE(print.objects().size() == size_t(part.object_count));
     std::vector<StringObjectException> warnings;
     const StringObjectException error = print.validate(&warnings);
     REQUIRE(error.string.empty());
@@ -4891,5 +4893,5 @@ TEST_CASE("Print validation reports belt-only brim settings with stable warning 
     CHECK(warning->string.find(part.expected_message) != std::string::npos);
     CHECK((warning->object != nullptr) == part.expected_model_object);
     if (part.expected_model_object)
-        CHECK(warning->object == model.objects.front());
+        CHECK(warning->object == print.objects().front()->model_object());
 }
