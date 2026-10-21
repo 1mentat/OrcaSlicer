@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Semantic mutations for public Config string parsing and forward-compatible boolean import.",
+  "description": "Semantic mutations for Config string import, typed ownership, and indexed option access.",
   "mutants": [
     {
       "id": "config-forward-compatibility-boolean-fallback-disabled",
@@ -19,6 +19,26 @@
       "expected_matches": 1,
       "description": "Replacing the trailing empty vector item with a space must fail the public delimiter parser's expected final empty value.",
       "test_filter": "String settings preserve escaped scalar and delimited vector content"
+    },
+    {
+      "id": "config-dynamic-config-lvalue-merge-overwrite-noop",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "it->second->set(kvp.second.get());",
+      "new": "it->second->set(it->second.get());",
+      "test_filter": "DynamicConfig copy\\, move\\, plus\\, swap\\, and erase preserve ownership",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Ignore the incoming same-type lvalue value in +=; the assertion that the destination count becomes 12 fails before any rvalue merge."
+    },
+    {
+      "id": "config-dynamic-int-vector-index-off-by-one",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "    int&                opt_int(const t_config_option_key &opt_key, unsigned int idx)           { return this->option<ConfigOptionInts>(opt_key)->get_at(idx); }",
+      "new": "    int&                opt_int(const t_config_option_key &opt_key, unsigned int idx)           { return this->option<ConfigOptionInts>(opt_key)->get_at(idx - 1); }",
+      "test_filter": "DynamicConfig indexed accessors address owned vector slots",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Read or write the preceding int-vector slot. With index 1 and initialized values {3, 5}, the accessor assertion expecting 7 at slot 1 must fail without an out-of-range access."
     }
   ]
 }

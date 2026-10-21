@@ -2910,7 +2910,7 @@ public:
             else {
                 assert(it->second->type() == kvp.second->type());
                 if (it->second->type() == kvp.second->type())
-                    *it->second = *kvp.second;
+                    it->second->set(kvp.second.get());
                 else
                     it->second.reset(kvp.second->clone());
             }

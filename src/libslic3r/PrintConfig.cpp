@@ -1077,6 +1077,7 @@ void PrintConfigDef::init_common_params()
     def->set_default_value(new ConfigOptionFloat(100.0));
 
     def           = this->add("extruder_printable_height", coFloats);
+    def->nullable = true;
     def->label    = L("Extruder printable height");
     def->tooltip  = L("Maximum printable height of this extruder which is limited by mechanism of printer.");
     def->sidetext = L("mm");	// millimeters, CIS languages need translation
@@ -2648,6 +2649,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloatsNullable{0});
 
     def = this->add("small_support_perimeter_speed", coFloatsOrPercents);
+    def->nullable = true;
     def->label = L("Small support perimeters");
     def->category = L("Speed");
     def->tooltip = L("Same as \"Small perimeters\", but for supports. "
@@ -2661,6 +2663,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloatsOrPercentsNullable{FloatOrPercent(50, true)});
 
     def = this->add("small_support_perimeter_threshold", coFloats);
+    def->nullable = true;
     def->label = L("Small support perimeters threshold");
     def->category = L("Speed");
     def->tooltip = L("This sets the threshold for small support perimeter length. The default threshold is 0mm.");
@@ -12462,7 +12465,7 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->cli_params = "slicing_data_directory";
     def->set_default_value(new ConfigOptionString("cached_data"));
 
-    def = this->add("load_slicedata", coStrings);
+    def = this->add("load_slicedata", coString);
     def->label = L("Load slicing data");
     def->tooltip = L("Load cached slicing data from directory.");
     def->cli_params = "slicing_data_directory";

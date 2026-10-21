@@ -6,6 +6,13 @@
 #include <vector>
 #include <set>
 #include <cmath>
+#include <memory>
+#include <sstream>
+#include <utility>
+
+#include <cereal/archives/binary.hpp>
+#include <cereal/types/string.hpp>
+#include <cereal/types/vector.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -39,6 +46,46 @@ void add_print_variant_columns(DynamicPrintConfig &config)
     config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = {"Direct Drive Standard", "Direct Drive High Flow",
                                                                                   "Direct Drive Standard", "Direct Drive High Flow"};
     config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {30., 200., 50., 500.};
+}
+
+void round_trip_registered_option_archives(const ConfigDef &definition)
+{
+    std::set<std::pair<ConfigOptionType, bool>> seen_dispatches;
+    for (const auto &entry : definition.options) {
+        const ConfigOptionDef &option_def = entry.second;
+        if (option_def.default_value.get() == nullptr)
+            continue;
+        INFO("registered option: " << option_def.opt_key);
+        REQUIRE(option_def.default_value->type() == option_def.type);
+        REQUIRE(option_def.default_value->nullable() == option_def.nullable);
+
+        const auto dispatch = std::make_pair(option_def.type, option_def.nullable);
+        if (!seen_dispatches.insert(dispatch).second)
+            continue;
+        std::unique_ptr<ConfigOption> materialized(option_def.create_default_option());
+        REQUIRE(materialized != nullptr);
+        REQUIRE(materialized->type() == option_def.type);
+        REQUIRE(materialized->nullable() == option_def.nullable);
+        CHECK(*materialized == *option_def.default_value);
+
+        std::stringstream bytes;
+        {
+            cereal::BinaryOutputArchive archive(bytes);
+            option_def.save_option_to_archive(archive, materialized.get());
+        }
+
+        bytes.seekg(0);
+        {
+            cereal::BinaryInputArchive archive(bytes);
+            std::unique_ptr<ConfigOption> restored(option_def.load_option_from_archive(archive));
+            REQUIRE(restored != nullptr);
+            CHECK(restored->type() == option_def.type);
+            CHECK(restored->nullable() == option_def.nullable);
+            CHECK(*restored == *materialized);
+            CHECK(*restored == *option_def.default_value);
+        }
+    }
+    REQUIRE_FALSE(seen_dispatches.empty());
 }
 
 } // namespace
@@ -1060,4 +1107,16 @@ TEST_CASE("Support filament identity follows vendor identifiers and generic mate
         CHECK(config.get_filament_type(displayed, 0) == "PLA");
         CHECK(displayed == "PLA");
     }
+}
+
+TEST_CASE("Registered print options round-trip through binary option archives", "[Config][ConfigArchive]")
+{
+    round_trip_registered_option_archives(print_config_def);
+}
+
+TEST_CASE("Registered CLI options round-trip through binary option archives", "[Config][ConfigArchive]")
+{
+    round_trip_registered_option_archives(cli_actions_config_def);
+    round_trip_registered_option_archives(cli_transform_config_def);
+    round_trip_registered_option_archives(cli_misc_config_def);
 }

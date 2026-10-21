@@ -908,6 +908,12 @@ identical, empty, and unequal-length integer groups. Header mutations require
 recompiling consumers; an isolated header check must avoid archived weak inline
 definitions masking the changed implementation.
 
+The ownership cases check copy isolation and overwriting existing values through
+both lvalue and rvalue merges. Resolver, typed string-key import, and mutable
+indexed access cases check public API behavior; indexed writes are read back
+through the separate const accessor. Their overwrite and index probes are in
+`config_public_contracts.json`.
+
 `[ConfigVariantRestore]` checks mapped vector slots, insertion, clamped removal,
 short source vectors, and invalid inputs. `[ConfigSerialization]` checks escaped
 strings and trailing empty vector entries. `[ConfigSubstitution]` checks typed
@@ -915,6 +921,13 @@ fallback values and recorded substitutions; `[ConfigMigration]` also checks a
 minimal ConfigDef-backed alias through public deserialization. Build
 `libslic3r_config_tests` for focused feedback. Its probes are in
 `config_public_contracts.json`.
+
+The registered print and CLI archive round trips use the existing
+`libslic3r_config_variant_expansion_tests` target. They check default metadata
+for every option and round-trip each distinct type/nullable dispatch. The
+declared point/grouped archive, substitution-order, and vector-collection cases use
+`libslic3r_config_tests`; their four value-corrupting `Config.hpp` probes are
+listed in `config_option_archive_roundtrip.json`.
 
 The Config JSON loading case checks flat and nested polygon groups and declared
 vector aliases using the print setting schema with generic ConfigBase loading.

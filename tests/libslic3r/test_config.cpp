@@ -2,6 +2,7 @@
 #include <exception>
 #include <stdexcept>
 #include <boost/nowide/cstdlib.hpp>
+#include "libslic3r/Config.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/libslic3r.h"
 #include <string>
@@ -25,7 +26,6 @@
 #include <cereal/archives/binary.hpp>
 
 #include <boost/nowide/fstream.hpp>
-#include "libslic3r/Config.hpp"
 #include <array>
 #include <algorithm>
 #include <cmath>
@@ -3460,6 +3460,13 @@ TEST_CASE("DynamicConfig copy, move, plus, swap, and erase preserve ownership", 
     DynamicConfig original;
     original.set_key_value("count", new ConfigOptionInt(4));
 
+    const ConfigBase &original_base = original;
+    DynamicConfig copied_from_base(original_base);
+    REQUIRE(copied_from_base.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied_from_base.opt<ConfigOptionInt>("count")->value == 4);
+    copied_from_base.opt<ConfigOptionInt>("count")->value = 6;
+    CHECK(original.opt<ConfigOptionInt>("count")->value == 4);
+
     DynamicConfig copied(original);
     copied.opt<ConfigOptionInt>("count")->value = 9;
     CHECK(original.opt<ConfigOptionInt>("count")->value == 4);
@@ -3473,9 +3480,24 @@ TEST_CASE("DynamicConfig copy, move, plus, swap, and erase preserve ownership", 
 
     DynamicConfig extra;
     extra.set_key_value("label", new ConfigOptionString("extra"));
+    extra.set_key_value("count", new ConfigOptionInt(12));
     copied += extra;
     REQUIRE(copied.has("label"));
     CHECK(copied.opt_string("label") == "extra");
+    REQUIRE(copied.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied.opt<ConfigOptionInt>("count")->value == 12);
+    CHECK(extra.opt<ConfigOptionInt>("count")->value == 12);
+    extra.opt<ConfigOptionInt>("count")->value = 13;
+    CHECK(copied.opt<ConfigOptionInt>("count")->value == 12);
+
+    DynamicConfig replacement;
+    replacement.set_key_value("count", new ConfigOptionInt(17));
+    replacement.set_key_value("label", new ConfigOptionString("moved"));
+    copied += std::move(replacement);
+    CHECK(replacement.empty());
+    REQUIRE(copied.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied.opt<ConfigOptionInt>("count")->value == 17);
+    CHECK(copied.opt_string("label") == "moved");
 
     DynamicConfig moved(std::move(copied));
     CHECK(copied.empty());
@@ -3487,6 +3509,47 @@ TEST_CASE("DynamicConfig copy, move, plus, swap, and erase preserve ownership", 
     CHECK(swapped.has("count"));
     CHECK(swapped.erase("count"));
     CHECK_FALSE(swapped.erase("count"));
+}
+
+TEST_CASE("Config resolver returns present options and throws for missing keys", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("known_value", new ConfigOptionInt(17));
+    const ConfigBase &resolver = config;
+
+    const ConfigOption *known = resolver.option_throw("known_value");
+    REQUIRE(known != nullptr);
+    CHECK(known->type() == ConfigOptionInt::static_type());
+    REQUIRE_THROWS_AS(resolver.option_throw("missing_value"), UnknownOptionException);
+}
+
+TEST_CASE("Strict deserialization converts typed string-key items", "[Config][ConfigContracts]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const std::string bool_key = "gcode_comments";
+    const std::string int_key = "raft_layers";
+    const std::string float_key = "max_bridge_length";
+    const std::string double_key = "layer_height";
+
+    config.set_deserialize_strict({
+        {bool_key, true},
+        {int_key, 8},
+        {float_key, 1.25f},
+        {double_key, 0.5}
+    });
+
+    const auto *bool_value = config.option<ConfigOptionBool>(bool_key);
+    const auto *int_value = config.option<ConfigOptionInt>(int_key);
+    const auto *float_value = config.option<ConfigOptionFloat>(float_key);
+    const auto *double_value = config.option<ConfigOptionFloat>(double_key);
+    REQUIRE(bool_value != nullptr);
+    REQUIRE(int_value != nullptr);
+    REQUIRE(float_value != nullptr);
+    REQUIRE(double_value != nullptr);
+    CHECK(bool_value->value);
+    CHECK(int_value->value == 8);
+    CHECK_THAT(float_value->value, WithinAbs(1.25, 1e-9));
+    CHECK_THAT(double_value->value, WithinAbs(0.5, 1e-9));
 }
 
 TEST_CASE("ConfigOptionFloats appends and resizes values with explicit defaults", "[Config][ConfigContracts]")
@@ -4045,6 +4108,36 @@ TEST_CASE("DynamicConfig indexed accessors preserve regular and nullable option 
     // existing boolean conversion (nonzero), while a concrete false remains false.
     CHECK(const_config.opt_bool("filament_retract_when_changing_layer", 0));
     CHECK_FALSE(const_config.opt_bool("filament_retract_when_changing_layer", 1));
+}
+
+TEST_CASE("DynamicConfig indexed accessors address owned vector slots", "[Config][ConfigContracts][ConfigAccessors]")
+{
+    DynamicConfig config;
+    config.set_key_value("ratio_slots", new ConfigOptionFloatsOrPercentsNullable({FloatOrPercent(12., false), FloatOrPercent(25., true)}));
+    config.set_key_value("int_slots", new ConfigOptionInts({3, 5}));
+    config.set_key_value("nullable_int_slots", new ConfigOptionIntsNullable({ConfigOptionIntsNullable::nil_value(), 11}));
+    config.set_key_value("enum_slots", new ConfigOptionEnumsGeneric({4, 9}));
+    config.set_key_value("nullable_enum_slots", new ConfigOptionEnumsGenericNullable({ConfigOptionEnumsGenericNullable::nil_value(), 12}));
+    auto *nullable_bool_slots = new ConfigOptionBoolsNullable;
+    nullable_bool_slots->values = {ConfigOptionBoolsNullable::nil_value(), 0};
+    config.set_key_value("nullable_bool_slots", nullable_bool_slots);
+
+    FloatOrPercent &ratio_slot = config.opt_float_or_percent_nullable("ratio_slots", 1);
+    ratio_slot.value = 30.;
+    ratio_slot.percent = true;
+    config.opt_int("int_slots", 1) = 7;
+    config.opt_int_nullable("nullable_int_slots", 1) = 13;
+
+    const DynamicConfig &view = config;
+    CHECK_THAT(view.opt_float_or_percent_nullable("ratio_slots", 1).value, WithinAbs(30., 1e-12));
+    CHECK(view.opt_float_or_percent_nullable("ratio_slots", 1).percent);
+    CHECK(view.opt_int("int_slots", 1) == 7);
+    CHECK(view.opt_int_nullable("nullable_int_slots", 1) == 13);
+    CHECK(view.opt_int_nullable("nullable_int_slots", 0) == ConfigOptionIntsNullable::nil_value());
+    CHECK(view.opt_enum("enum_slots", 1) == 9);
+    CHECK(view.opt_enum_nullable("nullable_enum_slots", 1) == 12);
+    CHECK(view.opt_bool_nullable("nullable_bool_slots", 0));
+    CHECK_FALSE(view.opt_bool_nullable("nullable_bool_slots", 1));
 }
 
 } // namespace config_residual_contracts
@@ -4714,4 +4807,93 @@ TEST_CASE("ConfigOption vector overrides copy regular sources and preserve nulla
     REQUIRE(target.apply_override(&replacement, default_index));
     const std::vector<int> expected_nullable{11, 30, 33};
     CHECK(target.values == expected_nullable);
+}
+
+TEST_CASE("Declared point and grouped integer option types round-trip through binary archives", "[Config][ConfigArchive]")
+{
+    // These are valid declared ConfigOptionDef types, not registered print settings.
+    ConfigOptionDef point3_definition;
+    point3_definition.opt_key = "archive_point3_contract";
+    point3_definition.type = coPoint3;
+    ConfigOptionDef groups_definition;
+    groups_definition.opt_key = "archive_int_groups_contract";
+    groups_definition.type = coIntsGroups;
+    CHECK(point3_definition.is_scalar());
+    CHECK_FALSE(groups_definition.is_scalar());
+
+    const ConfigOptionPoint3 point3_source(Vec3d(1.25, -2.5, 9.75));
+    const ConfigOptionIntsGroups groups_source({std::vector<int>{1, 4}, std::vector<int>{9}});
+
+    std::stringstream bytes;
+    {
+        cereal::BinaryOutputArchive archive(bytes);
+        point3_definition.save_option_to_archive(archive, &point3_source);
+        groups_definition.save_option_to_archive(archive, &groups_source);
+    }
+
+    bytes.seekg(0);
+    std::unique_ptr<ConfigOption> point3_restored;
+    std::unique_ptr<ConfigOption> groups_restored;
+    {
+        cereal::BinaryInputArchive archive(bytes);
+        point3_restored.reset(point3_definition.load_option_from_archive(archive));
+        groups_restored.reset(groups_definition.load_option_from_archive(archive));
+    }
+
+    REQUIRE(point3_restored != nullptr);
+    CHECK(point3_restored->type() == coPoint3);
+    CHECK(point3_restored->is_scalar());
+    CHECK_FALSE(point3_restored->nullable());
+    CHECK(*point3_restored == point3_source);
+    REQUIRE(groups_restored != nullptr);
+    CHECK(groups_restored->type() == coIntsGroups);
+    CHECK_FALSE(groups_restored->is_scalar());
+    CHECK_FALSE(groups_restored->nullable());
+    const auto *restored_groups = dynamic_cast<const ConfigOptionIntsGroups *>(groups_restored.get());
+    REQUIRE(restored_groups != nullptr);
+    CHECK_FALSE(restored_groups->is_nil(0));
+    CHECK(*groups_restored == groups_source);
+}
+
+TEST_CASE("Config substitutions order by option key and old value", "[Config][ConfigSubstitution]")
+{
+    ConfigOptionDef first_definition;
+    first_definition.opt_key = "first_option";
+    ConfigOptionDef second_definition;
+    second_definition.opt_key = "second_option";
+
+    ConfigSubstitution first;
+    first.opt_def = &first_definition;
+    first.old_value = "old-a";
+    ConfigSubstitution same_value;
+    same_value.opt_def = &first_definition;
+    same_value.old_value = "old-a";
+    ConfigSubstitution later_value;
+    later_value.opt_def = &first_definition;
+    later_value.old_value = "old-b";
+    ConfigSubstitution later_option;
+    later_option.opt_def = &second_definition;
+    later_option.old_value = "old-a";
+
+    CHECK(first == same_value);
+    CHECK_FALSE(first == later_value);
+    CHECK(first < later_value);
+    CHECK_FALSE(later_value < first);
+    CHECK(first < later_option);
+    CHECK_FALSE(later_option < first);
+}
+
+TEST_CASE("Config option vectors collect scalar values and first vector values", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloat scalar(2.5);
+    ConfigOptionFloats vector({3.5, 4.5});
+    ConfigOptionFloats collected;
+    const std::vector<const ConfigOption *> sources{&scalar, &vector};
+    collected.set(sources);
+    config_residual_contracts::check_values(collected.values, {2.5, 3.5});
+
+    ConfigOptionFloats slots({10., 20.});
+    ConfigOptionFloat replacement(7.);
+    slots.set_at(&replacement, 3, 0);
+    config_residual_contracts::check_values(slots.values, {10., 20., 10., 7.});
 }
