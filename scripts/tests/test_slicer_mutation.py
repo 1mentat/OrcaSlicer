@@ -77,6 +77,76 @@ class MutationSelectionTests(unittest.TestCase):
                              [("first", "First"), ("second", "Second")])
 
 
+class MutationManifestDigestTests(unittest.TestCase):
+    def write_manifest(self, path, ident):
+        payload = json.dumps({"mutants": [{
+            "id": ident, "path": "source.cpp", "old": "before", "new": "after",
+            "test_filter": ident.title(),
+        }]}).encode("utf-8") + b"\r\n"
+        path.write_bytes(payload)
+        return hashlib.sha256(payload).hexdigest()
+
+    def test_digest_binds_raw_manifest_bytes_and_each_repeated_selection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = self.write_manifest(root / "first.json", "first")
+            second = self.write_manifest(root / "second.json", "second")
+            mutants = slicer_mutation._load_mutants(
+                ["first.json", str(root / "second.json")], root,
+                expected_sha256=[first.upper(), second])
+            self.assertEqual([(m.id, m.test_filter) for m in mutants],
+                             [("first", "First"), ("second", "Second")])
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "SHA-256 mismatch"):
+                slicer_mutation._load_mutants(
+                    ["second.json", "first.json"], root, expected_sha256=[first, second])
+            (root / "first.json").write_bytes((root / "first.json").read_bytes() + b"\n")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "SHA-256 mismatch"):
+                slicer_mutation._load_mutants("first.json", root, expected_sha256=first)
+
+    def test_stale_catalog_fails_before_repository_build_or_source_work(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reviewed = self.write_manifest(root / "reviewed.json", "new-contract")
+            self.write_manifest(root / "stale.json", "old-contract")
+            source = root / "source.cpp"
+            source.write_bytes(b"before\n")
+            output = root / "evidence"
+            with mock.patch.object(slicer_mutation, "validate_clean_repo") as validate, \
+                    mock.patch.object(slicer_mutation, "_mutation_worktree") as worktree, \
+                    mock.patch.object(slicer_mutation, "run_command") as command:
+                code = slicer_mutation.main([
+                    "run", "--root", str(root), "--out", str(output),
+                    "--build-command", "build", "--test-command", "test",
+                    "--mutants", "stale.json", "--mutants-sha256", reviewed,
+                ])
+            self.assertEqual(code, 2)
+            validate.assert_not_called()
+            worktree.assert_not_called()
+            command.assert_not_called()
+            self.assertEqual(source.read_bytes(), b"before\n")
+            self.assertFalse((root / "build").exists())
+            report = json.loads((output / "mutation-report.json").read_text())
+            self.assertEqual(report["status"], "infrastructure_error")
+            self.assertIn("SHA-256 mismatch", report["error"])
+
+    def test_digest_guards_require_unambiguous_explicit_manifest_pairing(self):
+        for manifests, digests, error in [
+                (None, ["a" * 64], "explicit --mutants"),
+                (["first.json", "second.json"], ["a" * 64], "one --mutants-sha256"),
+                (["first.json"], ["bad-digest"], "64 hexadecimal")]:
+            with self.subTest(manifests=manifests, digests=digests):
+                with self.assertRaisesRegex(slicer_mutation.MutationError, error):
+                    slicer_mutation._load_mutants(manifests, expected_sha256=digests)
+
+    def test_matching_digest_does_not_hide_invalid_manifest_encoding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manifest = Path(temp) / "bad.json"
+            manifest.write_bytes(b"\xff")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "cannot read mutant manifest"):
+                slicer_mutation._load_mutants(
+                    str(manifest), expected_sha256=hashlib.sha256(b"\xff").hexdigest())
+
+
 class MutationArgvFileTests(unittest.TestCase):
     def make_detached_repo(self, parent):
         repo = Path(parent) / "repo"

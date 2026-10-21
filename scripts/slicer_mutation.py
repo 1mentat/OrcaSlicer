@@ -415,17 +415,30 @@ def validate_clean_repo(repo: Path) -> str:
     return head.stdout.strip()
 
 
-def _load_mutants(path: str | list[str] | None, root: Path | None = None) -> list[Mutant]:
+def _load_mutants(path: str | list[str] | None, root: Path | None = None, *,
+                  expected_sha256: str | list[str] | None = None) -> list[Mutant]:
     if not path:
+        if expected_sha256 is not None:
+            raise MutationError("--mutants-sha256 requires an explicit --mutants manifest")
         return list(DEFAULT_MUTANTS)
     if isinstance(path, list):
-        return [mutant for manifest in path for mutant in _load_mutants(manifest, root)]
+        digests = [None] * len(path) if expected_sha256 is None else expected_sha256
+        if not isinstance(digests, list) or len(digests) != len(path):
+            raise MutationError("provide one --mutants-sha256 per --mutants manifest, in the same order")
+        return [mutant for manifest, digest in zip(path, digests)
+                for mutant in _load_mutants(manifest, root, expected_sha256=digest)]
+    if expected_sha256 is not None and (
+            not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256) is None):
+        raise MutationError("--mutants-sha256 must contain 64 hexadecimal characters")
     manifest_arg = Path(path)
     manifest = ((root / manifest_arg) if root is not None and not manifest_arg.is_absolute()
                 else manifest_arg).resolve()
     try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = manifest.read_bytes()
+        if expected_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_sha256.lower():
+            raise MutationError(f"mutant manifest SHA-256 mismatch: {manifest}")
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise MutationError(f"cannot read mutant manifest {manifest}: {exc}") from exc
     entries = payload.get("mutants") if isinstance(payload, dict) else payload
     if not isinstance(entries, list):
@@ -1065,12 +1078,15 @@ def run_mutation(args: argparse.Namespace) -> int:
         args.build_command, args.build_argv_file, root=repo, command_name="build")
     test_argv, test_argv_file = _command_arguments(
         args.test_command, args.test_argv_file, root=repo, command_name="test")
+    manifest_digests = getattr(args, "mutants_sha256", None)
+    guarded_mutants = (_load_mutants(args.mutants, repo, expected_sha256=manifest_digests)
+                       if manifest_digests is not None else None)
     temp_preflight = _preflight_temp_environment()
     out_lexical = _lexical_output_path(repo, args.out)
     _output_available(out_lexical)
     out = out_lexical.resolve()
     commit = validate_clean_repo(repo)
-    mutants = _load_mutants(args.mutants, repo)
+    mutants = guarded_mutants if guarded_mutants is not None else _load_mutants(args.mutants, repo)
     if not mutants:
         raise MutationError("mutation manifest is empty")
     if len(mutants) > args.max_mutants:
@@ -1088,6 +1104,10 @@ def run_mutation(args: argparse.Namespace) -> int:
         work_parent.mkdir(parents=True, exist_ok=True)
 
     preflight: dict[str, Any] = {"explicit_temp_directories": temp_preflight}
+    if manifest_digests is not None:
+        preflight["mutant_manifests"] = [
+            {"path": str((repo / Path(path)).resolve()), "sha256": digest.lower()}
+            for path, digest in zip(args.mutants, manifest_digests)]
     argv_files = {name: source for name, source in
                   (("build", build_argv_file), ("test", test_argv_file))
                   if source is not None}
@@ -1287,6 +1307,8 @@ def _parser() -> argparse.ArgumentParser:
                               help="JSON argv array file, relative to --root unless absolute")
     run.add_argument("--mutants", action="append",
                      help="JSON mutant manifest; repeat to share one build across manifests (default: three Flow smoke mutants)")
+    run.add_argument("--mutants-sha256", action="append",
+                     help="require a reviewed manifest digest before repository/build work; repeat in --mutants order")
     run.add_argument("--max-mutants", type=int, default=DEFAULT_MAX_MUTANTS)
     run.add_argument("--out", default="build/slicer-mutation")
     run.add_argument("--work-root", help="parent directory for disposable worktree")

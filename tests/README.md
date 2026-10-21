@@ -1065,6 +1065,12 @@ are relative to `--root` unless absolute. The same `{root}`, `{build}`, and
 `{filter}` placeholders apply. Empty arguments after the executable are retained,
 and the preflight report records each argument file's path and SHA-256.
 
+Pin a reviewed catalog with `--mutants-sha256 <64-character SHA-256>`.
+Repeat this option once per `--mutants`, in the same order. The runner checks
+the raw catalog bytes before repository checks or compilation, selects mutants
+from those verified bytes, and records the manifest paths and digests in the
+preflight report. A mismatched digest fails the run without building.
+
 `mutation-report.json` records the commit, worktree commands, exact source
 match and replacement, build/test commands, and separate statuses for build
 errors, timeouts, killed mutants, and survivors. A mutant is counted only
