@@ -728,3 +728,234 @@ TEST_CASE("Arachne skeletal paths follow a concave variable-width outline", "[Ar
     CHECK(first.positive_width_junctions == repeated.positive_width_junctions);
     CHECK(first.varying_width_paths == repeated.varying_width_paths);
 }
+
+TEST_CASE("Arachne factory wrappers preserve nonlinear width thresholds", "[Arachne][SkeletalPublicAPI]")
+{
+    const coord_t min_output_width = scaled<coord_t>(0.28);
+    const coord_t min_feature_width = scaled<coord_t>(0.10);
+
+    for (const coord_t outer_wall_offset : {coord_t(0), scaled<coord_t>(0.02)}) {
+        CAPTURE(unscaled<double>(outer_wall_offset));
+        const auto widened = BeadingStrategyFactory::makeStrategy(
+            scaled<coord_t>(0.42), scaled<coord_t>(0.45), scaled<coord_t>(0.40),
+            float(M_PI / 4.0), true, min_output_width, min_feature_width,
+            0.5, 0.5, 8, outer_wall_offset, 2);
+        const std::vector<coord_t> thresholds = widened->getNonlinearThicknesses(1);
+        CHECK(std::find(thresholds.begin(), thresholds.end(), min_output_width) != thresholds.end());
+        CHECK(widened->getNonlinearThicknesses(9).empty());
+
+        const auto without_widening = BeadingStrategyFactory::makeStrategy(
+            scaled<coord_t>(0.42), scaled<coord_t>(0.45), scaled<coord_t>(0.40),
+            float(M_PI / 4.0), false, min_output_width, min_feature_width,
+            0.5, 0.5, 8, outer_wall_offset, 2);
+        CHECK(without_widening->getNonlinearThicknesses(1).empty());
+    }
+}
+
+TEST_CASE("Arachne taper preserves the output-width floor at its analytic thickness", "[Arachne][SkeletalPublicAPI]")
+{
+    constexpr double length_mm = 30.0;
+    constexpr double half_base_width_mm = 3.0;
+    constexpr double min_output_width_mm = 0.28;
+    const double half_slope = half_base_width_mm / length_mm;
+    const double expected_x = (min_output_width_mm / 2.0) *
+        std::sqrt(1.0 + half_slope * half_slope) / half_slope;
+    const Polygon taper = arachne_skeletal_public_contracts::polygon({
+        {0.0, 0.0}, {length_mm, -half_base_width_mm}, {length_mm, half_base_width_mm}
+    });
+
+    auto strategy = BeadingStrategyFactory::makeStrategy(
+        scaled<coord_t>(0.42), scaled<coord_t>(0.45), scaled<coord_t>(0.40),
+        float(M_PI / 4.0), true, scaled<coord_t>(min_output_width_mm), scaled<coord_t>(0.10),
+        0.5, 0.5, 8, 0, 2);
+    const coord_t transition_length = scaled<coord_t>(0.40);
+    SkeletalTrapezoidation trapezoidation(
+        Polygons{taper}, *strategy, strategy->getTransitioningAngle(),
+        scaled<coord_t>(0.25), scaled<coord_t>(0.40), scaled<coord_t>(0.10), transition_length);
+    std::vector<VariableWidthLines> toolpaths;
+    trapezoidation.generateToolpaths(toolpaths);
+
+    // Sample the public piecewise-linear width at the analytic local thickness.
+    // The contract is the width at that location, not a particular junction encoding.
+    double nearest_axis_error = std::numeric_limits<double>::infinity();
+    double nearest_width_mm = 0.0;
+    for (const VariableWidthLines &inset : toolpaths) {
+        for (const ExtrusionLine &line : inset) {
+            for (size_t i = 1; i < line.junctions.size(); ++i) {
+                const ExtrusionJunction &a = line.junctions[i - 1];
+                const ExtrusionJunction &b = line.junctions[i];
+                const double x_a = unscaled<double>(a.p.x());
+                const double x_b = unscaled<double>(b.p.x());
+                if (x_a == x_b)
+                    continue;
+                const double t = (expected_x - x_a) / (x_b - x_a);
+                if (t < 0.0 || t > 1.0)
+                    continue;
+                const double y = unscaled<double>(a.p.y()) +
+                    t * (unscaled<double>(b.p.y()) - unscaled<double>(a.p.y()));
+                const double axis_error = std::abs(y);
+                if (axis_error < nearest_axis_error) {
+                    nearest_axis_error = axis_error;
+                    nearest_width_mm = unscaled<double>(a.w) +
+                        t * (unscaled<double>(b.w) - unscaled<double>(a.w));
+                }
+            }
+        }
+    }
+    CAPTURE(expected_x, nearest_axis_error, nearest_width_mm);
+    REQUIRE(std::isfinite(nearest_axis_error));
+    CHECK(nearest_axis_error <= 0.02);
+    CHECK_THAT(nearest_width_mm, Catch::Matchers::WithinAbs(min_output_width_mm, 0.01));
+}
+
+
+namespace arachne_wide_neck_contracts {
+
+struct RegionMeasure {
+    double length_mm = 0.;
+    double width_area_mm2 = 0.;
+};
+
+struct Summary {
+    size_t paths = 0;
+    size_t zero_width_junctions = 0;
+    size_t negative_width_junctions = 0;
+    size_t nonfinite_width_junctions = 0;
+    size_t positive_width_segments = 0;
+    bool finite = true;
+    bool nonnegative_widths = true;
+    bool inside_outline_or_margin = true;
+    double width_squared_length_mm3 = 0.;
+    RegionMeasure left_lobe;
+    RegionMeasure neck;
+    RegionMeasure right_lobe;
+};
+
+std::vector<VariableWidthLines> generate(const Polygon &outline, double transition_length_mm)
+{
+    const coord_t transition_length = scaled<coord_t>(transition_length_mm);
+    auto strategy = BeadingStrategyFactory::makeStrategy(
+        scaled<coord_t>(0.42), scaled<coord_t>(0.45), transition_length,
+        float(M_PI / 4.0), true, scaled<coord_t>(0.28), scaled<coord_t>(0.10),
+        0.5, 0.5, 8, 0, 2);
+    SkeletalTrapezoidation trapezoidation(
+        Polygons{outline}, *strategy, strategy->getTransitioningAngle(),
+        scaled<coord_t>(0.25), scaled<coord_t>(0.40), scaled<coord_t>(0.10),
+        transition_length);
+    std::vector<VariableWidthLines> paths;
+    trapezoidation.generateToolpaths(paths);
+    return paths;
+}
+
+Summary summarize(const Polygon &outline, const std::vector<VariableWidthLines> &paths)
+{
+    Summary result;
+    const coord_t margin = scaled<coord_t>(0.02);
+    const auto add = [](RegionMeasure &region, double length_mm, double from_width_mm, double to_width_mm) {
+        region.length_mm += length_mm;
+        region.width_area_mm2 += length_mm * 0.5 * (from_width_mm + to_width_mm);
+    };
+
+    for (const VariableWidthLines &inset : paths) {
+        for (const ExtrusionLine &line : inset) {
+            if (line.junctions.size() < 2)
+                continue;
+            ++result.paths;
+            for (const ExtrusionJunction &junction : line.junctions) {
+                const double x = unscaled<double>(junction.p.x());
+                const double y = unscaled<double>(junction.p.y());
+                const double width = unscaled<double>(junction.w);
+                const bool finite_width = std::isfinite(width);
+                result.finite &= std::isfinite(x) && std::isfinite(y) && finite_width;
+                result.nonnegative_widths &= finite_width && width >= 0.;
+                if (!finite_width)
+                    ++result.nonfinite_width_junctions;
+                else if (width == 0.)
+                    ++result.zero_width_junctions;
+                else if (width < 0.)
+                    ++result.negative_width_junctions;
+                if (!outline.contains(junction.p)) {
+                    const Point projection = outline.point_projection(junction.p);
+                    const double distance = unscaled<double>((projection - junction.p).cast<double>().norm());
+                    result.inside_outline_or_margin &= distance <= unscaled<double>(margin);
+                }
+            }
+
+            for (size_t index = 1; index < line.junctions.size(); ++index) {
+                const ExtrusionJunction &from = line.junctions[index - 1];
+                const ExtrusionJunction &to = line.junctions[index];
+                const double from_x = unscaled<double>(from.p.x());
+                const double from_y = unscaled<double>(from.p.y());
+                const double to_x = unscaled<double>(to.p.x());
+                const double to_y = unscaled<double>(to.p.y());
+                const double length_mm = std::hypot(to_x - from_x, to_y - from_y);
+                const double midpoint_x = 0.5 * (from_x + to_x);
+                const double midpoint_y = 0.5 * (from_y + to_y);
+                const double from_width_mm = unscaled<double>(from.w);
+                const double to_width_mm = unscaled<double>(to.w);
+                // Skeletal output can retain zero-width contour markers. They are not
+                // extrusion, so exclude segments whose two endpoints both have zero width.
+                if (from_width_mm == 0. && to_width_mm == 0.)
+                    continue;
+                ++result.positive_width_segments;
+                const double width_squared_mean =
+                    (from_width_mm * from_width_mm + from_width_mm * to_width_mm + to_width_mm * to_width_mm) / 3.;
+                result.width_squared_length_mm3 += length_mm * width_squared_mean;
+
+                if (midpoint_x >= -11.0 && midpoint_x <= -7.0 && std::abs(midpoint_y) <= 3.25)
+                    add(result.left_lobe, length_mm, from_width_mm, to_width_mm);
+                if (midpoint_x >= -3.0 && midpoint_x <= 3.0 && std::abs(midpoint_y) <= 0.40)
+                    add(result.neck, length_mm, from_width_mm, to_width_mm);
+                if (midpoint_x >= 7.0 && midpoint_x <= 11.0 && std::abs(midpoint_y) <= 3.25)
+                    add(result.right_lobe, length_mm, from_width_mm, to_width_mm);
+            }
+        }
+    }
+    return result;
+}
+
+} // namespace arachne_wide_neck_contracts
+
+TEST_CASE("Arachne variable-width walls remain balanced through broad lobes and a narrow neck", "[Arachne][SkeletalPublicAPI]")
+{
+    using namespace arachne_wide_neck_contracts;
+    // The two 8 mm tall lobes taper through 2 mm shoulders into a 1 mm wide,
+    // 8 mm long neck. This large bead-count drop and the concave shoulders put
+    // transition propagation on both sides of the neck without depending on a
+    // particular generated junction or path ordering.
+    const Polygon outline = arachne_skeletal_public_contracts::polygon({
+        {-12., -4.}, {-6., -4.}, {-4., -0.5}, {4., -0.5}, {6., -4.}, {12., -4.},
+        {12., 4.}, {6., 4.}, {4., 0.5}, {-4., 0.5}, {-6., 4.}, {-12., 4.}
+    });
+    const auto short_paths = generate(outline, 0.40);
+    const auto long_paths = generate(outline, 2.40);
+    const Summary short_transition = summarize(outline, short_paths);
+    const Summary long_transition = summarize(outline, long_paths);
+
+    CAPTURE(short_transition.left_lobe.length_mm, short_transition.neck.length_mm,
+            short_transition.right_lobe.length_mm, long_transition.left_lobe.length_mm,
+            long_transition.neck.length_mm, long_transition.right_lobe.length_mm,
+            short_transition.zero_width_junctions, short_transition.negative_width_junctions,
+            short_transition.nonfinite_width_junctions, long_transition.zero_width_junctions,
+            long_transition.negative_width_junctions, long_transition.nonfinite_width_junctions,
+            short_transition.width_squared_length_mm3, long_transition.width_squared_length_mm3);
+    REQUIRE(long_transition.paths > 0);
+    REQUIRE(short_transition.positive_width_segments > 0);
+    REQUIRE(long_transition.positive_width_segments > 0);
+    REQUIRE(long_transition.left_lobe.length_mm > 0.5);
+    REQUIRE(short_transition.neck.length_mm > 4.0);
+    REQUIRE(long_transition.neck.length_mm > 4.0);
+    REQUIRE(long_transition.right_lobe.length_mm > 0.5);
+    CHECK(short_transition.finite);
+    CHECK(long_transition.finite);
+    CHECK(short_transition.nonnegative_widths);
+    CHECK(long_transition.nonnegative_widths);
+    CHECK(short_transition.inside_outline_or_margin);
+    CHECK(long_transition.inside_outline_or_margin);
+    CHECK_THAT(long_transition.left_lobe.length_mm,
+               Catch::Matchers::WithinRel(long_transition.right_lobe.length_mm, 0.05));
+    CHECK_THAT(long_transition.left_lobe.width_area_mm2,
+               Catch::Matchers::WithinRel(long_transition.right_lobe.width_area_mm2, 0.05));
+    CHECK(std::abs(short_transition.width_squared_length_mm3 -
+                   long_transition.width_squared_length_mm3) > 1e-3);
+}

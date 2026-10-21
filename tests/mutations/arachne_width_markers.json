@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Public Arachne nonlinear-width marker forwarding and analytic taper contracts.",
+  "mutants": [
+    {
+      "id": "arachne-limited-wrapper-drops-width-markers",
+      "path": "src/libslic3r/Arachne/BeadingStrategy/LimitedBeadingStrategy.cpp",
+      "old": "    if (lower_bead_count > max_bead_count)\n        return {};\n    return parent->getNonlinearThicknesses(lower_bead_count);",
+      "new": "    return {};",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Arachne factory wrappers preserve nonlinear width thresholds",
+      "description": "Dropping the parent marker at the factory outermost cap must fail the public marker-presence assertion, including both the plain and nonzero-outer-offset strategies."
+    },
+    {
+      "id": "arachne-toolpath-generation-skips-extra-width-ribs",
+      "path": "src/libslic3r/Arachne/SkeletalTrapezoidation.cpp",
+      "old": "    generateExtraRibs();",
+      "new": "    // Deliberately omitted by mutation.",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Arachne taper preserves the output-width floor at its analytic thickness",
+      "description": "Skipping the public pipeline consumer of nonlinear width markers must fail the independently derived piecewise-linear width floor at the analytic local thickness."
+    }
+  ]
+}

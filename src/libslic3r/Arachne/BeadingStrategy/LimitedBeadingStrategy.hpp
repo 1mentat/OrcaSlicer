@@ -5,6 +5,7 @@
 #define LIMITED_BEADING_STRATEGY_H
 
 #include <string>
+#include <vector>
 
 #include "BeadingStrategy.hpp"
 #include "libslic3r/libslic3r.h"
@@ -42,6 +43,7 @@ public:
     coord_t getTransitioningLength(coord_t lower_bead_count) const override;
     
     float getTransitionAnchorPos(coord_t lower_bead_count) const override;
+    std::vector<coord_t> getNonlinearThicknesses(coord_t lower_bead_count) const override;
 
 protected:
     const coord_t max_bead_count;

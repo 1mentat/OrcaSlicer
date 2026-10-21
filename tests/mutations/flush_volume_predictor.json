@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Public flush predictor sRGB linearization and CIEDE2000 reference contracts.",
+  "mutants": [
+    {
+      "id": "flush-rgb2lab-low-srgb-gamma-branch",
+      "path": "src/libslic3r/FlushVolPredictor.cpp",
+      "old": "return x / 12.92;",
+      "new": "return x;",
+      "expected_matches": 1,
+      "test_filter": "Flush predictor RGB to Lab conversion handles dark neutral colors",
+      "description": "Skip the low-sRGB gamma linearization; the independent dark-gray L* reference must fail."
+    },
+    {
+      "id": "flush-ciede2000-hue-wrap-mean-direction",
+      "path": "src/libslic3r/FlushVolPredictor.cpp",
+      "old": "if (p_H_sum < 2 * M_PI)",
+      "new": "if (p_H_sum > 2 * M_PI)",
+      "expected_matches": 1,
+      "test_filter": "Flush predictor CIEDE2000 matches Sharma supplemental pairs",
+      "description": "Reverse the wrapped average-hue branch; Sharma Table I pair 17 must fail the 27.1492 reference."
+    }
+  ]
+}

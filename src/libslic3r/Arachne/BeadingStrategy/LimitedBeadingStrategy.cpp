@@ -5,6 +5,7 @@
 #include <cassert>
 #include <string>
 #include <utility>
+#include <vector>
 #include <cstddef>
 
 #include "LimitedBeadingStrategy.hpp"
@@ -28,6 +29,13 @@ coord_t LimitedBeadingStrategy::getTransitioningLength(coord_t lower_bead_count)
 float LimitedBeadingStrategy::getTransitionAnchorPos(coord_t lower_bead_count) const
 {
     return parent->getTransitionAnchorPos(lower_bead_count);
+}
+
+std::vector<coord_t> LimitedBeadingStrategy::getNonlinearThicknesses(coord_t lower_bead_count) const
+{
+    if (lower_bead_count > max_bead_count)
+        return {};
+    return parent->getNonlinearThicknesses(lower_bead_count);
 }
 
 LimitedBeadingStrategy::LimitedBeadingStrategy(const coord_t max_bead_count, BeadingStrategyPtr parent)

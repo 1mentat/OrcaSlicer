@@ -1371,3 +1371,16 @@ The Surface and Texture probes exercise public geometry/placement contracts; the
 adaptive bed-mesh cases check emitted placeholders against an analytic first-layer
 island envelope. These focused runs do not replace the canonical suite or establish
 full settings variance.
+
+The Arachne `[SkeletalPublicAPI]` contracts check nonlinear width thresholds through
+factory wrappers, an analytic taper width floor, and balanced variable-width
+paths through a narrow neck. Build `libslic3r_arachne_tests` for focused runs;
+`tests/mutations/arachne_width_markers.json` challenges marker forwarding and the
+extra-rib generation that consumes those markers.
+
+The `[FlushVolPredictor]` contracts check sRGB/D65 color conversion, published
+CIEDE2000 reference pairs, and directional predictions from all three bundled
+purge datasets. Build `libslic3r_flush_volume_tests` for focused runs. Its two CPP
+probes are in `tests/mutations/flush_volume_predictor.json`. The four existing
+`[FlushVolCalculator]` contracts remain in the same file and focused executable.
+These direct algorithm contracts do not establish complete settings variance.
