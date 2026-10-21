@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed proposal for SVG public export geometry, collection forwarding, and attribute fallback contracts. Candidate is test-only; behavior and coverage are unverified pending native review.",
+  "mutants": [
+    {
+      "id": "svg-thick-line-full-width-offset",
+      "path": "src/libslic3r/SVG.cpp",
+      "old": "    coordf_t da  = coordf_t(0.5)*line.a_width/len;\n    coordf_t db  = coordf_t(0.5)*line.b_width/len;",
+      "new": "    coordf_t da  = coordf_t(1.0)*line.a_width/len;\n    coordf_t db  = coordf_t(1.0)*line.b_width/len;",
+      "test_filter": "SVG primitive collections retain tapered widths and scaled coordinates",
+      "test_case": "SVG primitive collections retain tapered widths and scaled coordinates",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Use each full endpoint width as the offset from the centerline. The literal trapezoid vertices derived from the documented 1 mm and 3 mm widths must fail ordinary CHECKs."
+    },
+    {
+      "id": "svg-empty-hole-color-falls-back-to-fill",
+      "path": "src/libslic3r/SVG.cpp",
+      "old": "            if (color_holes.empty())\n                color_holes = color_contour;",
+      "new": "            if (color_holes.empty())\n                color_holes = exp_with_attr.second.color_fill;",
+      "test_filter": "SVG attribute export applies contour fallbacks and wraps legends",
+      "test_case": "SVG attribute export applies contour fallbacks and wraps legends",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Resolve an omitted hole outline color from the fill color rather than the already-resolved contour color. The fixture has orange fill, teal contour, and no hole color; it expects both outer and hole strokes to remain teal."
+    }
+  ]
+}

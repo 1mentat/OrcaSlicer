@@ -4123,8 +4123,6 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
         should_line_ironing = false;
     }
     bool  should_cooling_before_tower = !solid_tool_toolchange;
-    bool  should_cooling_before_object = false;//interface layer heating print tower, then cooling print object
-    int cooling_begin_line = 2;
     float x_to_wipe = wipe_length;
     float dy                 = is_first_layer() ? m_perimeter_width : m_layer_info->extra_spacing * get_block_gap_width(m_current_tool,false);
     if (solid_tool_toolchange)
@@ -4140,31 +4138,6 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
 
     bool is_from_up = (m_cur_layer_id % 2 == 1);
 
-    auto estimate_time_kernel = [&WipeSpeedMap,&xr,&xl](int n) {
-        float time = std::numeric_limits<float>::max();
-        float one_line_len = xr - xl;
-        if (n <= 1)
-            time = one_line_len / WipeSpeedMap[0];
-        else if (n <= 2)
-            time = one_line_len / WipeSpeedMap[0] + one_line_len / WipeSpeedMap[1];
-        else if (n <= 3)
-            time = one_line_len / WipeSpeedMap[0] + one_line_len / WipeSpeedMap[1] + one_line_len / WipeSpeedMap[2];
-        else if (n <= 4)
-            time = one_line_len / WipeSpeedMap[0] + one_line_len / WipeSpeedMap[1] + one_line_len / WipeSpeedMap[2] + one_line_len / WipeSpeedMap[3];
-        else {
-            time = one_line_len / WipeSpeedMap[0] + one_line_len / WipeSpeedMap[1] + one_line_len / WipeSpeedMap[2] + one_line_len / WipeSpeedMap[3];
-            time += (n - 4) * one_line_len / WipeSpeedMap[4];
-        }
-        return time * 60.f;
-    };
-    auto estimate_wipe_time = [&estimate_time_kernel, & cleaning_box, &x_to_wipe, &xr, &xl, &dy, &solid_tool_toolchange](int begin_line) -> float {
-        int                      n            = std::ceil(x_to_wipe / (xr - xl));
-        if (solid_tool_toolchange) n = (cleaning_box.lu[1] - cleaning_box.ld[1]) / dy;
-        float total_time   = estimate_time_kernel(n);
-        float beg_time   = n <= 0 ? 0 : estimate_time_kernel(begin_line);
-        return total_time-beg_time;
-    };
-
     bool should_heating = m_filpar[m_current_tool].filament_cooling_before_tower > EPSILON && !solid_tool_toolchange && !is_first_layer();
     auto add_M104_by_requirement = [&writer, &should_heating, this]() {
         if (m_filpar[m_current_tool].filament_cooling_before_tower < EPSILON) return;
@@ -4176,29 +4149,7 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
     if (should_heating)
     {
         //No additional heating time is required.
-        //float estimate_time = estimate_wipe_time(0);
-        //int   extruder_id   = m_filament_map[m_current_tool] - 1;
-        //float heat_time     = m_filpar[m_current_tool].filament_cooling_before_tower / m_hotend_heating_rate[extruder_id];
-        //heat_time /= 2.f;
-        //speed_factor = estimate_time / (heat_time+estimate_time);
-        //wipe_speed *= speed_factor;
     }
-    if (should_cooling_before_object) {
-        int n = (cleaning_box.lu[1] - cleaning_box.ld[1]) / dy;
-        int extruder_id = get_extruder_id(m_current_tool, m_cur_layer_id);
-        float cooling_time     = (m_filpar[m_current_tool].filament_tower_interface_print_temp - m_filpar[m_current_tool].nozzle_temperature) / m_hotend_cooling_rate[extruder_id];
-        if (n < 2) {
-            float estimate_time = estimate_wipe_time(0);
-            speed_factor        = estimate_time > cooling_time? 1: estimate_time / cooling_time;
-            cooling_begin_line = 0;
-        } else {
-            float estimate_time = estimate_wipe_time(2);
-            speed_factor        = estimate_time > cooling_time ? 1 : estimate_time / cooling_time;
-            cooling_begin_line = 2; //TODO: No slowdown for the first two lines.
-        }
-        wipe_speed *= speed_factor;
-    }
-
 
     for (int i = 0; true; ++i) {
         if (i < WipeSpeedMap.size()) wipe_speed = WipeSpeedMap[i] * speed_factor;
@@ -4212,9 +4163,6 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
         float flat_iron_area = m_filpar[m_current_tool].flat_iron_area;
         float ironing_length = 3.;
 
-        if (should_cooling_before_object && i == cooling_begin_line) {
-            writer.format_line_M104(m_filpar[m_current_tool].nozzle_temperature, get_extruder_id(m_current_tool, m_cur_layer_id));
-        }
 
         if (i == 0 && m_use_gap_wall) { // BBS: add ironing after extruding start
             if (m_left_to_right) {

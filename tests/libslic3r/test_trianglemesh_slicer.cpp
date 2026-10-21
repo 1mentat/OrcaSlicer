@@ -309,6 +309,31 @@ TEST_CASE("The cut keeps both halves watertight when the plane follows an existi
     CHECK_THAT(std::abs(its_volume(lower)), Catch::Matchers::WithinAbs(4000.f, 1e-2f));
 }
 
+TEST_CASE("The cut caps a nested inward-facing cavity without filling it",
+          "[TriangleMeshSlicer][TriangleMeshCutMesh]")
+{
+    indexed_triangle_set mesh = its_make_cube(20., 14., 8.);
+    indexed_triangle_set cavity = its_make_cube(4., 6., 4.);
+    for (Vec3f &vertex : cavity.vertices)
+        vertex += Vec3f(8.f, 4.f, 2.f);
+    for (Vec3i32 &face : cavity.indices)
+        std::swap(face[0], face[1]);
+    its_merge(mesh, cavity);
+    REQUIRE(its_num_open_edges(mesh) == 0);
+    REQUIRE_THAT(std::abs(its_volume(mesh)), Catch::Matchers::WithinAbs(2144.f, 1e-2f));
+
+    indexed_triangle_set upper;
+    indexed_triangle_set lower;
+    cut_mesh(mesh, 4.f, &upper, &lower);
+
+    // Each half contains half of the 20 x 14 x 8 shell.  The reversed 4 x 6 x 4
+    // inner box removes 4 x 6 x 2 from each half, so both capped volumes are 1072.
+    CHECK(its_num_open_edges(upper) == 0);
+    CHECK(its_num_open_edges(lower) == 0);
+    CHECK_THAT(std::abs(its_volume(upper)), Catch::Matchers::WithinAbs(1072.f, 1e-2f));
+    CHECK_THAT(std::abs(its_volume(lower)), Catch::Matchers::WithinAbs(1072.f, 1e-2f));
+}
+
 TEST_CASE("The cut preserves a plane vertex when adjacent facets cross the plane",
           "[TriangleMeshSlicer][TriangleMeshCutMesh]")
 {

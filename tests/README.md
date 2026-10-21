@@ -1454,3 +1454,12 @@ geometry. Its two source probes are in
 
 The TriangleMeshSlicer and ExtrusionEntity focused targets add no duplicate
 CTest registrations.
+
+## Focused SVG export contracts
+
+The `libslic3r_svg_tests` target is excluded from CTest to avoid duplicate registrations. Its `[SVGExportContracts]` cases check nested-path/open failures, surface collection forwarding, tapered primitive geometry, color fallbacks, and the numeric three-column legend layout. Build and run the focused cases directly:
+
+```sh
+cmake --build build --config Release --target libslic3r_svg_tests
+build/tests/libslic3r/libslic3r_svg_tests "[SVGExportContracts]" --rng-seed 21907 --order rand
+```

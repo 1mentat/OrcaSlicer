@@ -17,14 +17,17 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "libslic3r/SVG.hpp"
+#include "libslic3r/Surface.hpp"
 #include "test_utils.hpp"
 
 #include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 
 #include <algorithm>
 #include <cstddef>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -169,6 +172,183 @@ TEST_CASE("SVG handles polygon winding and primitive annotations", "[SVG][SLASVG
     const std::string cw_text = read_text(cw_output.string());
     CHECK(cw_text.find("fill: white") != std::string::npos);
     CHECK(cw_text.find("fill: red") == std::string::npos);
+}
+
+TEST_CASE("SVG creates nested output paths and reports an unopenable destination", "[SVG][SVGExportContracts]")
+{
+    ScopedTemporaryDir directory("orca-svg-open");
+    const std::string nested_output = (directory.path() / "nested" / "output.svg").string();
+    {
+        SVG svg(nested_output);
+        REQUIRE(svg.is_opened());
+        svg.add_comment("created nested parent");
+        svg.Close();
+    }
+    CHECK(boost::filesystem::exists(directory.path() / "nested"));
+    CHECK(read_text(nested_output).find("<!-- created nested parent -->") != std::string::npos);
+
+    ScopedTemporaryFile blocker(".file");
+    {
+        std::ofstream file(blocker.string(), std::ios::binary);
+        REQUIRE(file.good());
+        file << "not a directory";
+    }
+    SVG unopenable((blocker.path() / "child.svg").string());
+    CHECK_FALSE(unopenable.is_opened());
+
+    const BoundingBox box(Point(0, 0), Point(scaled(1.), scaled(1.)));
+    SVG unopenable_with_bbox((blocker.path() / "boxed-child.svg").string(), box, 0, false);
+    CHECK_FALSE(unopenable_with_bbox.is_opened());
+}
+
+TEST_CASE("SVG surface value and pointer collections preserve filled and outline paths", "[SVG][SVGExportContracts]")
+{
+    const Surface top(stTop, square(1., 1., 8., 8.));
+    const Surface holed(stInternal, square_with_hole());
+    const Surfaces surfaces{top, holed};
+    const SurfacesPtr surface_refs{&surfaces[0], &surfaces[1]};
+
+    const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
+    ScopedTemporaryFile output(".svg");
+    {
+        SVG svg(output.string(), box, 0, false);
+        svg.draw(top, "single-fill", .4f);
+        svg.draw_outline(top, "single-rim", "single-hole", scaled(.2));
+        svg.draw(surfaces, "collection-fill", .6f);
+        svg.draw_outline(surfaces, "collection-rim", "collection-hole", scaled(.2));
+        svg.draw(surface_refs, "pointer-fill", .8f);
+        svg.draw_outline(surface_refs, "pointer-rim", "pointer-hole", scaled(.2));
+        svg.Close();
+    }
+
+    const std::string text = read_text(output.string());
+    // Each expolygon fill is one even-odd path; each outline is one path per contour and hole.
+    CHECK(count_text(text, "<path ") == 12);
+    CHECK(count_text(text, "fill: single-fill;") == 1);
+    CHECK(count_text(text, "fill: none;") == 7);
+    CHECK(count_text(text, "fill: collection-fill;") == 2);
+    CHECK(count_text(text, "fill: pointer-fill;") == 2);
+    CHECK(count_text(text, "fill: none; stroke: collection-rim;") == 2);
+    CHECK(count_text(text, "fill: none; stroke: collection-hole;") == 1);
+    CHECK(count_text(text, "fill: none; stroke: pointer-rim;") == 2);
+    CHECK(count_text(text, "fill: none; stroke: pointer-hole;") == 1);
+    CHECK(count_text(text, "fill: none; stroke: single-rim;") == 1);
+}
+
+TEST_CASE("SVG primitive collections retain tapered widths and scaled coordinates", "[SVG][SVGExportContracts]")
+{
+    const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
+    ScopedTemporaryFile output(".svg");
+    {
+        SVG svg(output.string(), box, 0, false);
+        svg.draw(Lines{Line(Point(scaled(0.), scaled(1.)), Point(scaled(2.), scaled(1.)))}, "line");
+        svg.draw(Polylines{Polyline{Point(scaled(1.), scaled(4.)), Point(scaled(3.), scaled(4.))}}, "polyline", scaled(.1));
+
+        const ThickLine thick_line(Point(scaled(1.), scaled(2.)), Point(scaled(5.), scaled(2.)),
+                                   scaled(1.), scaled(3.));
+        svg.draw(ThickLines{thick_line}, "direct-fill", "direct-stroke", scaled(.1));
+
+        ThickPolyline thick_polyline;
+        thick_polyline.points = {Point(scaled(1.), scaled(2.)), Point(scaled(5.), scaled(2.))};
+        thick_polyline.width = {static_cast<coordf_t>(scaled(1.)), static_cast<coordf_t>(scaled(3.))};
+        const ThickPolylines thick_polylines{thick_polyline};
+        svg.draw(thick_polylines, "thin-stroke", scaled(.1));
+        svg.draw(thick_polylines, "taper-fill", "taper-stroke", scaled(.1));
+
+        const Points markers{Point(scaled(2.), scaled(8.)), Point(scaled(3.), scaled(8.))};
+        svg.draw(markers, "marker", 0);
+
+        const Points scaled_path{Point(scaled(2.), scaled(3.)), Point(scaled(4.), scaled(3.)), Point(scaled(4.), scaled(5.))};
+        svg.draw(scaled_path, .5, "scaled-path", scaled(.2));
+        VecOfPoints scaled_groups;
+        scaled_groups.push_back(scaled_path);
+        scaled_groups.push_back(Points{Point(scaled(6.), scaled(3.)), Point(scaled(8.), scaled(3.))});
+        svg.draw(scaled_groups, .5, "scaled-group", scaled(.2));
+        svg.Close();
+    }
+
+    const std::string text = read_text(output.string());
+    CHECK(count_text(text, "<line ") == 1);
+    CHECK(count_text(text, "<circle cx=") == 2);
+    CHECK(count_text(text, "<polygon points=\"10.000000,15.000000 50.000000,5.000000 50.000000,35.000000 10.000000,25.000000\"") == 2);
+    CHECK(count_text(text, "<path d=\"") == 5);
+    const std::regex scaled_path_regex(
+        R"svg(<path d="([^"]*)" style="fill: none; stroke: (scaled-path|scaled-group);[^"]*"[^>]*>)svg");
+    std::vector<std::vector<double>> single_scaled_paths;
+    std::vector<std::vector<double>> scaled_groups;
+    for (std::sregex_iterator it(text.begin(), text.end(), scaled_path_regex), end; it != end; ++it) {
+        std::istringstream path_data((*it)[1].str());
+        std::string command;
+        path_data >> command;
+        REQUIRE(command == "M");
+
+        std::vector<double> coordinates;
+        double coordinate;
+        while (path_data >> coordinate)
+            coordinates.push_back(coordinate);
+        path_data.clear();
+        path_data >> command;
+        CHECK(command == "z");
+
+        if ((*it)[2].str() == "scaled-path")
+            single_scaled_paths.push_back(std::move(coordinates));
+        else
+            scaled_groups.push_back(std::move(coordinates));
+    }
+    REQUIRE(single_scaled_paths.size() == 1);
+    REQUIRE(scaled_groups.size() == 2);
+    const std::vector<double> expected_single{10., 15., 20., 15., 20., 25.};
+    const std::vector<double> expected_second_group{30., 15., 40., 15.};
+    CHECK(single_scaled_paths.front() == expected_single);
+    CHECK(scaled_groups.front() == expected_single);
+    CHECK(scaled_groups.back() == expected_second_group);
+}
+
+TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[SVG][SVGExportContracts]")
+{
+    const ExPolygons with_hole{square_with_hole()};
+    const ExPolygons plain{square(20., 2., 28., 10.)};
+
+    SVG::ExPolygonAttributes fill_fallback("fill fallback", "magenta", .35f);
+    fill_fallback.outline_width = scaled(.2);
+
+    SVG::ExPolygonAttributes hole_fallback("hole fallback", "orange", "teal", "", scaled(.2), .45f);
+    SVG::ExPolygonAttributes third_legend("third legend", "gold", .55f);
+    SVG::ExPolygonAttributes fourth_legend("fourth legend", "navy", .65f);
+    const std::vector<std::pair<ExPolygons, SVG::ExPolygonAttributes>> layers{
+        {with_hole, fill_fallback},
+        {with_hole, hole_fallback},
+        {plain, third_legend},
+        {plain, fourth_legend},
+    };
+
+    ScopedTemporaryFile output(".svg");
+    SVG::export_expolygons(output.string(), layers);
+
+    const std::string text = read_text(output.string());
+    CHECK(count_text(text, "stroke: magenta;") == 2);
+    CHECK(count_text(text, "stroke: teal;") == 2);
+    CHECK(count_text(text, "stroke: orange;") == 0);
+    CHECK(text.find("fill fallback") != std::string::npos);
+    CHECK(text.find("hole fallback") != std::string::npos);
+    CHECK(text.find("third legend") != std::string::npos);
+    CHECK(text.find("fourth legend") != std::string::npos);
+    CHECK(count_text(text, "<circle cx=") == 4);
+    CHECK(count_text(text, "<text x=") == 4);
+
+    const std::regex legend_circle(R"svg(<circle cx="([0-9.]+)" cy="([0-9.]+)" r="10" fill="[^"]*"/>)svg");
+    std::vector<std::pair<double, double>> legend_centers;
+    for (std::sregex_iterator it(text.begin(), text.end(), legend_circle), end; it != end; ++it)
+        legend_centers.emplace_back(std::stod((*it)[1].str()), std::stod((*it)[2].str()));
+    REQUIRE(legend_centers.size() == 4);
+    for (size_t i = 1; i < 3; ++i)
+        CHECK_THAT(legend_centers[i].second, WithinAbs(legend_centers[0].second, 1e-4));
+    CHECK_THAT(legend_centers[1].first - legend_centers[0].first, WithinAbs(200., 1e-4));
+    CHECK_THAT(legend_centers[2].first - legend_centers[1].first, WithinAbs(200., 1e-4));
+    CHECK_THAT(legend_centers[3].first, WithinAbs(legend_centers[0].first, 1e-4));
+    // The columns are 20 mm apart (200 SVG units); a 1.3 mm row step is 13 units.
+    // SVG's flipped Y axis makes the next row's screen coordinate smaller.
+    CHECK_THAT(legend_centers[3].second - legend_centers[0].second, WithinAbs(-13., 1e-4));
 }
 
 namespace svg_import_contracts {

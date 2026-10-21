@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "description": "A semantic probe for the public cut_mesh cavity-cap contract. The test checks watertight halves and analytic material volume rather than triangle ordering.",
+  "mutants": [
+    {
+      "id": "cut-cavity-hole-assignment-disabled",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "            slices[slice_idx].holes.emplace_back(std::move(hole));",
+      "new": "            // Mutant: leave the inner section out of the cap polygon.",
+      "expected_matches": 1,
+      "test_filter": "The cut caps a nested inward-facing cavity without filling it",
+      "description": "The cavity section must be attached to its containing outer slice when triangulating both cut caps. Dropping the hole assignment must fail the ordinary public volume or watertightness assertions."
+    }
+  ]
+}

@@ -1407,58 +1407,6 @@ bool ToolOrdering::has_non_support_filament(const PrintConfig &config) {
     return false;
 }
 
-std::set<std::pair<std::vector<unsigned int>, std::vector<unsigned int>>> generate_combinations(const std::vector<unsigned int> &extruders)
-{
-    int                                                                       n = extruders.size();
-    std::vector<bool>                                                         flags(n);
-    std::set<std::pair<std::vector<unsigned int>, std::vector<unsigned int>>> unique_combinations;
-
-    if (extruders.empty())
-        return unique_combinations;
-
-    for (int i = 1; i <= n / 2; ++i) {
-        std::fill(flags.begin(), flags.begin() + i, true);
-        std::fill(flags.begin() + i, flags.end(), false);
-
-        do {
-            std::vector<unsigned int> group1, group2;
-            for (int j = 0; j < n; ++j) {
-                if (flags[j]) {
-                    group1.push_back(extruders[j]);
-                } else {
-                    group2.push_back(extruders[j]);
-                }
-            }
-
-            if (group1.size() > group2.size()) { std::swap(group1, group2); }
-
-            unique_combinations.insert({group1, group2});
-
-        } while (std::prev_permutation(flags.begin(), flags.end()));
-    }
-
-    return unique_combinations;
-}
-
-float get_flush_volume(const std::vector<int> &filament_maps, const std::vector<unsigned int> &extruders, const std::vector<FlushMatrix> &matrix, size_t nozzle_nums)
-{
-    std::vector<std::vector<unsigned int>> nozzle_filaments;
-    nozzle_filaments.resize(nozzle_nums);
-
-    for (unsigned int filament_id : extruders) {
-        nozzle_filaments[filament_maps[filament_id]].emplace_back(filament_id);
-    }
-
-    float flush_volume = 0;
-    for (size_t nozzle_id = 0; nozzle_id < nozzle_nums; ++nozzle_id) {
-        for (size_t i = 0; i + 1 < nozzle_filaments[nozzle_id].size(); ++i) {
-            flush_volume += matrix[nozzle_id][nozzle_filaments[nozzle_id][i]][nozzle_filaments[nozzle_id][i+1]];
-        }
-    }
-
-    return flush_volume;
-}
-
 // Forward declaration — the single-nozzle-per-extruder nozzle list (defined below).
 static std::vector<MultiNozzleUtils::NozzleInfo> build_default_nozzle_list(const PrintConfig &print_config, size_t extruder_nums);
 
@@ -3164,29 +3112,7 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume(bool reorder_first
         if (map_mode != fmmAutoForFlush)
         {
             std::vector<std::vector<unsigned int>> best_sequences;
-            if (dynamic_reorder) {
-                // When the filament selector is active the "best" plan
-                // is the per-combo-range dynamic regroup, computed over a *copy* of the initial nozzle
-                // status so it cannot perturb the chosen m_nozzle_status / primary result. NOTE:
-                // is_dynamic_group_reorder() implies filament_map_mode == fmmAutoForFlush, contradicting
-                // this map_mode != fmmAutoForFlush guard, so this sub-branch is unreachable under the
-                // current predicate. It is provably inert.
-                auto best_context = build_filament_group_context(m_print, layer_filaments, physical_unprintables, geometric_unprintables, filament_unprintable_volumes, FilamentMapMode::fmmAutoForFlush,
-                                                                 m_initial_nozzle_status.get_nozzle_filament_map());
-                best_context.speed_info.group_with_time = false;
-                MultiNozzleUtils::NozzleStatusRecorder best_nozzle_status = m_initial_nozzle_status;
-                auto best_plan = plan_filament_mapping_and_order_by_combo_ranges(m_print, best_context, get_custom_seq, FilamentMapMode::fmmAutoForFlush,
-                                                                                 physical_unprintables, geometric_unprintables, filament_unprintable_volumes, &best_nozzle_status);
-                std::vector<std::vector<int>> best_nozzle_map_per_layer;
-                for (auto& res : best_plan) {
-                    best_sequences.emplace_back(cast<unsigned int>(res.fil_order));
-                    best_nozzle_map_per_layer.emplace_back(res.fil_nozzle_match);
-                }
-                auto best_result = MultiNozzleUtils::LayeredNozzleGroupResult::create(best_nozzle_map_per_layer, best_context.nozzle_info.nozzle_list, used_filaments, best_sequences);
-                if (best_result)
-                    m_stats_by_multi_extruder_best = calc_filament_change_info_by_toolorder(print_config, *best_result, nozzle_flush_mtx, best_sequences);
-            }
-            else {
+            {
                 // Best-for-flush grouping (nozzle-aware result). The extruder-level map fed to the flush
                 // reorder is derived exactly as before, so best_sequences (and the flush weight) are
                 // identical; only flush_filament_change_count is now charged per physical nozzle.

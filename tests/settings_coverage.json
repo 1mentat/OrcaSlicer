@@ -4283,13 +4283,15 @@
       "reason": "The stepped public Print fixture compares top_bottom_infill_wall_overlap=0.0 and 50.0. Layer count and perimeter length remain stable, while top-solid and terrace-top lengths grow for 50.0, bottom length changes, and both top/bottom surfaces remain positive. These are representative percent values only; the full percent range and boundary behavior are not claimed."
     },
     "elefant_foot_compensation": {
-      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
-      "tag": "[SLAPrint][SLAElephantFootFade]",
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[ElephantFoot]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
+        "interaction_matrix",
         "pipeline_oracle"
       ],
-      "reason": "The public SLA correction case compares compensation=0.0 with compensation=0.3 on the same 10 mm square and valid SLA correction config. It checks four layer areas, unchanged bounds and level/index metadata, and strict first-to-top area recovery for the compensated row. The tested zero/positive pair is representative evidence, not a full numeric-domain claim."
+      "reason": "The FFF [ElephantFoot] pipeline case checks the registered minimum 0.0 against a positive 0.4 mm correction, with per-layer contour-width measurements showing the three-layer fade and return to baseline after the active range. The earlier SLA [SLAPrint][SLAElephantFootFade] contract remains additional evidence: it checks 0.0 versus 0.3 on the same 10 mm square, four layer areas, unchanged bounds and level/index metadata, and area recovery. Positive values are representative; no maximum is declared."
     },
     "elefant_foot_min_width": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
@@ -4455,6 +4457,153 @@
         "pipeline_oracle"
       ],
       "reason": "The public Print-to-G-code fixture supplies the registered zero value on both axes and checks the 1 mm effective spacing floor against a 10 x 5 count for the independently derived clipped 9 x 4 mm region. A wide-spacing control checks Marlin2 3 x 3 and Klipper 4 x 4 minimums, with positive first-layer extrusion. These tested values do not claim complete global setting variance."
+    },
+    "elefant_foot_compensation_layers": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[ElephantFoot]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "interaction_matrix",
+        "pipeline_oracle"
+      ],
+      "reason": "The FFF [ElephantFoot] case exercises the registered minimum of one active layer and a representative three-layer fade at 0.4 mm compensation. Measured contour widths show the first-layer inset, decreasing correction through the third layer, and baseline width afterward. No maximum is declared."
+    },
+    "elefant_foot_layers_density": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[ElephantFoot]",
+      "dimensions": [
+        "boundary_values",
+        "interaction_matrix",
+        "pipeline_oracle"
+      ],
+      "reason": "The FFF [ElephantFoot] case exercises both registered percentage endpoints, 50% and 100%, within the elephant-foot compensation pipeline. It compares internal-solid extrusion volume per layer against the 100% control and verifies the configured 50% start and increasing density over the active layers, with unchanged out-of-range controls."
+    },
+    "slowdown_for_curled_perimeters": {
+      "test": "tests/fff_print/test_extrusion_processor.cpp",
+      "tag": "[ExtrusionProcessor]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered default is false. The caged-overhang contracts explicitly exercise false and true through Print processing: the precomputed lower-curled-line tree follows the configured state, the pipeline creates curled-wall data only when both overhang speed and this option are enabled, and a two-object case verifies that the combined behavior is found across objects. No nil/null object or region override is supplied, so nullable_behavior remains unclaimed."
+    },
+    "input_shaping_freq_x": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[InputShaping]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Marlin 2 Print-to-G-code contract emits X-axis M593 with the configured frequency and checks both registered frequency endpoints: 0 omits F, while 1000 emits F1000.00. A positive 45 Hz row distinguishes ordinary serialization from the endpoint behavior. The same contract verifies positive extrusion and unchanged material paths against the disabled control."
+    },
+    "input_shaping_freq_y": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[InputShaping]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Marlin 2 Print-to-G-code contract emits Y-axis M593 with the configured frequency and checks both registered frequency endpoints: 0 omits F, while 1000 emits F1000.00. A positive 50 Hz row distinguishes ordinary serialization from the endpoint behavior. The same contract verifies positive extrusion and unchanged material paths against the disabled control."
+    },
+    "input_shaping_damp_x": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[InputShaping]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Marlin 2 Print-to-G-code contract emits X-axis M593 with the configured damping and checks both registered endpoints: 0 omits D, while 1 emits D1.000. A positive 0.125 row distinguishes ordinary serialization from the endpoint behavior. The same contract verifies positive extrusion and unchanged material paths against the disabled control."
+    },
+    "input_shaping_damp_y": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[InputShaping]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Marlin 2 Print-to-G-code contract emits Y-axis M593 with the configured damping and checks both registered endpoints: 0 omits D, while 1 emits D1.000. A positive 0.275 row distinguishes ordinary serialization from the endpoint behavior. The same contract verifies positive extrusion and unchanged material paths against the disabled control."
+    },
+    "fan_kickstart": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodeFanPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted public G-code case compares explicit kickstart 0.0 (the registered minimum/off boundary) with 0.5 s. Both exports retain positive extrusion and equal XY/material totals; only the enabled run begins its nonzero fan sequence with PWM 255 before returning to the configured 30\u201360% target. No upper numeric bound is registered."
+    },
+    "infill_anchor": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[InfillAnchorVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted public infill-anchor cases exercise the documented 0 no-anchor behavior and positive absolute values, compare requested 1.2 mm against the 0.6 mm clamp, and compare absolute values with equivalent percentages. Independent sparse-path length and endpoint-contact measurements distinguish the outputs. Zero is a documented semantic boundary; no numeric min/max range is registered, so this remains partial rather than claiming a complete numeric boundary matrix."
+    },
+    "min_skirt_length": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted public skirt cases exercise the registered minimum 0 mm on real per-object skirts and a 500 mm minimum on a 20 mm cube. The positive case measures emitted skirt extrusion length and requires at least 500 mm, while the zero case verifies ordinary grouped skirt geometry. No maximum is registered."
+    },
+    "skirt_height": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted Print-to-G-code cases set skirt_height to 0, 1, 3, and 5 and count emitted skirt-role layers; the table also checks draft-shield and print-sequence interactions. The declared maximum of 10000 is not exercised, so this is partial evidence."
+    },
+    "support_object_elevation": {
+      "test": "tests/libslic3r/test_rotfinder.cpp",
+      "tag": "[Rotfinder]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted public SLA rotation-optimizer tests exercise elevations 0 and 4 mm and measure the resulting rotation with independent transformed-mesh support-score/contact-area oracles. The configured maximum 150 mm is not tested, and these tests do not cover a complete SLA print pipeline, so the setting remains partial."
+    },
+    "belt_support_floor_offset": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[BeltTreeLanding]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted belt-tree public G-code case compares floor offsets 0, -5, and +5 mm while keeping support geometry fixed. It measures exported support extrusion landing against the independently specified machine-frame floor and checks valid positive material motion. The registered limits -500 and +500 are not exercised."
+    },
+    "ironing_angle": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[IroningAngleFixed]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The accepted solid-ironing G-code case compares angle 0 in relative mode with angle 90 in fixed mode, and verifies emitted per-layer line directions from the exported motion. Because ironing_angle_fixed changes alongside the angle and the registered maximum 359 is not tested, this remains partial."
+    },
+    "filament_is_support": {
+      "test": "tests/libslic3r/test_config_variant_expansion.cpp",
+      "tag": "[ConfigGapContracts]",
+      "dimensions": [
+        "boolean_values"
+      ],
+      "reason": "The accepted public DynamicPrintConfig::get_filament_type test supplies both false and true support flags across generic and vendor-identified materials and checks the resolved material type and display name. This exercises the boolean values through the public material-classification API, but does not establish a complete FFF print/G-code pipeline oracle, so the setting remains partial."
+    },
+    "filament_type": {
+      "test": "tests/libslic3r/test_config_variant_expansion.cpp",
+      "tag": "[ConfigGapContracts]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "The accepted public DynamicPrintConfig::get_filament_type test supplies PLA, PETG, PA, and PVA entries and checks resolved type/display values for vendor and generic identifiers. This verifies config material classification, but does not establish a complete FFF print/G-code pipeline oracle, so the setting remains partial."
     }
   }
 }
