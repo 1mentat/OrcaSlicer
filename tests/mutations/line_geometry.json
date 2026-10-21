@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Three exact-anchor ordinary-assertion mutations for Line public geometry contracts.",
+  "mutants": [
+    {
+      "id": "line-transform-drops-affine-translation",
+      "path": "src/libslic3r/Line.cpp",
+      "old": "    LineInMatrixForm local_line = t * world_line.colwise().homogeneous();",
+      "new": "    LineInMatrixForm local_line = t.linear() * world_line;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Transforming a 3D line applies rotation and translation to both endpoints",
+      "expected_test_count": 1,
+      "description": "Drop affine translation; the exact analytic endpoint checks must fail."
+    },
+    {
+      "id": "line-bbox-clip-collapses-start-to-exit",
+      "path": "src/libslic3r/Line.cpp",
+      "old": "\t\tthis->a = x0clip.cast<coord_t>();",
+      "new": "\t\tthis->a = x1clip.cast<coord_t>();",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Line clipping and 3D plane intersection return analytic endpoints",
+      "expected_test_count": 1,
+      "description": "Use the exit point for both clipped endpoints; the entry/exit assertions must fail."
+    },
+    {
+      "id": "line-plane-intersection-ignores-origin-height",
+      "path": "src/libslic3r/Line.cpp",
+      "old": "    double t = (z - this->a(2)) / v(2);",
+      "new": "    double t = z / v(2);",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Line clipping and 3D plane intersection return analytic endpoints",
+      "expected_test_count": 1,
+      "description": "Compute interpolation as if the segment began at z=0; the independent plane point must fail."
+    }
+  ]
+}

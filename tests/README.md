@@ -521,6 +521,10 @@ independent top/bottom projections. Their mutation manifests are
 complementary arc midpoints, synchronized endpoints and the nearest forward
 extension. Circular-cutter mutation probes are in `sketch_circular_cutters.json`.
 
+`[LineContracts]` checks affine endpoint transforms, finite and infinite
+intersections, perpendicular distances, bounding-box clipping and 3D plane
+interpolation against analytic geometry. Its probes are in `line_geometry.json`.
+
 `[LineSplit]` checks clipping through holes, closed endpoints, boundary overlap
 and source-index provenance, including empty paths. `[RegionExpansion]` checks
 bounded wave growth, source and boundary IDs at shared vertices, and selection
