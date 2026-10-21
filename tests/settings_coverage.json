@@ -1409,12 +1409,13 @@
       "reason": "An empty model and a two-knot model are compared while disabled, then the model is enabled. Exported solid-path E values follow the linear interpolation factor while path geometry and ineligible outer-wall extrusion remain unchanged."
     },
     "printer_model": {
-      "test": "tests/fff_print/test_gcodeprocessor.cpp",
-      "tag": "[Elegoo]",
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SL1Settings]",
       "dimensions": [
-        "representative_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Processor contracts exercise Generic Marlin, case-insensitive Elegoo Carbon and Carbon 2 model aliases through M6211 timing and state. Other printer-model behavior and the complete slicing pipeline are not claimed."
+      "reason": "Two explicit distinct profile identities survive SLAPrint processing and appear under the specified field in actual exported SL1 config.ini. This validates archive metadata; it does not imply arbitrary string escaping or other uses of the setting. Separate processor evidence in tests/fff_print/test_gcodeprocessor.cpp [Elegoo]: Processor contracts exercise Generic Marlin, case-insensitive Elegoo Carbon and Carbon 2 model aliases through M6211 timing and state. Other printer-model behavior and the complete slicing pipeline are not claimed."
     },
     "machine_start_gcode": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -4612,6 +4613,51 @@
         "representative_values"
       ],
       "reason": "The named DynamicPrintConfig getter case checks the public vendor getter for a missing option, an empty value list, and a two-value list where it returns the first value. This is representative Config getter behavior only; no FFF/G-code pipeline or full value-domain claim is made."
+    },
+    "material_print_speed": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SL1Settings]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Both registered slow and fast material values produce the specified expUserProfile flag (1 and 0) in actual exported SL1 config.ini."
+    },
+    "sla_material_settings_id": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SL1Settings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two explicit distinct profile identities survive SLAPrint processing and appear under the specified field in actual exported SL1 config.ini. This validates archive metadata; it does not imply arbitrary string escaping or other uses of the setting."
+    },
+    "printer_variant": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SL1Settings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two explicit distinct profile identities survive SLAPrint processing and appear under the specified field in actual exported SL1 config.ini. This validates archive metadata; it does not imply arbitrary string escaping or other uses of the setting."
+    },
+    "printer_settings_id": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SL1Settings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two explicit distinct profile identities survive SLAPrint processing and appear under the specified field in actual exported SL1 config.ini. This validates archive metadata; it does not imply arbitrary string escaping or other uses of the setting."
+    },
+    "sla_print_settings_id": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SL1Settings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Two explicit distinct profile identities survive SLAPrint processing and appear under the specified field in actual exported SL1 config.ini. This validates archive metadata; it does not imply arbitrary string escaping or other uses of the setting."
     }
   }
 }

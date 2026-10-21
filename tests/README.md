@@ -435,6 +435,10 @@ width through public SLA slicing. Its mutations are in
 checks decoded layer images for a stepped model: ordered masks, physical area,
 centroid, and dimensions. Its mutations are in `sla_raster_pipeline.json`.
 
+`[SL1Settings]` generates slow and fast material profiles through SLAPrint and
+checks the emitted `config.ini` profile flag and identity values. Its focused
+probes are in `sla_sl1_settings_variance.json`.
+
 `[PresetPersistence]` checks inherited JSON imports, unresolved-parent rejection,
 subscription refreshes with newer preset timestamps, complete root-filament
 exports, and preservation of system presets during user-file loading. Its

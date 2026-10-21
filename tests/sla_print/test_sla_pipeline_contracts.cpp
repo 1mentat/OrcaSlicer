@@ -2050,15 +2050,32 @@ RasterLayerSummary summarize_png(const std::vector<std::uint8_t> &bytes,
     return result;
 }
 
+struct ExportProfile
+{
+    SLAMaterialSpeed material_speed = slamsFast;
+    std::string material_name;
+    std::string printer_model;
+    std::string printer_variant;
+    std::string printer_profile;
+    std::string print_profile;
+};
+
 struct RasterRun
 {
     std::vector<RasterLayerSummary> layers;
     std::vector<coord_t>             levels;
+    std::string                      config_ini;
 };
 
-RasterRun run_raster_export()
+RasterRun run_raster_export(ExportProfile profile = {})
 {
     DynamicPrintConfig config = sla_correction_variance_contracts::correction_config();
+    config.set_key_value("material_print_speed", new ConfigOptionEnum<SLAMaterialSpeed>(profile.material_speed));
+    config.set_key_value("sla_material_settings_id", new ConfigOptionString(profile.material_name));
+    config.set_key_value("printer_model", new ConfigOptionString(profile.printer_model));
+    config.set_key_value("printer_variant", new ConfigOptionString(profile.printer_variant));
+    config.set_key_value("printer_settings_id", new ConfigOptionString(profile.printer_profile));
+    config.set_key_value("sla_print_settings_id", new ConfigOptionString(profile.print_profile));
     config.set_key_value("layer_height", new ConfigOptionFloat(1.0));
     config.set_key_value("initial_layer_height", new ConfigOptionFloat(1.0));
     config.set_key_value("display_width", new ConfigOptionFloat(32.0));
@@ -2122,6 +2139,8 @@ RasterRun run_raster_export()
     REQUIRE(mz_zip_reader_locate_file(&reader.archive.arch, "prusaslicer.ini", nullptr, 0) >= 0);
 
     RasterRun result;
+    const auto config_ini = read_entry(reader, "config.ini");
+    result.config_ini.assign(reinterpret_cast<const char *>(config_ini.data()), config_ini.size());
     result.levels.reserve(print.print_layers().size());
     result.layers.reserve(print.print_layers().size());
     for (const auto &layer : print.print_layers())
@@ -2163,4 +2182,26 @@ TEST_CASE("SLA attached SL1 archive rasterizes stepped model layers",
     CHECK_THAT(run.layers[0].height_mm, Catch::Matchers::WithinAbs(8.0, 0.5));
     CHECK_THAT(run.layers[2].width_mm, Catch::Matchers::WithinAbs(4.0, 0.5));
     CHECK_THAT(run.layers[2].height_mm, Catch::Matchers::WithinAbs(4.0, 0.5));
+}
+
+TEST_CASE("SLA SL1 export records material speed and profile identity values",
+          "[SLAPrint][SLAPipeline][SL1Settings]")
+{
+    const std::string speed = GENERATE(std::string("slow"), std::string("fast"));
+    sla_raster_active_contracts::ExportProfile profile;
+    profile.material_speed = speed == "slow" ? slamsSlow : slamsFast;
+    profile.material_name = "resin-" + speed;
+    profile.printer_model = "model-" + speed;
+    profile.printer_variant = "variant-" + speed;
+    profile.printer_profile = "printer-profile-" + speed;
+    profile.print_profile = "print-profile-" + speed;
+
+    const auto run = sla_raster_active_contracts::run_raster_export(profile);
+    const std::string expected_user_profile = speed == "slow" ? "1" : "0";
+    CHECK(run.config_ini.find("expUserProfile = " + expected_user_profile + "\n") != std::string::npos);
+    CHECK(run.config_ini.find("materialName = " + profile.material_name + "\n") != std::string::npos);
+    CHECK(run.config_ini.find("printerModel = " + profile.printer_model + "\n") != std::string::npos);
+    CHECK(run.config_ini.find("printerVariant = " + profile.printer_variant + "\n") != std::string::npos);
+    CHECK(run.config_ini.find("printerProfile = " + profile.printer_profile + "\n") != std::string::npos);
+    CHECK(run.config_ini.find("printProfile = " + profile.print_profile + "\n") != std::string::npos);
 }
