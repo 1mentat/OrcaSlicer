@@ -16,6 +16,8 @@ heads and removed in a ``finally`` block by default.  ``--keep-worktree``
 preserves it and its build at the reported path.  A later invocation may use
 ``--reuse-worktree-from-report`` to validate and reset that linked worktree,
 retaining its ignored build outputs while rerunning every selected test.
+``--seed-worktree PATH`` adopts only an existing clean linked worktree's ignored
+build directory and still runs configure, build, baseline, reference, and head tests.
 Every command, tested commit/tree, duration, log path, JUnit path, and status is
 written to ``report.json``.
 
@@ -1390,10 +1392,26 @@ def _load_reusable_worktree(report_path: Path, repo: Path) -> tuple[dict[str, An
     if cleanup.get("parent_path") != str(worktree.parent):
         raise ValidationError("prior report worktree parent path does not match")
     add = worktree_record.get("add") or {}
+    seed = worktree_record.get("seed")
+    seed_state = seed.get("initial_state") if isinstance(seed, dict) else None
+    seeded = (isinstance(seed, dict)
+              and seed.get("producer") == "seed_existing_worktree"
+              and seed.get("validation_status") == "passed"
+              and seed.get("path") == raw_path
+              and cleanup.get("reason") == "--seed-worktree"
+              and cleanup.get("lock_released") is True
+              and isinstance(seed_state, dict)
+              and seed_state.get("available") is True
+              and seed_state.get("head_sha") == seed.get("expected_harness_sha")
+              and seed_state.get("index_tree_sha") == seed_state.get("head_tree_sha")
+              and seed_state.get("status") == ""
+              and seed_state.get("untracked_count") == 0)
     if ((not isinstance(add, dict) or add.get("returncode") != 0)
-            and not worktree_record.get("reused_from_report")):
+            and not worktree_record.get("reused_from_report") and not seeded):
         raise ValidationError("prior report does not identify a runner-owned linked worktree")
     final_state = worktree_record.get("final_state")
+    if seeded and not (isinstance(final_state, dict) and final_state.get("available") is True):
+        raise ValidationError("seed report has no exact final worktree state")
     if isinstance(final_state, dict) and final_state.get("available") is True:
         if final_state.get("untracked_count") != 0:
             raise ValidationError("prior retained worktree contains untracked files")
@@ -2112,6 +2130,47 @@ def _validate_reusable_worktree(repo: Path, worktree: Path, previous: dict[str, 
     return current_state
 
 
+def _resolve_seed_worktree_path(value: str, repo: Path, output: Path) -> Path:
+    raw = Path(value).expanduser()
+    if not raw.is_absolute():
+        raise ValidationError("--seed-worktree must be an absolute canonical path")
+    try:
+        worktree = raw.resolve(strict=True)
+    except OSError as exc:
+        raise ValidationError(f"seed worktree path is unavailable: {exc}") from exc
+    if str(raw) != str(worktree):
+        raise ValidationError("--seed-worktree must use its canonical path (no symlink aliases)")
+    if not worktree.is_dir() or worktree == repo:
+        raise ValidationError("seed path is missing, not a directory, or is the caller checkout")
+    try:
+        worktree.relative_to(repo)
+    except ValueError:
+        pass
+    else:
+        raise ValidationError("seed worktree must be outside the caller checkout")
+    try:
+        output.relative_to(worktree)
+    except ValueError:
+        pass
+    else:
+        raise ValidationError("new output directory must be outside the seed worktree")
+    return worktree
+
+
+def _validate_seed_worktree(repo: Path, worktree: Path, build_dir: str,
+                            harness_ref: str) -> dict[str, Any]:
+    _validate_reusable_worktree_registration(repo, worktree, harness_ref)
+    _check_ignored_build(worktree, build_dir)
+    _check_no_untracked_files_outside_build(worktree, build_dir)
+    _check_no_ignored_files_outside_build(worktree, build_dir)
+    state = _tracked_worktree_state(worktree, build_dir=build_dir)
+    if (state["head_sha"] != harness_ref or state["status"]
+            or state["index_tree_sha"] != state["head_tree_sha"]
+            or state["untracked_count"] != 0):
+        raise ValidationError("seed worktree must be clean at the exact harness-ref HEAD")
+    return state
+
+
 def _run_phase(argv: Sequence[str], *, cwd: Path, timeout: float, log: Path) -> CommandResult:
     """Keep full native output on disk and only a bounded tail in the report."""
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -2483,8 +2542,14 @@ def run_validation(args: argparse.Namespace) -> int:
     output = Path(args.output_dir).resolve()
     if output.exists() and any(output.iterdir()):
         raise ValidationError(f"output directory must be new or empty: {output}")
-    if getattr(args, "keep_worktree", False) and getattr(args, "reuse_worktree_from_report", None):
-        raise ValidationError("--keep-worktree cannot be combined with --reuse-worktree-from-report")
+    keep_mode = bool(getattr(args, "keep_worktree", False))
+    reuse_mode = bool(getattr(args, "reuse_worktree_from_report", None))
+    seed_mode = bool(getattr(args, "seed_worktree", None))
+    if sum((keep_mode, reuse_mode, seed_mode)) > 1:
+        raise ValidationError("--keep-worktree, --reuse-worktree-from-report, and --seed-worktree are mutually exclusive")
+    seed_worktree = (_resolve_seed_worktree_path(args.seed_worktree, repo, output)
+                     if seed_mode else None)
+    preserve_build_mode = reuse_mode or seed_mode
     output.mkdir(parents=True, exist_ok=True)
     numbers = parse_numbers(args.numbers)
     snapshot_bytes = snapshot_path.read_bytes()
@@ -2569,6 +2634,7 @@ def run_validation(args: argparse.Namespace) -> int:
             "keep_worktree": bool(getattr(args, "keep_worktree", False)),
             "reuse_worktree_from_report": (str(Path(args.reuse_worktree_from_report).expanduser())
                                             if getattr(args, "reuse_worktree_from_report", None) else None),
+            "seed_worktree": str(seed_worktree) if seed_worktree is not None else None,
             "minimum_tests": args.minimum_tests,
             "timeout_provenance": {
                 "phase_timeout_seconds": args.timeout,
@@ -2594,7 +2660,6 @@ def run_validation(args: argparse.Namespace) -> int:
     }
     worktree: Path | None = None
     reuse_lock: _PrValidationReuseLock | None = None
-    reuse_mode = bool(getattr(args, "reuse_worktree_from_report", None))
     cleanup: dict[str, Any] = {}
     started = time.monotonic()
     try:
@@ -2633,13 +2698,37 @@ def run_validation(args: argparse.Namespace) -> int:
                 expected_head = prior_state["head_sha"]
             else:
                 expected_head = previous["worktree"]["legacy_state_binding"]["commit_sha"]
-            reuse_lock = _acquire_pr_validation_reuse_lock(
-                repo, worktree, expected_head)
+        elif seed_mode:
+            assert seed_worktree is not None
+            worktree = seed_worktree
+            expected_head = harness_ref
+            report["worktree"] = {
+                "path": str(worktree),
+                "seed": {
+                    "producer": "seed_existing_worktree",
+                    "validation_status": "pending",
+                    "path": str(worktree),
+                    "expected_harness_sha": harness_ref,
+                },
+            }
+        else:
+            parent = Path(tempfile.mkdtemp(prefix="slicer-pr-validation-", dir=str(output.parent)))
+            worktree = parent / "repo"
+            add = _git(repo, "worktree", "add", "--detach", str(worktree), harness_ref, timeout=300)
+            report["worktree"] = {"path": str(worktree), "add": add.json()}
+            if add.returncode != 0:
+                raise ValidationError(f"cannot create validation worktree: {add.stderr.strip()}")
+        if preserve_build_mode:
+            assert worktree is not None
+            reuse_lock = _acquire_pr_validation_reuse_lock(repo, worktree, expected_head)
             report["worktree"]["reuse_lock"] = str(reuse_lock.path)
-            if "final_state" not in previous["worktree"]:
-                previous["worktree"]["final_state"] = _derive_legacy_final_state(
-                    worktree, previous["worktree"]["legacy_state_binding"], args.build_dir)
-            _validate_reusable_worktree(repo, worktree, previous, args.build_dir, output)
+            if reuse_mode:
+                if "final_state" not in previous["worktree"]:
+                    previous["worktree"]["final_state"] = _derive_legacy_final_state(
+                        worktree, previous["worktree"]["legacy_state_binding"], args.build_dir)
+                _validate_reusable_worktree(repo, worktree, previous, args.build_dir, output)
+            else:
+                seed_state = _validate_seed_worktree(repo, worktree, args.build_dir, harness_ref)
             requested_refs = [("harness-base", harness_base), ("harness-ref", harness_ref)]
             requested_refs.extend(
                 (f"snapshot-base-{item['number']}", item["resolved_oid"])
@@ -2649,14 +2738,14 @@ def run_validation(args: argparse.Namespace) -> int:
                 for item in report["preflight_heads"])
             report["worktree"]["build_collision_preflight"] = _check_build_path_collisions(
                 worktree, args.build_dir, requested_refs)
-            # Only reset tracked state. Preflight rejects unexpected untracked files,
-            # and omitting git clean prevents a changed ignore rule from deleting
-            # the retained build while switching to the requested harness.
+            # Keep the retained build while rejecting other staged, unstaged,
+            # untracked, or ignored paths before using an existing worktree.
             _check_reused_reset_preconditions(worktree, args.build_dir, None)
-            reset = _git(worktree, "reset", "--hard", harness_ref)
-            report["worktree"]["reset_to_harness"] = reset.json()
-            if reset.returncode != 0:
-                raise ValidationError(f"cannot reset reused worktree to harness: {reset.stderr.strip()}")
+            if reuse_mode:
+                reset = _git(worktree, "reset", "--hard", harness_ref)
+                report["worktree"]["reset_to_harness"] = reset.json()
+                if reset.returncode != 0:
+                    raise ValidationError(f"cannot reset reused worktree to harness: {reset.stderr.strip()}")
             build_path = _check_build_directory(worktree, args.build_dir)
             _check_no_untracked_files_outside_build(worktree, args.build_dir)
             _check_no_ignored_files_outside_build(worktree, args.build_dir)
@@ -2664,15 +2753,20 @@ def run_validation(args: argparse.Namespace) -> int:
             if (reset_state["head_sha"] != harness_ref or reset_state["status"] or
                     reset_state["untracked_count"] != 0 or
                     reset_state["index_tree_sha"] != reset_state["head_tree_sha"]):
-                raise ValidationError("reused worktree did not become clean at the requested harness")
-            report["worktree"]["reset_state"] = reset_state
+                state_name = "reused" if reuse_mode else "seed"
+                raise ValidationError(f"{state_name} worktree is not clean at the requested harness")
+            if seed_mode:
+                if reset_state != seed_state:
+                    raise ValidationError("seed worktree state changed during validation")
+                report["worktree"]["seed"].update({
+                    "validation_status": "passed", "initial_state": seed_state,
+                })
+            if reuse_mode:
+                report["worktree"]["reset_state"] = reset_state
+            else:
+                report["worktree"]["seed"]["state_before_baseline"] = reset_state
         else:
-            parent = Path(tempfile.mkdtemp(prefix="slicer-pr-validation-", dir=str(output.parent)))
-            worktree = parent / "repo"
-            add = _git(repo, "worktree", "add", "--detach", str(worktree), harness_ref, timeout=300)
-            report["worktree"] = {"path": str(worktree), "add": add.json()}
-            if add.returncode != 0:
-                raise ValidationError(f"cannot create validation worktree: {add.stderr.strip()}")
+            assert worktree is not None
             build_path = _resolve_build_path(worktree, args.build_dir)
         configure_args = _default_configure(worktree, build_path, args.deps_prefix, uv)
         configure_args.extend(_format_args(args.cmake_arg, root=worktree, build=build_path,
@@ -2784,10 +2878,10 @@ def run_validation(args: argparse.Namespace) -> int:
                                 worktree, output, reference_name, requested_base_oid, args,
                                 configure_args, build_args, patch_path, patch, patch_sha,
                                 resolution_manifest, baseline_passed_cases,
-                                preserve_build_dir=args.build_dir if reuse_mode else None,
-                                allowed_staged_paths=applied_paths if reuse_mode else None,
-                                reuse_lock=reuse_lock if reuse_mode else None,
-                                applied_paths=applied_paths if reuse_mode else None,
+                                preserve_build_dir=args.build_dir if preserve_build_mode else None,
+                                allowed_staged_paths=applied_paths if preserve_build_mode else None,
+                                reuse_lock=reuse_lock if preserve_build_mode else None,
+                                applied_paths=applied_paths if preserve_build_mode else None,
                                 previous_run=last_tree_run,
                                 identity_policy=reference_identity_policy,
                                 required_harness_cases=(identity_policy["required_harness_cases"]
@@ -2853,7 +2947,7 @@ def run_validation(args: argparse.Namespace) -> int:
                 mtime_snapshot: dict[str, Any] | None = None
                 mtime_snapshot_stats: dict[str, Any] | None = None
                 mtime_restore_stats: dict[str, Any] | None = None
-                if reuse_mode:
+                if preserve_build_mode:
                     mtime_snapshot, mtime_snapshot_stats = _snapshot_overlay_mtimes(
                         worktree, applied_paths, args.build_dir, last_tree_run, reuse_lock)
 
@@ -2864,8 +2958,8 @@ def run_validation(args: argparse.Namespace) -> int:
 
                 reset_ops = _reset_worktree(
                     worktree, resolved,
-                    preserve_build_dir=args.build_dir if reuse_mode else None,
-                    allowed_staged_paths=applied_paths if reuse_mode else None)
+                    preserve_build_dir=args.build_dir if preserve_build_mode else None,
+                    allowed_staged_paths=applied_paths if preserve_build_mode else None)
                 entry["reset"] = reset_ops
                 last_tree_run = None
                 if any(item.get("returncode") != 0 for item in reset_ops):
@@ -2995,23 +3089,24 @@ def run_validation(args: argparse.Namespace) -> int:
                 _write_json(output / "report.json", report)
     finally:
         if worktree is not None:
-            preserve_worktree = reuse_mode or (
+            preserve_worktree = preserve_build_mode or (
                 getattr(args, "keep_worktree", False) and
                 report.get("worktree", {}).get("add", {}).get("returncode") == 0)
             if preserve_worktree and worktree.is_dir():
                 try:
                     report.setdefault("worktree", {})["final_state"] = _tracked_worktree_state(
-                        worktree, build_dir=args.build_dir if reuse_mode else None)
+                        worktree, build_dir=args.build_dir if preserve_build_mode else None)
                 except (OSError, ValidationError, subprocess.TimeoutExpired) as exc:
                     report.setdefault("worktree", {})["final_state"] = {
                         "available": False, "error": str(exc),
                     }
-            if reuse_mode:
+            if preserve_build_mode:
                 cleanup = {
                     "preserved": True,
                     "path": str(worktree),
                     "parent_path": str(worktree.parent),
-                    "reason": "--reuse-worktree-from-report",
+                    "reason": ("--reuse-worktree-from-report" if reuse_mode
+                               else "--seed-worktree"),
                     "lock_acquired": reuse_lock is not None,
                 }
                 if reuse_lock is not None:
@@ -3108,6 +3203,9 @@ def _parser() -> argparse.ArgumentParser:
                                   help="preserve the temporary validation worktree and its build at the reported path")
     worktree_options.add_argument("--reuse-worktree-from-report", metavar="REPORT",
                                   help="reuse a completed report's preserved linked worktree and ignored build")
+    worktree_options.add_argument("--seed-worktree", metavar="PATH",
+                                  help=("seed validation from an existing clean detached linked worktree's "
+                                        "ignored build; all configure/build/test phases still run"))
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--test-timeout", type=float, default=DEFAULT_TEST_TIMEOUT,
                         help="per-CTest-case timeout in seconds (default: 180)")

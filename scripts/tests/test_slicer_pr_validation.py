@@ -21,13 +21,19 @@ import slicer_pr_validation  # noqa: E402
 
 class ParsingTests(unittest.TestCase):
     def test_keep_and_reuse_worktree_options_are_mutually_exclusive(self):
+        conflicting_options = (
+            ("--keep-worktree", "--reuse-worktree-from-report", "prior-report.json"),
+            ("--keep-worktree", "--seed-worktree", "/seed/repo"),
+            ("--reuse-worktree-from-report", "prior-report.json",
+             "--seed-worktree", "/seed/repo"),
+        )
         with mock.patch("sys.stderr"):
-            with self.assertRaises(SystemExit):
-                slicer_pr_validation._parser().parse_args([
-                    "--harness-base", "base", "--harness-ref", "ref",
-                    "--deps-prefix", "/unused", "--keep-worktree",
-                    "--reuse-worktree-from-report", "prior-report.json",
-                ])
+            for options in conflicting_options:
+                with self.subTest(options=options), self.assertRaises(SystemExit):
+                    slicer_pr_validation._parser().parse_args([
+                        "--harness-base", "base", "--harness-ref", "ref",
+                        "--deps-prefix", "/unused", *options,
+                    ])
 
     def test_nonpositive_test_jobs_fail_before_validation(self):
         for jobs in ("0", "-1"):
@@ -1787,6 +1793,341 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             "baseRefOid": base,
         }]), encoding="utf-8")
         return snapshot
+
+    def _make_seed_worktree(self, root, repo, ref, *, build_dir="build"):
+        worktree = root / "seed" / "repo"
+        worktree.parent.mkdir()
+        self._git(repo, "worktree", "add", "--quiet", "--detach", str(worktree), ref)
+        build = worktree / build_dir
+        build.mkdir()
+        (build / "cache.marker").write_text("retained build cache\n", encoding="utf-8")
+        return worktree.resolve()
+
+    @staticmethod
+    def _fake_native_phases():
+        calls = []
+
+        def fake_phase(argv, *, cwd, timeout, log):
+            calls.append((Path(cwd), list(argv), log.name))
+            log.parent.mkdir(parents=True, exist_ok=True)
+            if argv and argv[0] == "ctest":
+                junit = Path(argv[argv.index("--output-junit") + 1])
+                junit.write_text(
+                    '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+                    '<testcase classname="suite" name="ordinary baseline"/></testsuite>',
+                    encoding="utf-8")
+                output = "100% tests passed, 0 tests failed out of 1\n"
+                log.write_text(output, encoding="utf-8")
+                return slicer_pr_validation.CommandResult(list(argv), 0, 0.01, output, "")
+            log.write_text("", encoding="utf-8")
+            return slicer_pr_validation.CommandResult(list(argv), 0, 0.01, "", "")
+
+        return calls, fake_phase
+
+    def test_seed_worktree_runs_real_phases_and_reuse_rechecks_final_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            worktree = self._make_seed_worktree(root, repo, harness_ref)
+            output = root / "seed-evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.seed_worktree = str(worktree)
+            calls, fake_phase = self._fake_native_phases()
+            with mock.patch.object(slicer_pr_validation, "_run_phase", side_effect=fake_phase):
+                self.assertEqual(slicer_pr_validation.run_validation(args), 0)
+
+            report_path = output / "report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual([item[2] for item in calls],
+                             ["configure.log", "build.log", "test.log"] * 3)
+            self.assertTrue(all(cwd == worktree for cwd, _, _ in calls))
+            self.assertEqual(report["baseline"]["status"], "pass")
+            self.assertEqual(report["references"][base]["status"], "pass")
+            self.assertEqual(report["heads"][0]["status"], "pass")
+            self.assertNotIn("add", report["worktree"])
+            self.assertEqual(report["worktree"]["seed"]["producer"],
+                             "seed_existing_worktree")
+            self.assertEqual(report["worktree"]["seed"]["validation_status"], "passed")
+            self.assertTrue(report["worktree"]["final_state"]["available"])
+            self.assertEqual(report["cleanup"]["reason"], "--seed-worktree")
+            self.assertTrue(report["cleanup"]["lock_released"])
+            self.assertTrue((worktree / "build/cache.marker").is_file())
+            self.assertEqual(self._git(worktree, "rev-parse", "HEAD").stdout.strip(), head)
+
+            reuse_args = self._args(repo, snapshot, root / "reuse-evidence")
+            reuse_args.harness_base = base
+            reuse_args.harness_ref = harness_ref
+            reuse_args.reuse_worktree_from_report = str(report_path)
+            reuse_calls, fake_reuse_phase = self._fake_native_phases()
+            with mock.patch.object(slicer_pr_validation, "_run_phase",
+                                   side_effect=fake_reuse_phase):
+                self.assertEqual(slicer_pr_validation.run_validation(reuse_args), 0)
+            self.assertEqual(len(reuse_calls), 9)
+            reuse_report = json.loads(
+                (root / "reuse-evidence/report.json").read_text(encoding="utf-8"))
+            self.assertTrue(reuse_report["worktree"]["reused"])
+            self.assertEqual(reuse_report["worktree"]["path"], str(worktree))
+            self.assertTrue(reuse_report["cleanup"]["lock_released"])
+
+            tracked_file = worktree / "README.txt"
+            tracked_file.write_text("modified after seeded run\n", encoding="utf-8")
+            rejected_args = self._args(repo, snapshot, root / "changed-evidence")
+            rejected_args.harness_base = base
+            rejected_args.harness_ref = harness_ref
+            rejected_args.reuse_worktree_from_report = str(report_path)
+            with mock.patch.object(slicer_pr_validation, "_run_phase") as run_phase:
+                with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                            "tracked tree/status differs"):
+                    slicer_pr_validation.run_validation(rejected_args)
+            run_phase.assert_not_called()
+            self.assertEqual(tracked_file.read_text(encoding="utf-8"),
+                             "modified after seeded run\n")
+            self.assertTrue(worktree.is_dir())
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+    def test_seed_worktree_rejects_wrong_head_and_preserves_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            worktree = self._make_seed_worktree(root, repo, base)
+            args = self._args(repo, snapshot, root / "wrong-head-evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.seed_worktree = str(worktree)
+            with mock.patch.object(slicer_pr_validation, "_run_phase") as run_phase:
+                with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                            "not detached at its recorded HEAD"):
+                    slicer_pr_validation.run_validation(args)
+            run_phase.assert_not_called()
+            report = json.loads((root / "wrong-head-evidence/report.json").read_text(
+                encoding="utf-8"))
+            self.assertEqual(report["worktree"]["seed"]["validation_status"], "pending")
+            self.assertTrue(report["cleanup"]["preserved"])
+            self.assertFalse(report["cleanup"]["lock_acquired"])
+            self.assertTrue((worktree / "build/cache.marker").is_file())
+            self.assertEqual(self._git(worktree, "rev-parse", "HEAD").stdout.strip(), base)
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+    def test_seed_worktree_rejects_dirty_tracked_file_and_releases_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            worktree = self._make_seed_worktree(root, repo, harness_ref)
+            tracked_file = worktree / "tests/harness.txt"
+            tracked_file.write_text("preserve this dirty content\n", encoding="utf-8")
+            git_dir = Path(self._git(
+                worktree, "rev-parse", "--absolute-git-dir").stdout.strip())
+            lock = git_dir / slicer_pr_validation._PR_REUSE_LOCK
+            args = self._args(repo, snapshot, root / "dirty-evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.seed_worktree = str(worktree)
+
+            with mock.patch.object(slicer_pr_validation, "_run_phase") as run_phase:
+                with self.assertRaisesRegex(
+                        slicer_pr_validation.ValidationError,
+                        "seed worktree must be clean at the exact harness-ref HEAD"):
+                    slicer_pr_validation.run_validation(args)
+            run_phase.assert_not_called()
+
+            report = json.loads((root / "dirty-evidence/report.json").read_text(
+                encoding="utf-8"))
+            self.assertEqual(report["worktree"]["seed"]["validation_status"], "pending")
+            self.assertTrue(report["cleanup"]["preserved"])
+            self.assertTrue(report["cleanup"]["lock_acquired"])
+            self.assertTrue(report["cleanup"]["lock_released"])
+            self.assertFalse(lock.exists())
+            self.assertEqual(tracked_file.read_text(encoding="utf-8"),
+                             "preserve this dirty content\n")
+            self.assertTrue((worktree / "build/cache.marker").is_file())
+            self.assertEqual(self._git(worktree, "rev-parse", "HEAD").stdout.strip(),
+                             harness_ref)
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+    def test_seed_worktree_rejects_foreign_common_dir_and_preserves_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            foreign_repo = root / "foreign-repo"
+            subprocess.run(["git", "clone", "--shared", "--quiet", str(repo),
+                            str(foreign_repo)], check=True, cwd=root,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            worktree = root / "foreign-seed" / "repo"
+            worktree.parent.mkdir()
+            self._git(foreign_repo, "worktree", "add", "--quiet", "--detach",
+                      str(worktree), harness_ref)
+            worktree = worktree.resolve()
+            build = worktree / "build"
+            build.mkdir()
+            cache_marker = build / "cache.marker"
+            cache_marker.write_text("foreign cache stays intact\n", encoding="utf-8")
+            args = self._args(repo, snapshot, root / "foreign-evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.seed_worktree = str(worktree)
+
+            with mock.patch.object(slicer_pr_validation, "_run_phase") as run_phase:
+                with self.assertRaisesRegex(
+                        slicer_pr_validation.ValidationError,
+                        "different git common directory"):
+                    slicer_pr_validation.run_validation(args)
+            run_phase.assert_not_called()
+
+            report = json.loads((root / "foreign-evidence/report.json").read_text(
+                encoding="utf-8"))
+            self.assertEqual(report["worktree"]["seed"]["validation_status"], "pending")
+            self.assertTrue(report["cleanup"]["preserved"])
+            self.assertFalse(report["cleanup"]["lock_acquired"])
+            self.assertEqual(cache_marker.read_text(encoding="utf-8"),
+                             "foreign cache stays intact\n")
+            self.assertEqual(self._git(worktree, "rev-parse", "HEAD").stdout.strip(),
+                             harness_ref)
+            foreign_git_dir = Path(self._git(
+                worktree, "rev-parse", "--absolute-git-dir").stdout.strip())
+            self.assertFalse(
+                (foreign_git_dir / slicer_pr_validation._PR_REUSE_LOCK).exists())
+            self.assertTrue(worktree.is_dir())
+            self._git(foreign_repo, "worktree", "remove", "--force", str(worktree))
+
+    def test_seed_worktree_is_preserved_when_real_baseline_build_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            worktree = self._make_seed_worktree(root, repo, harness_ref)
+            args = self._args(repo, snapshot, root / "failed-baseline-evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.seed_worktree = str(worktree)
+            calls = []
+
+            def fail_build(argv, *, cwd, timeout, log):
+                calls.append((Path(cwd), list(argv)))
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text("build failed\n" if "--build" in argv else "",
+                               encoding="utf-8")
+                returncode = 1 if "--build" in argv else 0
+                return slicer_pr_validation.CommandResult(list(argv), returncode, 0.01, "", "")
+
+            with mock.patch.object(slicer_pr_validation, "_run_phase", side_effect=fail_build):
+                self.assertEqual(slicer_pr_validation.run_validation(args), 2)
+            report = json.loads((root / "failed-baseline-evidence/report.json").read_text(
+                encoding="utf-8"))
+            self.assertEqual(report["baseline"]["status"], "build_failed")
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(cwd == worktree for cwd, _ in calls))
+            self.assertTrue(report["cleanup"]["preserved"])
+            self.assertTrue(report["cleanup"]["lock_released"])
+            self.assertTrue((worktree / "build/cache.marker").is_file())
+            self.assertEqual(self._git(worktree, "rev-parse", "HEAD").stdout.strip(),
+                             harness_ref)
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+    def test_seed_worktree_rejects_existing_lock_and_preserves_worktree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            worktree = self._make_seed_worktree(root, repo, harness_ref)
+            git_dir = Path(self._git(worktree, "rev-parse", "--absolute-git-dir").stdout.strip())
+            lock = git_dir / slicer_pr_validation._PR_REUSE_LOCK
+            lock.write_text("existing owner\n", encoding="utf-8")
+            args = self._args(repo, snapshot, root / "locked-evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.seed_worktree = str(worktree)
+            with mock.patch.object(slicer_pr_validation, "_run_phase") as run_phase:
+                with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                            "lock exists"):
+                    slicer_pr_validation.run_validation(args)
+            run_phase.assert_not_called()
+            report = json.loads((root / "locked-evidence/report.json").read_text(
+                encoding="utf-8"))
+            self.assertTrue(report["cleanup"]["preserved"])
+            self.assertFalse(report["cleanup"]["lock_acquired"])
+            self.assertEqual(lock.read_text(encoding="utf-8"), "existing owner\n")
+            self.assertTrue((worktree / "build/cache.marker").is_file())
+            lock.unlink()
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+    def test_seed_worktree_rejects_untracked_files_outside_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            worktree = self._make_seed_worktree(root, repo, harness_ref)
+            unexpected = worktree / "unexpected.txt"
+            unexpected.write_text("keep me\n", encoding="utf-8")
+            args = self._args(repo, snapshot, root / "untracked-evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.seed_worktree = str(worktree)
+            with mock.patch.object(slicer_pr_validation, "_run_phase") as run_phase:
+                with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                            "unexpected untracked files outside retained build"):
+                    slicer_pr_validation.run_validation(args)
+            run_phase.assert_not_called()
+            self.assertEqual(unexpected.read_text(encoding="utf-8"), "keep me\n")
+            report = json.loads((root / "untracked-evidence/report.json").read_text(
+                encoding="utf-8"))
+            self.assertTrue(report["cleanup"]["preserved"])
+            self.assertEqual(report["worktree"]["seed"]["validation_status"], "pending")
+            self.assertTrue((worktree / "build/cache.marker").is_file())
+            unexpected.unlink()
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+    def test_seed_worktree_rejects_symlink_alias_before_creating_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            worktree = self._make_seed_worktree(root, repo, harness_ref)
+            alias = root / "seed-alias"
+            alias.symlink_to(worktree.parent, target_is_directory=True)
+            args = self._args(repo, snapshot, root / "alias-evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.seed_worktree = str(alias / worktree.name)
+            with mock.patch.object(slicer_pr_validation, "_run_phase") as run_phase:
+                with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                            "canonical path"):
+                    slicer_pr_validation.run_validation(args)
+            run_phase.assert_not_called()
+            self.assertFalse((root / "alias-evidence").exists())
+            self.assertTrue((worktree / "build/cache.marker").is_file())
+            self.assertEqual(self._git(worktree, "rev-parse", "HEAD").stdout.strip(),
+                             harness_ref)
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
+
+    def test_seed_worktree_requires_an_ignored_existing_build_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            worktree = self._make_seed_worktree(root, repo, harness_ref, build_dir="cache")
+            args = self._args(repo, snapshot, root / "nonignored-build-evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.build_dir = "cache"
+            args.seed_worktree = str(worktree)
+            with mock.patch.object(slicer_pr_validation, "_run_phase") as run_phase:
+                with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                            "not ignored"):
+                    slicer_pr_validation.run_validation(args)
+            run_phase.assert_not_called()
+            report = json.loads((root / "nonignored-build-evidence/report.json").read_text(
+                encoding="utf-8"))
+            self.assertTrue(report["cleanup"]["preserved"])
+            self.assertTrue(report["cleanup"]["lock_released"])
+            self.assertEqual(report["worktree"]["seed"]["validation_status"], "pending")
+            self.assertTrue((worktree / "cache/cache.marker").is_file())
+            self._git(repo, "worktree", "remove", "--force", str(worktree))
 
     def test_nonempty_output_directory_is_rejected_before_worktree_run(self):
         with tempfile.TemporaryDirectory() as temp:
