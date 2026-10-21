@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Public PrintConfig deserialization, generated variant-slot, and filament metadata contracts.",
+  "mutants": [
+    {
+      "id": "printconfig-asa-aero-legacy-token-not-normalized",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "if (token == \"ASA-Aero\") {\n                token = \"ASA-AERO\";",
+      "new": "if (token == \"ASA-AERO\") {\n                token = \"ASA-AERO\";",
+      "expected_matches": 1,
+      "test_filter": "ASA-Aero legacy filament spelling is normalized on deserialization",
+      "description": "The legacy ASA-Aero spelling is normalized to ASA-AERO while canonical spelling and the peer material remain unchanged."
+    },
+    {
+      "id": "printconfig-incomplete-extruder-map-fallback-removed",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "const int id = has_complete_id_map ? id_opt->get_at(index) : generated_extruder_id(index);",
+      "new": "const int id = has_complete_id_map ? id_opt->get_at(index) : 0;",
+      "expected_matches": 1,
+      "test_filter": "Incomplete extruder ID maps resolve variant slots with the configured stride",
+      "description": "The generated extruder ID fallback maps later variant columns to their owner and retains stride-scaled slot positions."
+    }
+  ]
+}

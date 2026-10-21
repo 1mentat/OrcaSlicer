@@ -1806,3 +1806,197 @@ TEST_CASE("Tree support floor contacts keep base-interface roles and interlace d
     REQUIRE(evidence.last_base_interface_paths > 0);
     REQUIRE(evidence.alternating_direction_pairs > 0);
 }
+
+namespace tree_support_zero_gap_roof_contracts {
+
+struct RoofEvidence {
+    bool finite = true;
+    bool zero_gap_resolved = false;
+    size_t support_paths = 0;
+    size_t interface_paths = 0;
+    size_t interface_layers = 0;
+    size_t invalid_paths = 0;
+    double resolved_gap_mm = std::numeric_limits<double>::quiet_NaN();
+    double total_support_length_mm = 0.0;
+    double total_support_volume_mm3 = 0.0;
+    double top_interface_z_mm = -std::numeric_limits<double>::infinity();
+    double top_overhang_coverage_mm2 = 0.0;
+};
+
+static ExPolygon cap_overhang_window(const Point &center_offset)
+{
+    // cap_overhang_fixture() has a 24x24 cap at XY [0,24]^2 and a 6x6 stem at
+    // [9,15]^2. The ring is the independently known underside that overhangs air.
+    Polygon outer{ Point::new_scale(0., 0.) - center_offset,
+                   Point::new_scale(24., 0.) - center_offset,
+                   Point::new_scale(24., 24.) - center_offset,
+                   Point::new_scale(0., 24.) - center_offset };
+    Polygon stem{ Point::new_scale(9., 9.) - center_offset,
+                  Point::new_scale(9., 15.) - center_offset,
+                  Point::new_scale(15., 15.) - center_offset,
+                  Point::new_scale(15., 9.) - center_offset };
+    return ExPolygon(std::move(outer), std::move(stem));
+}
+
+static double area_mm2(const ExPolygons &polygons)
+{
+    double scaled_area = 0.0;
+    for (const ExPolygon &polygon : polygons)
+        scaled_area += std::abs(polygon.area());
+    return unscale<double>(unscale<double>(scaled_area));
+}
+
+static RoofEvidence observe(double top_gap_mm)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "printable_area",                    "-100x-100,200x-100,200x200,-100x200" },
+        { "enable_support",                    1 },
+        { "support_type",                      "tree(auto)" },
+        { "support_style",                     "organic" },
+        { "support_on_build_plate_only",       0 },
+        { "support_threshold_angle",           30 },
+        { "support_remove_small_overhang",     0 },
+        { "support_top_z_distance",            top_gap_mm },
+        { "support_interface_top_layers",      3 },
+        { "support_interface_bottom_layers",   0 },
+        { "support_interface_spacing",         0.4 },
+        { "independent_support_layer_height",  false },
+        { "layer_height",                      0.2 },
+        { "initial_layer_print_height",        0.2 },
+        { "support_line_width",                0.4 },
+        { "line_width",                        0.4 },
+        { "nozzle_diameter",                   "0.4" },
+        { "tree_support_top_rate",             "30%" },
+        { "tree_support_branch_distance_organic", 1.0 },
+        { "tree_support_branch_angle_organic",  40.0 },
+        { "tree_support_branch_diameter_angle", 5.0 },
+        { "tree_support_tip_diameter",          0.8 },
+        { "tree_support_branch_diameter_organic", 2.0 },
+        { "tree_support_wall_count",           1 },
+        { "support_base_pattern",              "hollow" },
+        { "tree_support_auto_brim",            false },
+        { "tree_support_brim_width",           0.0 },
+        { "brim_type",                         "no_brim" },
+        { "brim_width",                        0.0 },
+        { "skirt_loops",                       0 },
+        { "raft_layers",                       0 },
+        { "enable_arc_fitting",                false },
+        { "resolution",                        0.01 },
+        { "use_relative_e_distances",          true },
+        { "layer_change_gcode",                "G92 E0\n" },
+    });
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(organic_tree_density_contracts::cap_overhang_fixture());
+    init_print(std::move(meshes), print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+
+    const PrintObject &object = *print.objects().front();
+    RoofEvidence result;
+    result.zero_gap_resolved = object.slicing_parameters().zero_gap_interface_top;
+    result.resolved_gap_mm = static_cast<double>(object.slicing_parameters().gap_support_object);
+    const ExPolygon overhang = cap_overhang_window(object.center_offset());
+    Polygons top_interface_coverage;
+
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer == nullptr) {
+            result.finite = false;
+            continue;
+        }
+        const double layer_z = static_cast<double>(layer->print_z);
+        result.finite = result.finite && std::isfinite(layer_z);
+        bool layer_has_interface = false;
+        Polygons layer_interface_coverage;
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            const double length_mm = unscale<double>(path.length());
+            const double flow_mm3_per_mm = path.mm3_per_mm;
+            const double width_mm = static_cast<double>(path.width);
+            const double height_mm = static_cast<double>(path.height);
+            const double volume_mm3 = length_mm * flow_mm3_per_mm;
+            const bool valid_physical_path = std::isfinite(length_mm) && length_mm > 0.0 &&
+                std::isfinite(flow_mm3_per_mm) && flow_mm3_per_mm > 0.0 &&
+                std::isfinite(width_mm) && width_mm > 0.0 &&
+                std::isfinite(height_mm) && height_mm > 0.0 &&
+                std::isfinite(volume_mm3) && volume_mm3 > 0.0;
+            if (!valid_physical_path) {
+                ++result.invalid_paths;
+                result.finite = false;
+                return;
+            }
+
+            ++result.support_paths;
+            result.total_support_length_mm += length_mm;
+            result.total_support_volume_mm3 += volume_mm3;
+            if (path.role() != erSupportMaterialInterface)
+                return;
+
+            ++result.interface_paths;
+            layer_has_interface = true;
+            path.polygons_covered_by_width(layer_interface_coverage, float(SCALED_EPSILON));
+        });
+        if (!layer_has_interface)
+            continue;
+
+        ++result.interface_layers;
+        if (layer_z > result.top_interface_z_mm + EPSILON) {
+            result.top_interface_z_mm = layer_z;
+            top_interface_coverage.clear();
+        }
+        if (std::abs(layer_z - result.top_interface_z_mm) <= EPSILON)
+            append(top_interface_coverage, layer_interface_coverage);
+    }
+
+    if (!top_interface_coverage.empty()) {
+        const ExPolygons clipped = intersection_ex(union_ex(top_interface_coverage), ExPolygons{overhang});
+        result.top_overhang_coverage_mm2 = area_mm2(clipped);
+    }
+    result.finite = result.finite && std::isfinite(result.total_support_length_mm);
+    result.finite = result.finite && std::isfinite(result.total_support_volume_mm3);
+    result.finite = result.finite && std::isfinite(result.top_interface_z_mm);
+    result.finite = result.finite && std::isfinite(result.top_overhang_coverage_mm2);
+    return result;
+}
+
+} // namespace tree_support_zero_gap_roof_contracts
+
+TEST_CASE("Zero-gap organic support roof reaches the cap underside",
+          "[TreeSupport][TreeSupportRoofContact]")
+{
+    using namespace tree_support_zero_gap_roof_contracts;
+    constexpr double cap_underside_z_mm = 5.8;
+    constexpr double layer_height_mm = 0.2;
+    const RoofEvidence zero_gap = observe(0.0);
+    const RoofEvidence positive_gap = observe(layer_height_mm);
+
+    for (const RoofEvidence &evidence : {zero_gap, positive_gap}) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.invalid_paths == 0);
+        REQUIRE(evidence.support_paths > 0);
+        REQUIRE(evidence.interface_paths > 0);
+        REQUIRE(evidence.interface_layers > 0);
+        REQUIRE(evidence.total_support_length_mm > 0.0);
+        REQUIRE(evidence.total_support_volume_mm3 > 0.0);
+        REQUIRE(evidence.top_overhang_coverage_mm2 > 0.01);
+    }
+
+    CHECK(zero_gap.zero_gap_resolved);
+    CHECK_FALSE(positive_gap.zero_gap_resolved);
+    CHECK_THAT(zero_gap.resolved_gap_mm, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(positive_gap.resolved_gap_mm, Catch::Matchers::WithinAbs(layer_height_mm, 1e-6));
+    // The fixture cap starts at z=5.8; with 0.2 mm layers the positive-gap control
+    // sits one full layer lower. The coverage assertion uses only the analytically
+    // known cap ring outside the 6x6 stem, not path count or stored polygon ordering.
+    CHECK_THAT(zero_gap.top_interface_z_mm,
+               Catch::Matchers::WithinAbs(cap_underside_z_mm, 0.03));
+    CHECK_THAT(positive_gap.top_interface_z_mm,
+               Catch::Matchers::WithinAbs(cap_underside_z_mm - layer_height_mm, 0.03));
+    CHECK_THAT(zero_gap.top_interface_z_mm - positive_gap.top_interface_z_mm,
+               Catch::Matchers::WithinAbs(layer_height_mm, 0.03));
+}

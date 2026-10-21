@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "test_filter": "Extra overhang perimeters add material in the unsupported step band",
+  "description": "Public Print geometry for additional overhang perimeters on an attached step.",
+  "mutants": [
+    {
+      "id": "extra-overhang-setting-gate-disabled",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "this->config->extra_perimeters_on_overhangs &&",
+      "new": "false &&",
+      "test_filter": "Extra overhang perimeters add material in the unsupported step band",
+      "expected_matches": 1,
+      "description": "Disabling the registered feature gate must remove added overhang-role extrusion from the analytically measured unsupported band while leaving the option-off control unchanged."
+    },
+    {
+      "id": "extra-overhang-path-filter-drops-valid-lines",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "if (p.length() > 3 * extrusion_spacing) {",
+      "new": "if (p.length() > 3000 * extrusion_spacing) {",
+      "test_filter": "Extra overhang perimeters add material in the unsupported step band",
+      "expected_matches": 1,
+      "description": "An inflated minimum-length filter drops valid overhang paths; the positive feature case must retain measurable extrusion in the unsupported band."
+    }
+  ]
+}

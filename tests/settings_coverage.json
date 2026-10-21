@@ -4604,6 +4604,14 @@
         "representative_values"
       ],
       "reason": "The accepted public DynamicPrintConfig::get_filament_type test supplies PLA, PETG, PA, and PVA entries and checks resolved type/display values for vendor and generic identifiers. This verifies config material classification, but does not establish a complete FFF print/G-code pipeline oracle, so the setting remains partial."
+    },
+    "filament_vendor": {
+      "test": "tests/libslic3r/test_config_variant_expansion.cpp",
+      "tag": "[Config][Filament]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "The named DynamicPrintConfig getter case checks the public vendor getter for a missing option, an empty value list, and a two-value list where it returns the first value. This is representative Config getter behavior only; no FFF/G-code pipeline or full value-domain claim is made."
     }
   }
 }

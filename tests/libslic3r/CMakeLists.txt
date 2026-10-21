@@ -48,6 +48,7 @@ add_executable(${_TEST_NAME}_tests
     test_preset_bundle_loading.cpp
     test_preset_setting_id.cpp
     test_preset_diff.cpp
+    test_printer_preset_collection.cpp
     test_vendor_cache.cpp
     test_preset_options.cpp
     test_elephant_foot_compensation.cpp
@@ -162,6 +163,18 @@ target_include_directories(libslic3r_preset_bundle_tests PRIVATE ${CMAKE_SOURCE_
 set_property(TARGET libslic3r_preset_bundle_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_preset_bundle_tests)
 slicer_enable_llvm_source_coverage(libslic3r_preset_bundle_tests)
+
+# Focused preset collection contracts without duplicate CTest registration.
+# Reuse the standalone NanoSVG provider required by the linked libslic3r archive.
+add_executable(libslic3r_preset_collection_tests EXCLUDE_FROM_ALL
+    test_preset_diff.cpp
+    test_printer_preset_collection.cpp
+    ../fff_print/fff_print_tests.cpp)
+target_link_libraries(libslic3r_preset_collection_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_preset_collection_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_preset_collection_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_preset_collection_tests)
+slicer_enable_llvm_source_coverage(libslic3r_preset_collection_tests)
 
 # Explicitly built .3mf format tests, without duplicate CTest registration.
 # Reuse the standalone NanoSVG implementation needed by linked libslic3r objects.
@@ -345,6 +358,17 @@ target_include_directories(libslic3r_config_tests PRIVATE ${CMAKE_SOURCE_DIR}/sr
 set_property(TARGET libslic3r_config_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_config_tests)
 slicer_enable_llvm_source_coverage(libslic3r_config_tests)
+
+# Focused config-variant tests, without duplicate CTest registration.
+# Use the standalone NanoSVG provider required by the linked libslic3r archive.
+add_executable(libslic3r_config_variant_expansion_tests EXCLUDE_FROM_ALL
+    test_config_variant_expansion.cpp
+    ../fff_print/fff_print_tests.cpp)
+target_link_libraries(libslic3r_config_variant_expansion_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_config_variant_expansion_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_config_variant_expansion_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_config_variant_expansion_tests)
+slicer_enable_llvm_source_coverage(libslic3r_config_variant_expansion_tests)
 
 # Explicitly built by the inventory audit; it is not an extra Catch test.
 add_executable(slicer_settings_inventory EXCLUDE_FROM_ALL settings_inventory_main.cpp)

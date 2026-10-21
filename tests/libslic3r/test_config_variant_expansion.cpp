@@ -790,6 +790,66 @@ TEST_CASE("get_index_for_extruder scales the variant column by the requested str
     REQUIRE(col1_stride2 == 2);
 }
 
+TEST_CASE("ASA-Aero legacy filament spelling is normalized on deserialization", "[Config][PrintConfigCompatibility]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("filament_type", "\"ASA-Aero\";\"PLA\"");
+
+    const auto *types = config.option<ConfigOptionStrings>("filament_type");
+    REQUIRE(types != nullptr);
+    REQUIRE(types->values.size() == 2);
+    CHECK(types->values[0] == "ASA-AERO");
+    CHECK(types->values[1] == "PLA");
+
+    config.set_deserialize_strict("filament_type", "\"ASA-AERO\";\"PETG\"");
+    const std::vector<std::string> expected_canonical_types{"ASA-AERO", "PETG"};
+    CHECK(config.option<ConfigOptionStrings>("filament_type")->values == expected_canonical_types);
+}
+
+TEST_CASE("Incomplete extruder ID maps resolve variant slots with the configured stride", "[Config][PrintConfigVariants]")
+{
+    DynamicPrintConfig config;
+    config.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {
+        "Direct Drive Standard,Direct Drive High Flow",
+        " Bowden Standard , Bowden High Flow "
+    };
+    // A transient preset may have the variant columns before its full ID map is synthesized.
+    config.option<ConfigOptionInts>("print_extruder_id", true)->values = {1};
+    config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard", "Bowden High Flow"
+    };
+
+    CHECK(config.get_index_for_extruder(2, "print_extruder_id", etBowden, nvtStandard,
+                                        "print_extruder_variant", 2) == 4);
+    CHECK(config.get_index_for_extruder(2, "print_extruder_id", etBowden, nvtHighFlow,
+                                        "print_extruder_variant", 2) == 6);
+
+    DynamicPrintConfig without_variant_list;
+    without_variant_list.option<ConfigOptionInts>("print_extruder_id", true)->values = {1};
+    without_variant_list.option<ConfigOptionStrings>("print_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"
+    };
+    CHECK(without_variant_list.get_index_for_extruder(2, "print_extruder_id", etDirectDrive, nvtStandard,
+                                                       "print_extruder_variant") == -1);
+}
+
+TEST_CASE("Filament metadata getters return the first stored value", "[Config][Filament]")
+{
+    DynamicPrintConfig config;
+    CHECK(config.get_filament_vendor().empty());
+    CHECK(config.get_filament_type().empty());
+
+    config.set_key_value("filament_vendor", new ConfigOptionStrings());
+    config.set_key_value("filament_type", new ConfigOptionStrings());
+    CHECK(config.get_filament_vendor().empty());
+    CHECK(config.get_filament_type().empty());
+
+    config.set_key_value("filament_vendor", new ConfigOptionStrings({"Acme Materials", "Second Vendor"}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PETG-CF", "PLA"}));
+    CHECK(config.get_filament_vendor() == "Acme Materials");
+    CHECK(config.get_filament_type() == "PETG-CF");
+}
+
 // A per-variant filament option read with a single value gives it to every filament variant. A project
 // exported by an older CLI holds a single value for an option no loaded preset defined, such as
 // filament_ironing_flow.

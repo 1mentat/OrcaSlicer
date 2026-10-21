@@ -944,6 +944,172 @@ TEST_CASE("A lower layer sliver too thin to print does not support the wall abov
 
 namespace {
 
+// A centered lower square supports part of the wider shelf, while the remaining first-layer area
+// is an analytic overhang band and the shared footprint attaches the shelf to the preceding layer.
+void process_supported_step(Print &print, Model &model, double lower_width, double shelf_width,
+                            const DynamicPrintConfig &config)
+{
+    ModelObject *object = model.add_object();
+    object->name = "supported_overhang_step.stl";
+    TriangleMesh support = make_cube(lower_width, lower_width, 5.);
+    const float lower_origin = float(40. - lower_width / 2.);
+    support.translate(lower_origin, lower_origin, 0.f);
+    object->add_volume(std::move(support), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh shelf = make_cube(shelf_width, shelf_width, 2.);
+    const float shelf_origin = float(40. - shelf_width / 2.);
+    shelf.translate(shelf_origin, shelf_origin, 5.f);
+    object->add_volume(std::move(shelf), ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->ensure_on_bed();
+
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO("supported-step validation=" << validation.string);
+    INFO("supported-step validation opt_key=" << validation.opt_key);
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    REQUIRE_NOTHROW(print.process());
+}
+
+struct OverhangStepEvidence {
+    double lower_area_mm2 = 0.;
+    double current_area_mm2 = 0.;
+    double unsupported_area_mm2 = 0.;
+    double unsupported_overhang_path_mm = 0.;
+    double unsupported_overhang_material_mm3 = 0.;
+    double first_layer_perimeter_mm = 0.;
+    size_t unsupported_overhang_paths = 0;
+    size_t invalid_flow_paths = 0;
+};
+
+double area_mm2(const ExPolygons &polygons)
+{
+    return area(polygons) / (double(scale_(1.)) * double(scale_(1.)));
+}
+
+OverhangStepEvidence overhang_step_evidence(const Print &print)
+{
+    OverhangStepEvidence evidence;
+    const PrintObject &object = *print.objects().front();
+    evidence.first_layer_perimeter_mm = unscale<double>(perimeter_length_at(print, first_layer_z));
+
+    const auto &layers = object.layers();
+    double largest_band_mm2 = 0.;
+    for (size_t layer_idx = 1; layer_idx < layers.size(); ++layer_idx) {
+        const Layer *below = layers[layer_idx - 1];
+        const Layer *layer = layers[layer_idx];
+        const ExPolygons unsupported = diff_ex(layer->lslices, below->lslices);
+        const double band_mm2 = area_mm2(unsupported);
+        if (band_mm2 <= largest_band_mm2)
+            continue;
+
+        largest_band_mm2 = band_mm2;
+        evidence.lower_area_mm2 = area_mm2(below->lslices);
+        evidence.current_area_mm2 = area_mm2(layer->lslices);
+        evidence.unsupported_area_mm2 = band_mm2;
+        evidence.unsupported_overhang_path_mm = 0.;
+        evidence.unsupported_overhang_material_mm3 = 0.;
+        evidence.unsupported_overhang_paths = 0;
+        evidence.invalid_flow_paths = 0;
+
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->perimeters, [&](const ExtrusionPath &path) {
+                if (path.role() != erOverhangPerimeter)
+                    return;
+                const Polylines portions = intersection_pl(Polylines{path.as_polyline()}, unsupported);
+                const double clipped_mm = unscale<double>(total_length(portions));
+                if (clipped_mm <= 0.)
+                    return;
+
+                ++evidence.unsupported_overhang_paths;
+                evidence.unsupported_overhang_path_mm += clipped_mm;
+                evidence.unsupported_overhang_material_mm3 += clipped_mm * path.mm3_per_mm;
+                if (!std::isfinite(path.width) || !std::isfinite(path.height) || !std::isfinite(path.mm3_per_mm) ||
+                    path.width <= 0. || path.height <= 0. || path.mm3_per_mm <= 0.)
+                    ++evidence.invalid_flow_paths;
+            });
+        }
+    }
+    return evidence;
+}
+
+DynamicPrintConfig extra_overhang_perimeter_config(bool enabled)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "wall_generator",                    "classic" },
+        { "layer_height",                       0.2 },
+        { "initial_layer_print_height",          0.2 },
+        { "nozzle_diameter",                    "0.4" },
+        { "gcode_flavor",                        "marlin" },
+        { "use_relative_e_distances",            true },
+        { "layer_change_gcode",                  "G92 E0\n" },
+        { "outer_wall_line_width",               0.42 },
+        { "inner_wall_line_width",               0.45 },
+        { "wall_loops",                         3 },
+        { "detect_overhang_wall",                true },
+        { "extra_perimeters_on_overhangs",       enabled },
+        { "overhang_reverse",                    false },
+        { "overhang_reverse_internal_only",      false },
+        { "unsupported_wall_last",               false },
+        { "only_one_wall_top",                   false },
+        { "only_one_wall_first_layer",           false },
+        { "detect_thin_wall",                    false },
+        { "top_shell_layers",                    2 },
+        { "bottom_shell_layers",                 2 },
+        { "sparse_infill_density",               "15%" },
+        { "skirt_loops",                         0 },
+        { "brim_type",                           "no_brim" },
+        { "raft_layers",                         0 },
+        { "printable_area",                      "0x0,100x0,100x100,0x100" },
+    });
+    return config;
+}
+
+} // namespace
+
+// The added paths must occupy the unsupported part of the step, keep the analytic attached footprint,
+// and carry valid extrusion flow. This checks the public Print geometry rather than only counting paths.
+TEST_CASE("Extra overhang perimeters add material in the unsupported step band", "[Perimeters][OverhangExtraPerimeters]")
+{
+    const auto [lower_width, shelf_width] = GENERATE(table<double, double>({
+        { 20., 40. },
+        {  8., 12. },
+    }));
+    CAPTURE(lower_width, shelf_width);
+    const double expected_lower_area_mm2 = lower_width * lower_width;
+    const double expected_current_area_mm2 = shelf_width * shelf_width;
+    const double expected_unsupported_area_mm2 = expected_current_area_mm2 - expected_lower_area_mm2;
+
+    auto slice = [lower_width = lower_width, shelf_width = shelf_width](bool enabled) {
+        Print print;
+        Model model;
+        process_supported_step(print, model, lower_width, shelf_width, extra_overhang_perimeter_config(enabled));
+        REQUIRE_FALSE(print.objects().empty());
+        return overhang_step_evidence(print);
+    };
+
+    const OverhangStepEvidence regular = slice(false);
+    const OverhangStepEvidence extra = slice(true);
+
+    CHECK_THAT(regular.lower_area_mm2, Catch::Matchers::WithinAbs(expected_lower_area_mm2, 2.));
+    CHECK_THAT(regular.current_area_mm2, Catch::Matchers::WithinAbs(expected_current_area_mm2, 2.));
+    CHECK_THAT(regular.unsupported_area_mm2, Catch::Matchers::WithinAbs(expected_unsupported_area_mm2, 2.));
+    CHECK_THAT(extra.lower_area_mm2, Catch::Matchers::WithinAbs(regular.lower_area_mm2, 0.01));
+    CHECK_THAT(extra.current_area_mm2, Catch::Matchers::WithinAbs(regular.current_area_mm2, 0.01));
+    CHECK_THAT(extra.unsupported_area_mm2, Catch::Matchers::WithinAbs(regular.unsupported_area_mm2, 0.01));
+    CHECK_THAT(extra.first_layer_perimeter_mm, Catch::Matchers::WithinAbs(regular.first_layer_perimeter_mm, 0.1));
+
+    CHECK(extra.unsupported_overhang_paths > regular.unsupported_overhang_paths);
+    CHECK(extra.unsupported_overhang_path_mm > regular.unsupported_overhang_path_mm + 1.0);
+    CHECK(extra.unsupported_overhang_material_mm3 > regular.unsupported_overhang_material_mm3);
+    CHECK(extra.unsupported_overhang_paths > 0);
+    CHECK(extra.invalid_flow_paths == 0);
+}
+
+namespace {
+
 // Every setting the fuzzy skin assertions below depend on.
 DynamicPrintConfig fuzzy_skin_config(const char *wall_generator)
 {

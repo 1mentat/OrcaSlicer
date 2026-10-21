@@ -1,0 +1,34 @@
+{
+  "description": "Printer preset lookup and visibility mutation probes.",
+  "mutants": [
+    {
+      "assertion_fragment": "CHECK(printers.find_system_preset_by_model_and_variant(\"Model A\", \"0.4\") == system_04);",
+      "candidate_test_case": "System printer lookup rejects empty models and skips matching user profiles",
+      "description": "Drop the system-profile guard. A lexically earlier user profile with the same model and variant would be returned before the required system profile.",
+      "expected_matches": 1,
+      "expected_result": "ordinary_assertion_kill",
+      "id": "printer-system-lookup-does-not-skip-user-match",
+      "new": "if (preset.config.opt_string(\"printer_model\") != model_id)",
+      "old": "if (!preset.is_system || preset.config.opt_string(\"printer_model\") != model_id)",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Preset.cpp",
+      "source_anchor_sha256": "eefe0a23cf2016da6686d9094eaa70fd2206b4d27b45f94c7471ae0c3b5406e8",
+      "test_filter": "System printer lookup rejects empty models and skips matching user profiles"
+    },
+    {
+      "assertion_fragment": "user->is_visible = false;\n    CHECK(printers.only_default_printers());",
+      "candidate_test_case": "Only default printers ignores hidden presets and sees visible user presets",
+      "description": "Count hidden non-default-named presets. The in-memory collection with only a hidden user preset must still be classified as containing only default printers.",
+      "expected_matches": 1,
+      "expected_result": "ordinary_assertion_kill",
+      "id": "only-default-printers-counts-hidden-user-presets",
+      "new": "if (!boost::starts_with(printer.name,\"Default\"))",
+      "old": "if (!boost::starts_with(printer.name,\"Default\") && printer.is_visible)",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Preset.cpp",
+      "source_anchor_sha256": "4738f796a7a385787018a5a2ae6d7fd0fb1076a8454e38f5e7583989592619c5",
+      "test_filter": "Only default printers ignores hidden presets and sees visible user presets"
+    }
+  ],
+  "schema_version": 1
+}

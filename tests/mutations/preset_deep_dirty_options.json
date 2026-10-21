@@ -1,0 +1,39 @@
+{
+  "description": "PresetCollection reports every missing vector slot and filters exact ignored dirty-option keys.",
+  "mutants": [
+    {
+      "assertion_fragments": [
+        "CHECK(diff == std::vector<std::string>{\"nozzle_diameter#0\", \"nozzle_diameter#1\"});"
+      ],
+      "candidate_test_case": "deep_diff reports every vector slot when an option exists on only one side",
+      "description": "Collapse the one-sided vector diff entries to the bare option key. The test runs both edited-only and reference-only presence and requires the per-slot keys nozzle_diameter#0 and nozzle_diameter#1.",
+      "expected_matches": 1,
+      "expected_result": "ordinary_assertion_kill",
+      "id": "preset-deep-diff-one-sided-vector-retains-slot-indices",
+      "new": "diff.push_back(opt_key);",
+      "old": "diff.push_back(opt_key + \"#\" + std::to_string(i));",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Preset.cpp",
+      "source_anchor_sha256": "2e44d1b348a80df13be9abb374f4888cb1d3aee7b6ca4e493cffa48df01922e8",
+      "test_filter": "deep_diff reports every vector slot when an option exists on only one side"
+    },
+    {
+      "assertion_fragments": [
+        "CHECK(PresetCollection::dirty_options_without_option_list(\n              &explicitly_empty, &absent, exact_ignored_key, false).empty());",
+        "CHECK(PresetCollection::dirty_options_without_option_list(\n              &edited, &reference, exact_ignored_key, true).empty());"
+      ],
+      "candidate_test_case": "dirty option reports preserve optional compatibility keys and filter exact ignores",
+      "description": "Disable exact ignore-set erasure. The changed optional compatibility key must be omitted when its exact key is ignored, while the paired different-key control still returns it.",
+      "expected_matches": 1,
+      "expected_result": "ordinary_assertion_kill",
+      "id": "preset-dirty-options-without-list-retains-exact-ignored-key",
+      "new": "if (false) { // mutation: retain keys in the exact ignore set",
+      "old": "if (option_ignore_list.find(*iter) != option_ignore_list.end()) {",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Preset.cpp",
+      "source_anchor_sha256": "839b1d60e70cf569cdd5d70a61ceca3d2042fe9edc043bbe3566063977a98c4f",
+      "test_filter": "dirty option reports preserve optional compatibility keys and filter exact ignores"
+    }
+  ],
+  "schema_version": 1
+}

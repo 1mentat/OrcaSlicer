@@ -873,6 +873,17 @@ roots are restored after each case. Its probes are in `preset_asset_resolution.j
 Build `libslic3r_preset_bundle_tests` for focused feedback without duplicate CTest
 registration or compilation of unrelated core test files.
 
+The three `PrinterPresetCollection` cases cover system and custom model/variant lookup,
+empty-model rejection, and visible-user classification. Their lookup mutations are in
+`printer_preset_lookup.json`. The opt-in `libslic3r_preset_collection_tests` target
+compiles those cases with the existing preset-diff contracts and stays outside default
+builds and CTest discovery:
+
+```sh
+cmake --build build --config Release --target libslic3r_preset_collection_tests
+build/tests/libslic3r/libslic3r_preset_collection_tests "[PrinterPresetCollection]" --rng-seed 21907 --order rand
+```
+
 `public_gap_contracts.json` challenges public behavior across geometry, model
 ownership and import cancellation, nullable setting migration, filament
 temperature validation, tool ordering, wipe-tower finish paths, and G-code
@@ -915,6 +926,22 @@ percentage values resolved against their declared base. `[ConfigVectorOverride]`
 checks regular and nullable slots, empty destinations, and mapped defaults.
 The getter probes are in `config_getters.json`.
 
+The PrintConfig additions have three independently named contracts:
+`ASA-Aero legacy filament spelling is normalized on deserialization`
+(`[Config][PrintConfigCompatibility]`), `Incomplete extruder ID maps resolve
+variant slots with the configured stride` (`[Config][PrintConfigVariants]`),
+and `Filament metadata getters return the first stored value`
+(`[Config][Filament]`). Build `libslic3r_config_variant_expansion_tests` for
+focused feedback; the two PrintConfig implementation probes select the first
+two exact case names in `tests/mutations/printconfig_public_contracts.json`.
+
+`Extra overhang perimeters add material in the unsupported step band`
+(`[Perimeters][OverhangExtraPerimeters]`) compares the option-off control with
+an analytic support/unsupported-band geometry and checks clipped path length,
+material, and valid flow. Build `fff_print_perimeters_tests` for focused
+feedback; its two implementation probes are in
+`tests/mutations/extra_overhang_perimeters.json`.
+
 `[Transformation][Skew]` checks perpendicular axes after scaling, rotation, and
 reflection, and nonorthogonal axes under shear with either determinant sign.
 Build `libslic3r_geometry_tests` for focused feedback; its probes are in
@@ -930,6 +957,8 @@ located painted vertical facet, with an unpainted control.
 directions above a lower model surface. Build `fff_print_tree_support_tests` for
 focused feedback; the same cases run in the canonical FFF suite without duplicate
 CTest registration. Its probes are in `tree_support_contacts.json`.
+
+`[TreeSupportRoofContact]` checks zero-gap organic roof contact against an analytic cap underside, with a 0.2 mm positive-gap control; its mutation probe is in `tests/mutations/tree_support_roof_contact.json`.
 
 `[ToolOrderUtils]` checks constrained flow capacities, group requirements,
 minimum flush costs, and filament ordering. Small path instances use exhaustive

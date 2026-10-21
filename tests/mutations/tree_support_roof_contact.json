@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Public TreeSupport zero-gap organic roof contact on a supported cap overhang.",
+  "mutants": [
+    {
+      "id": "tree-support-roof-layer-generation-disabled",
+      "path": "src/libslic3r/Support/TreeSupport3D.cpp",
+      "old": "            if (roof_enabled) {\n                // Try to support the overhangs by dense interfaces for num_support_roof_layers, cover the bottom most interface with tree tips.",
+      "new": "            if (roof_enabled && false) {\n                // Try to support the overhangs by dense interfaces for num_support_roof_layers, cover the bottom most interface with tree tips.",
+      "description": "Disable the active public top-interface roof-generation gate; the cap-ring interface path and contact-plane assertions must fail.",
+      "test_filter": "Zero-gap organic support roof reaches the cap underside",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}
