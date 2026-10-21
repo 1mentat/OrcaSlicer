@@ -1028,6 +1028,8 @@ on a closed mesh. Its mutations are in `texture_to_color_extended.json`.
 automatic subdivision thresholds, and adaptive vertex-color palette limits.
 Geometry oracles preserve volume, consistent orientation, and signed area. Its
 mutations are in `texture_to_color_options.json`.
+The same tag checks fixed-palette color retention and adaptive palette values
+after region smoothing. Those probes are in `texture_cluster_retention.json`.
 
 `[TextureToColorPublic]` checks textured tetrahedron conversion and cancellation
 output clearing. `[TextureToColorRepair]` checks independent boundary limits,

@@ -774,3 +774,80 @@ TEST_CASE("Adaptive vertex-color clustering splits only the distinct color bound
         CHECK(green_faces > 0);
     }
 }
+
+TEST_CASE("ClusterAndSmooth preserves a fixed palette center after region smoothing",
+          "[TextureToColor][TextureToColorOptions]")
+{
+    const TriMesh input = closed_tetrahedron();
+    const Color minority{{0, 0, 0}};
+    const Color majority{{255, 255, 255}};
+    const std::vector<Color> input_face_colors{minority, majority, majority, majority};
+    TextureToColorSettings settings = bounded_settings();
+    settings.target_colors_num = 2;
+    settings.smooth_weight = 1.0;
+
+    TriMesh out_mesh;
+    std::vector<Color> out_colors;
+    REQUIRE(ClusterAndSmooth(input, input_face_colors, out_mesh, out_colors, settings));
+    REQUIRE(out_mesh.indices.size() == input.indices.size());
+    REQUIRE(out_colors.size() == out_mesh.indices.size());
+    CHECK(color_utils::is_closed(out_mesh));
+    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))),
+               WithinAbs(1.0 / 6.0, 1e-5));
+    check_finite_and_valid(out_mesh);
+
+    auto matches_color = [](const Color &actual, const Color &expected) {
+        for (std::size_t channel = 0; channel < expected.size(); ++channel) {
+            if (std::abs(static_cast<double>(actual[channel]) -
+                         static_cast<double>(expected[channel])) > 2.0)
+                return false;
+        }
+        return true;
+    };
+    std::size_t majority_faces = 0;
+    std::size_t minority_faces = 0;
+    bool all_colors_in_fixed_palette = true;
+    for (const Color &color : out_colors) {
+        const bool is_majority = matches_color(color, majority);
+        const bool is_minority = matches_color(color, minority);
+        if (is_majority)
+            ++majority_faces;
+        if (is_minority)
+            ++minority_faces;
+        if (!is_majority && !is_minority)
+            all_colors_in_fixed_palette = false;
+    }
+    CHECK(all_colors_in_fixed_palette);
+    CHECK(majority_faces == 3);
+    CHECK(minority_faces == 1);
+}
+
+TEST_CASE("ClusterAndSmooth keeps the majority color after adaptive region smoothing",
+          "[TextureToColor][TextureToColorOptions]")
+{
+    const TriMesh input = closed_tetrahedron();
+    const Color minority{{0, 0, 0}};
+    const Color majority{{255, 255, 255}};
+    const std::vector<Color> input_face_colors{minority, majority, majority, majority};
+    TextureToColorSettings settings = bounded_settings();
+    settings.target_colors_num = 0;
+    settings.max_cluster_k = 2;
+    settings.max_color_distance = 0.0;
+    settings.smooth_weight = 1.0;
+
+    TriMesh out_mesh;
+    std::vector<Color> out_colors;
+    REQUIRE(ClusterAndSmooth(input, input_face_colors, out_mesh, out_colors, settings));
+    REQUIRE(out_mesh.indices.size() == input.indices.size());
+    REQUIRE(out_colors.size() == out_mesh.indices.size());
+    CHECK(color_utils::is_closed(out_mesh));
+    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))),
+               WithinAbs(1.0 / 6.0, 1e-5));
+    check_finite_and_valid(out_mesh);
+
+    for (const Color &color : out_colors) {
+        for (std::size_t channel = 0; channel < majority.size(); ++channel)
+            CHECK_THAT(static_cast<double>(color[channel]),
+                       WithinAbs(static_cast<double>(majority[channel]), 2.0));
+    }
+}
