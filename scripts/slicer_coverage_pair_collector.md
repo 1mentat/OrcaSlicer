@@ -22,3 +22,11 @@ from the input tracefiles, including zero-hit lines. Missing or unexpected
 identities fail integrity. Compiler-object audits also check the production
 source manifests and executable header mappings; metadata-only headers remain
 visible in the report without contributing executable lines.
+
+The source-line bounds audit hashes each mapped source file and rejects DA line
+numbers outside its physical lines, including zero-hit rows. Missing sources
+and paths resolving outside the source root also fail integrity. Raw exports
+and the union remain available when this check fails. This catches stale
+mappings that extend past the current file's end;
+matching bounds alone do not establish that an executable was built from the
+current source bytes.

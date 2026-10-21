@@ -9,6 +9,7 @@ passed or that a coverage threshold has been met.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -209,6 +210,41 @@ def _has_profile_execution(document: Any) -> bool:
     return False
 
 
+def _source_line_bounds(identities: set[tuple[str, int]], *, source_root: Path) -> dict[str, Any]:
+    """Reject physical-line mappings outside the source bytes, including cold rows."""
+    by_source: dict[str, list[int]] = {}
+    for source, number in identities:
+        by_source.setdefault(source, []).append(number)
+    sources = []
+    failures = []
+    for source, numbers in sorted(by_source.items()):
+        if not sc._under(Path(source), source_root):
+            failures.append({"source": source, "reason": "source_outside_root"})
+            continue
+        try:
+            digest = hashlib.sha256()
+            size = newlines = 0
+            last = b""
+            with Path(source).open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+                    newlines += chunk.count(b"\n")
+                    last = chunk[-1:]
+            lines = newlines + int(bool(last) and last != b"\n")
+            invalid = sorted(number for number in numbers if number < 1 or number > lines)
+            sources.append({"path": source, "sha256": digest.hexdigest(),
+                            "size_bytes": size, "line_count": lines})
+            if invalid:
+                failures.append({"source": source, "reason": "line_outside_source",
+                                 "line_count": lines, "invalid_identity_count": len(invalid),
+                                 "line_samples": invalid[:25]})
+        except (OSError, ValueError) as exc:
+            failures.append({"source": source, "reason": "source_unreadable", "error": str(exc)})
+    return {"status": "error" if failures else "pass", "sources": sources,
+            "failures": failures}
+
+
 def _input_snapshot(paths: list[Path]) -> list[dict[str, Any]]:
     unique = {sc._path_key(path): path for path in paths}
     return [sc._artifact_provenance(unique[key]) for key in sorted(unique)]
@@ -365,6 +401,7 @@ def collect(args: argparse.Namespace) -> int:
     summary_output = ""
     union_command: dict[str, Any] | None = None
     union_line_audit: dict[str, Any] = {"status": "not_run"}
+    source_line_audit: dict[str, Any] = {"status": "not_run", "sources": [], "failures": []}
     if tracefiles:
         union_argv = [lcov]
         for tracefile in tracefiles:
@@ -379,6 +416,8 @@ def collect(args: argparse.Namespace) -> int:
             try:
                 expected_identities = _lcov_line_identities(tracefiles, path_base=root)
                 union_identities = _lcov_line_identities([union_info], path_base=root)
+                source_line_audit = _source_line_bounds(
+                    expected_identities | union_identities, source_root=source_root)
                 missing_identities = sorted(expected_identities - union_identities)
                 unexpected_identities = sorted(union_identities - expected_identities)
                 union_line_audit = {
@@ -466,6 +505,7 @@ def collect(args: argparse.Namespace) -> int:
         errors.append({"reason": "coverage_input_changed_during_collection"})
 
     integrity_failures = {
+        "source_line_bounds": source_line_audit["failures"],
         "profile_mapping": mapping_warnings,
         "compiler_evidence": compiler_evidence.get("errors", []),
         "missing_compiled_source_mappings": missing_manifest,
@@ -511,6 +551,7 @@ def collect(args: argparse.Namespace) -> int:
         "integrity_failures": integrity_failures,
         "lcov_union": union_command,
         "lcov_union_line_audit": union_line_audit,
+        "source_line_bounds_audit": source_line_audit,
     }
     try:
         (output / "coverage-report.json").write_text(

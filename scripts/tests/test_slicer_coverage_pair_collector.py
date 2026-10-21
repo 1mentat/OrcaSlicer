@@ -22,7 +22,7 @@ class PairCollectorTests(unittest.TestCase):
         self.source_root = self.root / "src" / "libslic3r"
         self.source_root.mkdir(parents=True)
         self.source = self.source_root / "fixture.cpp"
-        self.source.write_text("int fixture() { return 1; }\n", encoding="utf-8")
+        self.source.write_text("int fixture() {\nreturn 1; }\n", encoding="utf-8")
         self.header = self.source_root / "metadata_only.h"
         self.header.write_text("#pragma once\n", encoding="utf-8")
         self.build = self.root / "build"
@@ -82,7 +82,7 @@ class PairCollectorTests(unittest.TestCase):
 
     def fake_tools(self, *, mismatch=False, mutate_input=None, invalid_summary=False,
                    zero_execution=False, union_missing=None, union_extra=False,
-                   mapping_free_header=False):
+                   mapping_free_header=False, stale_cold_mapping=False):
         source = str(self.source)
         json_export = json.dumps({"data": [{"files": [{
             "filename": source,
@@ -102,6 +102,8 @@ class PairCollectorTests(unittest.TestCase):
         }}]})
         hit = 0 if zero_execution else 1
         lcov_trace = f"TN:\nSF:{source}\nDA:1,{hit}\nDA:2,{hit}\nend_of_record\n"
+        if stale_cold_mapping:
+            lcov_trace += f"TN:\nSF:{source}\nDA:4056,0\nend_of_record\n"
         if mapping_free_header:
             lcov_trace += f"TN:\nSF:{self.header}\nend_of_record\n"
         calls = []
@@ -155,11 +157,12 @@ class PairCollectorTests(unittest.TestCase):
 
     def run_collector(self, *, mismatch=False, out=None, mutate_input=None, invalid_summary=False,
                       zero_execution=False, union_missing=None, union_extra=False,
-                      mapping_free_header=False):
+                      mapping_free_header=False, stale_cold_mapping=False):
         calls, run = self.fake_tools(
             mismatch=mismatch, mutate_input=mutate_input, invalid_summary=invalid_summary,
             zero_execution=zero_execution, union_missing=union_missing,
             union_extra=union_extra, mapping_free_header=mapping_free_header,
+            stale_cold_mapping=stale_cold_mapping,
         )
         with mock.patch.object(collector.sc, "_which", side_effect=lambda name, explicit=None: name), \
              mock.patch.object(collector.sc, "_run", side_effect=run):
@@ -202,6 +205,56 @@ class PairCollectorTests(unittest.TestCase):
             "missing_identity_samples": [],
             "unexpected_identity_samples": [],
         })
+
+    def test_stale_zero_hit_mapping_fails_even_when_union_retains_every_identity(self):
+        status, _ = self.run_collector(stale_cold_mapping=True)
+        self.assertEqual(status, 2)
+        report = json.loads((self.root / "report/coverage-report.json").read_text())
+        self.assertEqual(report["lcov_union_line_audit"]["status"], "pass")
+        self.assertEqual(report["integrity_status"], "error")
+        self.assertEqual(report["integrity_failures"]["source_line_bounds"], [{
+            "source": str(self.source.resolve()), "reason": "line_outside_source", "line_count": 2,
+            "invalid_identity_count": 1, "line_samples": [4056],
+        }])
+        self.assertIn("DA:4056,0", (self.root / "report/coverage-union.info").read_text())
+
+    def test_source_bounds_count_crlf_and_unterminated_final_line_and_bind_bytes(self):
+        self.source.write_bytes(b"first\r\nsecond")
+        audit = collector._source_line_bounds(
+            {(str(self.source), 1), (str(self.source), 2)}, source_root=self.source_root)
+        self.assertEqual(audit["status"], "pass")
+        self.assertEqual(audit["sources"], [{"path": str(self.source),
+            "sha256": self.sha(self.source), "size_bytes": 13, "line_count": 2}])
+
+    def test_empty_source_cannot_have_executable_lines_including_line_zero(self):
+        self.source.write_bytes(b"")
+        audit = collector._source_line_bounds(
+            {(str(self.source), 0), (str(self.source), 1)}, source_root=self.source_root)
+        self.assertEqual(audit["status"], "error")
+        self.assertEqual(audit["failures"][0]["line_samples"], [0, 1])
+        self.assertEqual(audit["failures"][0]["line_count"], 0)
+
+    def test_missing_source_is_an_integrity_failure(self):
+        self.source.unlink()
+        audit = collector._source_line_bounds({(str(self.source), 1)}, source_root=self.source_root)
+        self.assertEqual(audit["status"], "error")
+        self.assertEqual(audit["failures"][0]["reason"], "source_unreadable")
+        invalid_source = str(self.source_root / "invalid\0.cpp")
+        invalid = collector._source_line_bounds({(invalid_source, 1)}, source_root=self.source_root)
+        self.assertEqual(invalid["status"], "error")
+        self.assertEqual(invalid["sources"], [])
+
+    def test_source_bounds_reject_outside_and_symlink_escape_before_opening(self):
+        outside = self.root / "outside.cpp"
+        outside.write_bytes(b"outside\n")
+        linked = self.source_root / "linked.cpp"
+        linked.symlink_to(outside)
+        for source in (outside, linked):
+            with self.subTest(source=source), mock.patch.object(Path, "open") as opened:
+                audit = collector._source_line_bounds({(str(source), 1)}, source_root=self.source_root)
+                opened.assert_not_called()
+                self.assertEqual(audit["status"], "error")
+                self.assertEqual(audit["failures"][0]["reason"], "source_outside_root")
 
     def test_union_missing_source_file_fails_identity_audit(self):
         status, _ = self.run_collector(union_missing="file")
