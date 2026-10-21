@@ -708,10 +708,10 @@ message(STATUS "LIBDIR: ${LIBDIR}")
 message(STATUS "LIBDIR_BIN: ${LIBDIR_BIN}")
 
 include(cmake/SlicerCoverage.cmake)
-# Clang omits system-header coverage mappings even when profile counters are
-# emitted. Our own inline definitions must have consistent mappings in the
-# library and tests, so keep the source root non-system in coverage builds.
-if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+# Coverage instrumentation can omit or inconsistently map system headers.
+# Keep our own inline definitions non-system in coverage builds so their
+# mappings stay consistent between the libraries and tests.
+if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE OR SLICER_ENABLE_GCC_GCOV_COVERAGE)
     include_directories(${LIBDIR})
 else()
     # For the bundled boost libraries (boost::nowide)

@@ -60,7 +60,7 @@ static void check_elapsed_ms(const std::string& case_id, double elapsed_ms, doub
 #if defined(SLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY)
     std::clog << "[coverage timing diagnostic] case=" << case_id << " elapsed_ms=" << elapsed_ms
               << " release_ceiling_ms=" << release_ceiling_ms << " (not enforced under instrumentation)" << std::endl;
-    INFO("Elapsed under LLVM source coverage instrumentation (diagnostic only): " << elapsed_ms << " ms");
+    INFO("Elapsed under source coverage instrumentation (diagnostic only): " << elapsed_ms << " ms");
     INFO("The paired uninstrumented Release run enforces the " << release_ceiling_ms << " ms ceiling.");
     REQUIRE(std::isfinite(elapsed_ms));
     REQUIRE(elapsed_ms >= 0.0);

@@ -1057,6 +1057,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     run = sub.add_parser("run", help="run tests, merge profiles, and enforce the coverage gate")
+    run.add_argument("--backend", choices=("llvm", "gcov"), default="llvm",
+                     help="coverage format; GCC gcov reports are backend-specific")
     run.add_argument("--root", default=".", help="repository root (default: current directory)")
     run.add_argument("--build-dir", default="build", help="build directory relative to root")
     run.add_argument("--source-root", default="src/libslic3r", help="production source root")
@@ -1075,12 +1077,16 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout", type=float, default=1800.0)
     run.add_argument("--llvm-cov")
     run.add_argument("--llvm-profdata")
+    run.add_argument("--gcov", help="matching GCC gcov executable for --backend gcov")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.action == "run" and args.backend == "gcov":
+            from slicer_gcov_coverage import run_gcov_coverage
+            return run_gcov_coverage(args, common=sys.modules[__name__])
         return run_coverage(args) if args.action == "run" else 2
     except CoverageError as exc:
         if args.action == "run":

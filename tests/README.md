@@ -1505,3 +1505,51 @@ The `libslic3r_svg_tests` target is excluded from CTest to avoid duplicate regis
 cmake --build build --config Release --target libslic3r_svg_tests
 build/tests/libslic3r/libslic3r_svg_tests "[SVGExportContracts]" --rng-seed 21907 --order rand
 ```
+
+## GCC gcov coverage backend
+
+The opt-in `SLICER_ENABLE_GCC_GCOV_COVERAGE` backend is mutually exclusive
+with LLVM source coverage. It instruments the same two production archives
+and five canonical test targets, uses atomic GCC counters, and filters compiler
+instrumentation to the configured checkout's `src/` tree. It records GCC's
+physical source-line mapping as a separate backend-specific measurement. GCC
+and LLVM can map different physical lines, so a gcov denominator must never be
+substituted for an LLVM denominator or presented as directly comparable to an
+accepted LLVM percentage. Keep `--source-root src` when the report should also
+retain project sources outside `src/libslic3r`.
+
+Configure with GCC, `-DSLICER_ENABLE_GCC_GCOV_COVERAGE=ON`, and the usual
+Release/test options. Build `libslic3r_tests`, `fff_print_tests`,
+`sla_print_tests`, `libnest2d_tests`, and `filament_group_tests`, then run the
+full selected suite into a new, empty output directory. Pass the two production
+manifests and all five test manifests so each compiled translation unit has an
+explicit notes-file inventory:
+
+```sh
+python3 scripts/slicer_coverage.py run --backend gcov \
+  --root . --build-dir build --source-root src \
+  --object build/tests/libslic3r/libslic3r_tests \
+  --object build/tests/fff_print/fff_print_tests \
+  --object build/tests/sla_print/sla_print_tests \
+  --object build/tests/libnest2d/libnest2d_tests \
+  --object build/tests/filament_group/filament_group_tests \
+  --manifest build/slicer-coverage/libslic3r.sources.txt \
+  --manifest build/slicer-coverage/libslic3r_cgal.sources.txt \
+  --manifest build/slicer-coverage/libslic3r_tests.sources.txt \
+  --manifest build/slicer-coverage/fff_print_tests.sources.txt \
+  --manifest build/slicer-coverage/sla_print_tests.sources.txt \
+  --manifest build/slicer-coverage/libnest2d_tests.sources.txt \
+  --manifest build/slicer-coverage/filament_group_tests.sources.txt \
+  --compile-commands build/compile_commands.json \
+  --test-command 'ctest --test-dir build/tests -C Release --no-tests=error -LE "NotWorking|RequiresApp"' \
+  --metric lines --out build/gcov-coverage-run-1
+```
+
+The runner binds the CTest discovery list to JUnit identities, preserves raw
+stdout/stderr and test profiles, inventories every selected `.gcno` and any
+unselected build notes, and retains mapping-free translation units explicitly.
+It deduplicates gcov line records by resolved physical path and line number,
+including duplicates within a record and header mappings across translation
+units. The report records source hashes and the matching GCC/gcov versions.
+Threshold status applies only to the gcov physical-line metric; a valid result
+below threshold is still a measurement, not an LLVM result.

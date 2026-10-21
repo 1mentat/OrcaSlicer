@@ -1,4 +1,4 @@
-# LLVM source-based coverage for a production target and its test executable.
+# Opt-in source coverage for production targets and their test executables.
 #
 # This module is opt-in.  The caller should invoke, after the target is defined:
 #
@@ -16,55 +16,84 @@ include_guard(GLOBAL)
 
 option(SLICER_ENABLE_LLVM_SOURCE_COVERAGE
        "Instrument selected OrcaSlicer targets with LLVM source coverage" OFF)
+option(SLICER_ENABLE_GCC_GCOV_COVERAGE
+       "Instrument selected OrcaSlicer targets with GCC gcov source coverage" OFF)
+if (SLICER_ENABLE_LLVM_SOURCE_COVERAGE AND SLICER_ENABLE_GCC_GCOV_COVERAGE)
+    message(FATAL_ERROR "Enable only one source coverage backend: LLVM or GCC gcov")
+endif()
 
 option(SLICER_COVERAGE_PROJECT_FUNCTIONS_ONLY
        "Instrument only function definitions under CMAKE_SOURCE_DIR/src in LLVM coverage targets" OFF)
 
-if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE OR SLICER_ENABLE_GCC_GCOV_COVERAGE)
     # Object-level compiler evidence distinguishes mapping-free translation
     # units from executable code that was accidentally omitted from the link.
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
 
 function(slicer_enable_llvm_source_coverage TARGET_NAME)
-    if (NOT SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+    if (NOT SLICER_ENABLE_LLVM_SOURCE_COVERAGE AND NOT SLICER_ENABLE_GCC_GCOV_COVERAGE)
         return()
     endif()
     if (NOT TARGET ${TARGET_NAME})
         message(FATAL_ERROR "slicer_enable_llvm_source_coverage: unknown target '${TARGET_NAME}'")
     endif()
 
-    # GCC's gcov flags are intentionally not substituted here: the runner
-    # consumes LLVM's source mapping JSON and must fail loudly when that
-    # contract is unavailable.  clang-cl is the one MSVC frontend supported.
-    if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang" AND
-        NOT (MSVC AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "Clang"))
-        message(FATAL_ERROR
-            "SLICER_ENABLE_LLVM_SOURCE_COVERAGE requires Clang/AppleClang or clang-cl; "
-            "got ${CMAKE_CXX_COMPILER_ID} (${CMAKE_CXX_COMPILER_FRONTEND_VARIANT})")
-    endif()
-
-    # LLVM's source-based mapping is supported by clang-cl too, but the linker
-    # flags differ from MSVC's normal options only for the whole-archive helper
-    # below.  Keep the flags target-local so dependencies are not instrumented.
-    # Slicing runs concurrently: lost non-atomic increments can make LLVM's
-    # derived counters credit branches that never executed.
-    target_compile_options(${TARGET_NAME} PRIVATE
-        -fprofile-instr-generate -fcoverage-mapping -fprofile-update=atomic)
-    # Coverage includes Orca headers as project headers to retain their inline
-    # mappings. This exposes existing unused private fields that normal SYSTEM
-    # includes hide. Keep these diagnostics visible without blocking test-only
-    # overlays on older production trees; other warnings remain errors.
-    target_compile_options(${TARGET_NAME} PRIVATE
-        "$<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-Wno-error=unused-private-field>")
     get_target_property(_target_type ${TARGET_NAME} TYPE)
-    if (NOT _target_type STREQUAL "STATIC_LIBRARY")
-        target_link_options(${TARGET_NAME} PRIVATE -fprofile-instr-generate)
+    if (SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+        # GCC's gcov backend is a separate option and report format. Keep LLVM's
+        # source mapping flags and link behavior unchanged.
+        if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang" AND
+            NOT (MSVC AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "Clang"))
+            message(FATAL_ERROR
+                "SLICER_ENABLE_LLVM_SOURCE_COVERAGE requires Clang/AppleClang or clang-cl; "
+                "got ${CMAKE_CXX_COMPILER_ID} (${CMAKE_CXX_COMPILER_FRONTEND_VARIANT})")
+        endif()
+        # Slicing runs concurrently: lost non-atomic increments can make LLVM's
+        # derived counters credit branches that never executed.
+        target_compile_options(${TARGET_NAME} PRIVATE
+            -fprofile-instr-generate -fcoverage-mapping -fprofile-update=atomic)
+        # Coverage includes Orca headers as project headers to retain their inline
+        # mappings. This exposes existing unused private fields that normal SYSTEM
+        # includes hide. Keep these diagnostics visible without blocking test-only
+        # overlays on older production trees; other warnings remain errors.
+        target_compile_options(${TARGET_NAME} PRIVATE
+            "$<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-Wno-error=unused-private-field>")
+        if (NOT _target_type STREQUAL "STATIC_LIBRARY")
+            target_link_options(${TARGET_NAME} PRIVATE -fprofile-instr-generate)
+        else()
+            # CMake does not allow target_link_options() on a STATIC_LIBRARY.
+            # Propagate the runtime flag to every executable that consumes this
+            # archive, including the force-linked coverage test image.
+            target_link_libraries(${TARGET_NAME} INTERFACE "-fprofile-instr-generate")
+        endif()
     else()
-        # CMake does not allow target_link_options() on a STATIC_LIBRARY.
-        # Propagate the runtime flag to every executable that consumes this
-        # archive, including the force-linked coverage test image.
-        target_link_libraries(${TARGET_NAME} INTERFACE "-fprofile-instr-generate")
+        if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            message(FATAL_ERROR
+                "SLICER_ENABLE_GCC_GCOV_COVERAGE requires GNU GCC; "
+                "got ${CMAKE_CXX_COMPILER_ID}")
+        endif()
+        # Restrict GCC's profile counters to this checkout's source tree. Only
+        # pass --coverage to compile commands: putting it on a link command also
+        # enables instrumentation in LTO's generated code. The runtime is linked
+        # explicitly with -lgcov on the final executable target.
+        file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" _profile_source_root)
+        string(REGEX REPLACE "([][.+*?^$(){}|\\])" "\\\\\\1"
+               _profile_source_root_regex "${_profile_source_root}")
+        set(_profile_filter "^${_profile_source_root_regex}/src/.*")
+        target_compile_options(${TARGET_NAME} PRIVATE
+            --coverage -fprofile-update=atomic "-fprofile-filter-files=${_profile_filter}")
+        if (_target_type STREQUAL "STATIC_LIBRARY")
+            # Avoid changing a static target's existing target_link_libraries
+            # signature while propagating its runtime requirement to consumers.
+            set_property(TARGET ${TARGET_NAME} APPEND PROPERTY
+                INTERFACE_LINK_LIBRARIES "-lgcov")
+        else()
+            # Match the plain signature used by slicer_force_link_static_library
+            # on canonical test executables. Never pass --coverage at link time:
+            # that would instrument LTO-generated code as well.
+            target_link_libraries(${TARGET_NAME} "-lgcov")
+        endif()
     endif()
 
     get_target_property(_sources ${TARGET_NAME} SOURCES)
@@ -79,7 +108,7 @@ function(slicer_enable_llvm_source_coverage TARGET_NAME)
     # the target's source manifest and normal coverage flags remain active. Keep
     # CMAKE_SOURCE_DIR's configured spelling (including a
     # symlink alias) so it matches the paths clang sees in this build.
-    if (SLICER_COVERAGE_PROJECT_FUNCTIONS_ONLY)
+    if (SLICER_ENABLE_LLVM_SOURCE_COVERAGE AND SLICER_COVERAGE_PROJECT_FUNCTIONS_ONLY)
         set(_profile_list "${_manifest_dir}/project-functions-only.profiler-list")
         set(_profile_list_contents
             "[clang]\nsource:${CMAKE_SOURCE_DIR}/src/*=allow\ndefault:forbid\n")
@@ -117,11 +146,11 @@ function(slicer_enable_llvm_source_coverage TARGET_NAME)
     set_property(GLOBAL APPEND PROPERTY SLICER_COVERAGE_MANIFESTS "${_manifest}")
     string(MAKE_C_IDENTIFIER "${TARGET_NAME}" _target_identifier)
     set("SLICER_COVERAGE_${_target_identifier}_MANIFEST" "${_manifest}" CACHE FILEPATH
-        "LLVM source manifest for ${TARGET_NAME}")
+        "Source coverage manifest for ${TARGET_NAME}")
 endfunction()
 
 function(slicer_force_link_static_library TEST_TARGET LIBRARY_TARGET)
-    if (NOT SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+    if (NOT SLICER_ENABLE_LLVM_SOURCE_COVERAGE AND NOT SLICER_ENABLE_GCC_GCOV_COVERAGE)
         return()
     endif()
     if (NOT TARGET ${TEST_TARGET} OR NOT TARGET ${LIBRARY_TARGET})
