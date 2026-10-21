@@ -483,18 +483,71 @@ def _command_entry(result: CommandResult, log_path: Path) -> dict[str, Any]:
     return value
 
 
+_CTEST_COUNT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?% tests passed,\s*\d+ tests failed out of\s+(\d+)\b",
+    re.IGNORECASE,
+)
+_FALLBACK_TEST_COUNT_RES = (
+    re.compile(r"test cases?:\s*(\d+)\b", re.IGNORECASE),
+    re.compile(r"all tests passed\s*\(\d+\s+assertions?\s+in\s+(\d+)\s+test cases?\)",
+               re.IGNORECASE),
+)
+_NO_TESTS_RE = re.compile(
+    r"\bno\s+tests?(?:\s+were)?\s+found\b|\bno\s+test\s+cases?\b",
+    re.IGNORECASE,
+)
+
+
 def test_evidence(output: str) -> int:
     """Prefer CTest's invocation total over nested Catch assertion output."""
-    ctest = re.findall(r"\b\d+(?:\.\d+)?% tests passed,\s*\d+ tests failed out of\s+(\d+)\b",
-                       output, re.IGNORECASE)
+    ctest = _CTEST_COUNT_RE.findall(output)
     if ctest:
         return int(ctest[-1])
-    patterns = (
-        r"test cases?:\s*(\d+)\b",
-        r"all tests passed\s*\(\d+\s+assertions?\s+in\s+(\d+)\s+test cases?\)",
-    )
-    return max((int(match.group(1)) for pattern in patterns
-                for match in re.finditer(pattern, output, re.IGNORECASE)), default=0)
+    return max((int(match.group(1)) for pattern in _FALLBACK_TEST_COUNT_RES
+                for match in pattern.finditer(output)), default=0)
+
+
+def _read_test_log_evidence(log_path: Path) -> dict[str, Any]:
+    """Stream the retained test log for the console count and no-tests sentinel.
+
+    Scan the complete log in bounded chunks so CTest summaries and sentinels
+    remain visible even when a long failure listing pushes them out of the
+    bounded stdout tail in CommandResult.
+    """
+    last_ctest_count: int | None = None
+    fallback_count = 0
+    no_tests = False
+    overlap = ""
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as stream:
+            while True:
+                chunk = stream.read(MAX_OUTPUT)
+                if not chunk:
+                    break
+                window = overlap + chunk
+                ctest_counts = _CTEST_COUNT_RE.findall(window)
+                if ctest_counts:
+                    last_ctest_count = int(ctest_counts[-1])
+                for pattern in _FALLBACK_TEST_COUNT_RES:
+                    matches = pattern.findall(window)
+                    if matches:
+                        fallback_count = max(fallback_count, *(int(item) for item in matches))
+                if _NO_TESTS_RE.search(window):
+                    no_tests = True
+                overlap = window[-MAX_OUTPUT:]
+    except OSError as exc:
+        return {
+            "available": False,
+            "count": 0,
+            "no_tests": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "available": True,
+        "count": last_ctest_count if last_ctest_count is not None else fallback_count,
+        "no_tests": no_tests,
+        "error": None,
+    }
 
 
 def classify_test_result(result: CommandResult, evidence: int, *, skipped: int = 0,
@@ -518,8 +571,7 @@ def classify_test(result: CommandResult, evidence: int) -> str:
 
 
 def no_test_evidence(output: str) -> bool:
-    return bool(re.search(r"\bno\s+tests?(?:\s+were)?\s+found\b|\bno\s+test\s+cases?\b",
-                          output, re.IGNORECASE))
+    return bool(_NO_TESTS_RE.search(output))
 
 
 def skipped_test_evidence(output: str, junit: Path | None = None) -> int:
@@ -2131,9 +2183,12 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
     test = _run_phase(test_args, cwd=worktree, timeout=args.timeout,
                       log=run_dir / "test.log")
     entry["commands"]["test"].update(test.json())
-    test_output = test.stdout + test.stderr
-    entry["test_evidence"] = test_evidence(test_output)
-    entry["no_test_evidence"] = no_test_evidence(test_output)
+    test_log_evidence = _read_test_log_evidence(run_dir / "test.log")
+    entry["test_log_evidence_available"] = test_log_evidence["available"]
+    if test_log_evidence["error"] is not None:
+        entry["test_log_evidence_error"] = test_log_evidence["error"]
+    entry["test_evidence"] = test_log_evidence["count"]
+    entry["no_test_evidence"] = test_log_evidence["no_tests"]
     entry["junit_exists"] = junit.is_file()
     junit_evidence = read_junit_evidence(junit)
     entry["junit_evidence"] = junit_evidence

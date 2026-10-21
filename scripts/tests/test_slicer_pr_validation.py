@@ -1415,6 +1415,152 @@ class JUnitEvidenceTests(unittest.TestCase):
         self.assertEqual(classify(self._result(), good, 3), "test_evidence_incomplete")
 
 
+class CompleteTestLogEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def _args():
+        return Namespace(
+            test_timeout=180.0,
+            timeout=30.0,
+            minimum_tests=1,
+            build_dir="build",
+            jobs=1,
+            test_jobs=1,
+            exclude_labels="",
+            deps_prefix="deps",
+            uv="uv",
+        )
+
+    def _run_tree(self, *, full_log, junit_xml, returncode=0, timed_out=False,
+                  create_test_log=True, stdout=None):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            worktree = root / "worktree"
+            worktree.mkdir()
+
+            def fake_default_test(build, jobs, junit, excluded, timeout):
+                if junit_xml is not None:
+                    junit.write_text(junit_xml, encoding="utf-8")
+                return ["ctest", "--output-junit", str(junit)]
+
+            def fake_phase(argv, *, cwd, timeout, log):
+                log.parent.mkdir(parents=True, exist_ok=True)
+                if argv and argv[0] == "ctest":
+                    if create_test_log:
+                        log.write_text(full_log, encoding="utf-8")
+                    output = stdout if stdout is not None else full_log
+                    return slicer_pr_validation.CommandResult(
+                        list(argv), returncode, 0.01, output, "", timed_out)
+                log.write_text("", encoding="utf-8")
+                return slicer_pr_validation.CommandResult(list(argv), 0, 0.01, "", "")
+
+            with mock.patch.object(slicer_pr_validation, "_default_test",
+                                   side_effect=fake_default_test), \
+                 mock.patch.object(slicer_pr_validation, "_run_phase",
+                                   side_effect=fake_phase):
+                return slicer_pr_validation._run_tree(
+                    worktree, root / "output", "run", self._args(),
+                    ["cmake", "configure"], ["cmake", "build"],
+                    commit_sha="a" * 40, tree_sha="b" * 40,
+                )
+
+    def test_ctest_summary_before_large_failure_list_is_read_from_full_log(self):
+        full_log = (
+            "50% tests passed, 1 tests failed out of 2\n"
+            + "test cases: 99\n"
+            + "failed test output follows\n" * (slicer_pr_validation.MAX_OUTPUT // 8)
+        )
+        stdout_tail = "...[earlier output retained in log]...\n" + full_log[-slicer_pr_validation.MAX_OUTPUT:]
+        self.assertEqual(slicer_pr_validation.test_evidence(stdout_tail), 0)
+        self.assertGreater(len(stdout_tail), slicer_pr_validation.MAX_OUTPUT)
+        junit = (
+            '<testsuite tests="2" failures="1" errors="0" skipped="0">'
+            '<testcase classname="suite" name="assertion"><failure message="CHECK failed"/>'
+            '</testcase><testcase classname="suite" name="pass"/></testsuite>'
+        )
+
+        entry = self._run_tree(full_log=full_log, junit_xml=junit, returncode=8,
+                               stdout=stdout_tail)
+
+        self.assertEqual(entry["status"], "test_failed")
+        self.assertEqual(entry["test_evidence"], 2)
+        self.assertTrue(entry["test_log_evidence_available"])
+        self.assertFalse(entry["no_test_evidence"])
+        self.assertTrue(entry["junit_reference_usable"])
+
+    def test_streamed_matches_survive_chunk_boundaries_and_later_ctest_wins(self):
+        chunk_size = 64
+        early_catch = "test cases: 999\n"
+        first_ctest = "50% tests passed, 1 tests failed out of 123\n"
+        prefix_len = (chunk_size - 1 - len(early_catch) - first_ctest.index("123")) % chunk_size
+        prefix = "p" * prefix_len
+        second_ctest = "100% tests passed, 0 tests failed out of 45\n"
+        late_catch = "test cases: 10000\n"
+        before_sentinel = early_catch + prefix + first_ctest + second_ctest + late_catch
+        sentinel = "No tests were found"
+        sentinel_prefix_len = (chunk_size - 2 - len(before_sentinel) - sentinel.index("found")) % chunk_size
+        full_log = before_sentinel + "-" * sentinel_prefix_len + sentinel + "\n"
+
+        self.assertEqual(
+            (len(early_catch) + len(prefix) + first_ctest.index("123")) % chunk_size,
+            chunk_size - 1,
+        )
+        self.assertEqual(
+            (len(before_sentinel) + sentinel_prefix_len + sentinel.index("found")) % chunk_size,
+            chunk_size - 2,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            log_path = Path(temp) / "test.log"
+            log_path.write_text(full_log, encoding="utf-8")
+            with mock.patch.object(slicer_pr_validation, "MAX_OUTPUT", chunk_size):
+                evidence = slicer_pr_validation._read_test_log_evidence(log_path)
+
+        self.assertTrue(evidence["available"])
+        self.assertEqual(evidence["count"], 45)
+        self.assertTrue(evidence["no_tests"])
+
+    def test_no_tests_sentinel_outside_bounded_tail_is_detected(self):
+        full_log = "No tests were found!!!\n" + "ordinary output\n" * (
+            slicer_pr_validation.MAX_OUTPUT // 8)
+        stdout_tail = "...[earlier output retained in log]...\n" + full_log[-slicer_pr_validation.MAX_OUTPUT:]
+        self.assertFalse(slicer_pr_validation.no_test_evidence(stdout_tail))
+
+        entry = self._run_tree(full_log=full_log, junit_xml=None, stdout=stdout_tail)
+
+        self.assertEqual(entry["status"], "no_tests")
+        self.assertEqual(entry["test_evidence"], 0)
+        self.assertTrue(entry["no_test_evidence"])
+
+    def test_missing_log_or_junit_count_mismatch_fails_closed(self):
+        passing_junit = '<testsuite tests="2"><testcase name="one"/><testcase name="two"/></testsuite>'
+        missing_log = self._run_tree(
+            full_log="100% tests passed, 0 tests failed out of 2\n",
+            junit_xml=passing_junit,
+            create_test_log=False,
+            stdout="100% tests passed, 0 tests failed out of 2\n",
+        )
+        self.assertEqual(missing_log["status"], "test_evidence_incomplete")
+        self.assertFalse(missing_log["test_log_evidence_available"])
+        self.assertFalse(missing_log["junit_reference_usable"])
+
+        contradictory = self._run_tree(
+            full_log="100% tests passed, 0 tests failed out of 3\n",
+            junit_xml=passing_junit,
+        )
+        self.assertEqual(contradictory["status"], "test_evidence_incomplete")
+        self.assertEqual(contradictory["test_evidence"], 3)
+        self.assertEqual(contradictory["junit_evidence"]["counts"]["tests"], 2)
+
+    def test_timeout_and_execution_error_keep_their_statuses(self):
+        junit = '<testsuite tests="1"><testcase name="one"/></testsuite>'
+        log = "100% tests passed, 0 tests failed out of 1\n"
+        timeout = self._run_tree(full_log=log, junit_xml=junit, timed_out=True,
+                                 returncode=None)
+        self.assertEqual(timeout["status"], "test_timeout")
+
+        error = self._run_tree(full_log=log, junit_xml=junit, returncode=-11)
+        self.assertEqual(error["status"], "test_error")
+
+
 class ProcessCaptureTests(unittest.TestCase):
     def test_run_phase_keeps_large_output_on_disk_and_bounds_result(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1785,11 +1931,15 @@ class RunValidationOrchestrationTests(unittest.TestCase):
 
                     def fake_phase(argv, *, cwd, timeout, log):
                         calls.append(list(argv))
+                        log.parent.mkdir(parents=True, exist_ok=True)
                         if argv[0] == "ctest":
                             junit = Path(argv[argv.index("--output-junit") + 1])
                             junit.write_text('<testsuite tests="1"><testcase name="contract" /></testsuite>')
+                            log.write_text("100% tests passed, 0 tests failed out of 1\n",
+                                           encoding="utf-8")
                             return slicer_pr_validation.CommandResult(
                                 list(argv), 0, 0.01, "100% tests passed, 0 tests failed out of 1", "")
+                        log.write_text("", encoding="utf-8")
                         return slicer_pr_validation.CommandResult(list(argv), 0, 0.01, "", "")
 
                     build = slicer_pr_validation._default_build(worktree, build_path, args.jobs, args.targets)
