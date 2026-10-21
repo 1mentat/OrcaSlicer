@@ -692,3 +692,145 @@ TEST_CASE("Internal-only reversal preserves exterior winding on alternating laye
         }
     }
 }
+
+TEST_CASE("Elephant foot settings fade contour correction and infill density by layer",
+          "[BooleanSettings][ElephantFoot][SettingsVariance]")
+{
+    struct LayerEvidence {
+        double min_x = std::numeric_limits<double>::infinity();
+        double max_x = -std::numeric_limits<double>::infinity();
+        double min_y = std::numeric_limits<double>::infinity();
+        double max_y = -std::numeric_limits<double>::infinity();
+        double solid_fill_volume = 0.0;
+    };
+    auto run = [](double compensation, int compensation_layers, const char *density) {
+        DynamicPrintConfig config = boolean_config();
+        config.set_deserialize_strict({
+            { "layer_height",                    0.2 },
+            { "initial_layer_print_height",       0.2 },
+            { "wall_loops",                      2 },
+            { "top_shell_layers",                0 },
+            { "bottom_shell_layers",             1 },
+            { "top_shell_thickness",             0.0 },
+            { "bottom_shell_thickness",          0.2 },
+            { "sparse_infill_density",           "100%" },
+            { "raft_layers",                     0 },
+            { "elefant_foot_compensation",       compensation },
+            { "elefant_foot_compensation_layers", compensation_layers },
+            { "elefant_foot_layers_density",     density },
+        });
+
+        Print print;
+        Model model;
+        init_print({ make_cube(20.0, 20.0, 1.2) }, print, model, config);
+        const StringObjectException validation = print.validate();
+        INFO("validation.string: " + validation.string);
+        INFO("validation.opt_key: " + validation.opt_key);
+        REQUIRE(validation.string.empty());
+        REQUIRE_NOTHROW(print.process());
+        REQUIRE(print.objects().size() == 1);
+
+        std::vector<LayerEvidence> result;
+        const PrintObject &object = *print.objects().front();
+        result.reserve(object.layers().size());
+        for (const Layer *layer : object.layers()) {
+            LayerEvidence evidence;
+            for (const LayerRegion *region : layer->regions()) {
+                for (const Surface &surface : region->slices.surfaces) {
+                    for (const Point &point : surface.expolygon.contour.points) {
+                        const double x = unscaled<double>(point.x());
+                        const double y = unscaled<double>(point.y());
+                        evidence.min_x = std::min(evidence.min_x, x);
+                        evidence.max_x = std::max(evidence.max_x, x);
+                        evidence.min_y = std::min(evidence.min_y, y);
+                        evidence.max_y = std::max(evidence.max_y, y);
+                    }
+                }
+                for_each_extrusion_path(region->fills, [&evidence](const ExtrusionPath &path) {
+                    if (path.role() == erBottomSurface || path.role() == erSolidInfill)
+                        evidence.solid_fill_volume += unscaled<double>(path.length()) * path.mm3_per_mm;
+                });
+            }
+            result.emplace_back(evidence);
+        }
+        return result;
+    };
+
+    // A 20 mm square cross-section is deliberately much wider than the
+    // configured 0.4 mm compensation, so it remains printable on every layer.
+    const std::vector<LayerEvidence> plain = run(0.0, 3, "100%");
+    const std::vector<LayerEvidence> full_density = run(0.4, 3, "100%");
+    const std::vector<LayerEvidence> one_compensation_layer = run(0.4, 1, "100%");
+    const std::vector<LayerEvidence> reduced_density = run(0.4, 3, "50%");
+    REQUIRE(plain.size() >= 6);
+    REQUIRE(full_density.size() == plain.size());
+    REQUIRE(one_compensation_layer.size() == plain.size());
+    REQUIRE(reduced_density.size() == plain.size());
+
+    const double requested_compensation_mm = 0.4;
+    const int compensation_layers = 3;
+    std::vector<double> applied_inset;
+    for (size_t layer = 0; layer < plain.size(); ++layer) {
+        const LayerEvidence &base = plain[layer];
+        const LayerEvidence &corrected = full_density[layer];
+        CAPTURE(layer);
+        REQUIRE(std::isfinite(base.min_x));
+        REQUIRE(std::isfinite(corrected.min_x));
+        REQUIRE(std::isfinite(base.max_x));
+        REQUIRE(std::isfinite(base.min_y));
+        REQUIRE(std::isfinite(base.max_y));
+        REQUIRE(std::isfinite(corrected.max_x));
+        REQUIRE(std::isfinite(corrected.min_y));
+        REQUIRE(std::isfinite(corrected.max_y));
+        CHECK_THAT(corrected.max_x - corrected.min_x,
+                   Catch::Matchers::WithinAbs(base.max_x - base.min_x - 2.0 *
+                       (layer < static_cast<size_t>(compensation_layers) ?
+                            requested_compensation_mm * (compensation_layers - static_cast<int>(layer)) / compensation_layers : 0.0),
+                       0.12));
+        const double inset = 0.25 * ((corrected.min_x - base.min_x) + (base.max_x - corrected.max_x) +
+                                     (corrected.min_y - base.min_y) + (base.max_y - corrected.max_y));
+        applied_inset.push_back(inset);
+    }
+    CHECK(applied_inset[0] > 0.25);
+    CHECK(applied_inset[0] < requested_compensation_mm + 0.08);
+    CHECK(applied_inset[0] > applied_inset[1]);
+    CHECK(applied_inset[1] > applied_inset[2]);
+    CHECK(applied_inset[2] > 0.02);
+    CHECK_THAT(applied_inset[3], Catch::Matchers::WithinAbs(0.0, 0.03));
+
+    const double one_layer_inset = 0.25 *
+        ((one_compensation_layer[0].min_x - plain[0].min_x) +
+         (plain[0].max_x - one_compensation_layer[0].max_x) +
+         (one_compensation_layer[0].min_y - plain[0].min_y) +
+         (plain[0].max_y - one_compensation_layer[0].max_y));
+    CHECK_THAT(one_layer_inset, Catch::Matchers::WithinAbs(0.4, 0.08));
+    CHECK_THAT(one_compensation_layer[1].max_x - one_compensation_layer[1].min_x,
+               Catch::Matchers::WithinAbs(plain[1].max_x - plain[1].min_x, 0.03));
+
+    REQUIRE(full_density[0].solid_fill_volume > 0.0);
+    REQUIRE(full_density[1].solid_fill_volume > 0.0);
+    REQUIRE(full_density[2].solid_fill_volume > 0.0);
+    REQUIRE(full_density[3].solid_fill_volume > 0.0);
+    REQUIRE(full_density[4].solid_fill_volume > 0.0);
+    for (size_t layer = 0; layer <= 4; ++layer) {
+        CAPTURE(layer);
+        REQUIRE(reduced_density[layer].solid_fill_volume > 0.0);
+        const double ratio = reduced_density[layer].solid_fill_volume / full_density[layer].solid_fill_volume;
+        CHECK(std::isfinite(ratio));
+        if (layer == 0 || layer == 4)
+            CHECK_THAT(ratio, Catch::Matchers::WithinAbs(1.0, 0.04));
+        else
+            CHECK(ratio > 0.0);
+    }
+    const auto fill_ratio = [&](size_t layer) {
+        return reduced_density[layer].solid_fill_volume / full_density[layer].solid_fill_volume;
+    };
+    // With a 50% configured value and three affected layers, the public
+    // setting contract ramps effective solid density from 50% toward 100%.
+    CHECK_THAT(fill_ratio(1), Catch::Matchers::WithinAbs(0.5, 0.06));
+    CHECK_THAT(fill_ratio(2), Catch::Matchers::WithinAbs(2.0 / 3.0, 0.06));
+    CHECK_THAT(fill_ratio(3), Catch::Matchers::WithinAbs(5.0 / 6.0, 0.06));
+    CHECK(fill_ratio(1) < fill_ratio(2));
+    CHECK(fill_ratio(2) < fill_ratio(3));
+    CHECK(fill_ratio(3) < fill_ratio(4));
+}

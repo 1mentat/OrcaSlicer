@@ -335,3 +335,71 @@ TEST_CASE("The cut preserves a plane vertex when adjacent facets cross the plane
     CHECK(its_num_open_edges(lower_only) == 0);
     CHECK_THAT(std::abs(its_volume(lower_only)), Catch::Matchers::WithinAbs(125.f / 3.f, 1e-2f));
 }
+
+
+namespace trianglemesh_contour_repair_contracts {
+
+indexed_triangle_set closed_box_triangle_soup(bool reverse_right_wall, bool rotate_facets)
+{
+    const std::vector<Vec3f> vertices {
+        Vec3f(0.f, 0.f, 0.f), Vec3f(20.f, 0.f, 0.f), Vec3f(20.f, 14.f, 0.f), Vec3f(0.f, 14.f, 0.f),
+        Vec3f(0.f, 0.f, 8.f), Vec3f(20.f, 0.f, 8.f), Vec3f(20.f, 14.f, 8.f), Vec3f(0.f, 14.f, 8.f)
+    };
+    // Outward-wound closed rectangular shell: bottom, top, then the four side walls.
+    std::vector<Vec3i32> facets {
+        { 0, 2, 1 }, { 0, 3, 2 }, { 4, 5, 6 }, { 4, 6, 7 },
+        { 0, 1, 5 }, { 0, 5, 4 }, { 1, 2, 6 }, { 1, 6, 5 },
+        { 2, 3, 7 }, { 2, 7, 6 }, { 3, 0, 4 }, { 3, 4, 7 }
+    };
+    if (reverse_right_wall) {
+        std::swap(facets[6][1], facets[6][2]);
+        std::swap(facets[7][1], facets[7][2]);
+    }
+    if (rotate_facets)
+        std::rotate(facets.begin(), facets.begin() + 5, facets.end());
+
+    // Give every triangle three fresh vertex indices while retaining exactly coincident coordinates.
+    // The closed surface is geometric, but its triangle connectivity is intentionally split.
+    indexed_triangle_set soup;
+    soup.vertices.reserve(facets.size() * 3);
+    soup.indices.reserve(facets.size());
+    for (const Vec3i32 &facet : facets) {
+        Vec3i32 split_facet;
+        for (int corner = 0; corner < 3; ++corner) {
+            split_facet[corner] = static_cast<int>(soup.vertices.size());
+            soup.vertices.emplace_back(vertices[facet[corner]]);
+        }
+        soup.indices.emplace_back(split_facet);
+    }
+    return soup;
+}
+
+} // namespace trianglemesh_contour_repair_contracts
+
+TEST_CASE("Single-plane slicing closes a box with coincident split triangle vertices",
+          "[TriangleMeshSlicer][SinglePlaneSlice]")
+{
+    const auto soup = trianglemesh_contour_repair_contracts::closed_box_triangle_soup(false, false);
+    const Polygons contours = slice_mesh(soup, 4.f, MeshSlicingParams{});
+
+    REQUIRE(contours.size() == 1);
+    const Polygon &contour = contours.front();
+    require_xy_bounds(contour, 0., 20., 0., 14.);
+    CHECK_THAT(std::abs(contour.area()) * SCALING_FACTOR * SCALING_FACTOR,
+               Catch::Matchers::WithinAbs(280., 1e-4));
+}
+
+TEST_CASE("Single-plane slicing joins reversed split facets into one contour",
+          "[TriangleMeshSlicer][SinglePlaneSlice]")
+{
+    const auto soup = trianglemesh_contour_repair_contracts::closed_box_triangle_soup(true, true);
+    const Polygons contours = slice_mesh(soup, 4.f, MeshSlicingParams{});
+
+    REQUIRE(contours.size() == 1);
+    const Polygon &contour = contours.front();
+    require_xy_bounds(contour, 0., 20., 0., 14.);
+    CHECK_THAT(std::abs(contour.area()) * SCALING_FACTOR * SCALING_FACTOR,
+               Catch::Matchers::WithinAbs(280., 1e-4));
+    // The reversed-orientation repair path documents CCW normalization for patched contours.
+    CHECK(contour.area() > 0.);
+}

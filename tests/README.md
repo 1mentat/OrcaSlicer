@@ -1414,3 +1414,43 @@ Layer and region SVG contracts verify that each public exporter uses its matchin
 cmake --build build --config Release --target fff_print_workflow_tests
 build/tests/fff_print/fff_print_workflow_tests "Layer and region SVG exports reflect their public surface collections" --rng-seed 21907 --order rand
 ```
+
+
+## Focused feedback: TriangleMeshSlicer contour repair
+
+`[TriangleMeshSlicer][SinglePlaneSlice]` checks public single-plane slicing of
+a closed rectangular box whose triangle vertices are deliberately split by
+index. It requires one contour with analytic 20 by 14 mm bounds and 280 mm²
+area, including a mixed-winding facet variant. Its probes are in
+`tests/mutations/trianglemesh_slicer_open_contour.json`. Build and run the two
+exact cases with:
+
+```sh
+cmake --build build --config Release --target libslic3r_trianglemesh_slicer_tests
+build/tests/libslic3r/libslic3r_trianglemesh_slicer_tests "Single-plane slicing closes a box with coincident split triangle vertices" --rng-seed 21907 --order rand
+build/tests/libslic3r/libslic3r_trianglemesh_slicer_tests "Single-plane slicing joins reversed split facets into one contour" --rng-seed 21907 --order rand
+```
+
+## Focused feedback: extrusion entities
+
+`[ExtrusionEntity]` checks multipath footprint bounds against explicit path
+widths, preservation of contoured vertex-height pairs through clone and
+reversal, loop/scarf clipping, seam-gap trimming, and loop smoothness. Its two
+probes are in `tests/mutations/extrusion_entity_contracts.json`. Build and run
+the focused target with:
+
+```sh
+cmake --build build --config Release --target fff_print_extrusion_entity_tests
+build/tests/fff_print/fff_print_extrusion_entity_tests "[ExtrusionEntity]" --rng-seed 21907 --order rand
+```
+
+## Elephant-foot settings pipeline
+
+`[ElephantFoot]` checks contour compensation fade over configured layers and
+the solid-fill density ramp using a small FFF print and measured slice/fill
+geometry. Its two source probes are in
+`tests/mutations/elephant_foot.json`. This case runs in the existing
+`fff_print_tests` target.
+
+The TriangleMeshSlicer and ExtrusionEntity focused targets add no duplicate
+CTest registrations.
