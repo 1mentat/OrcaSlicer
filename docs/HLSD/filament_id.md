@@ -77,11 +77,9 @@ device-reported tray material id flowing through the shared matcher.
 | Snapmaker | runtime color/vendor/type match |
 
 Tray-to-preset matching is printer-scoped, but **several consumers match globally by id alone,
-first hit wins**: tray display names, `filament_is_support`, vitrification warnings, and
-multi-nozzle filament grouping in the slicing pipeline (`FilamentGroup::try_merge_filaments`
-merges plate slots sharing one `(filament_id, color)` pair, with matching
-extruder-printability, onto one nozzle group; the engine is implemented but no grouping path
-calls it yet).
+first hit wins**: tray display names, `filament_is_support`, and vitrification warnings.
+Automatic co-location of matching plate slots onto one nozzle group is not wired into the
+current grouping paths.
 Two *different* materials sharing one id
 feed wrong data to those consumers even when the presets live in different vendors — so
 cross-material id sharing is never safe. Within one printer, duplicate ids break AMS matching:

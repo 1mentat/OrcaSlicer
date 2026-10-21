@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Semantic probes for public multi-nozzle grouping, directed flush histories, and legacy metadata contracts.",
+  "mutants": [
+    {
+      "id": "multinozzle-flush-matrix-direction-reversed",
+      "path": "src/libslic3r/MultiNozzleUtils.cpp",
+      "old": "float flush_volume = flush_matrix[extruder_id][last_filament][filament];",
+      "new": "float flush_volume = flush_matrix[extruder_id][filament][last_filament];",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Multi-nozzle flush weight follows each nozzle's directed filament history",
+      "description": "Reverse the directed from/to lookup. The asymmetric itinerary expects a scaled weight of 8, so the reversed lookup must fail an ordinary assertion."
+    },
+    {
+      "id": "multinozzle-legacy-extruder-one-based-conversion-omitted",
+      "path": "src/libslic3r/MultiNozzleUtils.cpp",
+      "old": "filament_map[filament.id] - 1",
+      "new": "filament_map[filament.id]",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Legacy nozzle metadata keeps the first valid group record and converts extruder IDs once",
+      "description": "Omit the one-based to zero-based conversion for a valid legacy record. The public fixture checks exact extruder IDs and fails as an ordinary assertion."
+    }
+  ]
+}

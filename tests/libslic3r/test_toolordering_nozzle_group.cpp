@@ -6,6 +6,7 @@
 #include <catch2/matchers/catch_matchers.hpp>
 #include "libslic3r/FilamentGroupUtils.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
+#include "libslic3r/ProjectTask.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/Model.hpp"
@@ -1148,4 +1149,156 @@ TEST_CASE("ToolOrdering leaves all-placeholder layers unresolved when no tool ex
     CHECK((ordering.layer_tools()[0].extruders == std::vector<unsigned int>{ 0 }));
     CHECK(ordering.layer_tools()[1].extruders.empty());
     CHECK((ordering.layer_tools()[2].extruders == std::vector<unsigned int>{ 0 }));
+}
+
+
+TEST_CASE("Multi-nozzle utility groups mapped filaments into ordered nozzle representatives", "[ToolOrdering][MultiNozzle]")
+{
+    const std::vector<int> filament_nozzle_map = {2, 0, 2, 1};
+    const std::vector<int> filament_volume_map = {
+        static_cast<int>(nvtStandard), static_cast<int>(nvtHighFlow),
+        static_cast<int>(nvtHybrid), static_cast<int>(nvtTPUHighFlow)};
+    const std::vector<int> filament_extruder_map = {1, 0, 1, 0};
+
+    const auto nozzles = build_nozzle_list(0.4, filament_nozzle_map, filament_volume_map, filament_extruder_map);
+    REQUIRE(nozzles.size() == 3);
+
+    // The returned list is ordered by logical nozzle ID. For each ID the first mapped
+    // filament supplies its extruder and volume type; later filaments do not reorder it.
+    REQUIRE(nozzles[0].group_id == 0);
+    REQUIRE(nozzles[0].extruder_id == 0);
+    REQUIRE(nozzles[0].volume_type == nvtHighFlow);
+    REQUIRE(nozzles[1].group_id == 1);
+    REQUIRE(nozzles[1].extruder_id == 0);
+    REQUIRE(nozzles[1].volume_type == nvtTPUHighFlow);
+    REQUIRE(nozzles[2].group_id == 2);
+    REQUIRE(nozzles[2].extruder_id == 1);
+    REQUIRE(nozzles[2].volume_type == nvtStandard);
+    for (const auto &nozzle : nozzles)
+        REQUIRE(nozzle.diameter == "0.4");
+}
+
+TEST_CASE("Multi-nozzle flush weight follows each nozzle's directed filament history", "[ToolOrdering][MultiNozzle]")
+{
+    auto make_nozzle = [](int group_id, int extruder_id) {
+        NozzleInfo nozzle;
+        nozzle.diameter = "0.4";
+        nozzle.volume_type = nvtStandard;
+        nozzle.group_id = group_id;
+        nozzle.extruder_id = extruder_id;
+        return nozzle;
+    };
+    const std::vector<NozzleInfo> nozzle_list = {make_nozzle(0, 0), make_nozzle(1, 1)};
+    const std::vector<int> filament_nozzle_map = {0, 0, 0, 1, 1};
+    const std::vector<unsigned int> used_filaments = {0, 1, 2, 3, 4};
+    auto result = LayeredNozzleGroupResult::create(filament_nozzle_map, nozzle_list, used_filaments);
+    REQUIRE(result.has_value());
+
+    std::vector<std::vector<std::vector<float>>> flush_matrix(
+        2, std::vector<std::vector<float>>(5, std::vector<float>(5, 0.f)));
+    flush_matrix[0][0][1] = 100.f;
+    flush_matrix[0][1][0] = 900.f;
+    flush_matrix[0][1][2] = 200.f;
+    flush_matrix[0][2][1] = 800.f;
+    flush_matrix[1][3][4] = 400.f;
+    flush_matrix[1][4][3] = 1700.f;
+
+    // Independent hand-counted itinerary: nozzle 0 contributes 0->1 (100) and
+    // 1->2 (200); nozzle 1 contributes 3->4 (400). First loads, repeats, and
+    // unmapped filament 99 contribute nothing. The current conversion maps 700 volume
+    // units to int(700 * 1.26 * 0.01) == 8.
+    REQUIRE(result->estimate_seq_flush_weight(flush_matrix, {0, 0, 3, 99, 1, 4, 1, 2}) == 8);
+
+    // Ragged matrices skip only transitions whose extruder, previous-filament row,
+    // or destination column is absent. The first valid 0->1 transition remains usable.
+    const std::vector<std::vector<std::vector<float>>> missing_extruder = {{{0.f, 100.f}}};
+    const std::vector<std::vector<std::vector<float>>> missing_destination_row = {{{0.f, 100.f}, {}}};
+    REQUIRE(result->estimate_seq_flush_weight(missing_extruder, {0, 1, 2, 3, 4}) == 1);
+    REQUIRE(result->estimate_seq_flush_weight(missing_destination_row, {0, 1, 2, 3, 4}) == 1);
+    REQUIRE(result->estimate_seq_flush_weight({}, {0, 1, 2, 3, 4}) == 0);
+
+    // Two 40-volume transitions sum to 80 before conversion: truncating each
+    // transition separately would produce 0, while converting the sum produces 1.
+    flush_matrix[0][0][1] = 40.f;
+    flush_matrix[0][1][0] = 40.f;
+    REQUIRE(result->estimate_seq_flush_weight(flush_matrix, {0, 1, 0}) == 1);
+}
+
+TEST_CASE("Static nozzle queries fall back to known assignments when change history is unusable", "[ToolOrdering][MultiNozzle]")
+{
+    auto make_nozzle = [](int group_id, int extruder_id) {
+        NozzleInfo nozzle;
+        nozzle.diameter = "0.4";
+        nozzle.volume_type = group_id == 7 ? nvtHighFlow : nvtStandard;
+        nozzle.group_id = group_id;
+        nozzle.extruder_id = extruder_id;
+        return nozzle;
+    };
+    FilamentInfo legacy_filament;
+    legacy_filament.id = 5;
+    legacy_filament.group_id = {}; // old archives left this field empty
+    FilamentInfo mapped_filament;
+    mapped_filament.id = 8;
+    mapped_filament.group_id = {99, 7}; // unknown ID is ignored; known IDs are sorted
+
+    auto result = StaticNozzleGroupResult::create(
+        {legacy_filament, mapped_filament},
+        {make_nozzle(7, 1), make_nozzle(3, 0)},
+        {8}, {99}, true); // a missing sequence nozzle falls back to the filament's known set
+    REQUIRE(result.has_value());
+
+    REQUIRE(result->get_extruder_count() == 2);
+    REQUIRE(result->get_used_extruders() == std::vector<int>({0, 1}));
+    REQUIRE(result->get_used_filaments() == std::vector<unsigned int>({5, 8}));
+    REQUIRE(result->get_used_nozzles_in_extruder(1).size() == 1);
+    REQUIRE(result->get_used_nozzles_in_extruder(1)[0].group_id == 7);
+    REQUIRE(result->get_nozzles_for_filament(5).size() == 2);
+    REQUIRE(result->get_nozzles_for_filament(5)[0].group_id == 3);
+    REQUIRE(result->get_nozzles_for_filament(5)[1].group_id == 7);
+    REQUIRE(result->get_nozzles_for_filament(8).size() == 1);
+    REQUIRE(result->get_nozzles_for_filament(8)[0].group_id == 7);
+    const auto first_legacy = result->get_first_nozzle_for_filament(5);
+    const auto first_mapped = result->get_first_nozzle_for_filament(8);
+    REQUIRE(first_legacy.has_value());
+    REQUIRE(first_legacy->group_id == 3);
+    REQUIRE(first_mapped.has_value());
+    REQUIRE(first_mapped->group_id == 7);
+    REQUIRE_FALSE(result->get_nozzle_from_id(99).has_value());
+}
+
+TEST_CASE("Legacy nozzle metadata keeps the first valid group record and converts extruder IDs once", "[ToolOrdering][MultiNozzle]")
+{
+    FilamentInfo high_flow;
+    high_flow.id = 0;
+    high_flow.group_id = {5};
+    high_flow.nozzle_diameter = 0.6;
+    high_flow.nozzle_volume_type = "High Flow";
+
+    FilamentInfo missing_extruder;
+    missing_extruder.id = 4; // outside the supplied map falls back to extruder zero
+    missing_extruder.group_id = {2};
+    missing_extruder.nozzle_diameter = 0.8;
+    missing_extruder.nozzle_volume_type = "unknown-volume"; // unknown legacy string defaults to Standard
+
+    FilamentInfo duplicate_group;
+    duplicate_group.id = 1;
+    duplicate_group.group_id = {5}; // first record for group 5 remains authoritative
+    duplicate_group.nozzle_diameter = 0.4;
+    duplicate_group.nozzle_volume_type = "Standard";
+
+    FilamentInfo invalid_group;
+    invalid_group.id = 1;
+    invalid_group.group_id = {-1}; // negative logical IDs are ignored
+
+    const auto nozzles = load_nozzle_infos_with_compatibility(
+        {}, {high_flow, missing_extruder, duplicate_group, invalid_group}, {2, 1}, {}, {});
+    REQUIRE(nozzles.size() == 2);
+    REQUIRE(nozzles[0].group_id == 2);
+    REQUIRE(nozzles[0].extruder_id == 0);
+    REQUIRE(nozzles[0].diameter == "0.8");
+    REQUIRE(nozzles[0].volume_type == nvtStandard);
+    REQUIRE(nozzles[1].group_id == 5);
+    REQUIRE(nozzles[1].extruder_id == 1);
+    REQUIRE(nozzles[1].diameter == "0.6");
+    REQUIRE(nozzles[1].volume_type == nvtHighFlow);
 }

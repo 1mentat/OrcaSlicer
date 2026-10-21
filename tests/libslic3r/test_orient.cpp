@@ -89,6 +89,51 @@ void check_finite_mesh(const TriangleMesh &mesh)
     }
 }
 
+
+TriangleMesh cooling_prism()
+{
+    constexpr float length = 100.f;
+    constexpr float height = 14.f;
+    constexpr float slope_run = 2.f;
+    constexpr float depth = 80.f;
+    constexpr std::size_t profile_size = 6;
+    const std::array<std::array<float, 2>, profile_size> profile{{
+        {{0.f, 0.f}},
+        {{length, 0.f}},
+        {{length + slope_run, slope_run}},
+        {{length + slope_run, height - slope_run}},
+        {{length, height}},
+        {{0.f, height}}
+    }};
+
+    std::vector<Vec3f> vertices;
+    vertices.reserve(profile_size * 2);
+    for (int plane = 0; plane != 2; ++plane) {
+        const float y = plane == 0 ? 0.f : depth;
+        for (const auto &point : profile)
+            vertices.emplace_back(point[0], y, point[1]);
+    }
+
+    std::vector<Vec3i32> faces;
+    faces.reserve(profile_size * 4 - 4);
+    for (std::size_t i = 0; i < profile_size; ++i) {
+        const std::size_t next = (i + 1) % profile_size;
+        faces.emplace_back(static_cast<int>(i),
+                           static_cast<int>(i + profile_size),
+                           static_cast<int>(next + profile_size));
+        faces.emplace_back(static_cast<int>(i),
+                           static_cast<int>(next + profile_size),
+                           static_cast<int>(next));
+    }
+    for (std::size_t i = 1; i + 1 < profile_size; ++i) {
+        faces.emplace_back(0, static_cast<int>(i), static_cast<int>(i + 1));
+        faces.emplace_back(static_cast<int>(profile_size),
+                           static_cast<int>(profile_size + i + 1),
+                           static_cast<int>(profile_size + i));
+    }
+    return TriangleMesh(std::move(vertices), std::move(faces));
+}
+
 } // namespace
 
 TEST_CASE("Orientation returns a rigid leveling transform without changing source geometry", "[Orient]")
@@ -237,4 +282,85 @@ TEST_CASE("Cooling orientation turns an asymmetric overhang toward the configure
     REQUIRE(overhangs > 0);
     CHECK_THAT(std::abs(its_volume(cooled.its)), Catch::Matchers::WithinRel(static_cast<double>(std::abs(its_volume(source.its))), 1e-6));
     CHECK_THAT(cooled.bounding_box().size().z(), Catch::Matchers::WithinAbs(source.bounding_box().size().z(), 1e-5));
+}
+
+
+TEST_CASE("Parallel fan orientation aims an exposed slope toward the configured cooling axis", "[Orient][FanDirection]")
+{
+    constexpr double inv_sqrt_two = 0.7071067811865475244;
+    constexpr double input_yaw = 0.37;
+    TriangleMesh source = cooling_prism();
+    source.rotate_z(static_cast<float>(input_yaw));
+    source.translate(12.f, -8.f, 5.f);
+    const indexed_triangle_set original = source.its;
+    const double expected_volume = (100. * 14. + 2. * 14. - 2. * 2.) * 80.;
+    CHECK_THAT(std::abs(its_volume(source.its)), Catch::Matchers::WithinRel(expected_volume, 1e-6));
+
+    const double fan_sign = GENERATE(-1., 1.);
+    OrientMesh item = orient_mesh(source, "asymmetric fan prism");
+    item.overhang_angle = 30.;
+    item.has_cooling_fan = true;
+    item.cooling_direction = Vec3d(fan_sign, 0., 0.);
+
+    OrientParams params;
+    params.parallel = true;
+    params.progressind = [](unsigned, std::string) {};
+    OrientMeshs items{std::move(item)};
+    orient(items, {}, params);
+
+    REQUIRE(items.size() == 1);
+    const OrientMesh &result = items.front();
+    check_rigid_orientation(result);
+    check_mesh_unchanged(original, result.mesh);
+    CHECK_THAT(std::abs(its_volume(result.mesh.its)), Catch::Matchers::WithinRel(expected_volume, 1e-6));
+    CHECK(std::abs(result.orientation.z()) > 0.999);
+
+    const double cos_yaw = std::cos(input_yaw);
+    const double sin_yaw = std::sin(input_yaw);
+    const Vec3d lower_slope_normal(cos_yaw * inv_sqrt_two, sin_yaw * inv_sqrt_two, -inv_sqrt_two);
+    const Vec3d upper_slope_normal(cos_yaw * inv_sqrt_two, sin_yaw * inv_sqrt_two, inv_sqrt_two);
+    const Vec3d lower_after_primary = result.rotation_matrix * lower_slope_normal;
+    const Vec3d upper_after_primary = result.rotation_matrix * upper_slope_normal;
+    const Vec3d &downward_slope = lower_after_primary.z() < upper_after_primary.z()
+        ? lower_after_primary : upper_after_primary;
+    CHECK_THAT(downward_slope.z(), Catch::Matchers::WithinAbs(-inv_sqrt_two, 1e-5));
+
+    Vec3d expected_airflow_axis(downward_slope.x(), downward_slope.y(), 0.);
+    CHECK_THAT(expected_airflow_axis.norm(), Catch::Matchers::WithinAbs(inv_sqrt_two, 1e-5));
+    REQUIRE(expected_airflow_axis.norm() > 0.69);
+    expected_airflow_axis.normalize();
+    CHECK_THAT(result.orientation_vertical.dot(expected_airflow_axis), Catch::Matchers::WithinAbs(1., 0.001));
+
+    const Matrix3d &vertical = result.rotation_matrix_vertical;
+    CHECK_THAT((vertical.transpose() * vertical - Matrix3d::Identity()).norm(), Catch::Matchers::WithinAbs(0., 1e-7));
+    CHECK_THAT(vertical.determinant(), Catch::Matchers::WithinAbs(1., 1e-7));
+    CHECK_THAT((vertical * result.orientation_vertical - result.cooling_direction).norm(), Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT((vertical * downward_slope).dot(result.cooling_direction), Catch::Matchers::WithinAbs(inv_sqrt_two, 0.01));
+
+    TriangleMesh fully_oriented = result.mesh;
+    fully_oriented.transform(result.rotation_matrix);
+    fully_oriented.transform(result.rotation_matrix_vertical);
+    CHECK_THAT(std::abs(its_volume(fully_oriented.its)), Catch::Matchers::WithinRel(expected_volume, 1e-6));
+}
+
+TEST_CASE("Parallel fan orientation keeps the configured axis for a symmetric solid", "[Orient][FanDirection]")
+{
+    const double fan_sign = GENERATE(-1., 1.);
+    OrientMesh item = orient_mesh(make_cube(10., 10., 10.), "symmetric fan cube");
+    item.has_cooling_fan = true;
+    item.cooling_direction = Vec3d(fan_sign, 0., 0.);
+    const indexed_triangle_set original = item.mesh.its;
+
+    OrientParams params;
+    params.parallel = true;
+    params.progressind = [](unsigned, std::string) {};
+    OrientMeshs items{std::move(item)};
+    orient(items, {}, params);
+
+    REQUIRE(items.size() == 1);
+    const OrientMesh &result = items.front();
+    check_rigid_orientation(result);
+    check_mesh_unchanged(original, result.mesh);
+    CHECK_THAT((result.orientation_vertical - result.cooling_direction).norm(), Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT((result.rotation_matrix_vertical - Matrix3d::Identity()).norm(), Catch::Matchers::WithinAbs(0., 1e-7));
 }

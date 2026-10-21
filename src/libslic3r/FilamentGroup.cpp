@@ -53,18 +53,6 @@ namespace Slic3r
         }
     }
 
-    static std::unordered_map<int, int> get_merged_filament_map(const std::unordered_map<int, std::vector<int>>& merged_filaments)
-    {
-        std::unordered_map<int, int> filament_merge_map;
-        for (auto elem : merged_filaments) {
-            for (auto f : elem.second) {
-                //traverse filaments in merged group
-                filament_merge_map[f] = elem.first;
-            }
-        }
-        return filament_merge_map;
-    }
-
     static uint64_t fnv_hash_nozzle(int volume_type, int is_right_extruder, int loaded_filament = -1)
     {
         constexpr uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
@@ -950,89 +938,6 @@ namespace Slic3r
         }
         return ret;
     }
-
-    std::unordered_map<int, std::vector<int>> FilamentGroup::try_merge_filaments()
-    {
-        std::unordered_map<int, std::vector<int>>merged_filaments;
-
-        std::unordered_map<std::string, std::vector<int>> merge_filament_map;
-
-        auto unprintable_stat_to_str = [unprintable_filaments = this->ctx.model_info.unprintable_filaments](int idx) {
-            std::string str;
-            for (size_t eid = 0; eid < unprintable_filaments.size(); ++eid) {
-                if (unprintable_filaments[eid].count(idx)) {
-                    if (eid > 0)
-                        str += ',';
-                    str += std::to_string(idx);
-                }
-            }
-            return str;
-            };
-
-        for (size_t idx = 0; idx < ctx.model_info.filament_ids.size(); ++idx) {
-            std::string id = ctx.model_info.filament_ids[idx];
-            Color color = ctx.model_info.filament_info[idx].color;
-            std::string unprintable_str = unprintable_stat_to_str(idx);
-
-            std::string key = id + "," + color.to_hex_str(true) + "," + unprintable_str;
-            merge_filament_map[key].push_back(idx);
-        }
-
-        for (auto& elem : merge_filament_map) {
-            if (elem.second.size() > 1) {
-                merged_filaments[elem.second.front()] = elem.second;
-            }
-        }
-        return merged_filaments;
-    }
-
-    std::vector<int> FilamentGroup::seperate_merged_filaments(const std::vector<int>& filament_map, const std::unordered_map<int, std::vector<int>>& merged_filaments)
-    {
-        std::vector<int> ret_map = filament_map;
-        for (auto& elem : merged_filaments) {
-            int src = elem.first;
-            for (auto f : elem.second) {
-                ret_map[f] = ret_map[src];
-            }
-        }
-        return ret_map;
-    }
-
-    void  FilamentGroup::rebuild_context(const std::unordered_map<int, std::vector<int>>& merged_filaments)
-    {
-        if (merged_filaments.empty())
-            return;
-
-        FilamentGroupContext new_ctx = ctx;
-
-        std::unordered_map<int, int> filament_merge_map = get_merged_filament_map(merged_filaments);
-
-        // modify layer filaments
-        for (auto& layer_filament : new_ctx.model_info.layer_filaments) {
-            for (auto& f : layer_filament) {
-                if (auto iter = filament_merge_map.find((int)(f)); iter != filament_merge_map.end()) {
-                    f = iter->second;
-                }
-            }
-        }
-
-        for (auto& unprintables : new_ctx.model_info.unprintable_filaments) {
-            std::set<int> new_unprintables;
-            for (auto f : unprintables) {
-                if (auto iter = filament_merge_map.find((int)(f)); iter != filament_merge_map.end()) {
-                    new_unprintables.insert(iter->second);
-                }
-                else {
-                    new_unprintables.insert(f);
-                }
-            }
-        }
-
-        ctx = new_ctx;
-        return;
-    }
-
-
 
     std::vector<int> FilamentGroup::calc_filament_group(int* cost)
     {

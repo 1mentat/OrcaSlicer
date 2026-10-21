@@ -3080,6 +3080,184 @@ TEST_CASE("Per-extruder printable regions expose shared and excluded bed geometr
     }
 }
 
+
+namespace {
+
+ExPolygon svg_rectangle_mm(double min_x, double min_y, double max_x, double max_y)
+{
+    return ExPolygon({
+        Point::new_scale(min_x, min_y), Point::new_scale(max_x, min_y),
+        Point::new_scale(max_x, max_y), Point::new_scale(min_x, max_y)
+    });
+}
+
+ExPolygon svg_rectangle_with_hole_mm(double min_x, double min_y, double max_x, double max_y,
+                                     double hole_min_x, double hole_min_y,
+                                     double hole_max_x, double hole_max_y)
+{
+    ExPolygon shape = svg_rectangle_mm(min_x, min_y, max_x, max_y);
+    Polygon hole;
+    hole.points = { Point::new_scale(hole_min_x, hole_min_y), Point::new_scale(hole_min_x, hole_max_y),
+                    Point::new_scale(hole_max_x, hole_max_y), Point::new_scale(hole_max_x, hole_min_y) };
+    shape.holes.emplace_back(std::move(hole));
+    return shape;
+}
+
+std::string svg_filled_path(const std::string &svg, const std::string &color)
+{
+    const std::string style = "style=\"fill: " + color + ";";
+    const size_t style_pos = svg.find(style);
+    if (style_pos == std::string::npos)
+        return {};
+    const size_t path_start = svg.rfind("<path d=\"", style_pos);
+    const size_t path_end = svg.find("/>", style_pos);
+    if (path_start == std::string::npos || path_end == std::string::npos)
+        return {};
+    return svg.substr(path_start, path_end + 2 - path_start);
+}
+
+struct SvgPathBounds
+{
+    bool defined = false;
+    double min_x = 0.;
+    double min_y = 0.;
+    double max_x = 0.;
+    double max_y = 0.;
+};
+
+SvgPathBounds svg_path_bounds(const std::string &path)
+{
+    SvgPathBounds bounds;
+    const size_t d_start = path.find("d=\"");
+    if (d_start == std::string::npos)
+        return bounds;
+    const size_t d_end = path.find('\"', d_start + 3);
+    if (d_end == std::string::npos)
+        return bounds;
+
+    std::istringstream input(path.substr(d_start + 3, d_end - (d_start + 3)));
+    std::string token;
+    input >> token; // M
+    std::vector<double> coordinates;
+    while (input >> token) {
+        char *end = nullptr;
+        const double value = std::strtod(token.c_str(), &end);
+        if (end != token.c_str())
+            coordinates.emplace_back(value);
+    }
+    if (coordinates.size() < 6 || coordinates.size() % 2 != 0)
+        return bounds;
+
+    bounds.min_x = bounds.max_x = coordinates[0];
+    bounds.min_y = bounds.max_y = coordinates[1];
+    for (size_t i = 2; i < coordinates.size(); i += 2) {
+        bounds.min_x = std::min(bounds.min_x, coordinates[i]);
+        bounds.max_x = std::max(bounds.max_x, coordinates[i]);
+        bounds.min_y = std::min(bounds.min_y, coordinates[i + 1]);
+        bounds.max_y = std::max(bounds.max_y, coordinates[i + 1]);
+    }
+    bounds.defined = true;
+    return bounds;
+}
+
+std::string read_svg_file(const ScopedTemporaryFile &file)
+{
+    std::ifstream input(file.string(), std::ios::binary);
+    if (!input)
+        return {};
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE("Layer and region SVG exports reflect their public surface collections", "[Print][PrintPipelineWorkflows][LayerSvg]")
+{
+    Print print;
+    Model model;
+    init_valid({ cube(4.) }, print, model, pipeline_config());
+    print.process();
+
+    PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    Layer *layer = object->get_layer(0);
+    REQUIRE(layer != nullptr);
+    REQUIRE(layer->region_count() == 1);
+    LayerRegion *region = layer->get_region(0);
+
+    // The two public collections deliberately occupy disjoint footprints and carry
+    // different surface roles, so an exporter cannot pass by drawing the wrong data.
+    const ExPolygon slice = svg_rectangle_mm(0., 0., 2., 2.);
+    const ExPolygon fill = svg_rectangle_with_hole_mm(100., 0., 104., 4., 101., 1., 103., 3.);
+    region->slices.set(ExPolygons{ slice }, stTop);
+    region->fill_surfaces.set(ExPolygons{ fill }, stInternal);
+
+    ScopedTemporaryFile slices_svg(".svg");
+    layer->export_region_slices_to_svg(slices_svg.string().c_str());
+    const std::string slices_text = read_svg_file(slices_svg);
+    REQUIRE_FALSE(slices_text.empty());
+    const std::string top_path = svg_filled_path(slices_text, "rgb(255,0,0)");
+    REQUIRE_FALSE(top_path.empty());
+    CHECK(top_path.find("fill-opacity=\"0.500000\"") != std::string::npos);
+    const SvgPathBounds top_bounds = svg_path_bounds(top_path);
+    REQUIRE(top_bounds.defined);
+    CHECK_THAT(top_bounds.max_x - top_bounds.min_x, Catch::Matchers::WithinAbs(20., 1e-4));
+    CHECK_THAT(top_bounds.max_y - top_bounds.min_y, Catch::Matchers::WithinAbs(20., 1e-4));
+
+    const ExPolygon fill_boundary = svg_rectangle_mm(0.5, 0.5, 1.5, 1.5);
+    region->fill_surfaces.set(ExPolygons{ fill_boundary }, stInternal);
+    ScopedTemporaryFile region_slices_svg(".svg");
+    region->export_region_slices_to_svg(region_slices_svg.string().c_str());
+    const std::string region_slices_text = read_svg_file(region_slices_svg);
+    REQUIRE_FALSE(region_slices_text.empty());
+    const std::string region_top_path = svg_filled_path(region_slices_text, "rgb(255,0,0)");
+    REQUIRE_FALSE(region_top_path.empty());
+    const SvgPathBounds region_top_bounds = svg_path_bounds(region_top_path);
+    REQUIRE(region_top_bounds.defined);
+    CHECK_THAT(region_top_bounds.max_x - region_top_bounds.min_x, Catch::Matchers::WithinAbs(20., 1e-4));
+    CHECK(region_slices_text.find("style=\"stroke: rgb(255,255,128);") != std::string::npos);
+
+    // Move the fill surface to a remote, wider footprint before testing the Layer
+    // fill exporter so collection routing and the SVG viewport origin are distinct.
+    region->fill_surfaces.set(ExPolygons{ fill }, stInternal);
+    ScopedTemporaryFile layer_fill_svg(".svg");
+    layer->export_region_fill_surfaces_to_svg(layer_fill_svg.string().c_str());
+    const std::string layer_fill_text = read_svg_file(layer_fill_svg);
+    REQUIRE_FALSE(layer_fill_text.empty());
+    const std::string layer_fill_path = svg_filled_path(layer_fill_text, "rgb(255,255,128)");
+    // This is the defining collection-routing contract: Layer fill export must use fill_surfaces,
+    // not the disjoint top slice collection.
+    CHECK_FALSE(layer_fill_path.empty());
+    if (!layer_fill_path.empty()) {
+        CHECK(layer_fill_path.find("fill-opacity=\"0.500000\"") != std::string::npos);
+        const SvgPathBounds fill_bounds = svg_path_bounds(layer_fill_path);
+        REQUIRE(fill_bounds.defined);
+        CHECK_THAT(fill_bounds.max_x - fill_bounds.min_x, Catch::Matchers::WithinAbs(40., 1e-4));
+        CHECK_THAT(fill_bounds.max_y - fill_bounds.min_y, Catch::Matchers::WithinAbs(40., 1e-4));
+        const size_t svg_width_pos = layer_fill_text.find("width=\"");
+        REQUIRE(svg_width_pos != std::string::npos);
+        char *svg_width_end = nullptr;
+        const double svg_width = std::strtod(layer_fill_text.c_str() + svg_width_pos + 7, &svg_width_end);
+        REQUIRE(svg_width_end != layer_fill_text.c_str() + svg_width_pos + 7);
+        CHECK(fill_bounds.min_x >= 0.);
+        CHECK(fill_bounds.max_x <= svg_width); // the fill must stay inside its SVG viewport
+        CHECK(layer_fill_path.find("M ") != layer_fill_path.rfind("M ")); // outer contour and hole
+    }
+    CHECK(svg_filled_path(layer_fill_text, "rgb(255,0,0)").empty());
+
+    ScopedTemporaryFile region_fill_svg(".svg");
+    region->export_region_fill_surfaces_to_svg(region_fill_svg.string().c_str());
+    const std::string region_fill_text = read_svg_file(region_fill_svg);
+    REQUIRE_FALSE(region_fill_text.empty());
+    const std::string region_fill_path = svg_filled_path(region_fill_text, "rgb(255,255,128)");
+    REQUIRE_FALSE(region_fill_path.empty());
+    const SvgPathBounds region_bounds = svg_path_bounds(region_fill_path);
+    REQUIRE(region_bounds.defined);
+    CHECK_THAT(region_bounds.max_x - region_bounds.min_x, Catch::Matchers::WithinAbs(40., 1e-4));
+    CHECK_THAT(region_bounds.max_y - region_bounds.min_y, Catch::Matchers::WithinAbs(40., 1e-4));
+    CHECK(region_fill_text.find("style=\"fill: none; stroke: black;") != std::string::npos);
+    CHECK(region_fill_text.find("style=\"fill: none; stroke: blue;") != std::string::npos);
+}
+
 } // namespace print_workflow_contracts
 
 namespace support_cache_contracts {

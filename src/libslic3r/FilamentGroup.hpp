@@ -186,10 +186,6 @@ namespace Slic3r
         std::map<int, int> rebuild_unprintables(const std::vector<unsigned int>& used_filaments, const std::map<int,int>& extruder_unprintables);
         std::unordered_map<int, std::vector<int>> rebuild_nozzle_unprintables(const std::vector<unsigned int>& used_filaments, const std::unordered_map<int, std::vector<int>>& extruder_unprintables, const std::vector<int>& filament_volume_map);
 
-        std::unordered_map<int, std::vector<int>> try_merge_filaments();
-        void rebuild_context(const std::unordered_map<int, std::vector<int>>& merged_filaments);
-        std::vector<int> seperate_merged_filaments(const std::vector<int>& filament_map, const std::unordered_map<int,std::vector<int>>& merged_filaments );
-
     private:
         FilamentGroupContext ctx;
         MemoryedGroupHeap m_memoryed_heap;

@@ -827,6 +827,11 @@ inheritance across placeholder layers, and the no-tool case through public
 ToolOrdering methods. Its probes are in `toolordering_dontcare_seed.json`;
 build `libslic3r_toolordering_tests` for focused feedback.
 
+`[MultiNozzle]` checks ordered nozzle representatives, directed per-nozzle flush
+history, safe fallback queries, and legacy group metadata conversion through
+public utility results. Its probes are in `multinozzle_utils.json`; build
+`libslic3r_toolordering_tests` for focused feedback.
+
 `[Producer]` checks public G-code file import with unregistered producer headers,
 compatible role tags, ignored legacy Simplify3D metadata, and active Orca config
 and feature metadata. Build `fff_print_gcodeprocessor_tests` for focused feedback;
@@ -1384,3 +1389,28 @@ purge datasets. Build `libslic3r_flush_volume_tests` for focused runs. Its two C
 probes are in `tests/mutations/flush_volume_predictor.json`. The four existing
 `[FlushVolCalculator]` contracts remain in the same file and focused executable.
 These direct algorithm contracts do not establish complete settings variance.
+
+## PNG, orientation, and layer SVG contracts
+
+The PNG writer and scaling contracts check grayscale and RGB pixel values across the public overloads, row orientation, nearest-neighbor scaling, invalid signatures, and a safe file-open failure. Build `libslic3r_png_tests` for focused feedback; its probes are in `tests/mutations/png_write_scale.json`.
+
+```sh
+cmake --build build --config Release --target libslic3r_png_tests
+build/tests/libslic3r/libslic3r_png_tests "Grayscale PNG writer overloads preserve pixels and nearest-neighbor scaling" --rng-seed 21907 --order rand
+build/tests/libslic3r/libslic3r_png_tests "RGB PNG writer overloads preserve channels and decoded row order" --rng-seed 21907 --order rand
+```
+
+The orientation fan-direction tests use asymmetric and symmetric solids to check the public cooling-axis behavior. Build `libslic3r_orient_tests` for focused feedback; the probes are in `tests/mutations/orient_fan_direction.json`.
+
+```sh
+cmake --build build --config Release --target libslic3r_orient_tests
+build/tests/libslic3r/libslic3r_orient_tests "Parallel fan orientation aims an exposed slope toward the configured cooling axis" --rng-seed 21907 --order rand
+build/tests/libslic3r/libslic3r_orient_tests "Parallel fan orientation keeps the configured axis for a symmetric solid" --rng-seed 21907 --order rand
+```
+
+Layer and region SVG contracts verify that each public exporter uses its matching slice or fill collection, retains a disjoint fill island with a hole, and emits the documented bounds, outlines, and opacity. These cases are part of the FFF workflow tests and their probes are in `tests/mutations/layer_svg_contracts.json`.
+
+```sh
+cmake --build build --config Release --target fff_print_workflow_tests
+build/tests/fff_print/fff_print_workflow_tests "Layer and region SVG exports reflect their public surface collections" --rng-seed 21907 --order rand
+```

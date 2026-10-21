@@ -253,6 +253,24 @@ set_property(TARGET libslic3r_flush_volume_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_flush_volume_tests)
 slicer_enable_llvm_source_coverage(libslic3r_flush_volume_tests)
 
+# Explicitly built PNG writer/scaling tests, without duplicate CTest registration.
+add_executable(libslic3r_png_tests EXCLUDE_FROM_ALL test_png_read_write.cpp)
+target_link_libraries(libslic3r_png_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_png_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_png_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_png_tests)
+slicer_enable_llvm_source_coverage(libslic3r_png_tests)
+
+# Explicitly built orientation contracts, without duplicate CTest registration.
+add_executable(libslic3r_orient_tests EXCLUDE_FROM_ALL
+    test_orient.cpp
+    ../fff_print/fff_print_tests.cpp)
+target_link_libraries(libslic3r_orient_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_orient_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_orient_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_orient_tests)
+slicer_enable_llvm_source_coverage(libslic3r_orient_tests)
+
 # Explicitly built ExPolygon contract tests, without duplicate CTest registration.
 add_executable(libslic3r_expolygon_tests EXCLUDE_FROM_ALL
     test_expolygon_contracts.cpp

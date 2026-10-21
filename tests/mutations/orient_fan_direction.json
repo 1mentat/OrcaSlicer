@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "description": "Semantic probes for the public parallel orientation fan-direction contract.",
+  "test_filter": "[Orient][FanDirection]",
+  "mutants": [
+    {
+      "id": "orient-fan-score-reverses-facing-normal",
+      "path": "src/libslic3r/Orient.cpp",
+      "old": "            if (overhang_projected_tmp > overhang_projected_max)\n            {\n                overhang_projected_max = overhang_projected_tmp;\n                best_direction = cool_dir;\n            }",
+      "new": "            if (overhang_projected_tmp > overhang_projected_max)\n            {\n                overhang_projected_max = overhang_projected_tmp;\n                best_direction = -cool_dir;\n            }",
+      "expected_matches": 1,
+      "test_filter": "Parallel fan orientation aims an exposed slope toward the configured cooling axis",
+      "description": "Reversing the selected horizontal direction must fail the independently derived asymmetric-slope alignment assertion, without producing a degenerate direction."
+    },
+    {
+      "id": "orient-fan-symmetric-fallback-reverses-axis",
+      "path": "src/libslic3r/Orient.cpp",
+      "old": "            best_direction = machine_cool_dir;",
+      "new": "            best_direction = -machine_cool_dir;",
+      "expected_matches": 1,
+      "test_filter": "Parallel fan orientation keeps the configured axis for a symmetric solid",
+      "description": "The symmetric fallback must preserve the configured fan axis when the exposed-overhang score has no directional preference."
+    }
+  ]
+}

@@ -253,30 +253,6 @@ public:
         }
     }
 
-    void area_cumulation(const Eigen::MatrixXf& normals_, const Eigen::VectorXf& areas_, int num_directions = 10)
-    {
-        std::unordered_map<stl_normal, float, VecHash> alignments;
-        // init to 0
-        for (size_t i = 0; i < areas_.size(); i++)
-            alignments.insert(std::pair(normals_.row(i), 0));
-        // cumulate areas
-        for (size_t i = 0; i < areas_.size(); i++)
-        {
-            alignments[normals_.row(i)] += areas_(i);
-        }
-
-        typedef std::pair<stl_normal, float> PAIR;
-        std::vector<PAIR> align_counts(alignments.begin(), alignments.end());
-        sort(align_counts.begin(), align_counts.end(), [](const PAIR& p1, const PAIR& p2) {return p1.second > p2.second; });
-
-        num_directions = std::min((size_t)num_directions, align_counts.size());
-        for (size_t i = 0; i < num_directions; i++)
-        {
-            orientations.push_back(align_counts[i].first);
-            //orientations.push_back(its_face_normals(mesh->its)[i]);
-            BOOST_LOG_TRIVIAL(debug) << align_counts[i].first.transpose() << ", area: " << align_counts[i].second;
-        }
-    }
     //This function is to make sure to return the accurate normal rather than quantized normal
     void area_cumulation_accurate( std::vector<Vec3f>& normals_, const Eigen::MatrixXf& quantize_normals_, const Eigen::VectorXf& areas_, int num_directions = 10)
     {
@@ -375,29 +351,6 @@ public:
         }
     }
 
-    static Eigen::VectorXi argsort(const Eigen::VectorXf& vec, std::string order="ascend")
-    {
-        Eigen::VectorXi ind = Eigen::VectorXi::LinSpaced(vec.size(), 0, vec.size() - 1);//[0 1 2 3 ... N-1]
-        std::function<bool(int, int)> rule;
-        if (order == "ascend") {
-            rule = [vec](int i, int j)->bool {
-                return vec(i) < vec(j);
-                };
-            }
-        else {
-            rule = [vec](int i, int j)->bool {
-                return vec(i) > vec(j);
-                };
-            }
-        std::sort(ind.data(), ind.data() + ind.size(), rule);
-        return ind;
-
-        //sorted_vec.resize(vec.size());
-        //for (int i = 0; i < vec.size(); i++) {
-        //    sorted_vec(i) = vec(ind(i));
-        //}
-    }
-
     // previously calc_overhang
     CostItems get_features(Vec3f orientation, bool min_volume = true)
     {
@@ -442,21 +395,6 @@ public:
 #if 1
             // the simple way for contour is even better for faces of small bridges
             costs.contour = 4 * sqrt(costs.bottom);
-#else
-            float contour = 0;
-            int face_count = mesh->facets_count();
-            auto its = mesh->its;
-            int contour_amout = 0;
-            for (size_t i = 0; i < face_count; i++)
-            {
-                if (bottom_condition(i)) {
-                    Eigen::VectorXi index = argsort(z_projected.row(i));
-                    stl_vertex line = its.get_vertex(i, index(0)) - its.get_vertex(i, index(1));
-                    contour += line.norm();
-                    contour_amout++;
-                }
-            }
-            costs.contour += contour + params.CONTOUR_AMOUNT * contour_amout;
 #endif
         }
 

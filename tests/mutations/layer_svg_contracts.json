@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Layer and LayerRegion SVG public collection and fill-outline behavior.",
+  "mutants": [
+    {
+      "id": "layer-slices-export-preserves-half-opacity",
+      "path": "src/libslic3r/Layer.cpp",
+      "old": "void Layer::export_region_slices_to_svg(const char *path) const\n{\n    BoundingBox bbox;\n    for (const auto *region : m_regions)\n        for (const auto &surface : region->slices.surfaces)\n            bbox.merge(get_extents(surface.expolygon));\n    Point legend_size = export_surface_type_legend_to_svg_box_size();\n    Point legend_pos(bbox.min(0), bbox.max(1));\n    bbox.merge(Point(std::max(bbox.min(0) + legend_size(0), bbox.max(0)), bbox.max(1) + legend_size(1)));\n\n    SVG svg(path, bbox);\n    const float transparency = 0.5f;",
+      "new": "void Layer::export_region_slices_to_svg(const char *path) const\n{\n    BoundingBox bbox;\n    for (const auto *region : m_regions)\n        for (const auto &surface : region->slices.surfaces)\n            bbox.merge(get_extents(surface.expolygon));\n    Point legend_size = export_surface_type_legend_to_svg_box_size();\n    Point legend_pos(bbox.min(0), bbox.max(1));\n    bbox.merge(Point(std::max(bbox.min(0) + legend_size(0), bbox.max(0)), bbox.max(1) + legend_size(1)));\n\n    SVG svg(path, bbox);\n    const float transparency = 1.0f;",
+      "expected_matches": 1,
+      "test_filter": "Layer and region SVG exports reflect their public surface collections",
+      "ordinary_assertion_only": true,
+      "description": "The top-slice SVG oracle requires half-opacity; making its fill paths opaque changes the emitted SVG attribute."
+    },
+    {
+      "id": "layer-region-fill-retains-hole-outline",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "svg.draw_outline(surface.expolygon, \"black\", \"blue\", scale_(0.05));",
+      "new": "svg.draw_outline(surface.expolygon, \"black\", \"black\", scale_(0.05));",
+      "expected_matches": 1,
+      "test_filter": "Layer and region SVG exports reflect their public surface collections",
+      "ordinary_assertion_only": true,
+      "description": "The fill fixture has a real hole and asserts that the public region SVG contains a blue hole-outline path."
+    }
+  ]
+}
