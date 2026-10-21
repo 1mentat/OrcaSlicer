@@ -1327,3 +1327,20 @@ identities do not establish a shared root cause; raw failures remain visible. A 
 passing if the baseline fails, configuration/build/test fails, no tests run,
 tests are skipped, or the harness patch conflicts; the process exits nonzero
 when any selected head or the baseline is not a verified pass.
+
+`[ShortEdgeCollapse]` checks the no-op face-budget boundary and verifies valid,
+nondegenerate output for closed and open indexed meshes. Its two CPP probes
+challenge the boundary guard and final face-index remapping.
+
+`[ArchivePathMetadata]` checks ZIP Unicode-path version and CRC trust, UTF-8
+filename precedence, and fallback for truncated extra fields.
+`[ArchiveDiagnostics]` checks recognized archive error codes through the public
+error-string API without freezing English wording.
+
+`[SurfaceCollection]` checks metadata and hole preservation during
+simplification, grouping by merge properties, source-order filtering and
+removal, contour accumulation, and SVG colors and optional labels. Each
+subsystem has a separate two-probe CPP catalog so the mutation build stays on
+its focused executable: `tests/mutations/short_edge_collapse.json`,
+`tests/mutations/miniz_paths.json`, and `tests/mutations/surface_collection.json`.
+Each catalog is independently SHA-256 pinned and selects exact case names.

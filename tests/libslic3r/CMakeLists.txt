@@ -31,6 +31,7 @@ add_executable(${_TEST_NAME}_tests
     test_config_variant_expansion.cpp
     test_parameter_utils.cpp
     test_cut_surface_contracts.cpp
+    test_surface_collection.cpp
     test_cut_utils.cpp
     test_texture_painting.cpp
     test_texture_bake_regularize.cpp
@@ -313,3 +314,41 @@ add_executable(slicer_settings_inventory EXCLUDE_FROM_ALL settings_inventory_mai
 target_link_libraries(slicer_settings_inventory libslic3r nlohmann_json)
 target_include_directories(slicer_settings_inventory PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/deps_src)
 set_property(TARGET slicer_settings_inventory PROPERTY FOLDER "tests")
+
+
+# Explicitly built SurfaceCollection contracts, without duplicate CTest registration.
+# The standalone NanoSVG implementation satisfies SVG symbols pulled by libslic3r.
+add_executable(libslic3r_surface_collection_tests EXCLUDE_FROM_ALL
+    test_surface_collection.cpp
+    ../fff_print/fff_print_tests.cpp)
+target_link_libraries(libslic3r_surface_collection_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_surface_collection_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_surface_collection_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_surface_collection_tests)
+slicer_enable_llvm_source_coverage(libslic3r_surface_collection_tests)
+
+# Focused TriangleMesh contracts, without duplicate CTest registration.
+# Keep the established FFF test helpers and printer-parts fixture object available.
+add_executable(libslic3r_trianglemesh_tests EXCLUDE_FROM_ALL
+    test_trianglemesh.cpp
+    ../fff_print/fff_print_tests.cpp
+    ../fff_print/test_helpers.cpp
+    ../libnest2d/printer_parts.cpp)
+target_link_libraries(libslic3r_trianglemesh_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_trianglemesh_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_trianglemesh_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_trianglemesh_tests)
+slicer_enable_llvm_source_coverage(libslic3r_trianglemesh_tests)
+
+# Focused ZIP-path and archive-diagnostic contracts, without duplicate CTest registration.
+# Reuse the accepted FFF helper/printer-parts link support for the full test TU.
+add_executable(libslic3r_miniz_extension_tests EXCLUDE_FROM_ALL
+    test_miniz_extension.cpp
+    ../fff_print/fff_print_tests.cpp
+    ../fff_print/test_helpers.cpp
+    ../libnest2d/printer_parts.cpp)
+target_link_libraries(libslic3r_miniz_extension_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_miniz_extension_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_miniz_extension_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_miniz_extension_tests)
+slicer_enable_llvm_source_coverage(libslic3r_miniz_extension_tests)

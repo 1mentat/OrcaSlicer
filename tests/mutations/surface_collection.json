@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "description": "Two exact semantic probes for the surface_collection controls.",
+  "mutants": [
+    {
+      "id": "surface-groups-ignore-thickness-layer-and-angle",
+      "path": "src/libslic3r/SurfaceCollection.cpp",
+      "old": "            if (! git->empty() && surfaces_could_merge(*git->front(), *it)) {",
+      "new": "            if (! git->empty() && git->front()->surface_type == it->surface_type) {",
+      "expected_matches": 1,
+      "test_filter": "SurfaceCollection groups surfaces by every merge property",
+      "description": "Grouping only by SurfaceType merges surfaces that differ in thickness, layer count, or bridge angle; the returned group boundaries and member pointers must distinguish all three fields."
+    },
+    {
+      "id": "surface-simplification-drops-template-metadata",
+      "path": "src/libslic3r/SurfaceCollection.cpp",
+      "old": "            Surface s = *it_s;",
+      "new": "            Surface s(it_s->surface_type);",
+      "expected_matches": 1,
+      "test_filter": "SurfaceCollection simplify preserves surface metadata and holes",
+      "description": "Constructing a fresh Surface for each simplified polygon drops thickness, layer count, bridge angle, and extra perimeters from the originating surface."
+    }
+  ],
+  "base_commit": "0a6caec9ce6d433850a3a728d82c774d1f8b8901"
+}

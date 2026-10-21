@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "description": "Two exact semantic probes for the miniz_paths controls.",
+  "mutants": [
+    {
+      "id": "archive-unicode-path-crc-is-not-enforced",
+      "path": "src/libslic3r/miniz_extension.cpp",
+      "old": "if (stored_crc == path_crc)",
+      "new": "if (true)",
+      "expected_matches": 1,
+      "test_filter": "Archive Unicode path metadata requires its declared version and filename checksum"
+    },
+    {
+      "id": "archive-unicode-path-version-is-not-enforced",
+      "path": "src/libslic3r/miniz_extension.cpp",
+      "old": "field[1] == 0x70 && len >= 5 && field[4] == 0x01",
+      "new": "field[1] == 0x70 && len >= 5",
+      "expected_matches": 1,
+      "test_filter": "Archive Unicode path metadata requires its declared version and filename checksum"
+    }
+  ],
+  "base_commit": "0a6caec9ce6d433850a3a728d82c774d1f8b8901"
+}
