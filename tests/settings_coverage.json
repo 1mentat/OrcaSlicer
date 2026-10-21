@@ -4414,6 +4414,47 @@
         "pipeline_oracle"
       ],
       "reason": "The 0% and 100% percentage endpoints and 0 mm and 0.5 mm literal endpoints are sliced on a 0.3 mm ledge; zero values produce no support footprint and the larger thresholds produce positive support-island area. With external-wall width fixed at 0.4 mm, 50% and 0.2 mm are also required to produce matching support-island area and support path length. This checks selected endpoints and unit equivalence; the narrow ledge uses support-area eligibility because support extrusion may be filtered below its configured 0.4 mm path width."
+    },
+    "adaptive_bed_mesh_margin": {
+      "test": "tests/fff_print/test_adaptive_bed_mesh.cpp",
+      "tag": "[AdaptiveBedMesh]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix",
+        "pipeline_oracle"
+      ],
+      "reason": "The Print-to-G-code fixture pins skirt_loops=0 and skirt_height=0, disables support/brim/raft/XY compensation, and uses an unarranged 12 x 8 x 0.2 mm cube whose analytic first-layer island envelope is [0,0]-[12,8]. It compares margin 0 and 2 mm to that independent envelope and checks the 100 mm margin path after explicit clipping. Positive extrusion is only a fixture sanity check. No registered numeric bound is claimed for this margin."
+    },
+    "bed_mesh_min": {
+      "test": "tests/fff_print/test_adaptive_bed_mesh.cpp",
+      "tag": "[AdaptiveBedMesh]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix",
+        "pipeline_oracle"
+      ],
+      "reason": "With skirt height/loops both zero, the 100 mm margin exceeds the analytic [0,0]-[12,8] cube envelope; explicit bed_mesh_min [1,2] clips both minimum coordinates. The test checks emitted mesh placeholders and positive first-layer extrusion. Representative values only; no registered numeric bound is claimed."
+    },
+    "bed_mesh_max": {
+      "test": "tests/fff_print/test_adaptive_bed_mesh.cpp",
+      "tag": "[AdaptiveBedMesh]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix",
+        "pipeline_oracle"
+      ],
+      "reason": "With skirt height/loops both zero, the 100 mm margin exceeds the analytic [0,0]-[12,8] cube envelope; explicit bed_mesh_max [10,6] clips both maximum coordinates. The test checks emitted mesh placeholders and positive first-layer extrusion. Representative values only; no registered numeric bound is claimed."
+    },
+    "bed_mesh_probe_distance": {
+      "test": "tests/fff_print/test_adaptive_bed_mesh.cpp",
+      "tag": "[AdaptiveBedMesh]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "interaction_matrix",
+        "pipeline_oracle"
+      ],
+      "reason": "The public Print-to-G-code fixture supplies the registered zero value on both axes and checks the 1 mm effective spacing floor against a 10 x 5 count for the independently derived clipped 9 x 4 mm region. A wide-spacing control checks Marlin2 3 x 3 and Klipper 4 x 4 minimums, with positive first-layer extrusion. These tested values do not claim complete global setting variance."
     }
   }
 }

@@ -25,6 +25,7 @@ add_executable(${_TEST_NAME}_tests
     test_boolean_settings.cpp
 	test_settings_variance.cpp
 	test_gcode_settings_contracts.cpp
+	test_adaptive_bed_mesh.cpp
 	test_fan_mover_contracts.cpp
 	test_motion_flow_variance.cpp
 	test_pressure_equalizer.cpp
@@ -105,6 +106,16 @@ target_link_libraries(fff_print_gcode_tests test_common libslic3r Catch2::Catch2
 set_property(TARGET fff_print_gcode_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_gcode_tests)
 slicer_enable_llvm_source_coverage(fff_print_gcode_tests)
+
+# Focused adaptive bed-mesh Print-to-G-code contracts, without duplicate CTest registration.
+add_executable(fff_print_adaptive_bed_mesh_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_adaptive_bed_mesh.cpp)
+target_link_libraries(fff_print_adaptive_bed_mesh_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_adaptive_bed_mesh_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_adaptive_bed_mesh_tests)
+slicer_enable_llvm_source_coverage(fff_print_adaptive_bed_mesh_tests)
 
 # Focused infill contracts and runtime comparisons, without duplicate CTest registration.
 add_executable(fff_print_fill_tests EXCLUDE_FROM_ALL

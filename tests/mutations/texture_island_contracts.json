@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "description": "Public TextureDisplacement contracts align joined-chart boundary geometry, average island scales without changing placement, and smooth all RGB height-texture channels.",
+  "test_filter": "TextureDisplacement",
+  "mutants": [
+    {
+      "id": "texture-chart-join-keeps-reversed-edge-order",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "        if (u.source_vertex[size_t(ua)] != key.first)\n            std::swap(e.uv_lo, e.uv_hi);",
+      "new": "        // Mutant: leave reversed raw boundary endpoints in their input order.",
+      "expected_matches": 1,
+      "test_filter": "Joining charts aligns a reversed shared edge to the placed parent",
+      "description": "Skip ordering the child edge endpoints by base-vertex identity; the applied child placement no longer aligns both shared base-vertex endpoints with the independently derived parent endpoints.",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "texture-rgb-smoothing-skips-channel-blur",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "                smooth_height_pixels(channel, result.width, result.height, radius);",
+      "new": "                // Mutant: leave this RGB channel at its unsmoothed values.",
+      "expected_matches": 1,
+      "test_filter": "RGB texture smoothing preserves flat channels and reduces image contrast",
+      "description": "Bypass the per-channel blur; the red and blue contrast ranges must both shrink while the flat green channel remains unchanged.",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

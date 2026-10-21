@@ -1344,3 +1344,30 @@ subsystem has a separate two-probe CPP catalog so the mutation build stays on
 its focused executable: `tests/mutations/short_edge_collapse.json`,
 `tests/mutations/miniz_paths.json`, and `tests/mutations/surface_collection.json`.
 Each catalog is independently SHA-256 pinned and selects exact case names.
+
+
+## Focused feedback: Surface, adaptive bed mesh, and texture placement
+
+These explicit targets support focused iteration without duplicate CTest
+registrations. Run them from the repository root:
+
+```sh
+cmake --build build --config Release --target fff_print_adaptive_bed_mesh_tests
+build/tests/fff_print/fff_print_adaptive_bed_mesh_tests "[AdaptiveBedMesh]" --rng-seed 21907 --order rand
+
+cmake --build build --config Release --target libslic3r_surface_collection_tests
+build/tests/libslic3r/libslic3r_surface_collection_tests "Surface conversions preserve contour and hole order across copies and moves" --rng-seed 21907 --order rand
+build/tests/libslic3r/libslic3r_surface_collection_tests "Surface collections preserve geometry and metadata across set append and retag" --rng-seed 21907 --order rand
+build/tests/libslic3r/libslic3r_surface_collection_tests "Surface extents include negative and disjoint contours and define empty results" --rng-seed 21907 --order rand
+build/tests/libslic3r/libslic3r_surface_collection_tests "Surface SVG export preserves holes colors and requested opacity" --rng-seed 21907 --order rand
+
+cmake --build build --config Release --target libslic3r_texture_displacement_tests
+build/tests/libslic3r/libslic3r_texture_displacement_tests "Joining charts aligns a reversed shared edge to the placed parent" --rng-seed 21907 --order rand
+build/tests/libslic3r/libslic3r_texture_displacement_tests "Averaging island scales preserves placement and handles small inputs" --rng-seed 21907 --order rand
+build/tests/libslic3r/libslic3r_texture_displacement_tests "RGB texture smoothing preserves flat channels and reduces image contrast" --rng-seed 21907 --order rand
+```
+
+The Surface and Texture probes exercise public geometry/placement contracts; the
+adaptive bed-mesh cases check emitted placeholders against an analytic first-layer
+island envelope. These focused runs do not replace the canonical suite or establish
+full settings variance.

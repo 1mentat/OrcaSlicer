@@ -66,6 +66,24 @@ static std::shared_ptr<std::vector<unsigned char>> make_gray_png(size_t w, size_
     return std::make_shared<std::vector<unsigned char>>(std::move(bytes));
 }
 
+// Encode RGB texels through the same PNG path used by imported color textures.
+static std::shared_ptr<std::vector<unsigned char>> make_rgb_png(size_t w, size_t h,
+                                                               const std::vector<uint8_t> &pixels)
+{
+    REQUIRE(pixels.size() == w * h * 3);
+    ScopedTemporaryFile file(".png");
+    REQUIRE(Slic3r::png::write_rgb_to_file(file.string(), w, h, pixels));
+
+    std::vector<unsigned char> bytes;
+    {
+        std::ifstream ifs(file.string(), std::ios::binary);
+        REQUIRE(ifs.good());
+        bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+    }
+    REQUIRE_FALSE(bytes.empty());
+    return std::make_shared<std::vector<unsigned char>>(std::move(bytes));
+}
+
 // A flat map gives every painted vertex the same height sample.
 static std::shared_ptr<std::vector<unsigned char>> make_flat_gray_png(uint8_t value, size_t w = 4, size_t h = 4)
 {
@@ -3155,4 +3173,167 @@ TEST_CASE("Texture bake boundary falloff ramps an excluded planar seam", "[Textu
     const TextureBake::TriSoup unmasked_output =
         TextureBake::apply_displacement(unmasked, sample, settings, bounds);
     check_output(unmasked, unmasked_output, { 1.f, 1.f, 1.f, 1.f });
+}
+
+
+TEST_CASE("Joining charts aligns a reversed shared edge to the placed parent", "[TextureDisplacement]")
+{
+    PatchUnwrap unwrap;
+    unwrap.uvs = { Vec2f(0.f, 0.f), Vec2f(2.f, 0.f), Vec2f(0.f, -1.f),
+                   Vec2f(7.f, 5.f), Vec2f(5.f, 5.f), Vec2f(7.f, 6.f) };
+    unwrap.source_vertex = { 0, 1, 2, 1, 0, 3 };
+    unwrap.vertex_chart = { 0, 0, 0, 1, 1, 1 };
+    unwrap.chart_centroid = { Vec2f(1.f, 0.f), Vec2f(6.f, 5.f) };
+    unwrap.boundary_edges = { { 0, 1 }, { 3, 4 } };
+
+    std::vector<TextureIsland> placements(2);
+    placements[0].rotation_deg = 90.f;
+    placements[0].offset = Vec2f(10.f, 20.f);
+
+    TextureIsland joined;
+    REQUIRE(join_chart_placement(unwrap, placements, 1, 0, joined));
+    CHECK_THAT(joined.scale, WithinAbs(1.f, 1e-6f));
+
+    // Applying the returned placement puts the child's shared base vertices at the parent's
+    // already-placed endpoints. This checks the public geometry without pinning an angle encoding.
+    placements[1] = joined;
+    const Vec2f child_base0 = apply_island_transform(unwrap.uvs[4], 1, unwrap, placements);
+    const Vec2f child_base1 = apply_island_transform(unwrap.uvs[3], 1, unwrap, placements);
+    CHECK_THAT(child_base0.x(), WithinAbs(11.f, 1e-4f));
+    CHECK_THAT(child_base0.y(), WithinAbs(19.f, 1e-4f));
+    CHECK_THAT(child_base1.x(), WithinAbs(11.f, 1e-4f));
+    CHECK_THAT(child_base1.y(), WithinAbs(21.f, 1e-4f));
+    CHECK_THAT(placements[0].rotation_deg, WithinAbs(90.f, 1e-6f));
+    CHECK_THAT(placements[0].offset.x(), WithinAbs(10.f, 1e-6f));
+    CHECK_THAT(placements[0].offset.y(), WithinAbs(20.f, 1e-6f));
+
+    const auto failed_join_preserves_child_geometry = [&](const PatchUnwrap &candidate, int child, int parent) {
+        placements[1] = joined;
+        const Vec2f before0 = apply_island_transform(candidate.uvs[4], 1, candidate, placements);
+        const Vec2f before1 = apply_island_transform(candidate.uvs[3], 1, candidate, placements);
+        CHECK_FALSE(join_chart_placement(candidate, placements, child, parent, joined));
+        placements[1] = joined;
+        const Vec2f after0 = apply_island_transform(candidate.uvs[4], 1, candidate, placements);
+        const Vec2f after1 = apply_island_transform(candidate.uvs[3], 1, candidate, placements);
+        CHECK_THAT(after0.x(), WithinAbs(before0.x(), 1e-6f));
+        CHECK_THAT(after0.y(), WithinAbs(before0.y(), 1e-6f));
+        CHECK_THAT(after1.x(), WithinAbs(before1.x(), 1e-6f));
+        CHECK_THAT(after1.y(), WithinAbs(before1.y(), 1e-6f));
+    };
+
+    PatchUnwrap unshared = unwrap;
+    unshared.source_vertex[3] = 4;
+    unshared.source_vertex[4] = 5;
+    failed_join_preserves_child_geometry(unshared, 1, 0);
+    failed_join_preserves_child_geometry(unwrap, 2, 0);
+    failed_join_preserves_child_geometry(unwrap, -1, 0);
+    failed_join_preserves_child_geometry(unwrap, 1, -1);
+    failed_join_preserves_child_geometry(unwrap, 0, 0);
+}
+
+TEST_CASE("Averaging island scales preserves placement and handles small inputs", "[TextureDisplacement]")
+{
+    std::vector<TextureIsland> islands(3);
+    islands[0].scale = 2.f;
+    islands[0].rotation_deg = 15.f;
+    islands[0].offset = Vec2f(1.f, 2.f);
+    islands[1].scale = 4.f;
+    islands[1].rotation_deg = -30.f;
+    islands[1].offset = Vec2f(-3.f, 4.f);
+    islands[2].scale = 6.f;
+    islands[2].rotation_deg = 90.f;
+    islands[2].offset = Vec2f(5.f, -6.f);
+
+    average_island_scales(islands);
+
+    for (const TextureIsland &island : islands)
+        CHECK_THAT(island.scale, WithinAbs(4.f, 1e-6f));
+    CHECK_THAT(islands[0].rotation_deg, WithinAbs(15.f, 1e-6f));
+    CHECK_THAT(islands[0].offset.x(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(islands[0].offset.y(), WithinAbs(2.f, 1e-6f));
+    CHECK_THAT(islands[1].rotation_deg, WithinAbs(-30.f, 1e-6f));
+    CHECK_THAT(islands[1].offset.x(), WithinAbs(-3.f, 1e-6f));
+    CHECK_THAT(islands[1].offset.y(), WithinAbs(4.f, 1e-6f));
+    CHECK_THAT(islands[2].rotation_deg, WithinAbs(90.f, 1e-6f));
+    CHECK_THAT(islands[2].offset.x(), WithinAbs(5.f, 1e-6f));
+    CHECK_THAT(islands[2].offset.y(), WithinAbs(-6.f, 1e-6f));
+
+    std::vector<TextureIsland> empty;
+    average_island_scales(empty);
+    CHECK(empty.empty());
+
+    std::vector<TextureIsland> singleton(1);
+    singleton[0].scale = 2.5f;
+    average_island_scales(singleton);
+    CHECK_THAT(singleton[0].scale, WithinAbs(2.5f, 1e-6f));
+}
+
+TEST_CASE("RGB texture smoothing preserves flat channels and reduces image contrast", "[TextureDisplacement]")
+{
+    constexpr size_t width = 4;
+    constexpr size_t height = 4;
+    std::vector<uint8_t> pixels;
+    pixels.reserve(width * height * 3);
+    for (size_t y = 0; y < height; ++y)
+        for (size_t x = 0; x < width; ++x) {
+            pixels.push_back((x + y) % 2 == 0 ? 255 : 0);
+            pixels.push_back(73);
+            pixels.push_back(y % 2 == 0 ? 20 : 220);
+        }
+
+    TextureDisplacementLayer layer;
+    layer.image_data = make_rgb_png(width, height, pixels);
+    const std::vector<unsigned char> encoded_before = *layer.image_data;
+
+    layer.smoothing = 0.f;
+    const DecodedHeightTexture raw = decode_height_texture(layer);
+    REQUIRE_FALSE(raw.empty());
+    REQUIRE(raw.has_color());
+    REQUIRE(raw.rgb.size() == width * height * 3);
+
+    layer.smoothing = 1.f;
+    const DecodedHeightTexture smoothed = decode_height_texture(layer);
+    REQUIRE(smoothed.has_color());
+    REQUIRE(smoothed.rgb.size() == raw.rgb.size());
+
+    uint8_t raw_red_min = 255, raw_red_max = 0;
+    uint8_t smooth_red_min = 255, smooth_red_max = 0;
+    uint8_t raw_blue_min = 255, raw_blue_max = 0;
+    uint8_t smooth_blue_min = 255, smooth_blue_max = 0;
+    for (size_t i = 0; i < width * height; ++i) {
+        const uint8_t raw_red = raw.rgb[i * 3];
+        const uint8_t smooth_red = smoothed.rgb[i * 3];
+        const uint8_t raw_green = raw.rgb[i * 3 + 1];
+        const uint8_t smooth_green = smoothed.rgb[i * 3 + 1];
+        const uint8_t raw_blue = raw.rgb[i * 3 + 2];
+        const uint8_t smooth_blue = smoothed.rgb[i * 3 + 2];
+
+        raw_red_min = std::min(raw_red_min, raw_red);
+        raw_red_max = std::max(raw_red_max, raw_red);
+        smooth_red_min = std::min(smooth_red_min, smooth_red);
+        smooth_red_max = std::max(smooth_red_max, smooth_red);
+        raw_blue_min = std::min(raw_blue_min, raw_blue);
+        raw_blue_max = std::max(raw_blue_max, raw_blue);
+        smooth_blue_min = std::min(smooth_blue_min, smooth_blue);
+        smooth_blue_max = std::max(smooth_blue_max, smooth_blue);
+
+        CHECK(raw_green == 73);
+        CHECK(smooth_green == 73);
+    }
+    CHECK(raw_red_min == 0);
+    CHECK(raw_red_max == 255);
+    CHECK(raw_blue_min == 20);
+    CHECK(raw_blue_max == 220);
+    CHECK(smooth_red_max - smooth_red_min < raw_red_max - raw_red_min);
+    CHECK(smooth_blue_max - smooth_blue_min < raw_blue_max - raw_blue_min);
+
+    const DecodedHeightTexture cached = decode_height_texture(layer);
+    CHECK(cached.rgb == smoothed.rgb);
+    CHECK(cached.pixels == smoothed.pixels);
+    CHECK(*layer.image_data == encoded_before);
+
+    layer.smoothing = 0.f;
+    const DecodedHeightTexture unsmoothed_again = decode_height_texture(layer);
+    CHECK(unsmoothed_again.rgb == raw.rgb);
+    CHECK(unsmoothed_again.pixels == raw.pixels);
 }

@@ -3,6 +3,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "libslic3r/SurfaceCollection.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/ExPolygon.hpp"
@@ -266,4 +267,233 @@ TEST_CASE("SurfaceCollection SVG export colors surfaces and optionally labels th
     CHECK(count_text(plain, "<path ") == 2);
     CHECK(count_text(plain, ">0</text>") == 0);
     CHECK(count_text(plain, ">1</text>") == 0);
+}
+
+TEST_CASE("Surface conversions preserve contour and hole order across copies and moves", "[SurfaceCollection]")
+{
+    Surface holed(stTop, rectangle_with_hole(-100, -100, 0, 0));
+    holed.thickness = 0.35;
+    holed.thickness_layers = 2;
+    holed.bridge_angle = 0.25;
+    holed.extra_perimeters = 4;
+    Surface plain(stBottom, rectangle(20, 30, 60, 50));
+    Surfaces owned { holed, plain };
+
+    CHECK_THAT(holed.area(), WithinAbs(9100., 1e-6));
+    CHECK_FALSE(holed.empty());
+    const Polygons from_one = to_polygons(holed);
+    REQUIRE(from_one.size() == 2);
+    CHECK(from_one[0].points == holed.expolygon.contour.points);
+    CHECK(from_one[1].points == holed.expolygon.holes.front().points);
+
+    CHECK(number_polygons(owned) == 3);
+    const Polygons from_owned = to_polygons(owned);
+    REQUIRE(from_owned.size() == 3);
+    CHECK(from_owned[0].points == owned[0].expolygon.contour.points);
+    CHECK(from_owned[1].points == owned[0].expolygon.holes.front().points);
+    CHECK(from_owned[2].points == owned[1].expolygon.contour.points);
+
+    const SurfacesPtr reordered { &owned[1], &owned[0] };
+    CHECK(number_polygons(reordered) == 3);
+    const Polygons from_pointers = to_polygons(reordered);
+    REQUIRE(from_pointers.size() == 3);
+    CHECK(from_pointers[0].points == owned[1].expolygon.contour.points);
+    CHECK(from_pointers[1].points == owned[0].expolygon.contour.points);
+    CHECK(from_pointers[2].points == owned[0].expolygon.holes.front().points);
+
+    Polygons appended { rectangle(300, 300, 310, 310).contour };
+    polygons_append(appended, owned);
+    REQUIRE(appended.size() == 4);
+    CHECK(appended[0].points == rectangle(300, 300, 310, 310).contour.points);
+    CHECK(appended[1].points == owned[0].expolygon.contour.points);
+    CHECK(appended[2].points == owned[0].expolygon.holes.front().points);
+    CHECK(appended[3].points == owned[1].expolygon.contour.points);
+
+    Polygons pointer_append;
+    polygons_append(pointer_append, reordered);
+    REQUIRE(pointer_append.size() == 3);
+    CHECK(pointer_append[0].points == owned[1].expolygon.contour.points);
+    CHECK(pointer_append[1].points == owned[0].expolygon.contour.points);
+    CHECK(pointer_append[2].points == owned[0].expolygon.holes.front().points);
+
+    Surface rvalue_surface(stInternal, rectangle_with_hole(100, 100, 200, 200));
+    const Polygons from_rvalue = to_polygons(std::move(rvalue_surface));
+    REQUIRE(from_rvalue.size() == 2);
+    CHECK(from_rvalue[0].points == rectangle_with_hole(100, 100, 200, 200).contour.points);
+    CHECK(from_rvalue[1].points == rectangle_with_hole(100, 100, 200, 200).holes.front().points);
+
+    Surfaces move_append_source { holed, plain };
+    Polygons move_appended;
+    polygons_append(move_appended, std::move(move_append_source));
+    REQUIRE(move_appended.size() == 3);
+    CHECK(move_appended[0].points == holed.expolygon.contour.points);
+    CHECK(move_appended[1].points == holed.expolygon.holes.front().points);
+    CHECK(move_appended[2].points == plain.expolygon.contour.points);
+
+    const ExPolygons owned_copy = to_expolygons(owned);
+    const ExPolygons pointer_copy = to_expolygons(reordered);
+    REQUIRE(owned_copy.size() == 2);
+    REQUIRE(pointer_copy.size() == 2);
+    CHECK(owned_copy[0].holes.size() == 1);
+    CHECK(pointer_copy[0].contour.points == owned[1].expolygon.contour.points);
+    const Point copied_first_point = owned_copy[0].contour.points.front();
+    owned[0].clear();
+    CHECK(owned_copy[0].contour.points.front() == copied_first_point);
+    CHECK(owned_copy[0].holes.size() == 1);
+
+    Surfaces move_expolygon_source { holed, plain };
+    const ExPolygons moved_expolygons = to_expolygons(std::move(move_expolygon_source));
+    REQUIRE(move_expolygon_source.empty());
+    REQUIRE(moved_expolygons.size() == 2);
+    CHECK(moved_expolygons[0].holes.size() == 1);
+    CHECK(moved_expolygons[1].contour.points == plain.expolygon.contour.points);
+
+    holed.clear();
+    CHECK(holed.empty());
+    CHECK_THAT(holed.area(), WithinAbs(0., 1e-9));
+}
+
+TEST_CASE("Surface collections preserve geometry and metadata across set append and retag", "[SurfaceCollection]")
+{
+    const Surface source_surface = grouped_surface(stInternal, 7, 0.4, 2, 0.3);
+    const Surface second_surface = grouped_surface(stTop, 2, 0.25, 1, -1.0);
+    SurfaceCollection source(Surfaces { source_surface, second_surface });
+    SurfaceCollection target(Surfaces { tagged_surface(stPerimeter, 0) });
+
+    target.set(source);
+    REQUIRE(target.size() == 2);
+    CHECK(target.surfaces[0].extra_perimeters == 7);
+    CHECK(target.surfaces[1].extra_perimeters == 2);
+    CHECK(target.surfaces[0].expolygon.contour.points == source_surface.expolygon.contour.points);
+    CHECK(target.surfaces[1].expolygon.contour.points == second_surface.expolygon.contour.points);
+    CHECK_THAT(target.surfaces[0].thickness, WithinAbs(0.4, 1e-12));
+    CHECK(target.surfaces[0].thickness_layers == 2);
+    CHECK_THAT(target.surfaces[0].bridge_angle, WithinAbs(0.3, 1e-12));
+    CHECK(target.surfaces[0].expolygon.contour.points == source_surface.expolygon.contour.points);
+
+    SurfaceCollection from_surfaces;
+    from_surfaces.set(source.surfaces);
+    REQUIRE(from_surfaces.size() == 2);
+    CHECK_THAT(from_surfaces.surfaces[0].thickness, WithinAbs(0.4, 1e-12));
+    CHECK(from_surfaces.surfaces[0].expolygon.contour.points == source_surface.expolygon.contour.points);
+
+    const ExPolygons templated_input { source_surface.expolygon };
+    SurfaceCollection from_template;
+    from_template.set(templated_input, source_surface);
+    REQUIRE(from_template.size() == 1);
+    CHECK_THAT(from_template.surfaces.front().thickness, WithinAbs(0.4, 1e-12));
+    CHECK(from_template.surfaces.front().expolygon.contour.points == source_surface.expolygon.contour.points);
+
+    SurfaceCollection moved_target;
+    SurfaceCollection moved_source(Surfaces { source_surface });
+    moved_target.set(std::move(moved_source));
+    REQUIRE(moved_target.size() == 1);
+    CHECK_THAT(moved_target.surfaces.front().thickness, WithinAbs(0.4, 1e-12));
+    CHECK(moved_target.surfaces.front().expolygon.contour.points == source_surface.expolygon.contour.points);
+
+    target.append(source);
+    REQUIRE(target.size() == 4);
+    CHECK(target.surfaces[0].extra_perimeters == 7);
+    CHECK(target.surfaces[1].extra_perimeters == 2);
+    CHECK(target.surfaces[2].extra_perimeters == 7);
+    CHECK(target.surfaces[3].extra_perimeters == 2);
+    target.append(SurfaceCollection(Surfaces { source_surface }));
+    REQUIRE(target.size() == 5);
+    CHECK(target.surfaces[0].extra_perimeters == 7);
+    CHECK(target.surfaces[1].extra_perimeters == 2);
+    CHECK(target.surfaces[2].extra_perimeters == 7);
+    CHECK(target.surfaces[3].extra_perimeters == 2);
+    CHECK(target.surfaces[4].extra_perimeters == 7);
+    target.change_to_new_type(stInternal, stBottom);
+    CHECK(target.has(stBottom));
+    CHECK_FALSE(target.has(stInternal));
+    CHECK(target.has(stTop));
+    CHECK(target.surfaces[0].expolygon.contour.points == source_surface.expolygon.contour.points);
+    target.set_type(stPerimeter);
+    CHECK(target.has(stPerimeter));
+    CHECK_FALSE(target.has(stTop));
+    CHECK_FALSE(target.has(stBottom));
+    CHECK_THAT(target.surfaces[0].thickness, WithinAbs(0.4, 1e-12));
+
+    const ExPolygons additions { rectangle(-60, -40, -30, -20), rectangle(100, 110, 140, 150) };
+    const Surface metadata = grouped_surface(stTop, 9, 0.6, 3, 0.5);
+    target.append(additions, metadata);
+    REQUIRE(target.size() == 7);
+    CHECK(target.surfaces[5].surface_type == stTop);
+    CHECK(target.surfaces[5].expolygon.contour.points == additions[0].contour.points);
+    CHECK_THAT(target.surfaces[5].thickness, WithinAbs(0.6, 1e-12));
+    CHECK(target.surfaces[5].thickness_layers == 3);
+    CHECK_THAT(target.surfaces[5].bridge_angle, WithinAbs(0.5, 1e-12));
+    CHECK(target.surfaces[5].extra_perimeters == metadata.extra_perimeters);
+    CHECK(target.has(stTop));
+
+    const SurfaceCollection &view = target;
+    CHECK(std::distance(view.cbegin(), view.cend()) == 7);
+    CHECK(std::distance(view.begin(), view.end()) == 7);
+    CHECK(std::distance(target.begin(), target.end()) == 7);
+
+    ExPolygons replacement { rectangle(-10, -20, 5, 15) };
+    target.set(std::move(replacement), stBottom);
+    REQUIRE(replacement.empty());
+    REQUIRE(target.size() == 1);
+    CHECK(target.has(stBottom));
+    CHECK(target.surfaces.front().expolygon.contour.points == rectangle(-10, -20, 5, 15).contour.points);
+    CHECK_FALSE(target.has(stPerimeter));
+    target.clear();
+    CHECK(target.empty());
+}
+
+TEST_CASE("Surface extents include negative and disjoint contours and define empty results", "[SurfaceCollection]")
+{
+    const Surfaces surfaces {
+        Surface(stTop, rectangle(-60, -40, -30, -10)),
+        Surface(stBottom, rectangle(50, 20, 80, 70)),
+    };
+    const BoundingBox owned_bounds = get_extents(surfaces);
+    REQUIRE(owned_bounds.defined);
+    CHECK(owned_bounds.min.x() == -60);
+    CHECK(owned_bounds.min.y() == -40);
+    CHECK(owned_bounds.max.x() == 80);
+    CHECK(owned_bounds.max.y() == 70);
+
+    const SurfacesPtr pointers { &surfaces[1], &surfaces[0] };
+    const BoundingBox pointer_bounds = get_extents(pointers);
+    REQUIRE(pointer_bounds.defined);
+    CHECK(pointer_bounds.min.x() == -60);
+    CHECK(pointer_bounds.min.y() == -40);
+    CHECK(pointer_bounds.max.x() == 80);
+    CHECK(pointer_bounds.max.y() == 70);
+
+    const BoundingBox empty_owned = get_extents(Surfaces {});
+    CHECK_FALSE(empty_owned.defined);
+    const BoundingBox empty_pointers = get_extents(SurfacesPtr {});
+    CHECK_FALSE(empty_pointers.defined);
+}
+
+TEST_CASE("Surface SVG export preserves holes colors and requested opacity", "[SurfaceCollection]")
+{
+    const Surfaces surfaces {
+        Surface(stTop, rectangle_with_hole(-100, -50, 100, 50)),
+        Surface(stInternalSolid, rectangle(200, 20, 260, 80)),
+    };
+    ScopedTemporaryFile output(".svg");
+
+    REQUIRE(export_to_svg(output.string().c_str(), surfaces, 0.35f));
+
+    const std::string text = read_text(output.string());
+    const std::vector<std::string> paths = svg_paths(text);
+    REQUIRE(paths.size() == 2);
+    CHECK(paths[0].find("rgb(255,0,0)") != std::string::npos);
+    CHECK(paths[1].find("rgb(255,0,255)") != std::string::npos);
+    CHECK(count_text(paths[0], "M ") == 2);
+    CHECK(count_text(paths[1], "M ") == 1);
+    for (const std::string &path : paths) {
+        const std::string attribute = "fill-opacity=\"";
+        const size_t value_start = path.find(attribute);
+        REQUIRE(value_start != std::string::npos);
+        const size_t value_end = path.find('"', value_start + attribute.size());
+        REQUIRE(value_end != std::string::npos);
+        const double opacity = std::stod(path.substr(value_start + attribute.size(), value_end - value_start - attribute.size()));
+        CHECK_THAT(opacity, WithinAbs(0.35, 1e-6));
+    }
 }
