@@ -1187,3 +1187,173 @@ TEST_CASE("Chamfer rejects parallel, invalid, and overrun legs without mutating 
 }
 
 } // namespace sketch_array_chamfer_contracts
+
+namespace sketch_circle_cutter_contracts {
+
+SketchEntity circle_entity(const Vec2d& center, double radius)
+{
+    SketchEntity e;
+    e.type = SketchEntity::Type::Circle;
+    e.center = center;
+    e.p0 = center;
+    e.radius = radius;
+    return e;
+}
+
+SketchEntity arc_entity(const Vec2d& center, double radius, double start, double end)
+{
+    SketchEntity e;
+    e.type = SketchEntity::Type::Arc;
+    e.center = center;
+    e.radius = radius;
+    e.start_angle = start;
+    e.end_angle = end;
+    e.p0 = center + radius * Vec2d(std::cos(start), std::sin(start));
+    e.p1 = center + radius * Vec2d(std::cos(end), std::sin(end));
+    return e;
+}
+
+} // namespace sketch_circle_cutter_contracts
+
+TEST_CASE("Circle trim keeps the complement of the pick gap for full circular cutters",
+          "[SketchEdit]")
+{
+    using namespace sketch_circle_cutter_contracts;
+
+    const int cutter_kind = GENERATE(0, 1, 2);
+    CAPTURE(cutter_kind);
+
+    SketchEntity subject = circle_entity(Vec2d(0.0, 0.0), 5.0);
+    SketchEntity cutter;
+    if (cutter_kind == 0) {
+        cutter = circle_entity(Vec2d(6.0, 0.0), 5.0);
+    } else {
+        const double cutter_start = GENERATE(-5.5, 0.35, 5.5);
+        CAPTURE(cutter_start);
+        const double signed_turn = cutter_kind == 1 ? 2.0 * M_PI : -2.0 * M_PI;
+        cutter = arc_entity(Vec2d(6.0, 0.0), 5.0, cutter_start, cutter_start + signed_turn);
+    }
+
+    const double theta = std::atan2(4.0, 3.0);
+    const Vec2d upper_crossing(3.0, 4.0);
+    const Vec2d lower_crossing(3.0, -4.0);
+    REQUIRE(SketchEngine::trim_entity(subject, {cutter}, Vec2d(5.0, 0.0)));
+
+    REQUIRE(subject.type == SketchEntity::Type::Arc);
+    CHECK_THAT(subject.radius, WithinAbs(5.0, 1e-9));
+    CHECK_THAT(subject.end_angle - subject.start_angle,
+               WithinAbs(2.0 * M_PI - 2.0 * theta, 1e-9));
+
+    // The independently derived intersections bound the kept complement; endpoint order may vary.
+    const double endpoint_error = std::min(
+        (subject.p0 - upper_crossing).norm() + (subject.p1 - lower_crossing).norm(),
+        (subject.p0 - lower_crossing).norm() + (subject.p1 - upper_crossing).norm());
+    CHECK_THAT(endpoint_error, WithinAbs(0.0, 1e-9));
+
+    const double middle = 0.5 * (subject.start_angle + subject.end_angle);
+    const Vec2d retained_middle = subject.center + subject.radius *
+        Vec2d(std::cos(middle), std::sin(middle));
+    CHECK_THAT(retained_middle.x(), WithinAbs(-5.0, 1e-9));
+    CHECK_THAT(retained_middle.y(), WithinAbs(0.0, 1e-9));
+    CHECK_THAT((subject.p0 - (subject.center + subject.radius *
+        Vec2d(std::cos(subject.start_angle), std::sin(subject.start_angle)))).norm(),
+        WithinAbs(0.0, 1e-9));
+    CHECK_THAT((subject.p1 - (subject.center + subject.radius *
+        Vec2d(std::cos(subject.end_angle), std::sin(subject.end_angle)))).norm(),
+        WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("Circle trim ignores an arc cutter with only one crossing", "[SketchEdit]")
+{
+    using namespace sketch_circle_cutter_contracts;
+
+    SketchEntity subject = circle_entity(Vec2d(0.0, 0.0), 5.0);
+    const SketchEntity original = subject;
+    const SketchEntity upper_semicircle = arc_entity(
+        Vec2d(6.0, 0.0), 5.0, 0.0, M_PI);
+
+    REQUIRE_FALSE(SketchEngine::trim_entity(subject, {upper_semicircle}, Vec2d(5.0, 0.0)));
+    CHECK(subject.type == original.type);
+    CHECK_THAT(subject.center.x(), WithinAbs(original.center.x(), 1e-9));
+    CHECK_THAT(subject.center.y(), WithinAbs(original.center.y(), 1e-9));
+    CHECK_THAT(subject.radius, WithinAbs(original.radius, 1e-9));
+    CHECK_THAT((subject.p0 - original.p0).norm(), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("Circle trim leaves the subject unchanged for noncrossing circles",
+          "[SketchEdit]")
+{
+    using namespace sketch_circle_cutter_contracts;
+
+    const int relationship = GENERATE(0, 1, 2);
+    CAPTURE(relationship);
+    SketchEntity subject = circle_entity(Vec2d(0.0, 0.0), 5.0);
+    SketchEntity cutter;
+    if (relationship == 0) {
+        cutter = circle_entity(Vec2d(0.0, 0.0), 2.0);
+    } else if (relationship == 1) {
+        cutter = circle_entity(Vec2d(20.0, 0.0), 2.0);
+    } else {
+        cutter = circle_entity(Vec2d(1.0, 0.0), 1.0);
+    }
+    const SketchEntity original = subject;
+
+    REQUIRE_FALSE(SketchEngine::trim_entity(subject, {cutter}, Vec2d(5.0, 0.0)));
+    CHECK(subject.type == original.type);
+    CHECK_THAT((subject.center - original.center).norm(), WithinAbs(0.0, 1e-9));
+    CHECK_THAT((subject.p0 - original.p0).norm(), WithinAbs(0.0, 1e-9));
+    CHECK_THAT(subject.radius, WithinAbs(original.radius, 1e-9));
+}
+
+TEST_CASE("Arc extension selects the nearest forward circle intersection", "[SketchEdit]")
+{
+    using namespace sketch_circle_cutter_contracts;
+
+    const int cutter_kind = GENERATE(0, 1, 2);
+    CAPTURE(cutter_kind);
+    const double theta = std::atan2(4.0, 3.0);
+    SketchEntity subject = arc_entity(Vec2d(0.0, 0.0), 5.0, 0.0, 0.5);
+    SketchEntity cutter;
+    if (cutter_kind == 0) {
+        cutter = circle_entity(Vec2d(6.0, 0.0), 5.0);
+    } else {
+        const double cutter_start = GENERATE(-5.5, 0.35, 5.5);
+        CAPTURE(cutter_start);
+        const double signed_turn = cutter_kind == 1 ? 2.0 * M_PI : -2.0 * M_PI;
+        cutter = arc_entity(Vec2d(6.0, 0.0), 5.0,
+                            cutter_start, cutter_start + signed_turn);
+    }
+
+    const Vec2d pick(5.0 * std::cos(0.4), 5.0 * std::sin(0.4));
+    REQUIRE(SketchEngine::extend_entity(subject, {cutter}, pick));
+    CHECK_THAT(subject.start_angle, WithinAbs(0.0, 1e-9));
+    CHECK_THAT(subject.end_angle, WithinAbs(theta, 1e-9));
+    CHECK_THAT((subject.p0 - Vec2d(5.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
+    CHECK_THAT((subject.p1 - Vec2d(3.0, 4.0)).norm(), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("Line trim follows positive and negative arc-cutter sweeps", "[SketchEdit]")
+{
+    using namespace sketch_circle_cutter_contracts;
+
+    const int sweep_direction = GENERATE(0, 1);
+    CAPTURE(sweep_direction);
+    SketchEntity subject;
+    subject.type = SketchEntity::Type::Line;
+    subject.p0 = Vec2d(-10.0, 0.0);
+    subject.p1 = Vec2d(10.0, 0.0);
+
+    const double start = M_PI / 2.0;
+    const double end = sweep_direction == 0 ? 3.0 * M_PI / 2.0 : -M_PI / 2.0;
+    const SketchEntity cutter = arc_entity(Vec2d(0.0, 0.0), 5.0, start, end);
+    const Vec2d pick = sweep_direction == 0 ? Vec2d(-8.0, 0.0) : Vec2d(8.0, 0.0);
+
+    REQUIRE(SketchEngine::trim_entity(subject, {cutter}, pick));
+    if (sweep_direction == 0) {
+        CHECK_THAT((subject.p0 - Vec2d(-5.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
+        CHECK_THAT((subject.p1 - Vec2d(10.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
+    } else {
+        CHECK_THAT((subject.p0 - Vec2d(-10.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
+        CHECK_THAT((subject.p1 - Vec2d(5.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
+    }
+}

@@ -517,6 +517,10 @@ independent top/bottom projections. Their mutation manifests are
 `transform_gcode.json`, `wipetower_prime_public.json` and
 `trianglemesh_slicer_contracts.json`.
 
+`[SketchEdit]` checks circle and arc cutters against analytic intersections,
+complementary arc midpoints, synchronized endpoints and the nearest forward
+extension. Circular-cutter mutation probes are in `sketch_circular_cutters.json`.
+
 `[LineSplit]` checks clipping through holes, closed endpoints, boundary overlap
 and source-index provenance, including empty paths. `[RegionExpansion]` checks
 bounded wave growth, source and boundary IDs at shared vertices, and selection
