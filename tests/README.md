@@ -905,10 +905,19 @@ vector aliases using the print setting schema with generic ConfigBase loading.
 The fixture preserves each group and vertex and checks both aliased values.
 Its probes are in `config_json_groups.json`.
 
+`[ConfigGetter]` checks scalar and indexed values, inherited line width, and
+percentage values resolved against their declared base. `[ConfigVectorOverride]`
+checks regular and nullable slots, empty destinations, and mapped defaults.
+The getter probes are in `config_getters.json`.
+
 `[Transformation][Skew]` checks perpendicular axes after scaling, rotation, and
 reflection, and nonorthogonal axes under shear with either determinant sign.
 Build `libslic3r_geometry_tests` for focused feedback; its probes are in
 `geometry_transform_skew.json`.
+
+`[TransformContract]` checks affine composition, normalized coordinate frames,
+rotation about a fixed point, signed component access, axis setters, and resets.
+Its probes are in `geometry_transform_components.json`.
 
 `[TreeSupportPaintedEnforcer]` checks support extrusion near an independently
 located painted vertical facet, with an unpainted control.

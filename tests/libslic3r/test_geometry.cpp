@@ -1442,3 +1442,130 @@ TEST_CASE("Sheared transform axes report skew with either determinant sign",
     REQUIRE(std::abs(matrix.linear().col(first_axis).dot(matrix.linear().col(second_axis))) > 1.);
     CHECK(Geometry::Transformation(matrix).has_skew());
 }
+
+TEST_CASE("Transform constructors preserve declared affine coordinate mapping",
+          "[Geometry][Transformation][TransformContract]")
+{
+    const Transform3d translation = Geometry::translation_transform(Vec3d(3., -5., 7.));
+    const Transform3d rotation = Geometry::rotation_transform(Vec3d(0., 0., PI / 2.));
+    const Transform3d scaling = Geometry::scale_transform(Vec3d(2., 3., 4.));
+    const Transform3d mirror = Geometry::scale_transform(Vec3d(-1., 1., 1.));
+
+    Transform3d assembled_by_reference;
+    Geometry::assemble_transform(assembled_by_reference, translation, rotation, scaling, mirror);
+    const Transform3d assembled_by_value = Geometry::assemble_transform(translation, rotation, scaling, mirror);
+
+    // Apply mirror, scale, quarter-turn, then translation by hand to an asymmetric point.
+    const Vec3d sample(1., 2., 3.);
+    const Vec3d expected(-3., -7., 19.);
+    CHECK((assembled_by_reference * sample).isApprox(expected, 1e-12));
+    CHECK((assembled_by_value * sample).isApprox(expected, 1e-12));
+
+    Transform3d scalar_scale_by_reference;
+    Geometry::scale_transform(scalar_scale_by_reference, 2.);
+    const Transform3d scalar_scale_by_value = Geometry::scale_transform(2.);
+    const Vec3d scale_sample(1., -2., 3.);
+    const Vec3d scaled_expected(2., -4., 6.);
+    CHECK((scalar_scale_by_reference * scale_sample).isApprox(scaled_expected, 1e-12));
+    CHECK((scalar_scale_by_value * scale_sample).isApprox(scaled_expected, 1e-12));
+
+    const Vec3d origin(7., -3., 5.);
+    const Geometry::Transformation frame = Geometry::generate_transform(
+        Vec3d(0., 4., 0.), Vec3d(-2., 0., 0.), Vec3d(0., 0., 3.), origin);
+    const Vec3d local_point(2., 3., 4.);
+    const Vec3d frame_expected(4., -1., 9.);
+    CHECK((frame.get_matrix() * local_point).isApprox(frame_expected, 1e-12));
+}
+
+TEST_CASE("Rotating a transformation about a fixed point updates its origin and axes",
+          "[Geometry][Transformation][TransformContract]")
+{
+    Geometry::Transformation input(Geometry::scale_transform(Vec3d(2., 3., 4.)));
+    input.set_offset(Vec3d(2., 3., 4.));
+
+    const Vec3d pivot(10., 20., 30.);
+    const Geometry::Transformation rotated = Geometry::mat_around_a_point_rotate(
+        input, pivot, Vec3d::UnitZ(), float(PI / 2.));
+
+    // A positive quarter-turn maps (x,y,z) to (-y,x,z). Applying that to the
+    // scaled basis gives this explicit matrix; the translated origin is rotated
+    // around the independently specified pivot.
+    Matrix3d expected_linear;
+    expected_linear << 0., -3., 0., 2., 0., 0., 0., 0., 4.;
+    const Vec3d expected_offset(27., 12., 4.);
+    const Matrix3d actual_linear = rotated.get_matrix().linear();
+    const Vec3d actual_offset = rotated.get_offset();
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column)
+            CHECK_THAT(actual_linear(row, column), Catch::Matchers::WithinAbs(expected_linear(row, column), 1e-6));
+        CHECK_THAT(actual_offset[row], Catch::Matchers::WithinAbs(expected_offset[row], 1e-6));
+    }
+    const Vec3d transformed_x = rotated.get_matrix() * Vec3d::UnitX();
+    CHECK(transformed_x.isApprox(Vec3d(27., 14., 4.), 1e-6));
+}
+
+TEST_CASE("Transformation component access and axis setters preserve signed scale",
+          "[Geometry][Transformation][TransformContract]")
+{
+    const Vec3d euler(0.3, -0.2, 0.4);
+    Geometry::Transformation oriented(Geometry::rotation_transform(euler));
+    const Vec3d recovered = oriented.get_rotation_by_quaternion();
+    for (int axis = 0; axis < 3; ++axis)
+        CHECK_THAT(recovered[axis], Catch::Matchers::WithinAbs(euler[axis], 1e-12));
+
+    Geometry::Transformation signed_scale;
+    signed_scale.set_scaling_factor(Vec3d(4., 3., 2.));
+    signed_scale.set_mirror(Vec3d(1., 1., -1.));
+    Matrix3d expected_scale = Vec3d(4., 3., 2.).asDiagonal();
+    Matrix3d expected_mirror = Vec3d(1., 1., -1.).asDiagonal();
+    const Matrix3d actual_scale = signed_scale.get_scaling_factor_matrix().linear();
+    const Matrix3d actual_mirror = signed_scale.get_mirror_matrix().linear();
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column) {
+            CHECK_THAT(actual_scale(row, column), Catch::Matchers::WithinAbs(expected_scale(row, column), 1e-12));
+            CHECK_THAT(actual_mirror(row, column), Catch::Matchers::WithinAbs(expected_mirror(row, column), 1e-12));
+        }
+
+    const Vec3d offset(5., -6., 7.);
+    Geometry::Transformation axis_scale(Geometry::assemble_transform(
+        offset, Vec3d(0., 0., PI / 2.), Vec3d(4., 3., 2.)));
+    axis_scale.set_scaling_factor(Y, 5.);
+    Matrix3d expected_axis_scale;
+    expected_axis_scale << 0., -5., 0., 4., 0., 0., 0., 0., 2.;
+    math_gap_contracts::check_linear_and_offset(axis_scale.get_matrix(), expected_axis_scale, offset);
+
+    Geometry::Transformation no_full_turn;
+    no_full_turn.set_offset(offset);
+    no_full_turn.set_rotation(Z, -1e-10);
+    math_gap_contracts::check_linear_and_offset(no_full_turn.get_matrix(), Matrix3d::Identity(), offset);
+}
+
+TEST_CASE("Transformation resets preserve offset and the selected geometric components",
+          "[Geometry][Transformation][TransformContract]")
+{
+    const double angle = 0.37;
+    Matrix3d rotation;
+    rotation << std::cos(angle), -std::sin(angle), 0.,
+                std::sin(angle),  std::cos(angle), 0.,
+                0.,               0.,              1.;
+    const Vec3d scale(4., 3., 2.);
+    const Vec3d offset(-8., 6., 11.);
+    Transform3d matrix = Transform3d::Identity();
+    matrix.linear() = rotation * scale.asDiagonal();
+    matrix.translation() = offset;
+
+    Geometry::Transformation rotation_cleared(matrix);
+    rotation_cleared.reset_rotation();
+    const Matrix3d expected_unrotated = scale.asDiagonal();
+    math_gap_contracts::check_linear_and_offset(rotation_cleared.get_matrix(), expected_unrotated, offset);
+
+    Geometry::Transformation skew_cleared(matrix);
+    skew_cleared.reset_skew();
+    const double volume_preserving_uniform_scale = std::cbrt(scale.prod());
+    math_gap_contracts::check_linear_and_offset(
+        skew_cleared.get_matrix(), rotation * (volume_preserving_uniform_scale * Matrix3d::Identity()), offset);
+
+    Geometry::Transformation cleared(matrix);
+    cleared.reset();
+    CHECK(cleared.get_matrix().isApprox(Transform3d::Identity(), 1e-12));
+}
