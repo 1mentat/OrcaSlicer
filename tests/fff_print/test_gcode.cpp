@@ -3289,6 +3289,8 @@ TEST_CASE("Extrusion role hooks publish ordered role transitions and placeholder
 
 
 struct ExhaustFanEvidence {
+    std::vector<int> p2_pwm_during_deposition;
+    std::vector<double> deposition_feeds;
     std::vector<int> p3_pwm;
     std::vector<size_t> p3_ordinals;
     std::optional<size_t> first_deposition_ordinal;
@@ -3302,20 +3304,27 @@ ExhaustFanEvidence inspect_exhaust_fan_commands(const std::string &text,
     GCodeReader reader;
     reader.apply_config(config);
     size_t ordinal = 0;
-    reader.parse_buffer(text, [&evidence, &ordinal](GCodeReader &self,
-                                                  const GCodeReader::GCodeLine &line) {
+    std::optional<int> current_p2_pwm;
+    reader.parse_buffer(text, [&evidence, &ordinal, &current_p2_pwm](GCodeReader &self,
+                                                                    const GCodeReader::GCodeLine &line) {
         const size_t event = ordinal++;
         if (line.cmd_is("M106")) {
             float fan = 0.0f;
             float pwm = 0.0f;
-            if (line.has_value('P', fan) && std::isfinite(fan) && std::fabs(fan - 3.0f) <= 1e-6f) {
+            if (line.has_value('P', fan) && std::isfinite(fan) &&
+                (std::fabs(fan - 2.0f) <= 1e-6f || std::fabs(fan - 3.0f) <= 1e-6f)) {
                 REQUIRE(line.has_value('S', pwm));
                 REQUIRE(std::isfinite(pwm));
                 REQUIRE(pwm >= 0.0f);
                 REQUIRE(pwm <= 255.0f);
                 REQUIRE(std::fabs(pwm - std::round(pwm)) <= 1e-4f);
-                evidence.p3_pwm.push_back(static_cast<int>(std::lround(pwm)));
-                evidence.p3_ordinals.push_back(event);
+                const int value = static_cast<int>(std::lround(pwm));
+                if (std::fabs(fan - 2.0f) <= 1e-6f) {
+                    current_p2_pwm = value;
+                } else {
+                    evidence.p3_pwm.push_back(value);
+                    evidence.p3_ordinals.push_back(event);
+                }
             }
         }
 
@@ -3324,6 +3333,8 @@ ExhaustFanEvidence inspect_exhaust_fan_commands(const std::string &text,
         if (!evidence.first_deposition_ordinal.has_value())
             evidence.first_deposition_ordinal = event;
         evidence.last_deposition_ordinal = event;
+        evidence.p2_pwm_during_deposition.push_back(current_p2_pwm.value_or(-1));
+        evidence.deposition_feeds.push_back(static_cast<double>(line.new_F(self)));
     });
     return evidence;
 }
@@ -3417,6 +3428,81 @@ TEST_CASE("Air filtration capability gates directed exhaust fan phases", "[GCode
         require_exhaust_fan_row(commands, material, rows[i].expected_pwm);
         CHECK_THAT(material.xy_path, Catch::Matchers::WithinRel(reference_material.xy_path, 1e-4));
         CHECK_THAT(material.filament, Catch::Matchers::WithinRel(reference_material.filament, 1e-4));
+    }
+}
+
+TEST_CASE("Auxiliary and exhaust fan speed endpoints reach physical fan commands during deposition",
+          "[GCode][CoolingFanBoundaries]")
+{
+    struct SpeedRow {
+        const char *name;
+        int auxiliary;
+        int during;
+        int completion;
+    };
+    const std::array<SpeedRow, 7> rows{{
+        {"baseline", 40, 35, 65},
+        {"auxiliary minimum", 0, 35, 65},
+        {"auxiliary maximum", 100, 35, 65},
+        {"during exhaust minimum", 40, 0, 65},
+        {"during exhaust maximum", 40, 100, 65},
+        {"completion exhaust minimum", 40, 35, 0},
+        {"completion exhaust maximum", 40, 35, 100},
+    }};
+
+    const auto make_config = [](const SpeedRow &row) {
+        DynamicPrintConfig config = air_filtration_config(true, true, true, true);
+        config.set_deserialize_strict({
+            {"auxiliary_fan", true},
+            {"close_fan_the_first_x_layers", 0},
+            {"additional_cooling_fan_speed", row.auxiliary},
+            {"during_print_exhaust_fan_speed", std::to_string(row.during)},
+            {"complete_print_exhaust_fan_speed", std::to_string(row.completion)},
+            {"slow_down_for_layer_cooling", false},
+        });
+        return config;
+    };
+
+    const DynamicPrintConfig reference_config = make_config(rows.front());
+    const ExportedPrint reference_output = fresh_custom_mesh_export(reference_config, make_cube(8.0, 8.0, 0.8));
+    const ExhaustFanEvidence reference_commands = inspect_exhaust_fan_commands(reference_output.text, reference_config);
+    const MotionEvidence reference_material = motion_evidence(reference_output.text, reference_config);
+    const std::vector<int> reference_p3_pwm{35 * 255 / 100, 65 * 255 / 100};
+    require_exhaust_fan_row(reference_commands, reference_material, reference_p3_pwm);
+    REQUIRE(reference_commands.deposition_feeds.size() == reference_material.extrusion_moves);
+    REQUIRE_FALSE(reference_commands.deposition_feeds.empty());
+    for (double feed : reference_commands.deposition_feeds) {
+        REQUIRE(std::isfinite(feed));
+        REQUIRE(feed > 0.0);
+    }
+
+    for (size_t i = 0; i < rows.size(); ++i) {
+        CAPTURE(rows[i].name, rows[i].auxiliary, rows[i].during, rows[i].completion);
+        const DynamicPrintConfig config = make_config(rows[i]);
+        const ExportedPrint output = i == 0 ? reference_output
+                                            : fresh_custom_mesh_export(config, make_cube(8.0, 8.0, 0.8));
+        const ExhaustFanEvidence commands = inspect_exhaust_fan_commands(output.text, config);
+        const MotionEvidence material = motion_evidence(output.text, config);
+        const int expected_p2_pwm = rows[i].auxiliary * 255 / 100;
+        const std::vector<int> expected_p3_pwm{
+            rows[i].during * 255 / 100,
+            rows[i].completion * 255 / 100,
+        };
+
+        require_same_material(reference_material, material);
+        require_exhaust_fan_row(commands, material, expected_p3_pwm);
+        REQUIRE(commands.p3_ordinals.size() == 2);
+        CHECK(commands.p3_ordinals.front() < *commands.first_deposition_ordinal);
+        CHECK(commands.p3_ordinals.back() > *commands.last_deposition_ordinal);
+
+        REQUIRE(commands.p2_pwm_during_deposition.size() == material.extrusion_moves);
+        CHECK(std::all_of(commands.p2_pwm_during_deposition.begin(), commands.p2_pwm_during_deposition.end(),
+                          [expected_p2_pwm](int pwm) { return pwm == expected_p2_pwm; }));
+        REQUIRE(commands.deposition_feeds.size() == reference_commands.deposition_feeds.size());
+        REQUIRE_FALSE(commands.deposition_feeds.empty());
+        for (size_t move = 0; move < commands.deposition_feeds.size(); ++move)
+            CHECK_THAT(commands.deposition_feeds[move],
+                       Catch::Matchers::WithinAbs(reference_commands.deposition_feeds[move], 1e-3));
     }
 }
 

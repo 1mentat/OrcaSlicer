@@ -1849,13 +1849,14 @@
       "reason": "Three-entry and four-entry variant maps select per-filament temperatures and advance values through actual slicing. Numeric/index boundaries are not claimed."
     },
     "additional_cooling_fan_speed": {
-      "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[CoolingFanBoundaries]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Variant values 10, 20 and 40 percent must appear as the parsed auxiliary fan PWM percentages. Zero and 100-percent boundaries are not covered by this matrix."
+      "reason": "Independent rows use 0%, 40% and 100% auxiliary speed and require parsed physical P2 PWM on every deposition move with positive XY distance. Both exhaust settings remain fixed, and deposited material and every deposition feed match the representative export. Existing multifilament tests also retain variant values of 10%, 20% and 40%."
     },
     "nozzle_temperature_range_high": {
       "test": "tests/fff_print/test_multifilament.cpp",
@@ -4743,6 +4744,26 @@
         "pipeline_oracle"
       ],
       "reason": "The public SLAPrint test generates support_buildplate_only=false and true on the same 10x10x5 lower block and 6x6x2 ceiling shifted to x=7..13, with a blocked head at (8,5,12), a clear ceiling-to-buildplate head at (12,5,12), and a clear lower-body head at (1,1,0). Both rows require nonempty support products and identical model bounds and slice geometry: five 100 mm2 lower layers, two 36 mm2 ceiling layers, and 572 mm2 total model-slice area. At z=5.1, support area clipped to the known lower-block footprint is positive when the setting is false and zero when true. The focused native baseline passed, and the forced-false mapping mutation was killed by the ordinary true-row zero-area assertion. Numeric ranges and other setting interactions are not claimed."
+    },
+    "during_print_exhaust_fan_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[CoolingFanBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Independent rows use 0%, 35% and 100% during-print exhaust speed and require parsed P3 PWM before the first deposition move with positive XY distance. Auxiliary and completion speeds remain fixed, the completion command stays after deposition, and material and deposition feeds match the representative export."
+    },
+    "complete_print_exhaust_fan_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[CoolingFanBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Independent rows use 0%, 65% and 100% completion exhaust speed and require parsed final P3 PWM after the last deposition move with positive XY distance. Auxiliary and during-print speeds remain fixed, the during command stays before deposition, and material and deposition feeds match the representative export."
     }
   }
 }
