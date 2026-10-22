@@ -4233,12 +4233,12 @@
     },
     "extrusion_rate_smoothing_external_perimeter_only": {
       "test": "tests/fff_print/test_pressure_equalizer.cpp",
-      "tag": "[PressureEqualizer]",
+      "tag": "[PressureEqualizer][ExternalOnlyBoolean]",
       "dimensions": [
-        "representative_values",
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "The public tagged pressure case sets this boolean true and compares an external-perimeter row with an internal-perimeter control under the same config: external output has more than four extrusion moves and more than one speed marker, while total extrusion, 40 mm path, zero Y deviation, and final X=40 remain conserved; the internal control remains exactly four moves and one marker. Only the true value is exercised; false and complete boolean-domain evidence remain unclaimed. max_volumetric_extrusion_rate_slope=1.0 and segment_length=2.0 are pinned fixture parameters, not claims for those settings."
+      "reason": "All four combinations of absolute/relative E and external-only false/true process the same tagged external and internal 40 mm flow transition. External paths are smoothed in both boolean states; internal paths are smoothed only when false. Both roles retain total extrusion, XY path length, zero Y deviation and final X=40. The consumer-forced-true mutation fails the false rows; slope=1.0 and segment length=2.0 are pinned fixture parameters, not coverage claims for those settings."
     },
     "fan_speedup_overhangs": {
       "test": "tests/fff_print/test_cooling.cpp",
@@ -4278,12 +4278,12 @@
     },
     "part_cooling_fan_min_pwm": {
       "test": "tests/fff_print/test_cooling.cpp",
-      "tag": "[Cooling][CoolingSettings][FanPwmBoundaryValues]",
+      "tag": "[Cooling][CoolingSettings][RoleFanBoundaries]",
       "dimensions": [
         "boundary_values",
-        "fixture_only"
+        "pipeline_oracle"
       ],
-      "reason": "The direct GCodeWriter::set_fan case covers minimum PWM floors 0, 1, 99 and 100 at the registered endpoints and adjacent integer values, plus 40 with requested fan values 39, 40 and 41. Parsed output from the Marlin-compatible M106 writer path must preserve an exact zero-off command and produce the expected rounded/clamped PWM. This isolates the writer contract; full Print-pipeline interactions and other firmware fan commands remain unclaimed."
+      "reason": "The public Print fixture exercises part_cooling_fan_min_pwm floors 0, 1, 99 and 100 while parsing emitted fan commands at positive-XY internal-bridge, support-interface and ironing paths. For every active role sample, emitted PWM must match the independently mapped floor/role value, while the fixture preserves path counts, deposited filament and XY length across cached, fresh and restored Print exports. This adds pipeline evidence to the existing direct GCodeWriter boundary contract; other firmware mappings and unselected numeric values remain unclaimed."
     },
     "top_bottom_infill_wall_overlap": {
       "test": "tests/fff_print/test_settings_variance.cpp",

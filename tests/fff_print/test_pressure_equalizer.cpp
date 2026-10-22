@@ -119,6 +119,54 @@ TEST_CASE("Tagged external flow transitions preserve path geometry while smoothi
         CHECK_THAT(feedrate, Catch::Matchers::WithinAbs(1200.f, 0.001f));
 }
 
+TEST_CASE("Pressure smoothing honors the external-only setting for tagged roles", "[PressureEqualizer][ExternalOnlyBoolean]")
+{
+    const bool relative_e = GENERATE(false, true);
+    const bool external_only = GENERATE(false, true);
+    CAPTURE(relative_e, external_only);
+
+    Slic3r::GCodeConfig config;
+    config.use_relative_e_distances.value = relative_e;
+    const PressureObservation external = observe_pressure(
+        equalize_pressure(pressure_fixture(relative_e, Slic3r::erExternalPerimeter), relative_e, external_only), config);
+    const PressureObservation internal = observe_pressure(
+        equalize_pressure(pressure_fixture(relative_e, Slic3r::erPerimeter), relative_e, external_only), config);
+
+    const auto require_conserved_output = [](const PressureObservation &observation) {
+        REQUIRE(observation.extrusion_moves > 0);
+        CHECK_THAT(observation.total_extrusion, Catch::Matchers::WithinAbs(6.0, 0.001));
+        CHECK_THAT(observation.path_length, Catch::Matchers::WithinAbs(40.0, 0.001));
+        CHECK_THAT(observation.max_abs_y, Catch::Matchers::WithinAbs(0.0, 0.001));
+        CHECK_THAT(observation.final_x, Catch::Matchers::WithinAbs(40.0, 0.001));
+        REQUIRE_FALSE(observation.high_flow_feedrates.empty());
+        for (const float feedrate : observation.high_flow_feedrates) {
+            CHECK(feedrate > 0.f);
+            CHECK(feedrate <= 1200.f);
+        }
+    };
+    const auto require_smoothed_transition = [](const PressureObservation &observation) {
+        REQUIRE(observation.extrusion_moves > 4);
+        REQUIRE(observation.speed_markers > 1);
+        CHECK(std::any_of(observation.high_flow_feedrates.begin(), observation.high_flow_feedrates.end(),
+                          [](const float feedrate) { return feedrate < 1200.f; }));
+    };
+
+    require_conserved_output(external);
+    require_conserved_output(internal);
+    // External perimeters remain eligible under both settings. The boolean changes
+    // only whether the same physical flow transition is also smoothed on an inner perimeter.
+    require_smoothed_transition(external);
+    if (external_only) {
+        CHECK(internal.extrusion_moves == 4);
+        CHECK(internal.speed_markers == 1);
+        REQUIRE(internal.high_flow_feedrates.size() == 2);
+        for (const float feedrate : internal.high_flow_feedrates)
+            CHECK_THAT(feedrate, Catch::Matchers::WithinAbs(1200.f, 0.001f));
+    } else {
+        require_smoothed_transition(internal);
+    }
+}
+
 namespace {
 
 struct PressureStateMove {
