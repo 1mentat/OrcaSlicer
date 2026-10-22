@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Three ordinary assertion mutations for Point public coordinate contracts; v2 disambiguates the quarter-turn height-drop overload without changing its intended fault.",
+  "mutants": [
+    {
+      "id": "point-distance-drops-height",
+      "path": "src/libslic3r/Point.hpp",
+      "old": "    double distance_to(const Point3 &point) const { return (point - *this).cast<double>().norm(); }",
+      "new": "    double distance_to(const Point3 &point) const { return (point - *this).head<2>().cast<double>().norm(); }",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Point arithmetic retains height while projecting appends only XY",
+      "expected_test_count": 1
+    },
+    {
+      "id": "point-projection-repeats-x",
+      "path": "src/libslic3r/Point.hpp",
+      "old": "            return pt.to_point();",
+      "new": "            return Point(pt.x(), pt.x());",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Point arithmetic retains height while projecting appends only XY",
+      "expected_test_count": 1
+    },
+    {
+      "id": "point-quarter-turn-drops-height",
+      "path": "src/libslic3r/Point.hpp",
+      "old": "    Point3 rotate_90_degree_ccw() const { return Point3(-this->y(), this->x(), this->z()); }",
+      "new": "    Point3 rotate_90_degree_ccw() const { return Point3(-this->y(), this->x(), int64_t(0)); }",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Point rotations preserve height and rotate around the chosen center",
+      "expected_test_count": 1
+    }
+  ]
+}

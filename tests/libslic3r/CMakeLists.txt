@@ -69,6 +69,7 @@ add_executable(${_TEST_NAME}_tests
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
     test_geometry.cpp
+    test_point.cpp
     test_multimaterial_segmentation.cpp
     test_placeholder_parser.cpp
     test_png_read_write.cpp
@@ -328,6 +329,7 @@ slicer_enable_llvm_source_coverage(libslic3r_filament_group_utils_tests)
 # Keep the shared polygon fixtures available to the focused geometry tests.
 add_executable(libslic3r_geometry_tests EXCLUDE_FROM_ALL
     test_geometry.cpp
+    test_point.cpp
     test_polygon.cpp
     test_trianglemesh_slicer.cpp
     ../libnest2d/printer_parts.cpp
