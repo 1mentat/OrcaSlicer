@@ -748,6 +748,38 @@ TEST_CASE("Curled walls are estimated when overhang speed and the slowdown for c
         CHECK(has_curled_lines(*object));
 }
 
+TEST_CASE("Nil object overrides preserve inherited curled-wall gates", "[ExtrusionProcessor][NullableOverrides]")
+{
+    const auto [option_key, inherited] = GENERATE(table<const char *, bool>({
+        {"enable_overhang_speed", false},
+        {"enable_overhang_speed", true},
+        {"slowdown_for_curled_perimeters", false},
+        {"slowdown_for_curled_perimeters", true},
+    }));
+    CAPTURE(option_key, inherited);
+    const bool inherited_overhang_speed = std::string_view(option_key) == "enable_overhang_speed" ? inherited : true;
+    const bool inherited_curled_slowdown = std::string_view(option_key) == "slowdown_for_curled_perimeters" ? inherited : true;
+
+    DynamicPrintConfig config = caged_overhang_config("classic");
+    config.set_deserialize_strict({
+        {"enable_overhang_speed", inherited_overhang_speed ? "1" : "0"},
+        {"slowdown_for_curled_perimeters", inherited_curled_slowdown ? "1" : "0"},
+    });
+
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> object_overrides{
+        {},
+        {{option_key, "nil"}},
+    };
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{caged_overhang_mesh(), caged_overhang_mesh()}, print, model, config, &object_overrides);
+    print.process();
+
+    REQUIRE(print.objects().size() == 2);
+    CHECK(has_curled_lines(*print.objects()[0]) == inherited);
+    CHECK(has_curled_lines(*print.objects()[1]) == inherited);
+}
+
 TEST_CASE("Curled walls from an earlier slice are dropped once overhang speed is off", "[ExtrusionProcessor]")
 {
     DynamicPrintConfig config = caged_overhang_config("classic");

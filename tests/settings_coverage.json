@@ -719,13 +719,14 @@
       "reason": "Enabled and disabled rows slice the same cap with the threshold set to 0% and overhang fan speed at 100%. The enabled row has positive full-fan extrusion; the disabled row has none, while both conserve deposition. This is a single-filament physical cooling oracle, not a claim about all bridge roles or tool assignments."
     },
     "enable_overhang_speed": {
-      "test": "tests/fff_print/test_cooling.cpp",
-      "tag": "[Cooling]",
+      "test": "tests/fff_print/test_extrusion_processor.cpp",
+      "tag": "[ExtrusionProcessor][NullableOverrides]",
       "dimensions": [
         "boolean_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "Both overhang-speed states are exercised by cooling fixtures and checked through emitted speed behavior; interactions with every overhang mode are not claimed."
+      "reason": "The caged-overhang fixture varies enable_overhang_speed through inherited false and true while holding the other curled-wall gate true. A control object and an object with an explicit nil override both retain the inherited curled-line presence after Print processing. The four-row case covers both gates in the first filament slot; it does not claim every filament assignment or overhang mode."
     },
     "enforce_support_layers": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -4492,12 +4493,13 @@
     },
     "slowdown_for_curled_perimeters": {
       "test": "tests/fff_print/test_extrusion_processor.cpp",
-      "tag": "[ExtrusionProcessor]",
+      "tag": "[ExtrusionProcessor][NullableOverrides]",
       "dimensions": [
         "boolean_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "The registered default is false. The caged-overhang contracts explicitly exercise false and true through Print processing: the precomputed lower-curled-line tree follows the configured state, the pipeline creates curled-wall data only when both overhang speed and this option are enabled, and a two-object case verifies that the combined behavior is found across objects. No nil/null object or region override is supplied, so nullable_behavior remains unclaimed."
+      "reason": "The caged-overhang fixture varies slowdown_for_curled_perimeters through inherited false and true while holding the other curled-wall gate true. A control object and an object with an explicit nil override both retain the inherited curled-line presence after Print processing. The four-row case covers both gates in the first filament slot; it does not claim every filament assignment or overhang mode."
     },
     "input_shaping_freq_x": {
       "test": "tests/fff_print/test_gcode.cpp",
