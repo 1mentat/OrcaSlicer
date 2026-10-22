@@ -1646,3 +1646,50 @@ TEST_CASE("Line clipping and 3D plane intersection return analytic endpoints",
     CHECK_THAT(hit.y(), Catch::Matchers::WithinAbs(6.0, 1e-12));
     CHECK_THAT(hit.z(), Catch::Matchers::WithinAbs(5.0, 1e-12));
 }
+
+
+TEST_CASE("Bounding boxes rotate around an explicit center", "[Geometry][BoundingBoxContracts]")
+{
+    const BoundingBox source(Point(10, 20), Point(14, 22));
+    const BoundingBox rotated = source.rotated(PI / 2., Point(7, 17));
+
+    REQUIRE(rotated.defined);
+    CHECK(rotated.min == Point(2, 20));
+    CHECK(rotated.max == Point(4, 24));
+}
+
+TEST_CASE("3D bounding boxes merge point clouds and expose xy footprints in both units",
+          "[Geometry][BoundingBoxContracts]")
+{
+    const Pointf3s points{
+        Vec3d(4., -7., 2.),
+        Vec3d(10., 3., 15.),
+        Vec3d(-2., 8., 9.)
+    };
+    BoundingBoxf3 bounds;
+    bounds.merge(points);
+
+    REQUIRE(bounds.defined);
+    CHECK(bounds.min.isApprox(Vec3d(-2., -7., 2.), 1e-12));
+    CHECK(bounds.max.isApprox(Vec3d(10., 8., 15.), 1e-12));
+    CHECK(bounds.size().isApprox(Vec3d(12., 15., 13.), 1e-12));
+    CHECK_THAT(bounds.max_size(), Catch::Matchers::WithinAbs(15., 1e-12));
+
+    const Vec3d before_empty_merge_min = bounds.min;
+    const Vec3d before_empty_merge_max = bounds.max;
+    bounds.merge(BoundingBoxf3{});
+    CHECK(bounds.defined);
+    CHECK(bounds.min.isApprox(before_empty_merge_min, 1e-12));
+    CHECK(bounds.max.isApprox(before_empty_merge_max, 1e-12));
+
+    const Points raw_expected{
+        Point(-2, -7), Point(10, -7), Point(10, 8), Point(-2, 8)
+    };
+    CHECK(bounds.polygon(false).points == raw_expected);
+
+    const Points scaled_expected{
+        Point::new_scale(-2., -7.), Point::new_scale(10., -7.),
+        Point::new_scale(10., 8.), Point::new_scale(-2., 8.)
+    };
+    CHECK(bounds.polygon(true).points == scaled_expected);
+}
