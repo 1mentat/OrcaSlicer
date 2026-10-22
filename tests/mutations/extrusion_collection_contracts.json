@@ -1,0 +1,45 @@
+{
+  "candidate_test_source_sha256": "d89df9318ef5a598d0925341a34362b405c9edee1e3f3ab4b0f1b62a2f0bf6da",
+  "description": "Extrusion collections preserve role filtering, deep-copy ordering policy, and the minimum path flow.",
+  "mutants": [
+    {
+      "expected_assertion": "CHECK(borrowed.front() == &perimeter);",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "id": "extrusion-role-filter-retains-nonmatching-roles",
+      "new": "return ee->role() == role;",
+      "old": "return ee->role() != role;",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/ExtrusionEntityCollection.cpp",
+      "test_filter": "Extrusion role filtering preserves borrowed entities and chains matching copies from the nearest point"
+    },
+    {
+      "expected_assertion": "CHECK(destination.no_sort);",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "id": "extrusion-copy-assignment-drops-no-sort",
+      "new": "    this->no_sort       = false;",
+      "old": "    this->no_sort       = other.no_sort;",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/ExtrusionEntityCollection.cpp",
+      "test_filter": "Extrusion collection copy assignment deep copies paths and preserves no-sort"
+    },
+    {
+      "expected_assertion": "CHECK_THAT(collection.min_mm3_per_mm(), Catch::Matchers::WithinAbs(0.03, 1e-12));",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "id": "extrusion-collection-min-flow-selects-maximum",
+      "new": "    \tmin_mm3_per_mm = std::max(min_mm3_per_mm, entity->min_mm3_per_mm());",
+      "old": "    \tmin_mm3_per_mm = std::min(min_mm3_per_mm, entity->min_mm3_per_mm());",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/ExtrusionEntityCollection.cpp",
+      "test_filter": "Extrusion collection reports the minimum positive flow among its paths"
+    }
+  ],
+  "production_source": "src/libslic3r/ExtrusionEntityCollection.cpp",
+  "production_source_sha256": "7c8ee7d0d6b968c3e96696f2d6fa22f15eb69c7e447e864c9e1815e9e5fd136d",
+  "schema_version": 1,
+  "test_source": "tests/fff_print/test_extrusion_entity.cpp",
+  "test_source_base_sha256": "982eabbe5b5f53a7449528292609f664b3dd87a286e5698674ff218e707934da",
+  "test_tag": "[ExtrusionEntityCollection]"
+}

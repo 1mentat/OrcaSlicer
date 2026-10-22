@@ -402,3 +402,147 @@ TEST_CASE("Loop smoothness distinguishes ordinary corners from a narrow pointed 
     CHECK(square.is_smooth(0.2, 0.025));
     CHECK_FALSE(pointed.is_smooth(0.2, 0.025));
 }
+
+
+static ExtrusionPath collection_contract_path(ExtrusionRole role, double flow, const Points3 &points)
+{
+    ExtrusionPath path{role, flow, 0.45f, 0.2f};
+    for (const Point3 &point : points)
+        path.polyline.append(point);
+    return path;
+}
+
+TEST_CASE("Extrusion role filtering preserves borrowed entities and chains matching copies from the nearest point", "[ExtrusionEntityCollection]")
+{
+    ExtrusionPath perimeter = collection_contract_path(erPerimeter, 0.06, {Point3::new_scale(5., 0., 0.), Point3::new_scale(15., 0., 0.)});
+    ExtrusionPath infill = collection_contract_path(erInternalInfill, 0.04, {Point3::new_scale(0., 0., 0.), Point3::new_scale(1., 0., 0.)});
+    ExtrusionEntitiesPtr borrowed{&perimeter, &infill};
+    filter_by_extrusion_role_in_place(borrowed, erPerimeter);
+    REQUIRE(borrowed.size() == 1);
+    CHECK(borrowed.front() == &perimeter);
+    CHECK(perimeter.first_point3() == Point3::new_scale(5., 0., 0.));
+    CHECK(infill.first_point3() == Point3::new_scale(0., 0., 0.));
+
+    ExtrusionEntitiesPtr all_roles{&perimeter, &infill};
+    filter_by_extrusion_role_in_place(all_roles, erMixed);
+    REQUIRE(all_roles.size() == 2);
+    CHECK(all_roles[0] == &perimeter);
+    CHECK(all_roles[1] == &infill);
+
+    ExtrusionEntityCollection source;
+    source.append(collection_contract_path(erPerimeter, 0.06, {Point3::new_scale(100., 0., 0.), Point3::new_scale(110., 0., 0.)}));
+    source.append(infill);
+    source.append(perimeter);
+    const ExtrusionEntity *far_owner = source.entities[0];
+    const ExtrusionEntity *near_owner = source.entities[2];
+    ExtrusionEntityCollection chained = source.chained_path_from(Point::new_scale(0., 0.), erPerimeter);
+    REQUIRE(chained.entities.size() == 2);
+    CHECK(chained.entities[0] != near_owner);
+    CHECK(chained.entities[1] != far_owner);
+    const auto *first = dynamic_cast<const ExtrusionPath *>(chained.entities[0]);
+    const auto *second = dynamic_cast<const ExtrusionPath *>(chained.entities[1]);
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    CHECK(first->first_point3() == Point3::new_scale(5., 0., 0.));
+    CHECK(first->last_point3() == Point3::new_scale(15., 0., 0.));
+    CHECK(second->first_point3() == Point3::new_scale(100., 0., 0.));
+    CHECK(second->last_point3() == Point3::new_scale(110., 0., 0.));
+    CHECK(first->role() == erPerimeter);
+    CHECK(second->role() == erPerimeter);
+}
+
+TEST_CASE("Extrusion collection construction and conversion preserve direct path values and order", "[ExtrusionEntityCollection]")
+{
+    const ExtrusionPaths direct{
+        collection_contract_path(erPerimeter, 0.07, {Point3::new_scale(1., 0., 0.), Point3::new_scale(2., 0., 0.)}),
+        collection_contract_path(erBridgeInfill, 0.03, {Point3::new_scale(3., 1., 0.), Point3::new_scale(4., 1., 0.)})};
+    ExtrusionEntityCollection collection(direct);
+    ExtrusionEntityCollection nested;
+    nested.append(collection_contract_path(erSolidInfill, 0.02, {Point3::new_scale(5., 2., 0.), Point3::new_scale(6., 2., 0.)}));
+    collection.append(nested);
+
+    REQUIRE(collection.entities.size() == 3);
+    CHECK(collection.entities[0] != &direct[0]);
+    CHECK(collection.entities[1] != &direct[1]);
+    const ExtrusionPaths converted = static_cast<ExtrusionPaths>(collection);
+    REQUIRE(converted.size() == 2);
+    CHECK(converted[0].polyline.points == direct[0].polyline.points);
+    CHECK(converted[0].role() == direct[0].role());
+    CHECK_THAT(converted[0].mm3_per_mm, Catch::Matchers::WithinAbs(direct[0].mm3_per_mm, 1e-12));
+    CHECK(converted[1].polyline.points == direct[1].polyline.points);
+    CHECK(converted[1].role() == direct[1].role());
+    CHECK_THAT(converted[1].mm3_per_mm, Catch::Matchers::WithinAbs(direct[1].mm3_per_mm, 1e-12));
+}
+
+TEST_CASE("Extrusion collection copy assignment deep copies paths and preserves no-sort", "[ExtrusionEntityCollection]")
+{
+    ExtrusionEntityCollection source;
+    source.no_sort = true;
+    source.append(collection_contract_path(erPerimeter, 0.07, {Point3::new_scale(1., 0., 0.), Point3::new_scale(2., 0., 0.)}));
+    source.append(collection_contract_path(erInternalInfill, 0.04, {Point3::new_scale(3., 0., 0.), Point3::new_scale(4., 0., 0.)}));
+
+    ExtrusionEntityCollection destination;
+    destination.append(collection_contract_path(erBridgeInfill, 0.01, {Point3::new_scale(20., 0., 0.), Point3::new_scale(21., 0., 0.)}));
+    destination = source;
+    REQUIRE(destination.entities.size() == 2);
+    CHECK(destination.no_sort);
+    for (size_t i = 0; i < source.entities.size(); ++i) {
+        CHECK(destination.entities[i] != source.entities[i]);
+        const auto *source_path = dynamic_cast<const ExtrusionPath *>(source.entities[i]);
+        const auto *copied_path = dynamic_cast<const ExtrusionPath *>(destination.entities[i]);
+        REQUIRE(source_path != nullptr);
+        REQUIRE(copied_path != nullptr);
+        CHECK(copied_path->polyline.points == source_path->polyline.points);
+        CHECK(copied_path->role() == source_path->role());
+    }
+}
+
+TEST_CASE("Extrusion collection reversal reverses open paths while preserving loop winding", "[ExtrusionEntityCollection]")
+{
+    const Points3 open_points{
+        Point3::new_scale(0., 0., 0.), Point3::new_scale(2., 0., 0.), Point3::new_scale(3., 1., 0.)};
+    const Points3 loop_points{
+        Point3::new_scale(10., 10., 0.), Point3::new_scale(12., 10., 0.), Point3::new_scale(12., 12., 0.),
+        Point3::new_scale(10., 12., 0.), Point3::new_scale(10., 10., 0.)};
+    ExtrusionPath open_path = collection_contract_path(erPerimeter, 0.05, open_points);
+    ExtrusionLoop loop(ExtrusionPaths{collection_contract_path(erPerimeter, 0.06, loop_points)});
+    ExtrusionEntityCollection collection;
+    collection.append(open_path);
+    collection.append(loop);
+
+    collection.reverse();
+    REQUIRE(collection.entities.size() == 2);
+    const auto *reversed_loop = dynamic_cast<const ExtrusionLoop *>(collection.entities[0]);
+    const auto *reversed_path = dynamic_cast<const ExtrusionPath *>(collection.entities[1]);
+    REQUIRE(reversed_loop != nullptr);
+    REQUIRE(reversed_path != nullptr);
+    REQUIRE(reversed_loop->paths.size() == 1);
+    CHECK(reversed_loop->paths.front().polyline.points == loop_points);
+    CHECK(reversed_path->polyline.points == Points3(open_points.rbegin(), open_points.rend()));
+}
+
+TEST_CASE("Removing an extrusion entity preserves the remaining collection order", "[ExtrusionEntityCollection]")
+{
+    ExtrusionEntityCollection collection;
+    collection.append(collection_contract_path(erPerimeter, 0.06, {Point3::new_scale(1., 0., 0.), Point3::new_scale(2., 0., 0.)}));
+    collection.append(collection_contract_path(erInternalInfill, 0.04, {Point3::new_scale(3., 0., 0.), Point3::new_scale(4., 0., 0.)}));
+    collection.append(collection_contract_path(erBridgeInfill, 0.03, {Point3::new_scale(5., 0., 0.), Point3::new_scale(6., 0., 0.)}));
+    const ExtrusionEntity *first_before = collection.entities[0];
+    const ExtrusionEntity *last_before = collection.entities[2];
+
+    collection.remove(1);
+    REQUIRE(collection.entities.size() == 2);
+    CHECK(collection.entities[0] == first_before);
+    CHECK(collection.entities[1] == last_before);
+    CHECK(collection.entities[0]->first_point3() == Point3::new_scale(1., 0., 0.));
+    CHECK(collection.entities[1]->first_point3() == Point3::new_scale(5., 0., 0.));
+}
+
+TEST_CASE("Extrusion collection reports the minimum positive flow among its paths", "[ExtrusionEntityCollection]")
+{
+    ExtrusionEntityCollection collection;
+    collection.append(collection_contract_path(erPerimeter, 0.08, {Point3::new_scale(1., 0., 0.), Point3::new_scale(2., 0., 0.)}));
+    collection.append(collection_contract_path(erInternalInfill, 0.03, {Point3::new_scale(3., 0., 0.), Point3::new_scale(4., 0., 0.)}));
+    collection.append(collection_contract_path(erBridgeInfill, 0.12, {Point3::new_scale(5., 0., 0.), Point3::new_scale(6., 0., 0.)}));
+    CHECK_THAT(collection.min_mm3_per_mm(), Catch::Matchers::WithinAbs(0.03, 1e-12));
+}
