@@ -1,4 +1,5 @@
 #include "catch2/catch_test_macros.hpp"
+#include "catch2/generators/catch_generators.hpp"
 #include "catch2/catch_message.hpp"
 #include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/Config.hpp"
@@ -1327,4 +1328,359 @@ TEST_CASE("Nullable object speed overrides restore inherited G-code feeds",
             compare_fresh_and_incremental(parent, transition.nil_final);
         }
     }
+}
+
+namespace {
+
+struct WidthMeasurement {
+    size_t paths = 0;
+    double path_length = 0.0;
+    double length_weighted_width = 0.0;
+    double material_volume_mm3 = 0.0;
+    double minimum_width = std::numeric_limits<double>::max();
+    double maximum_width = 0.0;
+};
+
+struct WidthRoleEvidence {
+    WidthMeasurement all;
+    WidthMeasurement first_layer;
+    WidthMeasurement later_layers;
+};
+
+struct WidthPipelineEvidence {
+    std::array<WidthRoleEvidence, 5> roles{};
+    Evidence emitted;
+};
+
+std::optional<size_t> width_role_index(ExtrusionRole role)
+{
+    switch (role) {
+    case erExternalPerimeter: return outer;
+    case erPerimeter: return inner;
+    case erInternalInfill: return sparse;
+    case erTopSolidInfill: return top;
+    case erSolidInfill: return internal_solid;
+    default: return std::nullopt;
+    }
+}
+
+void add_width_path(WidthMeasurement &measurement, const ExtrusionPath &path)
+{
+    const double length = path.length();
+    const double width = static_cast<double>(path.width);
+    ++measurement.paths;
+    measurement.path_length += length;
+    measurement.length_weighted_width += length * width;
+    measurement.material_volume_mm3 += path.total_volume();
+    measurement.minimum_width = std::min(measurement.minimum_width, width);
+    measurement.maximum_width = std::max(measurement.maximum_width, width);
+}
+
+WidthPipelineEvidence fresh_width_pipeline_evidence(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({ matrix_fixture() }, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO("validation.string: " + validation.string);
+    INFO("validation.opt_key: " + validation.opt_key);
+    REQUIRE(validation.string.empty());
+
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+
+    WidthPipelineEvidence evidence;
+    evidence.emitted = evidence_for(print, output);
+    require_valid(evidence.emitted);
+    REQUIRE_FALSE(print.objects().empty());
+    const PrintObject &object = *print.objects().front();
+    REQUIRE_FALSE(object.layers().empty());
+    const Layer *first_layer = object.layers().front();
+
+    const auto record_collection = [&evidence](const ExtrusionEntityCollection &collection,
+                                                bool is_first_layer) {
+        for_each_extrusion_path(collection, [&evidence, is_first_layer](const ExtrusionPath &path) {
+            const std::optional<size_t> index = width_role_index(path.role());
+            if (!index)
+                return;
+            WidthRoleEvidence &role = evidence.roles[*index];
+            add_width_path(role.all, path);
+            add_width_path(is_first_layer ? role.first_layer : role.later_layers, path);
+        });
+    };
+
+    for (const Layer *layer : object.layers()) {
+        const bool is_first_layer = layer == first_layer;
+        for (const LayerRegion *region : layer->regions()) {
+            record_collection(region->perimeters, is_first_layer);
+            record_collection(region->fills, is_first_layer);
+            record_collection(region->thin_fills, is_first_layer);
+        }
+    }
+    return evidence;
+}
+
+constexpr double width_pipeline_minimum_layer_height = 0.2;
+
+DynamicPrintConfig width_pipeline_config(const char *setting, int width_mode, double nozzle_diameter)
+{
+    DynamicPrintConfig config = matrix_config();
+    config.set_deserialize_strict({
+        { "wall_generator",                   "classic" },
+        { "nozzle_diameter",                  std::to_string(nozzle_diameter) },
+        { "filament_diameter",                "1.75" },
+        { "filament_flow_ratio",              "1.0" },
+        { "print_flow_ratio",                 1.0 },
+        { "filament_max_volumetric_speed",    "200" },
+        { "filament_adaptive_volumetric_speed", false },
+        { "set_other_flow_ratios",            true },
+        { "first_layer_flow_ratio",           1.0 },
+        { "outer_wall_flow_ratio",            1.0 },
+        { "inner_wall_flow_ratio",            1.0 },
+        { "sparse_infill_flow_ratio",         1.0 },
+        { "internal_solid_infill_flow_ratio", 1.0 },
+        { "top_solid_infill_flow_ratio",      "1.0" },
+        { "bottom_solid_infill_flow_ratio",   1.0 },
+        { "gap_fill_flow_ratio",              1.0 },
+        { "outer_wall_speed",                 "120" },
+        { "inner_wall_speed",                 "120" },
+        { "sparse_infill_speed",              "120" },
+        { "internal_solid_infill_speed",      "120" },
+        { "top_surface_speed",                "120" },
+        { "wall_loops",                       2 },
+        { "top_shell_layers",                 2 },
+        { "bottom_shell_layers",              2 },
+        { "extra_solid_infills",              3 },
+        { "minimum_sparse_infill_area",       0.0 },
+        { "sparse_infill_density",            "20%" },
+        { "detect_thin_wall",                 false },
+        // Keep this nominal-width cohort on the regular full-line infill path.
+        // Narrow-area concentric fill and adaptive patterns have separate width contracts.
+        { "detect_narrow_internal_solid_infill", false },
+        { "top_surface_pattern",              "monotonicline" },
+        { "internal_solid_infill_pattern",    "monotonic" },
+        { "layer_height",                     width_pipeline_minimum_layer_height },
+        { "initial_layer_print_height",       0.3 },
+        { "use_relative_e_distances",         true },
+        { "gcode_comments",                   true },
+    });
+
+    // Start with every width on the public fallback path. Each case changes
+    // exactly one canonical setting so 0, absolute, and nozzle-relative input
+    // remain independently observable.
+    constexpr std::array<const char *, 7> width_keys{{
+        "line_width", "initial_layer_line_width", "outer_wall_line_width",
+        "inner_wall_line_width", "sparse_infill_line_width",
+        "internal_solid_infill_line_width", "top_surface_line_width"
+    }};
+    for (const char *key : width_keys)
+        config.set_key_value(key, new ConfigOptionFloatOrPercent(0.0, false));
+
+    const ConfigOptionFloatOrPercent selected = width_mode == 0
+        ? ConfigOptionFloatOrPercent(0.0, false)
+        : (width_mode == 1 ? ConfigOptionFloatOrPercent(0.50, false)
+                           : ConfigOptionFloatOrPercent(125.0, true));
+    config.set_key_value(setting, selected.clone());
+    return config;
+}
+
+double expected_auto_width(size_t role, double nozzle_diameter)
+{
+    // The documented default is nozzle diameter for top solid infill and
+    // 112.5% of nozzle diameter for perimeter and ordinary solid/infill roles.
+    return role == top ? nozzle_diameter : 1.125 * nozzle_diameter;
+}
+
+double expected_selected_width(int width_mode, size_t role, double nozzle_diameter)
+{
+    if (width_mode == 0)
+        return expected_auto_width(role, nozzle_diameter);
+    if (width_mode == 1)
+        return 0.50;
+    return 1.25 * nozzle_diameter;
+}
+
+void require_width(const WidthMeasurement &measurement, double expected,
+                   bool full_solid_spacing_may_adjust = false)
+{
+    REQUIRE(measurement.paths > 0);
+    REQUIRE(measurement.path_length > 0.0);
+    CHECK(std::isfinite(measurement.minimum_width));
+    CHECK(std::isfinite(measurement.maximum_width));
+    if (! full_solid_spacing_may_adjust) {
+        CHECK_THAT(measurement.minimum_width, Catch::Matchers::WithinAbs(expected, 1e-4));
+        CHECK_THAT(measurement.maximum_width, Catch::Matchers::WithinAbs(expected, 1e-4));
+        CHECK_THAT(measurement.length_weighted_width / measurement.path_length,
+                   Catch::Matchers::WithinAbs(expected, 1e-4));
+        return;
+    }
+
+    // Full-density rectilinear fill may increase centerline spacing by at most 20%.
+    // For rounded-rectangle flow, requested spacing is width - height*(1-pi/4),
+    // so the largest possible width increment is 0.2 times that spacing.
+    // The fixture's first layer is 0.3 mm, all later layers are 0.2 mm, and no
+    // layer is thinner than this conservative height used to maximize the cap.
+    constexpr double pi = 3.14159265358979323846;
+    constexpr double minimum_fixture_layer_height = width_pipeline_minimum_layer_height;
+    constexpr double maximum_spacing_increase = 0.2;
+    const double nominal_spacing = expected - minimum_fixture_layer_height * (1.0 - pi / 4.0);
+    REQUIRE(nominal_spacing > 0.0);
+    const double maximum_width = expected + maximum_spacing_increase * nominal_spacing;
+    // Spacing is quantized to internal coordinate units before being converted
+    // back to float path widths. Four coordinate steps plus four float ulps are
+    // a conservative envelope for those conversions, not a relaxed print-width tolerance.
+    const double rounding_mm = 4.0 * SCALING_FACTOR
+                             + 4.0 * std::numeric_limits<float>::epsilon()
+                               * std::max(1.0, maximum_width);
+    const double weighted_width = measurement.length_weighted_width / measurement.path_length;
+    INFO("solid fill nominal width: " << expected << ", spacing cap width: " << maximum_width
+         << ", conversion envelope: " << rounding_mm);
+    CHECK(measurement.minimum_width >= expected - rounding_mm);
+    CHECK(measurement.maximum_width <= maximum_width + rounding_mm);
+    CHECK(weighted_width >= expected - rounding_mm);
+    CHECK(weighted_width <= maximum_width + rounding_mm);
+}
+
+void require_role_material_reconciles(const WidthPipelineEvidence &evidence, size_t role,
+                                      double filament_diameter)
+{
+    const WidthMeasurement &geometry = evidence.roles[role].all;
+    const RoleEvidence &gcode_role = evidence.emitted.roles[role];
+    REQUIRE(geometry.paths > 0);
+    REQUIRE(geometry.material_volume_mm3 > 0.0);
+    REQUIRE(gcode_role.moves > 0);
+    REQUIRE(gcode_role.filament_length > 0.0);
+
+    constexpr double pi = 3.14159265358979323846;
+    const double filament_area = pi * filament_diameter * filament_diameter / 4.0;
+    const double emitted_volume = gcode_role.filament_length * filament_area;
+    const double e_rounding_bound = static_cast<double>(gcode_role.moves)
+                                  * e_pair_error_bound(gcode_role.max_positive_e_pair) * filament_area;
+    const double tolerance = e_rounding_bound
+                           + 0.001 * std::max(1.0, geometry.material_volume_mm3);
+    REQUIRE(tolerance < 0.01 * geometry.material_volume_mm3);
+    CHECK_THAT(emitted_volume,
+               Catch::Matchers::WithinAbs(geometry.material_volume_mm3, tolerance));
+}
+
+void require_role_pipeline(const WidthPipelineEvidence &evidence, size_t role,
+                           double expected_width, double filament_diameter)
+{
+    const bool full_solid_spacing_may_adjust = role == top || role == internal_solid;
+    const WidthRoleEvidence &geometry = evidence.roles[role];
+    require_width(geometry.all, expected_width, full_solid_spacing_may_adjust);
+    if (geometry.first_layer.paths > 0)
+        require_width(geometry.first_layer, expected_width, full_solid_spacing_may_adjust);
+    if (geometry.later_layers.paths > 0)
+        require_width(geometry.later_layers, expected_width, full_solid_spacing_may_adjust);
+    require_role_material_reconciles(evidence, role, filament_diameter);
+}
+
+void check_width_pipeline(const char *setting, int width_mode, double nozzle_diameter,
+                          std::optional<size_t> target_role, bool initial_layer_contract,
+                          bool global_fallback_contract)
+{
+    CAPTURE(setting, width_mode, nozzle_diameter);
+    constexpr double filament_diameter = 1.75;
+    const DynamicPrintConfig config = width_pipeline_config(setting, width_mode, nozzle_diameter);
+    REQUIRE(config.option(setting) != nullptr);
+    const auto *narrow_solid = config.opt<ConfigOptionBool>("detect_narrow_internal_solid_infill");
+    REQUIRE(narrow_solid != nullptr);
+    CHECK_FALSE(narrow_solid->value);
+    const ConfigOption *top_pattern = config.option("top_surface_pattern");
+    REQUIRE(top_pattern != nullptr);
+    CHECK(top_pattern->getInt() == int(ipMonotonicLine));
+    const ConfigOption *internal_solid_pattern = config.option("internal_solid_infill_pattern");
+    REQUIRE(internal_solid_pattern != nullptr);
+    CHECK(internal_solid_pattern->getInt() == int(ipMonotonic));
+    const WidthPipelineEvidence evidence = fresh_width_pipeline_evidence(config);
+    INFO("emitted evidence: " + evidence_summary(evidence.emitted));
+
+    if (initial_layer_contract) {
+        REQUIRE(target_role.has_value());
+        const size_t role = *target_role;
+        const WidthRoleEvidence &geometry = evidence.roles[role];
+        REQUIRE(geometry.first_layer.paths > 0);
+        REQUIRE(geometry.later_layers.paths > 0);
+        const double first_expected = expected_selected_width(width_mode, role, nozzle_diameter);
+        const double later_expected = expected_auto_width(role, nozzle_diameter);
+        require_width(geometry.first_layer, first_expected);
+        require_width(geometry.later_layers, later_expected);
+        REQUIRE(evidence.emitted.roles[role].first_layer_moves > 0);
+        REQUIRE(evidence.emitted.roles[role].later_layer_moves > 0);
+        require_role_material_reconciles(evidence, role, filament_diameter);
+        return;
+    }
+
+    if (global_fallback_contract) {
+        for (size_t role = outer; role <= internal_solid; ++role) {
+            CAPTURE(role);
+            require_role_pipeline(evidence, role,
+                                 expected_selected_width(width_mode, role, nozzle_diameter),
+                                 filament_diameter);
+        }
+        return;
+    }
+
+    REQUIRE(target_role.has_value());
+    const size_t role = *target_role;
+    require_role_pipeline(evidence, role,
+                         expected_selected_width(width_mode, role, nozzle_diameter),
+                         filament_diameter);
+}
+
+} // namespace
+
+TEST_CASE("Initial-layer line width controls first-layer extrusion paths",
+          "[MotionFlowVariance][WidthPipeline][SettingsVariance]")
+{
+    const double nozzle_diameter = GENERATE(0.4, 0.6);
+    const int width_mode = GENERATE(0, 1, 2);
+    check_width_pipeline("initial_layer_line_width", width_mode, nozzle_diameter,
+                         outer, true, false);
+}
+
+TEST_CASE("Default line width reaches paths when role widths are automatic",
+          "[MotionFlowVariance][WidthPipeline][SettingsVariance]")
+{
+    const double nozzle_diameter = GENERATE(0.4, 0.6);
+    const int width_mode = GENERATE(0, 1, 2);
+    check_width_pipeline("line_width", width_mode, nozzle_diameter,
+                         std::nullopt, false, true);
+}
+
+TEST_CASE("Outer-wall line width controls external-perimeter paths",
+          "[MotionFlowVariance][WidthPipeline][SettingsVariance]")
+{
+    const double nozzle_diameter = GENERATE(0.4, 0.6);
+    const int width_mode = GENERATE(0, 1, 2);
+    check_width_pipeline("outer_wall_line_width", width_mode, nozzle_diameter,
+                         outer, false, false);
+}
+
+TEST_CASE("Inner-wall line width controls inner-perimeter paths",
+          "[MotionFlowVariance][WidthPipeline][SettingsVariance]")
+{
+    const double nozzle_diameter = GENERATE(0.4, 0.6);
+    const int width_mode = GENERATE(0, 1, 2);
+    check_width_pipeline("inner_wall_line_width", width_mode, nozzle_diameter,
+                         inner, false, false);
+}
+
+TEST_CASE("Internal-solid infill line width controls solid-infill paths",
+          "[MotionFlowVariance][WidthPipeline][SettingsVariance]")
+{
+    const double nozzle_diameter = GENERATE(0.4, 0.6);
+    const int width_mode = GENERATE(0, 1, 2);
+    check_width_pipeline("internal_solid_infill_line_width", width_mode, nozzle_diameter,
+                         internal_solid, false, false);
+}
+
+TEST_CASE("Top-surface line width controls top-infill paths",
+          "[MotionFlowVariance][WidthPipeline][SettingsVariance]")
+{
+    const double nozzle_diameter = GENERATE(0.4, 0.6);
+    const int width_mode = GENERATE(0, 1, 2);
+    check_width_pipeline("top_surface_line_width", width_mode, nozzle_diameter,
+                         top, false, false);
 }

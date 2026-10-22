@@ -59,3 +59,5 @@ Check these before writing your own setup or output-parsing code.
 - Never combine conditions with `&&` or `||` inside one assertion. Split them so Catch2 can print both operands on failure.
 - Compare floats with `WithinAbs` or `WithinRel`, never `==`. Prefer these over `Approx` in new tests.
 - Keep tests self-contained: no shared state, green under `--order rand`.
+- Count Catch2 JUnit `<testcase>` nodes and check their exact names. The bundled JUnit reporter's `tests` attribute counts assertions.
+- `DYNAMIC_SECTION` can emit additional JUnit entries for section paths. Declare the expected root and section names explicitly when validating a focused run.
