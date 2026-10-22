@@ -4658,6 +4658,59 @@
         "pipeline_oracle"
       ],
       "reason": "Two explicit distinct profile identities survive SLAPrint processing and appear under the specified field in actual exported SL1 config.ini. This validates archive metadata; it does not imply arbitrary string escaping or other uses of the setting."
+    },
+    "bed_exclude_area": {
+      "test": "tests/fff_print/test_print_validation_clearance.cpp",
+      "tag": "[PrintValidationPreflight]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public Print::validate safety contract rejects a by-object or layered model whose footprint intersects the configured bed keep-out polygon and accepts the same fixture with the polygon moved clear. It does not claim generated G-code."
+    },
+    "enable_belt_purge_tower": {
+      "test": "tests/fff_print/test_print_validation_clearance.cpp",
+      "tag": "[PrintValidationPreflight]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With two used filaments, Print::validate reports the missing-purge warning for By-object and By-layer modes when enabled, and reports none with the option disabled. This is the option\u2019s preflight warning contract, not a generated purge path."
+    },
+    "extruder_clearance_height_to_lid": {
+      "test": "tests/fff_print/test_print_validation_clearance.cpp",
+      "tag": "[PrintValidationSequentialHeight]",
+      "dimensions": [
+        "representative_values",
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The existing by-object Print::validate fixture covers separate Y bands at the lid threshold and one millimeter above it, checking the corresponding pass/error and reported height polygon. This claims its validation boundary, not G-code output."
+    },
+    "wrapping_exclude_area": {
+      "test": "tests/fff_print/test_print_validation_clearance.cpp",
+      "tag": "[PrintValidationPreflight]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Print::validate blocks an object or estimated tower intersecting the configured clumping keep-out polygon when detection is enabled, and accepts the same geometry when disabled. The test asserts the exact diagnostic, object identity for models, and the disabled control; it does not claim generated G-code."
+    },
+    "wipe_tower_x": {
+      "test": "tests/fff_print/test_print_validation_clearance.cpp",
+      "tag": "[PrintValidationPreflight]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "The pre-slice estimated tower footprint is checked at safe and model/keep-out-overlapping X positions. Numeric bounds, generated tower geometry, and emitted G-code remain unclaimed."
+    },
+    "wipe_tower_y": {
+      "test": "tests/fff_print/test_print_validation_clearance.cpp",
+      "tag": "[PrintValidationPreflight]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "The pre-slice estimated tower footprint is checked at safe and model/keep-out-overlapping Y positions. Numeric bounds, generated tower geometry, and emitted G-code remain unclaimed."
     }
   }
 }

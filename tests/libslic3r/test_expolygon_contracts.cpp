@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <vector>
+#include <utility>
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
@@ -234,4 +235,86 @@ TEST_CASE("ExPolygon collection keeps the region with the largest outer contour"
     CHECK(candidates.front().holes.front().points == expected_hole);
     CHECK(candidates.front().is_valid());
     CHECK_THAT(candidates.front().area(), Catch::Matchers::WithinAbs(3600.0, 1e-6));
+}
+
+TEST_CASE("ExPolygon collection polyline conversions preserve ring order", "[ExPolygon][ExPolygonConversions]")
+{
+    const ExPolygons regions { rectangle_with_hole(), rectangle(200, 0, 40, 30) };
+    const std::vector<const Polygon *> expected_rings {
+        &regions[0].contour, &regions[0].holes.front(), &regions[1].contour
+    };
+
+    auto check_closed_rings = [&](const Polylines &polylines) {
+        REQUIRE(polylines.size() == expected_rings.size());
+        for (std::size_t i = 0; i < expected_rings.size(); ++i) {
+            Points expected = expected_rings[i]->points;
+            REQUIRE_FALSE(expected.empty());
+            expected.push_back(expected.front());
+            CHECK(polylines[i].points == expected);
+        }
+    };
+
+    check_closed_rings(to_polylines(regions));
+
+    ExPolygons movable_regions = regions;
+    check_closed_rings(to_polylines(std::move(movable_regions)));
+
+    ExPolygon movable_region = rectangle_with_hole();
+    const Polylines one_region = to_polylines(std::move(movable_region));
+    REQUIRE(one_region.size() == 2);
+    Points expected_contour = regions.front().contour.points;
+    expected_contour.push_back(expected_contour.front());
+    Points expected_hole = regions.front().holes.front().points;
+    expected_hole.push_back(expected_hole.front());
+    CHECK(one_region[0].points == expected_contour);
+    CHECK(one_region[1].points == expected_hole);
+}
+
+TEST_CASE("ExPolygon polygon pointer views refer to the original rings", "[ExPolygon][ExPolygonConversions]")
+{
+    const ExPolygon one = rectangle_with_hole();
+    const ConstPolygonPtrs one_view = to_polygon_ptrs(one);
+    REQUIRE(one_view.size() == 2);
+    CHECK(one_view[0] == &one.contour);
+    CHECK(one_view[1] == &one.holes.front());
+
+    const ExPolygons regions { one, rectangle(200, 0, 40, 30) };
+    const ConstPolygonPtrs collection_view = to_polygon_ptrs(regions);
+    REQUIRE(collection_view.size() == 3);
+    CHECK(collection_view[0] == &regions[0].contour);
+    CHECK(collection_view[1] == &regions[0].holes.front());
+    CHECK(collection_view[2] == &regions[1].contour);
+}
+
+TEST_CASE("Appending ExPolygon rings preserves destination prefix and source order", "[ExPolygon][ExPolygonConversions]")
+{
+    const ExPolygons regions { rectangle_with_hole(), rectangle(200, 0, 40, 30) };
+    const Polygon prefix = rectangle(500, 500, 20, 20).contour;
+    const std::vector<const Polygon *> expected_rings {
+        &regions[0].contour, &regions[0].holes.front(), &regions[1].contour
+    };
+
+    auto check_append = [&](const Polygons &appended) {
+        REQUIRE(appended.size() == expected_rings.size() + 1);
+        CHECK(appended.front().points == prefix.points);
+        for (std::size_t i = 0; i < expected_rings.size(); ++i)
+            CHECK(appended[i + 1].points == expected_rings[i]->points);
+    };
+
+    Polygons copied_append { prefix };
+    polygons_append(copied_append, regions);
+    check_append(copied_append);
+
+    ExPolygon movable_region = regions.front();
+    Polygons one_move_append { prefix };
+    polygons_append(one_move_append, std::move(movable_region));
+    REQUIRE(one_move_append.size() == 3);
+    CHECK(one_move_append[0].points == prefix.points);
+    CHECK(one_move_append[1].points == regions[0].contour.points);
+    CHECK(one_move_append[2].points == regions[0].holes.front().points);
+
+    ExPolygons movable_regions = regions;
+    Polygons move_append { prefix };
+    polygons_append(move_append, std::move(movable_regions));
+    check_append(move_append);
 }

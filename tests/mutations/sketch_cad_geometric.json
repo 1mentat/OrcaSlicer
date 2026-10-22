@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "arc_interior_snap_disabled",
+      "path": "src/libslic3r/CAD/SketchInference.cpp",
+      "old": "                if (u > 0.02 && u < 0.98)",
+      "new": "                if (u > 0.98 && u < 0.02)",
+      "test_filter": "Sketch editor projects cursor onto positive wrapped and negative circular arcs",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "expected_test_count": 1
+    },
+    {
+      "id": "ellipse_arc_end_param_tracks_solved_endpoint",
+      "path": "src/libslic3r/CAD/SketchSolver.cpp",
+      "old": "            double t0 = param(e.p0), t1 = param(e.p1);",
+      "new": "            double t0 = param(e.p0), t1 = t0;",
+      "test_filter": "Sketch editor reflows a solved EllipseArc along its original sweep",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "expected_test_count": 1
+    }
+  ]
+}
