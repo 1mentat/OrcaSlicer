@@ -3318,7 +3318,6 @@ DynamicPrintConfig support_config(const char *support_type, const char *support_
         { "support_type", support_type },
         { "support_style", support_style },
         { "support_on_build_plate_only", false },
-        { "support_interface_layers", 2 },
     });
     return config;
 }

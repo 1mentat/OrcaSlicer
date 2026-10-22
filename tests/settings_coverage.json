@@ -3509,10 +3509,10 @@
       "test": "tests/fff_print/test_cooling.cpp",
       "tag": "[SlowDownSettings]",
       "dimensions": [
-        "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "With slowdown enabled and a fixed 1000-second threshold, exports compare 1 and 5 mm/s minimum speeds. Parsed modal positive-extrusion feeds reach the independently derived 60 and 300 mm/min floors, with unchanged move count and deposited path/material. Full numeric bounds are not exercised."
+      "reason": "At a fixed 1000-second cooling threshold, the registered zero lower bound emits finite positive extrusion feeds below 60 mm/min, while 1 and 5 mm/s minima reach the independently derived 60 and 300 mm/min floors. Disabled and zero-time controls isolate the slowdown gate. Move count, deposited XY length, filament length and final XY coordinates remain unchanged. Clamping zero to 1 mm/s is killed by the physical feed assertion; the pristine rebuild passes all Cooling, SupportCache and two edited GCode fixture cases."
     },
     "toolchange_ordering": {
       "test": "tests/fff_print/test_wipe_tower.cpp",

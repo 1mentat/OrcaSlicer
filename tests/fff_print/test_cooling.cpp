@@ -37,7 +37,7 @@ using namespace Slic3r::Test;
 TEST_CASE("Fan is held off for the initial layers", "[Cooling]")
 {
     const std::string gcode = slice({ cube(20) }, {
-        { "cooling",                      true },
+        { "slow_down_for_layer_cooling", true },
         { "close_fan_the_first_x_layers", 5 },
     });
     CHECK(gcode.find("M106 S0") != std::string::npos);
@@ -122,6 +122,9 @@ struct FeedEvidence {
     std::vector<double> feeds;
     double path_length = 0.0;
     double filament_length = 0.0;
+    double final_x = 0.0;
+    double final_y = 0.0;
+    bool has_final_coordinates = false;
     bool finite = true;
 };
 
@@ -175,6 +178,13 @@ FeedEvidence inspect_feed_evidence(const std::string &gcode, const DynamicPrintC
     GCodeReader reader;
     reader.apply_config(config);
     reader.parse_buffer(gcode, [&evidence](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if ((line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) &&
+            (line.has_x() || line.has_y())) {
+            evidence.final_x = line.new_X(self);
+            evidence.final_y = line.new_Y(self);
+            evidence.has_final_coordinates = true;
+            evidence.finite = evidence.finite && std::isfinite(evidence.final_x) && std::isfinite(evidence.final_y);
+        }
         if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
             return;
         const double feed = line.has_f() ? line.f() : self.f();
@@ -194,9 +204,13 @@ void require_same_deposition(const FeedEvidence &expected, const FeedEvidence &a
     REQUIRE_FALSE(actual.feeds.empty());
     REQUIRE(expected.finite);
     REQUIRE(actual.finite);
+    REQUIRE(expected.has_final_coordinates);
+    REQUIRE(actual.has_final_coordinates);
     CHECK(actual.feeds.size() == expected.feeds.size());
     CHECK_THAT(actual.path_length, Catch::Matchers::WithinRel(expected.path_length, 1e-6));
     CHECK_THAT(actual.filament_length, Catch::Matchers::WithinAbs(expected.filament_length, 1e-3));
+    CHECK_THAT(actual.final_x, Catch::Matchers::WithinAbs(expected.final_x, 1e-3));
+    CHECK_THAT(actual.final_y, Catch::Matchers::WithinAbs(expected.final_y, 1e-3));
 }
 
 double minimum_feed(const FeedEvidence &evidence)
@@ -215,15 +229,18 @@ TEST_CASE("Layer cooling settings slow extrusion without changing deposited geom
     const DynamicPrintConfig no_time_config = slowdown_config(true, 0.0, 5.0);
     const DynamicPrintConfig slow_five_config = slowdown_config(true, 1000.0, 5.0);
     const DynamicPrintConfig slow_one_config = slowdown_config(true, 1000.0, 1.0);
+    const DynamicPrintConfig slow_zero_config = slowdown_config(true, 1000.0, 0.0);
 
     const FeedEvidence disabled = inspect_feed_evidence(slice({make_cube(8.0, 8.0, 1.2)}, disabled_config), disabled_config);
     const FeedEvidence no_time = inspect_feed_evidence(slice({make_cube(8.0, 8.0, 1.2)}, no_time_config), no_time_config);
     const FeedEvidence slow_five = inspect_feed_evidence(slice({make_cube(8.0, 8.0, 1.2)}, slow_five_config), slow_five_config);
     const FeedEvidence slow_one = inspect_feed_evidence(slice({make_cube(8.0, 8.0, 1.2)}, slow_one_config), slow_one_config);
+    const FeedEvidence slow_zero = inspect_feed_evidence(slice({make_cube(8.0, 8.0, 1.2)}, slow_zero_config), slow_zero_config);
 
     require_same_deposition(disabled, no_time);
     require_same_deposition(disabled, slow_five);
     require_same_deposition(disabled, slow_one);
+    require_same_deposition(disabled, slow_zero);
 
     // The boolean gate is isolated by disabled versus the otherwise identical 1000 s case.
     REQUIRE(minimum_feed(slow_five) + 1.0 < minimum_feed(disabled));
@@ -234,6 +251,11 @@ TEST_CASE("Layer cooling settings slow extrusion without changing deposited geom
     REQUIRE(minimum_feed(slow_one) + 1.0 < minimum_feed(slow_five));
     CHECK_THAT(minimum_feed(slow_five), Catch::Matchers::WithinAbs(5.0 * 60.0, 0.1));
     CHECK_THAT(minimum_feed(slow_one), Catch::Matchers::WithinAbs(1.0 * 60.0, 0.1));
+
+    // The registered lower bound is zero. At the same 1000 s target, emitted
+    // deposition remains finite and positive while falling below 1 mm/s.
+    REQUIRE(minimum_feed(slow_zero) > 0.0);
+    CHECK(minimum_feed(slow_zero) < 1.0 * 60.0);
 }
 
 namespace cooling_settings_followup {

@@ -4678,7 +4678,6 @@ TEST_CASE("GCode fan and slowdown branches preserve material while changing feed
 {
     DynamicPrintConfig fast = base_config();
     fast.set_deserialize_strict({
-        {"cooling", true},
         {"slow_down_for_layer_cooling", false},
         {"fan_cooling_layer_time", 0.0},
         {"slow_down_layer_time", 0.0},
@@ -5811,7 +5810,7 @@ TEST_CASE("belt apron uses first layer speed for every apron extrusion", "[GCode
 TEST_CASE("belt apron first layer fan override appears before the object", "[GCode][GCodeBeltApron]")
 {
     DynamicPrintConfig config = belt_apron_config();
-    config.set_deserialize_strict({{"cooling", true}, {"close_fan_the_first_x_layers", 0}, {"fan_max_speed", 100}, {"fan_min_speed", 100},
+    config.set_deserialize_strict({{"slow_down_for_layer_cooling", true}, {"close_fan_the_first_x_layers", 0}, {"fan_max_speed", 100}, {"fan_min_speed", 100},
                                    {"full_fan_speed_layer", 0}, {"slow_down_layer_time", 0}, {"fan_cooling_layer_time", 0},
                                    {"initial_layer_fan_speed", "37"}});
     const ExportedBelt out = export_belt(config);
