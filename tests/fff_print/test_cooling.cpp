@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "test_helpers.hpp"
@@ -152,7 +153,7 @@ DynamicPrintConfig slowdown_config(const bool enabled, const double layer_time, 
         {"slow_down_layer_time", layer_time},
         {"slow_down_min_speed", min_speed},
         {"slow_down_layers", 0},
-        {"fan_cooling_layer_time", 1001.0},
+        {"fan_cooling_layer_time", 1000.0},
         {"fan_min_speed", 0},
         {"fan_max_speed", 0},
         {"close_fan_the_first_x_layers", 0},
@@ -1259,4 +1260,98 @@ TEST_CASE("Overhang fan threshold strings bound full-fan extrusion monotonically
     CHECK(std::any_of(half_speed.fan_on.begin(), half_speed.fan_on.end(),
                       [](const FanOnEvent &event) { return event.pwm >= 126 && event.pwm <= 129; }));
     check_same_deposition(half_speed);
+}
+
+
+TEST_CASE("Cooling fan speed endpoints follow the selected layer-time branch",
+          "[Cooling][CoolingSettings][FanSpeedEndpoints]")
+{
+    using namespace cooling_settings_followup;
+
+    const DynamicPrintConfig reference_config = config_for(false, true, false);
+    const Evidence reference = inspect(slice({make_cube(8.0, 8.0, 0.8)}, reference_config), reference_config);
+    REQUIRE(reference.fan_seen);
+    REQUIRE_FALSE(reference.outer_feeds.empty());
+    REQUIRE_FALSE(reference.inner_feeds.empty());
+
+    const bool minimum_branch = GENERATE(true, false);
+    const int endpoint = GENERATE(0, 40, 100);
+    const int configured_minimum = minimum_branch ? endpoint : 0;
+    const int configured_maximum = minimum_branch ? 100 : endpoint;
+    const double threshold = minimum_branch ? 0.0 : 1000.0;
+    REQUIRE(configured_minimum <= configured_maximum);
+    CAPTURE(minimum_branch, endpoint, configured_minimum, configured_maximum, threshold);
+
+    // Keep minimum-hold enabled in every row. Equal legal thresholds avoid interpolation:
+    // zero selects minimum speed, while 1000 seconds selects maximum for this short-layer fixture.
+    DynamicPrintConfig config = config_for(false, true, false);
+    config.set_deserialize_strict({
+        {"fan_min_speed", configured_minimum},
+        {"fan_max_speed", configured_maximum},
+        {"slow_down_layer_time", threshold},
+        {"fan_cooling_layer_time", threshold},
+    });
+    const Evidence observed = inspect(slice({make_cube(8.0, 8.0, 0.8)}, config), config);
+
+    require_same_material(reference, observed);
+    REQUIRE(observed.fan_seen);
+    REQUIRE_FALSE(observed.part_fan_states.empty());
+    const int expected_pwm = static_cast<int>(std::lround(endpoint * 255.0 / 100.0));
+    CHECK(std::all_of(observed.part_fan_states.begin(), observed.part_fan_states.end(),
+                      [expected_pwm](int pwm) { return pwm == expected_pwm; }));
+
+    REQUIRE(observed.outer_feeds.size() == reference.outer_feeds.size());
+    REQUIRE(observed.inner_feeds.size() == reference.inner_feeds.size());
+    for (size_t i = 0; i < observed.outer_feeds.size(); ++i)
+        CHECK_THAT(observed.outer_feeds[i], Catch::Matchers::WithinAbs(reference.outer_feeds[i], 0.25));
+    for (size_t i = 0; i < observed.inner_feeds.size(); ++i)
+        CHECK_THAT(observed.inner_feeds[i], Catch::Matchers::WithinAbs(reference.inner_feeds[i], 0.25));
+}
+
+TEST_CASE("Cooling layer-time boundary selects minimum or interpolated fan speed",
+          "[Cooling][CoolingSettings][FanCoolingLayerTimeBoundaries]")
+{
+    using namespace cooling_settings_followup;
+
+    DynamicPrintConfig reference_config = config_for(false, true, false);
+    reference_config.set_deserialize_strict({
+        {"fan_min_speed", 40},
+        {"fan_max_speed", 100},
+        {"slow_down_layer_time", 0.0},
+        {"fan_cooling_layer_time", 0.0},
+    });
+    const Evidence reference = inspect(slice({make_cube(8.0, 8.0, 0.8)}, reference_config), reference_config);
+    REQUIRE(reference.fan_seen);
+    REQUIRE_FALSE(reference.part_fan_states.empty());
+    CHECK(std::all_of(reference.part_fan_states.begin(), reference.part_fan_states.end(),
+                      [](int pwm) { return pwm == 102; }));
+
+    const double fan_cooling_layer_time = GENERATE(0.0, 1000.0);
+    CAPTURE(fan_cooling_layer_time);
+    DynamicPrintConfig config = config_for(false, true, false);
+    config.set_deserialize_strict({
+        {"fan_min_speed", 40},
+        {"fan_max_speed", 100},
+        {"slow_down_layer_time", 0.0},
+        {"fan_cooling_layer_time", fan_cooling_layer_time},
+    });
+    const Evidence observed = inspect(slice({make_cube(8.0, 8.0, 0.8)}, config), config);
+
+    require_same_material(reference, observed);
+    REQUIRE(observed.fan_seen);
+    REQUIRE_FALSE(observed.part_fan_states.empty());
+    if (fan_cooling_layer_time == 0.0) {
+        CHECK(std::all_of(observed.part_fan_states.begin(), observed.part_fan_states.end(),
+                          [](int pwm) { return pwm == 102; }));
+    } else {
+        CHECK(std::all_of(observed.part_fan_states.begin(), observed.part_fan_states.end(),
+                          [](int pwm) { return pwm > 102 && pwm <= 255; }));
+    }
+
+    REQUIRE(observed.outer_feeds.size() == reference.outer_feeds.size());
+    REQUIRE(observed.inner_feeds.size() == reference.inner_feeds.size());
+    for (size_t i = 0; i < observed.outer_feeds.size(); ++i)
+        CHECK_THAT(observed.outer_feeds[i], Catch::Matchers::WithinAbs(reference.outer_feeds[i], 0.25));
+    for (size_t i = 0; i < observed.inner_feeds.size(); ++i)
+        CHECK_THAT(observed.inner_feeds[i], Catch::Matchers::WithinAbs(reference.inner_feeds[i], 0.25));
 }

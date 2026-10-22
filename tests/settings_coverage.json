@@ -622,22 +622,24 @@
       "reason": "The cooling pipeline holds the fan off for five configured initial layers and requires an explicit M106 S0 command; boundary counts are not claimed."
     },
     "fan_min_speed": {
-      "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][CoolingSettings][FanSpeedEndpoints]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The multifilament cooling matrix varies minimum fan speeds by extruder variant and requires the corresponding emitted PWM percentages; numeric boundaries are not claimed."
+      "reason": "The public cooling pipeline selects minimum speed with both legal thresholds at 0 and minimum-hold held true. Values 0 and 100 percent are endpoints, and 40 percent is a representative value; positive-XY deposition must carry PWM 0, 102, and 255. Configured maximum stays at 100, so min<=max. The same case preserves deposition move counts, XY path, filament length, and role feeds. Other fan settings and thresholds are not claimed."
     },
     "fan_max_speed": {
-      "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][CoolingSettings][FanSpeedEndpoints]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The multifilament cooling matrix varies maximum fan speeds by extruder variant and requires the corresponding emitted PWM percentages; numeric boundaries are not claimed."
+      "reason": "The public cooling pipeline selects maximum speed with both legal thresholds at 1000 seconds and minimum-hold held true. Values 0 and 100 percent are endpoints, and 40 percent is a representative value; positive-XY deposition must carry PWM 0, 102, and 255. Configured minimum stays at 0, so min<=max. Deposition move counts, XY path, filament length, and role feeds remain unchanged. Other fan settings and thresholds are not claimed."
     },
     "emit_machine_limits_to_gcode": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2001,13 +2003,13 @@
       "reason": "Wipe retraction preserves fractional speed with inward wipe disabled. GENERATE values 25.25,25.5,25.75 and relative/absolute-E modes; parsed retraction during wipe equals speed*distance/time and the remainder is emitted before wipe. Three fractional representatives, not the full speed domain. Additional retraction-variance cases: Separated cubes use 13 and 47 mm/s with deretraction held at 7 mm/s. Parsed retract feedrates must equal speed*60, keeping the retract writer path independent from the deretraction fallback."
     },
     "fan_cooling_layer_time": {
-      "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][CoolingSettings][FanCoolingLayerTimeBoundaries]",
       "dimensions": [
-        "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "Each filament cools with the fan speeds of its extruder variant. Fast/slow layer branches set fan_cooling_layer_time to 1000/0 per filament variant; parsed M106 S equals the expected maximum/minimum PWM while the rest of the slice remains valid. Thresholds 0 and 1000 only; slow_down_layer_time is also configured to keep the branch deterministic."
+      "reason": "With slow_down_layer_time fixed at 0 and min/max fan speeds fixed at 40/100, the public pipeline compares fan_cooling_layer_time 0 versus 1000 seconds. The 0 threshold holds PWM 102; the 1000 threshold interpolates above 102 and no higher than 255 on positive-XY deposition. Deposition and feed remain invariant. This isolates the fan-cooling threshold and does not claim intermediate values or full interactions."
     },
     "auxiliary_fan": {
       "test": "tests/fff_print/test_multifilament.cpp",
@@ -3500,10 +3502,10 @@
       "test": "tests/fff_print/test_cooling.cpp",
       "tag": "[SlowDownSettings]",
       "dimensions": [
-        "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "With slowdown enabled and minimum speed fixed, exports compare zero and 1000-second thresholds. Zero matches the disabled control; the high threshold drives extrusion to the configured speed floor while preserving deposition. Full numeric bounds are not exercised."
+      "reason": "The existing slowdown settings test holds the gate and minimum speed fixed while comparing legal layer-time thresholds 0 and 1000 seconds: zero matches the disabled control, and 1000 drives extrusion to the configured floor with unchanged deposited path and filament. Its fan_cooling_layer_time fixture is corrected from 1001 to legal 1000; full numeric range is not claimed."
     },
     "slow_down_min_speed": {
       "test": "tests/fff_print/test_cooling.cpp",
