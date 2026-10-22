@@ -2926,12 +2926,12 @@
     },
     "slicing_mode": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsReslice]",
+      "tag": "[SlicingModeHoleTopology]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "An overlapping-volume fixture distinguishes regular from even-odd parity and checks fresh/incremental/restored equality; close-holes is currently only a negative control on a mesh without the needed hole geometry."
+      "reason": "The real nested-cavity fixture explicitly selects regular, even_odd and close_holes. Regular and even-odd each retain one hole per occupied layer; close-holes removes every hole and adds the independently known 100 square millimetres per layer. The complete case passes in the accepted 4061-case native full run. The separate overlapping-volume case distinguishes regular versus even-odd parity and checks fresh/incremental/restored equality."
     },
     "fuzzy_skin_ripples_per_layer": {
       "test": "tests/libslic3r/test_fuzzy_skin.cpp",
