@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary assertion mutations for overlap-threshold cooling and configured overhang fan speed.",
+  "mutants": [
+    {
+      "id": "gcode-overlap-threshold-map-flattened",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    case (int) Overhang_threshold_1_4: return 0.9f;\n    case (int) Overhang_threshold_2_4: return 0.75f;\n    case (int) Overhang_threshold_3_4: return 0.5f;\n    case (int) Overhang_threshold_4_4: return 0.25f;\n    case (int) Overhang_threshold_bridge: return 0.05f;",
+      "new": "    case (int) Overhang_threshold_1_4: return 0.0f;\n    case (int) Overhang_threshold_2_4: return 0.0f;\n    case (int) Overhang_threshold_3_4: return 0.0f;\n    case (int) Overhang_threshold_4_4: return 0.0f;\n    case (int) Overhang_threshold_bridge: return 0.0f;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Overhang fan threshold strings bound full-fan extrusion monotonically",
+      "expected_test_count": 1
+    },
+    {
+      "id": "coolingbuffer-overhang-speed-uses-base-fan",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "            overhang_fan_speed   = EXTRUDER_CONFIG(overhang_fan_speed);",
+      "new": "            overhang_fan_speed   = fan_speed_new;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Overhang fan threshold strings bound full-fan extrusion monotonically",
+      "expected_test_count": 1
+    }
+  ]
+}

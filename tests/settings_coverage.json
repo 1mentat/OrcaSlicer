@@ -711,12 +711,12 @@
     },
     "enable_overhang_bridge_fan": {
       "test": "tests/fff_print/test_cooling.cpp",
-      "tag": "[Cooling]",
+      "tag": "[Cooling][OverhangFanSettings]",
       "dimensions": [
-        "representative_values",
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "An enabled overhang-bridge-fan configuration reaches the cooling export and its emitted fan evidence; the disabled state is not independently claimed."
+      "reason": "Enabled and disabled rows slice the same cap with the threshold set to 0% and overhang fan speed at 100%. The enabled row has positive full-fan extrusion; the disabled row has none, while both conserve deposition. This is a single-filament physical cooling oracle, not a claim about all bridge roles or tool assignments."
     },
     "enable_overhang_speed": {
       "test": "tests/fff_print/test_cooling.cpp",
@@ -916,21 +916,21 @@
     },
     "overhang_fan_speed": {
       "test": "tests/fff_print/test_cooling.cpp",
-      "tag": "[Cooling]",
+      "tag": "[Cooling][OverhangFanSettings]",
       "dimensions": [
-        "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "A 100 percent overhang fan speed reaches emitted cooling output; the numeric speed range is not claimed."
+      "reason": "The same cap fixture uses configured overhang fan speeds 0, 50, and 100 percent against pinned ordinary cooling at 20 percent. The 0-percent row has no full-fan extrusion, the 50-percent row emits a PWM 126-129 witness, and the 100-percent row cools a positive extruded distance at PWM 255. Deposited path and filament remain conserved; the fixture uses the first filament slot."
     },
     "overhang_fan_threshold": {
       "test": "tests/fff_print/test_cooling.cpp",
-      "tag": "[Cooling]",
+      "tag": "[Cooling][OverhangFanSettings]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "The configured overhang threshold is exercised through cooling output on the overhang fixture; other threshold values are not claimed."
+      "reason": "The single partially supported cap fixture is sliced through all six public threshold strings (0%, 10%, 25%, 50%, 75%, 95%). Full-fan extrusion is nonincreasing across the sweep, with strict 0%-vs-95% and 10%-vs-95% physical contrasts. Every row preserves deposited XY distance and filament. Intermediate thresholds may share physical plateaus; distinct adjacent-bin outputs and other meshes or tool assignments are not claimed."
     },
     "pad_enable": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",

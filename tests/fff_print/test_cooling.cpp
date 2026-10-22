@@ -941,6 +941,9 @@ struct MotionEvidence {
     std::vector<FanOnEvent> fan_on;
     double path_distance = 0.0;
     double elapsed_seconds = 0.0;
+    double deposited_xy_mm = 0.0;
+    double deposited_filament_mm = 0.0;
+    double full_fan_extrusion_xy_mm = 0.0;
     bool finite = true;
 };
 
@@ -996,8 +999,11 @@ MotionEvidence inspect_motion_and_fans(const std::string &gcode, const DynamicPr
     GCodeReader reader;
     reader.apply_config(config);
     int previous_fan_pwm = 0;
-    reader.parse_buffer(gcode, [&evidence, &previous_fan_pwm](GCodeReader &self,
+    int part_fan_pwm = 0;
+    reader.parse_buffer(gcode, [&evidence, &previous_fan_pwm, &part_fan_pwm](GCodeReader &self,
                                                    const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("M107") && !line.has_p())
+            part_fan_pwm = 0;
         if (line.cmd_is("M106") && !line.has_p()) {
             float pwm = 0.0f;
             REQUIRE(line.has_value('S', pwm));
@@ -1007,6 +1013,7 @@ MotionEvidence inspect_motion_and_fans(const std::string &gcode, const DynamicPr
             const int fan_pwm = static_cast<int>(std::lround(pwm));
             const bool rising = fan_pwm > previous_fan_pwm;
             previous_fan_pwm = fan_pwm;
+            part_fan_pwm = fan_pwm;
             if (fan_pwm > 0) {
                 // FanMover can relocate this command across buffered motion; classify by
                 // pinned PWM targets rather than output TYPE comments. Ordinary fan is
@@ -1024,6 +1031,13 @@ MotionEvidence inspect_motion_and_fans(const std::string &gcode, const DynamicPr
         const double dy = line.dist_Y(self);
         const double dz = line.dist_Z(self);
         const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (line.extruding(self)) {
+            const double xy = line.dist_XY(self);
+            evidence.deposited_xy_mm += xy;
+            evidence.deposited_filament_mm += line.dist_E(self);
+            if (part_fan_pwm == 255)
+                evidence.full_fan_extrusion_xy_mm += xy;
+        }
         if (!(distance > 0.0))
             return;
         evidence.path_distance += distance;
@@ -1031,7 +1045,10 @@ MotionEvidence inspect_motion_and_fans(const std::string &gcode, const DynamicPr
         if (std::isfinite(feed) && feed > 0.0)
             evidence.elapsed_seconds += distance * 60.0 / feed;
         evidence.finite = evidence.finite && std::isfinite(evidence.path_distance) &&
-                          std::isfinite(evidence.elapsed_seconds);
+                          std::isfinite(evidence.elapsed_seconds) &&
+                          std::isfinite(evidence.deposited_xy_mm) &&
+                          std::isfinite(evidence.deposited_filament_mm) &&
+                          std::isfinite(evidence.full_fan_extrusion_xy_mm);
     });
     return evidence;
 }
@@ -1121,4 +1138,103 @@ TEST_CASE("Fan speedup overhang setting changes physical fan scheduling without 
                Catch::Matchers::WithinRel(ordinary_material.path_length, 1e-6));
     CHECK_THAT(overhang_material.filament_length,
                Catch::Matchers::WithinAbs(ordinary_material.filament_length, 1e-3));
+}
+
+namespace overhang_fan_threshold_settings_contracts {
+
+using fan_speedup_overhangs_physical_contracts::FanOnEvent;
+using fan_speedup_overhangs_physical_contracts::MotionEvidence;
+
+TriangleMesh partially_supported_cap_fixture()
+{
+    // The stem supports ten of the cap's sixteen millimeters from one side. This gives the
+    // threshold endpoints both supported and unsupported perimeter spans.
+    TriangleMesh fixture = make_cube(16.0, 16.0, 1.2);
+    TriangleMesh stem = make_cube(10.0, 16.0, 3.6);
+    stem.translate(Vec3f(0.0f, 0.0f, 0.6f));
+    TriangleMesh cap = make_cube(16.0, 16.0, 1.2);
+    cap.translate(Vec3f(0.0f, 0.0f, 3.6f));
+    fixture.merge(stem);
+    fixture.merge(cap);
+    return fixture;
+}
+
+MotionEvidence export_case(const TriangleMesh &fixture, const bool enabled,
+                           const int speed, const std::string &threshold)
+{
+    DynamicPrintConfig config = fan_speedup_overhangs_physical_contracts::config_for(false);
+    config.set_deserialize_strict({
+        {"detect_overhang_wall", false},
+        {"enable_overhang_bridge_fan", enabled},
+        {"fan_kickstart", 0.0},
+        {"fan_speedup_time", 0.0},
+        {"ironing_type", "no ironing"},
+        {"reduce_fan_stop_start_freq", false},
+        {"seam_position", "back"},
+        {"top_shell_layers", 0},
+    });
+    // config_for() installs this enum through an integer-only typed override. Remove
+    // that override so strict string parsing recreates the option from the registry,
+    // including its enum-name map.
+    REQUIRE(config.erase("overhang_fan_threshold"));
+    config.set_deserialize_strict("overhang_fan_threshold", threshold);
+    const auto *threshold_option = config.option<ConfigOptionEnumsGeneric>("overhang_fan_threshold");
+    REQUIRE(threshold_option != nullptr);
+    REQUIRE(threshold_option->keys_map != nullptr);
+    config.set_key_value("overhang_fan_speed", new ConfigOptionInts{speed});
+    const std::string gcode = slice({fixture}, config);
+    return fan_speedup_overhangs_physical_contracts::inspect_motion_and_fans(gcode, config);
+}
+
+} // namespace overhang_fan_threshold_settings_contracts
+
+TEST_CASE("Overhang fan threshold strings bound full-fan extrusion monotonically",
+          "[Cooling][OverhangFanSettings]")
+{
+    using namespace overhang_fan_threshold_settings_contracts;
+    constexpr std::array<const char *, 6> thresholds{{"0%", "10%", "25%", "50%", "75%", "95%"}};
+    const TriangleMesh fixture = partially_supported_cap_fixture();
+    std::array<MotionEvidence, thresholds.size()> rows{};
+    for (size_t i = 0; i < thresholds.size(); ++i) {
+        CAPTURE(thresholds[i]);
+        rows[i] = export_case(fixture, true, 100, thresholds[i]);
+        REQUIRE(rows[i].finite);
+        REQUIRE(rows[i].path_distance > 0.0);
+        REQUIRE(rows[i].elapsed_seconds > 0.0);
+        if (i > 0) {
+            CHECK_THAT(rows[i].path_distance, Catch::Matchers::WithinAbs(rows[0].path_distance, 0.05));
+            CHECK(rows[i].full_fan_extrusion_xy_mm <= rows[i - 1].full_fan_extrusion_xy_mm + 0.05);
+        }
+    }
+    REQUIRE(rows.front().deposited_xy_mm > 0.0);
+    REQUIRE(rows.front().deposited_filament_mm > 0.0);
+    const auto check_same_deposition = [&rows](const MotionEvidence &observed) {
+        CHECK_THAT(observed.deposited_xy_mm,
+                   Catch::Matchers::WithinRel(rows.front().deposited_xy_mm, 1e-6));
+        CHECK_THAT(observed.deposited_filament_mm,
+                   Catch::Matchers::WithinAbs(rows.front().deposited_filament_mm, 1e-3));
+    };
+    for (size_t i = 1; i < rows.size(); ++i)
+        check_same_deposition(rows[i]);
+
+    // The endpoints express the public contract: 0% permits external-perimeter cooling,
+    // while 95% limits it to nearly unsupported spans. Intermediate bins may coincide.
+    CHECK(rows.front().full_fan_extrusion_xy_mm > rows.back().full_fan_extrusion_xy_mm + 0.1);
+    // 10% and 95% exercise the overlap-dependent threshold independently of the 0% special branch.
+    CHECK(rows[1].full_fan_extrusion_xy_mm > rows.back().full_fan_extrusion_xy_mm + 0.1);
+
+    const MotionEvidence disabled = export_case(fixture, false, 100, "0%");
+    const MotionEvidence zero_speed = export_case(fixture, true, 0, "0%");
+    for (const MotionEvidence &control : {disabled, zero_speed}) {
+        REQUIRE(control.finite);
+        CHECK(control.path_distance > 0.0);
+        CHECK_THAT(control.full_fan_extrusion_xy_mm, Catch::Matchers::WithinAbs(0.0, 0.05));
+        check_same_deposition(control);
+    }
+
+    const MotionEvidence half_speed = export_case(fixture, true, 50, "0%");
+    REQUIRE(half_speed.finite);
+    CHECK(std::any_of(half_speed.fan_on.begin(), half_speed.fan_on.end(),
+                      [](const FanOnEvent &event) { return event.pwm >= 126 && event.pwm <= 129; }));
+    check_same_deposition(half_speed);
 }
