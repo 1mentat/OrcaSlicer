@@ -20,6 +20,14 @@ import slicer_pr_validation  # noqa: E402
 
 
 class ParsingTests(unittest.TestCase):
+    def test_test_regex_is_optional_and_preserved_by_parser(self):
+        base = ["--harness-base", "base", "--harness-ref", "ref",
+                "--deps-prefix", "/unused"]
+        self.assertIsNone(slicer_pr_validation._parser().parse_args(base).test_regex)
+        regex = "^(Alpha [case]|Beta)$"
+        parsed = slicer_pr_validation._parser().parse_args([*base, "--test-regex", regex])
+        self.assertEqual(parsed.test_regex, regex)
+
     def test_keep_and_reuse_worktree_options_are_mutually_exclusive(self):
         conflicting_options = (
             ("--keep-worktree", "--reuse-worktree-from-report", "prior-report.json"),
@@ -34,6 +42,18 @@ class ParsingTests(unittest.TestCase):
                         "--harness-base", "base", "--harness-ref", "ref",
                         "--deps-prefix", "/unused", *options,
                     ])
+
+    def test_empty_test_regex_fails_before_validation(self):
+        for regex in ("", "   "):
+            with self.subTest(regex=regex), \
+                 mock.patch.object(slicer_pr_validation, "run_validation") as run, \
+                 mock.patch("sys.stderr"):
+                result = slicer_pr_validation.main([
+                    "--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused", "--test-regex", regex,
+                ])
+            self.assertEqual(result, 2)
+            run.assert_not_called()
 
     def test_nonpositive_test_jobs_fail_before_validation(self):
         for jobs in ("0", "-1"):
@@ -66,6 +86,13 @@ class ParsingTests(unittest.TestCase):
         custom = slicer_pr_validation._default_test(
             Path("/tmp/build"), 8, Path("/tmp/tests.xml"), "NotWorking", 37.5)
         self.assertEqual(custom[custom.index("--timeout") + 1], "37.5")
+
+    def test_default_test_keeps_full_suite_and_label_exclusion(self):
+        command = slicer_pr_validation._default_test(
+            Path("/tmp/build"), 4, Path("/tmp/tests.xml"),
+            "NotWorking|RequiresApp")
+        self.assertEqual(command[command.index("-LE") + 1], "NotWorking|RequiresApp")
+        self.assertNotIn("-R", command)
 
     def test_nonfinite_phase_timeout_fails_before_validation(self):
         for timeout in ("nan", "inf"):
@@ -483,7 +510,7 @@ class MinimumTestIntegrationTests(unittest.TestCase):
     """Exercise the count and identity gates through the real _run_tree path."""
 
     @staticmethod
-    def _args(minimum_tests=1):
+    def _args(minimum_tests=1, test_regex=None):
         return Namespace(
             test_timeout=180.0,
             timeout=30.0,
@@ -492,19 +519,23 @@ class MinimumTestIntegrationTests(unittest.TestCase):
             jobs=1,
             test_jobs=1,
             exclude_labels="",
+            test_regex=test_regex,
             deps_prefix="deps",
             uv="uv",
         )
 
-    def _run_tree(self, *, minimum_tests, names, build_result=None):
+    def _run_tree(self, *, minimum_tests, names, build_result=None, test_regex=None):
         with tempfile.TemporaryDirectory() as temp:
             root_output = Path(temp) / "output"
             worktree = Path(temp) / "worktree"
             worktree.mkdir()
 
-            def fake_default_test(build, jobs, junit, excluded, timeout):
+            def fake_default_test(build, jobs, junit, excluded, timeout, regex=None):
                 junit.write_text(_minimum_junit(names), encoding="utf-8")
-                return ["ctest", "--output-junit", str(junit)]
+                command = ["ctest", "--output-junit", str(junit)]
+                if regex is not None:
+                    command.extend(["-R", regex])
+                return command
 
             def fake_phase(argv, *, cwd, timeout, log):
                 log.parent.mkdir(parents=True, exist_ok=True)
@@ -519,7 +550,7 @@ class MinimumTestIntegrationTests(unittest.TestCase):
                 else:
                     result = slicer_pr_validation.CommandResult(
                         list(argv), 0, 0.01,
-                        "100% tests passed, 0 tests failed out of 3" if is_test else "",
+                        f"100% tests passed, 0 tests failed out of {len(names)}" if is_test else "",
                         "")
                 log.write_text(result.stdout + result.stderr, encoding="utf-8")
                 return result
@@ -529,10 +560,19 @@ class MinimumTestIntegrationTests(unittest.TestCase):
                  mock.patch.object(slicer_pr_validation, "_run_phase",
                                    side_effect=fake_phase):
                 return slicer_pr_validation._run_tree(
-                    worktree, root_output, "baseline", self._args(minimum_tests),
+                    worktree, root_output, "baseline",
+                    self._args(minimum_tests, test_regex),
                     ["cmake", "configure"], ["cmake", "build"],
                     commit_sha="a" * 40, tree_sha="b" * 40,
                 )
+
+    def test_test_regex_braces_reach_ctest_literally_and_minimum_gates_selected_cases(self):
+        regex = r"^(Alpha{2}|\{root\})$"
+        entry = self._run_tree(minimum_tests=2, names=["Alpha"], test_regex=regex)
+        self.assertEqual(entry["status"], "test_evidence_incomplete")
+        self.assertEqual(entry["minimum_tests_observed"], 1)
+        argv = entry["commands"]["test"]["argv"]
+        self.assertEqual(argv[argv.index("-R") + 1], regex)
 
     def test_count_floor_is_applied_after_junit_parsing(self):
         entry = self._run_tree(minimum_tests=4, names=["one", "two", "three"])
@@ -1443,7 +1483,7 @@ class CompleteTestLogEvidenceTests(unittest.TestCase):
             worktree = root / "worktree"
             worktree.mkdir()
 
-            def fake_default_test(build, jobs, junit, excluded, timeout):
+            def fake_default_test(build, jobs, junit, excluded, timeout, regex=None):
                 if junit_xml is not None:
                     junit.write_text(junit_xml, encoding="utf-8")
                 return ["ctest", "--output-junit", str(junit)]

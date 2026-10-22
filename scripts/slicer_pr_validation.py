@@ -2234,9 +2234,14 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
     junit = run_dir / "tests.junit.xml"
     build_path = _resolve_build_path(worktree, args.build_dir)
     test_jobs = args.test_jobs if args.test_jobs is not None else args.jobs
-    test_args = _default_test(build_path, test_jobs, junit, args.exclude_labels, test_timeout)
+    test_regex = getattr(args, "test_regex", None)
+    test_args = _default_test(build_path, test_jobs, junit, args.exclude_labels,
+                              test_timeout)
     test_args = _format_args(test_args, root=worktree, build=build_path,
                              deps_prefix=args.deps_prefix, uv=args.uv, jobs=args.jobs)
+    if test_regex is not None:
+        # Keep regex syntax literal: _format_args treats braces in command arguments as templates.
+        test_args.extend(["-R", test_regex])
     entry["commands"]["test"] = {"argv": test_args, "junit": str(junit),
                                   "log": str(run_dir / "test.log")}
     test = _run_phase(test_args, cwd=worktree, timeout=args.timeout,
@@ -2629,6 +2634,7 @@ def run_validation(args: argparse.Namespace) -> int:
             "deps_prefix": args.deps_prefix, "uv": uv, "jobs": args.jobs,
             "test_jobs": args.test_jobs if args.test_jobs is not None else args.jobs,
             "build_dir": args.build_dir, "exclude_labels": args.exclude_labels,
+            "test_regex": getattr(args, "test_regex", None),
             "targets": list(args.targets), "timeout_seconds": args.timeout,
             "test_timeout_seconds": getattr(args, "test_timeout", DEFAULT_TEST_TIMEOUT),
             "keep_worktree": bool(getattr(args, "keep_worktree", False)),
@@ -3217,6 +3223,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", dest="targets", action="append", default=None,
                         help="native test target (repeat to override defaults)")
     parser.add_argument("--exclude-labels", default=DEFAULT_EXCLUDED_LABELS)
+    parser.add_argument("--test-regex",
+                        help="optional regular expression passed to CTest -R to select test names")
     parser.add_argument("--patch-scope", choices=("test-only", "integration", "full"),
                         default="test-only",
                         help="overlay scope; test-only protects src/, integration allows build CMake, full applies the legacy complete diff")
@@ -3250,6 +3258,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if args.minimum_tests < 1:
         print("slicer_pr_validation: error: --minimum-tests must be positive", file=sys.stderr)
+        return 2
+    if args.test_regex is not None and not args.test_regex.strip():
+        print("slicer_pr_validation: error: --test-regex must not be empty", file=sys.stderr)
         return 2
     args.targets = tuple(args.targets or DEFAULT_TARGETS)
     args.uv = _resolve_uv(args.uv_executable)
