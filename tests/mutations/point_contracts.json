@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Three ordinary assertion mutations for Point public coordinate contracts; v2 disambiguates the quarter-turn height-drop overload without changing its intended fault.",
+  "description": "Four ordinary assertion mutations for Point coordinate and affine transform contracts.",
   "mutants": [
     {
       "id": "point-distance-drops-height",
@@ -30,6 +30,16 @@
       "expected_matches": 1,
       "ordinary_assertion_only": true,
       "test_filter": "Point rotations preserve height and rotate around the chosen center",
+      "expected_test_count": 1
+    },
+    {
+      "id": "float-vector-transform-drops-affine-translation",
+      "path": "src/libslic3r/Point.cpp",
+      "old": "    Eigen::MatrixXf dst(3, vertices_count);\n    dst = t * src.colwise().homogeneous();",
+      "new": "    Eigen::MatrixXf dst(3, vertices_count);\n    dst = t.linear() * src;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Float point vectors preserve order and input while applying an affine transform",
       "expected_test_count": 1
     }
   ]

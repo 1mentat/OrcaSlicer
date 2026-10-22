@@ -4,6 +4,8 @@
 
 #include <Eigen/Geometry>
 #include <cmath>
+#include <cstddef>
+#include <vector>
 
 #include "libslic3r/Point.hpp"
 #include "libslic3r/libslic3r.h"
@@ -113,4 +115,37 @@ TEST_CASE("Transform bases ignore translation and identify odd reflections", "[P
     CHECK(has_reflection(transform));
     transform.linear().col(1) *= -1.0;
     CHECK_FALSE(has_reflection(transform));
+}
+
+
+TEST_CASE("Float point vectors preserve order and input while applying an affine transform", "[Point][PointVectorTransformContracts]")
+{
+    Transform3f affine = Transform3f::Identity();
+    affine.linear() << 0.0f, -2.0f, 0.0f,
+                       3.0f,  0.0f, 0.0f,
+                       0.0f,  0.0f, 0.5f;
+    affine.translation() = Vec3f(10.0f, -4.0f, 2.0f);
+
+    const std::vector<Vec3f> empty_points;
+    CHECK(Slic3r::transform(empty_points, affine).empty());
+
+    const std::vector<Vec3f> points{
+        Vec3f(1.0f, 2.0f, 4.0f),
+        Vec3f(-3.0f, 0.0f, 2.0f),
+        Vec3f(0.0f, -1.0f, -2.0f),
+    };
+    const std::vector<Vec3f> original_points = points;
+    const std::vector<Vec3f> transformed = Slic3r::transform(points, affine);
+    const std::vector<Vec3f> expected{
+        Vec3f(6.0f, -1.0f, 4.0f),
+        Vec3f(10.0f, -13.0f, 3.0f),
+        Vec3f(12.0f, -4.0f, 1.0f),
+    };
+
+    REQUIRE(transformed.size() == expected.size());
+    REQUIRE(points.size() == original_points.size());
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        CHECK_THAT((transformed[index] - expected[index]).norm(), WithinAbs(0.0, 1e-5));
+        CHECK_THAT((points[index] - original_points[index]).norm(), WithinAbs(0.0, 1e-6));
+    }
 }
