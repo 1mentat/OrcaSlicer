@@ -1051,28 +1051,34 @@
       "reason": "Zero and a 1 mm Z-hop are sliced with retraction enabled; hopping adds vertical travel moves while preserving deposited material. The full numeric domain and disabled-retraction interaction are not claimed."
     },
     "line_width": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][WidthPipeline][SettingsVariance]",
       "dimensions": [
-        "boundary_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Role-specific and first-layer width options are automatic, so the global width must reach outer, inner, sparse, top, and internal-solid paths. The WidthPipeline cases slice automatic, 0.50 mm, and 125% widths at 0.4/0.6 mm nozzles using Classic walls, regular monotonic solid fills, and narrow-solid detection disabled. They compare actual extrusion-path widths with independent expectations and reconcile role material with emitted G-code E. Regular solid widths allow the bounded 20% spacing adjustment plus coordinate/float rounding. Other patterns, wall generators, and multi-extruder interactions remain unclaimed. Existing validation-boundary evidence remains in tests/fff_print/test_print.cpp [ValidationContracts]."
     },
     "inner_wall_line_width": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][WidthPipeline][SettingsVariance]",
       "dimensions": [
-        "boundary_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed. Separate representative fresh/incremental slicing evidence for 0.42 and 0.60 mm inner-wall geometry/filament is in tests/fff_print/test_motion_flow_variance.cpp [MotionFlowVariance]; this entry retains its narrower validation declaration."
+      "reason": "The WidthPipeline cases slice automatic, 0.50 mm, and 125% widths at 0.4/0.6 mm nozzles using Classic walls, regular monotonic solid fills, and narrow-solid detection disabled. They compare actual extrusion-path widths with independent expectations and reconcile role material with emitted G-code E. Regular solid widths allow the bounded 20% spacing adjustment plus coordinate/float rounding. Other patterns, wall generators, and multi-extruder interactions remain unclaimed. Existing validation-boundary evidence remains in tests/fff_print/test_print.cpp [ValidationContracts]. Earlier 0.42/0.60 mm fresh/incremental geometry and filament checks remain in [MotionFlowVariance]."
     },
     "outer_wall_line_width": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][WidthPipeline][SettingsVariance]",
       "dimensions": [
-        "boundary_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed. Separate representative fresh/incremental slicing evidence for 0.42 and 0.60 mm outer-wall geometry/filament is in tests/fff_print/test_motion_flow_variance.cpp [MotionFlowVariance]; this entry retains its narrower validation declaration."
+      "reason": "The WidthPipeline cases slice automatic, 0.50 mm, and 125% widths at 0.4/0.6 mm nozzles using Classic walls, regular monotonic solid fills, and narrow-solid detection disabled. They compare actual extrusion-path widths with independent expectations and reconcile role material with emitted G-code E. Regular solid widths allow the bounded 20% spacing adjustment plus coordinate/float rounding. Other patterns, wall generators, and multi-extruder interactions remain unclaimed. Existing validation-boundary evidence remains in tests/fff_print/test_print.cpp [ValidationContracts]. Earlier 0.42/0.60 mm fresh/incremental geometry and filament checks remain in [MotionFlowVariance]."
     },
     "sparse_infill_line_width": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1083,20 +1089,24 @@
       "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed. Separate representative fresh/incremental slicing evidence for 0.55 and 0.70 mm sparse-infill geometry/filament is in tests/fff_print/test_motion_flow_variance.cpp [MotionFlowVariance]; this entry retains its narrower validation declaration."
     },
     "internal_solid_infill_line_width": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][WidthPipeline][SettingsVariance]",
       "dimensions": [
-        "boundary_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The WidthPipeline cases slice automatic, 0.50 mm, and 125% widths at 0.4/0.6 mm nozzles using Classic walls, regular monotonic solid fills, and narrow-solid detection disabled. They compare actual extrusion-path widths with independent expectations and reconcile role material with emitted G-code E. Regular solid widths allow the bounded 20% spacing adjustment plus coordinate/float rounding. Other patterns, wall generators, and multi-extruder interactions remain unclaimed. Existing validation-boundary evidence remains in tests/fff_print/test_print.cpp [ValidationContracts]."
     },
     "top_surface_line_width": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][WidthPipeline][SettingsVariance]",
       "dimensions": [
-        "boundary_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The WidthPipeline cases slice automatic, 0.50 mm, and 125% widths at 0.4/0.6 mm nozzles using Classic walls, regular monotonic solid fills, and narrow-solid detection disabled. They compare actual extrusion-path widths with independent expectations and reconcile role material with emitted G-code E. Regular solid widths allow the bounded 20% spacing adjustment plus coordinate/float rounding. Other patterns, wall generators, and multi-extruder interactions remain unclaimed. Existing validation-boundary evidence remains in tests/fff_print/test_print.cpp [ValidationContracts]."
     },
     "skin_infill_line_width": {
       "test": "tests/fff_print/test_print.cpp",
@@ -4711,6 +4721,15 @@
         "representative_values"
       ],
       "reason": "The pre-slice estimated tower footprint is checked at safe and model/keep-out-overlapping Y positions. Numeric bounds, generated tower geometry, and emitted G-code remain unclaimed."
+    },
+    "initial_layer_line_width": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][WidthPipeline][SettingsVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "First-layer external-perimeter widths change while later-layer widths retain their automatic values. Numeric boundaries and other first-layer roles remain unclaimed. The WidthPipeline cases slice automatic, 0.50 mm, and 125% widths at 0.4/0.6 mm nozzles using Classic walls, regular monotonic solid fills, and narrow-solid detection disabled. They compare actual extrusion-path widths with independent expectations and reconcile role material with emitted G-code E. Regular solid widths allow the bounded 20% spacing adjustment plus coordinate/float rounding. Other patterns, wall generators, and multi-extruder interactions remain unclaimed."
     }
   }
 }
