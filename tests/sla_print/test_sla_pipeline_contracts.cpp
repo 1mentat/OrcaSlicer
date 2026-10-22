@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "test_utils.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/Format/SL1.hpp"
@@ -396,6 +397,128 @@ TEST_CASE("SLA manual supports elevate the object and emit support slices", "[SL
     CHECK(support_slice_area(*object) > 0.);
 }
 
+
+TEST_CASE("SLA buildplate-only setting omits blocked support while retaining a clear buildplate route",
+          "[SLAPrint][SLASupportRouting][SettingsVariance][BuildplateOnlySupport]")
+{
+    const bool buildplate_only = GENERATE(false, true);
+    CAPTURE(buildplate_only);
+
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_deserialize_strict({
+        { "supports_enable",                       true },
+        { "support_object_elevation",              5.0 },
+        { "support_head_front_diameter",           1.0 },
+        { "support_head_penetration",              0.2 },
+        { "support_head_width",                    1.0 },
+        { "support_pillar_diameter",               1.0 },
+        { "support_small_pillar_diameter_percent", 50.0 },
+        { "support_base_diameter",                 2.0 },
+        { "support_base_height",                   1.0 },
+        { "support_base_safety_distance",          0.5 },
+        { "support_critical_angle",                45.0 },
+        { "support_max_bridge_length",             0.5 },
+        { "support_max_pillar_link_distance",      10.0 },
+        { "support_max_bridges_on_pillar",         8 },
+        { "support_pillar_widening_factor",        0.0 },
+    });
+    config.set_key_value("support_pillar_connection_mode",
+                         new ConfigOptionEnum<SLAPillarConnectionMode>(slapcmDynamic));
+    config.set_key_value("support_buildplate_only", new ConfigOptionBool(buildplate_only));
+
+    // ensure_on_bed() leaves the lower block at z=0. Elevation 5 mm clears
+    // the support head width for public SLAPrint validation without moving
+    // the model or manual points in model coordinates. The ceiling is shifted
+    // right: (8,5,12) is blocked by the lower block, while (12,5,12) is clear
+    // to the build plate and spans the empty height gap in both settings.
+    // A third clear head below the lower block grounds that component too.
+    TriangleMesh model = make_cube(10.0, 10.0, 5.0);
+    TriangleMesh ceiling = make_cube(6.0, 6.0, 2.0);
+    ceiling.translate(Vec3f(7.f, 2.f, 12.f));
+    model.merge(ceiling);
+    sla::SupportPoints points{
+        sla::SupportPoint(8.f, 5.f, 12.f, 0.5f, true),
+        sla::SupportPoint(12.f, 5.f, 12.f, 0.5f, true),
+        sla::SupportPoint(1.f, 1.f, 0.f, 0.5f, true),
+    };
+
+    SlaCubeFixture fixture(std::move(config), std::move(model), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA support_buildplate_only validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    REQUIRE(object->get_support_points().size() == 3);
+    CHECK_THAT(object->get_elevation(), Catch::Matchers::WithinAbs(5.0, 1e-6));
+
+    // Both setting values preserve model bounds and the same exact slice profile.
+    const BoundingBoxf3 model_bounds = object->transformed_mesh().bounding_box();
+    CHECK_THAT(model_bounds.min.x(), Catch::Matchers::WithinAbs(0.0, 1e-4));
+    CHECK_THAT(model_bounds.min.y(), Catch::Matchers::WithinAbs(0.0, 1e-4));
+    CHECK_THAT(model_bounds.min.z(), Catch::Matchers::WithinAbs(0.0, 1e-4));
+    CHECK_THAT(model_bounds.max.x(), Catch::Matchers::WithinAbs(13.0, 1e-4));
+    CHECK_THAT(model_bounds.max.y(), Catch::Matchers::WithinAbs(10.0, 1e-4));
+    CHECK_THAT(model_bounds.max.z(), Catch::Matchers::WithinAbs(14.0, 1e-4));
+
+    const auto &slice_index = object->get_slice_index();
+    REQUIRE(slice_index.size() == fixture.print.print_layers().size());
+    std::size_t lower_body_layers = 0;
+    std::size_t upper_body_layers = 0;
+    double total_model_slice_area_mm2 = 0.0;
+    const double scale2 = scaled<double>(1.0) * scaled<double>(1.0);
+    for (const SLAPrintObject::SliceRecord &record : slice_index) {
+        const ExPolygons &model_slice = record.get_slice(soModel);
+        double area_mm2 = 0.0;
+        for (const ExPolygon &expolygon : model_slice)
+            area_mm2 += std::abs(expolygon.area()) / scale2;
+        total_model_slice_area_mm2 += area_mm2;
+
+        if (area_mm2 > 70.0) {
+            ++lower_body_layers;
+            CHECK_THAT(area_mm2, Catch::Matchers::WithinAbs(100.0, 1e-4));
+        } else if (area_mm2 > 1.0) {
+            ++upper_body_layers;
+            CHECK_THAT(area_mm2, Catch::Matchers::WithinAbs(36.0, 1e-4));
+        } else {
+            CHECK_THAT(area_mm2, Catch::Matchers::WithinAbs(0.0, 1e-4));
+            CHECK(model_slice.empty());
+        }
+
+        if (!model_slice.empty()) {
+            REQUIRE(model_slice.size() == 1);
+            CHECK(model_slice.front().holes.empty());
+        }
+    }
+    CHECK(lower_body_layers == 5);
+    CHECK(upper_body_layers == 2);
+    CHECK_THAT(total_model_slice_area_mm2, Catch::Matchers::WithinAbs(572.0, 1e-4));
+
+    // The clear head at x=12 supplies support in both rows. At z=5.1, only
+    // normal routing may also contact the intervening body near blocked x=8.
+    const TriangleMesh support = object->support_mesh();
+    REQUIRE_FALSE(support.empty());
+    CHECK(support_slice_area(*object) > 0.0);
+    const Polygons section = slice_mesh(support.its, 5.1f, MeshSlicingParams{});
+    REQUIRE_FALSE(section.empty());
+    // Clip to the independently known lower-block footprint, which excludes
+    // the clear pillar at x=12 while allowing model-facing contact to drift.
+    const Polygon blocked_region{
+        Point::new_scale(0.0, 0.0), Point::new_scale(10.0, 0.0),
+        Point::new_scale(10.0, 10.0), Point::new_scale(0.0, 10.0),
+    };
+    const ExPolygons blocked_section = intersection_ex(section, Polygons{blocked_region});
+    double blocked_area_mm2 = 0.0;
+    for (const ExPolygon &expolygon : blocked_section)
+        blocked_area_mm2 += std::abs(expolygon.area()) / scale2;
+    if (buildplate_only)
+        CHECK_THAT(blocked_area_mm2, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    else
+        CHECK(blocked_area_mm2 > 0.0);
+}
 
 TEST_CASE("SLA blocked model-facing supports anchor to the intervening body",
           "[SLASupportRouting][ModelFacingSupport]")

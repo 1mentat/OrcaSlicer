@@ -4732,6 +4732,15 @@
         "pipeline_oracle"
       ],
       "reason": "First-layer external-perimeter widths change while later-layer widths retain their automatic values. Numeric boundaries and other first-layer roles remain unclaimed. The WidthPipeline cases slice automatic, 0.50 mm, and 125% widths at 0.4/0.6 mm nozzles using Classic walls, regular monotonic solid fills, and narrow-solid detection disabled. They compare actual extrusion-path widths with independent expectations and reconcile role material with emitted G-code E. Regular solid widths allow the bounded 20% spacing adjustment plus coordinate/float rounding. Other patterns, wall generators, and multi-extruder interactions remain unclaimed."
+    },
+    "support_buildplate_only": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAPrint][SLASupportRouting][SettingsVariance][BuildplateOnlySupport]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public SLAPrint test generates support_buildplate_only=false and true on the same 10x10x5 lower block and 6x6x2 ceiling shifted to x=7..13, with a blocked head at (8,5,12), a clear ceiling-to-buildplate head at (12,5,12), and a clear lower-body head at (1,1,0). Both rows require nonempty support products and identical model bounds and slice geometry: five 100 mm2 lower layers, two 36 mm2 ceiling layers, and 572 mm2 total model-slice area. At z=5.1, support area clipped to the known lower-block footprint is positive when the setting is false and zero when true. The focused native baseline passed, and the forced-false mapping mutation was killed by the ordinary true-row zero-area assertion. Numeric ranges and other setting interactions are not claimed."
     }
   }
 }

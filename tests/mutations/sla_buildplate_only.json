@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "SLA support_buildplate_only boolean variance through the public SLAPrint support geometry pipeline.",
+  "mutants": [
+    {
+      "id": "support-buildplate-only-forced-false",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    scfg.ground_facing_only = c.support_buildplate_only.getBool();",
+      "new": "    scfg.ground_facing_only = false;",
+      "test_filter": "SLA buildplate-only setting omits blocked support while retaining a clear buildplate route",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Force the public setting mapping off. The true generated row then has support area in the z=5.1 section over the known lower-block footprint and fails the ordinary zero-area check; a clear point at x=12 keeps the object printable."
+    }
+  ]
+}
