@@ -17,6 +17,9 @@ target_include_directories(sla_pipeline_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set_property(TARGET sla_pipeline_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(sla_pipeline_tests)
 slicer_enable_llvm_source_coverage(sla_pipeline_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(sla_pipeline_tests TEST_PREFIX "FocusedSLA::")
+endif()
 
 orcaslicer_copy_test_dlls()
 

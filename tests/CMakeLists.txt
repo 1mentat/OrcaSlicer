@@ -35,6 +35,9 @@ if (NOT SLICER_TEST_PROCESSORS MATCHES "^[0-9]+$")
         "SLICER_TEST_PROCESSORS must be a non-negative integer (0 disables per-test affinity)")
 endif()
 
+option(SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY
+    "Register focused geometry and SLA targets with unique CTest names" OFF)
+
 add_library(test_common INTERFACE)
 target_compile_definitions(test_common INTERFACE TEST_DATA_DIR=R"\(${TEST_DATA_DIR}\)" PROFILES_DIR=R"\(${PROFILES_DIR}\)" CATCH_CONFIG_FAST_COMPILE)
 target_include_directories(test_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -105,30 +108,35 @@ set(SLICER_TEST_TARGETS_WITH_PARALLEL
     slic3rutils_tests)
 
 function(orcaslicer_discover_tests TARGET)
+    cmake_parse_arguments(REGISTER "" "TEST_PREFIX" "" ${ARGN})
+    set(_test_prefix_args)
+    if (REGISTER_TEST_PREFIX)
+        list(APPEND _test_prefix_args TEST_PREFIX "${REGISTER_TEST_PREFIX}")
+    endif()
     list(FIND SLICER_TEST_TARGETS_WITH_PARALLEL "${TARGET}" _parallel_target_index)
     if (SLICER_TEST_PROCESSORS GREATER 0)
         if (SLICER_TEST_PROCESSORS EQUAL 1 AND _parallel_target_index GREATER -1)
             # Keep explicitly concurrent tests at two slots even in a one-slot run.
             # Separate TEST_SPEC values are required so Catch discovery generates
             # distinct CTest test names/files for the two partitions.
-            catch_discover_tests(${TARGET}
+            catch_discover_tests(${TARGET} ${_test_prefix_args}
                 TEST_SPEC "~[Parallel]"
                 EXTRA_ARGS ${CATCH_EXTRA_ARGS}
                 ADD_TAGS_AS_LABELS
                 PROPERTIES PROCESSOR_AFFINITY TRUE PROCESSORS 1)
-            catch_discover_tests(${TARGET}
+            catch_discover_tests(${TARGET} ${_test_prefix_args}
                 TEST_SPEC "[Parallel]~[.]"
                 EXTRA_ARGS ${CATCH_EXTRA_ARGS}
                 ADD_TAGS_AS_LABELS
                 PROPERTIES PROCESSOR_AFFINITY TRUE PROCESSORS 2)
         else()
-            catch_discover_tests(${TARGET}
+            catch_discover_tests(${TARGET} ${_test_prefix_args}
                 EXTRA_ARGS ${CATCH_EXTRA_ARGS}
                 ADD_TAGS_AS_LABELS
                 PROPERTIES PROCESSOR_AFFINITY TRUE PROCESSORS ${SLICER_TEST_PROCESSORS})
         endif()
     else()
-        catch_discover_tests(${TARGET} EXTRA_ARGS ${CATCH_EXTRA_ARGS} ADD_TAGS_AS_LABELS)
+        catch_discover_tests(${TARGET} ${_test_prefix_args} EXTRA_ARGS ${CATCH_EXTRA_ARGS} ADD_TAGS_AS_LABELS)
     endif()
 endfunction()
 

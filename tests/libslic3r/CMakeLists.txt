@@ -339,6 +339,9 @@ target_include_directories(libslic3r_geometry_tests PRIVATE ${CMAKE_SOURCE_DIR}/
 set_property(TARGET libslic3r_geometry_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_geometry_tests)
 slicer_enable_llvm_source_coverage(libslic3r_geometry_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(libslic3r_geometry_tests TEST_PREFIX "FocusedGeometry::")
+endif()
 
 # Explicitly built Voronoi tests, without duplicate CTest registration.
 add_executable(libslic3r_voronoi_tests EXCLUDE_FROM_ALL
