@@ -6785,7 +6785,10 @@ void require_chamber_material_invariant(const std::string &observed, const Dynam
 TEST_CASE("Chamber temperature activation emits guarded start and shutdown targets",
           "[GCode][GCodeExportWorkflows][ChamberTemperaturePipeline]")
 {
-    const auto [active, target] = GENERATE(table<bool, int>({{false, 0}, {false, 65}, {true, 0}, {true, 65}}));
+    const auto [active, target] = GENERATE(table<bool, int>({
+        {false, 0}, {false, 65}, {false, 1500},
+        {true, 0},  {true, 65},  {true, 1500},
+    }));
     INFO("active=" << active << ", target=" << target);
 
     DynamicPrintConfig config = gcode_print_variance_contracts::base_config();
@@ -6898,6 +6901,34 @@ TEST_CASE("Chamber targets follow used-filament activation, maximum temperature,
     });
     const auto control = gcode_print_variance_contracts::fresh_custom_mesh_export(control_config, make_cube(5., 5., 2.));
     require_chamber_material_invariant(exported.text, config, control.text, control_config);
+}
+
+TEST_CASE("Chamber minimal temperature supplies the custom start wait with automatic control disabled",
+          "[GCode][GCodeExportWorkflows][ChamberTemperaturePipeline]")
+{
+    const int minimal_temperature = GENERATE(0, 50, 1500);
+    CAPTURE(minimal_temperature);
+    DynamicPrintConfig config = gcode_print_variance_contracts::base_config();
+    config.set_deserialize_strict({
+        {"activate_chamber_temp_control", "0"},
+        {"chamber_temperature", "1500"},
+        {"chamber_minimal_temperature", std::to_string(minimal_temperature)},
+        {"machine_start_gcode", "M191 S[chamber_minimal_temperature]\n"},
+    });
+    const auto exported = gcode_print_variance_contracts::fresh_custom_mesh_export(config, make_cube(5., 5., 0.8));
+
+    DynamicPrintConfig control_config = config;
+    control_config.set_deserialize_strict({{"machine_start_gcode", ""}});
+    const auto control = gcode_print_variance_contracts::fresh_custom_mesh_export(control_config, make_cube(5., 5., 0.8));
+    require_chamber_material_invariant(exported.text, config, control.text, control_config);
+
+    const ChamberEvidence evidence = parse_chamber_commands(exported.text, config);
+    REQUIRE(evidence.extrusions > 0);
+    REQUIRE(evidence.commands.size() == 1);
+    CHECK(evidence.commands.front().code == "M191");
+    CHECK_THAT(evidence.commands.front().target, Catch::Matchers::WithinAbs(minimal_temperature, 1e-4));
+    CHECK(evidence.commands.front().extrusions_before == 0);
+    CHECK(parse_chamber_commands(control.text, control_config).commands.empty());
 }
 
 } // namespace chamber_temperature_pipeline_contracts

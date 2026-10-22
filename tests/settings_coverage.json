@@ -4764,6 +4764,26 @@
         "pipeline_oracle"
       ],
       "reason": "Independent rows use 0%, 65% and 100% completion exhaust speed and require parsed final P3 PWM after the last deposition move with positive XY distance. Auxiliary and during-print speeds remain fixed, the during command stays before deposition, and material and deposition feeds match the representative export."
+    },
+    "chamber_temperature": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ChamberTemperaturePipeline]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The activation matrix exercises 0, representative 65 and the registered 1500 maximum with activation both off and on. Parsed physical M191 S1500 precedes positive-XY deposition and M141 S0 follows the last deposition in the active maximum row; otherwise identical controls preserve deposited material."
+    },
+    "chamber_minimal_temperature": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ChamberTemperaturePipeline]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With automatic chamber activation off and target held at 1500, the documented custom-start consumer emits M191 waits at 0, representative 50 and the registered 1500 maximum. Exactly one parsed numeric wait precedes positive-XY deposition; a control without the custom-start wait emits no chamber commands and preserves deposited material."
     }
   }
 }
