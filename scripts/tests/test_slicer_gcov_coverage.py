@@ -4,8 +4,11 @@ from collections import Counter
 import gzip
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
@@ -17,6 +20,196 @@ import slicer_coverage as common  # noqa: E402
 
 
 class GcovPhysicalLineTests(unittest.TestCase):
+    def test_gcov_jobs_cli_defaults_to_one_and_backend_requires_positive_integer(self):
+        args = common._parser().parse_args([
+            "run", "--backend", "gcov", "--object", "libslic3r_tests",
+            "--test-command", "ctest",
+        ])
+        self.assertEqual(args.gcov_jobs, 1)
+        args = common._parser().parse_args([
+            "run", "--backend", "gcov", "--object", "libslic3r_tests",
+            "--test-command", "ctest", "--gcov-jobs", "4",
+        ])
+        self.assertEqual(gcov.validate_gcov_jobs(args.gcov_jobs), 4)
+        for value in (0, -1, 1.5, True):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    ValueError, "positive integer"):
+                gcov.validate_gcov_jobs(value)
+
+    def test_parallel_gcov_preserves_report_order_and_cold_physical_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source_root = root / "src"
+            source = source_root / "sample.cpp"
+            header = source_root / "inline.hpp"
+            source_root.mkdir()
+            source.touch()
+            header.touch()
+            per_tu = [
+                [{"file": str(source), "lines": [
+                    {"line_number": 2, "count": 1},
+                    {"line_number": 3, "count": 0},
+                    {"line_number": 2, "count": 0},
+                ]}, {"file": str(header), "lines": [{"line_number": 7, "count": 0}]}],
+                [{"file": str(source), "lines": [
+                    {"line_number": 2, "count": 3},
+                    {"line_number": 4, "count": 0},
+                ]}, {"file": str(header), "lines": [{"line_number": 7, "count": 0}]}],
+                [{"file": str(source), "lines": [
+                    {"line_number": 3, "count": 0},
+                    {"line_number": 4, "count": 1},
+                ]}, {"file": str(header), "lines": [{"line_number": 7, "count": 0}]}],
+                [{"file": str(source), "lines": [
+                    {"line_number": 5, "count": 0},
+                ]}],
+            ]
+
+            def run_report(mode: str, jobs: int):
+                barrier = threading.Barrier(jobs) if jobs > 1 else None
+                active = 0
+                maximum_active = 0
+                lock = threading.Lock()
+
+                def fake_gcov(argv, *, cwd, timeout):
+                    nonlocal active, maximum_active
+                    index = int(Path(argv[-1]).stem.split("-")[1])
+                    with lock:
+                        active += 1
+                        maximum_active = max(maximum_active, active)
+                    try:
+                        if barrier is not None:
+                            barrier.wait(timeout=2)
+                            # Finish out of input order so the returned order is tested.
+                            time.sleep((len(per_tu) - index) * 0.003)
+                        payload = {
+                            "gcc_version": "13.3.0", "format_version": "1",
+                            "current_working_directory": str(root), "files": per_tu[index],
+                        }
+                        with gzip.open(cwd / f"tu-{index}.gcov.json.gz", "wt",
+                                       encoding="utf-8") as stream:
+                            json.dump(payload, stream)
+                        return subprocess.CompletedProcess(argv, 0, f"finished-{index}", "")
+                    finally:
+                        with lock:
+                            active -= 1
+
+                mode_dir = root / mode
+                commands = []
+                output_dirs = []
+                for index in range(len(per_tu)):
+                    cwd = mode_dir / f"tu-{index:04d}"
+                    cwd.mkdir(parents=True)
+                    output_dirs.append(cwd)
+                    note = root / f"note-{index}.gcno"
+                    commands.append((["gcov", "--json-format", str(note)], cwd,
+                                     cwd / "gcov.stdout.log", cwd / "gcov.stderr.log",
+                                     f"source-{index}"))
+
+                results = gcov.run_gcov_commands(
+                    commands, jobs=jobs, timeout=20, common=SimpleNamespace(_run=fake_gcov))
+                records = []
+                for index, result in enumerate(results):
+                    self.assertEqual(result.stdout, f"finished-{index}")
+                    emitted = sorted(output_dirs[index].glob("*.gcov.json.gz"))
+                    gcov.validate_gcov_output(result.returncode, len(emitted), f"source-{index}")
+                    tu_records, _ = gcov._read_gcov_json(emitted[0], "13.3.0")
+                    records.extend(gcov.project_gcov_records(tu_records, source_root))
+                    self.assertTrue((output_dirs[index] / "gcov.stdout.log").is_file())
+                    self.assertTrue((output_dirs[index] / "gcov.stderr.log").is_file())
+                report = gcov.validate_gcov_line_records(records, source_root=source_root)
+                return report, maximum_active
+
+            serial, serial_max = run_report("serial", 1)
+            parallel, parallel_max = run_report("parallel", 4)
+            self.assertEqual(serial, parallel)
+            self.assertEqual(serial_max, 1)
+            self.assertEqual(parallel_max, 4)
+            self.assertEqual(parallel["summary"], {
+                "hit_lines": 2, "mapped_lines": 5, "percent": 40.0,
+            })
+            cold = {(entry["filename"], entry["line_number"])
+                    for entry in parallel["physical_lines"] if entry["count"] == 0}
+            self.assertIn((str(source), 3), cold)
+            self.assertIn((str(source), 5), cold)
+            self.assertIn((str(header), 7), cold)
+
+    def test_parallel_gcov_failure_and_ambiguous_output_remain_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            started = []
+
+            def failing_gcov(argv, *, cwd, timeout):
+                index = int(argv[-1])
+                started.append(index)
+                return subprocess.CompletedProcess(argv, 9, "", "bad")
+
+            commands = []
+            for index in range(10):
+                cwd = root / str(index)
+                cwd.mkdir()
+                commands.append((["gcov", str(index)], cwd,
+                                 cwd / "stdout.log", cwd / "stderr.log", f"source-{index}"))
+            with self.assertRaisesRegex(ValueError, "gcov failed or emitted ambiguous JSON"):
+                gcov.run_gcov_commands(
+                    commands, jobs=1, timeout=20, common=SimpleNamespace(_run=failing_gcov))
+            self.assertEqual(started, [0])
+            self.assertTrue((root / "0" / "stdout.log").is_file())
+            self.assertTrue((root / "0" / "stderr.log").is_file())
+            self.assertFalse((root / "1" / "stdout.log").exists())
+
+            started.clear()
+
+            def ambiguous_gcov(argv, *, cwd, timeout):
+                index = int(argv[-1])
+                started.append(index)
+                (cwd / "one.gcov.json.gz").touch()
+                (cwd / "two.gcov.json.gz").touch()
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with self.assertRaisesRegex(ValueError, "gcov failed or emitted ambiguous JSON"):
+                gcov.run_gcov_commands(
+                    commands, jobs=1, timeout=20, common=SimpleNamespace(_run=ambiguous_gcov))
+            self.assertEqual(started, [0])
+            self.assertTrue((root / "0" / "stdout.log").is_file())
+            self.assertTrue((root / "0" / "stderr.log").is_file())
+            self.assertFalse((root / "1" / "stdout.log").exists())
+
+    def test_parallel_gcov_worker_exception_waits_for_pool_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            started = []
+            completed = []
+            lock = threading.Lock()
+            barrier = threading.Barrier(4)
+
+            def exceptional_gcov(argv, *, cwd, timeout):
+                index = int(argv[-1])
+                with lock:
+                    started.append(index)
+                try:
+                    barrier.wait(timeout=2)
+                    if index == 1:
+                        raise OSError("synthetic worker failure")
+                    time.sleep(0.02)
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                finally:
+                    with lock:
+                        completed.append(index)
+
+            commands = []
+            for index in range(10):
+                cwd = root / str(index)
+                cwd.mkdir()
+                commands.append((["gcov", str(index)], cwd,
+                                 cwd / "stdout.log", cwd / "stderr.log", f"source-{index}"))
+            with self.assertRaisesRegex(OSError, "synthetic worker failure"):
+                gcov.run_gcov_commands(
+                    commands, jobs=4, timeout=20, common=SimpleNamespace(_run=exceptional_gcov))
+            self.assertCountEqual(started, range(4))
+            self.assertCountEqual(completed, started)
+            self.assertFalse(any(thread.name.startswith("gcov_")
+                                 for thread in threading.enumerate()))
+
     def test_line_counts_deduplicate_within_and_across_records(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()

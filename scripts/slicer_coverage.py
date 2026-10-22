@@ -1078,6 +1078,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--llvm-cov")
     run.add_argument("--llvm-profdata")
     run.add_argument("--gcov", help="matching GCC gcov executable for --backend gcov")
+    run.add_argument("--gcov-jobs", type=int, default=1,
+                     help="maximum concurrent gcov processes for --backend gcov (default: 1)")
     return parser
 
 

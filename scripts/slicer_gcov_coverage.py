@@ -7,6 +7,7 @@ import, approximate, or replace the LLVM denominator.
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import gzip
 import hashlib
 import json
@@ -26,6 +27,94 @@ FULL_TEST_TARGETS = (
 )
 PRODUCTION_TARGETS = ("libslic3r", "libslic3r_cgal")
 REQUIRED_MANIFEST_TARGETS = set(PRODUCTION_TARGETS + FULL_TEST_TARGETS)
+
+
+def validate_gcov_jobs(value: Any) -> int:
+    """Require an explicit positive bound for concurrent gcov processes."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("--gcov-jobs must be a positive integer")
+    return value
+
+
+def validate_gcov_output(returncode: int, emitted_count: int, source: str) -> None:
+    """Keep the existing fail-closed gcov process/output cardinality gate."""
+    if returncode != 0 or emitted_count > 1:
+        raise ValueError(f"gcov failed or emitted ambiguous JSON for {source}")
+
+
+def run_gcov_commands(
+        commands: list[tuple[list[str], Path, Path, Path, str]], *, jobs: int,
+        timeout: float, common: Any) -> list[Any]:
+    """Run isolated gcov commands, returning results in input order.
+
+    Each tuple is (argv, cwd, stdout log, stderr log, source name). At most
+    ``jobs`` futures are submitted at once. A worker saves its logs and checks
+    the process/output cardinality before it can succeed. On failure, no more
+    work is submitted, pending futures are canceled, and running workers settle
+    before this function raises. Successful results retain input order.
+    """
+    jobs = validate_gcov_jobs(jobs)
+
+    def invoke(command: tuple[list[str], Path, Path, Path, str]) -> Any:
+        argv, cwd, stdout_path, stderr_path, source = command
+        result = common._run(argv, cwd=cwd, timeout=timeout)
+        stdout_path.write_text(result.stdout or "", encoding="utf-8")
+        stderr_path.write_text(result.stderr or "", encoding="utf-8")
+        emitted_count = sum(path.is_file() for path in cwd.glob("*.gcov.json.gz"))
+        validate_gcov_output(result.returncode, emitted_count, source)
+        return result
+
+    if not commands:
+        return []
+    if jobs == 1 or len(commands) == 1:
+        return [invoke(command) for command in commands]
+    worker_count = min(jobs, len(commands))
+    executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="gcov")
+    pending: dict[Any, int] = {}
+    results: list[Any] = [None] * len(commands)
+    next_index = 0
+
+    def submit_one() -> None:
+        nonlocal next_index
+        future = executor.submit(invoke, commands[next_index])
+        pending[future] = next_index
+        next_index += 1
+
+    try:
+        while next_index < worker_count:
+            submit_one()
+        while pending:
+            done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            # Consume every result already ready before replenishing the pool;
+            # this prevents a nearby completed failure from sitting behind a
+            # successful result and causing avoidable new submissions.
+            ready = sorted((future for future in pending if future in done or future.done()),
+                           key=pending.__getitem__)
+            for future in ready:
+                index = pending.pop(future)
+                results[index] = future.result()
+            if any(future.done() for future in pending):
+                continue
+            while next_index < len(commands) and len(pending) < worker_count:
+                if any(future.done() for future in pending):
+                    break
+                submit_one()
+        return results
+    except BaseException:
+        # Future.cancel() only cancels work that has not started; running gcov
+        # subprocesses are allowed to settle (or hit their own timeout).
+        for future in pending:
+            future.cancel()
+        if pending:
+            wait(tuple(pending))
+            for future in pending:
+                try:
+                    future.result()
+                except BaseException:
+                    pass
+        raise
+    finally:
+        executor.shutdown(wait=True)
 
 
 def _fail(common: Any, message: str) -> None:
@@ -372,6 +461,10 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         args.threshold = validate_threshold(float(args.threshold))
     except (TypeError, ValueError) as exc:
         _fail(common, str(exc))
+    try:
+        gcov_jobs = validate_gcov_jobs(getattr(args, "gcov_jobs", 1))
+    except (TypeError, ValueError) as exc:
+        _fail(common, str(exc))
     if args.metrics is None:
         args.metrics = ["lines"]
     if any(metric != "lines" for metric in args.metrics):
@@ -585,6 +678,7 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         "stderr_sha256": _hash_file(out / "ctest.stderr.log"),
         "junit": _sha_artifact(common, junit_path),
         "gcov_prefix": str(gcov_prefix), "gcov_prefix_strip": 0,
+        "gcov_jobs": gcov_jobs,
     }
     if test.returncode != 0 or not junit_path.is_file():
         report = {"status": "test_failed" if test.returncode else "missing_junit",
@@ -625,6 +719,8 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
     gcov_invocations: list[dict[str, Any]] = []
     gcov_json_metadata: list[dict[str, Any]] = []
     selected_note_to_row = {Path(row["gcno"]).resolve(): row for row in compile_rows}
+    gcov_jobs_to_run: list[dict[str, Any]] = []
+    gcov_commands: list[tuple[list[str], Path, Path, Path, str]] = []
     for index, note in enumerate(sorted(expected_notes)):
         row = selected_note_to_row[note]
         object_path = Path(row["object"])
@@ -642,10 +738,25 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
             shutil.copy2(gcda, staged_gcda)
         output_dir = out / "gcov-json" / f"tu-{index:04d}"
         output_dir.mkdir(parents=True)
-        result = common._run([gcov, "--json-format", str(staged_note)],
-                             cwd=output_dir, timeout=args.timeout)
-        (output_dir / "gcov.stdout.log").write_text(result.stdout or "", encoding="utf-8")
-        (output_dir / "gcov.stderr.log").write_text(result.stderr or "", encoding="utf-8")
+        gcov_jobs_to_run.append({"index": index, "note": note, "row": row,
+                                 "object": object_path, "gcda": gcda,
+                                 "staged_note": staged_note, "staged_gcda": staged_gcda,
+                                 "output_dir": output_dir})
+        gcov_commands.append(([gcov, "--json-format", str(staged_note)], output_dir,
+                              output_dir / "gcov.stdout.log", output_dir / "gcov.stderr.log",
+                              row["source"]))
+
+    gcov_results = run_gcov_commands(gcov_commands, jobs=gcov_jobs,
+                                     timeout=args.timeout, common=common)
+    for job, result in zip(gcov_jobs_to_run, gcov_results):
+        index = job["index"]
+        note = job["note"]
+        row = job["row"]
+        object_path = job["object"]
+        gcda = job["gcda"]
+        staged_note = job["staged_note"]
+        staged_gcda = job["staged_gcda"]
+        output_dir = job["output_dir"]
         emitted = sorted(output_dir.glob("*.gcov.json.gz"))
         gcov_invocations.append({"target": row["target"], "source": row["source"],
                                  "argv": [gcov, "--json-format", str(staged_note)],
@@ -654,8 +765,6 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
                                  "stdout_log": _sha_artifact(common, output_dir / "gcov.stdout.log"),
                                  "stderr_log": _sha_artifact(common, output_dir / "gcov.stderr.log"),
                                  "json": [_sha_artifact(common, path) for path in emitted]})
-        if result.returncode != 0 or len(emitted) > 1:
-            _fail(common, f"gcov failed or emitted ambiguous JSON for {row['source']}")
         tu_records: list[dict[str, Any]] = []
         project_tu_records: list[dict[str, Any]] = []
         if emitted:
