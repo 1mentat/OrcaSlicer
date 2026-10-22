@@ -37,6 +37,13 @@ test registered with CTest. For reproducible generator inputs, configure with
 the seed with the results and vary it in additional runs to explore other
 inputs. The default empty value keeps Catch2's automatic seed selection.
 
+CTest discovery uses a Python 3 interpreter to parse each Catch2 JSON listing
+once before CMake generates its test commands and properties. This avoids
+reparsing the entire listing for every test after a suite is linked. Run
+`python3 -m unittest discover -s scripts/tests -p test_catch_preprocessor.py`
+to check malformed listings and literal names, tags, and output paths without
+compiling C++.
+
 Run expensive development, coverage, and mutation controllers inside an OS
 resource boundary. Compiler job counts and test timeouts do not impose a memory
 limit. The Linux example below assumes a 64 GiB worker with a systemd user

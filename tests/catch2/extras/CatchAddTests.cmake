@@ -1,6 +1,8 @@
 # Distributed under the OSI-approved BSD 3-Clause License.  See accompanying
 # file Copyright.txt or https://cmake.org/licensing for details.
 
+set(_CATCH_ADD_TESTS_SCRIPT_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
 function(add_command NAME)
   set(_args "")
   # use ARGV* instead of ARGN, because ARGN splits arrays into multiple arguments
@@ -8,13 +10,25 @@ function(add_command NAME)
   foreach(_n RANGE 1 ${_last_arg})
     set(_arg "${ARGV${_n}}")
     if(_arg MATCHES "[^-./:a-zA-Z0-9_]")
-      set(_args "${_args} [==[${_arg}]==]") # form a bracket_argument
+      # Keep the existing delimiter for ordinary values, but extend it when
+      # the value itself contains the matching closing token.
+      set(_equals "==")
+      while(1)
+        set(_closing "]${_equals}]")
+        string(FIND "${_arg}" "${_closing}" _closing_pos)
+        if(_closing_pos EQUAL -1)
+          break()
+        endif()
+        string(APPEND _equals "=")
+      endwhile()
+      set(_args "${_args} [${_equals}[${_arg}]${_equals}]") # form a bracket_argument
     else()
       set(_args "${_args} ${_arg}")
     endif()
   endforeach()
   set(script "${script}${NAME}(${_args})\n" PARENT_SCOPE)
 endfunction()
+
 
 function(catch_discover_tests_impl)
 
@@ -134,26 +148,31 @@ function(catch_discover_tests_impl)
     endforeach()
   endif()
 
-  # Parse JSON output for list of tests/class names/tags
-  string(JSON version GET "${listing_output}" "version")
-  if(NOT version STREQUAL "1")
-    message(FATAL_ERROR "Unsupported catch output version: '${version}'")
+  # Pre-extract JSON records once instead of reparsing the full listing per test.
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  set(listing_json_file "${_CTEST_FILE}.listing.json")
+  set(listing_records_file "${_CTEST_FILE}.records.cmake")
+  file(WRITE "${listing_json_file}" "${listing_output}")
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}"
+      "${_CATCH_ADD_TESTS_SCRIPT_DIR}/CatchAddTestsPreprocess.py"
+      "${listing_json_file}"
+    OUTPUT_FILE "${listing_records_file}"
+    ERROR_VARIABLE preprocessing_error
+    RESULT_VARIABLE preprocessing_result
+  )
+  if(NOT preprocessing_result EQUAL 0)
+    message(FATAL_ERROR "Error preprocessing Catch test listing: ${preprocessing_error}")
   endif()
-
-  # Speed-up reparsing by cutting away unneeded parts of JSON.
-  string(JSON test_listing GET "${listing_output}" "listings" "tests")
-  string(JSON num_tests LENGTH "${test_listing}")
-
-  # Exit early if no tests are detected
-  if(num_tests STREQUAL "0")
+  include("${listing_records_file}")
+  file(REMOVE "${listing_json_file}" "${listing_records_file}")
+  if(_CATCH_PREPROCESSED_TEST_COUNT STREQUAL "0")
     return()
   endif()
-
-  # CMake's foreach-RANGE is inclusive, so we have to subtract 1
-  math(EXPR num_tests "${num_tests} - 1")
+  math(EXPR num_tests "${_CATCH_PREPROCESSED_TEST_COUNT} - 1")
 
   foreach(idx RANGE ${num_tests})
-    string(JSON single_test GET ${test_listing} ${idx})
+    set(single_test "${_CATCH_TEST_RECORD_${idx}}")
     string(JSON test_tags GET "${single_test}" "tags")
     string(JSON plain_name GET "${single_test}" "name")
 

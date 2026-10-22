@@ -161,6 +161,7 @@ if(NOT_SUBPROJECT)
         "extras/ParseAndAddCatchTests.cmake"
         "extras/Catch.cmake"
         "extras/CatchAddTests.cmake"
+        "extras/CatchAddTestsPreprocess.py"
         "extras/CatchShardTests.cmake"
         "extras/CatchShardTestsImpl.cmake"
       DESTINATION
