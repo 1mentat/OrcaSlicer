@@ -2270,13 +2270,14 @@
       "reason": "Changing SLA slice closing radius from 0.005 to 0.01 invalidates completed object slices. This tests recomputation state; geometric effects on gaps and the numeric domain remain unclaimed."
     },
     "pad_wall_height": {
-      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
-      "tag": "[SLALifecycle]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Changing SLA pad wall height from 1.0 to 2.0 invalidates a completed pad. Rebuilt pad dimensions and the numeric domain remain unclaimed."
+      "reason": "Wall heights 0, 1, and 30 mm at fixed thickness produce the corresponding public pad-mesh Z spans and preserve model slice area. All rows use 0.5 mm sampling to include an interior mesh plane for the 1 mm endpoint stack.",
+      "tag": "[SLAPadWallHeightBoundary]",
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp"
     },
     "support_pillar_diameter": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
@@ -2691,30 +2692,31 @@
     },
     "filament_cooling_moves": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[CoolingMotionBoundaries]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "With the same active ramming configuration, 0 versus 2 cooling moves removes or retains executable cooling motion. Scope is direct WipeTower2 output; the full numeric range remains unclaimed."
+      "reason": "The passing direct WipeTower2 case exercises move-count endpoints 0 and 20 plus representative 2. It parses relative E and XY output: each active cooling move contributes one positive and one negative 40 mm tube stroke (80 mm absolute E), with positive XY path, balanced net E, finite positive effective modal feeds, and unchanged recorded wipe geometry. This does not enumerate every count."
     },
     "filament_cooling_initial_speed": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[CoolingMotionBoundaries]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Initial speeds 2 and 4 are varied independently while final speed stays 6; parsed cooling motion changes and baseline feedrates are checked. Scope is direct WipeTower2 output."
+      "reason": "With final speed fixed at 6 mm/s, initial speeds 2 and 4 mm/s produce the configured first-stroke filament rate, derived independently from serialized E, XY distance, and effective modal F. Material balance, positive feed, and wipe geometry are preserved. The registered minimum 0 is not claimed."
     },
     "filament_cooling_final_speed": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[CoolingMotionBoundaries]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Final speeds 6 and 8 are varied independently while initial speed stays 2; parsed cooling motion changes and baseline feedrates are checked. Scope is direct WipeTower2 output."
+      "reason": "With initial speed fixed at 2 mm/s, final speeds 6 and 8 mm/s produce the configured final-stroke filament rate, derived independently from serialized E, XY distance, and effective modal F. Material balance, positive feed, and wipe geometry are preserved. The registered minimum 0 remains unclaimed because its separate diagnostic emits F0."
     },
     "filament_stamping_distance": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2999,12 +3001,12 @@
     },
     "enable_tower_interface_features": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[WipeTowerContact]",
+      "tag": "[WipeTowerContactPipeline]",
       "dimensions": [
         "boolean_values",
-        "fixture_only"
+        "pipeline_oracle"
       ],
-      "reason": "Direct wipe-tower generation exercises disabled and enabled interface features. Disabled output omits interface waits, temperature restores and pre-extrusion; enabled output contains the configured commands. Full Print wiring remains unclaimed."
+      "reason": "Paired true/false configs pass through init_print, Print::validate and public gcode(Print) export. The enabled output contains correctly targeted tower-interface waits, restores and pre-extrusions; disabled output contains none. Both retain a real tower/tool-change block and equal model extrusion count, XY path length and filament usage."
     },
     "filament_tower_interface_print_temp": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -4790,6 +4792,85 @@
         "pipeline_oracle"
       ],
       "reason": "With automatic chamber activation off and target held at 1500, the documented custom-start consumer emits M191 waits at 0, representative 50 and the registered 1500 maximum. Exactly one parsed numeric wait precedes positive-XY deposition; a control without the custom-start wait emits no chamber commands and preserves deposited material."
+    },
+    "pad_brim_size": {
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public SLAPrint validator rejects the registered zero brim endpoint. Valid 0.1, 5, and 30 mm brim rows produce increasing public pad footprints while preserving the model slice area.",
+      "tag": "[SLAPadBrimBoundary]",
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp"
+    },
+    "pad_object_connector_penetration": {
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "At penetration 0 and a positive penetration, the same elevated-support fixture compares public pad volume and footprint while stride, width, object gap, support geometry, and model slices stay fixed. No upper domain endpoint is claimed because PrintConfig declares none.",
+      "tag": "[SLAPadConnectorBoundary]",
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp"
+    },
+    "pad_object_connector_stride": {
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "At stride 0 and a positive stride, the same elevated-support fixture compares public pad volume and footprint while connector width, penetration, object gap, support geometry, and model slices stay fixed. No upper domain endpoint is claimed because PrintConfig declares none.",
+      "tag": "[SLAPadConnectorBoundary]",
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp"
+    },
+    "pad_object_connector_width": {
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "At width 0 and a positive width, the same elevated-support fixture compares public pad volume and footprint while stride, penetration, object gap, support geometry, and model slices stay fixed. No upper domain endpoint is claimed because PrintConfig declares none.",
+      "tag": "[SLAPadConnectorBoundary]",
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp"
+    },
+    "pad_object_gap": {
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "On an elevated-island model with one real support, gap 0 is checked against positive-gap public geometry without assuming whether the pad must be empty; production accepts an empty pad when around-object mode is enabled and everywhere mode is off. The representative and maximum gap rows must retain finite pad geometry, with model slice area and support mesh volume invariant.",
+      "tag": "[SLAPadObjectGapBoundary]",
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp"
+    },
+    "pad_wall_slope": {
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Registered slopes 45, 67.5, and 90 degrees produce strictly decreasing adjacent X/Y extents of the public pad mesh, while preserving pad Z span and baseline model slice area. The direction follows the public pad geometry offset term (thickness + wing height) / tan(slope); no angle outside the registered range is claimed.",
+      "tag": "[SLAPadWallSlopeBoundary]",
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp"
+    },
+    "pad_wall_thickness": {
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Wall thicknesses 0, 1, and 30 mm at fixed wall height produce the corresponding public pad-mesh Z spans and preserve model slice area. All rows use 0.5 mm sampling to include an interior mesh plane for the 1 mm endpoint stack.",
+      "tag": "[SLAPadWallThicknessBoundary]",
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp"
+    },
+    "calib_flowrate_topinfill_special_order": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[FlowCalibrationOrder]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public Print::process runs the setting false and true for default, inward, and outward Archimedean top-fill orders. For the default order, true puts the longest center-starting spiral last and preserves inside-out order; for explicit inward/outward settings, false and true produce identical ordered paths. Every comparison preserves deposited path length and covered footprint area."
     }
   }
 }

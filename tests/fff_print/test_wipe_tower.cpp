@@ -2436,6 +2436,226 @@ TEST_CASE("WipeTower2 cooling moves, rates and stamping settings alter emitted c
     CHECK(feedrates(cooling_motion(enabled)).count(240) == 1);
 }
 
+namespace {
+
+struct CoolingXYExtrusion {
+    double absolute_e = 0.0;
+    double xy_distance = 0.0;
+    double feed_mm_min = 0.0;
+};
+
+struct CoolingMotionEvidence {
+    size_t e_moves = 0;
+    size_t positive_e_moves = 0;
+    size_t negative_e_moves = 0;
+    size_t positive_xy_e_moves = 0;
+    double net_e = 0.0;
+    double absolute_e = 0.0;
+    double xy_path = 0.0;
+    std::vector<double> effective_feeds;
+    std::vector<CoolingXYExtrusion> xy_extrusions;
+    bool finite = true;
+};
+
+DynamicPrintConfig cooling_motion_config(const int move_count, const float initial_speed, const float final_speed)
+{
+    DynamicPrintConfig config = tower_dynamic({
+        {"enable_filament_ramming", true},
+        {"filament_ramming_parameters", "100 100 30 30 30 30"},
+        {"filament_stamping_distance", "0,0"},
+        {"cooling_tube_length", 40},
+        {"cooling_tube_retraction", 10},
+        {"filament_toolchange_delay", "1,1"},
+        {"use_relative_e_distances", true},
+    });
+    config.set_key_value("filament_cooling_moves", new ConfigOptionInts{move_count, move_count});
+    config.set_key_value("filament_cooling_initial_speed", new ConfigOptionFloats{initial_speed, initial_speed});
+    config.set_key_value("filament_cooling_final_speed", new ConfigOptionFloats{final_speed, final_speed});
+    return config;
+}
+
+CoolingMotionEvidence cooling_motion_evidence(const DirectRun &run, const DynamicPrintConfig &config)
+{
+    CoolingMotionEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool in_cooling = false;
+    bool first_cooling_complete = false;
+    reader.parse_buffer(run.gcode, [&evidence, &in_cooling, &first_cooling_complete](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment == " Cooling") {
+            if (!first_cooling_complete)
+                in_cooling = true;
+            return;
+        }
+        if (comment == " Cooling park") {
+            if (in_cooling)
+                first_cooling_complete = true;
+            in_cooling = false;
+            return;
+        }
+        if (!in_cooling || !line.cmd_is("G1") || !line.has_e())
+            return;
+
+        const double delta_e = line.dist_E(self);
+        if (std::abs(delta_e) <= EPSILON)
+            return;
+        const double xy = line.dist_XY(self);
+        const double feed = line.has_f() ? line.f() : self.f();
+        ++evidence.e_moves;
+        if (delta_e > 0.0)
+            ++evidence.positive_e_moves;
+        else
+            ++evidence.negative_e_moves;
+        if (xy > EPSILON)
+            ++evidence.positive_xy_e_moves;
+        if (xy > EPSILON)
+            evidence.xy_extrusions.push_back({std::abs(delta_e), xy, feed});
+        evidence.net_e += delta_e;
+        evidence.absolute_e += std::abs(delta_e);
+        evidence.xy_path += xy;
+        evidence.effective_feeds.push_back(feed);
+        evidence.finite = evidence.finite && std::isfinite(delta_e) && std::isfinite(xy) &&
+                          std::isfinite(feed) && feed >= 0.0 && xy >= 0.0;
+    });
+    return evidence;
+}
+
+void require_same_wipe_geometry(const DirectRun &reference, const DirectRun &observed)
+{
+    CHECK(observed.extrusion_count == reference.extrusion_count);
+    CHECK_THAT(observed.extrusion_length, WithinAbs(reference.extrusion_length, 1e-4));
+    CHECK_THAT(observed.depth, WithinAbs(reference.depth, 1e-4f));
+    CHECK_THAT(observed.height, WithinAbs(reference.height, 1e-4f));
+}
+
+void require_balanced_cooling_path(const CoolingMotionEvidence &evidence, const int move_count)
+{
+    REQUIRE(evidence.finite);
+    CHECK(evidence.e_moves == static_cast<size_t>(2 * move_count));
+    CHECK(evidence.positive_e_moves == static_cast<size_t>(move_count));
+    CHECK(evidence.negative_e_moves == static_cast<size_t>(move_count));
+    CHECK(evidence.positive_xy_e_moves == static_cast<size_t>(2 * move_count));
+    CHECK_THAT(evidence.net_e, WithinAbs(0.0, 1e-4));
+    CHECK_THAT(evidence.absolute_e, WithinAbs(80.0 * move_count, 1e-3));
+    if (move_count > 0)
+        CHECK(evidence.xy_path > 0.0);
+    else
+        CHECK_THAT(evidence.xy_path, WithinAbs(0.0, 1e-6));
+}
+
+void require_positive_effective_cooling_feeds(const CoolingMotionEvidence &evidence)
+{
+    for (const double feed : evidence.effective_feeds) {
+        CHECK(std::isfinite(feed));
+        CHECK(feed > 0.0);
+    }
+}
+
+double effective_filament_rate(const CoolingXYExtrusion &move)
+{
+    REQUIRE(std::isfinite(move.absolute_e));
+    REQUIRE(std::isfinite(move.xy_distance));
+    REQUIRE(std::isfinite(move.feed_mm_min));
+    REQUIRE(move.absolute_e > EPSILON);
+    REQUIRE(move.xy_distance > EPSILON);
+    REQUIRE(move.feed_mm_min > 0.0);
+
+    const double duration_seconds = 60.0 * move.xy_distance / move.feed_mm_min;
+    REQUIRE(std::isfinite(duration_seconds));
+    REQUIRE(duration_seconds > 0.0);
+    return move.absolute_e / duration_seconds;
+}
+
+void require_endpoint_cooling_rates(const CoolingMotionEvidence &evidence,
+                                    const double initial_speed,
+                                    const double final_speed)
+{
+    REQUIRE(evidence.xy_extrusions.size() >= 2);
+    REQUIRE(initial_speed > 0.0);
+    REQUIRE(final_speed > 0.0);
+
+    const double first_rate = effective_filament_rate(evidence.xy_extrusions.front());
+    const double last_rate = effective_filament_rate(evidence.xy_extrusions.back());
+    INFO("first cooling filament rate=" << first_rate << " mm/s, configured initial="
+         << initial_speed << " mm/s; last cooling filament rate=" << last_rate
+         << " mm/s, configured final=" << final_speed << " mm/s");
+
+    // WipeTowerWriter2 rounds F to the nearest 1 mm/min. At the smallest tested
+    // endpoint (2 mm/s, F=80 mm/min), this contributes at most 0.0125 mm/s;
+    // 0.02 mm/s also covers the 0.001 mm XY serialization. It remains narrow
+    // enough to detect a wrong endpoint rate.
+    constexpr double kRateToleranceMmPerSecond = 0.02;
+    CHECK_THAT(first_rate, WithinAbs(initial_speed, kRateToleranceMmPerSecond));
+    CHECK_THAT(last_rate, WithinAbs(final_speed, kRateToleranceMmPerSecond));
+}
+
+void require_same_material_motion(const DirectRun &reference, const DirectRun &observed,
+                                 const CoolingMotionEvidence &evidence, const int move_count)
+{
+    require_same_wipe_geometry(reference, observed);
+    require_balanced_cooling_path(evidence, move_count);
+    require_positive_effective_cooling_feeds(evidence);
+}
+
+} // namespace
+
+TEST_CASE("WipeTower2 cooling move counts preserve balanced filament and wipe geometry",
+          "[WipeTower][MultimaterialWipe][CoolingMotionBoundaries]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 60.f}, {0.4f, 0.2f, 1, 0, 60.f}};
+    constexpr std::array<int, 3> move_counts{{0, 2, 20}};
+    const DirectRun geometry_reference = run_tower(cooling_motion_config(0, 2.f, 6.f), plan);
+    require_finite(geometry_reference);
+
+    for (const int move_count : move_counts) {
+        CAPTURE(move_count);
+        const DynamicPrintConfig config = cooling_motion_config(move_count, 2.f, 6.f);
+        const DirectRun run = run_tower(config, plan);
+        require_finite(run);
+        const CoolingMotionEvidence evidence = cooling_motion_evidence(run, config);
+        require_same_material_motion(geometry_reference, run, evidence, move_count);
+        if (move_count == 0)
+            CHECK(cooling_motion(run).empty());
+        else
+            CHECK_FALSE(cooling_motion(run).empty());
+    }
+}
+
+TEST_CASE("WipeTower2 positive cooling speed representatives reach physical motion",
+          "[WipeTower][MultimaterialWipe][CoolingMotionBoundaries]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 60.f}, {0.4f, 0.2f, 1, 0, 60.f}};
+    struct Row {
+        const char *name;
+        float initial_speed;
+        float final_speed;
+    };
+    constexpr std::array<Row, 2> rows{{
+        {"representative initial speed", 4.f, 6.f},
+        {"representative final speed", 2.f, 8.f},
+    }};
+    const DirectRun reference = run_tower(cooling_motion_config(2, 2.f, 6.f), plan);
+    require_finite(reference);
+    const CoolingMotionEvidence reference_evidence = cooling_motion_evidence(
+        reference, cooling_motion_config(2, 2.f, 6.f));
+    require_same_material_motion(reference, reference, reference_evidence, 2);
+    const std::string reference_motion = cooling_motion(reference);
+
+    for (const Row &row : rows) {
+        CAPTURE(row.name, row.initial_speed, row.final_speed);
+        const DynamicPrintConfig config = cooling_motion_config(2, row.initial_speed, row.final_speed);
+        const DirectRun run = run_tower(config, plan);
+        require_finite(run);
+        const CoolingMotionEvidence evidence = cooling_motion_evidence(run, config);
+        require_same_material_motion(reference, run, evidence, 2);
+        require_endpoint_cooling_rates(evidence, row.initial_speed, row.final_speed);
+        CHECK(cooling_motion(run) != reference_motion);
+    }
+}
+
 TEST_CASE("WipeTower2 short stamping spreads the configured filament load over a bounded return path",
           "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
 {

@@ -1137,14 +1137,16 @@ struct PadVarianceRun {
     double model_area = 0.;
 };
 
-PadVarianceRun run_pad(double wall_thickness, double brim_size)
+PadVarianceRun run_pad(double wall_thickness, double brim_size,
+                       double wall_height = 1.0, double wall_slope = 45.0,
+                       double layer_height = 1.0)
 {
-    DynamicPrintConfig config = sla_config(1.0);
+    DynamicPrintConfig config = sla_config(layer_height);
     config.set_key_value("pad_enable", new ConfigOptionBool(true));
     config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(wall_thickness));
-    config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_wall_height", new ConfigOptionFloat(wall_height));
     config.set_key_value("pad_brim_size", new ConfigOptionFloat(brim_size));
-    config.set_key_value("pad_wall_slope", new ConfigOptionFloat(45.0));
+    config.set_key_value("pad_wall_slope", new ConfigOptionFloat(wall_slope));
     config.set_key_value("pad_max_merge_distance", new ConfigOptionFloat(50.0));
     config.set_key_value("pad_around_object", new ConfigOptionBool(false));
     config.set_key_value("pad_around_object_everywhere", new ConfigOptionBool(false));
@@ -2327,4 +2329,236 @@ TEST_CASE("SLA SL1 export records material speed and profile identity values",
     CHECK(run.config_ini.find("printerVariant = " + profile.printer_variant + "\n") != std::string::npos);
     CHECK(run.config_ini.find("printerProfile = " + profile.printer_profile + "\n") != std::string::npos);
     CHECK(run.config_ini.find("printProfile = " + profile.print_profile + "\n") != std::string::npos);
+}
+
+
+namespace sla_pad_geometry_boundary_contracts {
+
+struct AroundPadRun {
+    bool   empty = true;
+    double volume = 0.;
+    double footprint_x = 0.;
+    double footprint_y = 0.;
+    double support_volume = 0.;
+    double model_area = 0.;
+};
+
+AroundPadRun run_around_pad(double object_gap, double connector_stride,
+                            double connector_width, double connector_penetration,
+                            double support_base_safety_distance)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    sla_support_pad_followup_v4::enable_common_pad(config, false);
+    config.set_key_value("pad_object_gap", new ConfigOptionFloat(object_gap));
+    config.set_key_value("pad_object_connector_stride", new ConfigOptionFloat(connector_stride));
+    config.set_key_value("pad_object_connector_width", new ConfigOptionFloat(connector_width));
+    config.set_key_value("pad_object_connector_penetration", new ConfigOptionFloat(connector_penetration));
+    config.set_key_value("support_buildplate_only", new ConfigOptionBool(true));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance",
+                         new ConfigOptionFloat(support_base_safety_distance));
+
+    TriangleMesh model_mesh = make_cube(10.0, 10.0, 1.0);
+    TriangleMesh elevated_island = make_cube(6.0, 6.0, 2.0);
+    elevated_island.translate(12.f, 2.f, 5.f);
+    model_mesh.merge(elevated_island);
+    sla::SupportPoints points{sla::SupportPoint(15.f, 5.f, 5.f, 0.5f, true)};
+
+    SlaCubeFixture fixture(std::move(config), std::move(model_mesh), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    const auto validation = fixture.print.validate();
+    INFO("embedded pad validation: " << validation.string);
+    REQUIRE(validation.string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    REQUIRE(object->is_step_done(slaposPad));
+    REQUIRE(object->get_support_points().size() == 1);
+    TriangleMesh pad = object->pad_mesh();
+    TriangleMesh support = object->support_mesh();
+    REQUIRE_FALSE(support.empty());
+
+    AroundPadRun result;
+    result.empty = pad.empty();
+    result.support_volume = std::abs(static_cast<double>(support.volume()));
+    REQUIRE(std::isfinite(result.support_volume));
+    REQUIRE(result.support_volume > 0.);
+    if (!result.empty) {
+        result.volume = std::abs(static_cast<double>(pad.volume()));
+        const auto bbox = pad.bounding_box();
+        result.footprint_x = bbox.max.x() - bbox.min.x();
+        result.footprint_y = bbox.max.y() - bbox.min.y();
+        REQUIRE(std::isfinite(result.volume));
+        REQUIRE(std::isfinite(result.footprint_x));
+        REQUIRE(std::isfinite(result.footprint_y));
+        REQUIRE(result.volume > 0.);
+        REQUIRE(result.footprint_x > 0.);
+        REQUIRE(result.footprint_y > 0.);
+    }
+
+    const double area_scale = scaled<double>(1.0) * scaled<double>(1.0);
+    for (const SLAPrintObject::SliceRecord &record : object->get_slice_index())
+        for (const ExPolygon &slice : record.get_slice(soModel))
+            result.model_area += slice.area() / area_scale;
+    REQUIRE(std::isfinite(result.model_area));
+    REQUIRE(result.model_area > 0.);
+    return result;
+}
+
+bool geometry_differs(const AroundPadRun &a, const AroundPadRun &b)
+{
+    if (a.empty != b.empty)
+        return true;
+    if (a.empty)
+        return false;
+    constexpr double tolerance = 1e-3;
+    return std::abs(a.volume - b.volume) > tolerance ||
+           std::abs(a.footprint_x - b.footprint_x) > tolerance ||
+           std::abs(a.footprint_y - b.footprint_y) > tolerance;
+}
+
+void check_same_model_and_support(const AroundPadRun &reference,
+                                 const AroundPadRun &candidate)
+{
+    CHECK_THAT(candidate.model_area,
+               Catch::Matchers::WithinAbs(reference.model_area, 1e-4));
+    CHECK_THAT(candidate.support_volume,
+               Catch::Matchers::WithinAbs(reference.support_volume, 1e-4));
+}
+
+} // namespace sla_pad_geometry_boundary_contracts
+
+// pad_blueprint samples from the ground plane in layer_height steps below the
+// full-height endpoint. A 1 mm stack at a 1 mm stride has no interior sample,
+// so these endpoint sweeps use 0.5 mm layers to exercise generated geometry.
+TEST_CASE("SLA pad wall thickness honors its registered boundaries",
+          "[SLAPrint][SLAFeatures][SLAPadWallThicknessBoundary]")
+{
+    const std::vector<double> values{0.0, 1.0, 30.0};
+    std::vector<sla_pad_variance_contracts::PadVarianceRun> runs;
+    for (const double value : values) {
+        INFO("pad_wall_thickness=" << value);
+        runs.emplace_back(sla_pad_variance_contracts::run_pad(value, 30.0, 1.0, 90.0, 0.5));
+    }
+    REQUIRE(runs.size() == values.size());
+    for (std::size_t i = 0; i < runs.size(); ++i) {
+        CHECK_THAT(runs[i].z_span, Catch::Matchers::WithinAbs(values[i] + 1.0, 1e-4));
+        CHECK_THAT(runs[i].model_area,
+                   Catch::Matchers::WithinAbs(runs.front().model_area, 1e-4));
+    }
+    CHECK(runs.front().z_span < runs.back().z_span);
+}
+
+TEST_CASE("SLA pad wall height honors its registered boundaries",
+          "[SLAPrint][SLAFeatures][SLAPadWallHeightBoundary]")
+{
+    const std::vector<double> values{0.0, 1.0, 30.0};
+    std::vector<sla_pad_variance_contracts::PadVarianceRun> runs;
+    for (const double value : values) {
+        INFO("pad_wall_height=" << value);
+        runs.emplace_back(sla_pad_variance_contracts::run_pad(1.0, 30.0, value, 90.0, 0.5));
+    }
+    REQUIRE(runs.size() == values.size());
+    for (std::size_t i = 0; i < runs.size(); ++i) {
+        CHECK_THAT(runs[i].z_span, Catch::Matchers::WithinAbs(values[i] + 1.0, 1e-4));
+        CHECK_THAT(runs[i].model_area,
+                   Catch::Matchers::WithinAbs(runs.front().model_area, 1e-4));
+    }
+    CHECK(runs.front().z_span < runs.back().z_span);
+}
+
+TEST_CASE("SLA pad brim rejects zero and expands through its valid range",
+          "[SLAPrint][SLAFeatures][SLAPadBrimBoundary]")
+{
+    DynamicPrintConfig invalid_config = sla_config(1.0);
+    invalid_config.set_key_value("pad_enable", new ConfigOptionBool(true));
+    invalid_config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(0.8));
+    invalid_config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    invalid_config.set_key_value("pad_brim_size", new ConfigOptionFloat(0.0));
+    invalid_config.set_key_value("pad_wall_slope", new ConfigOptionFloat(90.0));
+    SlaCubeFixture invalid_fixture(std::move(invalid_config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(invalid_fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    const auto rejection = invalid_fixture.print.validate();
+    CHECK(rejection.string.find("Pad brim size is too small") != std::string::npos);
+
+    const std::vector<double> values{0.1, 5.0, 30.0};
+    std::vector<sla_pad_variance_contracts::PadVarianceRun> runs;
+    for (const double value : values) {
+        INFO("pad_brim_size=" << value);
+        runs.emplace_back(sla_pad_variance_contracts::run_pad(0.8, value, 1.0, 90.0));
+    }
+    REQUIRE(runs.size() == values.size());
+    for (std::size_t i = 1; i < runs.size(); ++i) {
+        CHECK(runs[i].footprint_x > runs[i - 1].footprint_x);
+        CHECK(runs[i].footprint_y > runs[i - 1].footprint_y);
+        CHECK_THAT(runs[i].model_area,
+                   Catch::Matchers::WithinAbs(runs.front().model_area, 1e-4));
+    }
+}
+
+TEST_CASE("SLA pad wall slope boundaries change the public footprint",
+          "[SLAPrint][SLAFeatures][SLAPadWallSlopeBoundary]")
+{
+    const std::vector<double> values{45.0, 67.5, 90.0};
+    std::vector<sla_pad_variance_contracts::PadVarianceRun> runs;
+    for (const double value : values) {
+        INFO("pad_wall_slope=" << value);
+        runs.emplace_back(sla_pad_variance_contracts::run_pad(1.0, 30.0, 1.0, value));
+    }
+    REQUIRE(runs.size() == values.size());
+    for (const auto &run : runs)
+        CHECK_THAT(run.z_span, Catch::Matchers::WithinAbs(2.0, 1e-4));
+    for (std::size_t i = 1; i < runs.size(); ++i) {
+        CHECK(runs[i - 1].footprint_x > runs[i].footprint_x);
+        CHECK(runs[i - 1].footprint_y > runs[i].footprint_y);
+        CHECK_THAT(runs[i].model_area,
+                   Catch::Matchers::WithinAbs(runs.front().model_area, 1e-4));
+    }
+}
+
+TEST_CASE("SLA around-object pad gap boundaries change pad geometry",
+          "[SLAPrint][SLAFeatures][SLAPadObjectGapBoundary]")
+{
+    const auto no_gap = sla_pad_geometry_boundary_contracts::run_around_pad(0.0, 1.0, 0.5, 0.3, 10.0);
+    const auto representative = sla_pad_geometry_boundary_contracts::run_around_pad(1.0, 1.0, 0.5, 0.3, 10.0);
+    const auto maximum = sla_pad_geometry_boundary_contracts::run_around_pad(10.0, 1.0, 0.5, 0.3, 10.0);
+
+    // Production permits an empty pad when around-object mode is enabled and
+    // everywhere mode is off. Accept either valid endpoint result, but require
+    // the zero-gap geometry to differ from the positive-gap reference.
+    CHECK(sla_pad_geometry_boundary_contracts::geometry_differs(no_gap, representative));
+    REQUIRE_FALSE(representative.empty);
+    REQUIRE_FALSE(maximum.empty);
+    CHECK(sla_pad_geometry_boundary_contracts::geometry_differs(maximum, representative));
+    sla_pad_geometry_boundary_contracts::check_same_model_and_support(representative, no_gap);
+    sla_pad_geometry_boundary_contracts::check_same_model_and_support(representative, maximum);
+}
+
+TEST_CASE("SLA around-object connector boundaries change pad geometry",
+          "[SLAPrint][SLAFeatures][SLAPadConnectorBoundary]")
+{
+    const auto reference = sla_pad_geometry_boundary_contracts::run_around_pad(1.0, 2.0, 1.0, 1.0, 1.0);
+    const auto no_stride = sla_pad_geometry_boundary_contracts::run_around_pad(1.0, 0.0, 1.0, 1.0, 1.0);
+    const auto no_width = sla_pad_geometry_boundary_contracts::run_around_pad(1.0, 2.0, 0.0, 1.0, 1.0);
+    const auto zero_penetration = sla_pad_geometry_boundary_contracts::run_around_pad(1.0, 2.0, 1.0, 0.0, 1.0);
+
+    REQUIRE_FALSE(reference.empty);
+    REQUIRE_FALSE(no_stride.empty);
+    REQUIRE_FALSE(no_width.empty);
+    REQUIRE_FALSE(zero_penetration.empty);
+    CHECK(sla_pad_geometry_boundary_contracts::geometry_differs(reference, no_stride));
+    CHECK(sla_pad_geometry_boundary_contracts::geometry_differs(reference, no_width));
+    CHECK(sla_pad_geometry_boundary_contracts::geometry_differs(reference, zero_penetration));
+    sla_pad_geometry_boundary_contracts::check_same_model_and_support(reference, no_stride);
+    sla_pad_geometry_boundary_contracts::check_same_model_and_support(reference, no_width);
+    sla_pad_geometry_boundary_contracts::check_same_model_and_support(reference, zero_penetration);
 }

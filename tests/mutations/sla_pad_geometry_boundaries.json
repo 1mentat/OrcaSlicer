@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Public SLA pad geometry boundaries: thickness mapping, wall-slope footprint, object gap, and connector stride.",
+  "mutants": [
+    {
+      "description": "The public pad Z span must follow wall thickness at zero and 30 mm while wall height stays fixed; each row must also preserve baseline model slice area.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "id": "sla-pad-wall-thickness-ignored",
+      "new": "pcfg.wall_thickness_mm = c.pad_wall_height.getFloat();",
+      "old": "pcfg.wall_thickness_mm = c.pad_wall_thickness.getFloat();",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "test_filter": "SLA pad wall thickness honors its registered boundaries",
+      "test_tag": "[SLAPadWallThicknessBoundary]"
+    },
+    {
+      "description": "Adjacent 45, 67.5, and 90 degree rows must have strictly decreasing X/Y footprint extents while preserving model slice area.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "id": "sla-pad-wall-slope-ignored",
+      "new": "pcfg.wall_slope = PI / 4.0;",
+      "old": "pcfg.wall_slope = c.pad_wall_slope.getFloat() * PI / 180.0;",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "test_filter": "SLA pad wall slope boundaries change the public footprint",
+      "test_tag": "[SLAPadWallSlopeBoundary]"
+    },
+    {
+      "description": "The zero-gap empty result and maximum-gap geometry must differ from the representative case.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "id": "sla-pad-object-gap-ignored",
+      "new": "ret.object_gap_mm        = ret.stick_width_mm;",
+      "old": "ret.object_gap_mm        = c.pad_object_gap.getFloat();",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "test_filter": "SLA around-object pad gap boundaries change pad geometry",
+      "test_tag": "[SLAPadObjectGapBoundary]"
+    },
+    {
+      "description": "A zero-stride control must differ from the positive-stride connector geometry.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "id": "sla-pad-connector-stride-ignored",
+      "new": "ret.stick_stride_mm      = 0.0;",
+      "old": "ret.stick_stride_mm      = c.pad_object_connector_stride.getFloat();",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "test_filter": "SLA around-object connector boundaries change pad geometry",
+      "test_tag": "[SLAPadConnectorBoundary]"
+    }
+  ]
+}
