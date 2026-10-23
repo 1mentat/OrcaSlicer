@@ -187,6 +187,9 @@ target_include_directories(libslic3r_3mf_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set_property(TARGET libslic3r_3mf_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_3mf_tests)
 slicer_enable_llvm_source_coverage(libslic3r_3mf_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(libslic3r_3mf_tests TEST_PREFIX "Focused3MF::")
+endif()
 
 # Explicitly built parser tests, without duplicate CTest registration.
 add_executable(libslic3r_placeholder_parser_tests EXCLUDE_FROM_ALL test_placeholder_parser.cpp)

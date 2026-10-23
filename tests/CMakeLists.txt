@@ -36,7 +36,7 @@ if (NOT SLICER_TEST_PROCESSORS MATCHES "^[0-9]+$")
 endif()
 
 option(SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY
-    "Register focused geometry, SLA, G-code, and cooling targets with unique CTest names" OFF)
+    "Register focused test targets with unique CTest names" OFF)
 
 add_library(test_common INTERFACE)
 target_compile_definitions(test_common INTERFACE TEST_DATA_DIR=R"\(${TEST_DATA_DIR}\)" PROFILES_DIR=R"\(${PROFILES_DIR}\)" CATCH_CONFIG_FAST_COMPILE)

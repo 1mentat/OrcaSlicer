@@ -162,6 +162,9 @@ target_link_libraries(fff_print_wipe_tower_tests test_common libslic3r Catch2::C
 set_property(TARGET fff_print_wipe_tower_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_wipe_tower_tests)
 slicer_enable_llvm_source_coverage(fff_print_wipe_tower_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_wipe_tower_tests TEST_PREFIX "FocusedWipeTower::")
+endif()
 
 # Focused perimeter contracts, without duplicate CTest registration.
 add_executable(fff_print_perimeters_tests EXCLUDE_FROM_ALL

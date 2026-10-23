@@ -210,6 +210,9 @@ Both targets are excluded from the default build and CTest discovery. Enabling
 `SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY` registers their cases with
 `FocusedGCode::` and `FocusedCooling::` prefixes for bounded PR validation;
 the option is off by default.
+The same option registers `libslic3r_3mf_tests` and
+`fff_print_wipe_tower_tests` with `Focused3MF::` and `FocusedWipeTower::`
+prefixes, so format and tower contracts can join a focused PR run.
 Use `--filter 'Case A,Case B'` instead of `--tag` to select an explicit Catch
 expression. Keep the entire expression in one argument. The same source,
 expected-count, and JUnit checks apply.
