@@ -2592,19 +2592,21 @@
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[WipeTowerPurgeSpeedVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Caps of 10, 40, and 200 mm/s produce measured positive-extrusion maxima of 10, 40, and 160 mm/s in later-layer WipeTower2 purge and sparse-grid regions configured at 160 mm/s. Geometry and material totals remain invariant. Scope is the direct WipeTower2 consumer; legacy WipeTower, first-layer exceptions, independent region-speed variations, and full numeric-domain coverage remain unclaimed."
+      "reason": "The registered minimum 10 and representatives 40 and 200 mm/s produce measured positive-extrusion maxima of 10, 40 and 160 mm/s in later-layer WipeTower2 purge and sparse-grid regions configured at 160 mm/s. Geometry and material totals remain invariant. No upper bound is registered; legacy WipeTower and first-layer exceptions remain unclaimed."
     },
     "wipe_tower_extra_spacing": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[MultimaterialWipe]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "A one-factor 100% versus 200% comparison with ramming disabled changes later-layer tower depth. Scope is direct WipeTower2 geometry; numeric boundaries remain unclaimed."
+      "reason": "The registered endpoints 100% and 300% are varied independently with ramming disabled; both outputs are finite and the 300% setting increases later-layer tower depth. Scope is direct WipeTower2 geometry."
     },
     "wipe_tower_extra_flow": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2675,10 +2677,11 @@
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[MultimaterialWipe]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Angles 0 and 90 on a tall direct tower plan produce distinct bounding-box dimensions and finite extrusion. Full angle-domain and complete Print pipeline coverage remain unclaimed."
+      "reason": "The registered angle endpoints 0 and 90 degrees on the same tall direct tower plan produce finite extrusion and distinct bounding-box depths, with the 90-degree cone wider. Scope is direct WipeTower2 geometry; complete Print interactions remain unclaimed."
     },
     "enable_filament_ramming": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2722,10 +2725,11 @@
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[MultimaterialWipe]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Distances 0 and 2 are varied independently in the same cooling fixture and must change executable cooling motion. Full numeric boundaries and complete Print pipeline behavior remain unclaimed."
+      "reason": "The registered minimum 0 and representative 2 mm are varied independently in the same cooling fixture. The public WipeTower2 G-code has no bounded stamping return pair at 0; at 2 it has a finite positive pair carrying 4 mm of filament over 12 mm of horizontal travel. No upper bound is registered. Scope is the direct WipeTower2 consumer."
     },
     "filament_stamping_loading_speed": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
