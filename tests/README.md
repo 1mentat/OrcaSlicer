@@ -204,6 +204,12 @@ sources and link, without recompiling production objects.
 Before building, the runner checks that the compile database assigns the test
 source to the requested CMake target. Canonical and focused targets may both
 own the same source; selecting an unrelated target fails before compilation.
+For G-code and cooling iteration, build `fff_print_gcode_tests` or
+`fff_print_cooling_tests` to compile only that test file and its shared setup.
+Both targets are excluded from the default build and CTest discovery. Enabling
+`SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY` registers their cases with
+`FocusedGCode::` and `FocusedCooling::` prefixes for bounded PR validation;
+the option is off by default.
 Use `--filter 'Case A,Case B'` instead of `--tag` to select an explicit Catch
 expression. Keep the entire expression in one argument. The same source,
 expected-count, and JUnit checks apply.
