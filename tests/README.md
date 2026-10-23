@@ -243,6 +243,29 @@ For texture-bake stage diagnostics, use `libslic3r_texture_bake_debug_tests` and
 `--production-source src/libslic3r/TextureBake/TextureBakeDebug.cpp`.
 This target also stays outside default builds and CTest discovery.
 
+For faster Release iteration, enable `SLICER_FAST_FOCUSED_TEST_COMPILE` in a
+configured test build and build one focused target:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON \
+  -DSLICER_FAST_FOCUSED_TEST_COMPILE=ON
+cmake --build build --config Release --target fff_print_wipe_tower_tests --parallel 4
+```
+
+The option defaults to `OFF`. When enabled, it appends `-O1` only for C++ sources
+in executable targets named `*_tests` whose `EXCLUDE_FROM_ALL` property is true,
+and only in the `libslic3r`, `fff_print`, and `sla_print` test directories. The
+canonical default-build suites and production targets keep their normal Release
+flags. GNU and native Clang frontends are supported; MSVC and clang-cl fail at
+configure time. Debug and non-Release configurations are unchanged.
+
+A Linux GCC probe on the WipeTower test translation unit measured a direct,
+non-coverage compile at 99.3 seconds with `-O3` and 73.8 seconds with `-O1`.
+In a separate coverage-enabled paired run, both binaries passed the same 137
+`[WipeTower]` cases; execution took 15.15 seconds at `-O3` and 16.37 seconds at
+`-O1`. These measurements cover this file on Linux GCC; other suites and
+toolchains need their own checks.
+
 Coverage builds include Orca's source headers as ordinary project headers.
 Clang suppresses system-header mappings even when it emits profile counters;
 mixing those counters with unused inline mappings can silently remove executed
