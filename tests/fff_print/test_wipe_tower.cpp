@@ -2153,6 +2153,27 @@ void require_finite(const DirectRun &run)
     CHECK_FALSE(run.gcode.empty());
 }
 
+struct RibOutlineSize {
+    double x = 0.;
+    double y = 0.;
+};
+
+// The two rib walls are diagonal bands centered on the rectangle's opposite-corner diagonals.
+// A band of width r projects r*b/L onto X and r*a/L onto Y; extra rib length extends both ends
+// by e, adding 2*e*a/L and 2*e*b/L. The box also contains the body rectangle.
+RibOutlineSize expected_rib_outline_size(const DirectRun &run, double requested_rib_width,
+                                         double configured_extra_length, double first_layer_z)
+{
+    const double a = run.width;
+    const double b = run.depth;
+    const double diagonal = std::hypot(a, b);
+    const double effective_rib_width = std::min(requested_rib_width, std::min(a, b) / 2.);
+    const double height_fraction = std::abs(double(run.height) - first_layer_z) / double(run.height);
+    const double per_end_extension = height_fraction * configured_extra_length / 2.;
+    return {a + 2. * per_end_extension * a / diagonal + effective_rib_width * b / diagonal,
+            b + 2. * per_end_extension * b / diagonal + effective_rib_width * a / diagonal};
+}
+
 std::vector<std::vector<float>> folded_flush_config(const DynamicPrintConfig &dynamic)
 {
     return WipeTower2::extract_wipe_volumes(dynamic);
@@ -2952,6 +2973,66 @@ static GridTrace trace_feedrate_region(const std::vector<WipeTower::ToolChangeRe
     return trace;
 }
 
+struct PurgeDepositTrace {
+    bool saw_wipe_begin = false;
+    bool saw_toolchange_end = false;
+    std::size_t wipe_xy_moves = 0;
+    std::size_t finish_xy_moves = 0;
+    std::size_t invalid_motion = 0;
+    double wipe_filament_mm = 0.;
+    double finish_filament_mm = 0.;
+};
+
+static PurgeDepositTrace trace_purge_and_finish_deposits(
+    const std::vector<WipeTower::ToolChangeResult> &layer, const DynamicPrintConfig &config)
+{
+    PurgeDepositTrace trace;
+    bool in_wipe = false;
+    bool in_finish = false;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(layer_gcode(layer), [&trace, &in_wipe, &in_finish](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("CP TOOLCHANGE START") != std::string_view::npos) {
+            in_wipe = false;
+            in_finish = false;
+            return;
+        }
+        if (comment.find("CP TOOLCHANGE WIPE") != std::string_view::npos) {
+            in_wipe = true;
+            in_finish = false;
+            trace.saw_wipe_begin = true;
+            return;
+        }
+        if (in_wipe && comment.find("CP TOOLCHANGE END") != std::string_view::npos) {
+            in_wipe = false;
+            in_finish = true;
+            trace.saw_toolchange_end = true;
+            return;
+        }
+        if ((!in_wipe && !in_finish) || !line.cmd_is("G1") || !line.has_e() ||
+            (!line.has_x() && !line.has_y()))
+            return;
+        const double distance = line.dist_XY(self);
+        const double extrusion = line.dist_E(self);
+        if (!std::isfinite(distance) || !std::isfinite(extrusion)) {
+            ++trace.invalid_motion;
+            return;
+        }
+        // Retractions, zero-length moves, and other non-deposit moves are outside this volume trace.
+        if (distance <= 0. || extrusion <= 0.)
+            return;
+        if (in_wipe) {
+            ++trace.wipe_xy_moves;
+            trace.wipe_filament_mm += extrusion;
+        } else {
+            ++trace.finish_xy_moves;
+            trace.finish_filament_mm += extrusion;
+        }
+    });
+    return trace;
+}
+
 static void require_positive_region(const GridTrace &trace)
 {
     REQUIRE(trace.saw_begin);
@@ -2964,6 +3045,189 @@ static void require_positive_region(const GridTrace &trace)
 }
 
 } // namespace
+
+TEST_CASE("WipeTower2 honors the minimum prime tower width",
+          "[WipeTower][MultimaterialWipe][WipeTowerGeometryEndpoints]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f}};
+    const DirectRun minimum = run_tower(tower_dynamic({
+        {"enable_filament_ramming", false}, {"prime_tower_width", 2},
+        {"prime_tower_brim_width", 0}, {"wipe_tower_wall_type", "rectangle"}}), plan);
+    const DirectRun nominal = run_tower(tower_dynamic({
+        {"enable_filament_ramming", false}, {"prime_tower_width", 35},
+        {"prime_tower_brim_width", 0}, {"wipe_tower_wall_type", "rectangle"}}), plan);
+    require_finite(minimum);
+    require_finite(nominal);
+    CHECK_THAT(minimum.width, WithinAbs(2.f, 1e-4f));
+    CHECK(minimum.box.size().x() < nominal.box.size().x());
+}
+
+TEST_CASE("WipeTower2 derives auto brim width from tower height",
+          "[WipeTower][MultimaterialWipe][WipeTowerGeometryEndpoints]")
+{
+    constexpr float plan_max_z = 10.2f;
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f}, {plan_max_z, 0.2f, 1, 0, 80.f}};
+    const auto run = [&](float brim_width) {
+        return run_tower(tower_dynamic({
+            {"enable_filament_ramming", false}, {"prime_tower_width", 35},
+            {"prime_tower_brim_width", brim_width}, {"wipe_tower_wall_type", "rectangle"}}), plan);
+    };
+    const DirectRun no_brim = run(0.f);
+    const DirectRun automatic = run(-1.f);
+    require_finite(no_brim);
+    require_finite(automatic);
+    CHECK_THAT(automatic.height, WithinAbs(plan_max_z, 1e-4f));
+    REQUIRE(automatic.height < 100.f);
+    const float requested_auto_width = plan_max_z * 8.f / 100.f;
+    const DirectRun explicit_auto_width = run(requested_auto_width);
+    require_finite(explicit_auto_width);
+    CHECK(automatic.brim > no_brim.brim);
+    CHECK_THAT(automatic.brim, WithinAbs(explicit_auto_width.brim, 1e-4f));
+    CHECK(automatic.box.size().x() > no_brim.box.size().x());
+    CHECK(automatic.box.size().y() > no_brim.box.size().y());
+}
+
+TEST_CASE("WipeTower2 reaches requested purge volume at maximum extra flow",
+          "[WipeTower][MultimaterialWipe][WipeTowerGeometryEndpoints]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 80.f}};
+    const DynamicPrintConfig nominal_config = tower_dynamic({
+        {"enable_filament_ramming", false}, {"prime_tower_width", 35},
+        {"prime_tower_brim_width", 0}, {"wipe_tower_wall_type", "rectangle"},
+        {"wipe_tower_extra_spacing", 100}, {"wipe_tower_extra_flow", 100},
+        {"use_relative_e_distances", true}});
+    const DynamicPrintConfig maximum_config = tower_dynamic({
+        {"enable_filament_ramming", false}, {"prime_tower_width", 35},
+        {"prime_tower_brim_width", 0}, {"wipe_tower_wall_type", "rectangle"},
+        {"wipe_tower_extra_spacing", 100}, {"wipe_tower_extra_flow", 300},
+        {"use_relative_e_distances", true}});
+    const DirectRun nominal = run_tower(nominal_config, plan);
+    const DirectRun maximum = run_tower(maximum_config, plan);
+    require_finite(nominal);
+    require_finite(maximum);
+    REQUIRE_FALSE(nominal.layers.empty());
+    REQUIRE_FALSE(maximum.layers.empty());
+    const GridTrace nominal_wipe = trace_feedrate_region(
+        nominal.layers.front(), nominal_config, "CP TOOLCHANGE WIPE", "CP TOOLCHANGE END");
+    const GridTrace maximum_wipe = trace_feedrate_region(
+        maximum.layers.front(), maximum_config, "CP TOOLCHANGE WIPE", "CP TOOLCHANGE END");
+    require_positive_region(nominal_wipe);
+    require_positive_region(maximum_wipe);
+    CHECK(nominal_wipe.invalid_feedrate_moves == 0);
+    CHECK(maximum_wipe.invalid_feedrate_moves == 0);
+    const PurgeDepositTrace nominal_deposit = trace_purge_and_finish_deposits(nominal.layers.front(), nominal_config);
+    const PurgeDepositTrace maximum_deposit = trace_purge_and_finish_deposits(maximum.layers.front(), maximum_config);
+    REQUIRE(nominal_deposit.saw_wipe_begin);
+    REQUIRE(nominal_deposit.saw_toolchange_end);
+    REQUIRE(maximum_deposit.saw_wipe_begin);
+    REQUIRE(maximum_deposit.saw_toolchange_end);
+    REQUIRE(nominal_deposit.wipe_xy_moves > 0);
+    REQUIRE(nominal_deposit.finish_xy_moves > 0);
+    REQUIRE(maximum_deposit.wipe_xy_moves > 0);
+    REQUIRE(maximum_deposit.finish_xy_moves > 0);
+    CHECK(nominal_deposit.invalid_motion == 0);
+    CHECK(maximum_deposit.invalid_motion == 0);
+
+    // save_on_last_wipe() credits finish_layer() material toward the requested budget.
+    // The wipe loop rounds depth up to complete rows (get_wipe_depth() uses int(...) + 1),
+    // so the public contract is reaching the total budget, not exact volume conservation.
+    const double filament_area = std::acos(-1.) * 1.75 * 1.75 / 4.;
+    const double volume_format_epsilon = 0.02; // E formatting contributes <0.007mm3 for at most 51 moves.
+    const double nominal_total_volume =
+        (nominal_deposit.wipe_filament_mm + nominal_deposit.finish_filament_mm) * filament_area;
+    const double maximum_total_volume =
+        (maximum_deposit.wipe_filament_mm + maximum_deposit.finish_filament_mm) * filament_area;
+    CHECK(nominal_total_volume >= 80. - volume_format_epsilon);
+    CHECK(maximum_total_volume >= 80. - volume_format_epsilon);
+
+    const double nominal_e_per_xy_mm = nominal_wipe.extrusion_delta / nominal_wipe.path_length;
+    const double maximum_e_per_xy_mm = maximum_wipe.extrusion_delta / maximum_wipe.path_length;
+    // XY serializes to 0.001mm and E to 0.0001mm; worst-case accumulation over these
+    // 47/15 moves shifts the ratio by <0.001, so this 0.003 bound remains a 0.1% check.
+    CHECK_THAT(maximum_e_per_xy_mm / nominal_e_per_xy_mm, WithinAbs(3., 0.003));
+    CHECK(maximum_wipe.path_length < nominal_wipe.path_length);
+}
+
+TEST_CASE("WipeTower2 extends rib geometry at maximum extra length",
+          "[WipeTower][MultimaterialWipe][WipeTowerGeometryEndpoints]")
+{
+    constexpr float first_layer_z = 0.2f;
+    constexpr float top_layer_z = 0.4f;
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {first_layer_z, 0.2f, 0, 1, 80.f}, {top_layer_z, 0.2f, 1, 1, 0.f}};
+    const auto run = [&](float extra_length) {
+        return run_tower(tower_dynamic({
+            {"enable_filament_ramming", false}, {"prime_tower_width", 35},
+            {"prime_tower_brim_width", 0}, {"wipe_tower_wall_type", "rib"},
+            {"wipe_tower_fillet_wall", false}, {"wipe_tower_extra_rib_length", extra_length},
+            {"wipe_tower_rib_width", 6}}), plan);
+    };
+    const DirectRun nominal = run(0.f);
+    const DirectRun maximum = run(300.f);
+    require_finite(nominal);
+    require_finite(maximum);
+    CHECK_THAT(nominal.height, WithinAbs(top_layer_z, 1e-4f));
+    CHECK_THAT(maximum.height, WithinAbs(top_layer_z, 1e-4f));
+    // At H=.4 the height-based minimum depth is 5 mm; this purge is deeper, so the
+    // diagonal body length is the base and the configured extra length is unambiguous.
+    REQUIRE(nominal.depth > 5.1f);
+    REQUIRE(maximum.depth > 5.1f);
+    const double nominal_diagonal = std::hypot(double(nominal.width), double(nominal.depth));
+    const double maximum_diagonal = std::hypot(double(maximum.width), double(maximum.depth));
+    CHECK_THAT(nominal.rib_length, WithinAbs(nominal_diagonal, 0.01));
+    CHECK_THAT(maximum.rib_length, WithinAbs(maximum_diagonal + 300., 0.01));
+    CHECK_THAT(maximum.rib_length - nominal.rib_length, WithinAbs(300.f, 1e-3f));
+    CHECK_THAT(maximum.width, WithinAbs(nominal.width, 1e-4f));
+    CHECK_THAT(maximum.depth, WithinAbs(nominal.depth, 1e-4f));
+    CHECK(maximum.box.size().x() > nominal.box.size().x());
+
+    const RibOutlineSize nominal_outline = expected_rib_outline_size(nominal, 6., 0., first_layer_z);
+    const RibOutlineSize maximum_outline = expected_rib_outline_size(maximum, 6., 300., first_layer_z);
+    // get_bbx() measures the emitted first-layer outline; no brim is configured. The
+    // expected growth comes from both extended endpoints, not a comparison of stored lengths.
+    CHECK_THAT(nominal.box.size().x(), WithinAbs(nominal_outline.x, 0.02));
+    CHECK_THAT(nominal.box.size().y(), WithinAbs(nominal_outline.y, 0.02));
+    CHECK_THAT(maximum.box.size().x(), WithinAbs(maximum_outline.x, 0.02));
+    CHECK_THAT(maximum.box.size().y(), WithinAbs(maximum_outline.y, 0.02));
+}
+
+TEST_CASE("WipeTower2 clips rib width at its registered endpoints",
+          "[WipeTower][MultimaterialWipe][WipeTowerGeometryEndpoints]")
+{
+    constexpr float first_layer_z = 0.2f;
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {first_layer_z, 0.2f, 0, 1, 80.f}};
+    const auto run = [&](float rib_width) {
+        return run_tower(tower_dynamic({
+            {"enable_filament_ramming", false}, {"prime_tower_width", 35},
+            {"prime_tower_brim_width", 0}, {"wipe_tower_wall_type", "rib"},
+            {"wipe_tower_fillet_wall", false}, {"wipe_tower_extra_rib_length", 0},
+            {"wipe_tower_rib_width", rib_width}}), plan);
+    };
+    const DirectRun zero = run(0.f);
+    const DirectRun maximum = run(300.f);
+    require_finite(zero);
+    require_finite(maximum);
+    const float zero_attachment_limit = std::min(zero.depth, zero.width) / 2.f;
+    const float maximum_attachment_limit = std::min(maximum.depth, maximum.width) / 2.f;
+    CHECK_THAT(zero.rib_width, WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(maximum.rib_width, WithinAbs(maximum_attachment_limit, 1e-4f));
+    REQUIRE(zero_attachment_limit > 0.f);
+    REQUIRE(maximum_attachment_limit > 0.f);
+
+    const RibOutlineSize zero_outline = expected_rib_outline_size(zero, 0., 0., first_layer_z);
+    const RibOutlineSize maximum_outline = expected_rib_outline_size(maximum, 300., 0., first_layer_z);
+    // The 0-width bands leave the body rectangle. At the 300 mm endpoint, the two
+    // diagonal bands add their analytically projected width; each run uses its own
+    // auto-squared body dimensions because finish-layer accounting can change that body.
+    CHECK_THAT(zero.box.size().x(), WithinAbs(zero_outline.x, 0.02));
+    CHECK_THAT(zero.box.size().y(), WithinAbs(zero_outline.y, 0.02));
+    CHECK_THAT(maximum.box.size().x(), WithinAbs(maximum_outline.x, 0.02));
+    CHECK_THAT(maximum.box.size().y(), WithinAbs(maximum_outline.y, 0.02));
+}
 
 TEST_CASE("WipeTower2 purge and sparse extrusion respect cap and region speed limits",
           "[WipeTower][MultimaterialWipe][WipeTowerPurgeSpeedVariance]")
@@ -4594,32 +4858,43 @@ struct PipelineTrace {
     std::size_t interface_waits = 0;
     std::size_t targeted_interface_waits = 0;
     std::size_t correctly_targeted_interface_waits = 0;
+    std::size_t interface_restores_before_wipe = 0;
     std::size_t interface_restores = 0;
     std::size_t pre_extrusions = 0;
     std::size_t model_extrusions = 0;
+    double prewipe_xy_path = 0.;
+    double prewipe_filament = 0.;
     double model_xy_path = 0.;
     double model_filament = 0.;
     bool saw_incoming_tool_wait = false;
 };
 
-DynamicPrintConfig contact_pipeline_config(bool enabled)
+DynamicPrintConfig contact_pipeline_config(bool enabled, bool cooldown_during_tower = false,
+                                           const char *interface_temperatures = "215,220",
+                                           const char *pre_extrusion_distances = "2,2",
+                                           const char *pre_extrusion_lengths = "3,3",
+                                           const char *nozzle_temperature_range_high = nullptr)
 {
-    return multifilament_config(2, {
+    DynamicPrintConfig config = multifilament_config(2, {
         { "nozzle_diameter",                            "0.4,0.4" },
         { "printer_extruder_id",                        "1,2" },
-        { "printer_extruder_variant",                   "Direct Drive Standard,Direct Drive Standard" },
+        // Give each filament a stable identity and a matching nozzle variant so per-filament
+        // temperature highs remain distinct through Print's variant expansion.
+        { "printer_extruder_variant",                   "Direct Drive Standard;Direct Drive Standard" },
+        { "filament_extruder_variant",                  "Direct Drive Standard;Direct Drive Standard" },
+        { "filament_self_index",                        "1,2" },
         { "extruder_printable_height",                  "0,0" },
         { "nozzle_temperature_initial_layer",           "200,200" },
         { "nozzle_temperature",                         "200,200" },
-        { "filament_tower_interface_print_temp",       "215,220" },
-        { "filament_tower_interface_pre_extrusion_dist", "2,2" },
-        { "filament_tower_interface_pre_extrusion_length", "3,3" },
+        { "filament_tower_interface_print_temp",       interface_temperatures },
+        { "filament_tower_interface_pre_extrusion_dist", pre_extrusion_distances },
+        { "filament_tower_interface_pre_extrusion_length", pre_extrusion_lengths },
         // Keep the public tool-change template's incoming-tool wait as the one
         // surviving M109.  append_tcr2 must remove the duplicate untagged wait
         // emitted by the contact tower itself when this option is off.
         { "change_filament_gcode",                         "T[next_extruder]\nM109 S[new_filament_temp] T[next_extruder]\n" },
         { "enable_tower_interface_features",           enabled },
-        { "enable_tower_interface_cooldown_during_tower", false },
+        { "enable_tower_interface_cooldown_during_tower", cooldown_during_tower },
         { "enable_filament_ramming",                   false },
         { "enable_prime_tower",                         true },
         { "wipe_tower_type",                            "type2" },
@@ -4638,6 +4913,9 @@ DynamicPrintConfig contact_pipeline_config(bool enabled)
         { "use_relative_e_distances",                   true },
         { "layer_change_gcode",                         "G92 E0\n" },
     });
+    if (nozzle_temperature_range_high != nullptr)
+        config.set_deserialize_strict({ { "nozzle_temperature_range_high", nozzle_temperature_range_high } });
+    return config;
 }
 
 std::string export_contact_pipeline(const DynamicPrintConfig &config)
@@ -4656,7 +4934,8 @@ std::string export_contact_pipeline(const DynamicPrintConfig &config)
     return gcode(print);
 }
 
-PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrintConfig &config)
+PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrintConfig &config,
+                                     int interface_temperature_0 = 215, int interface_temperature_1 = 220)
 {
     PipelineTrace result;
     GCodeReader reader;
@@ -4664,7 +4943,8 @@ PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrin
     bool in_tower = false;
     bool before_wipe = false;
     int current_tool = -1;
-    reader.parse_buffer(gcode, [&result, &in_tower, &before_wipe, &current_tool](GCodeReader &self,
+    reader.parse_buffer(gcode, [&result, &in_tower, &before_wipe, &current_tool,
+                             interface_temperature_0, interface_temperature_1](GCodeReader &self,
                                                                                   const GCodeReader::GCodeLine &line) {
         const std::string raw = line.raw();
         if (raw.find("CP TOOLCHANGE START") != std::string::npos) {
@@ -4683,8 +4963,8 @@ PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrin
             float temperature = 0.f;
             const bool has_temperature = line.has_value('S', temperature) && std::isfinite(temperature);
             const bool is_interface_wait = has_temperature &&
-                                           (std::abs(temperature - 215.f) <= 1e-4f ||
-                                            std::abs(temperature - 220.f) <= 1e-4f);
+                                           (std::abs(temperature - float(interface_temperature_0)) <= 1e-4f ||
+                                            std::abs(temperature - float(interface_temperature_1)) <= 1e-4f);
             if (is_interface_wait) {
                 ++result.interface_waits;
                 float target_tool_value = 0.f;
@@ -4692,7 +4972,8 @@ PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrin
                     const int target_tool = int(std::lround(target_tool_value));
                     if (std::abs(target_tool_value - float(target_tool)) <= 1e-4f) {
                         ++result.targeted_interface_waits;
-                        const int expected_temperature = target_tool == 0 ? 215 : (target_tool == 1 ? 220 : -1);
+                        const int expected_temperature = target_tool == 0 ? interface_temperature_0 :
+                                                         (target_tool == 1 ? interface_temperature_1 : -1);
                         if (target_tool == current_tool && expected_temperature > 0 &&
                             std::abs(temperature - float(expected_temperature)) <= 1e-4f)
                             ++result.correctly_targeted_interface_waits;
@@ -4701,6 +4982,12 @@ PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrin
                     }
                 }
             }
+        }
+        if (in_tower && before_wipe && line.cmd_is("M104")) {
+            float temperature = 0.f;
+            if (line.has_value('S', temperature) && std::isfinite(temperature) &&
+                std::abs(temperature - 200.f) <= 1e-4f)
+                ++result.interface_restores_before_wipe;
         }
         if (in_tower && !before_wipe && line.cmd_is("M104")) {
             float temperature = 0.f;
@@ -4712,8 +4999,12 @@ PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrin
         if (line.extruding(self) && line.dist_XY(self) > 0.f) {
             if (in_tower) {
                 ++result.tower_extrusions;
-                if (before_wipe && line.dist_E(self) > 2.5f && line.dist_E(self) < 3.5f)
-                    ++result.pre_extrusions;
+                if (before_wipe) {
+                    result.prewipe_xy_path += line.dist_XY(self);
+                    result.prewipe_filament += line.dist_E(self);
+                    if (line.dist_E(self) > 2.5f && line.dist_E(self) < 3.5f)
+                        ++result.pre_extrusions;
+                }
             } else {
                 ++result.model_extrusions;
                 result.model_xy_path += line.dist_XY(self);
@@ -4727,6 +5018,15 @@ PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrin
         }
     });
     return result;
+}
+
+void check_model_deposition_unchanged(const PipelineTrace &before, const PipelineTrace &after)
+{
+    REQUIRE(before.model_extrusions > 0);
+    REQUIRE(after.model_extrusions > 0);
+    CHECK(before.model_extrusions == after.model_extrusions);
+    CHECK_THAT(before.model_xy_path, Catch::Matchers::WithinRel(after.model_xy_path, 1e-6));
+    CHECK_THAT(before.model_filament, Catch::Matchers::WithinRel(after.model_filament, 1e-6));
 }
 
 } // namespace
@@ -4765,6 +5065,88 @@ TEST_CASE("Tower contact temperature override and restore reach exported type-2 
     CHECK(enabled.model_extrusions == disabled.model_extrusions);
     CHECK_THAT(enabled.model_xy_path, Catch::Matchers::WithinRel(disabled.model_xy_path, 1e-6));
     CHECK_THAT(enabled.model_filament, Catch::Matchers::WithinRel(disabled.model_filament, 1e-6));
+}
+
+TEST_CASE("Tower interface cooldown restores base temperature before wiping when enabled",
+          "[WipeTower][WipeTowerContact][WipeTowerContactPipeline]")
+{
+    const DynamicPrintConfig restore_after_wipe_config = contact_pipeline_config(true, false);
+    const DynamicPrintConfig cool_during_wipe_config = contact_pipeline_config(true, true);
+    const PipelineTrace restore_after_wipe = trace_contact_pipeline(
+        export_contact_pipeline(restore_after_wipe_config), restore_after_wipe_config);
+    const PipelineTrace cool_during_wipe = trace_contact_pipeline(
+        export_contact_pipeline(cool_during_wipe_config), cool_during_wipe_config);
+
+    REQUIRE(restore_after_wipe.tower_blocks > 0);
+    REQUIRE(cool_during_wipe.tower_blocks == restore_after_wipe.tower_blocks);
+    REQUIRE(restore_after_wipe.interface_waits > 0);
+    CHECK(cool_during_wipe.interface_waits == restore_after_wipe.interface_waits);
+    CHECK(cool_during_wipe.interface_restores_before_wipe > restore_after_wipe.interface_restores_before_wipe);
+    CHECK(restore_after_wipe.interface_restores > cool_during_wipe.interface_restores);
+    CHECK(cool_during_wipe.interface_restores_before_wipe + cool_during_wipe.interface_restores ==
+          restore_after_wipe.interface_restores_before_wipe + restore_after_wipe.interface_restores);
+    check_model_deposition_unchanged(restore_after_wipe, cool_during_wipe);
+}
+
+TEST_CASE("Tower interface temperature uses the configured range high for the minus one sentinel",
+          "[WipeTower][WipeTowerContact][WipeTowerContactPipeline]")
+{
+    // Pin equal range highs so the -1 interface setting is the only changed input.
+    const DynamicPrintConfig explicit_config = contact_pipeline_config(
+        true, false, "215,220", "2,2", "3,3", "260,265");
+    // -1 is the registered sentinel; distinct in-range highs make its fallback observable.
+    const DynamicPrintConfig sentinel_config = contact_pipeline_config(
+        true, false, "-1,-1", "2,2", "3,3", "260,265");
+    const PipelineTrace explicit_output = trace_contact_pipeline(
+        export_contact_pipeline(explicit_config), explicit_config);
+    const PipelineTrace sentinel_output = trace_contact_pipeline(
+        export_contact_pipeline(sentinel_config), sentinel_config, 260, 265);
+
+    REQUIRE(explicit_output.interface_waits > 0);
+    CHECK(sentinel_output.interface_waits == explicit_output.interface_waits);
+    CHECK(explicit_output.correctly_targeted_interface_waits == explicit_output.interface_waits);
+    CHECK(sentinel_output.correctly_targeted_interface_waits == sentinel_output.interface_waits);
+    CHECK(explicit_output.interface_restores == explicit_output.interface_waits);
+    CHECK(sentinel_output.interface_restores == sentinel_output.interface_waits);
+    check_model_deposition_unchanged(explicit_output, sentinel_output);
+}
+
+TEST_CASE("Zero tower interface pre-extrusion distance removes its emitted move",
+          "[WipeTower][WipeTowerContact][WipeTowerContactPipeline]")
+{
+    const DynamicPrintConfig zero_config = contact_pipeline_config(true, false, "215,220", "0,0", "3,3");
+    const DynamicPrintConfig positive_config = contact_pipeline_config(true, false, "215,220", "2,2", "3,3");
+    const PipelineTrace zero = trace_contact_pipeline(export_contact_pipeline(zero_config), zero_config);
+    const PipelineTrace positive = trace_contact_pipeline(
+        export_contact_pipeline(positive_config), positive_config);
+
+    REQUIRE(positive.interface_waits > 0);
+    CHECK(zero.tower_blocks == positive.tower_blocks);
+    CHECK(zero.interface_waits == positive.interface_waits);
+    CHECK_THAT(positive.prewipe_xy_path - zero.prewipe_xy_path,
+               Catch::Matchers::WithinAbs(2. * double(positive.interface_waits), 1e-3));
+    CHECK_THAT(positive.prewipe_filament - zero.prewipe_filament,
+               Catch::Matchers::WithinAbs(3. * double(positive.interface_waits), 1e-3));
+    check_model_deposition_unchanged(zero, positive);
+}
+
+TEST_CASE("Zero tower interface pre-extrusion length removes its emitted material",
+          "[WipeTower][WipeTowerContact][WipeTowerContactPipeline]")
+{
+    const DynamicPrintConfig zero_config = contact_pipeline_config(true, false, "215,220", "2,2", "0,0");
+    const DynamicPrintConfig positive_config = contact_pipeline_config(true, false, "215,220", "2,2", "3,3");
+    const PipelineTrace zero = trace_contact_pipeline(export_contact_pipeline(zero_config), zero_config);
+    const PipelineTrace positive = trace_contact_pipeline(
+        export_contact_pipeline(positive_config), positive_config);
+
+    REQUIRE(positive.interface_waits > 0);
+    CHECK(zero.tower_blocks == positive.tower_blocks);
+    CHECK(zero.interface_waits == positive.interface_waits);
+    CHECK_THAT(positive.prewipe_xy_path - zero.prewipe_xy_path,
+               Catch::Matchers::WithinAbs(2. * double(positive.interface_waits), 1e-3));
+    CHECK_THAT(positive.prewipe_filament - zero.prewipe_filament,
+               Catch::Matchers::WithinAbs(3. * double(positive.interface_waits), 1e-3));
+    check_model_deposition_unchanged(zero, positive);
 }
 
 } // namespace tower_contact_pipeline_contracts

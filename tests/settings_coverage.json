@@ -2610,30 +2610,33 @@
     },
     "wipe_tower_extra_flow": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTowerGeometryEndpoints]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "A one-factor 100% versus 200% comparison at fixed requested purge volume changes executable purge motion. Scope is direct WipeTower2 output; numeric boundaries remain unclaimed."
+      "reason": "Registered100%/300% endpoints hold the80mm3 request, filament diameter, spacing, ramming and rectangular plan fixed. Independent G-code traces include both wipe and finished-wall deposits toward the purge floor, require300% E-per-XY-mm to be3times100% within0.1%, and require shorter wipe travel. Whole-row volume quantization is allowed; exact volume conservation is unclaimed."
     },
     "prime_tower_brim_width": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTowerGeometryEndpoints]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "Brim widths 0 and 4 produce different generated brim widths with other rectangle settings held fixed. Scope is direct tower geometry; the upper numeric range remains unclaimed."
+      "reason": "The -1 Auto sentinel on a fixed10.2mm tower produces the same quantized brim as an independent0.816mm explicit request and expands both generated first-layer bounds relative to0mm brim. No upper bound is registered."
     },
     "prime_tower_width": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTowerGeometryEndpoints]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "The direct WipeTower2 width consumer retains an explicitly configured 32 mm width. Boundary values and complete Print pipeline behavior remain unclaimed."
+      "reason": "Rectangle generation compares registered minimum2mm and35mm at fixed purge, brim and ramming settings; effective width is2mm and generated first-layer X envelope shrinks with finite output."
     },
     "wipe_tower_wall_type": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2647,21 +2650,23 @@
     },
     "wipe_tower_rib_width": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTowerGeometryEndpoints]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "A configured rib width of 6 produces a positive generated rib width. Numeric boundaries and a complete pipeline comparison remain unclaimed."
+      "reason": "Fixed non-filleted rib geometry compares registered endpoints0/300mm. Zero yields a zero-width band and body-rectangle envelope;300mm clips to half each body minor dimension, and actual first-layer XY bounds match the independently projected diagonal-band outline. Each run uses its own body because finishing-material credit affects planning."
     },
     "wipe_tower_extra_rib_length": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTowerGeometryEndpoints]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "Zero and 8 are exercised in rib fixtures with generated rib lengths compared. Fillet also varies, so isolated numeric variation remains unclaimed."
+      "reason": "Fixed non-filleted rib geometry at two planned layers0.2/0.4mm compares0 with registered maximum300mm. Body dimensions stay equal; effective length grows by300mm; the actual first-layer XY envelope matches an independent diagonal-band projection with height taper. No lower bound is registered."
     },
     "wipe_tower_fillet_wall": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -3014,30 +3019,33 @@
     },
     "filament_tower_interface_print_temp": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[WipeTowerContact]",
+      "tag": "[WipeTowerContactPipeline]",
       "dimensions": [
         "representative_values",
-        "fixture_only"
+        "boundary_values",
+        "pipeline_oracle"
       ],
-      "reason": "Direct wipe-tower output parses configured 215/220 degree interface waits and 200 degree restoration; other temperatures and full Print wiring remain unclaimed."
+      "reason": "Public Print exports compare explicit215/220 with the registered -1 sentinel. Both fixtures pin distinct range highs260/265 and valid filament identities; every interface wait must target the incoming tool at its expected temperature, with base-temperature restoration and model deposition conserved."
     },
     "filament_tower_interface_pre_extrusion_dist": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[WipeTowerContact]",
+      "tag": "[WipeTowerContactPipeline]",
       "dimensions": [
         "representative_values",
-        "fixture_only"
+        "boundary_values",
+        "pipeline_oracle"
       ],
-      "reason": "Direct wipe-tower generation tests nominal 2 mm and extreme 1000 mm interface distances, requiring both translated bed limits to clamp output motion; full range and full Print wiring remain unclaimed."
+      "reason": "Public Print exports compare minimum0 with2mm distance at fixed3mm filament length; parsed tower-local path and material differences are2mm XY and3mm E per interface wait, with model deposition unchanged."
     },
     "filament_tower_interface_pre_extrusion_length": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[WipeTowerContact]",
+      "tag": "[WipeTowerContactPipeline]",
       "dimensions": [
         "representative_values",
-        "fixture_only"
+        "boundary_values",
+        "pipeline_oracle"
       ],
-      "reason": "Direct wipe-tower generation checks configured 1, 3 and 5 mm pre-extrusion as parsed E3, E5 and E7 moves after the 2 mm recovery. Other lengths and full Print wiring remain unclaimed."
+      "reason": "Public Print exports compare minimum0 with3mm filament length at fixed2mm distance; parsed tower-local path and material differences are2mm XY and3mm E per interface wait, with model deposition unchanged."
     },
     "filament_adhesiveness_category": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -4875,6 +4883,15 @@
         "pipeline_oracle"
       ],
       "reason": "Public Print::process runs the setting false and true for default, inward, and outward Archimedean top-fill orders. For the default order, true puts the longest center-starting spiral last and preserves inside-out order; for explicit inward/outward settings, false and true produce identical ordered paths. Every comparison preserves deposited path length and covered footprint area."
+    },
+    "enable_tower_interface_cooldown_during_tower": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerContactPipeline]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Paired false/true public Print exports move base-temperature restoration from after tower wiping to before it while preserving total restore count and model deposition."
     }
   }
 }

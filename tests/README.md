@@ -66,6 +66,18 @@ systemd-run --user --wait --pipe --slice=orca-validation.slice \
 Place the entire Python controller or CTest command inside the service so its
 descendants share the limits and are stopped when it exits. Use smaller limits
 for focused tests, such as 4 GiB, two CPUs, and a five-minute service deadline.
+For concurrent Linux workers, prefix the service command with `taskset -c`
+and its assigned CPU list. Verify `Cpus_allowed_list` in `/proc/<pid>/status`
+for the service process and a compiler child. `AllowedCPUs` requires the cgroup
+cpuset controller, which some containers do not expose; CPU quota still limits
+total CPU use but does not select particular cores.
+
+Check a suspected build conflict using the service's `MainPID`, `SubState`, and
+`ControlGroup`, then inspect the live compiler's working directory and cgroup.
+A service with `SubState=exited` and `MainPID=0` has completed. An old
+`systemd-run --wait` wrapper can remain afterward with the build command in its
+arguments, so command-line searches alone can mistake it for ongoing work.
+
 `LimitFSIZE` limits each output file, including libraries and coverage exports;
 leave enough room for the expected artifacts and check free storage before a
 run. Disable core dumps so an assertion failure cannot fill the worker's disk.
@@ -649,6 +661,13 @@ island coordinates, extrusion geometry, interface metadata, layer links, and
 malformed payload rejection. `[WipeTowerContact]` checks parsed feedrates,
 interface temperature commands, pre-extrusion lengths, and bed clipping through
 the tower generator; these settings claims remain separate from full Print wiring.
+
+`[WipeTowerContactPipeline]` checks tool-targeted interface temperatures, the
+range-high sentinel, cooldown ordering, and zero pre-extrusion settings in
+exported Print G-code while conserving model deposition.
+`[WipeTowerGeometryEndpoints]` checks width and brim boundaries, physical purge
+flow, and rib outlines. Their mutations are in
+`tower_interface_geometry_endpoints.json`.
 
 `[SupportBasePattern]` checks all six registered normal-support base patterns,
 including structured fallback warnings, honeycomb geometry, and alternating

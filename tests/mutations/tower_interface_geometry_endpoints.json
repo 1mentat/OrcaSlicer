@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "description": "Physical tower interface temperature, cooldown, automatic brim, purge flow and rib-length contracts.",
+  "mutants": [
+    {
+      "id": "tower-interface-cooldown-before-wipe-inverted",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "if (m_enable_tower_interface_cooldown_during_tower && interface_temp > 0 && interface_temp != base_temp)",
+      "new": "if (!m_enable_tower_interface_cooldown_during_tower && interface_temp > 0 && interface_temp != base_temp)",
+      "expected_matches": 1,
+      "test_filter": "Tower interface cooldown restores base temperature before wiping when enabled",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Invert only the pre-wipe cooldown gate; independent before/after restore counts and total restoration must fail."
+    },
+    {
+      "id": "tower-type2-sentinel-uses-base-temperature",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "interface_temp = gcodegen.config().filament_tower_interface_print_temp.get_at(new_extruder_id);\n                if (interface_temp == -1)\n                    interface_temp = gcodegen.config().nozzle_temperature_range_high.get_at(gcodegen.get_filament_config_index(new_extruder_id));",
+      "new": "interface_temp = gcodegen.config().filament_tower_interface_print_temp.get_at(new_extruder_id);\n                if (interface_temp == -1)\n                    interface_temp = gcodegen.config().nozzle_temperature.get_at(gcodegen.get_filament_config_index(new_extruder_id));",
+      "expected_matches": 1,
+      "test_filter": "Tower interface temperature uses the configured range high for the minus one sentinel",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "In append_tcr2 change the sentinel fallback from distinct260/265 range highs to200 base temperatures; the per-tool physical wait oracle must reject it."
+    },
+    {
+      "id": "tower-auto-brim-disabled",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "if (brim_width < 0.f)\n            brim_width = WipeTower::get_auto_brim_by_height(m_wipe_tower_height);",
+      "new": "if (brim_width < 0.f)\n            brim_width = 0.f;",
+      "expected_matches": 1,
+      "test_filter": "WipeTower2 derives auto brim width from tower height",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Disable generated automatic brim while retaining all valid endpoint handling; physical expansion and explicit equivalent assertions must fail."
+    },
+    {
+      "id": "tower-extra-flow-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_extra_flow(float(config.wipe_tower_extra_flow/100.)),",
+      "new": "m_extra_flow(1.f),",
+      "expected_matches": 1,
+      "test_filter": "WipeTower2 reaches requested purge volume at maximum extra flow",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Ignore configured300% flow; independently parsed E-per-XY-mm ratio must fail to reach3."
+    },
+    {
+      "id": "tower-extra-rib-length-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_rib_length += m_extra_rib_length;",
+      "new": "m_rib_length += 0.f;",
+      "expected_matches": 1,
+      "test_filter": "WipeTower2 extends rib geometry at maximum extra length",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Ignore configured300mm extra length; directdelta and independent first-layer band-envelope assertions must fail."
+    }
+  ]
+}
