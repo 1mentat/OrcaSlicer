@@ -19,6 +19,8 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode.hpp"
+#include "libslic3r/GCode/CoolingBuffer.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
@@ -1354,4 +1356,166 @@ TEST_CASE("Cooling layer-time boundary selects minimum or interpolated fan speed
         CHECK_THAT(observed.outer_feeds[i], Catch::Matchers::WithinAbs(reference.outer_feeds[i], 0.25));
     for (size_t i = 0; i < observed.inner_feeds.size(); ++i)
         CHECK_THAT(observed.inner_feeds[i], Catch::Matchers::WithinAbs(reference.inner_feeds[i], 0.25));
+}
+
+
+namespace cooling_fan_layer_contracts {
+
+DynamicPrintConfig layer_config(const int close_layers, const int full_layer, const int first_layer_speed)
+{
+    DynamicPrintConfig config = cooling_settings_followup::config_for(false, true, false);
+    config.set_key_value("fan_min_speed", new ConfigOptionFloats{100.0});
+    config.set_key_value("fan_max_speed", new ConfigOptionFloats{100.0});
+    config.set_key_value("overhang_fan_speed", new ConfigOptionInts{0});
+    config.set_key_value("close_fan_the_first_x_layers", new ConfigOptionInts{close_layers});
+    config.set_key_value("full_fan_speed_layer", new ConfigOptionInts{full_layer});
+    config.set_key_value("initial_layer_fan_speed", new ConfigOptionInts{first_layer_speed});
+    return config;
+}
+
+std::array<std::vector<int>, 4> physical_layer_pwm(const std::string &gcode,
+                                                    const DynamicPrintConfig &config)
+{
+    std::array<std::vector<int>, 4> samples;
+    GCodeReader reader;
+    reader.apply_config(config);
+    int part_fan = -1;
+    reader.parse_buffer(gcode, [&samples, &part_fan](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("M107") && !line.has('P'))
+            part_fan = 0;
+        else if (line.cmd_is("M106") && !line.has('P')) {
+            float pwm = 0.0f;
+            REQUIRE(line.has_value('S', pwm));
+            REQUIRE(std::isfinite(pwm));
+            REQUIRE(pwm >= 0.0f);
+            REQUIRE(pwm <= 255.0f);
+            part_fan = static_cast<int>(std::lround(pwm));
+        }
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        const int layer = static_cast<int>(std::lround(line.new_Z(self) / 0.2)) - 1;
+        REQUIRE(layer >= 0);
+        REQUIRE(layer < static_cast<int>(samples.size()));
+        REQUIRE(part_fan >= 0);
+        samples[static_cast<size_t>(layer)].push_back(part_fan);
+    });
+    return samples;
+}
+
+void require_layer_pwm(const std::array<std::vector<int>, 4> &observed,
+                       const std::array<int, 4> &expected_pwm)
+{
+    for (size_t layer = 0; layer < observed.size(); ++layer) {
+        INFO("physical deposition layer " << layer);
+        REQUIRE_FALSE(observed[layer].empty());
+        const int pwm = expected_pwm[layer];
+        CHECK(std::all_of(observed[layer].begin(), observed[layer].end(),
+                          [pwm](const int value) { return value == pwm; }));
+    }
+}
+
+void require_public_filter_material(const cooling_slowdown_contracts::FeedEvidence &evidence,
+                                    const size_t expected_deposits)
+{
+    REQUIRE(evidence.finite);
+    REQUIRE(evidence.feeds.size() == expected_deposits);
+    CHECK_THAT(evidence.path_length,
+               Catch::Matchers::WithinAbs(std::sqrt(2.0) + static_cast<double>(expected_deposits - 1), 1e-3));
+    CHECK_THAT(evidence.filament_length,
+               Catch::Matchers::WithinAbs(0.1 * static_cast<double>(expected_deposits), 1e-3));
+    for (const double feed : evidence.feeds)
+        CHECK_THAT(feed, Catch::Matchers::WithinAbs(3600.0, 1e-3));
+}
+
+std::string run_public_filter(const DynamicPrintConfig &config, const size_t last_layer)
+{
+    PrintConfig print_config;
+    print_config.apply(config, true);
+    GCode generator;
+    generator.apply_print_config(print_config);
+    generator.writer().set_extruders({0});
+    CoolingBuffer buffer(generator);
+
+    std::string output;
+    for (size_t layer_id = 0; layer_id <= last_layer; ++layer_id) {
+        // Each public filter input is a small valid layer with positive XY/E deposition.
+        const std::string input = "G1 F3600 ;_EXTRUDE_SET_SPEED\nG1 X" + std::to_string((layer_id % 2) + 1) +
+                                  " Y1 E0.1\n;_EXTRUDE_END\n";
+        output += buffer.process_layer(std::string(input), layer_id, true);
+    }
+    return output;
+}
+
+} // namespace cooling_fan_layer_contracts
+
+TEST_CASE("Cooling layer gates and first-layer override control physical P0 output",
+          "[Cooling][CoolingSettings][FanLayerPhysical]")
+{
+    using namespace cooling_fan_layer_contracts;
+    struct Row {
+        const char *name;
+        int close_layers;
+        int full_layer;
+        int first_layer_speed;
+        std::array<int, 4> expected_pwm;
+    };
+    // Independently pinned Marlin PWM oracle: 25/50/75/100% -> S63/127/191/255;
+    // the anchored 33/67/83% ramp points -> S84/171/212.
+    constexpr std::array<Row, 8> rows{{
+        {"ramp without override", 0, 4, -1, {63, 127, 191, 255}},
+        {"zero override anchors ramp", 0, 4, 0, {0, 84, 171, 255}},
+        {"representative override anchors ramp", 0, 4, 50, {127, 171, 212, 255}},
+        {"maximum override", 0, 4, 100, {255, 255, 255, 255}},
+        {"one closed layer", 1, 4, -1, {0, 84, 171, 255}},
+        {"override gated by closed layer", 1, 4, 100, {0, 84, 171, 255}},
+        {"full layer below close gate", 2, 1, -1, {0, 0, 255, 255}},
+        {"zero full-speed layer disables ramp", 0, 0, -1, {255, 255, 255, 255}},
+    }};
+
+    const DynamicPrintConfig baseline_config = layer_config(0, 4, -1);
+    const auto baseline_material = cooling_slowdown_contracts::inspect_feed_evidence(
+        slice({make_cube(8.0, 8.0, 0.8)}, baseline_config), baseline_config);
+    REQUIRE(baseline_material.finite);
+    REQUIRE_FALSE(baseline_material.feeds.empty());
+
+    for (const Row &row : rows) {
+        CAPTURE(row.name, row.close_layers, row.full_layer, row.first_layer_speed);
+        const DynamicPrintConfig config = layer_config(row.close_layers, row.full_layer, row.first_layer_speed);
+        const std::string gcode = slice({make_cube(8.0, 8.0, 0.8)}, config);
+        const auto material = cooling_slowdown_contracts::inspect_feed_evidence(gcode, config);
+        cooling_slowdown_contracts::require_same_deposition(baseline_material, material);
+        REQUIRE(material.feeds.size() == baseline_material.feeds.size());
+        for (size_t i = 0; i < material.feeds.size(); ++i)
+            CHECK_THAT(material.feeds[i], Catch::Matchers::WithinAbs(baseline_material.feeds[i], 0.25));
+        require_layer_pwm(physical_layer_pwm(gcode, config), row.expected_pwm);
+    }
+}
+
+TEST_CASE("Cooling layer settings honor their upper registered endpoints in the public filter",
+          "[Cooling][CoolingSettings][FanLayerBoundaries]")
+{
+    using namespace cooling_fan_layer_contracts;
+    // The public filter accepts one generated layer at a time; these bounded inputs exercise
+    // layer 1000 without slicing a 1000-layer mesh. Every input has positive XY/E deposition.
+    const DynamicPrintConfig close_config = layer_config(1000, 0, -1);
+    const std::string close_gcode = run_public_filter(close_config, 1000);
+    const auto close = cooling_settings_followup::inspect(close_gcode, close_config);
+    REQUIRE(close.deposition_moves == 1001);
+    REQUIRE(close.part_fan_states.size() == close.deposition_moves);
+    require_public_filter_material(cooling_slowdown_contracts::inspect_feed_evidence(close_gcode, close_config),
+                                   close.deposition_moves);
+    for (size_t layer = 0; layer < 1000; ++layer)
+        CHECK(close.part_fan_states[layer] == 0);
+    CHECK(close.part_fan_states[1000] == 255);
+
+    const DynamicPrintConfig full_config = layer_config(0, 1000, -1);
+    const std::string full_gcode = run_public_filter(full_config, 999);
+    const auto full = cooling_settings_followup::inspect(full_gcode, full_config);
+    REQUIRE(full.deposition_moves == 1000);
+    REQUIRE(full.part_fan_states.size() == full.deposition_moves);
+    require_public_filter_material(cooling_slowdown_contracts::inspect_feed_evidence(full_gcode, full_config),
+                                   full.deposition_moves);
+    CHECK(full.part_fan_states.front() == 0);
+    CHECK(full.part_fan_states[499] == 127);
+    CHECK(full.part_fan_states.back() == 255);
 }

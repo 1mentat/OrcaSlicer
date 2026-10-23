@@ -595,31 +595,37 @@
       "reason": "The exporter sets a regular nozzle temperature of 203 and requires that value in emitted thermal commands; the integer range is not claimed."
     },
     "initial_layer_fan_speed": {
-      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
-      "tag": "[GCodeSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "interaction_matrix"
       ],
-      "reason": "The exporter sets initial-layer fan speed zero and requires an emitted fan-off command; the full percent domain is not claimed. [GCodeBeltApron] additionally requires the 37 percent override before the first object layer, parsed from executable fan PWM commands."
+      "reason": "Print exports vary disabled -1, zero, representative 50 and maximum 100 percent. Physical P0 samples verify the first-layer target and anchored ramp; a nonzero closed-layer gate suppresses the override. Every row preserves deposited geometry, filament and feeds relative to the no-override control.",
+      "tag": "[FanLayerPhysical]",
+      "test": "tests/fff_print/test_cooling.cpp"
     },
     "full_fan_speed_layer": {
-      "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
-      "tag": "[GCodeSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "interaction_matrix"
       ],
-      "reason": "The exporter sets the full-speed transition at layer two and requires full-speed fan output; other transition counts are not claimed."
+      "reason": "Four-layer Print exports cover disabled 0, below-gate 1 and representative 4 ramp targets with explicit physical PWM expectations. Bounded public CoolingBuffer input covers registered maximum 1000 at the first, midpoint and final layer, with analytic deposited-path, filament and feed invariants.",
+      "tag": "[CoolingSettings]",
+      "test": "tests/fff_print/test_cooling.cpp"
     },
     "close_fan_the_first_x_layers": {
-      "test": "tests/fff_print/test_cooling.cpp",
-      "tag": "[Cooling]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "interaction_matrix"
       ],
-      "reason": "The cooling pipeline holds the fan off for five configured initial layers and requires an explicit M106 S0 command; boundary counts are not claimed."
+      "reason": "Four-layer Print exports vary the closed-layer gate at 0, 1 and 2 while sampling physical P0 state at every positive-XY deposition move and preserving feeds and material. Bounded public CoolingBuffer input covers the registered maximum 1000: deposition layers 0\u2013999 remain off and layer 1000 reaches full PWM.",
+      "tag": "[CoolingSettings]",
+      "test": "tests/fff_print/test_cooling.cpp"
     },
     "fan_min_speed": {
       "test": "tests/fff_print/test_cooling.cpp",
