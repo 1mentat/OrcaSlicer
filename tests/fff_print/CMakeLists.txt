@@ -152,6 +152,22 @@ target_link_libraries(fff_print_tree_support_tests test_common libslic3r Catch2:
 set_property(TARGET fff_print_tree_support_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_tree_support_tests)
 slicer_enable_llvm_source_coverage(fff_print_tree_support_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_tree_support_tests TEST_PREFIX "FocusedTreeSupport::")
+endif()
+
+# Focused filament-assignment contracts, without duplicate default CTest registration.
+add_executable(fff_print_multifilament_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_multifilament.cpp)
+target_link_libraries(fff_print_multifilament_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_multifilament_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_multifilament_tests)
+slicer_enable_llvm_source_coverage(fff_print_multifilament_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_multifilament_tests TEST_PREFIX "FocusedMultiFilament::")
+endif()
 
 # Focused WipeTower contracts, without duplicate CTest registration.
 add_executable(fff_print_wipe_tower_tests EXCLUDE_FROM_ALL

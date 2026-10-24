@@ -225,6 +225,10 @@ the option is off by default.
 The same option registers `libslic3r_3mf_tests` and
 `fff_print_wipe_tower_tests` with `Focused3MF::` and `FocusedWipeTower::`
 prefixes, so format and tower contracts can join a focused PR run.
+It also registers `fff_print_tree_support_tests` and
+`fff_print_multifilament_tests` with `FocusedTreeSupport::` and
+`FocusedMultiFilament::` prefixes. These excluded targets compile only their
+respective test source and shared setup for support and filament iteration.
 Use `--filter 'Case A,Case B'` instead of `--tag` to select an explicit Catch
 expression. Keep the entire expression in one argument. The same source,
 expected-count, and JUnit checks apply.

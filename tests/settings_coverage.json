@@ -1886,7 +1886,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
     },
     "inner_wall_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
@@ -1895,7 +1895,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
     },
     "sparse_infill_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
@@ -1904,7 +1904,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
     },
     "internal_solid_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
@@ -1913,7 +1913,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
     },
     "top_surface_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
@@ -1922,7 +1922,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
     },
     "bottom_surface_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
@@ -1931,7 +1931,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Two- and three-filament slices assert the active tool for wall versus infill roles, with a per-object wall override control. Related wall or infill assignments vary together; isolated role assignments and complete numeric boundaries are not claimed."
+      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
     },
     "print_extruder_id": {
       "test": "tests/libslic3r/test_config.cpp",

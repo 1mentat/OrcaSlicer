@@ -302,6 +302,128 @@ TEST_CASE("Each feature prints with its assigned filament (three filaments)", "[
     CHECK(tools_for_role(gcode, "infill")    == std::set<int>{ 1 }); // filament 2
 }
 
+// Unlike the older inline-comment helper, this parser follows emitted TYPE:/FEATURE: state.
+// A tool switch clears that state so toolchange priming cannot inherit the previous feature.
+static std::string_view marked_role(std::string_view comment);
+
+static std::set<int> tools_for_marked_role_after_toolchange(const std::string &gcode,
+                                                            const DynamicPrintConfig &config,
+                                                            std::string_view role)
+{
+    std::set<int> tools;
+    int current_tool = 0;
+    std::string active_role;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&tools, &current_tool, &active_role, role](GCodeReader &self,
+                                                                           const GCodeReader::GCodeLine &line) {
+        const std::string command(line.cmd());
+        if (command.size() >= 2 && command[0] == 'T' && std::isdigit(static_cast<unsigned char>(command[1]))) {
+            current_tool = std::stoi(command.substr(1));
+            active_role.clear();
+            return;
+        }
+
+        const std::string_view comment(line.comment());
+        const std::string_view marker = marked_role(comment);
+        if (comment.find("TYPE:") != std::string_view::npos || comment.find("FEATURE:") != std::string_view::npos) {
+            active_role.clear();
+            if (!marker.empty())
+                active_role.assign(marker.data(), marker.size());
+        }
+        if (line.extruding(self) && std::hypot(line.dist_X(self), line.dist_Y(self)) > 0.0 && active_role == role)
+            tools.insert(current_tool);
+    });
+    return tools;
+}
+
+TEST_CASE("Role filament assignments honor default and available-ID endpoints",
+          "[MultiFilament][RoleFilamentEndpoints][SettingsVariance]")
+{
+    const std::vector<std::pair<const char *, const char *>> role_settings{
+        { "outer_wall_filament_id",     "Outer wall" },
+        { "inner_wall_filament_id",     "Inner wall" },
+        { "sparse_infill_filament_id",  "Sparse infill" },
+        { "internal_solid_filament_id", "Internal solid infill" },
+        { "top_surface_filament_id",    "Top surface" },
+        { "bottom_surface_filament_id", "Bottom surface" },
+    };
+    constexpr int filament_count = 3;
+    // Source-reviewed consequences of setting one role to filament 3 while the
+    // other five IDs remain at Default (0). Keep this behavioral expectation
+    // table explicit instead of mirroring normalize_fdm_1()'s branching code.
+    const std::vector<std::pair<std::string_view, std::vector<std::string_view>>> roles_on_selected_tool{
+        { "outer_wall_filament_id",     { "outer_wall_filament_id" } },
+        { "inner_wall_filament_id",     { "inner_wall_filament_id" } },
+        { "sparse_infill_filament_id",  { "sparse_infill_filament_id", "internal_solid_filament_id", "top_surface_filament_id", "bottom_surface_filament_id" } },
+        { "internal_solid_filament_id", { "internal_solid_filament_id", "top_surface_filament_id", "bottom_surface_filament_id" } },
+        { "top_surface_filament_id",    { "top_surface_filament_id", "internal_solid_filament_id" } },
+        { "bottom_surface_filament_id", { "bottom_surface_filament_id", "internal_solid_filament_id" } },
+    };
+
+    auto config_for = [](const char *override_key, int filament_id) {
+        DynamicPrintConfig config = multifilament_config(3, {
+            { "enable_prime_tower", false },
+            { "skirt_loops",        0 },
+            { "brim_type",          "no_brim" },
+            { "gcode_comments",     true },
+            { "wall_loops",         2 },
+            { "top_shell_layers",   2 },
+            { "bottom_shell_layers",2 },
+            { "sparse_infill_density", "20%" },
+            { "extra_solid_infills", "3" },
+            { "layer_height",       0.2 },
+            { "initial_layer_print_height", 0.2 },
+        });
+        config.set_deserialize_strict({
+            { "outer_wall_filament_id",     0 },
+            { "inner_wall_filament_id",     0 },
+            { "sparse_infill_filament_id",  0 },
+            { "internal_solid_filament_id", 0 },
+            { "top_surface_filament_id",    0 },
+            { "bottom_surface_filament_id", 0 },
+        });
+        if (override_key != nullptr)
+            config.set_deserialize_strict(override_key, std::to_string(filament_id));
+        return config;
+    };
+
+    const DynamicPrintConfig default_config = config_for(nullptr, 0);
+    const std::string default_gcode = slice({ cube(20) }, default_config);
+    for (const auto &[key, role] : role_settings) {
+        CAPTURE(key, role);
+        const ConfigOptionDef *definition = print_config_def.get(key);
+        REQUIRE(definition != nullptr);
+        REQUIRE(definition->type == coInt);
+        CHECK_FALSE(definition->nullable);
+        CHECK(definition->min == 0.0f);
+        REQUIRE(definition->default_value.get() != nullptr);
+        CHECK(definition->get_default_value<ConfigOptionInt>()->value == 0);
+        CHECK_FALSE(definition->is_value_valid(-1));
+        REQUIRE(definition->is_value_valid(0));
+        REQUIRE(definition->is_value_valid(filament_count));
+        CHECK(default_config.option(key)->getInt() == 0);
+        CHECK(tools_for_marked_role_after_toolchange(default_gcode, default_config, role) == std::set<int>{ 0 });
+
+        const DynamicPrintConfig highest_config = config_for(key, filament_count);
+        REQUIRE(highest_config.option(key) != nullptr);
+        REQUIRE(highest_config.option(key)->getInt() == filament_count);
+        const std::string highest_gcode = slice({ cube(20) }, highest_config);
+        const std::string_view selected_key(key);
+        const auto expected_row = std::find_if(roles_on_selected_tool.begin(), roles_on_selected_tool.end(),
+            [selected_key](const auto &row) { return row.first == selected_key; });
+        REQUIRE(expected_row != roles_on_selected_tool.end());
+        for (const auto &[peer_key, peer_role] : role_settings) {
+            const bool receives_assignment =
+                std::find(expected_row->second.begin(), expected_row->second.end(), peer_key) != expected_row->second.end();
+            const int expected_tool = receives_assignment ? filament_count - 1 : 0;
+            CAPTURE(key, role, peer_key, peer_role, expected_tool);
+            CHECK(tools_for_marked_role_after_toolchange(highest_gcode, highest_config, peer_role) ==
+                  std::set<int>{ expected_tool });
+        }
+    }
+}
+
 // The override must survive tool ordering: object 1's walls print on their filament's
 // tool, object 0 stays on the first. If dropped, every wall prints on tool 0.
 TEST_CASE("Per-object wall filament override is honored", "[MultiFilament]")
