@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Model.hpp"
@@ -306,17 +307,18 @@ TEST_CASE("Each feature prints with its assigned filament (three filaments)", "[
 // A tool switch clears that state so toolchange priming cannot inherit the previous feature.
 static std::string_view marked_role(std::string_view comment);
 
-static std::set<int> tools_for_marked_role_after_toolchange(const std::string &gcode,
-                                                            const DynamicPrintConfig &config,
-                                                            std::string_view role)
+using MarkedRoleTools = std::map<std::string, std::set<int>>;
+
+static MarkedRoleTools tools_for_marked_roles_after_toolchange(const std::string &gcode,
+                                                               const DynamicPrintConfig &config)
 {
-    std::set<int> tools;
+    MarkedRoleTools tools;
     int current_tool = 0;
     std::string active_role;
     GCodeReader reader;
     reader.apply_config(config);
-    reader.parse_buffer(gcode, [&tools, &current_tool, &active_role, role](GCodeReader &self,
-                                                                           const GCodeReader::GCodeLine &line) {
+    reader.parse_buffer(gcode, [&tools, &current_tool, &active_role](GCodeReader &self,
+                                                                     const GCodeReader::GCodeLine &line) {
         const std::string command(line.cmd());
         if (command.size() >= 2 && command[0] == 'T' && std::isdigit(static_cast<unsigned char>(command[1]))) {
             current_tool = std::stoi(command.substr(1));
@@ -331,10 +333,16 @@ static std::set<int> tools_for_marked_role_after_toolchange(const std::string &g
             if (!marker.empty())
                 active_role.assign(marker.data(), marker.size());
         }
-        if (line.extruding(self) && std::hypot(line.dist_X(self), line.dist_Y(self)) > 0.0 && active_role == role)
-            tools.insert(current_tool);
+        if (line.extruding(self) && std::hypot(line.dist_X(self), line.dist_Y(self)) > 0.0 && !active_role.empty())
+            tools[active_role].insert(current_tool);
     });
     return tools;
+}
+
+static std::set<int> observed_tools_for_role(const MarkedRoleTools &tools, std::string_view role)
+{
+    const auto found = tools.find(std::string(role));
+    return found == tools.end() ? std::set<int>{} : found->second;
 }
 
 TEST_CASE("Role filament assignments honor default and available-ID endpoints",
@@ -364,6 +372,9 @@ TEST_CASE("Role filament assignments honor default and available-ID endpoints",
     auto config_for = [](const char *override_key, int filament_id) {
         DynamicPrintConfig config = multifilament_config(3, {
             { "enable_prime_tower", false },
+            { "gcode_flavor", "marlin2" },
+            { "use_relative_e_distances", true },
+            { "layer_change_gcode", "G92 E0\n" },
             { "skirt_loops",        0 },
             { "brim_type",          "no_brim" },
             { "gcode_comments",     true },
@@ -401,14 +412,22 @@ TEST_CASE("Role filament assignments honor default and available-ID endpoints",
         CHECK(definition->get_default_value<ConfigOptionInt>()->value == 0);
         CHECK_FALSE(definition->is_value_valid(-1));
         REQUIRE(definition->is_value_valid(0));
+        CHECK(definition->is_value_valid(1));
+        CHECK(definition->is_value_valid(2));
         REQUIRE(definition->is_value_valid(filament_count));
+        REQUIRE(definition->is_value_valid(filament_count + 1));
         CHECK(default_config.option(key)->getInt() == 0);
-        CHECK(tools_for_marked_role_after_toolchange(default_gcode, default_config, role) == std::set<int>{ 0 });
+    }
+    const auto default_tools = tools_for_marked_roles_after_toolchange(default_gcode, default_config);
+    for (const auto &[key, role] : role_settings) {
+        CAPTURE(key, role);
+        CHECK(observed_tools_for_role(default_tools, role) == std::set<int>{ 0 });
 
         const DynamicPrintConfig highest_config = config_for(key, filament_count);
         REQUIRE(highest_config.option(key) != nullptr);
         REQUIRE(highest_config.option(key)->getInt() == filament_count);
         const std::string highest_gcode = slice({ cube(20) }, highest_config);
+        const auto highest_tools = tools_for_marked_roles_after_toolchange(highest_gcode, highest_config);
         const std::string_view selected_key(key);
         const auto expected_row = std::find_if(roles_on_selected_tool.begin(), roles_on_selected_tool.end(),
             [selected_key](const auto &row) { return row.first == selected_key; });
@@ -418,8 +437,36 @@ TEST_CASE("Role filament assignments honor default and available-ID endpoints",
                 std::find(expected_row->second.begin(), expected_row->second.end(), peer_key) != expected_row->second.end();
             const int expected_tool = receives_assignment ? filament_count - 1 : 0;
             CAPTURE(key, role, peer_key, peer_role, expected_tool);
-            CHECK(tools_for_marked_role_after_toolchange(highest_gcode, highest_config, peer_role) ==
-                  std::set<int>{ expected_tool });
+            CHECK(observed_tools_for_role(highest_tools, peer_role) == std::set<int>{ expected_tool });
+        }
+    }
+
+    // All six roles use the same configured count. Check both interior available IDs and the
+    // first unavailable ID together so each key receives the same physical-output oracle.
+    const std::vector<std::pair<int, int>> domain_cases{ { 1, 0 }, { 2, 1 }, { 4, 0 } };
+    for (const auto &[filament_id, expected_tool] : domain_cases) {
+        DynamicPrintConfig domain_config = config_for(nullptr, 0);
+        for (const auto &[key, role] : role_settings)
+            domain_config.set_deserialize_strict(key, std::to_string(filament_id));
+
+        for (const auto &[key, role] : role_settings) {
+            CAPTURE(filament_id, key, role);
+            REQUIRE(domain_config.option(key) != nullptr);
+            CHECK(domain_config.option(key)->getInt() == filament_id);
+        }
+
+        Print domain_print;
+        Model domain_model;
+        init_print({ cube(20) }, domain_print, domain_model, domain_config);
+        const auto validation = domain_print.validate();
+        CAPTURE(filament_id);
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        const std::string domain_gcode = Slic3r::Test::gcode(domain_print);
+        const auto domain_tools = tools_for_marked_roles_after_toolchange(domain_gcode, domain_config);
+        for (const auto &[key, role] : role_settings) {
+            CAPTURE(filament_id, expected_tool, key, role);
+            CHECK(observed_tools_for_role(domain_tools, role) == std::set<int>{ expected_tool });
         }
     }
 }

@@ -623,7 +623,7 @@
         "pipeline_oracle",
         "interaction_matrix"
       ],
-      "reason": "Four-layer Print exports vary the closed-layer gate at 0, 1 and 2 while sampling physical P0 state at every positive-XY deposition move and preserving feeds and material. Bounded public CoolingBuffer input covers the registered maximum 1000: deposition layers 0\u2013999 remain off and layer 1000 reaches full PWM.",
+      "reason": "Four-layer Print exports vary the closed-layer gate at 0, 1 and 2 while sampling physical P0 state at every positive-XY deposition move and preserving feeds and material. Bounded public CoolingBuffer input covers the registered maximum 1000: deposition layers 0–999 remain off and layer 1000 reaches full PWM.",
       "tag": "[CoolingSettings]",
       "test": "tests/fff_print/test_cooling.cpp"
     },
@@ -1395,7 +1395,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The matrix varies 250 and 1000 mm/s\u00b2 outer-wall acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed outer-wall extrusion on every observed layer carries acceleration 611 while the default is 1200. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The matrix varies 250 and 1000 mm/s² outer-wall acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed outer-wall extrusion on every observed layer carries acceleration 611 while the default is 1200. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "sparse_infill_acceleration": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -1404,7 +1404,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The matrix varies 500 and 12000 mm/s\u00b2 sparse-infill acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed sparse-infill extrusion on every observed layer carries acceleration 555, independent of default acceleration 1200. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The matrix varies 500 and 12000 mm/s² sparse-infill acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode.cpp: Every parsed sparse-infill extrusion on every observed layer carries acceleration 555, independent of default acceleration 1200. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "print_flow_ratio": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -1644,7 +1644,7 @@
         "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "Adjacent two-extruder boxes are sliced with interlocking off and on. The analytic 400 mm\u00b2 union is conserved in every layer while enabled ownership changes."
+      "reason": "Adjacent two-extruder boxes are sliced with interlocking off and on. The analytic 400 mm² union is conserved in every layer while enabled ownership changes."
     },
     "interlocking_beam_width": {
       "test": "tests/fff_print/test_interlocking.cpp",
@@ -1671,7 +1671,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "One- and two-layer beam groups change both materials\u2019 vertical ownership signatures. A 21-layer object with two-layer groups preserves the final partial group. Representative counts only."
+      "reason": "One- and two-layer beam groups change both materials’ vertical ownership signatures. A 21-layer object with two-layer groups preserves the final partial group. Representative counts only."
     },
     "interlocking_depth": {
       "test": "tests/fff_print/test_interlocking.cpp",
@@ -1881,57 +1881,63 @@
     },
     "outer_wall_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "tag": "[MultiFilament][RoleFilamentEndpoints][SettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
+      "reason": "Existing role-routing slices retain representative-value evidence. The dedicated RoleFilamentEndpoints case checks each role's default 0 and isolated highest available ID 3, including the source-defined inheritance peers, and its schema checks reject -1. Added rows set all six keys to IDs 1, 2, and 4 in a three-filament fixture; TYPE:/FEATURE:-state parsing requires each role to emit exactly tool 0, tool 1, and tool 0 respectively. ID 4 is the first value above the configured count: the public schema accepts it and PrintObject clamps it to ID 1 before export. This covers the bounded operational domain through count+1, not unrestricted integer inputs or INT_MAX."
     },
     "inner_wall_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "tag": "[MultiFilament][RoleFilamentEndpoints][SettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
+      "reason": "Existing role-routing slices retain representative-value evidence. The dedicated RoleFilamentEndpoints case checks each role's default 0 and isolated highest available ID 3, including the source-defined inheritance peers, and its schema checks reject -1. Added rows set all six keys to IDs 1, 2, and 4 in a three-filament fixture; TYPE:/FEATURE:-state parsing requires each role to emit exactly tool 0, tool 1, and tool 0 respectively. ID 4 is the first value above the configured count: the public schema accepts it and PrintObject clamps it to ID 1 before export. This covers the bounded operational domain through count+1, not unrestricted integer inputs or INT_MAX."
     },
     "sparse_infill_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "tag": "[MultiFilament][RoleFilamentEndpoints][SettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
+      "reason": "Existing role-routing slices retain representative-value evidence. The dedicated RoleFilamentEndpoints case checks each role's default 0 and isolated highest available ID 3, including the source-defined inheritance peers, and its schema checks reject -1. Added rows set all six keys to IDs 1, 2, and 4 in a three-filament fixture; TYPE:/FEATURE:-state parsing requires each role to emit exactly tool 0, tool 1, and tool 0 respectively. ID 4 is the first value above the configured count: the public schema accepts it and PrintObject clamps it to ID 1 before export. This covers the bounded operational domain through count+1, not unrestricted integer inputs or INT_MAX."
     },
     "internal_solid_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "tag": "[MultiFilament][RoleFilamentEndpoints][SettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
+      "reason": "Existing role-routing slices retain representative-value evidence. The dedicated RoleFilamentEndpoints case checks each role's default 0 and isolated highest available ID 3, including the source-defined inheritance peers, and its schema checks reject -1. Added rows set all six keys to IDs 1, 2, and 4 in a three-filament fixture; TYPE:/FEATURE:-state parsing requires each role to emit exactly tool 0, tool 1, and tool 0 respectively. ID 4 is the first value above the configured count: the public schema accepts it and PrintObject clamps it to ID 1 before export. This covers the bounded operational domain through count+1, not unrestricted integer inputs or INT_MAX."
     },
     "top_surface_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "tag": "[MultiFilament][RoleFilamentEndpoints][SettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
+      "reason": "Existing role-routing slices retain representative-value evidence. The dedicated RoleFilamentEndpoints case checks each role's default 0 and isolated highest available ID 3, including the source-defined inheritance peers, and its schema checks reject -1. Added rows set all six keys to IDs 1, 2, and 4 in a three-filament fixture; TYPE:/FEATURE:-state parsing requires each role to emit exactly tool 0, tool 1, and tool 0 respectively. ID 4 is the first value above the configured count: the public schema accepts it and PrintObject clamps it to ID 1 before export. This covers the bounded operational domain through count+1, not unrestricted integer inputs or INT_MAX."
     },
     "bottom_surface_filament_id": {
       "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "tag": "[MultiFilament][RoleFilamentEndpoints][SettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Existing two- and three-filament slices check role assignments and a per-object wall override. The dedicated RoleFilamentEndpoints case separately sets each of six roles to Default (0) and to the highest configured filament ID (3), requiring the exact nonempty role/tool sets including default infill/surface inheritance. Schema checks reject -1. Values beyond the configured filament count and the unrestricted schema maximum remain unclaimed, so complete numeric boundary coverage is not declared."
+      "reason": "Existing role-routing slices retain representative-value evidence. The dedicated RoleFilamentEndpoints case checks each role's default 0 and isolated highest available ID 3, including the source-defined inheritance peers, and its schema checks reject -1. Added rows set all six keys to IDs 1, 2, and 4 in a three-filament fixture; TYPE:/FEATURE:-state parsing requires each role to emit exactly tool 0, tool 1, and tool 0 respectively. ID 4 is the first value above the configured count: the public schema accepts it and PrintObject clamps it to ID 1 before export. This covers the bounded operational domain through count+1, not unrestricted integer inputs or INT_MAX."
     },
     "print_extruder_id": {
       "test": "tests/libslic3r/test_config.cpp",
@@ -2556,7 +2562,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The passing \u201cSEMM suppresses tower temperature waits while retaining purge geometry\u201d case runs one public WipeTower2 plan with single_extruder_multi_material=false/true and otherwise identical temperatures and wait settings. The ordinary row requires one tagged M109 and no M104, the SEMM row requires no M109 and one M104, and both rows retain finite positive purge geometry. Broader SEMM priming, filament-vector, and Print wiring interactions remain unclaimed."
+      "reason": "The passing “SEMM suppresses tower temperature waits while retaining purge geometry” case runs one public WipeTower2 plan with single_extruder_multi_material=false/true and otherwise identical temperatures and wait settings. The ordinary row requires one tagged M109 and no M104, the SEMM row requires no M109 and one M104, and both rows retain finite positive purge geometry. Broader SEMM priming, filament-vector, and Print wiring interactions remain unclaimed."
     },
     "purge_in_prime_tower": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2682,7 +2688,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The passing \u201cWipeTower2 rib fillet changes the emitted wall path without changing its plan\u201d case holds the rib plan, purge floor, and ramming setting fixed while wipe_tower_fillet_wall is false/true. Both outputs are finite with positive geometry; plan width/depth/rib dimensions are preserved while emitted positive-segment count, non-collinear turns, and length change. Other wall types and multi-parameter fillet interactions remain unclaimed."
+      "reason": "The passing “WipeTower2 rib fillet changes the emitted wall path without changing its plan” case holds the rib plan, purge floor, and ramming setting fixed while wipe_tower_fillet_wall is false/true. Both outputs are finite with positive geometry; plan width/depth/rib dimensions are preserved while emitted positive-segment count, non-collinear turns, and length change. Other wall types and multi-parameter fillet interactions remain unclaimed."
     },
     "wipe_tower_cone_angle": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2702,7 +2708,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The passing \u201cRamming enable settings gate the configured unload material\u201d case runs the same public WipeTower2 plan with the SEMM route selected and enable_filament_ramming=false/true. Both rows require finite output; the disabled row has zero positive unload E and the enabled row has the independently calculated positive unload volume. The non-SEMM rows are a separate multitool control; complete ramming-rate and cooling interactions remain unclaimed."
+      "reason": "The passing “Ramming enable settings gate the configured unload material” case runs the same public WipeTower2 plan with the SEMM route selected and enable_filament_ramming=false/true. Both rows require finite output; the disabled row has zero positive unload E and the enabled row has the independently calculated positive unload volume. The non-SEMM rows are a separate multitool control; complete ramming-rate and cooling interactions remain unclaimed."
     },
     "filament_cooling_moves": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2831,7 +2837,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The passing \u201cFilament swap current is opt-in and restored without changing purge geometry\u201d case holds the public SEMM plan and all other settings fixed while high_current_on_filament_swap is false/true. It parses the disabled command absence and enabled M907/M906 pair for Marlin and RepRapFirmware, while preserving extrusion length, elapsed time, and depth; Klipper\u2019s documented no-command control is also checked. Full printer-current domains remain unclaimed."
+      "reason": "The passing “Filament swap current is opt-in and restored without changing purge geometry” case holds the public SEMM plan and all other settings fixed while high_current_on_filament_swap is false/true. It parses the disabled command absence and enabled M907/M906 pair for Marlin and RepRapFirmware, while preserving extrusion length, elapsed time, and depth; Klipper’s documented no-command control is also checked. Full printer-current domains remain unclaimed."
     },
     "internal_solid_infill_pattern": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -3597,7 +3603,7 @@
         "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "The public concave-hole fixture exercises brim_ears_outer_only=false and true with brim ears enabled, a fixed 125 degree angle, and zero detection-length override. Both runs require positive ears and independently classify whether the first-layer brim enters the model hole, so the setting\u2019s hole-exclusion behavior is observed. Other brim types and the complete geometry interaction matrix remain unclaimed."
+      "reason": "The public concave-hole fixture exercises brim_ears_outer_only=false and true with brim ears enabled, a fixed 125 degree angle, and zero detection-length override. Both runs require positive ears and independently classify whether the first-layer brim enters the model hole, so the setting’s hole-exclusion behavior is observed. Other brim types and the complete geometry interaction matrix remain unclaimed."
     },
     "brim_ears_max_angle": {
       "test": "tests/fff_print/test_skirt_brim.cpp",
@@ -4231,7 +4237,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The public two-component fixture has analytically separated 8x8 mm (64 mm\u00b2) and 14x14 mm (196 mm\u00b2) components. At 0.0 mm\u00b2 the small component remains internal sparse fill; at 80.0 mm\u00b2 it becomes internal solid fill while the large component remains sparse and its solid-fill count is unchanged. The registered setting has a lower bound of zero and no declared upper bound; only these representative threshold controls are claimed."
+      "reason": "The public two-component fixture has analytically separated 8x8 mm (64 mm²) and 14x14 mm (196 mm²) components. At 0.0 mm² the small component remains internal sparse fill; at 80.0 mm² it becomes internal solid fill while the large component remains sparse and its solid-fill count is unchanged. The registered setting has a lower bound of zero and no declared upper bound; only these representative threshold controls are claimed."
     },
     "wall_transition_length": {
       "test": "tests/libslic3r/test_arachne_walls.cpp",
@@ -4341,7 +4347,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The same public SLA case compares elefant_foot_min_width=0.2 with 30.0 while compensation is positive. The 30 mm protected minimum preserves the 10 mm square at 100 mm\u00b2 on all four layers, while the ordinary minimum allows the correction row to shrink and recover. This is a physical protection pair only; no full minimum-width range or boundary claim is made."
+      "reason": "The same public SLA case compares elefant_foot_min_width=0.2 with 30.0 while compensation is positive. The 30 mm protected minimum preserves the 10 mm square at 100 mm² on all four layers, while the ordinary minimum allows the correction row to shrink and recover. This is a physical protection pair only; no full minimum-width range or boundary claim is made."
     },
     "faded_layers": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
@@ -4574,7 +4580,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The accepted public G-code case compares explicit kickstart 0.0 (the registered minimum/off boundary) with 0.5 s. Both exports retain positive extrusion and equal XY/material totals; only the enabled run begins its nonzero fan sequence with PWM 255 before returning to the configured 30\u201360% target. No upper numeric bound is registered."
+      "reason": "The accepted public G-code case compares explicit kickstart 0.0 (the registered minimum/off boundary) with 0.5 s. Both exports retain positive extrusion and equal XY/material totals; only the enabled run begins its nonzero fan sequence with PWM 255 before returning to the configured 30–60% target. No upper numeric bound is registered."
     },
     "infill_anchor": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -4716,7 +4722,7 @@
         "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "With two used filaments, Print::validate reports the missing-purge warning for By-object and By-layer modes when enabled, and reports none with the option disabled. This is the option\u2019s preflight warning contract, not a generated purge path."
+      "reason": "With two used filaments, Print::validate reports the missing-purge warning for By-object and By-layer modes when enabled, and reports none with the option disabled. This is the option’s preflight warning contract, not a generated purge path."
     },
     "extruder_clearance_height_to_lid": {
       "test": "tests/fff_print/test_print_validation_clearance.cpp",
