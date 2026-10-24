@@ -3087,7 +3087,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Top Z gaps 0.0 and 0.4 are compared with four top interface layers; both emit finite interface support and their maximum interface Z positions differ by more than 0.1. The numeric domain and independent-layer-height interactions remain unclaimed."
+      "reason": "Top Z gaps 0.0 and 0.4 are compared with four top interface layers; both emit finite interface support and their maximum interface Z positions differ by more than 0.1. The numeric domain and independent-layer-height interactions remain unclaimed. The TreeSupport roof-contact cases also compare 0.0 and 0.2 mm gaps on broad and subminimum-area cap overhangs: zero-gap tips preserve an interface at the underside, while the subminimum positive-gap control emits regular support one layer below."
     },
     "support_bottom_z_distance": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -4132,7 +4132,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The new public tree-support contact case compares raft_expansion 0 and 3 mm at the same contact Z and requires finite positive support footprint area, width, and height in both rows, with the expanded footprint increasing in both dimensions and area. No numeric boundary claim is made."
+      "reason": "Public tree-support contact cases compare raft_expansion 0 and 3 mm at the same contact Z. A plain cube checks footprint area and bounds; a cap-overhang fixture checks positive cap support and raft-contact interface extrusion in an analytic stem-expansion ring, excluding tree-base geometry. No numeric boundary or complete interaction claim is made."
     },
     "enable_wrapping_detection": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -5200,7 +5200,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The case \"Tree support brim width changes the first support footprint\" passes on the same proven tree_slim interaction fixture with auto brim disabled and one support wall. Configured widths 0 and 16 mm both require finite, nonempty support, positive first-layer paths, area and length; the 16 mm row must increase measured first-layer footprint area by more than 1 percent. The registry declares a minimum but no maximum, so this is representative value evidence, not complete boundary coverage. Broad interaction claims are not made."
+      "reason": "The case \"Tree support brim width changes the first support footprint\" passes on the same proven tree_slim interaction fixture with auto brim disabled and one support wall. Configured widths 0 and 16 mm both require finite, nonempty support, positive first-layer paths, area and length; the 16 mm row must increase measured first-layer footprint area by more than 1 percent. The registry declares a minimum but no maximum, so this is representative value evidence, not complete boundary coverage. Broad interaction claims are not made. The tree_support_brim_width.json mutation catalog validates that forcing this width to zero fails the explicit-width footprint assertion; unique detection is not claimed."
     }
   }
 }

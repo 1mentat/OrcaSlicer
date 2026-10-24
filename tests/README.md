@@ -1076,7 +1076,18 @@ directions above a lower model surface. Build `fff_print_tree_support_tests` for
 focused feedback; the same cases run in the canonical FFF suite without duplicate
 CTest registration. Its probes are in `tree_support_contacts.json`.
 
-`[TreeSupportRoofContact]` checks zero-gap organic roof contact against an analytic cap underside, with a 0.2 mm positive-gap control; its mutation probe is in `tests/mutations/tree_support_roof_contact.json`.
+`[TreeSupportRoofContact]` checks zero-gap organic roof contact against an
+analytic cap underside, with a 0.2 mm positive-gap control. A subminimum-area
+overhang checks that zero-gap tree tips preserve contact-interface extrusion,
+while the positive-gap control emits regular support one layer below. The
+broad-cap mutation probe is in `tests/mutations/tree_support_roof_contact.json`.
+
+`[TreeSupportRaftContact]` checks raft expansion on both a plain cube and a cap
+overhang. The overhang case measures raft-contact interface extrusion in a known
+ring outside the stem and retains a separate support witness under the cap.
+`tests/mutations/tree_support_brim_width.json` challenges the explicit brim-width
+footprint comparison by forcing the configured width to zero. This validates the
+oracle without claiming that it uniquely detects the mutation.
 
 `[ToolOrderUtils]` checks constrained flow capacities, group requirements,
 minimum flush costs, and filament ordering. Small path instances use exhaustive

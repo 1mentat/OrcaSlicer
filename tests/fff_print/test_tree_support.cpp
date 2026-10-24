@@ -2034,6 +2034,7 @@ struct RoofEvidence {
     double resolved_gap_mm = std::numeric_limits<double>::quiet_NaN();
     double total_support_length_mm = 0.0;
     double total_support_volume_mm3 = 0.0;
+    double top_support_z_mm = -std::numeric_limits<double>::infinity();
     double top_interface_z_mm = -std::numeric_limits<double>::infinity();
     double top_overhang_coverage_mm2 = 0.0;
 };
@@ -2061,7 +2062,29 @@ static double area_mm2(const ExPolygons &polygons)
     return unscale<double>(unscale<double>(scaled_area));
 }
 
-static RoofEvidence observe(double top_gap_mm)
+static TriangleMesh subminimum_roof_fixture()
+{
+    TriangleMesh model = make_cube(2.0, 2.0, 1.0);
+    TriangleMesh stem = make_cube(2.0, 2.0, 6.0);
+    stem.translate(0.0, 0.0, 0.5);
+    TriangleMesh cap = make_cube(2.4, 2.0, 0.8);
+    cap.translate(0.0, 0.0, 5.8);
+    model.merge(stem);
+    model.merge(cap);
+    return model;
+}
+
+static ExPolygon subminimum_roof_window(const Point &center_offset)
+{
+    // The cap extends 0.4 mm beyond the 2x2 stem along one 2 mm side: 0.8 mm^2 total.
+    Polygon outer{ Point::new_scale(2.0, 0.0) - center_offset,
+                   Point::new_scale(2.4, 0.0) - center_offset,
+                   Point::new_scale(2.4, 2.0) - center_offset,
+                   Point::new_scale(2.0, 2.0) - center_offset };
+    return ExPolygon(std::move(outer));
+}
+
+static RoofEvidence observe(double top_gap_mm, bool subminimum_roof = false)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -2101,11 +2124,16 @@ static RoofEvidence observe(double top_gap_mm)
         { "use_relative_e_distances",          true },
         { "layer_change_gcode",                "G92 E0\n" },
     });
+    if (subminimum_roof)
+        config.set_deserialize_strict({
+            { "support_object_xy_distance", 0.0 },
+        });
 
     Print print;
     Model model;
     std::vector<TriangleMesh> meshes;
-    meshes.emplace_back(organic_tree_density_contracts::cap_overhang_fixture());
+    meshes.emplace_back(subminimum_roof ? subminimum_roof_fixture() :
+                        organic_tree_density_contracts::cap_overhang_fixture());
     init_print(std::move(meshes), print, model, config, nullptr, false);
     const StringObjectException validation = print.validate();
     INFO(validation.string);
@@ -2117,7 +2145,8 @@ static RoofEvidence observe(double top_gap_mm)
     RoofEvidence result;
     result.zero_gap_resolved = object.slicing_parameters().zero_gap_interface_top;
     result.resolved_gap_mm = static_cast<double>(object.slicing_parameters().gap_support_object);
-    const ExPolygon overhang = cap_overhang_window(object.center_offset());
+    const ExPolygon overhang = subminimum_roof ? subminimum_roof_window(object.center_offset()) :
+                               cap_overhang_window(object.center_offset());
     Polygons top_interface_coverage;
 
     for (const SupportLayer *layer : object.support_layers()) {
@@ -2149,6 +2178,7 @@ static RoofEvidence observe(double top_gap_mm)
             ++result.support_paths;
             result.total_support_length_mm += length_mm;
             result.total_support_volume_mm3 += volume_mm3;
+            result.top_support_z_mm = std::max(result.top_support_z_mm, layer_z);
             if (path.role() != erSupportMaterialInterface)
                 return;
 
@@ -2174,7 +2204,10 @@ static RoofEvidence observe(double top_gap_mm)
     }
     result.finite = result.finite && std::isfinite(result.total_support_length_mm);
     result.finite = result.finite && std::isfinite(result.total_support_volume_mm3);
-    result.finite = result.finite && std::isfinite(result.top_interface_z_mm);
+    if (result.support_paths > 0)
+        result.finite = result.finite && std::isfinite(result.top_support_z_mm);
+    if (result.interface_paths > 0)
+        result.finite = result.finite && std::isfinite(result.top_interface_z_mm);
     result.finite = result.finite && std::isfinite(result.top_overhang_coverage_mm2);
     return result;
 }
@@ -2214,4 +2247,202 @@ TEST_CASE("Zero-gap organic support roof reaches the cap underside",
                Catch::Matchers::WithinAbs(cap_underside_z_mm - layer_height_mm, 0.03));
     CHECK_THAT(zero_gap.top_interface_z_mm - positive_gap.top_interface_z_mm,
                Catch::Matchers::WithinAbs(layer_height_mm, 0.03));
+}
+
+TEST_CASE("Zero-gap tree tips carry a subminimum roof through the contact interface",
+          "[TreeSupport][TreeSupportRoofContact]")
+{
+    using namespace tree_support_zero_gap_roof_contracts;
+    constexpr double cap_underside_z_mm = 5.8;
+    constexpr double layer_height_mm = 0.2;
+    const ExPolygon exposed_strip = subminimum_roof_window(Point::new_scale(0.0, 0.0));
+    CHECK_THAT(area_mm2(ExPolygons{exposed_strip}), Catch::Matchers::WithinAbs(0.8, 1e-3));
+
+    // The 0.8 mm^2 strip and 0.8 mm tip (about 0.50 mm^2) both fall below the 1 mm^2 roof threshold.
+    // The next-layer roof check leaves dtt_roof at zero. Zero gap alone enables force_tip_to_roof
+    // and passes all three roof-tip layers to add_points_along_lines; the positive-gap row gets regular tips.
+    const RoofEvidence zero_gap = observe(0.0, true);
+    const RoofEvidence positive_gap = observe(layer_height_mm, true);
+
+    for (const RoofEvidence &evidence : {zero_gap, positive_gap}) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.invalid_paths == 0);
+        REQUIRE(evidence.support_paths > 0);
+        REQUIRE(evidence.total_support_length_mm > 0.0);
+        REQUIRE(evidence.total_support_volume_mm3 > 0.0);
+    }
+
+    REQUIRE(zero_gap.interface_paths > 0);
+    REQUIRE(zero_gap.interface_layers > 0);
+    REQUIRE(zero_gap.top_overhang_coverage_mm2 > 0.001);
+    CHECK(positive_gap.interface_paths == 0);
+    CHECK(positive_gap.interface_layers == 0);
+
+    CHECK(zero_gap.zero_gap_resolved);
+    CHECK_FALSE(positive_gap.zero_gap_resolved);
+    CHECK_THAT(zero_gap.resolved_gap_mm, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(positive_gap.resolved_gap_mm, Catch::Matchers::WithinAbs(layer_height_mm, 1e-6));
+    CHECK_THAT(zero_gap.top_interface_z_mm,
+               Catch::Matchers::WithinAbs(cap_underside_z_mm, 0.03));
+    CHECK_THAT(positive_gap.top_support_z_mm,
+               Catch::Matchers::WithinAbs(cap_underside_z_mm - layer_height_mm, 0.03));
+}
+
+namespace tree_support_raft_overhang_contracts {
+
+// Reuse the published cap/stem dimensions while letting the stem itself form the
+// first-layer footprint. This makes the raft expansion annulus analytically known.
+static TriangleMesh raft_cap_overhang_fixture()
+{
+    TriangleMesh model = make_cube(6.0, 6.0, 6.0);
+    model.translate(9.0, 9.0, 0.0);
+    TriangleMesh cap = make_cube(24.0, 24.0, 0.8);
+    cap.translate(0.0, 0.0, 5.8);
+    model.merge(cap);
+    return model;
+}
+
+static ExPolygon raft_expansion_witness(const Point &center_offset)
+{
+    Polygon outer{ Point::new_scale(6.5, 6.5) - center_offset,
+                   Point::new_scale(17.5, 6.5) - center_offset,
+                   Point::new_scale(17.5, 17.5) - center_offset,
+                   Point::new_scale(6.5, 17.5) - center_offset };
+    Polygon stem{ Point::new_scale(9.0, 9.0) - center_offset,
+                  Point::new_scale(9.0, 15.0) - center_offset,
+                  Point::new_scale(15.0, 15.0) - center_offset,
+                  Point::new_scale(15.0, 9.0) - center_offset };
+    // This ring lies outside the unexpanded 6x6 stem and inside its 3mm expansion.
+    return ExPolygon(std::move(outer), std::move(stem));
+}
+
+struct RaftOverhangEvidence {
+    double raft_contact_top_z = std::numeric_limits<double>::quiet_NaN();
+    double raft_contact_witness_area_mm2 = 0.0;
+    double cap_overhang_support_area_mm2 = 0.0;
+    size_t raft_contact_interface_paths = 0;
+    size_t physical_support_paths = 0;
+    double total_support_length_mm = 0.0;
+    double total_support_volume_mm3 = 0.0;
+    bool finite = true;
+};
+
+static RaftOverhangEvidence observe(double raft_expansion)
+{
+    constexpr double cap_bottom_z_mm = 5.8;
+    constexpr double top_gap_mm = 0.2;
+    Print print;
+    slice_with_tree_support(raft_cap_overhang_fixture(), print, "organic", 30, 0, 3, {
+        { "printable_area",                    "-100x-100,200x-100,200x200,-100x200" },
+        { "layer_height",                       0.2 },
+        { "initial_layer_print_height",         0.2 },
+        { "support_top_z_distance",             top_gap_mm },
+        { "support_interface_top_layers",       3 },
+        { "support_interface_spacing",          0.4 },
+        { "independent_support_layer_height",   false },
+        { "support_interface_bottom_layers",   0 },
+        { "support_remove_small_overhang",      0 },
+        { "tree_support_auto_brim",             false },
+        { "tree_support_brim_width",            0.0 },
+        { "tree_support_top_rate",              "30%" },
+        { "tree_support_branch_distance_organic", 1.0 },
+        { "tree_support_branch_angle_organic",  40.0 },
+        { "tree_support_branch_diameter_angle", 5.0 },
+        { "tree_support_tip_diameter",          0.8 },
+        { "tree_support_branch_diameter_organic", 2.0 },
+        { "tree_support_wall_count",            1 },
+        { "support_base_pattern",               "hollow" },
+        { "support_line_width",                 0.4 },
+        { "line_width",                         0.4 },
+        { "nozzle_diameter",                    "0.4" },
+        { "raft_expansion",                     raft_expansion },
+        { "skirt_loops",                        0 },
+        { "brim_type",                          "no_brim" },
+        { "brim_width",                         0.0 },
+        { "enable_arc_fitting",                false },
+        { "resolution",                         0.01 },
+    });
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    RaftOverhangEvidence result;
+    result.raft_contact_top_z = double(object.slicing_parameters().raft_contact_top_z);
+    const double cap_support_z = double(object.slicing_parameters().object_print_z_min) +
+                                 cap_bottom_z_mm - top_gap_mm;
+    const ExPolygon cap_overhang = tree_support_zero_gap_roof_contracts::cap_overhang_window(object.center_offset());
+    const ExPolygon raft_witness = raft_expansion_witness(object.center_offset());
+    Polygons raft_interface_paths;
+    Polygons cap_support_paths;
+
+    REQUIRE(std::isfinite(result.raft_contact_top_z));
+    REQUIRE(std::isfinite(cap_support_z));
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer == nullptr) {
+            result.finite = false;
+            continue;
+        }
+        const double layer_z = double(layer->print_z);
+        result.finite = result.finite && std::isfinite(layer_z);
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            const double length_mm = unscale<double>(path.length());
+            const double flow_mm3_per_mm = path.mm3_per_mm;
+            const double width_mm = double(path.width);
+            const double height_mm = double(path.height);
+            const double volume_mm3 = length_mm * flow_mm3_per_mm;
+            const bool valid_path = std::isfinite(length_mm) && length_mm > 0.0 &&
+                std::isfinite(flow_mm3_per_mm) && flow_mm3_per_mm > 0.0 &&
+                std::isfinite(width_mm) && width_mm > 0.0 &&
+                std::isfinite(height_mm) && height_mm > 0.0 &&
+                std::isfinite(volume_mm3) && volume_mm3 > 0.0;
+            if (!valid_path) {
+                result.finite = false;
+                return;
+            }
+            ++result.physical_support_paths;
+            result.total_support_length_mm += length_mm;
+            result.total_support_volume_mm3 += volume_mm3;
+            if (std::abs(layer_z - result.raft_contact_top_z) <= EPSILON &&
+                path.role() == erSupportMaterialInterface) {
+                ++result.raft_contact_interface_paths;
+                path.polygons_covered_by_width(raft_interface_paths, float(SCALED_EPSILON));
+            }
+            if (std::abs(layer_z - cap_support_z) <= 0.03)
+                path.polygons_covered_by_width(cap_support_paths, float(SCALED_EPSILON));
+        });
+    }
+
+    const ExPolygons contact_coverage = union_ex(raft_interface_paths);
+    const ExPolygons witness_coverage = intersection_ex(contact_coverage, ExPolygons{raft_witness});
+    result.raft_contact_witness_area_mm2 = tree_support_zero_gap_roof_contracts::area_mm2(witness_coverage);
+    const ExPolygons supported_cap_ring = intersection_ex(union_ex(cap_support_paths), ExPolygons{cap_overhang});
+    result.cap_overhang_support_area_mm2 = tree_support_zero_gap_roof_contracts::area_mm2(supported_cap_ring);
+    result.finite = result.finite && std::isfinite(result.raft_contact_witness_area_mm2) &&
+        std::isfinite(result.cap_overhang_support_area_mm2) &&
+        std::isfinite(result.total_support_length_mm) && std::isfinite(result.total_support_volume_mm3);
+    return result;
+}
+
+} // namespace tree_support_raft_overhang_contracts
+
+TEST_CASE("Organic raft expansion preserves support under a cap overhang",
+          "[TreeSupport][TreeSupport3D][TreeSupportRaftContact]")
+{
+    using namespace tree_support_raft_overhang_contracts;
+    const RaftOverhangEvidence unexpanded = observe(0.0);
+    const RaftOverhangEvidence expanded   = observe(3.0);
+
+    for (const RaftOverhangEvidence &evidence : {unexpanded, expanded}) {
+        REQUIRE(evidence.finite);
+        REQUIRE(evidence.physical_support_paths > 0);
+        REQUIRE(evidence.total_support_length_mm > 0.0);
+        REQUIRE(evidence.total_support_volume_mm3 > 0.0);
+        REQUIRE(evidence.raft_contact_interface_paths > 0);
+        REQUIRE(evidence.cap_overhang_support_area_mm2 > 0.0);
+    }
+    CHECK_THAT(expanded.raft_contact_top_z,
+               Catch::Matchers::WithinAbs(unexpanded.raft_contact_top_z, EPSILON));
+    // The analytic witness is outside the unexpanded stem and inside its 3mm
+    // raft expansion. Only raft-contact interface extrusion is measured here;
+    // cap-generated tree bases cannot inflate this local witness.
+    REQUIRE(expanded.raft_contact_witness_area_mm2 > unexpanded.raft_contact_witness_area_mm2 + 20.0);
 }
