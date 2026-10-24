@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Internal-solid and gap-infill feeds follow their own configured speeds, including minimum and nullable object inheritance controls.",
+  "description": "Role feeds follow their own configured speeds, including registered minima and nullable object inheritance controls.",
   "mutants": [
     {
       "description": "Route solid-infill extrusion through sparse-infill speed; the parsed role feed must expose the wrong modal rate.",
@@ -17,6 +17,22 @@
       "old": "            speed = NOZZLE_CONFIG(gap_infill_speed);",
       "path": "src/libslic3r/GCode.cpp",
       "test_filter": "Gap infill speed honors its minimum and nullable object inheritance"
+    },
+    {
+      "description": "Route this role through a distinct companion role speed; the target role modal-F oracle should fail at the representative or endpoint output.",
+      "id": "outer-wall-speed-routed-to-inner-wall-speed",
+      "new": "            speed = NOZZLE_CONFIG(inner_wall_speed);",
+      "old": "            speed = NOZZLE_CONFIG(outer_wall_speed);",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "Outer wall speed honors its minimum and nullable object inheritance"
+    },
+    {
+      "description": "Route this role through a distinct companion role speed; the target role modal-F oracle should fail at the representative or endpoint output.",
+      "id": "top-surface-speed-routed-to-sparse-infill-speed",
+      "new": "            speed = NOZZLE_CONFIG(sparse_infill_speed);",
+      "old": "            speed = NOZZLE_CONFIG(top_surface_speed);",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "Top surface speed honors its minimum and nullable object inheritance"
     }
   ]
 }

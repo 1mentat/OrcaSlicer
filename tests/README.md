@@ -352,7 +352,8 @@ variants. Its mutations are in `object_speed_nullable.json`.
 check the registered minimum, a representative feed, and nil/explicit/nil
 object overrides. Parsed maximum role feedrate must equal the configured speed while geometry and
 deposited material remain unchanged. Outer-wall controls disable the separate
-small-perimeter branch. The solid and gap probes are in `role_speed_sources.json`.
+small-perimeter branch. Routing probes for outer wall, top surface, solid infill,
+and gap fill are in `role_speed_sources.json`.
 `[FilamentFlowVariance]` and `[FilamentMaxVolumetricSpeed]` check deposited
 material and volumetric feedrate limits, including fresh/incremental agreement.
 `[LayerGeometrySettings]` checks initial height, independent shell thicknesses,
