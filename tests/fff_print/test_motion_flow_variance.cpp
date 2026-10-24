@@ -62,6 +62,8 @@ struct RoleEvidence {
     // writer filtering make them related, but they are different oracles.
     double geometry_path_length = 0.0;
     double gcode_path_length = 0.0;
+    double role_motion_path_length = 0.0;
+    size_t role_motion_moves = 0;
     double filament_length = 0.0;
     // Maximum of |previous E| and |current E| for positive moves. This is
     // needed because GCodeReader::dist_E() subtracts two parsed float E values.
@@ -81,7 +83,7 @@ struct Evidence {
     size_t layers = 0;
     size_t perimeter_items = 0;
     double perimeter_length = 0.0;
-    std::array<RoleEvidence, 7> roles{};
+    std::array<RoleEvidence, 8> roles{};
     double travel_feedrate = 0.0;
     size_t motion_moves = 0;
     size_t extrusion_moves = 0;
@@ -103,6 +105,7 @@ enum RoleIndex : size_t {
     internal_solid = 4,
     bottom = 5,
     gap_fill = 6,
+    overhang = 7,
 };
 
 DynamicPrintConfig matrix_config()
@@ -208,6 +211,8 @@ Evidence evidence_for(const Print &print, const std::string &output)
                     evidence.roles[outer].geometry_path_length += path.length();
                 else if (path.role() == erPerimeter)
                     evidence.roles[inner].geometry_path_length += path.length();
+                else if (path.role() == erOverhangPerimeter)
+                    evidence.roles[overhang].geometry_path_length += path.length();
             });
             for_each_extrusion_path(region->fills, [&evidence](const ExtrusionPath &path) {
                 switch (path.role()) {
@@ -219,6 +224,9 @@ Evidence evidence_for(const Print &print, const std::string &output)
                     break;
                 case erInternalInfill:
                     evidence.roles[sparse].geometry_path_length += path.length();
+                    break;
+                case erOverhangPerimeter:
+                    evidence.roles[overhang].geometry_path_length += path.length();
                     break;
                 case erTopSolidInfill:
                     evidence.roles[top].geometry_path_length += path.length();
@@ -263,7 +271,9 @@ Evidence evidence_for(const Print &print, const std::string &output)
             if (evidence.role_marker_samples.size() < 8)
                 evidence.role_marker_samples.emplace_back(comment);
         }
-        if (comment.find("Outer wall") != std::string_view::npos)
+        if (comment.find("Overhang wall") != std::string_view::npos)
+            active_role = overhang;
+        else if (comment.find("Outer wall") != std::string_view::npos)
             active_role = outer;
         else if (comment.find("Inner wall") != std::string_view::npos)
             active_role = inner;
@@ -303,6 +313,11 @@ Evidence evidence_for(const Print &print, const std::string &output)
             evidence.gcode_filament_length += static_cast<double>(delta_e_f);
         }
 
+        if (active_role.has_value() && xy > EPSILON) {
+            RoleEvidence &role_evidence = evidence.roles[*active_role];
+            role_evidence.role_motion_path_length += xy;
+            ++role_evidence.role_motion_moves;
+        }
         if (active_role.has_value() && extrusion) {
             RoleEvidence &role_evidence = evidence.roles[*active_role];
             role_evidence.max_positive_e_pair = std::max(role_evidence.max_positive_e_pair, max_pair_abs_e);
@@ -1034,10 +1049,11 @@ TEST_CASE("Role flow ratios scale declared deposited material by role and layer"
 {
     const DynamicPrintConfig baseline_config = role_flow_config();
     const Evidence baseline = fresh_role_flow_evidence(baseline_config);
-    for (size_t i = 0; i < baseline.roles.size(); ++i) {
-        CAPTURE(i);
-        REQUIRE(baseline.roles[i].moves > 0);
-        REQUIRE(baseline.roles[i].filament_length > 0.0);
+    for (const size_t role : std::array<size_t, 7>{
+             outer, inner, sparse, top, internal_solid, bottom, gap_fill }) {
+        CAPTURE(role);
+        REQUIRE(baseline.roles[role].moves > 0);
+        REQUIRE(baseline.roles[role].filament_length > 0.0);
     }
     REQUIRE(baseline.roles[outer].first_layer_moves > 0);
     REQUIRE(baseline.roles[outer].later_layer_moves > 0);
@@ -1071,10 +1087,11 @@ TEST_CASE("Role flow gate leaves top and bottom ratios active while disabling ot
     require_role_flow_registry();
     const DynamicPrintConfig baseline_config = role_flow_config();
     const Evidence baseline = fresh_role_flow_evidence(baseline_config);
-    for (size_t i = 0; i < baseline.roles.size(); ++i) {
-        CAPTURE(i);
-        REQUIRE(baseline.roles[i].moves > 0);
-        REQUIRE(baseline.roles[i].filament_length > 0.0);
+    for (const size_t role : std::array<size_t, 7>{
+             outer, inner, sparse, top, internal_solid, bottom, gap_fill }) {
+        CAPTURE(role);
+        REQUIRE(baseline.roles[role].moves > 0);
+        REQUIRE(baseline.roles[role].filament_length > 0.0);
     }
     REQUIRE(baseline.roles[bottom].first_layer_moves > 0);
     // Later shell layers on this uniform solid have the internal-solid role.
@@ -1107,10 +1124,11 @@ TEST_CASE("Role flow gate compounds first-layer and role ratios",
     require_role_flow_registry();
     const DynamicPrintConfig baseline_config = role_flow_config();
     const Evidence baseline = fresh_role_flow_evidence(baseline_config);
-    for (size_t i = 0; i < baseline.roles.size(); ++i) {
-        CAPTURE(i);
-        REQUIRE(baseline.roles[i].moves > 0);
-        REQUIRE(baseline.roles[i].filament_length > 0.0);
+    for (const size_t role : std::array<size_t, 7>{
+             outer, inner, sparse, top, internal_solid, bottom, gap_fill }) {
+        CAPTURE(role);
+        REQUIRE(baseline.roles[role].moves > 0);
+        REQUIRE(baseline.roles[role].filament_length > 0.0);
     }
     REQUIRE(baseline.roles[bottom].first_layer_moves > 0);
     // Later shell layers on this uniform solid have the internal-solid role.
@@ -1847,4 +1865,157 @@ TEST_CASE("Top-surface line width controls top-infill paths",
     const int width_mode = GENERATE(0, 1, 2);
     check_width_pipeline("top_surface_line_width", width_mode, nozzle_diameter,
                          top, false, false);
+}
+
+namespace {
+
+DynamicPrintConfig numeric_role_flow_config()
+{
+    DynamicPrintConfig config = role_flow_config();
+    config.set_deserialize_strict({
+        { "nozzle_diameter",                  "0.4" },
+        { "filament_diameter",                "1.75" },
+        { "filament_flow_ratio",              "1.0" },
+        { "print_flow_ratio",                 1.0 },
+        { "filament_max_volumetric_speed",    "200" },
+        { "filament_adaptive_volumetric_speed", false },
+        { "set_other_flow_ratios",            true },
+        { "first_layer_flow_ratio",           1.0 },
+        { "outer_wall_flow_ratio",            1.0 },
+        { "inner_wall_flow_ratio",            1.0 },
+        { "overhang_flow_ratio",              1.0 },
+        { "sparse_infill_flow_ratio",         1.0 },
+        { "detect_overhang_wall",             true },
+        { "enable_support",                   false },
+    });
+    return config;
+}
+
+Evidence fresh_overhang_role_flow_evidence(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{ mesh(TestMesh::overhang) }, print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO("validation.string: " + validation.string);
+    INFO("validation.opt_key: " + validation.opt_key);
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    require_bounded_role_output(output);
+    Evidence evidence = evidence_for(print, output);
+    require_valid(evidence);
+    REQUIRE(evidence.roles[overhang].geometry_path_length > 0.0);
+    REQUIRE(evidence.roles[overhang].role_motion_path_length > 0.0);
+    return evidence;
+}
+
+Evidence numeric_role_flow_evidence(const DynamicPrintConfig &config, bool use_overhang_fixture)
+{
+    if (use_overhang_fixture)
+        return fresh_overhang_role_flow_evidence(config);
+    return fresh_role_flow_evidence(config);
+}
+
+void require_flow_ratio_geometry(const Evidence &expected, const Evidence &observed)
+{
+    REQUIRE(observed.layers == expected.layers);
+    REQUIRE(observed.perimeter_items == expected.perimeter_items);
+    CHECK_THAT(observed.perimeter_length, Catch::Matchers::WithinRel(expected.perimeter_length, 1e-7));
+    CHECK(observed.motion_moves == expected.motion_moves);
+    for (size_t i = 0; i < expected.roles.size(); ++i) {
+        CAPTURE(i);
+        CHECK_THAT(observed.roles[i].geometry_path_length,
+                   Catch::Matchers::WithinRel(expected.roles[i].geometry_path_length, 1e-7));
+        // This includes non-extruding XY moves. At the legal zero-flow endpoint,
+        // the role path must still be emitted while its deposited E becomes zero.
+        CHECK(observed.roles[i].role_motion_moves == expected.roles[i].role_motion_moves);
+        CHECK_THAT(observed.roles[i].role_motion_path_length,
+                   Catch::Matchers::WithinRel(expected.roles[i].role_motion_path_length, 1e-6));
+    }
+}
+
+void require_numeric_role_flow_contract(const char *key, size_t target_role, bool use_overhang_fixture)
+{
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->type == coFloat);
+    CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(0.0, 1e-12));
+    CHECK_THAT(definition->max, Catch::Matchers::WithinAbs(2.0, 1e-12));
+    const double minimum = definition->min;
+    const double representative = 0.75;
+    const double maximum = definition->max;
+    REQUIRE(definition->is_value_valid(minimum));
+    REQUIRE(definition->is_value_valid(representative));
+    REQUIRE(definition->is_value_valid(maximum));
+
+    const DynamicPrintConfig baseline_config = numeric_role_flow_config();
+    const Evidence baseline = numeric_role_flow_evidence(baseline_config, use_overhang_fixture);
+    INFO("baseline evidence: " + evidence_summary(baseline));
+    REQUIRE(baseline.roles[target_role].geometry_path_length > 0.0);
+    REQUIRE(baseline.roles[target_role].role_motion_path_length > 0.0);
+    REQUIRE(baseline.roles[target_role].moves > 0);
+    REQUIRE(baseline.roles[target_role].filament_length > 0.0);
+    bool has_positive_non_target_deposition = false;
+    for (size_t i = 0; i < baseline.roles.size(); ++i) {
+        if (i != target_role && baseline.roles[i].moves > 0 && baseline.roles[i].filament_length > 0.0)
+            has_positive_non_target_deposition = true;
+    }
+    REQUIRE(has_positive_non_target_deposition);
+
+    for (const double ratio : { minimum, representative, maximum }) {
+        CAPTURE(key, ratio);
+        DynamicPrintConfig changed_config = baseline_config;
+        changed_config.set_deserialize_strict(key, std::to_string(ratio));
+        REQUIRE(changed_config.option(key) != nullptr);
+        REQUIRE(changed_config.option(key)->serialize() != baseline_config.option(key)->serialize());
+        REQUIRE(changed_config.option("set_other_flow_ratios")->serialize()
+                == baseline_config.option("set_other_flow_ratios")->serialize());
+
+        const Evidence changed = numeric_role_flow_evidence(changed_config, use_overhang_fixture);
+        INFO("changed evidence: " + evidence_summary(changed));
+        require_flow_ratio_geometry(baseline, changed);
+        // A role-specific flow multiplier changes E-per-XY, not the other
+        // deposition roles or the XY geometry of the selected role.
+        for (size_t i = 0; i < baseline.roles.size(); ++i) {
+            CAPTURE(i);
+            if (i == target_role)
+                continue;
+            require_same_role_material(baseline.roles[i], changed.roles[i]);
+        }
+        const RoleEvidence &before = baseline.roles[target_role];
+        const RoleEvidence &after = changed.roles[target_role];
+        if (ratio == 0.0) {
+            CHECK(after.moves == 0);
+            CHECK_THAT(after.filament_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+            CHECK_THAT(after.gcode_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+        } else {
+            require_scaled_role_material(before, after, ratio);
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("Outer wall flow ratio scales only external-wall material",
+          "[MotionFlowVariance][RoleFlowVariance][SettingsVariance]")
+{
+    require_numeric_role_flow_contract("outer_wall_flow_ratio", outer, false);
+}
+
+TEST_CASE("Inner wall flow ratio scales only inner-wall material",
+          "[MotionFlowVariance][RoleFlowVariance][SettingsVariance]")
+{
+    require_numeric_role_flow_contract("inner_wall_flow_ratio", inner, false);
+}
+
+TEST_CASE("Sparse infill flow ratio scales only sparse-infill material",
+          "[MotionFlowVariance][RoleFlowVariance][SettingsVariance]")
+{
+    require_numeric_role_flow_contract("sparse_infill_flow_ratio", sparse, false);
+}
+
+TEST_CASE("Overhang flow ratio scales only detected overhang-wall material",
+          "[MotionFlowVariance][RoleFlowVariance][SettingsVariance]")
+{
+    require_numeric_role_flow_contract("overhang_flow_ratio", overhang, true);
 }

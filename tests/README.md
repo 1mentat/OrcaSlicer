@@ -343,6 +343,12 @@ applying the same changed setting. It checks separate geometry and parsed
 G-code evidence, deposited material, feature feedrates, and acceleration
 states. Its speed/width/flow partitions have explicit companion settings so
 cooling or volumetric limits cannot silently mask the tested effect.
+The numeric outer-wall, inner-wall, sparse-infill, and overhang flow-ratio
+cases check both registered endpoints (0 and 2) and a representative ratio
+of 0.75 against a ratio-1 control. Only the selected role's material changes;
+sliced geometry, role-tagged XY motion, and other roles' material stay stable.
+These cases explicitly enable `set_other_flow_ratios` and pin the first-layer,
+print, and filament multipliers to 1.
 `[ObjectSpeedNullable]` checks four object speed overrides through a
 nil, explicit, then nil transition on the same print. Fresh parent and explicit
 controls verify geometry, material, and feeds for standard and high-flow nozzle

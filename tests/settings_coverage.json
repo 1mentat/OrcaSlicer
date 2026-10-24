@@ -5122,6 +5122,46 @@
       ],
       "tag": "[SLAExposureBounds]",
       "reason": "Public SLA validation accepts max_initial_exposure_time at its registered zero minimum when actual exposure and the paired limit are also zero, accepts the inclusive nonzero equality at 3 seconds, and rejects max_initial_exposure_time=2.9 when it excludes the configured 3-second exposure. This is a bounded validation contract; it does not exhaust the unbounded positive domain."
+    },
+    "outer_wall_flow_ratio": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][RoleFlowVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered 0 and 2 endpoints and representative 0.75 value are compared with ratio 1 on a real FFF print. Only external-wall material scales; zero preserves sliced geometry and role-tagged XY motion while depositing zero material. Other roles retain their material. The fixture explicitly enables set_other_flow_ratios and pins first-layer, print, and filament multipliers to 1. Full cross-setting interactions are not claimed."
+    },
+    "inner_wall_flow_ratio": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][RoleFlowVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered 0 and 2 endpoints and representative 0.75 value are compared with ratio 1 on a real FFF print. Only inner-wall material scales; zero preserves sliced geometry and role-tagged XY motion while depositing zero material. Other roles retain their material. The fixture explicitly enables set_other_flow_ratios and pins first-layer, print, and filament multipliers to 1. Full cross-setting interactions are not claimed."
+    },
+    "sparse_infill_flow_ratio": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][RoleFlowVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered 0 and 2 endpoints and representative 0.75 value are compared with ratio 1 on a real FFF print. Only sparse-infill material scales; zero preserves sliced geometry and role-tagged XY motion while depositing zero material. Other roles retain their material. The fixture explicitly enables set_other_flow_ratios and pins first-layer, print, and filament multipliers to 1. Full cross-setting interactions are not claimed."
+    },
+    "overhang_flow_ratio": {
+      "test": "tests/fff_print/test_motion_flow_variance.cpp",
+      "tag": "[MotionFlowVariance][RoleFlowVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered 0 and 2 endpoints and representative 0.75 value are compared with ratio 1 on a real FFF print. Only detected overhang-wall material scales; zero preserves sliced geometry and role-tagged XY motion while depositing zero material. Other roles retain their material. The fixture explicitly enables set_other_flow_ratios and pins first-layer, print, and filament multipliers to 1. Full cross-setting interactions are not claimed."
     }
   }
 }
