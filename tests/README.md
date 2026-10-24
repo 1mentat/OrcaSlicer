@@ -1398,6 +1398,12 @@ to its exact commit. Configure, build, and test output goes directly to log file
 the JSON report keeps only a bounded tail. Run the controller under the resource
 limits described above, including a file-size limit for those logs.
 
+Both validation and mutation reports use `status: in_progress` during execution.
+Active baseline, reference, head, and mutant rows are recorded before their child
+commands start. An unfinished report is a checkpoint, not proof that its process
+is still alive; inspect the controller process or service before deciding whether
+to wait or recover. Completed outcomes retain their existing classifications.
+
 A passing head requires complete JUnit evidence whose testcase count agrees
 with CTest. Missing or contradictory reports and duplicate testcase identities
 are incomplete evidence. Crashes, timeouts, and JUnit errors are execution

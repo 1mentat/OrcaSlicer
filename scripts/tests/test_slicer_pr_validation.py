@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import unittest
 from unittest import mock
 
@@ -1863,6 +1864,114 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             return slicer_pr_validation.CommandResult(list(argv), 0, 0.01, "", "")
 
         return calls, fake_phase
+
+    def test_report_shows_active_rows_while_fake_children_are_running(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            started_dir = root / "fake-children-started"
+            release_dir = root / "release-fake-children"
+            started_dir.mkdir()
+            release_dir.mkdir()
+            active_runs = ("baseline", "reference", "pr-1")
+            child_script = (
+                "import pathlib,sys,time\n"
+                "phase,run_name=sys.argv[1:3]\n"
+                "started=pathlib.Path(sys.argv[3]); release=pathlib.Path(sys.argv[4])\n"
+                "if phase == 'configure' and run_name in ('baseline','reference','pr-1'):\n"
+                " marker=started / run_name; gate=release / run_name\n"
+                " if not marker.exists():\n"
+                "  marker.touch()\n"
+                "  while not gate.exists(): time.sleep(0.01)\n"
+                "if phase == 'test':\n"
+                " pathlib.Path(sys.argv[5]).write_text('<testsuite tests=\"1\" failures=\"0\" errors=\"0\" skipped=\"0\"><testcase classname=\"suite\" name=\"fake child test\"/></testsuite>', encoding='utf-8')\n"
+                " print('100% tests passed, 0 tests failed out of 1')\n"
+            )
+
+            def fake_phase(argv, *, cwd, timeout, log):
+                phase = log.stem
+                junit = str(Path(argv[argv.index("--output-junit") + 1])) if phase == "test" else ""
+                completed = subprocess.run(
+                    [sys.executable, "-c", child_script, phase, log.parent.name,
+                     str(started_dir), str(release_dir), junit],
+                    cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text(completed.stdout + completed.stderr, encoding="utf-8")
+                return slicer_pr_validation.CommandResult(
+                    list(argv), completed.returncode, 0.01, completed.stdout, completed.stderr)
+
+            results = []
+            errors = []
+            finished = threading.Event()
+
+            def run():
+                try:
+                    results.append(slicer_pr_validation.run_validation(args))
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    finished.set()
+
+            def wait_for_active_child(name):
+                deadline = time.monotonic() + 10
+                while not (started_dir / name).exists() and not finished.is_set() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue((started_dir / name).exists(), f"fake {name} child did not reach the barrier")
+                return json.loads((output / "report.json").read_text(encoding="utf-8"))
+
+            worker = threading.Thread(target=run)
+            with mock.patch.object(slicer_pr_validation, "_run_phase", side_effect=fake_phase):
+                worker.start()
+                try:
+                    live = wait_for_active_child("baseline")
+                    self.assertEqual(live["status"], "in_progress")
+                    self.assertEqual(live["baseline"]["status"], "in_progress")
+                    (release_dir / "baseline").touch()
+
+                    live = wait_for_active_child("reference")
+                    self.assertEqual(live["status"], "in_progress")
+                    self.assertEqual(live["references"][base]["status"], "in_progress")
+                    (release_dir / "reference").touch()
+
+                    live = wait_for_active_child("pr-1")
+                    self.assertEqual(live["status"], "in_progress")
+                    self.assertEqual(live["heads"][0]["status"], "in_progress")
+                finally:
+                    for name in active_runs:
+                        (release_dir / name).touch()
+                    worker.join(timeout=30)
+            self.assertFalse(worker.is_alive(), "fake validation thread did not finish")
+            self.assertEqual(errors, [])
+            self.assertEqual(results, [0])
+            final = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(final["status"], "pass")
+            self.assertEqual(final["baseline"]["status"], "pass")
+            self.assertEqual(final["references"][base]["status"], "pass")
+            self.assertEqual(final["heads"][0]["status"], "pass")
+
+    def test_exception_marks_active_report_terminal_infrastructure_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            output = root / "exception-evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=RuntimeError("fake child exception")):
+                with self.assertRaisesRegex(RuntimeError, "fake child exception"):
+                    slicer_pr_validation.run_validation(args)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "infrastructure_error")
+            self.assertEqual(report["error"], "fake child exception")
+            self.assertEqual(report["baseline"]["status"], "infrastructure_error")
+            self.assertIn("finished_at_epoch", report)
 
     def test_seed_worktree_runs_real_phases_and_reuse_rechecks_final_state(self):
         with tempfile.TemporaryDirectory() as temp:

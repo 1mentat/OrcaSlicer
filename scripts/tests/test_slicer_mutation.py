@@ -9,6 +9,9 @@ import shlex
 import sys
 import subprocess
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
 import unittest
 from unittest import mock
 
@@ -850,6 +853,10 @@ class MutationEvidenceHardeningTests(unittest.TestCase):
             root.mkdir()
             target = Path(temp) / "target"
             target.mkdir()
+            prior_report = target / "mutation-report.json"
+            prior_bytes = (b'{ "schema_version": 1, "status": "in_progress", '
+                           b'"mutants": [{"id": "prior", "status": "in_progress"}] }\n')
+            prior_report.write_bytes(prior_bytes)
             link = Path(temp) / "evidence-link"
             try:
                 link.symlink_to(target, target_is_directory=True)
@@ -861,12 +868,12 @@ class MutationEvidenceHardeningTests(unittest.TestCase):
             ])
             with self.assertRaises(slicer_mutation.MutationError):
                 slicer_mutation.run_mutation(args)
-            self.assertEqual(list(target.iterdir()), [])
+            self.assertEqual(prior_report.read_bytes(), prior_bytes)
             self.assertEqual(slicer_mutation.main([
                 "run", "--root", str(root), "--out", str(link),
                 "--build-command", "build", "--test-command", "test",
             ]), 2)
-            self.assertEqual(list(target.iterdir()), [])
+            self.assertEqual(prior_report.read_bytes(), prior_bytes)
 
     def test_runner_writes_preflight_checkpoint_before_fake_worktree(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -959,6 +966,131 @@ class MutationEvidenceHardeningTests(unittest.TestCase):
             self.assertEqual(report["status"], "cleanup_failed")
             self.assertTrue(report["cleanup_failed"])
 
+    def test_report_shows_active_mutant_while_fake_child_is_running(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            source = repo / "source.cpp"
+            source.write_text("old", encoding="utf-8")
+            out = root / "evidence"
+            build_count = root / "build-count"
+            test_count = root / "test-count"
+            child_started = root / "child-started"
+            release_child = root / "release-child"
+            build_argv = root / "build.argv.json"
+            test_argv = root / "test.argv.json"
+            build_script = (
+                "import pathlib,sys,time\n"
+                "count=pathlib.Path(sys.argv[1]); n=int(count.read_text())+1 if count.exists() else 1\n"
+                "count.write_text(str(n))\n"
+                "if n == 2:\n"
+                " pathlib.Path(sys.argv[2]).touch()\n"
+                " while not pathlib.Path(sys.argv[3]).exists(): time.sleep(0.01)\n"
+            )
+            test_script = (
+                "import pathlib,sys\n"
+                "count=pathlib.Path(sys.argv[1]); n=int(count.read_text())+1 if count.exists() else 1\n"
+                "count.write_text(str(n))\n"
+                "if n == 1: print('test cases: 1 | 1 passed')\n"
+                "else:\n"
+                " print('assertions: 1 | 1 failed\\n0% tests passed, 1 tests failed out of 1')\n"
+                " sys.exit(8)\n"
+            )
+            build_argv.write_text(json.dumps([
+                sys.executable, "-c", build_script,
+                str(build_count), str(child_started), str(release_child),
+            ]), encoding="utf-8")
+            test_argv.write_text(json.dumps([
+                sys.executable, "-c", test_script, str(test_count),
+            ]), encoding="utf-8")
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--out", str(out),
+                "--build-argv-file", str(build_argv),
+                "--test-argv-file", str(test_argv), "--max-mutants", "1",
+            ])
+            mutant = slicer_mutation.Mutant("one", "source.cpp", "old", "new", "")
+
+            @contextmanager
+            def use_repo(*_args, **_kwargs):
+                yield repo
+
+            result = []
+            errors = []
+            finished = threading.Event()
+
+            def run():
+                try:
+                    result.append(slicer_mutation.run_mutation(args))
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    finished.set()
+
+            worker = threading.Thread(target=run)
+            with mock.patch.object(slicer_mutation, "validate_clean_repo", return_value="a" * 40), \
+                    mock.patch.object(slicer_mutation, "_load_mutants", return_value=[mutant]), \
+                    mock.patch.object(slicer_mutation, "_mutation_worktree", side_effect=use_repo):
+                worker.start()
+                try:
+                    deadline = time.monotonic() + 10
+                    while not child_started.exists() and not finished.is_set() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(child_started.exists(), "fake build child did not reach the barrier")
+                    live = json.loads((out / "mutation-report.json").read_text(encoding="utf-8"))
+                    self.assertEqual(live["status"], "in_progress")
+                    self.assertEqual(live["mutants"][0]["id"], "one")
+                    self.assertEqual(live["mutants"][0]["status"], "in_progress")
+                finally:
+                    release_child.touch()
+                    worker.join(timeout=20)
+            self.assertFalse(worker.is_alive(), "fake validation thread did not finish")
+            self.assertEqual(errors, [])
+            self.assertEqual(result, [0])
+            final = json.loads((out / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(final["status"], "pass")
+            self.assertEqual(final["mutants"][0]["status"], "killed")
+            self.assertEqual(final["checkpoint"]["state"], "complete")
+
+    def test_run_persists_infrastructure_error_before_propagating_exception(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            out = root / "evidence"
+            mutant = slicer_mutation.Mutant("one", "source.cpp", "old", "new", "")
+            command_count = 0
+            source = repo / "source.cpp"
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--out", str(out),
+                "--build-command", "fake-build", "--test-command", "fake-test",
+                "--max-mutants", "1",
+            ])
+
+            @contextmanager
+            def use_repo(*_args, **_kwargs):
+                yield repo
+
+            def fake_command(argv, *, cwd, timeout, output_file=None):
+                nonlocal command_count
+                command_count += 1
+                if command_count == 3:
+                    raise RuntimeError("fake child error")
+                return slicer_mutation.CommandResult(
+                    list(argv), 0, 0.01, "test cases: 1 | 1 passed\n", "")
+
+            with mock.patch.object(slicer_mutation, "validate_clean_repo", return_value="a" * 40), \
+                    mock.patch.object(slicer_mutation, "_load_mutants", return_value=[mutant]), \
+                    mock.patch.object(slicer_mutation, "_mutation_worktree", side_effect=use_repo), \
+                    mock.patch.object(slicer_mutation, "_apply", return_value=(source, b"old")), \
+                    mock.patch.object(slicer_mutation, "run_command", side_effect=fake_command):
+                with self.assertRaisesRegex(RuntimeError, "fake child error"):
+                    slicer_mutation.run_mutation(args)
+            report = json.loads((out / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "infrastructure_error")
+            self.assertEqual(report["error"], "fake child error")
+            self.assertEqual(report["mutants"][0]["status"], "infrastructure_error")
+
     def test_interrupted_run_leaves_in_progress_checkpoint(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp) / "repo"
@@ -1010,13 +1142,15 @@ class MutationEvidenceHardeningTests(unittest.TestCase):
             out = Path(temp) / "evidence"
             out.mkdir()
             marker = out / "mutation-report.json"
-            marker.write_text("old evidence\n")
+            prior_bytes = (b'{ "schema_version": 1, "status": "in_progress", '
+                           b'"mutants": [{"id": "prior", "status": "in_progress"}] }\n')
+            marker.write_bytes(prior_bytes)
             code = slicer_mutation.main([
                 "run", "--root", temp, "--out", str(out),
                 "--build-command", "fake-build", "--test-command", "fake-test",
             ])
             self.assertEqual(code, 2)
-            self.assertEqual(marker.read_text(), "old evidence\n")
+            self.assertEqual(marker.read_bytes(), prior_bytes)
 
 
 class MutationCheckpointIntegrationTests(unittest.TestCase):
@@ -1130,7 +1264,7 @@ class MutationCheckpointIntegrationTests(unittest.TestCase):
         self.assertEqual(checkpoint["checkpoint"]["state"], "in_progress")
         self.assertNotEqual(checkpoint["status"], "pass")
         self.assertEqual([(entry["id"], entry["status"]) for entry in checkpoint["mutants"]],
-                         [("first", "killed")])
+                         [("first", "killed"), ("second", "in_progress")])
 
     def test_survivor_does_not_mask_another_mutants_build_error(self):
         code, report, _ = self.run_two_mutants(first_build_error=True)

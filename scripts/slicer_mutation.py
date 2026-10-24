@@ -1049,6 +1049,34 @@ def _mutation_worktree(repo: Path, commit: str, work_parent: Path | None,
                 raise postflight_error
 
 
+@contextmanager
+def _mutation_worktree_with_report(repo: Path, commit: str, work_parent: Path | None,
+                                   persistent_path: Path | None, report_path: Path,
+                                   report: dict[str, Any],
+                                   reuse_detached_checkout: bool = False):
+    """Promote only this invocation's in-memory active report on exceptions."""
+    try:
+        with _mutation_worktree(repo, commit, work_parent, persistent_path,
+                                report_path, report, reuse_detached_checkout) as worktree:
+            yield worktree
+    except Exception as exc:
+        # The report object is created only after the output path is validated
+        # as fresh, so it is the evidence owned by this invocation. Never infer
+        # ownership by rereading a pre-existing on-disk status.
+        if report.get("status") == "in_progress":
+            report["status"] = "infrastructure_error"
+            report["error"] = str(exc)
+            for entry in report.get("mutants", []):
+                if isinstance(entry, dict) and entry.get("status") == "in_progress":
+                    entry["status"] = "infrastructure_error"
+                    entry["error"] = str(exc)
+            try:
+                _write_report(report_path, report)
+            except (OSError, TypeError, ValueError):
+                pass
+        raise
+
+
 def _result_log_evidence(result: CommandResult) -> LogEvidence | None:
     if result.log_path is None:
         return None
@@ -1102,6 +1130,8 @@ def run_mutation(args: argparse.Namespace) -> int:
         work_parent = work_parent.resolve()
     if work_parent:
         work_parent.mkdir(parents=True, exist_ok=True)
+    persistent_path = (_persistent_worktree_path(repo, args.persistent_worktree)
+                       if args.persistent_worktree else None)
 
     preflight: dict[str, Any] = {"explicit_temp_directories": temp_preflight}
     if manifest_digests is not None:
@@ -1115,7 +1145,7 @@ def run_mutation(args: argparse.Namespace) -> int:
         preflight["argv_files"] = argv_files
     report: dict[str, Any] = {
         "schema_version": 1,
-        "status": "infrastructure_error",
+        "status": "in_progress",
         "git": {"commit": commit, "root": str(repo)},
         "limits": {"max_mutants": args.max_mutants, "timeout_seconds": args.timeout},
         "commands": {"configure": configure_argv, "build": build_argv, "test": test_argv},
@@ -1134,10 +1164,9 @@ def run_mutation(args: argparse.Namespace) -> int:
         command_serial += 1
         return _command_log(log_root, command_serial, phase, label)
 
-    persistent_path = (_persistent_worktree_path(repo, args.persistent_worktree)
-                       if args.persistent_worktree else None)
-    with _mutation_worktree(repo, commit, work_parent, persistent_path,
-                        report_path, report, args.reuse_detached_checkout) as worktree:
+    with _mutation_worktree_with_report(repo, commit, work_parent, persistent_path,
+                                        report_path, report,
+                                        args.reuse_detached_checkout) as worktree:
         build_dir = (worktree / args.build_dir).resolve()
         if configure_argv:
             configure = run_command(_expand(configure_argv, root=worktree, build=build_dir),
@@ -1211,7 +1240,10 @@ def run_mutation(args: argparse.Namespace) -> int:
                 "old": mutant.old, "new": mutant.new,
                 "old_sha256": hashlib.sha256(mutant.old.encode("utf-8")).hexdigest(),
                 "new_sha256": hashlib.sha256(mutant.new.encode("utf-8")).hexdigest(),
+                "status": "in_progress",
             }
+            report["mutants"].append(entry)
+            _checkpoint(report_path, report, f"mutant:{mutant.id}:started")
             path: Path | None = None
             original: bytes | None = None
             try:
@@ -1222,7 +1254,6 @@ def run_mutation(args: argparse.Namespace) -> int:
                 entry["build"] = mutant_build.json()
                 if mutant_build.timed_out or mutant_build.returncode != 0:
                     entry["status"] = _classify_build(mutant_build)
-                    report["mutants"].append(entry)
                     _checkpoint(report_path, report, f"mutant:{mutant.id}:build")
                     continue
                 selected_test = _test_command(test_argv, mutant)
@@ -1241,12 +1272,10 @@ def run_mutation(args: argparse.Namespace) -> int:
                 entry["status"] = _classify_test(
                     mutant_test, mutant_evidence, baseline_counts[mutant.test_filter],
                     log_evidence=log_evidence)
-                report["mutants"].append(entry)
                 _checkpoint(report_path, report, f"mutant:{mutant.id}:test")
             except MutationError as exc:
                 entry["status"] = "mutation_error"
                 entry["error"] = str(exc)
-                report["mutants"].append(entry)
                 _checkpoint(report_path, report, f"mutant:{mutant.id}:error")
             finally:
                 if path is not None and original is not None:

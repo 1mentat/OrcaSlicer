@@ -2206,7 +2206,7 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
         "commit_sha": commit_sha,
         "tree_sha": tree_sha,
         "tested_tree_sha": tree_sha,
-        "status": "infrastructure_error",
+        "status": "in_progress",
         "commands": {},
     }
     test_timeout = getattr(args, "test_timeout", DEFAULT_TEST_TIMEOUT)
@@ -2431,7 +2431,7 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
         "name": reference_name,
         "commit_sha": base_sha,
         "reference_base_sha": base_sha,
-        "status": "infrastructure_error",
+        "status": "in_progress",
         "harness_patch_applied": False,
     }
     mtime_snapshot: dict[str, Any] | None = None
@@ -2606,7 +2606,7 @@ def run_validation(args: argparse.Namespace) -> int:
     uv = _resolve_uv(args.uv_executable)
     report: dict[str, Any] = {
         "schema_version": 1,
-        "status": "infrastructure_error",
+        "status": "in_progress",
         "started_at_epoch": time.time(),
         "snapshot": str(snapshot_path),
         "snapshot_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
@@ -2664,10 +2664,13 @@ def run_validation(args: argparse.Namespace) -> int:
         "reference": {},
         "heads": [],
     }
+    _write_json(output / "report.json", report)
     worktree: Path | None = None
     reuse_lock: _PrValidationReuseLock | None = None
     cleanup: dict[str, Any] = {}
     started = time.monotonic()
+    validation_completed = False
+    validation_error: Exception | None = None
     try:
         for record in records:
             resolved, resolution = resolve_commit(repo, record["headRefOid"])
@@ -2781,6 +2784,8 @@ def run_validation(args: argparse.Namespace) -> int:
         report["commands"] = {"configure": configure_args, "build": build_args}
 
         baseline_tree, baseline_tree_result = _tree_sha(worktree)
+        report["baseline"] = {"status": "in_progress", "name": "baseline"}
+        _write_json(output / "report.json", report)
         baseline = _run_tree(worktree, output, "baseline", args, configure_args, build_args,
                              commit_sha=harness_ref, tree_sha=baseline_tree)
         baseline["tree_resolution"] = baseline_tree_result.json()
@@ -2880,6 +2885,15 @@ def run_validation(args: argparse.Namespace) -> int:
                                 "reference"
                                 if len(reference_base_oids) == 1 and requested_base_oid == harness_base
                                 else f"reference-base-{requested_base_oid[:12]}")
+                            reference_for_head = {
+                                "name": reference_name,
+                                "commit_sha": requested_base_oid,
+                                "reference_base_sha": requested_base_oid,
+                                "status": "in_progress",
+                                "harness_patch_applied": False,
+                            }
+                            report["references"][requested_base_oid] = reference_for_head
+                            _write_json(output / "report.json", report)
                             reference_for_head = _run_reference_entry(
                                 worktree, output, reference_name, requested_base_oid, args,
                                 configure_args, build_args, patch_path, patch, patch_sha,
@@ -2915,7 +2929,7 @@ def run_validation(args: argparse.Namespace) -> int:
                     "head_ref_name": record.get("headRefName", ""),
                     "head_ref_oid": requested_oid,
                     "reference_base_sha": requested_base_oid,
-                    "status": "infrastructure_error",
+                    "status": "in_progress",
                 }
                 resolved, resolution = resolve_commit(worktree, requested_oid)
                 entry["head_resolution"] = resolution.json()
@@ -3042,6 +3056,8 @@ def run_validation(args: argparse.Namespace) -> int:
                 if mtime_restore_stats is None and mtime_snapshot_stats is not None:
                     mtime_reason = mtime_snapshot_stats.get("reason") or "snapshot_had_no_eligible_files"
                 record_head_mtime_state(mtime_reason)
+                report["heads"].append(entry)
+                _write_json(output / "report.json", report)
                 run = _run_tree(worktree, output, f"pr-{number}", args, configure_args, build_args,
                                 commit_sha=resolved, tree_sha=tree)
                 last_tree_run = run
@@ -3086,13 +3102,31 @@ def run_validation(args: argparse.Namespace) -> int:
                     tested_head_cache[resolved] = copy.deepcopy(entry)
                 entry["failure_classification"] = classify_failure_names(
                     reference_for_head, entry)
-                report["heads"].append(entry)
                 if entry["status"] != "pass":
                     return_code = 1 if entry["status"] in {"configure_failed", "build_failed",
                                                                "test_failed", "test_skipped", "no_tests",
                                                                "test_timeout",
                                                                "configure_timeout", "build_timeout"} else 2
                 _write_json(output / "report.json", report)
+        validation_completed = True
+    except Exception as exc:
+        validation_error = exc
+        report["status"] = "infrastructure_error"
+        report["error"] = str(exc)
+        baseline_row = report.get("baseline")
+        if isinstance(baseline_row, dict) and baseline_row.get("status") == "in_progress":
+            baseline_row["status"] = "infrastructure_error"
+        for row in report.get("references", {}).values():
+            if isinstance(row, dict) and row.get("status") == "in_progress":
+                row["status"] = "infrastructure_error"
+        reference_row = report.get("reference")
+        if isinstance(reference_row, dict) and reference_row.get("status") == "in_progress":
+            reference_row["status"] = "infrastructure_error"
+        for row in report.get("heads", []):
+            if isinstance(row, dict) and row.get("status") == "in_progress":
+                row["status"] = "infrastructure_error"
+        return_code = 2
+        raise
     finally:
         if worktree is not None:
             preserve_worktree = preserve_build_mode or (
@@ -3152,7 +3186,8 @@ def run_validation(args: argparse.Namespace) -> int:
                             cleanup["parent_remove_error"] = str(exc)
             report["cleanup"] = cleanup
         report["elapsed_seconds"] = time.monotonic() - started
-        report["finished_at_epoch"] = time.time()
+        if validation_completed or validation_error is not None:
+            report["finished_at_epoch"] = time.time()
         report["original_checkout_after"] = {
             "head_sha": resolve_commit(repo, "HEAD")[0],
             "status": _status(repo),
@@ -3180,7 +3215,10 @@ def run_validation(args: argparse.Namespace) -> int:
         elif cleanup and not cleanup.get("preserved", False) and not cleanup.get("removed", False):
             report["status"] = "cleanup_failed"
             return_code = 2
-        else:
+        elif validation_error is not None:
+            report["status"] = "infrastructure_error"
+            return_code = 2
+        elif validation_completed:
             report["status"], return_code = _overall_status(report)
         _write_json(output / "report.json", report)
     return return_code
