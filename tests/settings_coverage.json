@@ -5015,6 +5015,51 @@
         "pipeline_oracle"
       ],
       "reason": "The public FFF exporter compares a disabled hook, an enabled multiline M117/G1 hook, and an enabled empty hook. Only the configured enabled hook emits once per each of six layers with independently checked layer/Z/maximum-Z and extruder metadata. Its temporary Z motion must return to every expected deposition layer while material and XY path remain unchanged. This is bounded script behavior, not all expressions."
+    },
+    "filament_colour": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[Published]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Published 3MF material import replaces a selected slot colour with the explicit published colour, verifies it on the stored preset, and reselects that material after the edited layer changes. Full material imports also preserve the published colour on their detached copy. This is bounded preset-workflow behavior, not print rendering."
+    },
+    "filament_settings_id": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[Published]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public published-3MF import creates a detached material and requires its stored filament_settings_id to equal the normalized author preset name while keeping unrelated receiver presets unchanged. This is bounded imported material identity behavior, not all identity sources."
+    },
+    "compatible_prints": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[Preset]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public preset load rewrites renamed process references in filament compatibility lists; an SLA control resolves against SLA process profiles rather than FFF profiles. Published full-material import additionally clears inherited restrictions. These are bounded profile-resolution and import contracts."
+    },
+    "compatible_prints_condition": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[Published]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A public published-3MF full-material import starts from a receiver with an explicit rejecting process condition and requires the imported detached material to have an empty condition. This protects removal of receiver restrictions; arbitrary compatibility expressions are not claimed."
+    },
+    "default_bed_type": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[Bundle]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public preset selection resolves an explicitly configured Engineering Plate symbolic default, while saved per-printer bed selections take precedence for re-enabled or existing printers. Both resolved project bed type and persisted selection are checked. This is bounded selection precedence, not all bed labels."
     }
   }
 }
