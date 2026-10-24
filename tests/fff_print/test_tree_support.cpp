@@ -433,14 +433,15 @@ static double support_area_mm2(const ExPolygons &polygons)
     return unscale<double>(unscale<double>(area));
 }
 
-static TreeSupportInteractionEvidence observe_tree_support(const TriangleMesh &mesh, bool auto_brim, int wall_count)
+static TreeSupportInteractionEvidence observe_tree_support(const TriangleMesh &mesh, bool auto_brim, int wall_count,
+                                                           double tree_brim_width_mm = 16.0)
 {
     Print print;
     slice_with_tree_support(mesh, print, "tree_slim", 30, 0, 0, {
         { "printable_area",                "-100x-100,200x-100,200x200,-100x200" },
         { "initial_layer_print_height",    0.2 },
         { "tree_support_auto_brim",        auto_brim },
-        { "tree_support_brim_width",       16.0 },
+        { "tree_support_brim_width",       tree_brim_width_mm },
         { "tree_support_wall_count",       wall_count },
         { "support_base_pattern",          "rectilinear" },
         { "support_critical_regions_only",  false },
@@ -1369,17 +1370,43 @@ static double support_area_mm2(const ExPolygons &islands)
 
 static constexpr double lower_region_ceiling_mm = 5.8 - 0.2 - 1.0;
 
-// Read public support slices on the existing cap-overhang fixture. The highest
-// island area is the contact footprint; lower islands expose the branch cross-section.
+// Read public support geometry on the existing cap-overhang fixture. Organic rows
+// use support_islands unchanged; classic rows use base_areas plus physical extrusion
+// footprints because classic TreeSupport does not populate support_islands.
 // The branch comparison stays at least 1 mm below the cap's 5.8 mm bottom minus the
 // configured 0.2 mm contact gap, outside the region shaped by the tip diameter.
-static ProfileEvidence observe(double branch_diameter_mm, double tip_diameter_mm)
+struct ProfileOptions {
+    const char *style = "organic";
+    double organic_branch_diameter_mm = 2.0;
+    double tip_diameter_mm = 0.8;
+    double organic_branch_angle = 40.0;
+    double preferred_angle = 25.0;
+    double diameter_angle = 5.0;
+    double classic_branch_angle = 40.0;
+    double classic_branch_diameter_mm = 5.0;
+    double classic_branch_distance_mm = 5.0;
+    bool support_enabled = true;
+};
+
+static ExPolygons profile_geometry(const SupportLayer &layer, const ProfileOptions &options)
+{
+    if (std::string_view(options.style) == "organic")
+        return layer.support_islands;
+
+    // Classic TreeSupport keeps public branch polygons in base_areas and emits
+    // roof/interface material as support_fills. roof_areas is protected, so
+    // combine public base areas with the actual extrusion-width footprints.
+    const Polygons physical_footprints = layer.support_fills.polygons_covered_by_width();
+    return union_ex(layer.base_areas, physical_footprints);
+}
+
+static DynamicPrintConfig config_for(const ProfileOptions &options)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
-        { "enable_support",                  1 },
+        { "enable_support",                  options.support_enabled },
         { "support_type",                    "tree(auto)" },
-        { "support_style",                   "organic" },
+        { "support_style",                   options.style },
         { "use_relative_e_distances",         true },
         { "before_layer_change_gcode",       "" },
         { "layer_change_gcode",              "G92 E0\n" },
@@ -1393,28 +1420,43 @@ static ProfileEvidence observe(double branch_diameter_mm, double tip_diameter_mm
         { "tree_support_brim_width",         0.0 },
         { "tree_support_auto_brim",          false },
         { "tree_support_top_rate",           "10%" },
+        { "tree_support_branch_distance",     options.classic_branch_distance_mm },
         { "tree_support_branch_distance_organic", 5.0 },
-        { "tree_support_branch_angle_organic", 40.0 },
-        { "tree_support_branch_diameter_organic", branch_diameter_mm },
-        { "tree_support_branch_diameter_angle", 5.0 },
-        { "tree_support_tip_diameter",       tip_diameter_mm },
+        { "tree_support_branch_angle",        options.classic_branch_angle },
+        { "tree_support_branch_angle_organic", options.organic_branch_angle },
+        { "tree_support_angle_slow",          options.preferred_angle },
+        { "tree_support_branch_diameter",     options.classic_branch_diameter_mm },
+        { "tree_support_branch_diameter_organic", options.organic_branch_diameter_mm },
+        { "tree_support_branch_diameter_angle", options.diameter_angle },
+        { "tree_support_tip_diameter",       options.tip_diameter_mm },
         { "tree_support_wall_count",         1 },
         { "support_base_pattern",            "hollow" },
         { "support_interface_top_layers",    0 },
         { "support_interface_bottom_layers", 0 },
         { "initial_layer_print_height",      0.2 },
         { "layer_height",                   0.2 },
+        { "support_threshold_angle",         30 },
         { "skirt_loops",                     0 },
         { "enable_arc_fitting",              false },
         { "resolution",                      0.01 },
         { "raft_layers",                     0 },
     });
+    return config;
+}
 
-    Print print;
-    Model model;
+static void init_cap_overhang_print(Print &print, Model &model, const DynamicPrintConfig &config)
+{
     std::vector<TriangleMesh> meshes;
     meshes.emplace_back(organic_tree_density_contracts::cap_overhang_fixture());
     init_print(std::move(meshes), print, model, config, nullptr, false);
+}
+
+static ProfileEvidence observe(const ProfileOptions &options)
+{
+    const DynamicPrintConfig config = config_for(options);
+    Print print;
+    Model model;
+    init_cap_overhang_print(print, model, config);
     const StringObjectException validation = print.validate();
     INFO(validation.string);
     REQUIRE(validation.string.empty());
@@ -1425,26 +1467,51 @@ static ProfileEvidence observe(double branch_diameter_mm, double tip_diameter_mm
     const auto layers = print.objects().front()->support_layers();
     for (const SupportLayer *layer : layers) {
         REQUIRE(layer != nullptr);
-        if (layer->support_islands.empty())
-            continue;
-        const double z = static_cast<double>(layer->print_z);
-        result.slices.push_back({z, layer->support_islands});
-        result.highest_support_z = std::max(result.highest_support_z, z);
-        ++result.active_layers;
-        if (z > 0.0 && z < lower_region_ceiling_mm)
-            result.largest_lower_branch_area_mm2 = std::max(
-                result.largest_lower_branch_area_mm2, support_area_mm2(layer->support_islands));
+        ExPolygons geometry = profile_geometry(*layer, options);
         for_each_extrusion_path(layer->support_fills, [&result](const ExtrusionPath &path) {
             if (path.length() > 0 && path.mm3_per_mm > 0.0)
                 ++result.physical_extrusion_paths;
         });
+        if (geometry.empty())
+            continue;
+        const double z = static_cast<double>(layer->print_z);
+        result.slices.push_back({z, std::move(geometry)});
+        result.highest_support_z = std::max(result.highest_support_z, z);
+        ++result.active_layers;
+        if (z > 0.0 && z < lower_region_ceiling_mm)
+            result.largest_lower_branch_area_mm2 = std::max(
+                result.largest_lower_branch_area_mm2, support_area_mm2(result.slices.back().islands));
     }
     std::stable_sort(result.slices.begin(), result.slices.end(), [](const SupportSlice &lhs, const SupportSlice &rhs) {
         return lhs.print_z_mm < rhs.print_z_mm;
     });
-    REQUIRE_FALSE(result.slices.empty());
-    result.top_contact_area_mm2 = support_area_mm2(result.slices.back().islands);
+    if (options.support_enabled) {
+        INFO("style=" << options.style
+             << " support_enabled=" << options.support_enabled
+             << " organic_branch_angle=" << options.organic_branch_angle
+             << " preferred_angle=" << options.preferred_angle
+             << " classic_branch_angle=" << options.classic_branch_angle
+             << " classic_branch_diameter_mm=" << options.classic_branch_diameter_mm
+             << " classic_branch_distance_mm=" << options.classic_branch_distance_mm
+             << " organic_branch_diameter_mm=" << options.organic_branch_diameter_mm
+             << " tip_diameter_mm=" << options.tip_diameter_mm
+             << " diameter_angle=" << options.diameter_angle
+             << " geometry_slices=" << result.slices.size()
+             << " physical_extrusion_paths=" << result.physical_extrusion_paths);
+        REQUIRE(result.active_layers > 0);
+        REQUIRE(result.physical_extrusion_paths > 0);
+        REQUIRE_FALSE(result.slices.empty());
+        result.top_contact_area_mm2 = support_area_mm2(result.slices.back().islands);
+    }
     return result;
+}
+
+static ProfileEvidence observe(double branch_diameter_mm, double tip_diameter_mm)
+{
+    ProfileOptions options;
+    options.organic_branch_diameter_mm = branch_diameter_mm;
+    options.tip_diameter_mm = tip_diameter_mm;
+    return observe(options);
 }
 
 static double sliced_geometry_difference_mm2(const ProfileEvidence &lhs, const ProfileEvidence &rhs,
@@ -1519,6 +1586,154 @@ TEST_CASE("Organic tip diameter changes valid public support contact geometry",
     REQUIRE(wide_tip.top_contact_area_mm2 > narrow_tip.top_contact_area_mm2 + 0.01);
 }
 
+
+TEST_CASE("Organic branch angles change public support geometry",
+          "[TreeSupport][OrganicTreeAngles][SupportSettingsVariance]")
+{
+    using namespace tree_support_organic_profile_contracts;
+    ProfileOptions low_max_angle;
+    low_max_angle.organic_branch_angle = 10.0;
+    low_max_angle.preferred_angle = 10.0;
+    ProfileOptions high_max_angle;
+    high_max_angle.organic_branch_angle = 60.0;
+    high_max_angle.preferred_angle = 10.0;
+    ProfileOptions high_preferred_angle = high_max_angle;
+    high_preferred_angle.preferred_angle = 85.0;
+
+    const ProfileEvidence low_max = observe(low_max_angle);
+    const ProfileEvidence high_max = observe(high_max_angle);
+    const ProfileEvidence high_preferred = observe(high_preferred_angle);
+    for (const ProfileEvidence *evidence : { &low_max, &high_max, &high_preferred }) {
+        REQUIRE(evidence->active_layers > 0);
+        REQUIRE(evidence->physical_extrusion_paths > 0);
+        REQUIRE(evidence->top_contact_area_mm2 > 0.0);
+        REQUIRE(evidence->largest_lower_branch_area_mm2 > 0.0);
+    }
+    CHECK_THAT(high_max.highest_support_z, Catch::Matchers::WithinAbs(low_max.highest_support_z, EPSILON));
+    CHECK_THAT(high_preferred.highest_support_z, Catch::Matchers::WithinAbs(high_max.highest_support_z, EPSILON));
+    REQUIRE(sliced_geometry_difference_mm2(high_max, low_max) > 0.01);
+    // The registered 85 degree preferred angle is capped by the 60 degree organic maximum.
+    // The 10 degree minimum and capped high value should still produce different lower support slices.
+    REQUIRE(sliced_geometry_difference_mm2(high_preferred, high_max) > 0.01);
+}
+
+TEST_CASE("Zero organic branch angle passes public print validation",
+          "[TreeSupport][OrganicTreeAngles][SupportSettingsVariance]")
+{
+    using namespace tree_support_organic_profile_contracts;
+    ProfileOptions zero_angle_options;
+    zero_angle_options.organic_branch_angle = 0.0;
+    zero_angle_options.preferred_angle = 10.0;
+    DynamicPrintConfig config = config_for(zero_angle_options);
+    config.set_deserialize_strict({
+        { "printable_area", "-100x-100,200x-100,200x200,-100x200" },
+    });
+
+    Print print;
+    Model model;
+    init_cap_overhang_print(print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE(print.objects().size() == 1);
+    CHECK_THAT(print.objects().front()->config().tree_support_branch_angle_organic,
+               Catch::Matchers::WithinAbs(0.0, EPSILON));
+
+    // Validation-only: TreeSupportCommon.hpp:104 resolves this registered value to 0;
+    // line 105 then supplies std::clamp with lower 0 and upper -EPSILON, violating lo <= hi.
+    // This source-proven precondition issue has no runtime symptom claimed by this test.
+}
+
+TEST_CASE("Organic branch diameter angle changes lower public support geometry",
+          "[TreeSupport][OrganicTreeAngles][SupportSettingsVariance]")
+{
+    using namespace tree_support_organic_profile_contracts;
+    ProfileOptions uniform_options;
+    uniform_options.diameter_angle = 0.0;
+    ProfileOptions tapered_options;
+    tapered_options.diameter_angle = 15.0;
+    const ProfileEvidence uniform = observe(uniform_options);
+    const ProfileEvidence tapered = observe(tapered_options);
+
+    for (const ProfileEvidence *evidence : { &uniform, &tapered }) {
+        REQUIRE(evidence->active_layers > 0);
+        REQUIRE(evidence->physical_extrusion_paths > 0);
+        REQUIRE(evidence->largest_lower_branch_area_mm2 > 0.0);
+    }
+    CHECK_THAT(tapered.highest_support_z, Catch::Matchers::WithinAbs(uniform.highest_support_z, EPSILON));
+    REQUIRE(sliced_geometry_difference_mm2(tapered, uniform, lower_region_ceiling_mm) > 0.01);
+}
+
+TEST_CASE("Tree branch settings change public support geometry",
+          "[TreeSupport][TreeSupportBranchSettings][SupportSettingsVariance]")
+{
+    using namespace tree_support_organic_profile_contracts;
+    ProfileOptions vertical_options;
+    vertical_options.style = "tree_slim";
+    vertical_options.classic_branch_angle = 0.0;
+    ProfileOptions angled_options = vertical_options;
+    angled_options.classic_branch_angle = 60.0;
+    ProfileOptions thin_options;
+    thin_options.style = "tree_slim";
+    thin_options.classic_branch_diameter_mm = 1.0;
+    ProfileOptions thick_options = thin_options;
+    thick_options.classic_branch_diameter_mm = 10.0;
+    ProfileOptions close_options;
+    close_options.style = "tree_slim";
+    close_options.classic_branch_distance_mm = 1.0;
+    ProfileOptions spaced_options = close_options;
+    spaced_options.classic_branch_distance_mm = 10.0;
+    ProfileOptions disabled_options;
+    disabled_options.style = "tree_slim";
+    disabled_options.support_enabled = false;
+
+    const ProfileEvidence vertical = observe(vertical_options);
+    const ProfileEvidence angled = observe(angled_options);
+    const ProfileEvidence thin = observe(thin_options);
+    const ProfileEvidence thick = observe(thick_options);
+    const ProfileEvidence close = observe(close_options);
+    const ProfileEvidence spaced = observe(spaced_options);
+    const ProfileEvidence disabled = observe(disabled_options);
+
+    REQUIRE(disabled.slices.empty());
+    REQUIRE(disabled.physical_extrusion_paths == 0);
+    for (const ProfileEvidence *evidence : { &vertical, &angled, &thin, &thick, &close, &spaced }) {
+        REQUIRE(evidence->active_layers > 0);
+        REQUIRE(evidence->physical_extrusion_paths > 0);
+        REQUIRE(evidence->largest_lower_branch_area_mm2 > 0.0);
+    }
+    CHECK_THAT(angled.highest_support_z, Catch::Matchers::WithinAbs(vertical.highest_support_z, EPSILON));
+    CHECK_THAT(thick.highest_support_z, Catch::Matchers::WithinAbs(thin.highest_support_z, EPSILON));
+    CHECK_THAT(spaced.highest_support_z, Catch::Matchers::WithinAbs(close.highest_support_z, EPSILON));
+    REQUIRE(sliced_geometry_difference_mm2(angled, vertical) > 0.01);
+    REQUIRE(sliced_geometry_difference_mm2(thick, thin, lower_region_ceiling_mm) > 0.01);
+    REQUIRE(sliced_geometry_difference_mm2(spaced, close) > 0.01);
+}
+
+TEST_CASE("Tree support brim width changes the first support footprint",
+          "[TreeSupport][TreeSupportInteractions][SupportSettingsVariance]")
+{
+    using namespace tree_support_interactions_contracts;
+    const TriangleMesh mesh = interaction_fixture();
+    const TreeSupportInteractionEvidence no_brim = observe_tree_support(mesh, false, 1, 0.0);
+    const TreeSupportInteractionEvidence wide_brim = observe_tree_support(mesh, false, 1, 16.0);
+
+    INFO("style=tree_slim auto_brim=false wall_count=1 no_brim_width_mm=0 wide_brim_width_mm=16"
+         << " no_brim_paths=" << no_brim.path_count
+         << " wide_brim_paths=" << wide_brim.path_count
+         << " no_brim_first_layer_area_mm2=" << no_brim.first_layer_area_mm2
+         << " wide_brim_first_layer_area_mm2=" << wide_brim.first_layer_area_mm2);
+    for (const TreeSupportInteractionEvidence *evidence : { &no_brim, &wide_brim }) {
+        REQUIRE(evidence->finite);
+        REQUIRE(evidence->nonempty_layers > 0);
+        REQUIRE(evidence->first_layer_path_count > 0);
+        REQUIRE(evidence->first_layer_area_mm2 > 0.0);
+        REQUIRE(evidence->first_layer_length_mm > 0.0);
+        REQUIRE(evidence->path_count > 0);
+        REQUIRE(evidence->total_length_mm > 0.0);
+    }
+    REQUIRE(wide_brim.first_layer_area_mm2 > no_brim.first_layer_area_mm2 * 1.01);
+}
 
 namespace tree_support_vertical_enforcer_contracts {
 

@@ -1023,31 +1023,34 @@
       "reason": "Full a44 native run passes the exact case \"SLA supports_enable controls manual support production on one fixture\" once for both disabled and enabled public SLA pipelines: disabled support mesh/slice are empty and enabled support geometry/volume/slice outputs are finite and positive. This adds boolean-state evidence while retaining the existing representative and pipeline dimensions; broader support interactions remain unclaimed."
     },
     "tree_support_branch_angle": {
-      "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportBranchSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Tree support generation uses a 40 degree branch angle and checks generated support geometry; angle boundaries are not claimed."
+      "reason": "The case \"Tree branch settings change public support geometry\" passes on the fixed cap-overhang fixture. The tree_slim rows exercise the registered 0 and 60 degree endpoints; the same case uses the configured 40 degree representative in its paired diameter and distance rows. Enabled rows require active support layers, positive physical extrusion-path counts, and nonzero lower-branch geometry; the angle endpoint outputs retain matched support height and differ in public sliced geometry. Other classic-setting interactions and the full geometry domain are not claimed."
     },
     "tree_support_branch_diameter": {
-      "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportBranchSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Tree support generation uses a 1.0 mm branch diameter and checks generated support geometry; numeric boundaries are not claimed."
+      "reason": "The case \"Tree branch settings change public support geometry\" passes on the fixed cap-overhang fixture. The tree_slim rows compare the registered 1 and 10 mm diameter endpoints and use the configured 5 mm representative in the paired angle and distance rows. Enabled rows require active support layers, positive physical extrusion-path counts, and nonzero lower-branch geometry; the endpoint rows retain matched support height and their lower public support slices differ. Branching interactions and monotonic total area are not claimed."
     },
     "tree_support_branch_distance": {
       "test": "tests/fff_print/test_tree_support.cpp",
-      "tag": "[TreeSupport][SupportCriticalRegionsOnly]",
+      "tag": "[TreeSupportBranchSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The public critical-region tree-support fixture explicitly pins the canonical tree_support_branch_distance to 5.0 mm and requires positive support points and independent ordinary/cantilever support segments. Numeric bounds and a setting-specific contrast remain unclaimed."
+      "reason": "The case \"Tree branch settings change public support geometry\" passes on the fixed cap-overhang fixture. The tree_slim rows compare the registered 1 and 10 mm distance endpoints and use the configured 5 mm representative in the paired angle and diameter rows. Enabled rows require active support layers, positive physical extrusion-path counts, and nonzero lower-branch geometry; the endpoint rows retain matched support height and differ in public sliced geometry. Other settings interactions and broader geometry claims are not made."
     },
     "z_hop": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -5162,6 +5165,42 @@
         "pipeline_oracle"
       ],
       "reason": "The registered 0 and 2 endpoints and representative 0.75 value are compared with ratio 1 on a real FFF print. Only detected overhang-wall material scales; zero preserves sliced geometry and role-tagged XY motion while depositing zero material. Other roles retain their material. The fixture explicitly enables set_other_flow_ratios and pins first-layer, print, and filament multipliers to 1. Full cross-setting interactions are not claimed."
+    },
+    "tree_support_angle_slow": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[OrganicTreeAngles]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The case \"Organic branch angles change public support geometry\" passes with the registered 10 and 85 degree preferred-angle endpoints. The organic branch maximum is fixed at 60 degrees, so 85 degrees is exercised as a configured upper value that is clamped by that maximum; the resulting lower support geometry differs from the 10 degree preferred-angle row with the same 60 degree branch maximum. Each row requires active support layers, positive physical paths, positive top-contact and lower-branch geometry, and matched support height. Other cap combinations are not claimed."
+    },
+    "tree_support_branch_angle_organic": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[OrganicTreeAngles]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The case \"Organic branch angles change public support geometry\" passes for 10 and 60 degree organic branch angles with preferred angle fixed at 10 degrees; both rows require active support layers, positive physical paths and geometry, matched support height, and distinct public sliced geometry. A separate zero-angle case only proves that Print::validate accepts and stores 0. TreeSupportCommon.hpp:104-105 then calls std::clamp with lower bound 0 and upper bound -EPSILON, violating its lo <= hi precondition, so zero receives no runtime or boundary-value credit. Other organic-setting interactions are not claimed."
+    },
+    "tree_support_branch_diameter_angle": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[OrganicTreeAngles]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The case \"Organic branch diameter angle changes lower public support geometry\" passes for the registered 0 and 15 degree endpoints. Both organic rows require active support layers, positive physical extrusion paths and nonzero lower-branch geometry, and preserve matched support height; their lower-region public support slices differ. Broader setting interactions are not claimed."
+    },
+    "tree_support_brim_width": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportInteractions]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The case \"Tree support brim width changes the first support footprint\" passes on the same proven tree_slim interaction fixture with auto brim disabled and one support wall. Configured widths 0 and 16 mm both require finite, nonempty support, positive first-layer paths, area and length; the 16 mm row must increase measured first-layer footprint area by more than 1 percent. The registry declares a minimum but no maximum, so this is representative value evidence, not complete boundary coverage. Broad interaction claims are not made."
     }
   }
 }
