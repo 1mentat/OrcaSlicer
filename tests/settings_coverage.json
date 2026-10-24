@@ -4955,6 +4955,26 @@
         "pipeline_oracle"
       ],
       "reason": "Physical-printer controls emit the legacy semicolon-separated name from two memberships and reduce it to the single surviving name after deleting a referenced preset. Collection reload preserves that membership while unrelated printers retain their configured host and name."
+    },
+    "gap_infill_speed": {
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "The public FFF export verifies real gap-role geometry and material at the registered minimum and representative speed. Maximum parsed gap-fill modal F tracks each configured rate; nil per-object values inherit before and after an explicit override and agree with independent global controls.",
+      "tag": "[MotionFlowVariance][GapInfillSpeed][SettingsVariance]",
+      "test": "tests/fff_print/test_motion_flow_variance.cpp"
+    },
+    "internal_solid_infill_speed": {
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "The public FFF export tests the registered minimum and a distinct representative rate. Parsed internal-solid role moves require finite nonzero geometry, G-code path, and filament while their maximum modal F matches the configured rate; nil per-object values inherit before and after an explicit override, whose output matches an independently sliced global control.",
+      "tag": "[MotionFlowVariance][InternalSolidInfillSpeed][SettingsVariance]",
+      "test": "tests/fff_print/test_motion_flow_variance.cpp"
     }
   }
 }

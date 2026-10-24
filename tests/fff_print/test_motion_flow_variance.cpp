@@ -1332,6 +1332,122 @@ TEST_CASE("Nullable object speed overrides restore inherited G-code feeds",
 
 namespace {
 
+void set_nullable_role_speed(DynamicPrintConfig &config, const char *key, double value)
+{
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->type == coFloats);
+    REQUIRE(definition->nullable);
+    REQUIRE(definition->is_value_valid(value));
+    config.set_key_value(key, new ConfigOptionFloatsNullable({ value }));
+}
+
+DynamicPrintConfig role_speed_contract_config()
+{
+    DynamicPrintConfig config = role_flow_config();
+    // Keep all target-role G-code speeds observable: first-layer infill uses
+    // this speed before the role-specific value takes effect on later layers.
+    set_nullable_role_speed(config, "initial_layer_infill_speed", 1.0);
+    set_nullable_role_speed(config, "sparse_infill_speed", 91.0);
+    set_nullable_role_speed(config, "internal_solid_infill_speed", 62.0);
+    set_nullable_role_speed(config, "gap_infill_speed", 46.0);
+    return config;
+}
+
+ObjectSpeedTransition apply_role_flow_object_speed_nil_explicit_nil(
+    const DynamicPrintConfig &config, const char *key, double explicit_value)
+{
+    Print print;
+    Model model;
+    init_role_flow_fixture(print, model, config);
+    REQUIRE_FALSE(model.objects.empty());
+    ModelObject *object = model.objects.front();
+    REQUIRE(object != nullptr);
+
+    ObjectSpeedTransition transition;
+    transition.nil_initial = apply_object_speed_state(
+        print, model, *object, config, key,
+        ConfigOptionFloatsNullable({ ConfigOptionFloatsNullable::nil_value() }));
+    transition.explicit_value = apply_object_speed_state(
+        print, model, *object, config, key,
+        ConfigOptionFloatsNullable({ explicit_value }));
+    transition.nil_final = apply_object_speed_state(
+        print, model, *object, config, key,
+        ConfigOptionFloatsNullable({ ConfigOptionFloatsNullable::nil_value() }));
+    return transition;
+}
+
+void require_role_speed_output(const Evidence &evidence, size_t role, double configured_mm_per_second)
+{
+    const RoleEvidence &observed = evidence.roles[role];
+    REQUIRE(observed.moves > 0);
+    REQUIRE(observed.later_layer_moves > 0);
+    REQUIRE(observed.geometry_path_length > 0.0);
+    REQUIRE(observed.gcode_path_length > 0.0);
+    REQUIRE(observed.filament_length > 0.0);
+    // G-code F is expressed in mm/min; GCode::extrude() converts mm/s by 60.
+    CHECK_THAT(observed.feedrate,
+               Catch::Matchers::WithinAbs(configured_mm_per_second * 60.0, 1.0));
+}
+
+void verify_nullable_role_speed_contract(const char *key, size_t role)
+{
+    constexpr double representative_speed = 52.0;
+    constexpr double explicit_object_speed = 24.0;
+
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->type == coFloats);
+    REQUIRE(definition->nullable);
+    const double minimum = definition->min;
+    REQUIRE(std::isfinite(minimum));
+    REQUIRE(definition->is_value_valid(minimum));
+
+    DynamicPrintConfig boundary_config = role_speed_contract_config();
+    set_nullable_role_speed(boundary_config, key, minimum);
+    const Evidence boundary = fresh_role_flow_evidence(boundary_config);
+    INFO("registered minimum output: " + evidence_summary(boundary));
+    require_role_speed_output(boundary, role, minimum);
+
+    DynamicPrintConfig parent_config = role_speed_contract_config();
+    set_nullable_role_speed(parent_config, key, representative_speed);
+    const Evidence parent = fresh_role_flow_evidence(parent_config);
+    INFO("inherited output: " + evidence_summary(parent));
+    require_role_speed_output(parent, role, representative_speed);
+    require_same_geometry(parent, boundary);
+    require_same_material(parent, boundary);
+
+    DynamicPrintConfig explicit_global_config = parent_config;
+    set_nullable_role_speed(explicit_global_config, key, explicit_object_speed);
+    const Evidence explicit_global = fresh_role_flow_evidence(explicit_global_config);
+    require_role_speed_output(explicit_global, role, explicit_object_speed);
+
+    const ObjectSpeedTransition transition = apply_role_flow_object_speed_nil_explicit_nil(
+        parent_config, key, explicit_object_speed);
+    compare_fresh_and_incremental(parent, transition.nil_initial);
+    compare_fresh_and_incremental(explicit_global, transition.explicit_value);
+    compare_fresh_and_incremental(parent, transition.nil_final);
+    require_role_speed_output(transition.nil_initial, role, representative_speed);
+    require_role_speed_output(transition.explicit_value, role, explicit_object_speed);
+    require_role_speed_output(transition.nil_final, role, representative_speed);
+}
+
+} // namespace
+
+TEST_CASE("Internal solid infill speed honors its minimum and nullable object inheritance",
+          "[MotionFlowVariance][InternalSolidInfillSpeed][SettingsVariance]")
+{
+    verify_nullable_role_speed_contract("internal_solid_infill_speed", internal_solid);
+}
+
+TEST_CASE("Gap infill speed honors its minimum and nullable object inheritance",
+          "[MotionFlowVariance][GapInfillSpeed][SettingsVariance]")
+{
+    verify_nullable_role_speed_contract("gap_infill_speed", gap_fill);
+}
+
+namespace {
+
 struct WidthMeasurement {
     size_t paths = 0;
     double path_length = 0.0;

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Internal-solid and gap-infill feeds follow their own configured speeds, including minimum and nullable object inheritance controls.",
+  "mutants": [
+    {
+      "description": "Route solid-infill extrusion through sparse-infill speed; the parsed role feed must expose the wrong modal rate.",
+      "id": "internal-solid-infill-speed-uses-sparse-speed",
+      "new": "            speed = NOZZLE_CONFIG(sparse_infill_speed);",
+      "old": "            speed = NOZZLE_CONFIG(internal_solid_infill_speed);",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "Internal solid infill speed honors its minimum and nullable object inheritance"
+    },
+    {
+      "description": "Route gap-fill extrusion through sparse-infill speed; the independently observed gap-role feed must fail.",
+      "id": "gap-infill-speed-uses-sparse-speed",
+      "new": "            speed = NOZZLE_CONFIG(sparse_infill_speed);",
+      "old": "            speed = NOZZLE_CONFIG(gap_infill_speed);",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "Gap infill speed honors its minimum and nullable object inheritance"
+    }
+  ]
+}
