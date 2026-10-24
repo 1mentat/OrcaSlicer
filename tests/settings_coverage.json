@@ -1337,41 +1337,45 @@
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
       "tag": "[MotionFlowVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle",
         "nullable_behavior"
       ],
-      "reason": "The accepted MotionFlowVariance case exercises this key in both scalar and variant fixtures, with an object override transition nil -> explicit -> nil. It compares each incremental result with fresh parent and fresh explicit exports and requires the role feed to change for the explicit value. Numeric boundaries, percentage domains, and other variant mappings are not claimed."
+      "reason": "Public FFF export exercises the registered minimum 1 and 52 mm/s on actual external-perimeter paths; maximum parsed role modal F is checked while positive geometry and material remain stable. Per-object nil values inherit across an explicit 24 mm/s override. The separate small-perimeter gate is pinned to zero so this fixture path tests outer_wall_speed directly. The existing ObjectSpeedNullable control additionally checks standard and high-flow nozzle variants through fresh/incremental exports. The minimum-speed control uses a fixed standard fixture; full numeric ranges and other variant mappings are not claimed."
     },
     "inner_wall_speed": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
       "tag": "[MotionFlowVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle",
         "nullable_behavior"
       ],
-      "reason": "The accepted MotionFlowVariance case exercises this key in both scalar and variant fixtures, with an object override transition nil -> explicit -> nil. It compares each incremental result with fresh parent and fresh explicit exports and requires the role feed to change for the explicit value. Numeric boundaries, percentage domains, and other variant mappings are not claimed."
+      "reason": "Public FFF export exercises the registered minimum 1 and 52 mm/s on actual inner-perimeter paths; maximum parsed role modal F is checked while positive geometry and material remain stable. Per-object nil values inherit across an explicit 24 mm/s override. The existing ObjectSpeedNullable control additionally checks standard and high-flow nozzle variants through fresh/incremental exports. The minimum-speed control uses a fixed standard fixture; full numeric ranges and other variant mappings are not claimed."
     },
     "sparse_infill_speed": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
       "tag": "[MotionFlowVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle",
         "nullable_behavior"
       ],
-      "reason": "The accepted MotionFlowVariance case exercises this key in both scalar and variant fixtures, with an object override transition nil -> explicit -> nil. It compares each incremental result with fresh parent and fresh explicit exports and requires the role feed to change for the explicit value. Numeric boundaries, percentage domains, and other variant mappings are not claimed."
+      "reason": "Public FFF export exercises the registered minimum 1 and 52 mm/s on actual sparse-infill paths; maximum parsed role modal F is checked while positive geometry and material remain stable. Per-object nil values inherit across an explicit 24 mm/s override. The existing ObjectSpeedNullable control additionally checks standard and high-flow nozzle variants through fresh/incremental exports. The minimum-speed control uses a fixed standard fixture; full numeric ranges and other variant mappings are not claimed."
     },
     "top_surface_speed": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
       "tag": "[MotionFlowVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle",
         "nullable_behavior"
       ],
-      "reason": "The accepted MotionFlowVariance case exercises this key in both scalar and variant fixtures, with an object override transition nil -> explicit -> nil. It compares each incremental result with fresh parent and fresh explicit exports and requires the role feed to change for the explicit value. Numeric boundaries, percentage domains, and other variant mappings are not claimed."
+      "reason": "Public FFF export exercises the registered minimum 1 and 52 mm/s on actual top-solid-infill paths; maximum parsed role modal F is checked while positive geometry and material remain stable. Per-object nil values inherit across an explicit 24 mm/s override. The existing ObjectSpeedNullable control additionally checks standard and high-flow nozzle variants through fresh/incremental exports. The minimum-speed control uses a fixed standard fixture; full numeric ranges and other variant mappings are not claimed."
     },
     "travel_speed": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -4975,6 +4979,42 @@
       "reason": "The public FFF export tests the registered minimum and a distinct representative rate. Parsed internal-solid role moves require finite nonzero geometry, G-code path, and filament while their maximum modal F matches the configured rate; nil per-object values inherit before and after an explicit override, whose output matches an independently sliced global control.",
       "tag": "[MotionFlowVariance][InternalSolidInfillSpeed][SettingsVariance]",
       "test": "tests/fff_print/test_motion_flow_variance.cpp"
+    },
+    "change_extrusion_role_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ExtrusionRoleGCode]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public FFF exporter compares empty hooks with distinct machine, filament, and process M117 templates. Every observed role transition must emit the configured machine marker in order with independently checked current/previous roles and layer number/Z; deposition is conserved. This is bounded single-filament template behavior, not all expressions or filament mappings."
+    },
+    "filament_change_extrusion_role_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ExtrusionRoleGCode]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public FFF exporter compares empty hooks with distinct machine, filament, and process M117 templates. Every observed role transition must emit the configured filament marker in order with independently checked current/previous roles and layer number/Z; deposition is conserved. This is bounded single-filament template behavior, not all expressions or filament mappings."
+    },
+    "process_change_extrusion_role_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ExtrusionRoleGCode]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public FFF exporter compares empty hooks with distinct machine, filament, and process M117 templates. Every observed role transition must emit the configured process marker in order with independently checked current/previous roles and layer number/Z; deposition is conserved. This is bounded single-filament template behavior, not all expressions or filament mappings."
+    },
+    "wrapping_detection_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[WrappingDetectionGCode]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public FFF exporter compares a disabled hook, an enabled multiline M117/G1 hook, and an enabled empty hook. Only the configured enabled hook emits once per each of six layers with independently checked layer/Z/maximum-Z and extruder metadata. Its temporary Z motion must return to every expected deposition layer while material and XY path remain unchanged. This is bounded script behavior, not all expressions."
     }
   }
 }

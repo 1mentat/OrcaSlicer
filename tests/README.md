@@ -347,10 +347,12 @@ cooling or volumetric limits cannot silently mask the tested effect.
 nil, explicit, then nil transition on the same print. Fresh parent and explicit
 controls verify geometry, material, and feeds for standard and high-flow nozzle
 variants. Its mutations are in `object_speed_nullable.json`.
-`[InternalSolidInfillSpeed]` and `[GapInfillSpeed]` check the registered
-minimum, a representative feed, and nil/explicit/nil object overrides. Parsed
-maximum role feedrate must equal the configured speed while geometry and
-deposited material remain unchanged. Their mutations are in `role_speed_sources.json`.
+`[OuterWallSpeed]`, `[InnerWallSpeed]`, `[SparseInfillSpeed]`,
+`[TopSurfaceSpeed]`, `[InternalSolidInfillSpeed]`, and `[GapInfillSpeed]`
+check the registered minimum, a representative feed, and nil/explicit/nil
+object overrides. Parsed maximum role feedrate must equal the configured speed while geometry and
+deposited material remain unchanged. Outer-wall controls disable the separate
+small-perimeter branch. The solid and gap probes are in `role_speed_sources.json`.
 `[FilamentFlowVariance]` and `[FilamentMaxVolumetricSpeed]` check deposited
 material and volumetric feedrate limits, including fresh/incremental agreement.
 `[LayerGeometrySettings]` checks initial height, independent shell thicknesses,

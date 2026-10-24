@@ -1390,7 +1390,9 @@ void require_role_speed_output(const Evidence &evidence, size_t role, double con
                Catch::Matchers::WithinAbs(configured_mm_per_second * 60.0, 1.0));
 }
 
-void verify_nullable_role_speed_contract(const char *key, size_t role)
+void verify_nullable_role_speed_contract(
+    const char *key, size_t role,
+    const DynamicPrintConfig &base_config = role_speed_contract_config())
 {
     constexpr double representative_speed = 52.0;
     constexpr double explicit_object_speed = 24.0;
@@ -1403,13 +1405,13 @@ void verify_nullable_role_speed_contract(const char *key, size_t role)
     REQUIRE(std::isfinite(minimum));
     REQUIRE(definition->is_value_valid(minimum));
 
-    DynamicPrintConfig boundary_config = role_speed_contract_config();
+    DynamicPrintConfig boundary_config = base_config;
     set_nullable_role_speed(boundary_config, key, minimum);
     const Evidence boundary = fresh_role_flow_evidence(boundary_config);
     INFO("registered minimum output: " + evidence_summary(boundary));
     require_role_speed_output(boundary, role, minimum);
 
-    DynamicPrintConfig parent_config = role_speed_contract_config();
+    DynamicPrintConfig parent_config = base_config;
     set_nullable_role_speed(parent_config, key, representative_speed);
     const Evidence parent = fresh_role_flow_evidence(parent_config);
     INFO("inherited output: " + evidence_summary(parent));
@@ -1444,6 +1446,52 @@ TEST_CASE("Gap infill speed honors its minimum and nullable object inheritance",
           "[MotionFlowVariance][GapInfillSpeed][SettingsVariance]")
 {
     verify_nullable_role_speed_contract("gap_infill_speed", gap_fill);
+}
+
+namespace {
+
+DynamicPrintConfig role_speed_endpoint_config()
+{
+    DynamicPrintConfig config = role_speed_contract_config();
+    // Pin first-layer feeds to the tested minimum so they cannot hide the
+    // target role's later-layer feed; a zero threshold disables the separate
+    // small-perimeter speed branch for external walls.
+    set_nullable_role_speed(config, "initial_layer_speed", 1.0);
+    set_nullable_role_speed(config, "initial_layer_infill_speed", 1.0);
+    set_nullable_role_speed(config, "small_perimeter_threshold", 0.0);
+    // Hold companion roles at distinct registered rates while one setting is
+    // swept. This also makes a role-to-role speed routing error observable.
+    set_nullable_role_speed(config, "outer_wall_speed", 67.0);
+    set_nullable_role_speed(config, "inner_wall_speed", 77.0);
+    set_nullable_role_speed(config, "sparse_infill_speed", 87.0);
+    set_nullable_role_speed(config, "top_surface_speed", 97.0);
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("Outer wall speed honors its minimum and nullable object inheritance",
+          "[MotionFlowVariance][OuterWallSpeed][SettingsVariance]")
+{
+    verify_nullable_role_speed_contract("outer_wall_speed", outer, role_speed_endpoint_config());
+}
+
+TEST_CASE("Inner wall speed honors its minimum and nullable object inheritance",
+          "[MotionFlowVariance][InnerWallSpeed][SettingsVariance]")
+{
+    verify_nullable_role_speed_contract("inner_wall_speed", inner, role_speed_endpoint_config());
+}
+
+TEST_CASE("Sparse infill speed honors its minimum and nullable object inheritance",
+          "[MotionFlowVariance][SparseInfillSpeed][SettingsVariance]")
+{
+    verify_nullable_role_speed_contract("sparse_infill_speed", sparse, role_speed_endpoint_config());
+}
+
+TEST_CASE("Top surface speed honors its minimum and nullable object inheritance",
+          "[MotionFlowVariance][TopSurfaceSpeed][SettingsVariance]")
+{
+    verify_nullable_role_speed_contract("top_surface_speed", top, role_speed_endpoint_config());
 }
 
 namespace {
