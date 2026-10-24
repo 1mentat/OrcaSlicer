@@ -1386,6 +1386,11 @@ for tracked overlay files whose bytes, size, and permissions still match after
 reapplication. Changed files retain their new timestamps. The report records
 eligibility, skipped paths, and restored file/byte counts under
 `build_input_mtime_preservation`. Configure, build, and tests still execute.
+Use a consistent `umask 022` before the initial checkout and every subsequent
+reset and overlay application (`UMask=0022` for a systemd service). A more
+permissive mask can recreate an otherwise identical file as mode `0664` after
+it was built as `0644`; the permission guard then correctly skips timestamp
+reuse and the build repeats. Do not change modes in a live validation checkout.
 
 Use a new or empty output directory for every run. Before building, the runner
 records the snapshot SHA-256 and verifies every selected head and base resolves
@@ -1431,6 +1436,7 @@ Run all snapshot heads, or select reproducible PR numbers with repeated or
 comma-separated `--numbers` values:
 
 ```sh
+umask 022
 DEPS_PREFIX=/path/to/OrcaSlicer-deps/usr/local
 UV="$(command -v uv)"
 python3 scripts/slicer_pr_validation.py \
