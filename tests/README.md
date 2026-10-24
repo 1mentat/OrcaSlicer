@@ -812,6 +812,9 @@ branches, extruder selectors, and generated command markers.
 material categories and two physical heaters. Distinct explicit temperatures
 and sentinel range highs check each incoming heater's template and contact-grid
 waits, base-temperature restores, and conserved model deposition.
+Its sentinel fallback probe is in
+`tests/mutations/tower_interface_geometry_endpoints.json`, alongside the Type2
+fallback probe.
 
 `[RoleFanBoundaries]` checks fan state on real internal-bridge, support-interface
 and ironing extrusion across selected endpoint values, cached settings changes,

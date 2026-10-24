@@ -25,6 +25,17 @@
       "description": "In append_tcr2 change the sentinel fallback from distinct260/265 range highs to200 base temperatures; the per-tool physical wait oracle must reject it."
     },
     {
+      "description": "At the unique legacy append_tcr sentinel fallback, replace nozzle_temperature_range_high with nozzle_temperature. The type-1 contact test must fail its ordinary per-heater temperature assertions.",
+      "id": "legacy-type1-sentinel-uses-base-temperature",
+      "new": "int interface_temp = full_config.filament_tower_interface_print_temp.get_at(new_filament_id);\n                if (interface_temp == -1)\n                    interface_temp = full_config.nozzle_temperature.get_at(new_fi);",
+      "old": "int interface_temp = full_config.filament_tower_interface_print_temp.get_at(new_filament_id);\n                if (interface_temp == -1)\n                    interface_temp = full_config.nozzle_temperature_range_high.get_at(new_fi);",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "Legacy wipe tower routes sentinel interface temperatures to each incoming heater",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    },
+    {
       "id": "tower-auto-brim-disabled",
       "path": "src/libslic3r/GCode/WipeTower2.cpp",
       "old": "if (brim_width < 0.f)\n            brim_width = WipeTower::get_auto_brim_by_height(m_wipe_tower_height);",
