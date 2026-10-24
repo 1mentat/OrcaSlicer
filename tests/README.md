@@ -808,6 +808,11 @@ emit cooling without scheduling a later heating command or heating block.
 The preheating mutation manifest challenges the usage-block gates, temperature
 branches, extruder selectors, and generated command markers.
 
+`[LegacyWipeTowerContactPipeline]` exports a type-1 tower with alternating
+material categories and two physical heaters. Distinct explicit temperatures
+and sentinel range highs check each incoming heater's template and contact-grid
+waits, base-temperature restores, and conserved model deposition.
+
 `[RoleFanBoundaries]` checks fan state on real internal-bridge, support-interface
 and ironing extrusion across selected endpoint values, cached settings changes,
 fresh prints and restored settings. The fixture keeps both role-generating mesh

@@ -4934,6 +4934,53 @@ std::string export_contact_pipeline(const DynamicPrintConfig &config)
     return gcode(print);
 }
 
+struct LegacyContactPipelineRun {
+    std::string gcode;
+    std::array<bool, 2> contact_heaters{};
+};
+
+LegacyContactPipelineRun export_legacy_contact_pipeline(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    auto add_slab = [object](double z, int extruder) {
+        TriangleMesh mesh = make_cube(8., 8., 0.4);
+        mesh.translate(0., 0., z);
+        ModelVolume *volume = object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
+        volume->config.set("extruder", extruder);
+    };
+    // Four touching regions alternate categories twice, so each incoming heater
+    // has a later positive-depth block for its independent contact-grid wait.
+    add_slab(0.0, 1);
+    add_slab(0.4, 2);
+    add_slab(0.8, 1);
+    add_slab(1.2, 2);
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    const auto validation = print.validate();
+    INFO("Legacy contact validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+
+    LegacyContactPipelineRun result;
+    result.gcode = gcode(print);
+    const auto nozzle_mapping = print.get_layered_nozzle_group_result();
+    REQUIRE(nozzle_mapping != nullptr);
+    CHECK(nozzle_mapping->get_extruder_id(0) == 0);
+    CHECK(nozzle_mapping->get_extruder_id(1) == 1);
+    const std::vector<int> expected_physical_map{0, 1};
+    CHECK(print.config().physical_extruder_map.values == expected_physical_map);
+    for (const auto &layer : print.wipe_tower_data().tool_changes)
+        for (const WipeTower::ToolChangeResult &change : layer) {
+            if (!change.is_contact || change.new_tool < 0 || change.new_tool >= int(result.contact_heaters.size()))
+                continue;
+            result.contact_heaters[std::size_t(change.new_tool)] = true;
+        }
+    return result;
+}
+
 PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrintConfig &config,
                                      int interface_temperature_0 = 215, int interface_temperature_1 = 220)
 {
@@ -5029,6 +5076,134 @@ void check_model_deposition_unchanged(const PipelineTrace &before, const Pipelin
     CHECK_THAT(before.model_filament, Catch::Matchers::WithinRel(after.model_filament, 1e-6));
 }
 
+struct LegacyContactTrace {
+    PipelineTrace model_deposition;
+    std::size_t tower_blocks = 0;
+    std::size_t contact_grid_markers = 0;
+    std::size_t contact_grid_waits = 0;
+    std::size_t contact_grid_restores_after_wait = 0;
+    std::size_t template_wait_commands = 0;
+    std::size_t incorrectly_targeted_template_waits = 0;
+    std::size_t incorrectly_targeted_contact_waits = 0;
+    std::array<std::vector<int>, 2> template_waits_by_heater;
+    std::array<std::vector<int>, 2> contact_grid_waits_by_heater;
+    std::array<std::size_t, 2> contact_grid_restores_by_heater{};
+    std::string contact_grid_temperature_commands;
+};
+
+LegacyContactTrace trace_legacy_contact_commands(const std::string &gcode, const DynamicPrintConfig &config,
+                                                  const std::array<int, 2> &expected_interface_temperatures)
+{
+    LegacyContactTrace result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool in_tower = false;
+    bool in_wipe_tower = false;
+    bool in_contact_grid = false;
+    int pending_template_tool = -1;
+    std::array<bool, 2> contact_grid_wait_seen{};
+    const std::string tower_start = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start);
+    const std::string tower_end = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End);
+
+    auto get_tool = [](const GCodeReader::GCodeLine &line, char parameter) {
+        float value = 0.f;
+        if (!line.has_value(parameter, value) || !std::isfinite(value))
+            return -1;
+        const int tool = int(std::lround(value));
+        return std::abs(value - float(tool)) <= 1e-4f ? tool : -1;
+    };
+    auto expected_temperature = [&expected_interface_temperatures](int tool) {
+        return tool >= 0 && tool < 2 ? expected_interface_temperatures[tool] : -1;
+    };
+
+    reader.parse_buffer(gcode, [&result, &in_tower, &in_wipe_tower, &in_contact_grid, &pending_template_tool,
+                                &contact_grid_wait_seen, &get_tool, &expected_temperature,
+                                &tower_start, &tower_end](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string raw = line.raw();
+        if (raw.find(tower_start) != std::string::npos)
+            in_wipe_tower = true;
+        if (raw.find("CP TOOLCHANGE START") != std::string::npos) {
+            in_tower = true;
+            ++result.tower_blocks;
+        }
+        // Contact-grid sections are emitted by finish-block helpers and may sit
+        // outside the surrounding tool-change marker pair. Track their raw
+        // protocol markers independently from template tool-change parsing.
+        if (raw.find("CP EMPTY GRID START") != std::string::npos) {
+            in_contact_grid = true;
+            contact_grid_wait_seen.fill(false);
+            ++result.contact_grid_markers;
+        }
+        if (raw.find("CP EMPTY GRID END") != std::string::npos)
+            in_contact_grid = false;
+
+        const std::string_view command = line.cmd();
+        if (in_tower && command.size() >= 2 && command[0] == 'T' &&
+            std::isdigit(static_cast<unsigned char>(command[1]))) {
+            pending_template_tool = std::stoi(std::string(command.substr(1)));
+        } else if (pending_template_tool >= 0 && !command.empty()) {
+            // Keep a pending T through blank/comment lines, but only accept its
+            // next meaningful M109 outside the generator-owned contact grid.
+            if (in_tower && !in_contact_grid && line.cmd_is("M109")) {
+                float temperature = 0.f;
+                const bool has_temperature = line.has_value('S', temperature) && std::isfinite(temperature);
+                const int target = get_tool(line, 'T');
+                ++result.template_wait_commands;
+                if (!has_temperature || target != pending_template_tool || target < 0 || target > 1)
+                    ++result.incorrectly_targeted_template_waits;
+                else
+                    result.template_waits_by_heater[target].push_back(int(std::lround(temperature)));
+            }
+            pending_template_tool = -1;
+        }
+
+        if (in_contact_grid && (line.cmd_is("M109") || line.cmd_is("M104")))
+            result.contact_grid_temperature_commands.append(raw).append("\n");
+        if (in_contact_grid && line.cmd_is("M109")) {
+            float temperature = 0.f;
+            const bool has_temperature = line.has_value('S', temperature) && std::isfinite(temperature);
+            const int target = get_tool(line, 'T');
+            const int expected = expected_temperature(target);
+            if (has_temperature && target >= 0 && target < 2 && expected > 0 &&
+                std::abs(temperature - float(expected)) <= 1e-4f) {
+                ++result.contact_grid_waits;
+                result.contact_grid_waits_by_heater[target].push_back(int(std::lround(temperature)));
+                contact_grid_wait_seen[target] = true;
+            } else if (has_temperature &&
+                       (std::abs(temperature - float(expected_temperature(0))) <= 1e-4f ||
+                        std::abs(temperature - float(expected_temperature(1))) <= 1e-4f)) {
+                ++result.incorrectly_targeted_contact_waits;
+            }
+        }
+        if (in_contact_grid && line.cmd_is("M104")) {
+            float temperature = 0.f;
+            const bool has_temperature = line.has_value('S', temperature) && std::isfinite(temperature);
+            const int target = get_tool(line, 'T');
+            if (has_temperature && std::abs(temperature - 200.f) <= 1e-4f &&
+                target >= 0 && target < 2 && contact_grid_wait_seen[target]) {
+                ++result.contact_grid_restores_after_wait;
+                ++result.contact_grid_restores_by_heater[target];
+            }
+        }
+
+        // Model conservation excludes the entire reserved wipe-tower region,
+        // including finish-block contact grids outside CP TOOLCHANGE markers.
+        if (!in_wipe_tower && !in_tower && line.extruding(self) && line.dist_XY(self) > 0.f) {
+            ++result.model_deposition.model_extrusions;
+            result.model_deposition.model_xy_path += line.dist_XY(self);
+            result.model_deposition.model_filament += line.dist_E(self);
+        }
+        if (raw.find(tower_end) != std::string::npos)
+            in_wipe_tower = false;
+
+        if (raw.find("CP TOOLCHANGE END") != std::string::npos) {
+            in_tower = false;
+            pending_template_tool = -1;
+        }
+    });
+    return result;
+}
+
 } // namespace
 
 TEST_CASE("Tower contact temperature override and restore reach exported type-2 tower", "[WipeTower][WipeTowerContact][WipeTowerContactPipeline]")
@@ -5109,6 +5284,85 @@ TEST_CASE("Tower interface temperature uses the configured range high for the mi
     CHECK(explicit_output.interface_restores == explicit_output.interface_waits);
     CHECK(sentinel_output.interface_restores == sentinel_output.interface_waits);
     check_model_deposition_unchanged(explicit_output, sentinel_output);
+}
+
+TEST_CASE("Legacy wipe tower routes sentinel interface temperatures to each incoming heater",
+          "[WipeTower][WipeTowerContact][LegacyWipeTowerContactPipeline]")
+{
+    DynamicPrintConfig explicit_config = contact_pipeline_config(true, false, "215,220", "2,2", "3,3", "260,265");
+    DynamicPrintConfig sentinel_config = contact_pipeline_config(true, false, "-1,-1", "2,2", "3,3", "260,265");
+    explicit_config.set_deserialize_strict({
+        { "wipe_tower_type", "type1" },
+        { "filament_adhesiveness_category", "0,1" },
+        { "physical_extruder_map", "0,1" },
+        { "wipe_tower_no_sparse_layers", false },
+    });
+    sentinel_config.set_deserialize_strict({
+        { "wipe_tower_type", "type1" },
+        { "filament_adhesiveness_category", "0,1" },
+        { "physical_extruder_map", "0,1" },
+        { "wipe_tower_no_sparse_layers", false },
+    });
+    const std::array<int, 2> explicit_temperatures{215, 220};
+    const std::array<int, 2> sentinel_temperatures{260, 265};
+    const LegacyContactPipelineRun explicit_run = export_legacy_contact_pipeline(explicit_config);
+    const LegacyContactPipelineRun sentinel_run = export_legacy_contact_pipeline(sentinel_config);
+    const std::string &explicit_gcode = explicit_run.gcode;
+    const std::string &sentinel_gcode = sentinel_run.gcode;
+    const LegacyContactTrace explicit_commands =
+        trace_legacy_contact_commands(explicit_gcode, explicit_config, explicit_temperatures);
+    const LegacyContactTrace sentinel_commands =
+        trace_legacy_contact_commands(sentinel_gcode, sentinel_config, sentinel_temperatures);
+    const PipelineTrace &explicit_deposition = explicit_commands.model_deposition;
+    const PipelineTrace &sentinel_deposition = sentinel_commands.model_deposition;
+
+    REQUIRE(explicit_commands.tower_blocks > 0);
+    REQUIRE(sentinel_commands.tower_blocks > 0);
+    // Bind the emitted template assertion to public Type1 contact results for
+    // both incoming filaments before interpreting exported M109 commands.
+    REQUIRE(explicit_run.contact_heaters[0]);
+    REQUIRE(explicit_run.contact_heaters[1]);
+    REQUIRE(sentinel_run.contact_heaters[0]);
+    REQUIRE(sentinel_run.contact_heaters[1]);
+    INFO("explicit grid markers=" << explicit_commands.contact_grid_markers
+         << ", grid waits=" << explicit_commands.contact_grid_waits
+         << ", template waits=" << explicit_commands.template_wait_commands
+         << "; explicit grid M109/M104:\n" << explicit_commands.contact_grid_temperature_commands
+         << "; sentinel grid markers=" << sentinel_commands.contact_grid_markers
+         << ", grid waits=" << sentinel_commands.contact_grid_waits
+         << ", template waits=" << sentinel_commands.template_wait_commands
+         << "; sentinel grid M109/M104:\n" << sentinel_commands.contact_grid_temperature_commands);
+    REQUIRE(explicit_commands.contact_grid_markers > 0);
+    REQUIRE(sentinel_commands.contact_grid_markers > 0);
+    REQUIRE(explicit_commands.contact_grid_waits > 0);
+    REQUIRE(sentinel_commands.contact_grid_waits > 0);
+    REQUIRE(explicit_commands.template_wait_commands > 0);
+    REQUIRE(sentinel_commands.template_wait_commands > 0);
+
+    // The public template's T[next_extruder] is the zero-based filament ID;
+    // pinned identities and distinct range highs make each mapping observable.
+    for (int heater = 0; heater < 2; ++heater) {
+        INFO("incoming heater T" << heater);
+        REQUIRE_FALSE(explicit_commands.template_waits_by_heater[heater].empty());
+        REQUIRE_FALSE(sentinel_commands.template_waits_by_heater[heater].empty());
+        CHECK(std::all_of(explicit_commands.template_waits_by_heater[heater].begin(),
+                          explicit_commands.template_waits_by_heater[heater].end(),
+                          [&, heater](int temperature) { return temperature == explicit_temperatures[heater]; }));
+        CHECK(std::all_of(sentinel_commands.template_waits_by_heater[heater].begin(),
+                          sentinel_commands.template_waits_by_heater[heater].end(),
+                          [&, heater](int temperature) { return temperature == sentinel_temperatures[heater]; }));
+        CHECK_FALSE(explicit_commands.contact_grid_waits_by_heater[heater].empty());
+        CHECK_FALSE(sentinel_commands.contact_grid_waits_by_heater[heater].empty());
+        CHECK(explicit_commands.contact_grid_restores_by_heater[heater] > 0);
+        CHECK(sentinel_commands.contact_grid_restores_by_heater[heater] > 0);
+    }
+    CHECK(explicit_commands.incorrectly_targeted_template_waits == 0);
+    CHECK(sentinel_commands.incorrectly_targeted_template_waits == 0);
+    CHECK(explicit_commands.incorrectly_targeted_contact_waits == 0);
+    CHECK(sentinel_commands.incorrectly_targeted_contact_waits == 0);
+    CHECK(explicit_commands.contact_grid_restores_after_wait > 0);
+    CHECK(sentinel_commands.contact_grid_restores_after_wait > 0);
+    check_model_deposition_unchanged(explicit_deposition, sentinel_deposition);
 }
 
 TEST_CASE("Zero tower interface pre-extrusion distance removes its emitted move",
