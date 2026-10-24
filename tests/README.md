@@ -348,7 +348,8 @@ cases check both registered endpoints (0 and 2) and a representative ratio
 of 0.75 against a ratio-1 control. Only the selected role's material changes;
 sliced geometry, role-tagged XY motion, and other roles' material stay stable.
 These cases explicitly enable `set_other_flow_ratios` and pin the first-layer,
-print, and filament multipliers to 1.
+print, and filament multipliers to 1. Wrong-role multiplier probes are in
+`role_flow_ratio_sources.json`.
 The shared role fixture pins the seam to `back`, avoiding visibility sampling
 that these oracles do not exercise. In a matched single-run comparison, all 23
 cases passed in 17.49 seconds versus 239.69 seconds with the aligned seam,
@@ -513,7 +514,8 @@ public SLA validation. `[SLAExposureStatistics]`, `[SLATiltStatistics]`, and
 `[SLAAreaFillStatistics]` check six-layer exposure fade weights, fast/slow tilt
 durations, and layer classification against physical time totals and layer-time
 multisets. Setting-only pairs preserve slice areas and object material; zero
-exposure and tilt minima retain positive geometry and material.
+exposure and tilt minima retain positive geometry and material. Timing-source
+and area-fill classification probes are in `sla_exposure_statistics.json`.
 
 `[PresetPersistence]` checks inherited JSON imports, unresolved-parent rejection,
 subscription refreshes with newer preset timestamps, complete root-filament

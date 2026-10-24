@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "sla-fast-slow-layer-tilt-sources-swapped",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "        const double tilt_time = is_fast_layer ? fast_tilt : slow_tilt;",
+      "new": "        const double tilt_time = is_fast_layer ? slow_tilt : fast_tilt;",
+      "expected_matches": 1,
+      "test_filter": "SLA fast and slow tilt durations affect only their classified layers",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Swap the fast/slow timing sources; the case independently varies each duration on its classified layers and checks exact six-layer timing deltas."
+    },
+    {
+      "id": "sla-area-fill-ignored-by-fast-layer-classification",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "        const bool is_fast_layer = (layer_model_area + layer_support_area) <= display_area*area_fill;",
+      "new": "        const bool is_fast_layer = (layer_model_area + layer_support_area) <= display_area;",
+      "expected_matches": 1,
+      "test_filter": "SLA area fill selects fast versus slow layer timing",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Ignore area_fill in the classifier; the 0% fixture becomes fast and fails its slow/fast counts and timing assertions."
+    }
+  ],
+  "description": "SLA layer statistics select the configured tilt duration and area-fill threshold."
+}
