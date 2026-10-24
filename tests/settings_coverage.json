@@ -25,9 +25,10 @@
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[WipeTower]",
       "dimensions": [
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "A single-filament plate begins with the option enabled: ordinary and raft configurations normalize it off and reserve zero tower depth, while smooth timelapse retains a tower with positive depth. This checks resolved Print behavior; explicit configured-false versus configured-true variance is not claimed by this case."
+      "reason": "A single-filament plate still exercises ordinary/raft normalization off and smooth-timelapse retention. A paired public two-head export compares configured false and true: the false row retains model extrusion but has no wipe-tower region, while the true row has positive tower extrusion and tool commands. The two fixtures do not claim every single-filament/timelapse interaction."
     },
     "sparse_infill_pattern": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -3448,17 +3449,19 @@
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[PrimeTowerFramework]",
       "dimensions": [
-        "boolean_values"
+        "boolean_values",
+        "pipeline_oracle"
       ],
-      "reason": "Direct legacy WipeTower generation compares disabled/enabled framework with one large first purge and two smaller later purges. Enabled later-layer positive extrusion spans stay near the first depth and exceed disabled spans. Print wiring and Type2 behavior are not exercised."
+      "reason": "The direct generator case retains its explicit false/true geometry comparison. A public Type1 two-head export identifies the generated 0->1 first toolchange and a later 1->0 toolchange by tool IDs and Z; the later positive-extrusion Y span must exceed its disabled counterpart and remain near the first span when framework is on. Other purge matrices and physical-tool interactions are not claimed. Public framework rows pin cyclic tool order and zero tower brim so the intentionally shrinking brim chamfer cannot alter the measured wall span."
     },
     "prime_tower_flat_ironing": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[PrimeTowerFlatIroning]",
       "dimensions": [
-        "boolean_values"
+        "boolean_values",
+        "pipeline_oracle"
       ],
-      "reason": "Direct legacy WipeTower generation compares disabled ironing with enabled 4 and 16 square millimeter areas. Parsed non-extruding XY command counts increase with enabled ironing while extrusion command counts stay unchanged. Print wiring and Type2 behavior are not exercised."
+      "reason": "The direct legacy case retains the false/true ironing comparison. A public Type1 export with gap skipping enabled confirms flat ironing adds tower XY travel while retaining tower extrusion-move count. Other Type1/Type2 and material interactions remain unclaimed."
     },
     "filament_tower_ironing_area": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -3473,9 +3476,10 @@
       "tag": "[WipeTowerGapWall]",
       "dimensions": [
         "boolean_values",
+        "pipeline_oracle",
         "interaction_matrix"
       ],
-      "reason": "The public WipeTower2 gap-wall helper compares both skip-points values for rectangle, rib, and cone walls. Rectangle and rib permit gap walls only when enabled; cone walls reject them in both rows. Print output is not exercised by this direct contract."
+      "reason": "Direct gap-wall rows compare both values for rectangle, rib and cone walls. Public Type1 exports compare false and true with ironing off, an axis-aligned rectangular wall and zero tower brim. Each of the ten layers has a full closed wall; unique deposited coverage on its four edges must equal its perimeter with skipping off and perimeter minus 2.5 mm with skipping on, matching five times the configured 0.5 mm perimeter width. At least one emitted non-extruding travel must bridge a 2.5 mm rectangle-perimeter arc, including corner crossings. Tool command counts remain equal. Other wall configurations are not claimed."
     },
     "gcode_remap_x": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -5207,6 +5211,24 @@
         "pipeline_oracle"
       ],
       "reason": "The case \"Tree support brim width changes the first support footprint\" passes on the same proven tree_slim interaction fixture with auto brim disabled and one support wall. Configured widths 0 and 16 mm both require finite, nonempty support, positive first-layer paths, area and length; the 16 mm row must increase measured first-layer footprint area by more than 1 percent. The registry declares a minimum but no maximum, so this is representative value evidence, not complete boundary coverage. Broad interaction claims are not made. The tree_support_brim_width.json mutation catalog validates that forcing this width to zero fails the explicit-width footprint assertion; unique detection is not claimed."
+    },
+    "flush_into_support": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[PrimeTowerBooleanPipeline]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Paired Type2 public exports retain positive support. Two-head rows keep the SEMM gate disabled and require equal emitted support-tool sets and tower E for false/true. Two logical filaments sharing one nozzle enable SEMM and purge-in-tower with a 160/20 matrix and 20 mm3 tower minimum: enabling support flushing must move support-role extrusion to incoming tool 1 and reduce positive tower E. Dedicated support assignments, soluble materials and all purge budgets remain unclaimed."
+    },
+    "tool_change_on_wipe_tower": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[PrimeTowerBooleanPipeline]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Paired public Type2 multihead exports disable ramming and compare false/true. The parser captures the XY position at each actual Tx change and counts changes inside the physical XY envelope of positive extrusion measured inside the reserved wipe-tower tags; enabling the setting increases tool changes over the tower without changing total tool changes. Other macros and tower types are not claimed."
     }
   }
 }

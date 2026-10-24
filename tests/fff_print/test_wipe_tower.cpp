@@ -6932,3 +6932,668 @@ TEST_CASE("Object and infill purging preserve every exported copy's deposited ma
 }
 
 } // namespace wiping_export_contracts
+namespace prime_tower_boolean_family_contracts {
+
+namespace {
+
+struct TowerXYMove {
+    double x0 = 0.;
+    double y0 = 0.;
+    double x1 = 0.;
+    double y1 = 0.;
+    bool extruding = false;
+};
+
+struct ExportMotion {
+    std::size_t tool_commands = 0;
+    std::size_t tool_changes = 0;
+    std::size_t tool_changes_over_tower = 0;
+    std::size_t tower_extrusion_moves = 0;
+    std::size_t tower_travel_moves = 0;
+    std::size_t model_extrusion_moves = 0;
+    std::size_t support_extrusion_moves = 0;
+    double tower_e_length = 0.;
+    std::set<int> support_tools;
+    std::vector<std::pair<double, double>> tool_change_positions;
+    std::vector<std::vector<TowerXYMove>> tower_regions;
+};
+
+struct TowerToolchangeSpan {
+    float print_z = 0.f;
+    int initial_tool = -1;
+    int new_tool = -1;
+    float y_span = 0.f;
+};
+
+struct PublicPrintRun {
+    std::string gcode;
+    std::vector<TowerToolchangeSpan> tower_toolchange_spans;
+};
+
+DynamicPrintConfig two_head_tower_config(const char *type = "type1")
+{
+    return multifilament_config(2, {
+        {"nozzle_diameter", "0.4,0.4"},
+        {"printer_extruder_id", "1,2"},
+        {"printer_extruder_variant", "Direct Drive Standard,Direct Drive Standard"},
+        {"extruder_printable_height", "250,250"},
+        {"single_extruder_multi_material", false},
+        {"single_extruder_multi_material_priming", false},
+        {"enable_prime_tower", true},
+        {"prime_tower_width", 35},
+        {"wipe_tower_x", 50},
+        {"wipe_tower_y", 50},
+        {"wipe_tower_type", type},
+        {"prime_volume", 80},
+        {"filament_multitool_ramming", "0,0"},
+        {"enable_filament_ramming", false},
+        {"flush_into_objects", false},
+        {"flush_into_infill", false},
+        {"flush_into_support", false},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"gcode_comments", true},
+        {"enable_arc_fitting", false},
+        {"gcode_flavor", "marlin"},
+    });
+}
+
+DynamicPrintConfig role_tower_config()
+{
+    DynamicPrintConfig config = two_head_tower_config("type1");
+    config.set_deserialize_strict({
+        // No brim loops: the measured XY envelope is the actual outer-wall boundary.
+        {"prime_tower_brim_width", 0},
+        // Keep the wall sides axis-aligned so boundary extrusion/travel measures the intended gap.
+        {"wipe_tower_wall_type", "rectangle"},
+        {"wipe_tower_rotation_angle", 0},
+        {"sparse_infill_filament_id", 1},
+        {"internal_solid_filament_id", 1},
+        {"top_surface_filament_id", 1},
+        {"bottom_surface_filament_id", 1},
+        {"outer_wall_filament_id", 2},
+        {"inner_wall_filament_id", 2},
+    });
+    return config;
+}
+
+PublicPrintRun run_public_print(const DynamicPrintConfig &config,
+                                std::vector<TriangleMesh> meshes,
+                                const std::vector<std::vector<ConfigBase::SetDeserializeItem>> &overrides = {},
+                                bool arrange = true)
+{
+    Print print;
+    Model model;
+    init_print(std::move(meshes), print, model, config, &overrides, arrange);
+    // Some logical-filament role assignments are not all counted by the first
+    // apply; reapply once the Print regions are present, as the existing
+    // slice_with_prime_tower helper does.
+    print.apply(model, config);
+
+    PublicPrintRun result;
+    result.gcode = gcode(print);
+    if (!print.has_wipe_tower())
+        return result;
+
+    for (const auto &layer : print.wipe_tower_data().tool_changes) {
+        for (const WipeTower::ToolChangeResult &change : layer) {
+            if (change.combined_away)
+                continue;
+            float min_y = std::numeric_limits<float>::infinity();
+            float max_y = -std::numeric_limits<float>::infinity();
+            for (std::size_t i = 1; i < change.extrusions.size(); ++i) {
+                if (!(change.extrusions[i].width > 0.f))
+                    continue;
+                min_y = std::min({min_y, change.extrusions[i - 1].pos.y(), change.extrusions[i].pos.y()});
+                max_y = std::max({max_y, change.extrusions[i - 1].pos.y(), change.extrusions[i].pos.y()});
+            }
+            if (std::isfinite(double(min_y)) && std::isfinite(double(max_y)) && max_y > min_y)
+                result.tower_toolchange_spans.push_back({change.print_z, change.initial_tool, change.new_tool, max_y - min_y});
+        }
+    }
+    return result;
+}
+
+ExportMotion inspect_export(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    ExportMotion result;
+    const std::string &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start);
+    const std::string &end_tag   = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End);
+    bool in_tower = false;
+    bool active_role_is_support = false;
+    std::string active_role;
+    int current_tool = -1;
+    double tower_min_x = std::numeric_limits<double>::infinity();
+    double tower_min_y = std::numeric_limits<double>::infinity();
+    double tower_max_x = -std::numeric_limits<double>::infinity();
+    double tower_max_y = -std::numeric_limits<double>::infinity();
+    std::vector<TowerXYMove> region_moves;
+    auto finish_tower_region = [&]() {
+        if (in_tower) {
+            result.tower_regions.push_back(std::move(region_moves));
+            region_moves.clear();
+        }
+    };
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&result, &in_tower, &active_role_is_support, &active_role, &current_tool,
+                                &tower_min_x, &tower_min_y, &tower_max_x, &tower_max_y,
+                                &region_moves, &finish_tower_region, &start_tag, &end_tag](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string raw = line.raw();
+        const std::string_view raw_view(raw);
+        const std::string_view command = line.cmd();
+        if (raw_view.find(start_tag) != std::string_view::npos) {
+            finish_tower_region();
+            in_tower = true;
+        }
+        if (command.size() >= 2 && command.front() == 'T' && std::isdigit(static_cast<unsigned char>(command[1]))) {
+            ++result.tool_commands;
+            const int next_tool = std::stoi(std::string(command.substr(1)));
+            if (current_tool >= 0 && next_tool != current_tool) {
+                ++result.tool_changes;
+                // The forced-travel setting changes the physical position at Tx. Checking that
+                // position avoids attributing unrelated earlier travel/comments to this change.
+                result.tool_change_positions.emplace_back(self.x(), self.y());
+            }
+            // Role comments can precede a tool change; never carry their role onto the new tool.
+            active_role.clear();
+            active_role_is_support = false;
+            current_tool = next_tool;
+        }
+        if (raw_view.rfind(";TYPE:", 0) == 0) {
+            active_role = raw.substr(6);
+            std::string lowered_role = active_role;
+            std::transform(lowered_role.begin(), lowered_role.end(), lowered_role.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            active_role_is_support = lowered_role.find("support") != std::string::npos;
+        } else if (raw_view.rfind("; FEATURE:", 0) == 0) {
+            active_role = raw.substr(10);
+            std::string lowered_role = active_role;
+            std::transform(lowered_role.begin(), lowered_role.end(), lowered_role.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            active_role_is_support = lowered_role.find("support") != std::string::npos;
+        }
+
+        const bool extruding = line.extruding(self);
+        if (in_tower && line.cmd_is("G1") && (line.has_x() || line.has_y())) {
+            const double x0 = self.x();
+            const double y0 = self.y();
+            const double x1 = line.new_X(self);
+            const double y1 = line.new_Y(self);
+            if (std::isfinite(x0) && std::isfinite(y0) && std::isfinite(x1) && std::isfinite(y1))
+                region_moves.push_back({x0, y0, x1, y1, extruding});
+            if (extruding) {
+                ++result.tower_extrusion_moves;
+                const double e_length = line.dist_E(self);
+                if (std::isfinite(e_length) && e_length > 0.)
+                    result.tower_e_length += e_length;
+                if (std::isfinite(x0) && std::isfinite(y0) && std::isfinite(x1) && std::isfinite(y1)) {
+                    tower_min_x = std::min({tower_min_x, x0, x1});
+                    tower_min_y = std::min({tower_min_y, y0, y1});
+                    tower_max_x = std::max({tower_max_x, x0, x1});
+                    tower_max_y = std::max({tower_max_y, y0, y1});
+                }
+            } else {
+                ++result.tower_travel_moves;
+            }
+        } else if (line.cmd_is("G1") && (line.has_x() || line.has_y()) && extruding) {
+            ++result.model_extrusion_moves;
+            const std::string_view comment = line.comment();
+            std::string lowered_comment(comment);
+            std::transform(lowered_comment.begin(), lowered_comment.end(), lowered_comment.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            if (active_role_is_support || lowered_comment.find("support") != std::string::npos) {
+                ++result.support_extrusion_moves;
+                result.support_tools.insert(current_tool);
+            }
+        }
+        if (raw_view.find(end_tag) != std::string_view::npos) {
+            finish_tower_region();
+            in_tower = false;
+        }
+    });
+    if (in_tower)
+        finish_tower_region();
+
+    // Count actual tool changes whose Tx position is in the emitted tower's XY envelope.
+    // The margin includes a corner entry point while excluding the separated model objects.
+    const double tower_margin = 1.0;
+    if (std::isfinite(tower_min_x) && std::isfinite(tower_min_y) &&
+        std::isfinite(tower_max_x) && std::isfinite(tower_max_y)) {
+        for (const auto &[x, y] : result.tool_change_positions)
+            if (std::isfinite(x) && std::isfinite(y) &&
+                x >= tower_min_x - tower_margin && x <= tower_max_x + tower_margin &&
+                y >= tower_min_y - tower_margin && y <= tower_max_y + tower_margin)
+                ++result.tool_changes_over_tower;
+
+    }
+    return result;
+}
+
+struct GapWallCoverage {
+    std::size_t region_index = 0;
+    double y_min = 0.;
+    double y_max = 0.;
+    double perimeter = 0.;
+    double closed_edge_coverage = 0.;
+    double open_edge_coverage = 0.;
+    double closest_open_boundary_travel_arc = std::numeric_limits<double>::infinity();
+    bool has_expected_open_boundary_travel = false;
+};
+
+struct GapWallComparison {
+    std::vector<GapWallCoverage> complete_closed_wall_regions;
+    bool has_expected_open_boundary_travel = false;
+};
+
+using WallInterval = std::pair<double, double>;
+
+void append_clipped_interval(std::vector<WallInterval> &intervals, double a, double b,
+                             double minimum, double maximum)
+{
+    const double low = std::max(minimum, std::min(a, b));
+    const double high = std::min(maximum, std::max(a, b));
+    if (high > low)
+        intervals.emplace_back(low, high);
+}
+
+double unique_interval_length(std::vector<WallInterval> intervals, double tolerance)
+{
+    if (intervals.empty())
+        return 0.;
+    std::sort(intervals.begin(), intervals.end());
+    double length = 0.;
+    double low = intervals.front().first;
+    double high = intervals.front().second;
+    for (std::size_t i = 1; i < intervals.size(); ++i) {
+        if (intervals[i].first <= high + tolerance) {
+            high = std::max(high, intervals[i].second);
+        } else {
+            length += high - low;
+            low = intervals[i].first;
+            high = intervals[i].second;
+        }
+    }
+    return length + high - low;
+}
+
+double unique_rectangle_edge_coverage(const std::vector<TowerXYMove> &moves,
+                                      double x_min, double x_max, double y_min, double y_max,
+                                      double tolerance)
+{
+    // bottom, top, left, right; merging intervals prevents retraced or repeated paths
+    // from counting as extra wall coverage.
+    std::array<std::vector<WallInterval>, 4> edges;
+    for (const TowerXYMove &move : moves) {
+        if (!move.extruding)
+            continue;
+        if (std::abs(move.y1 - move.y0) <= tolerance) {
+            const double y = (move.y0 + move.y1) * 0.5;
+            if (std::abs(y - y_min) <= tolerance)
+                append_clipped_interval(edges[0], move.x0, move.x1, x_min, x_max);
+            if (std::abs(y - y_max) <= tolerance)
+                append_clipped_interval(edges[1], move.x0, move.x1, x_min, x_max);
+        }
+        if (std::abs(move.x1 - move.x0) <= tolerance) {
+            const double x = (move.x0 + move.x1) * 0.5;
+            if (std::abs(x - x_min) <= tolerance)
+                append_clipped_interval(edges[2], move.y0, move.y1, y_min, y_max);
+            if (std::abs(x - x_max) <= tolerance)
+                append_clipped_interval(edges[3], move.y0, move.y1, y_min, y_max);
+        }
+    }
+    double covered = 0.;
+    for (const auto &edge : edges)
+        covered += unique_interval_length(edge, tolerance);
+    return covered;
+}
+
+std::optional<double> rectangle_perimeter_position(double x, double y,
+                                                   double x_min, double x_max,
+                                                   double y_min, double y_max,
+                                                   double tolerance)
+{
+    const double width = x_max - x_min;
+    const double height = y_max - y_min;
+    const double perimeter = 2. * (width + height);
+    double position = 0.;
+    if (std::abs(y - y_min) <= tolerance && x >= x_min - tolerance && x <= x_max + tolerance)
+        position = x - x_min;
+    else if (std::abs(x - x_max) <= tolerance && y >= y_min - tolerance && y <= y_max + tolerance)
+        position = width + y - y_min;
+    else if (std::abs(y - y_max) <= tolerance && x >= x_min - tolerance && x <= x_max + tolerance)
+        position = width + height + x_max - x;
+    else if (std::abs(x - x_min) <= tolerance && y >= y_min - tolerance && y <= y_max + tolerance)
+        position = 2. * width + height + y_max - y;
+    else
+        return std::nullopt;
+
+    position = std::fmod(position, perimeter);
+    if (position < 0.)
+        position += perimeter;
+    return position;
+}
+
+GapWallComparison compare_gap_wall_regions(const ExportMotion &closed, const ExportMotion &open,
+                                           double wall_x, double wall_width, double expected_gap)
+{
+    constexpr double tolerance = 0.025;
+    GapWallComparison comparison;
+    const double wall_right = wall_x + wall_width;
+    const std::size_t paired_region_count = std::min(closed.tower_regions.size(), open.tower_regions.size());
+
+    for (std::size_t region_index = 0; region_index < paired_region_count; ++region_index) {
+        std::vector<double> full_span_y;
+        for (const TowerXYMove &move : closed.tower_regions[region_index]) {
+            const double move_left = std::min(move.x0, move.x1);
+            const double move_right = std::max(move.x0, move.x1);
+            if (move.extruding && std::abs(move.y1 - move.y0) <= tolerance &&
+                std::abs((move_right - move_left) - wall_width) <= tolerance &&
+                std::abs(move_left - wall_x) <= tolerance && std::abs(move_right - wall_right) <= tolerance)
+                full_span_y.push_back((move.y0 + move.y1) * 0.5);
+        }
+        std::sort(full_span_y.begin(), full_span_y.end());
+        std::vector<double> unique_span_y;
+        for (double y : full_span_y)
+            if (unique_span_y.empty() || std::abs(y - unique_span_y.back()) > tolerance)
+                unique_span_y.push_back(y);
+        if (unique_span_y.size() != 2 || unique_span_y[1] <= unique_span_y[0] + tolerance)
+            continue;
+
+        GapWallCoverage row;
+        row.region_index = region_index;
+        row.y_min = unique_span_y.front();
+        row.y_max = unique_span_y.back();
+        row.perimeter = 2. * (wall_width + row.y_max - row.y_min);
+        row.closed_edge_coverage = unique_rectangle_edge_coverage(
+            closed.tower_regions[region_index], wall_x, wall_right, row.y_min, row.y_max, tolerance);
+        row.open_edge_coverage = unique_rectangle_edge_coverage(
+            open.tower_regions[region_index], wall_x, wall_right, row.y_min, row.y_max, tolerance);
+
+        for (const TowerXYMove &move : open.tower_regions[region_index]) {
+            if (move.extruding || std::hypot(move.x1 - move.x0, move.y1 - move.y0) <= tolerance)
+                continue;
+            const auto start = rectangle_perimeter_position(move.x0, move.y0, wall_x, wall_right,
+                                                            row.y_min, row.y_max, tolerance);
+            const auto end = rectangle_perimeter_position(move.x1, move.y1, wall_x, wall_right,
+                                                          row.y_min, row.y_max, tolerance);
+            if (!start || !end)
+                continue;
+            const double direct_arc = std::abs(*start - *end);
+            const double shortest_arc = std::min(direct_arc, row.perimeter - direct_arc);
+            row.closest_open_boundary_travel_arc = std::min(row.closest_open_boundary_travel_arc, shortest_arc);
+            if (std::abs(shortest_arc - expected_gap) <= tolerance) {
+                row.has_expected_open_boundary_travel = true;
+                comparison.has_expected_open_boundary_travel = true;
+            }
+        }
+        comparison.complete_closed_wall_regions.push_back(row);
+    }
+    return comparison;
+}
+
+TriangleMesh support_capital_fixture()
+{
+    TriangleMesh model = make_cube(40., 40., 1.);
+    TriangleMesh stem = make_cube(8., 8., 3.);
+    stem.translate(Vec3f(16.f, 16.f, 0.f));
+    TriangleMesh cap = make_cube(40., 40., 1.);
+    cap.translate(Vec3f(0.f, 0.f, 3.f));
+    model.merge(stem);
+    model.merge(cap);
+    return model;
+}
+
+} // namespace
+
+TEST_CASE("Prime tower master switch gates public two-tool tower output",
+          "[WipeTower][PrimeTowerBooleanPipeline][EnablePrimeTower][SettingsVariance]")
+{
+    const std::vector<TriangleMesh> meshes{make_cube(10., 10., 2.), [] {
+        TriangleMesh mesh = make_cube(10., 10., 2.);
+        mesh.translate(Vec3f(30.f, 0.f, 0.f));
+        return mesh;
+    }()};
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {{"extruder", 1}}, {{"extruder", 2}}
+    };
+    DynamicPrintConfig off_config = two_head_tower_config("type1");
+    off_config.set_deserialize_strict({{"enable_prime_tower", false}});
+    const DynamicPrintConfig on_config = two_head_tower_config("type1");
+
+    const PublicPrintRun off = run_public_print(off_config, meshes, overrides, false);
+    const PublicPrintRun on = run_public_print(on_config, meshes, overrides, false);
+    const ExportMotion off_motion = inspect_export(off.gcode, off_config);
+    const ExportMotion on_motion = inspect_export(on.gcode, on_config);
+
+    CHECK(wipe_tower_regions(off.gcode).empty());
+    REQUIRE_FALSE(wipe_tower_regions(on.gcode).empty());
+    CHECK(off_motion.model_extrusion_moves > 0);
+    CHECK(on_motion.model_extrusion_moves > 0);
+    CHECK(on_motion.tower_extrusion_moves > 0);
+    CHECK(on_motion.tool_commands > 0);
+}
+
+TEST_CASE("Type1 framework preserves a large first purge depth in public later layers",
+          "[WipeTower][PrimeTowerBooleanPipeline][PrimeTowerFramework][SettingsVariance]")
+{
+    auto framework_run = [](bool framework) {
+        DynamicPrintConfig config = two_head_tower_config("type1");
+        config.set_deserialize_strict({
+            {"prime_tower_enable_framework", framework},
+            // Exclude the brim chamfer: it deliberately shrinks on later layers.
+            {"prime_tower_brim_width", 0},
+            {"wipe_tower_wall_type", "rectangle"},
+            {"prime_tower_skip_points", false},
+            {"prime_tower_flat_ironing", false},
+            {"prime_tower_infill_gap", 150},
+            {"wipe_tower_extra_flow", 100},
+            {"wipe_tower_extra_spacing", 100},
+            {"filament_adhesiveness_category", "0,0"},
+            {"toolchange_ordering", "cyclic"},
+            {"toolchange_cyclic_order", "1,2"},
+            {"toolchange_cyclic_first_layer", true},
+            // The first 0 -> 1 change is large; later 1 -> 0 changes need much less purge.
+            {"flush_volumes_matrix", "0,160,20,0"},
+            {"filament_prime_volume", "20,160"},
+        });
+        TriangleMesh tall = make_cube(20., 20., 0.6);
+        TriangleMesh first_layer_only = make_cube(10., 10., 0.2);
+        first_layer_only.translate(Vec3f(30.f, 0.f, 0.f));
+        return run_public_print(config, {std::move(tall), std::move(first_layer_only)},
+                                {{{"extruder", 1}}, {{"extruder", 2}}}, false);
+    };
+    const PublicPrintRun disabled = framework_run(false);
+    const PublicPrintRun enabled = framework_run(true);
+    auto first_large_change = [](const PublicPrintRun &run) {
+        return std::find_if(run.tower_toolchange_spans.begin(), run.tower_toolchange_spans.end(),
+                            [](const TowerToolchangeSpan &span) {
+                                return span.initial_tool == 0 && span.new_tool == 1;
+                            });
+    };
+    const auto disabled_first = first_large_change(disabled);
+    const auto enabled_first = first_large_change(enabled);
+    REQUIRE(disabled_first != disabled.tower_toolchange_spans.end());
+    REQUIRE(enabled_first != enabled.tower_toolchange_spans.end());
+    auto later_small_change = [](const PublicPrintRun &run, const TowerToolchangeSpan &first) {
+        return std::find_if(run.tower_toolchange_spans.begin(), run.tower_toolchange_spans.end(),
+                            [&first](const TowerToolchangeSpan &span) {
+                                return span.initial_tool == 1 && span.new_tool == 0 && span.print_z > first.print_z;
+                            });
+    };
+    const auto disabled_later = later_small_change(disabled, *disabled_first);
+    const auto enabled_later = later_small_change(enabled, *enabled_first);
+    REQUIRE(disabled_later != disabled.tower_toolchange_spans.end());
+    REQUIRE(enabled_later != enabled.tower_toolchange_spans.end());
+    CAPTURE(enabled_first->y_span, disabled_first->y_span, enabled_later->y_span, disabled_later->y_span);
+    CHECK_THAT(enabled_later->print_z, Catch::Matchers::WithinAbs(disabled_later->print_z, 1e-5f));
+    CHECK(enabled_later->y_span > disabled_later->y_span + 0.5f);
+    CHECK_THAT(enabled_later->y_span, Catch::Matchers::WithinAbs(enabled_first->y_span, 0.5f));
+}
+
+TEST_CASE("Type1 tower gap and ironing flags change emitted public tower motion",
+          "[WipeTower][PrimeTowerBooleanPipeline][PrimeTowerFlatIroning][WipeTowerGapWall][SettingsVariance]")
+{
+    DynamicPrintConfig closed_config = role_tower_config();
+    closed_config.set_deserialize_strict({{"prime_tower_skip_points", false}, {"prime_tower_flat_ironing", false}});
+    DynamicPrintConfig open_config = role_tower_config();
+    open_config.set_deserialize_strict({{"prime_tower_skip_points", true}, {"prime_tower_flat_ironing", false}});
+    DynamicPrintConfig ironing_config = role_tower_config();
+    ironing_config.set_deserialize_strict({
+        {"prime_tower_skip_points", true},
+        {"prime_tower_flat_ironing", true},
+        {"filament_tower_ironing_area", "16,16"},
+    });
+    const auto export_role_config = [](const DynamicPrintConfig &config) {
+        return run_public_print(config, {make_cube(10., 10., 2.)});
+    };
+    const PublicPrintRun closed = export_role_config(closed_config);
+    const PublicPrintRun open = export_role_config(open_config);
+    const PublicPrintRun ironing = export_role_config(ironing_config);
+    const ExportMotion closed_motion = inspect_export(closed.gcode, closed_config);
+    const ExportMotion open_motion = inspect_export(open.gcode, open_config);
+    const ExportMotion ironing_motion = inspect_export(ironing.gcode, ironing_config);
+
+    REQUIRE(closed_motion.tower_extrusion_moves > 0);
+    REQUIRE(open_motion.tower_extrusion_moves > 0);
+    // generate_support_wall_new removes 2 * (2.5 * perimeter width) at each skip point.
+    // With this fixture's 0.4 mm nozzle, perimeter width is 1.25 * 0.4 = 0.5 mm.
+    constexpr double expected_missing_wall_segment = 5. * 1.25 * 0.4;
+    constexpr double wall_tolerance = 0.025;
+    REQUIRE_THAT(closed_config.opt_float("wipe_tower_rotation_angle"), Catch::Matchers::WithinAbs(0., 1e-6));
+    const GapWallComparison gap_wall = compare_gap_wall_regions(
+        closed_motion, open_motion, closed_config.opt_float("wipe_tower_x", 0),
+        closed_config.opt_float("prime_tower_width"), expected_missing_wall_segment);
+    REQUIRE(closed_motion.tower_regions.size() == open_motion.tower_regions.size());
+    // The 2 mm fixture emits one full wall on each 0.2 mm layer.
+    const auto expected_wall_layers = static_cast<std::size_t>(std::lround(2. / closed_config.opt_float("layer_height")));
+    REQUIRE(gap_wall.complete_closed_wall_regions.size() == expected_wall_layers);
+    for (const GapWallCoverage &region : gap_wall.complete_closed_wall_regions) {
+        CAPTURE(region.region_index, region.y_min, region.y_max, region.perimeter,
+                region.closed_edge_coverage, region.open_edge_coverage,
+                region.closest_open_boundary_travel_arc, expected_missing_wall_segment);
+        CHECK_THAT(region.closed_edge_coverage, Catch::Matchers::WithinAbs(region.perimeter, wall_tolerance));
+        CHECK_THAT(region.open_edge_coverage,
+                   Catch::Matchers::WithinAbs(region.perimeter - expected_missing_wall_segment, wall_tolerance));
+    }
+    CHECK(gap_wall.has_expected_open_boundary_travel);
+    CHECK(open_motion.tool_commands == closed_motion.tool_commands);
+    CHECK(ironing_motion.tower_travel_moves > open_motion.tower_travel_moves);
+    CHECK(ironing_motion.tower_extrusion_moves == open_motion.tower_extrusion_moves);
+}
+
+TEST_CASE("Flushing into support routes emitted paths and reduces tower filament",
+          "[WipeTower][PrimeTowerBooleanPipeline][FlushIntoSupport][SettingsVariance]")
+{
+    auto support_run = [](bool semm, bool flush_into_support) {
+        // The multihead rows are an intentional inactive control: Type2 does
+        // not call mark_wiping_extrusions while SEMM is disabled. The active
+        // rows reuse the public multifilament_config fixture used by other
+        // SEMM pipeline tests (two logical filaments, one physical nozzle).
+        DynamicPrintConfig config = semm
+            ? multifilament_config(2, {
+                {"single_extruder_multi_material", true},
+                {"single_extruder_multi_material_priming", false},
+                {"purge_in_prime_tower", true},
+                {"enable_prime_tower", true},
+                {"wipe_tower_type", "type2"},
+                {"prime_tower_width", 35},
+                {"wipe_tower_x", 50},
+                {"wipe_tower_y", 50},
+            })
+            : two_head_tower_config("type2");
+        config.set_deserialize_strict({
+            {"single_extruder_multi_material", semm},
+            {"single_extruder_multi_material_priming", false},
+            {"purge_in_prime_tower", true},
+            {"enable_prime_tower", true},
+            {"wipe_tower_type", "type2"},
+            {"skirt_loops", 0},
+            {"brim_type", "no_brim"},
+            {"raft_layers", 0},
+            {"layer_height", 0.2},
+            {"initial_layer_print_height", 0.2},
+            {"enable_arc_fitting", false},
+            {"enable_support", true},
+            {"support_on_build_plate_only", false},
+            {"support_filament", 0},
+            {"support_interface_filament", 0},
+            {"flush_into_support", flush_into_support},
+            {"flush_into_objects", false},
+            {"flush_into_infill", false},
+            {"filament_soluble", "0,0"},
+            {"filament_is_support", "0,0"},
+            {"flush_volumes_matrix", "0,160,20,0"},
+            {"flush_multiplier", 1.0},
+            {"filament_minimal_purge_on_wipe_tower", "20,20"},
+            {"change_filament_gcode", "T[next_extruder]\n"},
+            {"toolchange_ordering", "cyclic"},
+            {"toolchange_cyclic_order", "1,2"},
+            {"toolchange_cyclic_first_layer", true},
+            {"prime_volume", 80},
+            {"use_relative_e_distances", true},
+            {"layer_change_gcode", "G92 E0\n"},
+            {"gcode_comments", true},
+            {"gcode_flavor", "marlin"},
+        });
+        TriangleMesh support = support_capital_fixture();
+        TriangleMesh second = make_cube(10., 10., 4.);
+        second.translate(Vec3f(60.f, 0.f, 0.f));
+        const PublicPrintRun run = run_public_print(
+            config, {std::move(support), std::move(second)},
+            {{{"extruder", 1}}, {{"extruder", 2}}}, false);
+        return inspect_export(run.gcode, config);
+    };
+
+    const ExportMotion multihead_off = support_run(false, false);
+    const ExportMotion multihead_on = support_run(false, true);
+    REQUIRE(multihead_off.support_extrusion_moves > 0);
+    REQUIRE(multihead_on.support_extrusion_moves > 0);
+    REQUIRE(multihead_off.tower_extrusion_moves > 0);
+    REQUIRE(multihead_off.tower_e_length > 0.);
+    CHECK(multihead_off.support_tools == std::set<int>{0});
+    CHECK(multihead_on.support_tools == multihead_off.support_tools);
+    CHECK_THAT(multihead_on.tower_e_length, Catch::Matchers::WithinAbs(multihead_off.tower_e_length, 1e-5));
+
+    const ExportMotion semm_off = support_run(true, false);
+    const ExportMotion semm_on = support_run(true, true);
+    REQUIRE(semm_off.support_extrusion_moves > 0);
+    REQUIRE(semm_on.support_extrusion_moves > 0);
+    REQUIRE(semm_off.tower_extrusion_moves > 0);
+    REQUIRE(semm_off.tower_e_length > 0.);
+    CHECK(semm_off.support_tools == std::set<int>{0});
+    CHECK(semm_on.support_tools.count(1) > semm_off.support_tools.count(1));
+    CHECK(semm_off.tower_e_length > semm_on.tower_e_length + 0.25);
+}
+
+TEST_CASE("Type2 tool-change-on-tower forces travel before public multihead tool changes",
+          "[WipeTower][PrimeTowerBooleanPipeline][SettingsVariance]")
+{
+    auto run = [](bool force_travel) {
+        DynamicPrintConfig config = two_head_tower_config("type2");
+        config.set_deserialize_strict({{"tool_change_on_wipe_tower", force_travel}});
+        TriangleMesh first = make_cube(20., 20., 2.);
+        TriangleMesh second = make_cube(20., 20., 2.);
+        second.translate(Vec3f(50.f, 0.f, 0.f));
+        const PublicPrintRun result = run_public_print(
+            config, {std::move(first), std::move(second)},
+            {{{"extruder", 1}}, {{"extruder", 2}}}, false);
+        return inspect_export(result.gcode, config);
+    };
+    const ExportMotion off = run(false);
+    const ExportMotion on = run(true);
+    REQUIRE(off.tool_changes > 0);
+    REQUIRE(on.tool_changes == off.tool_changes);
+    CHECK(on.tool_changes_over_tower > off.tool_changes_over_tower);
+    CHECK(on.tool_changes_over_tower > 0);
+}
+
+} // namespace prime_tower_boolean_family_contracts
