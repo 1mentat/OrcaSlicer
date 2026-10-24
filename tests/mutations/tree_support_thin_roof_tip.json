@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Remove the zero-gap trigger for tree-tip roof recovery; the subminimum strip should lose its top interface while the broad-cap roof control remains covered by the regular roof path.",
+  "mutants": [
+    {
+      "id": "tree-support-zero-gap-subminimum-roof-tip-recovery-disabled",
+      "path": "src/libslic3r/Support/TreeSupport3D.cpp",
+      "old": "roof_enabled && (interface_placer.support_parameters.zero_gap_interface_top || sqr<double>(config.min_radius) * M_PI > mesh_group_settings.minimum_roof_area)",
+      "new": "roof_enabled && (sqr<double>(config.min_radius) * M_PI > mesh_group_settings.minimum_roof_area)",
+      "description": "Remove only the zero-gap branch that forces tree-tip roof recovery when the roof and tip areas are below the minimum roof area.",
+      "test_filter": "TreeSupportRoofContact",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

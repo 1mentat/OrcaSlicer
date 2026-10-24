@@ -1081,6 +1081,10 @@ analytic cap underside, with a 0.2 mm positive-gap control. A subminimum-area
 overhang checks that zero-gap tree tips preserve contact-interface extrusion,
 while the positive-gap control emits regular support one layer below. The
 broad-cap mutation probe is in `tests/mutations/tree_support_roof_contact.json`.
+`tests/mutations/tree_support_thin_roof_tip.json` removes only the zero-gap
+trigger for recovering a subminimum roof through tree tips. With the
+`TreeSupportRoofContact` CTest label, the thin-roof case fails its physical
+interface assertion while the broad-cap control stays green.
 
 `[TreeSupportRaftContact]` checks raft expansion on both a plain cube and a cap
 overhang. The overhang case measures raft-contact interface extrusion in a known
