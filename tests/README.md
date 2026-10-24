@@ -349,6 +349,11 @@ of 0.75 against a ratio-1 control. Only the selected role's material changes;
 sliced geometry, role-tagged XY motion, and other roles' material stay stable.
 These cases explicitly enable `set_other_flow_ratios` and pin the first-layer,
 print, and filament multipliers to 1.
+The shared role fixture pins the seam to `back`, avoiding visibility sampling
+that these oracles do not exercise. In a matched single-run comparison, all 23
+cases passed in 17.49 seconds versus 239.69 seconds with the aligned seam,
+using the same seed, compiler flags, assertions, and four-CPU limit. Dedicated
+seam settings tests retain their own variance.
 `[ObjectSpeedNullable]` checks four object speed overrides through a
 nil, explicit, then nil transition on the same print. Fresh parent and explicit
 controls verify geometry, material, and feeds for standard and high-flow nozzle

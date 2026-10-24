@@ -125,6 +125,8 @@ DynamicPrintConfig matrix_config()
         { "skirt_loops",               0 },
         { "brim_type",                 "no_brim" },
         { "raft_layers",               0 },
+        // Role speed, width, and flow oracles do not depend on seam visibility.
+        { "seam_position",             "back" },
         // Keep requested feature speeds from being hidden by cooling or the
         // default filament volumetric cap. These are registered FFF options,
         // so the fixture records the actual companion gates it depends on.
