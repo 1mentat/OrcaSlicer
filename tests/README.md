@@ -229,6 +229,11 @@ It also registers `fff_print_tree_support_tests` and
 `fff_print_multifilament_tests` with `FocusedTreeSupport::` and
 `FocusedMultiFilament::` prefixes. These excluded targets compile only their
 respective test source and shared setup for support and filament iteration.
+`[RoleFilamentEndpoints]` checks default and highest configured filament IDs
+against the emitted tools, including each role's inheritance peers. The
+`role_filament_routing.json` mutation redirects top-surface collections to the
+bottom-surface filament. Its filter also selects the two equal-ID feature
+controls, which preserve their tool assignments under that substitution.
 Use `--filter 'Case A,Case B'` instead of `--tag` to select an explicit Catch
 expression. Keep the entire expression in one argument. The same source,
 expected-count, and JUnit checks apply.

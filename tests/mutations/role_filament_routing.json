@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Top-solid-infill and ironing collections use their configured top-surface filament. The endpoint case distinguishes their tool route while equal-ID controls remain unchanged.",
+  "mutants": [
+    {
+      "id": "top-surface-routed-to-bottom-filament",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "extruder = region.config().top_surface_filament_id;",
+      "new": "extruder = region.config().bottom_surface_filament_id;",
+      "description": "Select the bottom-surface filament for top-solid-infill and ironing collections. The independent top-surface assignment must still select its own physical tool.",
+      "test_filter": "^(Role filament assignments honor default and available-ID endpoints|Each feature prints with its assigned filament( \\(three filaments\\))?)$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}
