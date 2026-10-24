@@ -4892,6 +4892,69 @@
         "pipeline_oracle"
       ],
       "reason": "Paired false/true public Print exports move base-temperature restoration from after tower wiping to before it while preserving total restore count and model deposition."
+    },
+    "print_host": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleLoading][PresetDeep][External]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public external-config loading rejects project host values while preserving independently configured defaults. Physical-printer save/load and membership deletion also retain distinct configured host names. These are preset workflow oracles; network delivery is not claimed."
+    },
+    "printhost_apikey": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleLoading][PresetDeep][External]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public external-config loading ignores a project API key with empty defaults and preserves a distinct nonempty default key when the project supplies another value. The output config and imported-key list are checked; authentication or network delivery is not claimed."
+    },
+    "compatible_printers": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundle][PresetCalibration]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Calibration selection evaluates explicit matching and nonmatching printer lists, then switches between two printer profiles and checks the exact selected filament sets. An empty list with a compatibility condition supplies a separate control; no complete expression domain is claimed."
+    },
+    "compatible_printers_condition": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundle][PresetCalibration]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "An empty direct-printer list and a named printer_model condition admit the filament for one selected printer and reject it for another. The public calibration set is independently checked alongside direct-list controls and empty-selection reset. Arbitrary compatibility expressions are not claimed."
+    },
+    "inherits": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[Preset][PresetParent]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public preset parent resolution returns the named live parent for an inherited child and returns null for a missing parent. External-config controls also refresh inherited values while retaining explicitly different project values. These are preset resolution oracles rather than sliced-output claims."
+    },
+    "preset_names": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleLoading][PresetDeep][PhysicalPrinter]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Physical-printer membership controls cover multiple names, duplicate insertion, missing-name deletion, and empty reset. Save/load and collection deletion check the resulting stored lists, preserve unrelated printers, and reload the surviving membership from disk."
+    },
+    "preset_name": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleLoading][PresetDeep][PhysicalPrinter]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Physical-printer controls emit the legacy semicolon-separated name from two memberships and reduce it to the single surviving name after deleting a referenced preset. Collection reload preserves that membership while unrelated printers retain their configured host and name."
     }
   }
 }
