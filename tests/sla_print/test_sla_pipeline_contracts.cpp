@@ -158,6 +158,100 @@ SlaRunSummary process_fixture(double layer_height)
     return {slice_index.size(), stats.objects_used_material};
 }
 
+struct SlaStatisticsRun
+{
+    std::vector<double> layer_times;
+    std::vector<double> model_slice_areas;
+    double object_material = 0.0;
+    double support_material = 0.0;
+    double estimated_time = 0.0;
+    std::size_t fast_layers = 0;
+    std::size_t slow_layers = 0;
+};
+
+DynamicPrintConfig sla_statistics_config(double initial_exposure,
+                                         double regular_exposure,
+                                         double area_fill,
+                                         double fast_tilt,
+                                         double slow_tilt)
+{
+    DynamicPrintConfig config = sla_config(0.5);
+    config.set_key_value("faded_layers", new ConfigOptionInt(3));
+    config.set_key_value("initial_exposure_time", new ConfigOptionFloat(initial_exposure));
+    config.set_key_value("exposure_time", new ConfigOptionFloat(regular_exposure));
+    config.set_key_value("area_fill", new ConfigOptionFloat(area_fill));
+    config.set_key_value("fast_tilt_time", new ConfigOptionFloat(fast_tilt));
+    config.set_key_value("slow_tilt_time", new ConfigOptionFloat(slow_tilt));
+    return config;
+}
+
+SlaStatisticsRun run_sla_statistics(DynamicPrintConfig config)
+{
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 3.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    const auto &slice_index = object->get_slice_index();
+    REQUIRE(slice_index.size() == fixture.print.print_layers().size());
+    REQUIRE(slice_index.size() == 6);
+
+    SlaStatisticsRun result;
+    result.model_slice_areas.reserve(slice_index.size());
+    const double mm2_scale = scaled<double>(1.0) * scaled<double>(1.0);
+    for (const SLAPrintObject::SliceRecord &record : slice_index) {
+        REQUIRE(record.is_valid());
+        CHECK(record.get_slice(soSupport).empty());
+        const ExPolygons &model_slice = record.get_slice(soModel);
+        REQUIRE(model_slice.size() == 1);
+        const double model_slice_area = model_slice.front().area() / mm2_scale;
+        CHECK_THAT(model_slice_area, Catch::Matchers::WithinAbs(100.0, 1e-4));
+        result.model_slice_areas.push_back(model_slice_area);
+    }
+
+    const SLAPrintStatistics &stats = fixture.print.print_statistics();
+    result.layer_times = stats.layers_times;
+    result.object_material = stats.objects_used_material;
+    result.support_material = stats.support_used_material;
+    result.estimated_time = stats.estimated_print_time;
+    result.fast_layers = stats.fast_layers_count;
+    result.slow_layers = stats.slow_layers_count;
+    REQUIRE(result.layer_times.size() == slice_index.size());
+    CHECK_THAT(result.object_material, Catch::Matchers::WithinAbs(300.0, 1e-3));
+    CHECK_THAT(result.support_material, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    double layer_time_sum = 0.0;
+    for (const double layer_time : result.layer_times) {
+        CHECK(std::isfinite(layer_time));
+        CHECK(layer_time >= 0.0);
+        layer_time_sum += layer_time;
+    }
+    CHECK_THAT(result.estimated_time, Catch::Matchers::WithinAbs(layer_time_sum, 1e-8));
+    return result;
+}
+
+void check_same_sla_geometry(const SlaStatisticsRun &expected, const SlaStatisticsRun &actual)
+{
+    CHECK(actual.model_slice_areas.size() == expected.model_slice_areas.size());
+    if (actual.model_slice_areas.size() == expected.model_slice_areas.size())
+        for (std::size_t i = 0; i < actual.model_slice_areas.size(); ++i)
+            CHECK_THAT(actual.model_slice_areas[i], Catch::Matchers::WithinAbs(expected.model_slice_areas[i], 1e-7));
+    CHECK_THAT(actual.object_material, Catch::Matchers::WithinRel(expected.object_material, 1e-8));
+    CHECK_THAT(actual.support_material, Catch::Matchers::WithinAbs(expected.support_material, 1e-9));
+}
+
+void check_sla_layer_times(const SlaStatisticsRun &run, std::vector<double> expected)
+{
+    REQUIRE(run.layer_times.size() == expected.size());
+    std::sort(expected.begin(), expected.end());
+    std::vector<double> actual = run.layer_times;
+    std::sort(actual.begin(), actual.end());
+    for (std::size_t i = 0; i < expected.size(); ++i)
+        CHECK_THAT(actual[i], Catch::Matchers::WithinAbs(expected[i], 1e-8));
+}
+
 struct PillarConnectionRun
 {
     double support_volume = 0.0;
@@ -281,6 +375,131 @@ TEST_CASE("SLA exposure validation rejects values outside printer bounds", "[SLA
     invalid_config.set_key_value("exposure_time", new ConfigOptionFloat(6.0));
     SlaCubeFixture invalid(std::move(invalid_config));
     CHECK_FALSE(invalid.print.validate().string.empty());
+}
+
+TEST_CASE("SLA exposure limits accept inclusive endpoints and reject either side",
+          "[SLAPrint][SLAPipeline][SLAExposureBounds]")
+{
+    DynamicPrintConfig zero_config = sla_config(1.0);
+    zero_config.set_key_value("min_exposure_time", new ConfigOptionFloat(0.0));
+    zero_config.set_key_value("exposure_time", new ConfigOptionFloat(0.0));
+    zero_config.set_key_value("max_exposure_time", new ConfigOptionFloat(0.0));
+    zero_config.set_key_value("min_initial_exposure_time", new ConfigOptionFloat(0.0));
+    zero_config.set_key_value("initial_exposure_time", new ConfigOptionFloat(0.0));
+    zero_config.set_key_value("max_initial_exposure_time", new ConfigOptionFloat(0.0));
+    SlaCubeFixture zero_endpoint(std::move(zero_config));
+    CHECK(zero_endpoint.print.validate().string.empty());
+
+    DynamicPrintConfig equality_config = sla_config(1.0);
+    equality_config.set_key_value("min_exposure_time", new ConfigOptionFloat(2.0));
+    equality_config.set_key_value("exposure_time", new ConfigOptionFloat(2.0));
+    equality_config.set_key_value("max_exposure_time", new ConfigOptionFloat(2.0));
+    equality_config.set_key_value("min_initial_exposure_time", new ConfigOptionFloat(3.0));
+    equality_config.set_key_value("initial_exposure_time", new ConfigOptionFloat(3.0));
+    equality_config.set_key_value("max_initial_exposure_time", new ConfigOptionFloat(3.0));
+    SlaCubeFixture equality_endpoint(std::move(equality_config));
+    CHECK(equality_endpoint.print.validate().string.empty());
+
+    const auto rejects_bound = [](const char *key, double value) {
+        DynamicPrintConfig config = sla_config(1.0);
+        config.set_key_value(key, new ConfigOptionFloat(value));
+        SlaCubeFixture fixture(std::move(config));
+        return !fixture.print.validate().string.empty();
+    };
+    CHECK(rejects_bound("min_exposure_time", 2.1));
+    CHECK(rejects_bound("max_exposure_time", 1.9));
+    CHECK(rejects_bound("min_initial_exposure_time", 3.1));
+    CHECK(rejects_bound("max_initial_exposure_time", 2.9));
+}
+
+TEST_CASE("SLA exposure durations determine fade-weighted layer statistics",
+          "[SLAPrint][SLAPipeline][SLAExposureStatistics]")
+{
+    DynamicPrintConfig nominal_config = sla_statistics_config(4.0, 2.0, 100.0, 0.0, 0.0);
+    const SlaStatisticsRun nominal = run_sla_statistics(nominal_config);
+    CHECK(nominal.fast_layers == 6);
+    CHECK(nominal.slow_layers == 0);
+    // For faded_layers=3, the six exposure weights are 3 initial layers and
+    // fade fractions 3/4, 1/2, and 1/4: 4.5*initial + 1.5*regular.
+    CHECK_THAT(nominal.estimated_time, Catch::Matchers::WithinAbs(21.0, 1e-8));
+    check_sla_layer_times(nominal, { 2.5, 3.0, 3.5, 4.0, 4.0, 4.0 });
+
+    DynamicPrintConfig regular_config = nominal_config;
+    regular_config.set_key_value("exposure_time", new ConfigOptionFloat(2.5));
+    const SlaStatisticsRun regular = run_sla_statistics(std::move(regular_config));
+    check_same_sla_geometry(nominal, regular);
+    CHECK(regular.fast_layers == 6);
+    CHECK(regular.slow_layers == 0);
+    CHECK_THAT(regular.estimated_time - nominal.estimated_time,
+               Catch::Matchers::WithinAbs(0.75, 1e-8));
+    check_sla_layer_times(regular, { 2.875, 3.25, 3.625, 4.0, 4.0, 4.0 });
+
+    DynamicPrintConfig initial_config = nominal_config;
+    initial_config.set_key_value("initial_exposure_time", new ConfigOptionFloat(5.0));
+    const SlaStatisticsRun initial = run_sla_statistics(std::move(initial_config));
+    check_same_sla_geometry(nominal, initial);
+    CHECK(initial.fast_layers == 6);
+    CHECK(initial.slow_layers == 0);
+    CHECK_THAT(initial.estimated_time - nominal.estimated_time,
+               Catch::Matchers::WithinAbs(4.5, 1e-8));
+    check_sla_layer_times(initial, { 2.75, 3.5, 4.25, 5.0, 5.0, 5.0 });
+
+    const SlaStatisticsRun zero = run_sla_statistics(sla_statistics_config(0.0, 0.0, 100.0, 0.0, 0.0));
+    check_same_sla_geometry(nominal, zero);
+    CHECK(zero.fast_layers == 6);
+    CHECK(zero.slow_layers == 0);
+    CHECK_THAT(zero.estimated_time, Catch::Matchers::WithinAbs(0.0, 1e-8));
+    check_sla_layer_times(zero, { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 });
+}
+
+TEST_CASE("SLA fast and slow tilt durations affect only their classified layers",
+          "[SLAPrint][SLAPipeline][SLATiltStatistics]")
+{
+    DynamicPrintConfig fast_config = sla_statistics_config(2.0, 2.0, 100.0, 0.0, 0.0);
+    const SlaStatisticsRun fast_zero = run_sla_statistics(fast_config);
+    fast_config.set_key_value("fast_tilt_time", new ConfigOptionFloat(2.0));
+    const SlaStatisticsRun fast_two = run_sla_statistics(std::move(fast_config));
+    check_same_sla_geometry(fast_zero, fast_two);
+    CHECK(fast_zero.fast_layers == 6);
+    CHECK(fast_zero.slow_layers == 0);
+    CHECK_THAT(fast_two.estimated_time - fast_zero.estimated_time,
+               Catch::Matchers::WithinAbs(12.0, 1e-8));
+    check_sla_layer_times(fast_zero, { 2.0, 2.0, 2.0, 2.0, 2.0, 2.0 });
+    check_sla_layer_times(fast_two, { 4.0, 4.0, 4.0, 4.0, 4.0, 4.0 });
+
+    DynamicPrintConfig slow_config = sla_statistics_config(2.0, 2.0, 0.0, 0.0, 0.0);
+    const SlaStatisticsRun slow_zero = run_sla_statistics(slow_config);
+    slow_config.set_key_value("slow_tilt_time", new ConfigOptionFloat(3.0));
+    const SlaStatisticsRun slow_three = run_sla_statistics(std::move(slow_config));
+    check_same_sla_geometry(slow_zero, slow_three);
+    CHECK(slow_zero.fast_layers == 0);
+    CHECK(slow_zero.slow_layers == 6);
+    CHECK_THAT(slow_three.estimated_time - slow_zero.estimated_time,
+               Catch::Matchers::WithinAbs(18.0, 1e-8));
+    check_sla_layer_times(slow_zero, { 2.0, 2.0, 2.0, 2.0, 2.0, 2.0 });
+    check_sla_layer_times(slow_three, { 5.0, 5.0, 5.0, 5.0, 5.0, 5.0 });
+}
+
+TEST_CASE("SLA area fill selects fast versus slow layer timing",
+          "[SLAPrint][SLAPipeline][SLAAreaFillStatistics]")
+{
+    DynamicPrintConfig slow_config = sla_statistics_config(2.0, 2.0, 0.0, 0.0, 2.0);
+    const SlaStatisticsRun slow = run_sla_statistics(slow_config);
+
+    DynamicPrintConfig fast_config = slow_config;
+    fast_config.set_key_value("area_fill", new ConfigOptionFloat(100.0));
+    const SlaStatisticsRun fast = run_sla_statistics(std::move(fast_config));
+    check_same_sla_geometry(slow, fast);
+    CHECK(slow.fast_layers == 0);
+    CHECK(slow.slow_layers == 6);
+    CHECK(fast.fast_layers == 6);
+    CHECK(fast.slow_layers == 0);
+    CHECK_THAT(slow.estimated_time, Catch::Matchers::WithinAbs(24.0, 1e-8));
+    CHECK_THAT(fast.estimated_time, Catch::Matchers::WithinAbs(12.0, 1e-8));
+    CHECK_THAT(slow.estimated_time - fast.estimated_time,
+               Catch::Matchers::WithinAbs(12.0, 1e-8));
+    check_sla_layer_times(slow, { 4.0, 4.0, 4.0, 4.0, 4.0, 4.0 });
+    check_sla_layer_times(fast, { 2.0, 2.0, 2.0, 2.0, 2.0, 2.0 });
 }
 
 TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures][SLAHollowingToggle]")

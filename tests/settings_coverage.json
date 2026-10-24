@@ -747,12 +747,12 @@
     },
     "exposure_time": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
-      "tag": "[SLAPrint][SLAPipeline]",
       "dimensions": [
-        "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "The SLA validation contract accepts a 2.0 second exposure and rejects 6.0 seconds when the configured maximum is 5.0 seconds. This is one coupled validation case, not the complete exposure boundary domain."
+      "tag": "[SLAPrint][SLAPipeline]",
+      "reason": "Public SLA validation accepts the zero minimum and equal configured exposure limits and rejects exposures outside either limit. Six-layer prints at regular exposures 0, 2 and 2.5 seconds preserve six 100 mm2 slices and 300 mm3 of object material; their layer-time multisets and totals follow the independently calculated fade weights. The unbounded positive domain is represented, not exhausted."
     },
     "filament_density": {
       "test": "tests/fff_print/test_gcodeprocessor.cpp",
@@ -891,13 +891,12 @@
     },
     "max_exposure_time": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
-      "tag": "[SLAPrint][SLAPipeline]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle",
-        "interaction_matrix"
+        "boundary_values",
+        "pipeline_oracle"
       ],
-      "reason": "The SLA validation contract lowers the maximum exposure from its fixture default to 5.0 seconds and observes rejection of a coupled 6.0 second exposure. It does not claim standalone maximum-bound behavior."
+      "tag": "[SLAExposureBounds]",
+      "reason": "Public SLA validation accepts max_exposure_time at its registered zero minimum when actual exposure and the paired limit are also zero, accepts the inclusive nonzero equality at 2 seconds, and rejects max_exposure_time=1.9 when it excludes the configured 2-second exposure. This is a bounded validation contract; it does not exhaust the unbounded positive domain."
     },
     "max_layer_height": {
       "test": "tests/fff_print/test_layer_height_variance.cpp",
@@ -5060,6 +5059,69 @@
         "pipeline_oracle"
       ],
       "reason": "Public preset selection resolves an explicitly configured Engineering Plate symbolic default, while saved per-printer bed selections take precedence for re-enabled or existing printers. Both resolved project bed type and persisted selection are checked. This is bounded selection precedence, not all bed labels."
+    },
+    "initial_exposure_time": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "tag": "[SLAPrint][SLAPipeline]",
+      "reason": "Public SLA validation accepts the zero minimum and equal configured initial-exposure limits and rejects exposures outside either limit. Six-layer prints at initial exposures 0, 4 and 5 seconds retain their slice areas and object material while layer-time multisets and totals follow the independently calculated fade weights. The unbounded positive domain is represented, not exhausted."
+    },
+    "fast_tilt_time": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "tag": "[SLATiltStatistics]",
+      "reason": "Six fast-classified layers compare fast_tilt_time at its registered zero minimum and 2 seconds, yielding a 12-second total increase and six corresponding layer times while slice areas and material remain unchanged. Slow-layer timing is checked separately; the unbounded positive domain is not exhausted."
+    },
+    "slow_tilt_time": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "tag": "[SLATiltStatistics]",
+      "reason": "Six slow-classified layers compare slow_tilt_time at its registered zero minimum and 3 seconds, yielding an 18-second total increase and six corresponding layer times while slice areas and material remain unchanged. Fast-layer timing is checked separately; the unbounded positive domain is not exhausted."
+    },
+    "area_fill": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "tag": "[SLAAreaFillStatistics]",
+      "reason": "The same six-layer 100 mm2 model uses area_fill at its registered zero minimum and a representative 100 percent: all six layers change from slow to fast, and their 4 versus 2 second times produce totals of 24 versus 12 seconds with unchanged geometry and material. No registered upper bound exists; 100 is a representative, not an asserted maximum."
+    },
+    "min_exposure_time": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "tag": "[SLAExposureBounds]",
+      "reason": "Public SLA validation accepts min_exposure_time at its registered zero minimum when actual exposure and the paired limit are also zero, accepts the inclusive nonzero equality at 2 seconds, and rejects min_exposure_time=2.1 when it excludes the configured 2-second exposure. This is a bounded validation contract; it does not exhaust the unbounded positive domain."
+    },
+    "min_initial_exposure_time": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "tag": "[SLAExposureBounds]",
+      "reason": "Public SLA validation accepts min_initial_exposure_time at its registered zero minimum when actual exposure and the paired limit are also zero, accepts the inclusive nonzero equality at 3 seconds, and rejects min_initial_exposure_time=3.1 when it excludes the configured 3-second exposure. This is a bounded validation contract; it does not exhaust the unbounded positive domain."
+    },
+    "max_initial_exposure_time": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "tag": "[SLAExposureBounds]",
+      "reason": "Public SLA validation accepts max_initial_exposure_time at its registered zero minimum when actual exposure and the paired limit are also zero, accepts the inclusive nonzero equality at 3 seconds, and rejects max_initial_exposure_time=2.9 when it excludes the configured 3-second exposure. This is a bounded validation contract; it does not exhaust the unbounded positive domain."
     }
   }
 }

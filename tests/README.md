@@ -497,6 +497,13 @@ centroid, and dimensions. Its mutations are in `sla_raster_pipeline.json`.
 checks the emitted `config.ini` profile flag and identity values. Its focused
 probes are in `sla_sl1_settings_variance.json`.
 
+`[SLAExposureBounds]` checks inclusive zero and nonzero exposure limits through
+public SLA validation. `[SLAExposureStatistics]`, `[SLATiltStatistics]`, and
+`[SLAAreaFillStatistics]` check six-layer exposure fade weights, fast/slow tilt
+durations, and layer classification against physical time totals and layer-time
+multisets. Setting-only pairs preserve slice areas and object material; zero
+exposure and tilt minima retain positive geometry and material.
+
 `[PresetPersistence]` checks inherited JSON imports, unresolved-parent rejection,
 subscription refreshes with newer preset timestamps, complete root-filament
 exports, and preservation of system presets during user-file loading. Its
