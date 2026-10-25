@@ -1331,6 +1331,135 @@ TEST_CASE("Machine-gated filament cut distances follow the mapped machine slots"
     }
 }
 
+struct RetractionPlaceholderObservation {
+    std::set<std::string> marker_lines;
+    std::map<int, double> positive_extrusion_by_tool;
+};
+
+static RetractionPlaceholderObservation observe_retraction_placeholders(const std::string &gcode,
+                                                                          const DynamicPrintConfig &config)
+{
+    RetractionPlaceholderObservation observation;
+    int current_tool = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&observation, &current_tool](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view command = line.cmd();
+        if (command.size() >= 2 && command[0] == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
+            current_tool = std::stoi(std::string(command.substr(1)));
+
+        const std::string_view comment = line.comment();
+        const size_t comment_start = comment.find_first_not_of(" \t");
+        constexpr std::string_view marker_prefix = "RETRACTION_CONTRACT filament=";
+        if (comment_start != std::string_view::npos &&
+            comment.substr(comment_start, marker_prefix.size()) == marker_prefix) {
+            std::istringstream fields(std::string(comment.substr(comment_start)));
+            std::string label, filament, cut_values, ec_values;
+            if (fields >> label >> filament >> cut_values >> ec_values)
+                observation.marker_lines.insert(label + "|" + filament + "|" + cut_values + "|" + ec_values);
+        }
+
+        if (line.extruding(self))
+            observation.positive_extrusion_by_tool[current_tool] += line.dist_E(self);
+    });
+    return observation;
+}
+
+// This checks exported macro values only: these placeholders expose settings to user G-code and
+// do not prove that the slicer itself performs a physical filament cut or long retract.
+TEST_CASE("Cut and extruder-change placeholders follow mapped explicit settings",
+          "[MultiFilament][FilamentCutRetractionOverride][Pipeline]")
+{
+    struct Case {
+        const char *name;
+        LongRectrationLevel gate;
+        std::vector<unsigned char> filament_cut_bools;
+        std::vector<double> filament_cut_distances;
+        std::vector<unsigned char> extruder_change_bools;
+        std::vector<double> extruder_change_distances;
+        std::vector<std::string> expected_markers;
+    };
+    const std::vector<Case> cases = {
+        {
+            "disabled gate inherits mapped machine cut values; EC uses explicit endpoints",
+            LongRectrationLevel::Disabled,
+            { ConfigOptionBoolsNullable::nil_value(), ConfigOptionBoolsNullable::nil_value() },
+            { ConfigOptionFloatsNullable::nil_value(), ConfigOptionFloatsNullable::nil_value() },
+            { false, true }, { 0., 10. },
+            { "RETRACTION_CONTRACT|filament=0|cut=1,18|ec=0,0",
+              "RETRACTION_CONTRACT|filament=1|cut=0,10|ec=1,10" },
+        },
+        {
+            "machine gate ignores explicit filament cut values and EC endpoints export",
+            LongRectrationLevel::EnableMachine,
+            { false, true }, { 10., 18. }, { true, false }, { 10., 0. },
+            { "RETRACTION_CONTRACT|filament=0|cut=1,18|ec=1,10",
+              "RETRACTION_CONTRACT|filament=1|cut=0,10|ec=0,0" },
+        },
+        {
+            "filament gate with nil cut overrides inherits machine cut values",
+            LongRectrationLevel::EnableFilament,
+            { ConfigOptionBoolsNullable::nil_value(), ConfigOptionBoolsNullable::nil_value() },
+            { ConfigOptionFloatsNullable::nil_value(), ConfigOptionFloatsNullable::nil_value() },
+            { true, true }, { 0., 10. },
+            { "RETRACTION_CONTRACT|filament=0|cut=1,18|ec=1,0",
+              "RETRACTION_CONTRACT|filament=1|cut=0,10|ec=1,10" },
+        },
+        {
+            "filament gate exports explicit cut endpoints and EC minimum",
+            LongRectrationLevel::EnableFilament,
+            { true, false }, { 10., 18. }, { false, false }, { 10., 0. },
+            { "RETRACTION_CONTRACT|filament=0|cut=1,10|ec=0,10",
+              "RETRACTION_CONTRACT|filament=1|cut=0,18|ec=0,0" },
+        },
+    };
+
+    const std::string filament_start_gcode =
+        "; RETRACTION_CONTRACT filament=[filament_extruder_id] cut=[long_retraction_when_cut],[retraction_distance_when_cut] "
+        "ec=[long_retraction_when_ec],[retraction_distance_when_ec]";
+    std::optional<std::map<int, double>> reference_extrusion;
+    for (const Case &test_case : cases) {
+        CAPTURE(test_case.name);
+        DynamicPrintConfig config = single_variant_two_extruder_retraction_config();
+        config.set_deserialize_strict({
+            { "enable_long_retraction_when_cut", int(test_case.gate) },
+        });
+        config.set_key_value("long_retractions_when_cut", new ConfigOptionBools({ false, true }));
+        config.set_key_value("retraction_distances_when_cut", new ConfigOptionFloats({ 10., 18. }));
+        config.set_key_value("filament_long_retractions_when_cut",
+                             new ConfigOptionBoolsNullable(test_case.filament_cut_bools));
+        config.set_key_value("filament_retraction_distances_when_cut",
+                             new ConfigOptionFloatsNullable(test_case.filament_cut_distances));
+        config.set_key_value("long_retractions_when_ec",
+                             new ConfigOptionBoolsNullable(test_case.extruder_change_bools));
+        config.set_key_value("retraction_distances_when_ec",
+                             new ConfigOptionFloatsNullable(test_case.extruder_change_distances));
+        config.set_key_value("filament_start_gcode",
+                             new ConfigOptionStrings({ filament_start_gcode, filament_start_gcode }));
+
+        const std::string output = slice_with_object_overrides(
+            { cube(5.), cube(5.) }, config,
+            { { { "extruder", 1 } }, { { "extruder", 2 } } });
+        const RetractionPlaceholderObservation observation = observe_retraction_placeholders(output, config);
+        const std::set<std::string> expected_markers(test_case.expected_markers.begin(),
+                                                      test_case.expected_markers.end());
+        CHECK(observation.marker_lines == expected_markers);
+
+        REQUIRE(observation.positive_extrusion_by_tool.count(0) == 1);
+        REQUIRE(observation.positive_extrusion_by_tool.count(1) == 1);
+        CHECK(observation.positive_extrusion_by_tool.at(0) > 0.0);
+        CHECK(observation.positive_extrusion_by_tool.at(1) > 0.0);
+        if (!reference_extrusion.has_value()) {
+            reference_extrusion = observation.positive_extrusion_by_tool;
+        } else {
+            CHECK_THAT(observation.positive_extrusion_by_tool.at(0),
+                       Catch::Matchers::WithinAbs(reference_extrusion->at(0), 1e-4));
+            CHECK_THAT(observation.positive_extrusion_by_tool.at(1),
+                       Catch::Matchers::WithinAbs(reference_extrusion->at(1), 1e-4));
+        }
+    }
+}
+
 
 // The exporter emits the role marker on its own line before the following extrusion moves.
 // Accept both public compatibility spellings (TYPE:/FEATURE:) and keep the active role across

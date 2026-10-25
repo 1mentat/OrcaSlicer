@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Mapped machine and nullable filament cut overrides, and explicit extruder-change macro values. Filters select the existing override case and the macro pipeline case.",
+  "mutants": [
+    {
+      "id": "cut-filament-override-gate-inverted",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    if (opt_key == \"long_retractions_when_cut\" && new_full_config.option<ConfigOptionInt>(\"enable_long_retraction_when_cut\")->value != LongRectrationLevel::EnableFilament) {",
+      "new": "    if (opt_key == \"long_retractions_when_cut\" && new_full_config.option<ConfigOptionInt>(\"enable_long_retraction_when_cut\")->value == LongRectrationLevel::EnableFilament) {",
+      "description": "Invert the gate that ignores filament cut-bool values outside EnableFilament. The pipeline oracle distinguishes mapped machine values from explicit filament values across all three gate values.",
+      "test_filter": "FilamentCutRetractionOverride",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "extruder-change-distance-uses-cut-placeholder-source",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    this->placeholder_parser().set(\"current_nozzle_id\", next_nozzle_id);\n    {\n        size_t fi = get_filament_config_index(new_filament_id);\n        this->placeholder_parser().set(\"retraction_distance_when_cut\", m_config.retraction_distances_when_cut.get_at(fi));\n        this->placeholder_parser().set(\"long_retraction_when_cut\", m_config.long_retractions_when_cut.get_at(fi));\n        this->placeholder_parser().set(\"retraction_distance_when_ec\", m_config.retraction_distances_when_ec.get_at(fi));",
+      "new": "    this->placeholder_parser().set(\"current_nozzle_id\", next_nozzle_id);\n    {\n        size_t fi = get_filament_config_index(new_filament_id);\n        this->placeholder_parser().set(\"retraction_distance_when_cut\", m_config.retraction_distances_when_cut.get_at(fi));\n        this->placeholder_parser().set(\"long_retraction_when_cut\", m_config.long_retractions_when_cut.get_at(fi));\n        this->placeholder_parser().set(\"retraction_distance_when_ec\", m_config.retraction_distances_when_cut.get_at(fi));",
+      "description": "Feed the cut-distance vector to the extruder-change distance placeholder in the multi-extruder toolchange path. The candidate emits both distinct cut endpoints and EC endpoints in the same macro line.",
+      "test_filter": "FilamentCutRetractionOverride",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

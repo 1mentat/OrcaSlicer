@@ -795,6 +795,17 @@ and replacement filament values and checks its public applied retraction config.
 It complements exported-motion checks under `[FilamentRetractionOverrides]`;
 `filament_retraction_routing.json` tests the nullable override lookup itself.
 
+`[FilamentCutRetractionOverride]` also checks exported cut and extruder-change
+placeholders on two tools with reversed machine-slot mapping. Four selected
+scenarios cover all three named cut gates, machine and filament cut-distance
+endpoints, nil cut overrides, explicit Boolean overrides, and explicit
+extruder-change endpoints. Every scenario retains positive extrusion on both
+tools and conserves deposited material. The oracle observes values supplied to
+user G-code; it does not measure a physical cut or retract, and extruder-change
+nil behavior remains unclaimed. The two bounded mutations are in
+`filament_cut_ec_placeholders.json`. Its CTest label also selects the existing
+mapped cut-distance override case.
+
 `[ExtrusionRoleGCode]` checks machine, filament, and process hook ordering,
 role transitions, and layer placeholders against emitted motion roles.
 `[CalibrationTowerOutput]` checks temperature, outer-wall speed, junction

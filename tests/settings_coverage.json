@@ -5318,6 +5318,78 @@
         "pipeline_oracle"
       ],
       "reason": "The BBL-vendor case uses the representative string values empty and http://printer.local, crossed with bbl_use_printhost false and true. The public PresetBundle API requires use_bbl_device_tab() to become false only for the local-host-plus-nonempty-URL combination; use_bbl_network() follows the Boolean independently. This is a bounded API decision matrix, not URL parsing, transport, arbitrary schemes, or a printer connection test."
+    },
+    "enable_long_retraction_when_cut": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament][FilamentCutRetractionOverride][Pipeline]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "One public two-tool macro test uses four explicitly selected scenario rows covering Disabled, EnableMachine, and EnableFilament. The option has no canonical enum metadata, so the named source values are representative only. This is a bounded four-row scenario set, not a full Cartesian interaction claim. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
+    },
+    "filament_long_retractions_when_cut": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament][FilamentCutRetractionOverride][Pipeline]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "nullable_behavior",
+        "interaction_matrix"
+      ],
+      "reason": "The four public macro scenario rows include nil filament booleans that inherit mapped machine values and explicit false/true values honored under EnableFilament. Only these selected combinations are exercised; no full Cartesian claim is made. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
+    },
+    "filament_retraction_distances_when_cut": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament][FilamentCutRetractionOverride][Pipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "nullable_behavior",
+        "interaction_matrix"
+      ],
+      "reason": "The four public macro scenario rows include nil filament distances that inherit mapped machine endpoints 10/18 and explicit endpoints under EnableFilament. Only these selected combinations are exercised; no full Cartesian claim is made. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
+    },
+    "long_retractions_when_cut": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament][FilamentCutRetractionOverride][Pipeline]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The four public macro scenario rows emit both machine cut booleans after the reversed two-tool machine-slot map. They exercise the machine values under selected gate/override combinations only; no exhaustive interaction domain is claimed. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
+    },
+    "long_retractions_when_ec": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament][FilamentCutRetractionOverride][Pipeline]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The four public macro scenario rows emit explicit false/true per-filament extruder-change booleans on a mapped two-tool print. Nullable nil behavior is deliberately unclaimed. This observes exported macro settings, not physical cutting or retraction. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
+    },
+    "retraction_distances_when_cut": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament][FilamentCutRetractionOverride][Pipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The four public macro scenario rows emit machine cut-distance endpoints 10 and 18 after the reversed two-tool machine-slot map, and compare explicit filament endpoints where selected. These are bounded scenarios, not a full Cartesian interaction claim. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
+    },
+    "retraction_distances_when_ec": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[MultiFilament][FilamentCutRetractionOverride][Pipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The four public macro scenario rows emit explicit extruder-change distance values 0 and 10 on a mapped two-tool print. Nullable nil behavior is deliberately unclaimed, and the values are not a physical extruder-change measurement. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
     }
   }
 }
