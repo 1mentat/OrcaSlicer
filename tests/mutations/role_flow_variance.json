@@ -41,6 +41,14 @@
       "new": "_mm3_per_mm *= (0.0 * m_config.gap_fill_flow_ratio + 1.0);",
       "description": "Retain the setting read but suppress its multiplier. The 0.8 and 1.2 variants must scale only eligible material with stable path geometry.",
       "test_filter": "RoleFlowVariance"
+    },
+    {
+      "id": "role-flow-gap-fill-maximum-clamped",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.gap_fill_flow_ratio;",
+      "new": "_mm3_per_mm *= std::min(m_config.gap_fill_flow_ratio.value, 1.5);",
+      "description": "Clamp gap-fill flow below its registered maximum. Representative 0.8/1.2/1.4 controls retain their behavior; the endpoint-2 material oracle must fail while role paths remain unchanged.",
+      "test_filter": "RoleFlowVariance"
     }
   ]
 }

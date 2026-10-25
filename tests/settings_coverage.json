@@ -3199,9 +3199,10 @@
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "interaction_matrix"
+        "interaction_matrix",
+        "boundary_values"
       ],
-      "reason": "Active values 0.8, 1.0, and 1.2 scale only first-layer deposited material, with later-layer controls. The gate-disabled 0.7 value has no effect. Combined role ratios are checked against explicit first-layer products, with geometry and move counts unchanged. Individual ratio and multiplication-replacement mutations are caught. Numeric boundaries and exhaustive combinations remain unclaimed."
+      "reason": "Registered minimum 0 suppresses first-layer deposited E while preserving generated role XY paths; registered maximum 2 doubles first-layer material while later-layer controls remain unchanged. The existing representative and interaction coverage is retained. Nullable inheritance and exhaustive combinations remain unclaimed."
     },
     "top_solid_infill_flow_ratio": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -3209,9 +3210,10 @@
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "interaction_matrix"
+        "interaction_matrix",
+        "boundary_values"
       ],
-      "reason": "Values 0.8, 1.0, 1.1, and 1.2 scale top-role deposited material while preserving geometry and unrelated roles. The top ratio remains active with set_other_flow_ratios false and is included in the enabled role/layer interaction matrix. Replacing the top multiplier with one fails the material oracle. Numeric boundaries and exhaustive combinations remain unclaimed."
+      "reason": "Registered minimum 0 suppresses top-surface deposited E while preserving its generated XY path; registered maximum 2 doubles top-surface material without changing other roles. The nullable coFloats option is checked as a single-nozzle vector at index 0. Nullable inheritance and exhaustive combinations remain unclaimed."
     },
     "bottom_solid_infill_flow_ratio": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -3219,9 +3221,10 @@
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "interaction_matrix"
+        "interaction_matrix",
+        "boundary_values"
       ],
-      "reason": "Values 0.8, 1.0, and 1.2 scale bottom-role deposited material while preserving geometry and unrelated roles. The bottom ratio remains active with set_other_flow_ratios false and multiplies the first-layer factor when enabled. Replacing the bottom multiplier with one fails the material oracle. Numeric boundaries and exhaustive combinations remain unclaimed."
+      "reason": "Registered minimum 0 suppresses bottom-surface deposited E while preserving its generated XY path; registered maximum 2 doubles bottom-surface material without changing other roles. Existing representative and role/layer interaction coverage is retained. Nullable inheritance and exhaustive combinations remain unclaimed."
     },
     "internal_solid_infill_flow_ratio": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -3229,9 +3232,10 @@
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "interaction_matrix"
+        "interaction_matrix",
+        "boundary_values"
       ],
-      "reason": "Active values 0.7, 0.8, 1.0, and 1.2 scale internal-solid deposited material while preserving geometry and unrelated roles. Gate-disabled 0.7 leaves material unchanged; enabled combined ratios retain the expected layer factors. Replacing the internal-solid multiplier with one fails the material oracle. Numeric boundaries and exhaustive combinations remain unclaimed."
+      "reason": "Registered minimum 0 suppresses internal-solid deposited E while preserving its generated XY path; registered maximum 2 doubles internal-solid material without changing other roles. Existing representative and gate coverage is retained. Nullable inheritance and exhaustive combinations remain unclaimed."
     },
     "gap_fill_flow_ratio": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -3239,9 +3243,10 @@
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "interaction_matrix"
+        "interaction_matrix",
+        "boundary_values"
       ],
-      "reason": "Active values 0.8, 1.0, 1.2, and 1.4 scale gap-fill deposited material while preserving geometry and unrelated roles. Gate-disabled 0.7 leaves material unchanged; the enabled compound case checks first-layer 0.8 times gap-fill 1.4 and later-layer 1.4. Replacing the gap-fill multiplier with one fails both compound and representative material oracles. Numeric boundaries and exhaustive combinations remain unclaimed."
+      "reason": "Registered minimum 0 suppresses gap-fill deposited E while preserving its generated XY path; registered maximum 2 doubles gap-fill material without changing other roles. Existing representative and gate coverage is retained. Nullable inheritance and exhaustive combinations remain unclaimed."
     },
     "seam_slope_conditional": {
       "test": "tests/fff_print/test_precise_seam.cpp",

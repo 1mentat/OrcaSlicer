@@ -368,6 +368,12 @@ sliced geometry, role-tagged XY motion, and other roles' material stay stable.
 These cases explicitly enable `set_other_flow_ratios` and pin the first-layer,
 print, and filament multipliers to 1. Wrong-role multiplier probes are in
 `role_flow_ratio_sources.json`.
+The first-layer, top, bottom, internal-solid, and gap-fill ratios also exercise
+registered endpoints 0 and 2. Zero removes deposited E while retaining role XY
+paths; two doubles only the selected material, with independent layer and role
+controls. The top ratio uses an explicit single-nozzle vector; its nil behavior
+is not covered by this endpoint case. `role_flow_variance.json` includes a
+gap-fill clamp below the maximum to challenge this boundary oracle.
 The shared role fixture pins the seam to `back`, avoiding visibility sampling
 that these oracles do not exercise. In a matched single-run comparison, all 23
 cases passed in 17.49 seconds versus 239.69 seconds with the aligned seam,

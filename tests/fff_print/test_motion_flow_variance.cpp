@@ -1164,6 +1164,157 @@ TEST_CASE("Role flow gate compounds first-layer and role ratios",
     require_named_role_factors(baseline, changed, first_layer, later_layer);
 }
 
+namespace {
+
+void require_same_role_paths(const Evidence &expected, const Evidence &observed)
+{
+    REQUIRE(observed.layers == expected.layers);
+    REQUIRE(observed.perimeter_items == expected.perimeter_items);
+    CHECK_THAT(observed.perimeter_length,
+               Catch::Matchers::WithinRel(expected.perimeter_length, 1e-7));
+    CHECK(observed.motion_moves == expected.motion_moves);
+    for (size_t i = 0; i < expected.roles.size(); ++i) {
+        CAPTURE(i);
+        CHECK_THAT(observed.roles[i].geometry_path_length,
+                   Catch::Matchers::WithinAbs(expected.roles[i].geometry_path_length, 1e-7));
+        CHECK(observed.roles[i].role_motion_moves == expected.roles[i].role_motion_moves);
+        CHECK_THAT(observed.roles[i].role_motion_path_length,
+                   Catch::Matchers::WithinAbs(expected.roles[i].role_motion_path_length, 1e-5));
+    }
+}
+
+void require_no_role_deposition(const RoleEvidence &observed)
+{
+    CHECK(observed.moves == 0);
+    CHECK(observed.first_layer_moves == 0);
+    CHECK(observed.later_layer_moves == 0);
+    CHECK_THAT(observed.filament_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(observed.first_layer_filament_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(observed.later_layer_filament_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(observed.gcode_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+}
+
+void require_no_first_layer_deposition(const RoleEvidence &observed)
+{
+    CHECK(observed.first_layer_moves == 0);
+    CHECK_THAT(observed.first_layer_filament_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+}
+
+} // namespace
+
+TEST_CASE("Registered flow-ratio endpoints preserve role paths and bound deposited material",
+          "[MotionFlowVariance][RoleFlowVariance][SettingsVariance]")
+{
+    DynamicPrintConfig baseline_config = role_flow_config();
+    baseline_config.set_deserialize_strict({
+        { "nozzle_diameter", "0.4" },
+        { "small_area_infill_flow_compensation", false },
+    });
+    REQUIRE(baseline_config.option("set_other_flow_ratios") != nullptr);
+    CHECK(baseline_config.option<ConfigOptionBool>("set_other_flow_ratios")->value);
+
+    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(baseline_config.option("nozzle_diameter"));
+    REQUIRE(nozzles != nullptr);
+    REQUIRE(nozzles->size() == 1);
+
+    const auto *top_definition = print_config_def.get("top_solid_infill_flow_ratio");
+    REQUIRE(top_definition != nullptr);
+    REQUIRE(top_definition->nullable);
+    const auto *top_values = dynamic_cast<const ConfigOptionFloatsNullable *>(
+        baseline_config.option("top_solid_infill_flow_ratio"));
+    REQUIRE(top_values != nullptr);
+    REQUIRE(top_values->size() == 1);
+    REQUIRE_FALSE(top_values->is_nil(0));
+    CHECK_THAT(top_values->get_at(0), Catch::Matchers::WithinAbs(1.0, 1e-12));
+
+    const Evidence baseline = fresh_role_flow_evidence(baseline_config);
+    REQUIRE(baseline.roles[outer].first_layer_moves > 0);
+    REQUIRE(baseline.roles[outer].later_layer_moves > 0);
+    REQUIRE(baseline.roles[bottom].first_layer_moves > 0);
+    REQUIRE(baseline.roles[top].later_layer_moves > 0);
+    for (const RoleFlowCase &flow_case : role_flow_cases()) {
+        CAPTURE(flow_case.matrix.key);
+        const ConfigOptionDef *definition = print_config_def.get(flow_case.matrix.key);
+        REQUIRE(definition != nullptr);
+        REQUIRE(definition->type == flow_case.matrix.type);
+        CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(0.0, 1e-12));
+        CHECK_THAT(definition->max, Catch::Matchers::WithinAbs(2.0, 1e-12));
+        REQUIRE(definition->is_value_valid(0.0));
+        REQUIRE(definition->is_value_valid(2.0));
+        if (flow_case.matrix.type == coFloats)
+            REQUIRE(definition->nullable);
+        else
+            REQUIRE(flow_case.matrix.type == coFloat);
+
+        REQUIRE(baseline.roles[flow_case.target_role].geometry_path_length > 0.0);
+        REQUIRE(baseline.roles[flow_case.target_role].role_motion_path_length > 0.0);
+        REQUIRE(baseline.roles[flow_case.target_role].moves > 0);
+        REQUIRE(baseline.roles[flow_case.target_role].filament_length > 0.0);
+
+        for (const double endpoint : { 0.0, 2.0 }) {
+            CAPTURE(endpoint);
+            DynamicPrintConfig changed_config = baseline_config;
+            if (flow_case.matrix.type == coFloats)
+                changed_config.set_key_value(flow_case.matrix.key, new ConfigOptionFloatsNullable({ endpoint }));
+            else
+                changed_config.set_key_value(flow_case.matrix.key, new ConfigOptionFloat(endpoint));
+            REQUIRE(changed_config.option(flow_case.matrix.key) != nullptr);
+            REQUIRE(changed_config.option(flow_case.matrix.key)->serialize()
+                    != baseline_config.option(flow_case.matrix.key)->serialize());
+            CHECK(changed_config.option("set_other_flow_ratios")->serialize()
+                  == baseline_config.option("set_other_flow_ratios")->serialize());
+            if (flow_case.matrix.type == coFloats) {
+                const auto *values = dynamic_cast<const ConfigOptionFloatsNullable *>(
+                    changed_config.option(flow_case.matrix.key));
+                REQUIRE(values != nullptr);
+                REQUIRE(values->size() == 1);
+                REQUIRE_FALSE(values->is_nil(0));
+                CHECK_THAT(values->get_at(0), Catch::Matchers::WithinAbs(endpoint, 1e-12));
+            }
+
+            const Evidence changed = fresh_role_flow_evidence(changed_config);
+            INFO("baseline evidence: " + evidence_summary(baseline));
+            INFO("endpoint evidence: " + evidence_summary(changed));
+            require_same_role_paths(baseline, changed);
+
+            if (flow_case.first_layer_only) {
+                for (size_t role = 0; role < baseline.roles.size(); ++role) {
+                    CAPTURE(role);
+                    const RoleEvidence &before = baseline.roles[role];
+                    const RoleEvidence &after = changed.roles[role];
+                    if (endpoint == 0.0)
+                        require_no_first_layer_deposition(after);
+                    else if (before.first_layer_moves > 0)
+                        require_scaled_material_section(before.first_layer_moves,
+                            before.first_layer_filament_length, before.max_positive_e_pair,
+                            after.first_layer_moves, after.first_layer_filament_length,
+                            after.max_positive_e_pair, 2.0);
+                    else
+                        require_same_material_section(before.first_layer_moves,
+                            before.first_layer_filament_length, before.max_positive_e_pair,
+                            after.first_layer_moves, after.first_layer_filament_length,
+                            after.max_positive_e_pair);
+                    require_same_material_section(before.later_layer_moves,
+                        before.later_layer_filament_length, before.max_positive_e_pair,
+                        after.later_layer_moves, after.later_layer_filament_length,
+                        after.max_positive_e_pair);
+                }
+            } else {
+                for (size_t role = 0; role < baseline.roles.size(); ++role) {
+                    CAPTURE(role);
+                    if (role != flow_case.target_role) {
+                        require_same_role_material(baseline.roles[role], changed.roles[role]);
+                    } else if (endpoint == 0.0) {
+                        require_no_role_deposition(changed.roles[role]);
+                    } else {
+                        require_scaled_role_material(baseline.roles[role], changed.roles[role], 2.0);
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 namespace {
 
