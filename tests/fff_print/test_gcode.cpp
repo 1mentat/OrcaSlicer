@@ -607,6 +607,145 @@ TEST_CASE("Machine envelope selects junction deviation only when enabled and pos
     }
 }
 
+TEST_CASE("Machine envelope serializes registered numeric boundaries and preserves deposited motion",
+          "[GCode][GCodePrintVariance][MachineEnvelope][GCodeExportWorkflows]")
+{
+    struct ParsedEnvelope {
+        std::vector<std::array<float, 4>> acceleration;
+        std::vector<std::array<float, 4>> speed;
+        std::vector<std::array<float, 3>> mode_acceleration;
+        std::vector<std::array<float, 4>> jerk;
+        std::vector<float> junction_deviation;
+    };
+
+    const auto parse_envelope = [](const ExportedPrint &output, const DynamicPrintConfig &config) {
+        ParsedEnvelope parsed;
+        GCodeReader reader;
+        reader.apply_config(config);
+        reader.parse_buffer(output.text, [&parsed](GCodeReader &, const GCodeReader::GCodeLine &line) {
+            const auto read_four = [&line](const std::array<char, 4> &words) {
+                std::array<float, 4> values{};
+                for (size_t i = 0; i < words.size(); ++i) {
+                    REQUIRE(line.has_value(words[i], values[i]));
+                    REQUIRE(std::isfinite(values[i]));
+                }
+                return values;
+            };
+            if (line.cmd_is("M201"))
+                parsed.acceleration.push_back(read_four({{'X', 'Y', 'Z', 'E'}}));
+            else if (line.cmd_is("M203"))
+                parsed.speed.push_back(read_four({{'X', 'Y', 'Z', 'E'}}));
+            else if (line.cmd_is("M204") && line.has('P') && line.has('R') && line.has('T')) {
+                // GCodeWriter can emit separate P-only/T-only changes later; the full P/R/T
+                // command is the machine-envelope preamble whose three source settings are tested.
+                std::array<float, 3> values{};
+                const std::array<char, 3> words{{'P', 'R', 'T'}};
+                for (size_t i = 0; i < values.size(); ++i) {
+                    REQUIRE(line.has_value(words[i], values[i]));
+                    REQUIRE(std::isfinite(values[i]));
+                }
+                parsed.mode_acceleration.push_back(values);
+            } else if (line.cmd_is("M205")) {
+                float junction = 0.f;
+                if (line.has_value('J', junction)) {
+                    REQUIRE(std::isfinite(junction));
+                    parsed.junction_deviation.push_back(junction);
+                }
+                if (line.has('Z') && line.has('E'))
+                    parsed.jerk.push_back(read_four({{'X', 'Y', 'Z', 'E'}}));
+            }
+        });
+        return parsed;
+    };
+
+    const auto check_four = [](const std::vector<std::array<float, 4>> &actual,
+                               const std::array<float, 4> &expected) {
+        REQUIRE(actual.size() == 1);
+        for (size_t i = 0; i < expected.size(); ++i)
+            CHECK_THAT(actual.front()[i], Catch::Matchers::WithinAbs(expected[i], 1e-5f));
+    };
+    const auto check_three = [](const std::vector<std::array<float, 3>> &actual,
+                                const std::array<float, 3> &expected) {
+        REQUIRE(actual.size() == 1);
+        for (size_t i = 0; i < expected.size(); ++i)
+            CHECK_THAT(actual.front()[i], Catch::Matchers::WithinAbs(expected[i], 1e-5f));
+    };
+
+    DynamicPrintConfig reference_config = base_config();
+    const ExportedPrint reference = fresh_export(reference_config);
+    const MotionEvidence reference_motion = motion_evidence(reference.text, reference_config);
+    REQUIRE(reference_motion.extrusion_moves > 0);
+    REQUIRE(reference_motion.xy_path > 0.0);
+    REQUIRE(reference_motion.filament > 0.0);
+
+    // All fifteen speed/jerk/acceleration options have a registered minimum of zero
+    // and no registered maximum. Junction deviation alone also has a finite 0.3 maximum.
+    DynamicPrintConfig minimum_config = base_config();
+    minimum_config.set_deserialize_strict({
+        {"emit_machine_limits_to_gcode", true},
+        {"machine_max_acceleration_x", "0,0"},
+        {"machine_max_acceleration_y", "0,0"},
+        {"machine_max_acceleration_z", "0,0"},
+        {"machine_max_acceleration_e", "0,0"},
+        {"machine_max_acceleration_extruding", "0,0"},
+        {"machine_max_acceleration_retracting", "0,0"},
+        {"machine_max_acceleration_travel", "0,0"},
+        {"machine_max_speed_x", "0,0"},
+        {"machine_max_speed_y", "0,0"},
+        {"machine_max_speed_z", "0,0"},
+        {"machine_max_speed_e", "0,0"},
+        {"machine_max_jerk_x", "0,0"},
+        {"machine_max_jerk_y", "0,0"},
+        {"machine_max_jerk_z", "0,0"},
+        {"machine_max_jerk_e", "0,0"},
+        {"machine_max_junction_deviation", "0,0"},
+    });
+    const ExportedPrint minimum_output = fresh_export(minimum_config);
+    const MotionEvidence minimum_motion = motion_evidence(minimum_output.text, minimum_config);
+    require_same_material(reference_motion, minimum_motion);
+    const ParsedEnvelope minimum = parse_envelope(minimum_output, minimum_config);
+    const std::array<float, 4> zero_four{{0.f, 0.f, 0.f, 0.f}};
+    const std::array<float, 3> zero_three{{0.f, 0.f, 0.f}};
+    check_four(minimum.acceleration, zero_four);
+    check_four(minimum.speed, zero_four);
+    check_three(minimum.mode_acceleration, zero_three);
+    check_four(minimum.jerk, zero_four);
+    CHECK(minimum.junction_deviation.empty());
+
+    // Distinct positive axis values catch X/Y/Z/E mixups. These are representative
+    // values, not upper-bound claims; the inclusive registered JD maximum is tested here.
+    DynamicPrintConfig upper_junction_config = base_config();
+    upper_junction_config.set_deserialize_strict({
+        {"emit_machine_limits_to_gcode", true},
+        {"machine_max_acceleration_x", "101,101"},
+        {"machine_max_acceleration_y", "202,202"},
+        {"machine_max_acceleration_z", "303,303"},
+        {"machine_max_acceleration_e", "404,404"},
+        {"machine_max_acceleration_extruding", "505,505"},
+        {"machine_max_acceleration_retracting", "606,606"},
+        {"machine_max_acceleration_travel", "707,707"},
+        {"machine_max_speed_x", "11,11"},
+        {"machine_max_speed_y", "22,22"},
+        {"machine_max_speed_z", "33,33"},
+        {"machine_max_speed_e", "44,44"},
+        {"machine_max_jerk_x", "1.11,1.11"},
+        {"machine_max_jerk_y", "2.22,2.22"},
+        {"machine_max_jerk_z", "0.33,0.33"},
+        {"machine_max_jerk_e", "4.44,4.44"},
+        {"machine_max_junction_deviation", "0.3,0.3"},
+    });
+    const ExportedPrint upper_junction_output = fresh_export(upper_junction_config);
+    const MotionEvidence upper_junction_motion = motion_evidence(upper_junction_output.text, upper_junction_config);
+    require_same_material(reference_motion, upper_junction_motion);
+    const ParsedEnvelope upper_junction = parse_envelope(upper_junction_output, upper_junction_config);
+    check_four(upper_junction.acceleration, {{101.f, 202.f, 303.f, 404.f}});
+    check_four(upper_junction.speed, {{11.f, 22.f, 33.f, 44.f}});
+    check_three(upper_junction.mode_acceleration, {{505.f, 606.f, 707.f}});
+    check_four(upper_junction.jerk, {{1.11f, 2.22f, 0.33f, 4.44f}});
+    REQUIRE(upper_junction.junction_deviation.size() == 1);
+    CHECK_THAT(upper_junction.junction_deviation.front(), Catch::Matchers::WithinAbs(0.3f, 1e-5f));
+}
+
 TEST_CASE("Z hop changes travel height while preserving material paths", "[GCodePrintVariance]")
 {
     DynamicPrintConfig no_hop = base_config();

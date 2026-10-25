@@ -658,39 +658,44 @@
       "reason": "Both boolean values are sliced with Marlin2: enabling emits executable M201/M203/M204/M205 commands and preserves deposited material."
     },
     "machine_max_acceleration_extruding": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single- and multi-extruder machine-envelope tests set extruding acceleration values and require the selected maximum in M204 output; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M204 P field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_acceleration_retracting": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single- and multi-extruder machine-envelope tests set retracting acceleration values and require the selected maximum in M204 output; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M204 R field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_acceleration_travel": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single- and multi-extruder machine-envelope tests set travel acceleration values and require the selected maximum in M204 output; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M204 T field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_junction_deviation": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
-        "fixture_only"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Machine-envelope tests set junction deviation values and require their selected maximum in M205 J output; numeric boundaries are not claimed."
+      "reason": "The Machine envelope serializes registered numeric boundaries and preserves deposited motion real Marlin2 exports check the registered inclusive endpoints 0 and 0.3 plus positive 0.25: zero omits M205 J, while 0.3 emits it. Parsed deposited motion is unchanged. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "accel_to_decel_factor": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -783,112 +788,124 @@
       "reason": "The SLA layer-count comparison runs 1.0 and 0.5 mm initial heights together with matching layer heights and preserves model volume. It does not isolate initial-layer behavior or claim numeric boundaries."
     },
     "machine_max_acceleration_e": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the E acceleration value in M201; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M201 E field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_acceleration_x": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the X acceleration value in M201; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M201 X field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_acceleration_y": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the Y acceleration value in M201; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M201 Y field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_acceleration_z": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the Z acceleration value in M201; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M201 Z field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_jerk_e": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the E jerk value in M205; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M205 E field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_jerk_x": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the X jerk value in M205; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M205 X field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_jerk_y": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the Y jerk value in M205; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M205 Y field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_jerk_z": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the Z jerk value in M205; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M205 Z field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_speed_e": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the E speed value in M203; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M203 E field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_speed_x": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the X speed value in M203; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M203 X field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_speed_y": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the Y speed value in M203; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M203 Y field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "machine_max_speed_z": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCodePrintVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Single and multi-extruder machine-envelope exports check the Z speed value in M203; numeric boundaries are not claimed."
+      "reason": "A real Marlin2 export serializes the registered zero minimum and a distinct positive representative for this setting, parses its M203 Z field, and confirms nonzero deposited motion is unchanged. This option has no registered maximum, so no maximum-domain claim is made. Existing GCodeWriter coverage continues to check maximum selection among used extruders."
     },
     "max_exposure_time": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
