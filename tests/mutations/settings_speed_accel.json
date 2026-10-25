@@ -14,7 +14,7 @@
       "id": "gw-klipper-combined",
       "path": "src/libslic3r/GCodeWriter.cpp",
       "old": "        gcode += std::to_string(acceleration);\n        if (this->config.accel_to_decel_enable) {\n            gcode += \" ACCEL_TO_DECEL=\";\n            gcode += float_to_string_decimal_point(acceleration * this->config.accel_to_decel_factor / 100);\n        }\n        m_last_acceleration = acceleration;",
-      "new": "        gcode += std::to_string(acceleration);\n        if (false) {\n            gcode += \" ACCEL_TO_DECEL=\";\n            gcode += float_to_string_decimal_point(acceleration * this->config.accel_to_decel_factor / 100);\n        }\n        m_last_acceleration = acceleration;",
+      "new": "        gcode += std::to_string(acceleration);\n        if (this->config.accel_to_decel_enable) {\n            gcode += \" ACCEL_TO_DECEL=\";\n            gcode += float_to_string_decimal_point(acceleration * this->config.accel_to_decel_factor / 10);\n        }\n        m_last_acceleration = acceleration;",
       "test_filter": "SettingsSpeedAccelVariance",
       "description": "Klipper set_accel_and_jerk preserves the accel-to-decel contract"
     },

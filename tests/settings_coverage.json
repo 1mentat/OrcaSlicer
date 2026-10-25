@@ -702,9 +702,10 @@
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
         "boundary_values",
-        "representative_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The registered 1% and 100% endpoints resolve acceleration 1600 to ACCEL_TO_DECEL 16 and 1600 in direct GCodeWriter output; the 50% representative remains. Public slicing propagation and pipeline behavior are not claimed."
+      "reason": "The named direct-writer contract checks registered endpoints 1 and 100 plus 50. A four-layer Klipper Print export adds factors 1, 37, and 100 and verifies ACCEL_TO_DECEL as the configured percentage of each emitted ACCEL command with enablement on; deposited motion and material stay invariant. Disabled-mode factor independence, firmware execution, and other motion-setting interactions are not claimed."
     },
     "brim_type": {
       "test": "tests/fff_print/test_gcodeprocessor.cpp",
@@ -2293,9 +2294,10 @@
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
-        "boolean_values"
+        "boolean_values",
+        "pipeline_oracle"
       ],
-      "reason": "Direct Klipper GCodeWriter output emits ACCEL_TO_DECEL=800 when enabled at factor 50 and omits the field when disabled. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The existing direct-writer case remains, and a four-layer Klipper Print export checks both boolean values across factors 1, 37, and 100. Parsed executable SET_VELOCITY_LIMIT commands omit ACCEL_TO_DECEL when disabled and otherwise carry the configured percentage of every emitted ACCEL, while positive deposited motion and material remain invariant. Firmware execution and other motion-setting interactions are not claimed."
     },
     "relative_correction_x": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",

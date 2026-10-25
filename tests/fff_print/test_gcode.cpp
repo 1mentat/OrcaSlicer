@@ -4264,6 +4264,52 @@ TEST_CASE("Bridge and internal bridge speed percentages reach bridge role moves"
                       [](double f) { return std::abs(f - 31.5 * 60) < 1e-3; }));
 }
 
+struct KlipperAccelerationCommandEvidence
+{
+    std::optional<double> acceleration;
+    std::optional<double> accel_to_decel;
+};
+
+std::vector<KlipperAccelerationCommandEvidence> parse_klipper_acceleration_commands(const std::string &output)
+{
+    std::vector<KlipperAccelerationCommandEvidence> commands;
+    std::istringstream lines(output);
+    std::string raw_line;
+    while (std::getline(lines, raw_line)) {
+        const size_t comment = raw_line.find(';');
+        std::istringstream fields(raw_line.substr(0, comment));
+        std::string command_name;
+        fields >> command_name;
+        if (command_name != "SET_VELOCITY_LIMIT")
+            continue;
+
+        KlipperAccelerationCommandEvidence command;
+        std::string token;
+        while (fields >> token) {
+            const auto value_after = [&token](const char *key) -> std::optional<double> {
+                const size_t key_size = std::string_view(key).size();
+                if (token.compare(0, key_size, key) != 0)
+                    return std::nullopt;
+                const std::string value = token.substr(key_size);
+                if (value.empty())
+                    return std::nullopt;
+                size_t parsed = 0;
+                const double number = std::stod(value, &parsed);
+                if (parsed != value.size() || !std::isfinite(number))
+                    return std::nullopt;
+                return number;
+            };
+            if (const auto acceleration = value_after("ACCEL="))
+                command.acceleration = *acceleration;
+            else if (const auto accel_to_decel = value_after("ACCEL_TO_DECEL="))
+                command.accel_to_decel = *accel_to_decel;
+        }
+        if (command.acceleration.has_value())
+            commands.emplace_back(command);
+    }
+    return commands;
+}
+
 TEST_CASE("Klipper accel-to-decel enable controls the emitted percentage command", "[GCode][SettingsSpeedAccelVariance]")
 {
     GCodeCommentGuard comments_guard;
@@ -4308,6 +4354,76 @@ TEST_CASE("Klipper accel-to-decel enable controls the emitted percentage command
         endpoint.set_extruder(0);
         CHECK(endpoint.set_accel_and_jerk(1600, 0) ==
               "SET_VELOCITY_LIMIT ACCEL=1600 ACCEL_TO_DECEL=" + std::to_string(expected_accel_to_decel) + "\n");
+    }
+}
+
+TEST_CASE("Klipper accel-to-decel settings shape emitted acceleration commands without changing deposited motion",
+          "[GCode][SettingsSpeedAccelVariance]")
+{
+    struct Row { bool enabled; int factor; };
+    const std::array<Row, 6> rows{{
+        {false, 1}, {false, 37}, {false, 100},
+        {true, 1},  {true, 37},  {true, 100},
+    }};
+    std::optional<gcode_print_variance_contracts::MotionEvidence> reference_material;
+
+    for (const Row &row : rows) {
+        CAPTURE(row.enabled, row.factor);
+        DynamicPrintConfig config = motion_config(gcfKlipper);
+        config.set_deserialize_strict({
+            {"default_acceleration", 1200},
+            {"initial_layer_acceleration", 300},
+            {"outer_wall_acceleration", 611},
+            {"inner_wall_acceleration", 777},
+            {"top_surface_acceleration", 888},
+            {"travel_acceleration", 4000},
+            {"machine_max_acceleration_extruding", "20000,20000"},
+            {"machine_max_acceleration_x", "20000,20000"},
+            {"machine_max_acceleration_y", "20000,20000"},
+            {"accel_to_decel_enable", row.enabled},
+            {"accel_to_decel_factor", row.factor},
+        });
+
+        // A 0.8 mm model at 0.2 mm layer height exercises four layers: first-layer
+        // setup, ordinary-layer reset, and later role-specific acceleration commands.
+        const gcode_print_variance_contracts::ExportedPrint exported = gcode_print_variance_contracts::fresh_custom_mesh_export(config, make_cube(8., 8., 0.8));
+        REQUIRE(gcode_print_variance_contracts::count_text(exported.text, ";LAYER_CHANGE") == 4);
+        const gcode_print_variance_contracts::MotionEvidence material = gcode_print_variance_contracts::motion_evidence(exported.text, config);
+        REQUIRE(material.extrusion_moves > 0);
+        CHECK(std::isfinite(material.xy_path));
+        CHECK(material.xy_path > 0.0);
+        CHECK(std::isfinite(material.filament));
+        CHECK(material.filament > 0.0);
+        if (!reference_material.has_value())
+            reference_material = material;
+        else
+            gcode_print_variance_contracts::require_same_material(*reference_material, material);
+
+        const auto commands = parse_klipper_acceleration_commands(exported.text);
+        REQUIRE_FALSE(commands.empty());
+        std::set<int> emitted_accelerations;
+        for (const KlipperAccelerationCommandEvidence &command : commands) {
+            REQUIRE(command.acceleration.has_value());
+            CHECK(std::isfinite(*command.acceleration));
+            CHECK(*command.acceleration > 0.0);
+            emitted_accelerations.insert(static_cast<int>(std::lround(*command.acceleration)));
+            if (row.enabled) {
+                CHECK(command.accel_to_decel.has_value());
+                if (command.accel_to_decel.has_value())
+                    CHECK_THAT(*command.accel_to_decel,
+                               Catch::Matchers::WithinAbs(*command.acceleration * row.factor / 100.0, 0.02));
+            } else {
+                CHECK_FALSE(command.accel_to_decel.has_value());
+            }
+        }
+
+        // Initial and ordinary layer setup use set_print_acceleration; later
+        // role overrides travel through the Klipper set_accel_and_jerk path.
+        CHECK(emitted_accelerations.count(300) == 1);
+        CHECK(emitted_accelerations.count(1200) == 1);
+        CHECK(emitted_accelerations.count(611) == 1);
+        CHECK(emitted_accelerations.count(777) == 1);
+        CHECK(emitted_accelerations.count(888) == 1);
     }
 }
 
