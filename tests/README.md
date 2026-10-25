@@ -288,6 +288,14 @@ In a separate coverage-enabled paired run, both binaries passed the same 137
 `-O1`. These measurements cover this file on Linux GCC; other suites and
 toolchains need their own checks.
 
+A coverage-enabled Linux GCC comparison on the G-code test translation unit
+passed the same 19 speed, acceleration, and export-control cases at both
+optimization levels. Compiling the edited file, linking against unchanged
+production libraries and reused test helpers, and running those cases took
+140.5 seconds at `-O1` and 168.8 seconds at `-O3`. Compilation accounted for
+101.6 and 124.5 seconds respectively. This is one paired worker measurement;
+the per-arm times exclude shared setup and integrity checks.
+
 Coverage builds include Orca's source headers as ordinary project headers.
 Clang suppresses system-header mappings even when it emits profile counters;
 mixing those counters with unused inline mappings can silently remove executed

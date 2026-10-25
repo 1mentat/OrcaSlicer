@@ -3772,6 +3772,7 @@ struct ParsedMotion
     std::vector<int> travel_accelerations;
     std::vector<double> travel_jerks;
     std::vector<double> bridge_feeds;
+    std::vector<double> internal_bridge_feeds;
     size_t extrusions = 0;
     size_t travels    = 0;
 };
@@ -3815,8 +3816,11 @@ ParsedMotion parse_motion(const std::string& output, const DynamicPrintConfig& c
                 role = "Internal solid infill";
             else if (comment.find("Sparse infill") != std::string_view::npos)
                 role = "Sparse infill";
+            else if (comment.find("Internal Bridge") != std::string_view::npos ||
+                     comment.find("Internal bridge") != std::string_view::npos)
+                role = "Internal bridge";
             else if (comment.find("Bridge") != std::string_view::npos)
-                role = comment.find("Internal bridge") != std::string_view::npos ? "Internal bridge" : "Bridge";
+                role = "Bridge";
             else
                 role.clear();
         }
@@ -3844,6 +3848,8 @@ ParsedMotion parse_motion(const std::string& output, const DynamicPrintConfig& c
                 parsed.first_layer_feeds[role].push_back(line.new_F(self));
             if (role == "Bridge")
                 parsed.bridge_feeds.push_back(line.new_F(self));
+            else if (role == "Internal bridge")
+                parsed.internal_bridge_feeds.push_back(line.new_F(self));
             if (layer_index >= 0 && !role.empty()) {
                 parsed.role_accelerations[role][layer_index].push_back(print_acceleration);
                 parsed.role_jerks[role][layer_index].push_back(jerk);
@@ -3875,12 +3881,15 @@ void require_all_first_role_feeds(const ParsedMotion& motion, const std::string&
         CHECK_THAT(feed, Catch::Matchers::WithinAbs(expected, 1e-3));
 }
 
-void require_all_role_accelerations(const ParsedMotion& motion, const std::string& role, int expected)
+void require_all_role_accelerations(const ParsedMotion& motion, const std::string& role, int expected,
+                                    int minimum_layer = 0)
 {
     const auto found = motion.role_accelerations.find(role);
     REQUIRE(found != motion.role_accelerations.end());
     size_t samples = 0;
     for (const auto& [layer, values] : found->second) {
+        if (layer < minimum_layer)
+            continue;
         REQUIRE(layer >= 0);
         REQUIRE_FALSE(values.empty());
         for (int value : values) {
@@ -4250,8 +4259,8 @@ TEST_CASE("Bridge and internal bridge speed percentages reach bridge role moves"
             });
     REQUIRE(internal_paths > 0);
     const ParsedMotion internal_motion = parse_motion(gcode(internal_print), config);
-    REQUIRE_FALSE(internal_motion.bridge_feeds.empty());
-    CHECK(std::any_of(internal_motion.bridge_feeds.begin(), internal_motion.bridge_feeds.end(),
+    REQUIRE_FALSE(internal_motion.internal_bridge_feeds.empty());
+    CHECK(std::all_of(internal_motion.internal_bridge_feeds.begin(), internal_motion.internal_bridge_feeds.end(),
                       [](double f) { return std::abs(f - 31.5 * 60) < 1e-3; }));
 }
 
@@ -4288,6 +4297,18 @@ TEST_CASE("Klipper accel-to-decel enable controls the emitted percentage command
     disabled_print.set_extruder(0);
     CHECK(disabled_print.set_print_acceleration(1600) == "SET_VELOCITY_LIMIT ACCEL=1600\n");
     CHECK(disabled.set_accel_and_jerk(1600, 0) == "SET_VELOCITY_LIMIT ACCEL=1600\n");
+
+    for (const auto &[factor, expected_accel_to_decel] : std::array<std::pair<int, int>, 2>{{{1, 16}, {100, 1600}}}) {
+        CAPTURE(factor);
+        GCodeWriter endpoint;
+        endpoint.config.gcode_flavor.value = gcfKlipper;
+        endpoint.config.accel_to_decel_enable.value = true;
+        endpoint.config.accel_to_decel_factor.value = factor;
+        endpoint.set_extruders({0});
+        endpoint.set_extruder(0);
+        CHECK(endpoint.set_accel_and_jerk(1600, 0) ==
+              "SET_VELOCITY_LIMIT ACCEL=1600 ACCEL_TO_DECEL=" + std::to_string(expected_accel_to_decel) + "\n");
+    }
 }
 
 TEST_CASE("Configured acceleration and jerk boundaries remain finite in emitted motion", "[GCode][SettingsSpeedAccelVariance]")
@@ -4312,6 +4333,229 @@ TEST_CASE("Configured acceleration and jerk boundaries remain finite in emitted 
     }
     for (double value : motion.travel_jerks)
         CHECK(std::isfinite(value));
+}
+
+TEST_CASE("Registered minimum speeds reach first-layer and bridge extrusion roles", "[GCode][SettingsSpeedAccelVariance]")
+{
+    struct FirstLayerMinimumRow {
+        const char *target;
+        double wall_speed;
+        double infill_speed;
+        const char *travel_speed;
+        double expected_wall_feed;
+        double expected_infill_feed;
+        double expected_travel_feed;
+    };
+    const std::array<FirstLayerMinimumRow, 3> rows{{
+        {"initial_layer_speed", 1, 43, "100%", 60, 2580, 4800},
+        {"initial_layer_infill_speed", 27, 1, "100%", 1620, 60, 4800},
+        {"initial_layer_travel_speed", 27, 43, "1", 1620, 2580, 60},
+    }};
+    for (const FirstLayerMinimumRow &row : rows) {
+        CAPTURE(row.target);
+        DynamicPrintConfig first_layer = motion_config();
+        first_layer.set_deserialize_strict({
+            {"initial_layer_speed", row.wall_speed},
+            {"initial_layer_infill_speed", row.infill_speed},
+            {"initial_layer_travel_speed", row.travel_speed},
+            {"bottom_shell_layers", 0},
+            {"top_shell_layers", 0},
+            {"sparse_infill_density", "35%"},
+        });
+        const ParsedMotion motion = parse_motion(export_cube(first_layer), first_layer);
+        REQUIRE(motion.extrusions > 0);
+        require_all_first_role_feeds(motion, "Outer wall", row.expected_wall_feed);
+        require_all_first_role_feeds(motion, "Sparse infill", row.expected_infill_feed);
+        REQUIRE_FALSE(motion.first_layer_xy_travel_feeds.empty());
+        for (const double feed : motion.first_layer_xy_travel_feeds)
+            CHECK_THAT(feed, Catch::Matchers::WithinAbs(row.expected_travel_feed, 1e-3));
+    }
+
+    DynamicPrintConfig bridge = motion_config();
+    bridge.set_deserialize_strict({
+        {"bridge_speed", 1},
+        {"internal_bridge_speed", "1"},
+        {"bridge_acceleration", 432},
+        {"initial_layer_acceleration", 0},
+        {"sparse_infill_density", "15%"},
+        {"top_shell_layers", 3},
+        {"bottom_shell_layers", 2},
+        {"thick_internal_bridges", false},
+    });
+
+    const ParsedMotion external_bridge = parse_motion(slice({TestMesh::bridge}, bridge), bridge);
+    REQUIRE_FALSE(external_bridge.bridge_feeds.empty());
+    CHECK(std::all_of(external_bridge.bridge_feeds.begin(), external_bridge.bridge_feeds.end(),
+                      [](double feed) { return std::abs(feed - 60) < 1e-3; }));
+
+    DynamicPrintConfig internal_bridge_config = bridge;
+    internal_bridge_config.set_deserialize_strict({
+        {"bridge_speed", 21},
+        {"internal_bridge_speed", "1"},
+    });
+    Model internal_model;
+    Print internal_print;
+    init_print(std::vector<TriangleMesh>{internal_bridge_fixture()}, internal_print, internal_model,
+               internal_bridge_config, nullptr, false);
+    REQUIRE(internal_print.validate().string.empty());
+    internal_print.process();
+    size_t internal_paths = 0;
+    for (const Layer *layer : internal_print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions())
+            for_each_extrusion_path(region->fills, [&internal_paths](const ExtrusionPath &path) {
+                if (path.role() == erInternalBridgeInfill)
+                    ++internal_paths;
+            });
+    REQUIRE(internal_paths > 0);
+    const ParsedMotion internal_bridge = parse_motion(gcode(internal_print), internal_bridge_config);
+    REQUIRE_FALSE(internal_bridge.internal_bridge_feeds.empty());
+    CHECK(std::all_of(internal_bridge.internal_bridge_feeds.begin(), internal_bridge.internal_bridge_feeds.end(),
+                      [](double feed) { return std::abs(feed - 60) < 1e-3; }));
+}
+
+TEST_CASE("Zero acceleration and jerk bounds preserve role fallback on emitted motion", "[GCode][SettingsSpeedAccelVariance]")
+{
+    DynamicPrintConfig config = motion_config();
+    config.set_deserialize_strict({
+        {"default_acceleration", 1200},
+        {"emit_machine_limits_to_gcode", false},
+        // Establish an emitted jerk state so the zero travel override is observable as a no-op.
+        {"machine_start_gcode", "M205 X10 Y10\n"},
+        {"retraction_minimum_travel", 0},
+        {"outer_wall_acceleration", 611},
+        {"initial_layer_acceleration", 0},
+        {"inner_wall_acceleration", 0},
+        {"top_surface_acceleration", 0},
+        {"travel_jerk", 12},
+        {"initial_layer_travel_jerk", "0"},
+        {"default_jerk", 10},
+        {"initial_layer_jerk", 0},
+        {"outer_wall_jerk", 0},
+        {"inner_wall_jerk", 0},
+        {"top_surface_jerk", 0},
+        {"infill_jerk", 0},
+    });
+
+    DynamicPrintConfig no_travel_acceleration = config;
+    no_travel_acceleration.set_deserialize_strict({
+        {"travel_acceleration", 0},
+        {"initial_layer_travel_acceleration", "0"},
+    });
+    const std::string zero_travel_output = export_cube(no_travel_acceleration);
+    const ParsedMotion zero_travel = parse_motion(zero_travel_output, no_travel_acceleration);
+    CHECK(zero_travel_output.find("M205 X10 Y10") != std::string::npos);
+    REQUIRE_FALSE(zero_travel.first_layer_xy_travel_feeds.empty());
+    REQUIRE_FALSE(zero_travel.first_layer_xy_travel_accelerations.empty());
+    CHECK(std::all_of(zero_travel.first_layer_xy_travel_accelerations.begin(),
+                      zero_travel.first_layer_xy_travel_accelerations.end(), [](int value) { return value == 0; }));
+    CHECK(zero_travel_output.find("M204 T") == std::string::npos);
+
+    DynamicPrintConfig base_travel_acceleration = config;
+    base_travel_acceleration.set_deserialize_strict({
+        {"travel_acceleration", 4000},
+        {"initial_layer_travel_acceleration", "0"},
+    });
+    const ParsedMotion base_travel = parse_motion(export_cube(base_travel_acceleration), base_travel_acceleration);
+    REQUIRE_FALSE(base_travel.first_layer_xy_travel_accelerations.empty());
+    CHECK(std::all_of(base_travel.first_layer_xy_travel_accelerations.begin(),
+                      base_travel.first_layer_xy_travel_accelerations.end(), [](int value) { return value == 0; }));
+    REQUIRE_FALSE(base_travel.travel_accelerations.empty());
+    CHECK(std::all_of(base_travel.travel_accelerations.begin(), base_travel.travel_accelerations.end(),
+                      [](int value) { return value == 4000; }));
+    REQUIRE_FALSE(base_travel.first_layer_xy_travel_jerks.empty());
+    CHECK(std::all_of(base_travel.first_layer_xy_travel_jerks.begin(), base_travel.first_layer_xy_travel_jerks.end(),
+                      [](double value) { return std::abs(value - 10) < 1e-3; }));
+    CHECK(std::any_of(base_travel.travel_jerks.begin(), base_travel.travel_jerks.end(),
+                      [](double value) { return std::abs(value - 12) < 1e-3; }));
+
+    require_first_role_accelerations(base_travel, "Outer wall", 611);
+    require_first_role_accelerations(base_travel, "Bottom surface", 1200);
+    require_all_role_accelerations(base_travel, "Inner wall", 1200);
+    require_all_role_accelerations(base_travel, "Top surface", 1200);
+}
+
+TEST_CASE("Nullable object acceleration overrides inherit parent values on exported motion",
+          "[GCode][SettingsSpeedAccelVariance]")
+{
+    DynamicPrintConfig config = motion_config();
+    config.set_deserialize_strict({
+        {"default_acceleration", 1200},
+        {"outer_wall_acceleration", 611},
+        {"initial_layer_acceleration", 333},
+        {"inner_wall_acceleration", 777},
+        {"top_surface_acceleration", 888},
+    });
+    const std::array<std::pair<const char *, double>, 3> overrides{{
+        {"initial_layer_acceleration", 444},
+        {"inner_wall_acceleration", 701},
+        {"top_surface_acceleration", 801},
+    }};
+    const auto export_object_state = [&config, &overrides](int state) {
+        Model model;
+        Print print;
+        TriangleMesh shape = cube(12.0);
+        shape.scale(Vec3f(1.f, 1.f, 0.55f));
+        init_print({std::move(shape)}, print, model, config);
+        REQUIRE_FALSE(model.objects.empty());
+        ModelObject *object = model.objects.front();
+        REQUIRE(object != nullptr);
+
+        if (state != 0) {
+            for (const auto &[key, explicit_value] : overrides) {
+                if (state == 1) {
+                    object->config.set_key_value(key,
+                        new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value()}));
+                    const ConfigOption *option = object->config.option(key);
+                    REQUIRE(option != nullptr);
+                    REQUIRE(option->is_nil());
+                } else {
+                    object->config.set_key_value(key, new ConfigOptionFloatsNullable({explicit_value}));
+                    const ConfigOption *option = object->config.option(key);
+                    REQUIRE(option != nullptr);
+                    REQUIRE_FALSE(option->is_nil());
+                }
+            }
+        }
+
+        (void)print.apply(model, config);
+        const auto validation = print.validate();
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        const std::string output = gcode(print);
+        REQUIRE_FALSE(output.empty());
+        return parse_motion(output, config);
+    };
+
+    const ParsedMotion inherited = export_object_state(0);
+    const ParsedMotion nil_overrides = export_object_state(1);
+    const ParsedMotion explicit_overrides = export_object_state(2);
+
+    REQUIRE(inherited.extrusions > 0);
+    REQUIRE(nil_overrides.extrusions == inherited.extrusions);
+    REQUIRE(nil_overrides.travels == inherited.travels);
+    REQUIRE(nil_overrides.first_layer_feeds.size() == inherited.first_layer_feeds.size());
+    for (const auto &[role, inherited_feeds] : inherited.first_layer_feeds) {
+        CAPTURE(role);
+        const auto found = nil_overrides.first_layer_feeds.find(role);
+        REQUIRE(found != nil_overrides.first_layer_feeds.end());
+        REQUIRE(found->second.size() == inherited_feeds.size());
+        for (size_t i = 0; i < inherited_feeds.size(); ++i)
+            CHECK_THAT(found->second[i], Catch::Matchers::WithinAbs(inherited_feeds[i], 1e-3));
+    }
+    require_first_role_accelerations(inherited, "Outer wall", 333);
+    require_first_role_accelerations(inherited, "Inner wall", 333);
+    require_all_role_accelerations(inherited, "Inner wall", 777, 1);
+    require_all_role_accelerations(inherited, "Top surface", 888);
+    CHECK(nil_overrides.role_accelerations == inherited.role_accelerations);
+    require_first_role_accelerations(nil_overrides, "Outer wall", 333);
+    require_first_role_accelerations(nil_overrides, "Bottom surface", 333);
+    require_first_role_accelerations(nil_overrides, "Inner wall", 333);
+    require_all_role_accelerations(nil_overrides, "Inner wall", 777, 1);
+    require_all_role_accelerations(nil_overrides, "Top surface", 888);
+    require_first_role_accelerations(explicit_overrides, "Outer wall", 444);
+    require_first_role_accelerations(explicit_overrides, "Inner wall", 444);
+    require_all_role_accelerations(explicit_overrides, "Inner wall", 701, 1);
+    require_all_role_accelerations(explicit_overrides, "Top surface", 801);
 }
 
 } // namespace settings_speed_accel_contracts

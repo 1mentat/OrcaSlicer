@@ -701,9 +701,10 @@
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values"
       ],
-      "reason": "Direct Klipper output resolves factor 50 from acceleration 1600 to ACCEL_TO_DECEL=800. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The registered 1% and 100% endpoints resolve acceleration 1600 to ACCEL_TO_DECEL 16 and 1600 in direct GCodeWriter output; the 50% representative remains. Public slicing propagation and pipeline behavior are not claimed."
     },
     "brim_type": {
       "test": "tests/fff_print/test_gcodeprocessor.cpp",
@@ -2169,109 +2170,124 @@
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "First-layer outer walls emit F1620 for 27 mm/s, while the no-bottom-shell fixture emits sparse infill at F2580 for the independently configured 43 mm/s infill speed. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "An isolated row sets initial_layer_speed to its registered 1 mm/s minimum while first-layer infill remains 43 mm/s and travel remains 100%; outer walls emit F60. Existing 27 mm/s representative checks remain; no upper bound is registered."
     },
     "initial_layer_infill_speed": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Bottom-surface and first-layer sparse-infill feedrates equal the configured 43 mm/s value; a first-layer-role mutation is killed by the sparse-infill distinction. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "An isolated row sets initial_layer_infill_speed to its registered 1 mm/s minimum while outer-wall speed remains 27 mm/s and travel remains 100%; sparse infill emits F60. Existing 43 mm/s representative checks remain; no upper bound is registered."
     },
     "initial_layer_travel_speed": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "All eligible first-layer XY travel moves emit F2400 for 50% of the configured 80 mm/s travel speed. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "An isolated row sets initial_layer_travel_speed to its registered 1 mm/s minimum while outer-wall/infill speeds remain 27/43 mm/s; eligible first-layer XY travel emits F60. Existing 50% representative checks remain; no upper bound is registered."
     },
     "initial_layer_travel_acceleration": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "All eligible first-layer XY travel moves emit acceleration 1000, the exact 25% resolution of travel acceleration 4000; the config value is also checked. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "At the registered zero minimum, first-layer travel emits no acceleration override while later travel uses the configured 4000 base. Existing 25% resolution remains; no upper bound is registered."
     },
     "initial_layer_travel_jerk": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "All eligible first-layer XY travel moves emit jerk 6, the exact 50% resolution of travel jerk 12; the config value is also checked. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "At the registered zero minimum, first-layer travel jerk emits no override and preserves the explicit M205 X10 Y10 startup state; later travel emits travel_jerk 12. The parsed startup state is not a claim about firmware defaults when no command was sent. Existing 50% resolution remains; no upper bound is registered."
     },
     "initial_layer_acceleration": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
+        "nullable_behavior",
         "pipeline_oracle"
       ],
-      "reason": "First-layer outer-wall and bottom-surface commands all carry acceleration 333. Later-layer independence is not claimed."
+      "reason": "Zero is the registered minimum: first-layer outer walls fall through to outer-wall acceleration 611 and bottom surfaces to default 1200. Existing 333 output remains. A nil object override inherits parent value 333 and explicit 444 overrides it; no upper bound is registered."
     },
     "inner_wall_acceleration": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
+        "nullable_behavior",
         "pipeline_oracle"
       ],
-      "reason": "Every parsed inner-wall extrusion on every observed layer carries acceleration 777. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "Zero is the registered minimum: later-layer inner walls fall through to default acceleration 1200. Existing 777 output remains on later layers; first-layer acceleration takes precedence for layer 0. A nil object override inherits parent value 777 on later layers (layer 0 remains 333), while explicit 701 applies on later layers (layer 0 remains 444); no upper bound is registered."
     },
     "top_surface_acceleration": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
+        "nullable_behavior",
         "pipeline_oracle"
       ],
-      "reason": "Every parsed top-surface extrusion on every observed layer carries acceleration 888. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "Zero is the registered minimum: top-surface extrusion falls through to default acceleration 1200. Existing 888 output remains. A nil object override inherits parent value 888 and explicit 801 overrides it; no upper bound is registered."
     },
     "travel_acceleration": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The 4000 base resolves 25 percent first-layer XY travel acceleration to an emitted 1000; direct Marlin2 writer output also checks M204 T1234. Full travel acceleration ranges are not claimed."
+      "reason": "With machine-limit emission disabled and short-travel thresholds set to zero, registered travel-acceleration zero emits no M204 T override; the parsed unset state is not physical firmware acceleration zero. A 4000 control emits on later travel. Existing 25% resolution and direct writer 1234 checks remain; no upper bound is registered."
     },
     "travel_speed_z": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Only first-layer pure-Z moves that rise above the configured layer height are considered hops: explicit 9 mm/s emits F540; zero falls back to 80 mm/s with first-layer travel speed explicitly set to 100%, emitting F4800. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The registered zero minimum falls back to travel_speed and emits F4800 on pure-Z hops; the existing 9 mm/s control emits F540. No upper bound is registered."
     },
     "bridge_speed": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "External bridge moves emit exact F1260 and F2220 for independent 21 and 37 mm/s cases. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The registered 1 mm/s minimum emits F60 on external bridge extrusion. The existing exports retain external 21/37 mm/s and internal 150% representative checks; no upper bound is registered."
     },
     "internal_bridge_speed": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The merged-tower fixture contains internal-bridge paths and emits F1890 for 150% of bridge speed 21 mm/s. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "With external bridge_speed held at 21 mm/s, the registered 1 mm/s absolute minimum emits F60 on actual internal-bridge extrusion. The existing internal-bridge 150% case remains; no upper bound is registered."
     },
     "accel_to_decel_enable": {
       "test": "tests/fff_print/test_gcode.cpp",
