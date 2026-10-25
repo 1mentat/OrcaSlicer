@@ -3572,13 +3572,13 @@
       "reason": "The direct cooling-orientation component exercises all four registered values: fdUndefine, fdLeft, fdRight, and fdBoth. Symmetric solids preserve finite geometry; the asymmetric overhang requires the configured one-sided alignment or either X-facing alignment for fdBoth. This is complete direct-component evidence only; there is no public FFF Print pipeline oracle, so the required pipeline dimension remains intentionally unclaimed."
     },
     "wipe_tower_type": {
-      "test": "tests/libslic3r/test_wipe_tower_estimate.cpp",
-      "tag": "[WipeTowerEstimate]",
       "dimensions": [
         "enum_values",
-        "fixture_only"
+        "pipeline_oracle"
       ],
-      "reason": "The direct WipeTower estimate contract deserializes and checks both registered values, type1 and type2, through DynamicPrintConfig and FullPrintConfig resolution and compares finite positive footprint results. This is direct estimate/config evidence only; the fixture does not claim public FFF prime-tower emission or the full interaction matrix with wall type, flush volumes, and printer model."
+      "reason": "Both registered values reach public Print/G-code fixtures: type1 validates tower output, framework depth, skipped-wall deposition and ironing travel; type2 validates support flushing and the physical position at tool changes. The direct estimate cases in tests/libslic3r/test_wipe_tower_estimate.cpp also retain both values and check positive finite footprints. All five public pipeline cases passed 60 assertions in the accepted focused run. This covers the two enum alternatives in these fixtures; interactions across all wall geometries, flush heuristics, printer models and firmware are not claimed.",
+      "tag": "[PrimeTowerBooleanPipeline]",
+      "test": "tests/fff_print/test_wipe_tower.cpp"
     },
     "counterbore_hole_bridging": {
       "test": "tests/fff_print/test_perimeters.cpp",

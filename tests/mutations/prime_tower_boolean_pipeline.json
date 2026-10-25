@@ -1,0 +1,55 @@
+{
+  "description": "Public Print/G-code prime-tower Boolean pipeline contract and ordinary-assertion mutation evidence.",
+  "mutants": [
+    {
+      "description": "Remove only the tool_change_on_wipe_tower alternative from should_travel_to_tower. The five exact public Print/G-code cases cover Type1 and Type2 tower configurations; the Type2 travel case is the causal detector and the other four are controls.",
+      "expected_control_cases": [
+        "Prime tower master switch gates public two-tool tower output",
+        "Type1 framework preserves a large first purge depth in public later layers",
+        "Type1 tower gap and ironing flags change emitted public tower motion",
+        "Flushing into support routes emitted paths and reduces tower filament"
+      ],
+      "expected_failure_case": "Type2 tool-change-on-tower forces travel before public multihead tool changes",
+      "expected_matches": 1,
+      "expected_test_count": 5,
+      "id": "gcode-type2-tool-change-on-tower-override-ignored",
+      "new": "|| is_ramming);",
+      "old": "|| is_ramming\n                                                             || tool_change_on_wipe_tower);",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "Prime tower master switch gates public two-tool tower output,Type1 framework preserves a large first purge depth in public later layers,Type1 tower gap and ironing flags change emitted public tower motion,Flushing into support routes emitted paths and reduces tower filament,Type2 tool-change-on-tower forces travel before public multihead tool changes",
+      "validation_evidence": {
+        "candidate_source_sha256": "3c9ca6a2bd6f754990a05c0c32c0450fe1f42b50cbf6a9afea2308c7ce11ec59",
+        "mutant": {
+          "completed_exit_code": 42,
+          "error_count": 0,
+          "failed_assertions": 2,
+          "failed_cases": 1,
+          "skipped": 0,
+          "timeouts_count_as_kill": false
+        },
+        "pristine": {
+          "completed_exit_code": 0,
+          "errors": 0,
+          "passed_assertions": 60,
+          "passed_cases": 5,
+          "skipped": 0,
+          "test_cases": 5
+        },
+        "restored": {
+          "completed_exit_code": 0,
+          "errors": 0,
+          "passed_assertions": 60,
+          "passed_cases": 5,
+          "skipped": 0,
+          "test_cases": 5
+        },
+        "root_accepted_mutation_sha256": "11452218368ccac23d2b2325f31a1210d7d9375bce478f17380096dc32ce2a7d",
+        "production_baseline_head": "321e8c973e2e0b8db0165180c8e542cfadde9806",
+        "test_source_commit": "67be7600a225b389560b6c534b8ce0a2976fd47e",
+        "normal_coverage_credit": false
+      }
+    }
+  ],
+  "schema_version": 1
+}
