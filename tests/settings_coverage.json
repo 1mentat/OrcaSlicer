@@ -5298,6 +5298,26 @@
         "pipeline_oracle"
       ],
       "reason": "Run the same two-object, two-nozzle sequential model with this project flag false and true. The false run must use the static path (dynamic gate false, zero-layer static result, no cached per-object plans); the true run must use the selector path (gate true, positive stitched layer count, two cached per-object plans, map write-back, and successful export). This proves the flag changes the public Print processing path. It does not claim the fixture migrates a filament between physical nozzles or that output bytes differ."
+    },
+    "bbl_use_printhost": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleLifecycleExtended]",
+      "dimensions": [
+        "boolean_values",
+        "interaction_matrix",
+        "pipeline_oracle"
+      ],
+      "reason": "In the configured BBL-vendor fixture, both false and true are paired with print_host_webui empty and http://printer.local. The public PresetBundle use_bbl_network() and use_bbl_device_tab() results are checked for each of the four combinations. An unlisted-model control with the Boolean false and URL empty requires both APIs to return false. This covers both Boolean values, this 2x2 interaction, and vendor gating; other vendors and host connection behavior are not claimed."
+    },
+    "print_host_webui": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleLifecycleExtended]",
+      "dimensions": [
+        "representative_values",
+        "interaction_matrix",
+        "pipeline_oracle"
+      ],
+      "reason": "The BBL-vendor case uses the representative string values empty and http://printer.local, crossed with bbl_use_printhost false and true. The public PresetBundle API requires use_bbl_device_tab() to become false only for the local-host-plus-nonempty-URL combination; use_bbl_network() follows the Boolean independently. This is a bounded API decision matrix, not URL parsing, transport, arbitrary schemes, or a printer connection test."
     }
   }
 }
