@@ -1662,6 +1662,14 @@ substituted for an LLVM denominator or presented as directly comparable to an
 accepted LLVM percentage. Keep `--source-root src` when the report should also
 retain project sources outside `src/libslic3r`.
 
+When a target's compiler launcher is `ccache`, the module adds `--ccache-skip`
+immediately before GCC's source-filter option. This lets ccache pass the option
+through while retaining it in the cache key; GCC receives the same coverage,
+atomic-counter, and source-filter flags. Other compiler launchers are unchanged.
+This does not change ccache's requirements for precompiled headers. Check the
+generated launcher arguments on Linux with
+`python3 -m unittest discover -s scripts/tests -p test_slicer_coverage_cmake.py`.
+
 Configure with GCC, `-DSLICER_ENABLE_GCC_GCOV_COVERAGE=ON`, and the usual
 Release/test options. Build `libslic3r_tests`, `fff_print_tests`,
 `sla_print_tests`, `libnest2d_tests`, and `filament_group_tests`, then run the

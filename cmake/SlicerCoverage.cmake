@@ -81,8 +81,27 @@ function(slicer_enable_llvm_source_coverage TARGET_NAME)
         string(REGEX REPLACE "([][.+*?^$(){}|\\])" "\\\\\\1"
                _profile_source_root_regex "${_profile_source_root}")
         set(_profile_filter "^${_profile_source_root_regex}/src/.*")
+        # ccache does not parse GCC's profile-filter option as one of its own
+        # options. Ask it to pass the option through for each language whose
+        # target compiler launcher is ccache; the compiler still sees the exact
+        # same coverage/filter flags.
+        set(_gcov_ccache_skip_options)
+        foreach(_lang IN ITEMS C CXX)
+            get_target_property(_compiler_launcher_args ${TARGET_NAME}
+                ${_lang}_COMPILER_LAUNCHER)
+            if (_compiler_launcher_args)
+                list(GET _compiler_launcher_args 0 _compiler_launcher)
+                get_filename_component(_compiler_launcher_name "${_compiler_launcher}" NAME)
+                if (_compiler_launcher_name STREQUAL "ccache" OR
+                    _compiler_launcher_name STREQUAL "ccache.exe")
+                    list(APPEND _gcov_ccache_skip_options
+                        "$<$<COMPILE_LANGUAGE:${_lang}>:--ccache-skip>")
+                endif()
+            endif()
+        endforeach()
         target_compile_options(${TARGET_NAME} PRIVATE
-            --coverage -fprofile-update=atomic "-fprofile-filter-files=${_profile_filter}")
+            --coverage -fprofile-update=atomic ${_gcov_ccache_skip_options}
+            "-fprofile-filter-files=${_profile_filter}")
         if (_target_type STREQUAL "STATIC_LIBRARY")
             # Avoid changing a static target's existing target_link_libraries
             # signature while propagating its runtime requirement to consumers.
