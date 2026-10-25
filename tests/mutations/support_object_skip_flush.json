@@ -1,0 +1,57 @@
+{
+  "description": "Public Print/G-code support-object skip-flush mask contract and ordinary-assertion mutation evidence.",
+  "mutants": [
+    {
+      "description": "Clear the encoded object-label mask instead of retaining it for the outgoing filament end-macro path. The enabled BBL skip-flush case is the causal detector; the first-layer scan case is a control.",
+      "expected_control_cases": [
+        "First-layer scan marker appears only when enabled on BBL printers"
+      ],
+      "expected_failure_case": "The skip-flush command names the next object before the outgoing filament end macro",
+      "expected_matches": 1,
+      "expected_test_count": 2,
+      "id": "gcode-support-object-skip-flush-label-mask-discarded",
+      "minimum_failed_assertions": 1,
+      "new": "m_filament_instances_code.clear();",
+      "old": "m_filament_instances_code = _encode_label_ids_to_base64(filament_instances_id);",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "The skip-flush command names the next object before the outgoing filament end macro,First-layer scan marker appears only when enabled on BBL printers",
+      "validation_evidence": {
+        "candidate_source_sha256": "a5955917c2c8084c97301319dc640ac737992e641bdf958f11b8f162d8c44289",
+        "mutant": {
+          "completed_exit_code": 42,
+          "error_count": 0,
+          "failed_assertions": 1,
+          "failed_cases": 1,
+          "failed_case": "The skip-flush command names the next object before the outgoing filament end macro",
+          "failure_message": "has_pre_macro_mask",
+          "skipped": 0,
+          "timeouts_count_as_kill": false
+        },
+        "pristine": {
+          "completed_exit_code": 0,
+          "errors": 0,
+          "passed_assertions": 290,
+          "passed_cases": 2,
+          "skipped": 0,
+          "test_cases": 2
+        },
+        "restored": {
+          "completed_exit_code": 0,
+          "errors": 0,
+          "passed_assertions": 290,
+          "passed_cases": 2,
+          "skipped": 0,
+          "test_cases": 2
+        },
+        "root_accepted_mutation_sha256": "d81af899915caad9ceeaf661966878929a8c4ec9f4ea959826abca8bdd286650",
+        "root_accepted_result_sha256": "f7ef308a563bb31c3d8b4da0c95d5a09544927dda01e8b0254700223b72edbb2",
+        "production_baseline_head": "67be7600a225b389560b6c534b8ce0a2976fd47e",
+        "normal_coverage_credit": false,
+        "patch_sha256": "3b55850daf98c9a92c3361b4a1494cca93bbe8fdf8d7896604e513730c39c9f2",
+        "test_source_commit": "d41c0251ab6c511bcfb440c987c9ceff44efe6b2"
+      }
+    }
+  ],
+  "schema_version": 1
+}

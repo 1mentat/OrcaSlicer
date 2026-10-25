@@ -1724,19 +1724,23 @@ const SpiralLayerEvidence *final_flat_transition(const SpiralSettingsEvidence &e
 
 TEST_CASE("Spiral settings preserve smooth geometry and flow transitions", "[GCode][GCodeExportWorkflows][SpiralSettings]")
 {
-    // Five bounded public exports. The smooth-off output is also the flow baseline.
+    // Seven bounded public exports. The smooth-off output is also the flow baseline.
     const DynamicPrintConfig smooth_off_config = spiral_settings_config(false, "0%", 0.0, 0.0);
     const DynamicPrintConfig smooth_zero_config = spiral_settings_config(true, "0%", 0.0, 0.0);
     const DynamicPrintConfig smooth_high_config = spiral_settings_config(true, "1000%", 0.0, 0.0);
     const DynamicPrintConfig flow_start_config = spiral_settings_config(false, "0%", 0.5, 0.0);
+    const DynamicPrintConfig flow_start_max_config = spiral_settings_config(false, "0%", 1.0, 0.0);
     const DynamicPrintConfig flow_finish_config = spiral_settings_config(false, "0%", 0.0, 0.5);
+    const DynamicPrintConfig flow_finish_max_config = spiral_settings_config(false, "0%", 0.0, 1.0);
 
     const SpiralSettingsEvidence smooth_off = export_spiral_settings(smooth_off_config);
     const SpiralSettingsEvidence smooth_zero = export_spiral_settings(smooth_zero_config);
     const SpiralSettingsEvidence smooth_high = export_spiral_settings(smooth_high_config);
     const SpiralSettingsEvidence flow_baseline = smooth_off;
     const SpiralSettingsEvidence flow_start = export_spiral_settings(flow_start_config);
+    const SpiralSettingsEvidence flow_start_max = export_spiral_settings(flow_start_max_config);
     const SpiralSettingsEvidence flow_finish = export_spiral_settings(flow_finish_config);
+    const SpiralSettingsEvidence flow_finish_max = export_spiral_settings(flow_finish_max_config);
 
     REQUIRE(smooth_off.layers.size() >= 3);
     REQUIRE(smooth_off.perimeter_extrusions > 0);
@@ -1773,20 +1777,28 @@ TEST_CASE("Spiral settings preserve smooth geometry and flow transitions", "[GCo
 
     const size_t baseline_first_index = first_spiral_settings_layer(flow_baseline);
     const size_t start_first_index = first_spiral_settings_layer(flow_start);
+    const size_t start_max_first_index = first_spiral_settings_layer(flow_start_max);
     const size_t baseline_last_index = last_spiral_settings_layer(flow_baseline);
     const size_t finish_last_index = last_spiral_settings_layer(flow_finish);
+    const size_t finish_max_last_index = last_spiral_settings_layer(flow_finish_max);
     REQUIRE(baseline_first_index < flow_baseline.layers.size());
     REQUIRE(start_first_index < flow_start.layers.size());
+    REQUIRE(start_max_first_index < flow_start_max.layers.size());
     REQUIRE(baseline_last_index < flow_baseline.layers.size());
     REQUIRE(finish_last_index < flow_finish.layers.size());
+    REQUIRE(finish_max_last_index < flow_finish_max.layers.size());
 
     const SpiralLayerEvidence &base_first = flow_baseline.layers[baseline_first_index];
     const SpiralLayerEvidence &start_first = flow_start.layers[start_first_index];
+    const SpiralLayerEvidence &start_max_first = flow_start_max.layers[start_max_first_index];
     const SpiralLayerEvidence &base_last = flow_baseline.layers[baseline_last_index];
     const SpiralLayerEvidence &finish_last = flow_finish.layers[finish_last_index];
+    const SpiralLayerEvidence &finish_max_last = flow_finish_max.layers[finish_max_last_index];
     REQUIRE(base_first.perimeter_extrusions > 0);
     REQUIRE(base_last.perimeter_extrusions > 0);
 
+    // The configured ratios are the endpoints of the per-move interpolation in
+    // SpiralVase; retain the 0.5 samples and require more material at the 1.0 end.
     // Finishing flow changes only the appended flat transition loop; its rising
     // final loop remains unchanged and is checked independently.
     CHECK(finish_last.spiral_z_extrusions == base_last.spiral_z_extrusions);
@@ -1794,13 +1806,24 @@ TEST_CASE("Spiral settings preserve smooth geometry and flow transitions", "[GCo
                Catch::Matchers::WithinAbs(base_last.spiral_filament_length, 1e-4));
     CHECK_THAT(finish_last.spiral_xy_path_length,
                Catch::Matchers::WithinAbs(base_last.spiral_xy_path_length, 1e-4));
+    CHECK(finish_max_last.spiral_z_extrusions == base_last.spiral_z_extrusions);
+    CHECK_THAT(finish_max_last.spiral_filament_length,
+               Catch::Matchers::WithinAbs(base_last.spiral_filament_length, 1e-4));
+    CHECK_THAT(finish_max_last.spiral_xy_path_length,
+               Catch::Matchers::WithinAbs(base_last.spiral_xy_path_length, 1e-4));
     const SpiralLayerEvidence *base_transition = final_flat_transition(flow_baseline, baseline_last_index);
     const SpiralLayerEvidence *finish_transition = final_flat_transition(flow_finish, finish_last_index);
+    const SpiralLayerEvidence *finish_max_transition =
+        final_flat_transition(flow_finish_max, finish_max_last_index);
     REQUIRE(base_transition != nullptr);
     REQUIRE(finish_transition != nullptr);
+    REQUIRE(finish_max_transition != nullptr);
     CHECK(start_first.filament_length > base_first.filament_length + 1e-4);
+    CHECK(start_max_first.filament_length > start_first.filament_length + 1e-4);
     CHECK(finish_transition->flat_filament_length >
           base_transition->flat_filament_length + 1e-4);
+    CHECK(finish_max_transition->flat_filament_length >
+          finish_transition->flat_filament_length + 1e-4);
 }
 
 TEST_CASE("Sequential spiral vase preserves rising perimeter flow and by-layer geometry",

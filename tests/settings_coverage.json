@@ -3260,18 +3260,20 @@
       "tag": "[SpiralSettings]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Finishing ratios 0 and 0.5 change filament in the appended flat transition while final rising-loop move count, filament and XY length remain unchanged. Suppressing finishing flow fails the flat-transition increase assertion. Numeric boundaries are unclaimed."
+      "reason": "The public SpiralSettings export checks finishing-flow ratios 0, 0.5, and 1.0 in the appended flat transition. Flat-transition deposited filament must increase at each step, while the final rising-loop extrusion count, filament length, and XY path length remain equal to the zero-flow baseline."
     },
     "spiral_mode_max_xy_smoothing": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SpiralSettings]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "With smoothing enabled, 0% is a geometry no-op and 1000% changes spiral endpoints or path length. Reversing the distance predicate breaks both witnesses. The full FloatOrPercent domain is unclaimed."
+      "reason": "The public SpiralSettings export checks the percentage bounds 0% and 1000% for XY smoothing. Zero percent preserves the unsmoothed geometry; 1000% must change the spiral geometry or XY path length. Absolute-millimeter FloatOrPercent inputs remain unclaimed."
     },
     "spiral_mode_smooth": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -3287,9 +3289,10 @@
       "tag": "[SpiralSettings]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Starting ratios 0 and 0.5 change filament deposited in the first rising spiral layer. Suppressing starting flow makes the values equal and fails the increase assertion. Both outputs require finite positive spiral geometry; numeric boundaries are unclaimed."
+      "reason": "The public SpiralSettings export checks starting-flow ratios 0, 0.5, and 1.0 on the first rising spiral layer. Its deposited filament length must increase at 0.5 versus 0 and at 1.0 versus 0.5; the start-flow claim is limited to that first-layer material witness."
     },
     "support_flow_ratio": {
       "test": "tests/fff_print/test_support_material.cpp",
