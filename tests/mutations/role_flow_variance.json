@@ -49,6 +49,14 @@
       "new": "_mm3_per_mm *= std::min(m_config.gap_fill_flow_ratio.value, 1.5);",
       "description": "Clamp gap-fill flow below its registered maximum. Representative 0.8/1.2/1.4 controls retain their behavior; the endpoint-2 material oracle must fail while role paths remain unchanged.",
       "test_filter": "RoleFlowVariance"
+    },
+    {
+      "id": "role-flow-top-solid-object-override-ignored",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (*my_opt != *(it->second)) {",
+      "new": "if (*my_opt != *(it->second) && it->first != \"top_solid_infill_flow_ratio\") {",
+      "description": "Suppress the model-object top-solid flow override while retaining the parent ratio. The nil/explicit/nil public Print case must detect the lost explicit override through deposited material and fresh-export equivalence.",
+      "test_filter": "NullableFlow"
     }
   ]
 }

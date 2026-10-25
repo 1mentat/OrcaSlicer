@@ -371,9 +371,14 @@ print, and filament multipliers to 1. Wrong-role multiplier probes are in
 The first-layer, top, bottom, internal-solid, and gap-fill ratios also exercise
 registered endpoints 0 and 2. Zero removes deposited E while retaining role XY
 paths; two doubles only the selected material, with independent layer and role
-controls. The top ratio uses an explicit single-nozzle vector; its nil behavior
-is not covered by this endpoint case. `role_flow_variance.json` includes a
-gap-fill clamp below the maximum to challenge this boundary oracle.
+controls. The endpoint case uses an explicit single-nozzle vector. A separate
+nullable-flow case checks a top-solid object override: parent ratio 1.2 is retained by an
+object-level nil slot, explicit 0.7 scales deposited top material by 0.7/1.2,
+and returning to nil restores parent behavior through incremental `Print::apply`
+with fresh-export equivalence. This remains single-nozzle evidence; multi-nozzle
+variant interactions and exhaustive combinations are unclaimed.
+`role_flow_variance.json` includes a gap-fill clamp below the maximum to challenge
+the boundary oracle and a dropped object override to challenge nullable flow.
 The shared role fixture pins the seam to `back`, avoiding visibility sampling
 that these oracles do not exercise. In a matched single-run comparison, all 23
 cases passed in 17.49 seconds versus 239.69 seconds with the aligned seam,

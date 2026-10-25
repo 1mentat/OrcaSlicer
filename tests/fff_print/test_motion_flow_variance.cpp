@@ -2172,3 +2172,58 @@ TEST_CASE("Overhang flow ratio scales only detected overhang-wall material",
 {
     require_numeric_role_flow_contract("overhang_flow_ratio", overhang, true);
 }
+
+TEST_CASE("Nullable top-solid flow override inherits and restores parent deposited material",
+          "[MotionFlowVariance][RoleFlowVariance][SettingsVariance][NullableFlow]")
+{
+    constexpr double parent_ratio = 1.2;
+    constexpr double object_ratio = 0.7;
+    constexpr double object_to_parent = object_ratio / parent_ratio;
+    constexpr const char *key = "top_solid_infill_flow_ratio";
+
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->type == coFloats);
+    REQUIRE(definition->nullable);
+    REQUIRE(definition->is_value_valid(parent_ratio));
+    REQUIRE(definition->is_value_valid(object_ratio));
+
+    DynamicPrintConfig parent_config = role_flow_config();
+    parent_config.set_key_value(key, new ConfigOptionFloatsNullable({ parent_ratio }));
+    const auto *parent_values = dynamic_cast<const ConfigOptionFloatsNullable *>(parent_config.option(key));
+    REQUIRE(parent_values != nullptr);
+    REQUIRE(parent_values->size() == 1);
+    REQUIRE_FALSE(parent_values->is_nil(0));
+    CHECK_THAT(parent_values->get_at(0), Catch::Matchers::WithinAbs(parent_ratio, 1e-12));
+
+    const Evidence parent = fresh_role_flow_evidence(parent_config);
+    REQUIRE(parent.roles[top].later_layer_moves > 0);
+    REQUIRE(parent.roles[top].later_layer_filament_length > 0.0);
+    REQUIRE(parent.roles[outer].later_layer_moves > 0);
+
+    DynamicPrintConfig expected_explicit_config = parent_config;
+    expected_explicit_config.set_key_value(key, new ConfigOptionFloatsNullable({ object_ratio }));
+    const Evidence expected_explicit = fresh_role_flow_evidence(expected_explicit_config);
+    INFO("parent evidence: " + evidence_summary(parent));
+    INFO("fresh explicit evidence: " + evidence_summary(expected_explicit));
+    require_same_role_paths(parent, expected_explicit);
+    require_role_ratio(parent, expected_explicit, top, object_to_parent);
+
+    const ObjectSpeedTransition transition =
+        apply_role_flow_object_speed_nil_explicit_nil(parent_config, key, object_ratio);
+    INFO("incremental nil-initial evidence: " + evidence_summary(transition.nil_initial));
+    INFO("incremental explicit evidence: " + evidence_summary(transition.explicit_value));
+    INFO("incremental nil-final evidence: " + evidence_summary(transition.nil_final));
+
+    // An object nil slot leaves the parent's print-config slot in force.
+    compare_fresh_and_incremental(parent, transition.nil_initial);
+    for (size_t role = 0; role < parent.roles.size(); ++role)
+        require_same_role_material(parent.roles[role], transition.nil_initial.roles[role]);
+    // An explicit object slot overrides only the top-solid emitted material.
+    compare_fresh_and_incremental(expected_explicit, transition.explicit_value);
+    require_role_ratio(parent, transition.explicit_value, top, object_to_parent);
+    // Returning the same object slot to nil restores parent behavior after Print::apply.
+    compare_fresh_and_incremental(parent, transition.nil_final);
+    for (size_t role = 0; role < parent.roles.size(); ++role)
+        require_same_role_material(parent.roles[role], transition.nil_final.roles[role]);
+}

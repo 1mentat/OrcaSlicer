@@ -3211,9 +3211,10 @@
         "representative_values",
         "pipeline_oracle",
         "interaction_matrix",
-        "boundary_values"
+        "boundary_values",
+        "nullable_behavior"
       ],
-      "reason": "Registered minimum 0 suppresses top-surface deposited E while preserving its generated XY path; registered maximum 2 doubles top-surface material without changing other roles. The nullable coFloats option is checked as a single-nozzle vector at index 0. Nullable inheritance and exhaustive combinations remain unclaimed."
+      "reason": "Registered minimum 0 suppresses top-surface deposited E while preserving its generated XY path; registered maximum 2 doubles top-surface material without changing other roles. The nullable coFloats option is exercised as a one-nozzle vector at index 0: with parent ratio 1.2, an object-level nil slot retains parent top-solid material, an explicit 0.7 slot scales only that material by 0.7/1.2, and returning the slot to nil restores parent behavior through incremental Print::apply with fresh-export equivalence. Multi-nozzle variant interactions and exhaustive combinations remain unclaimed."
     },
     "bottom_solid_infill_flow_ratio": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
