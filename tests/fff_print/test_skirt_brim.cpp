@@ -7,6 +7,7 @@
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Flow.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Geometry.hpp"
@@ -41,6 +42,7 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
 #include "libslic3r/BeltBrim.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -1827,3 +1829,262 @@ TEST_CASE("Single-loop draft shields retain all first-layer loops and limit late
 }
 
 } // namespace draft_shield_single_loop_contracts
+
+namespace skirt_settings_variance {
+
+struct Bounds {
+    double min_x = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double min_y = std::numeric_limits<double>::infinity();
+    double max_y = -std::numeric_limits<double>::infinity();
+};
+
+struct SkirtEvidence {
+    size_t positive_xy_moves = 0;
+    double xy_length = 0.0;
+    double filament = 0.0;
+    double first_x = std::numeric_limits<double>::quiet_NaN();
+    double first_y = std::numeric_limits<double>::quiet_NaN();
+    double first_feed_mm_s = std::numeric_limits<double>::quiet_NaN();
+    Bounds bounds;
+    bool finite = true;
+};
+
+struct SkirtSample {
+    SkirtEvidence skirt;
+    Bounds model_bounds;
+    double spacing = 0.0;
+};
+
+Bounds first_layer_model_bounds(const Print &print)
+{
+    Bounds bounds;
+    const PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE(object->instances().size() == 1);
+    REQUIRE_FALSE(object->layers().empty());
+    REQUIRE_FALSE(object->layers().front()->lslices.empty());
+    const Vec3d plate_origin = print.get_plate_origin();
+    Point world_shift = object->instances().front().shift_without_plate_offset();
+    world_shift += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    for (const ExPolygon &slice : object->layers().front()->lslices) {
+        for (const Point &point : slice.contour.points) {
+            const double x = unscale<double>((point + world_shift).x());
+            const double y = unscale<double>((point + world_shift).y());
+            bounds.min_x = std::min(bounds.min_x, x);
+            bounds.max_x = std::max(bounds.max_x, x);
+            bounds.min_y = std::min(bounds.min_y, y);
+            bounds.max_y = std::max(bounds.max_y, y);
+        }
+    }
+    REQUIRE(std::isfinite(bounds.min_x));
+    REQUIRE(std::isfinite(bounds.max_x));
+    REQUIRE(std::isfinite(bounds.min_y));
+    REQUIRE(std::isfinite(bounds.max_y));
+    return bounds;
+}
+
+SkirtEvidence inspect_skirt(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    SkirtEvidence evidence;
+    std::string role;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&evidence, &role](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (const std::string_view marker = brim_flow_variance::role_marker(line.comment()); !marker.empty())
+            role.assign(marker.begin(), marker.end());
+        if (role != "Skirt" || !line.extruding(self))
+            return;
+        const double xy = line.dist_XY(self);
+        if (!std::isfinite(xy) || xy <= EPSILON)
+            return;
+        const double start_x = self.x();
+        const double start_y = self.y();
+        const double end_x = line.new_X(self);
+        const double end_y = line.new_Y(self);
+        const double e = line.dist_E(self);
+        const double feed = double(line.new_F(self)) / 60.0;
+        if (!std::isfinite(start_x) || !std::isfinite(start_y) ||
+            !std::isfinite(end_x) || !std::isfinite(end_y) ||
+            !std::isfinite(e) || !std::isfinite(feed)) {
+            evidence.finite = false;
+            return;
+        }
+        if (evidence.positive_xy_moves == 0) {
+            evidence.first_x = start_x;
+            evidence.first_y = start_y;
+            evidence.first_feed_mm_s = feed;
+        }
+        for (const auto &[x, y] : { std::pair<double, double>{start_x, start_y},
+                                    std::pair<double, double>{end_x, end_y} }) {
+            evidence.bounds.min_x = std::min(evidence.bounds.min_x, x);
+            evidence.bounds.max_x = std::max(evidence.bounds.max_x, x);
+            evidence.bounds.min_y = std::min(evidence.bounds.min_y, y);
+            evidence.bounds.max_y = std::max(evidence.bounds.max_y, y);
+        }
+        ++evidence.positive_xy_moves;
+        evidence.xy_length += xy;
+        evidence.filament += e;
+    });
+    return evidence;
+}
+
+SkirtSample export_skirt(double distance, double angle, double speed)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height", 0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "initial_layer_line_width", 0.5 },
+        { "elefant_foot_compensation", 0.0 },
+        { "xy_contour_compensation", 0.0 },
+        { "xy_hole_compensation", 0.0 },
+        { "filament_shrink", "100%" },
+        { "printable_area", "0x0,250x0,250x210,0x210" },
+        { "wall_loops", 1 },
+        { "top_shell_layers", 1 },
+        { "bottom_shell_layers", 1 },
+        { "sparse_infill_density", "0%" },
+        { "skirt_loops", 1 },
+        { "skirt_height", 1 },
+        { "min_skirt_length", 0.0 },
+        { "skirt_type", "combined" },
+        { "skirt_distance", distance },
+        { "skirt_start_angle", angle },
+        { "skirt_speed", speed },
+        { "brim_type", "no_brim" },
+        { "raft_layers", 0 },
+        { "draft_shield", "disabled" },
+        { "enable_support", false },
+        { "enable_prime_tower", false },
+        { "gcode_flavor", "marlin" },
+        { "use_relative_e_distances", true },
+        { "enable_arc_fitting", false },
+        { "slow_down_for_layer_cooling", false },
+        { "gcode_comments", true },
+        { "machine_start_gcode", "" },
+        { "machine_end_gcode", "" },
+        { "file_start_gcode", "" },
+        { "layer_change_gcode", "G92 E0\n" },
+        { "print_sequence", "by layer" },
+        // The first-layer generic extrusion path supplies the zero-speed fallback.
+        { "initial_layer_infill_speed", 23.0 },
+        { "support_speed", 41.0 },
+        { "filament_max_volumetric_speed", "200" },
+    });
+
+    TriangleMesh mesh = make_cube(20.0, 20.0, 0.8);
+    mesh.translate(115.f, 95.f, 0.f);
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(std::move(mesh));
+    Print print;
+    Model model;
+    Slic3r::Test::init_print(std::move(meshes), print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    SkirtSample sample;
+    sample.model_bounds = first_layer_model_bounds(print);
+    sample.spacing = print.skirt_flow().spacing();
+    REQUIRE(std::isfinite(sample.spacing));
+    REQUIRE(sample.spacing > 0.0);
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    sample.skirt = inspect_skirt(output, config);
+    return sample;
+}
+
+void require_same_loop_geometry(const SkirtEvidence &reference, const SkirtEvidence &changed)
+{
+    REQUIRE(reference.finite);
+    REQUIRE(changed.finite);
+    REQUIRE(reference.positive_xy_moves > 0);
+    REQUIRE(changed.positive_xy_moves > 0);
+    REQUIRE(reference.filament > 0.0);
+    REQUIRE(changed.filament > 0.0);
+    CHECK_THAT(changed.xy_length, Catch::Matchers::WithinAbs(reference.xy_length, 0.02));
+    CHECK_THAT(changed.filament, Catch::Matchers::WithinAbs(reference.filament, 0.01));
+    CHECK_THAT(changed.bounds.min_x, Catch::Matchers::WithinAbs(reference.bounds.min_x, 0.01));
+    CHECK_THAT(changed.bounds.max_x, Catch::Matchers::WithinAbs(reference.bounds.max_x, 0.01));
+    CHECK_THAT(changed.bounds.min_y, Catch::Matchers::WithinAbs(reference.bounds.min_y, 0.01));
+    CHECK_THAT(changed.bounds.max_y, Catch::Matchers::WithinAbs(reference.bounds.max_y, 0.01));
+}
+
+} // namespace skirt_settings_variance
+
+TEST_CASE("Skirt distance endpoints preserve analytic model clearance",
+          "[SkirtBrim][SettingsVariance][SkirtDistance]")
+{
+    using namespace skirt_settings_variance;
+    constexpr Bounds known_model{115.0, 135.0, 95.0, 115.0};
+    for (double distance : {0.0, 3.0, 60.0}) {
+        CAPTURE(distance);
+        const SkirtSample sample = export_skirt(distance, 0.0, 37.0);
+        REQUIRE(sample.skirt.finite);
+        REQUIRE(sample.skirt.positive_xy_moves > 0);
+        REQUIRE(sample.skirt.xy_length > 0.0);
+        REQUIRE(sample.skirt.filament > 0.0);
+        CHECK_THAT(sample.model_bounds.min_x, Catch::Matchers::WithinAbs(known_model.min_x, 0.01));
+        CHECK_THAT(sample.model_bounds.max_x, Catch::Matchers::WithinAbs(known_model.max_x, 0.01));
+        CHECK_THAT(sample.model_bounds.min_y, Catch::Matchers::WithinAbs(known_model.min_y, 0.01));
+        CHECK_THAT(sample.model_bounds.max_y, Catch::Matchers::WithinAbs(known_model.max_y, 0.01));
+
+        // Print::make_skirt_offsets starts at distance-spacing/2 then applies one
+        // spacing offset. Removing half-spacing from each measured centerline gap
+        // recovers the configured physical clearance on all four sides.
+        const double left_clearance = known_model.min_x - sample.skirt.bounds.min_x - sample.spacing / 2.0;
+        const double right_clearance = sample.skirt.bounds.max_x - known_model.max_x - sample.spacing / 2.0;
+        const double bottom_clearance = known_model.min_y - sample.skirt.bounds.min_y - sample.spacing / 2.0;
+        const double top_clearance = sample.skirt.bounds.max_y - known_model.max_y - sample.spacing / 2.0;
+        CHECK_THAT(left_clearance, Catch::Matchers::WithinAbs(distance, 0.03));
+        CHECK_THAT(right_clearance, Catch::Matchers::WithinAbs(distance, 0.03));
+        CHECK_THAT(bottom_clearance, Catch::Matchers::WithinAbs(distance, 0.03));
+        CHECK_THAT(top_clearance, Catch::Matchers::WithinAbs(distance, 0.03));
+    }
+}
+
+TEST_CASE("Skirt angle selects the registered start and zero speed uses layer fallback",
+          "[SkirtBrim][SettingsVariance][SkirtAngle][SkirtSpeed]")
+{
+    using namespace skirt_settings_variance;
+    const SkirtSample base = export_skirt(3.0, 0.0, 37.0);
+    REQUIRE(base.skirt.finite);
+    REQUIRE(base.skirt.positive_xy_moves > 0);
+    REQUIRE(base.skirt.filament > 0.0);
+    REQUIRE(std::isfinite(base.skirt.first_x));
+    REQUIRE(std::isfinite(base.skirt.first_y));
+
+    constexpr double center_x = 125.0;
+    constexpr double center_y = 105.0;
+    SkirtSample negative_half_turn;
+    SkirtSample positive_half_turn;
+    for (double angle : {-180.0, -90.0, 0.0, 90.0, 180.0}) {
+        CAPTURE(angle);
+        const SkirtSample sample = export_skirt(3.0, angle, 37.0);
+        if (angle == -180.0)
+            negative_half_turn = sample;
+        if (angle == 180.0)
+            positive_half_turn = sample;
+        require_same_loop_geometry(base.skirt, sample.skirt);
+        CHECK_THAT(sample.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(37.0, 0.05));
+        const double dx = sample.skirt.first_x - center_x;
+        const double dy = sample.skirt.first_y - center_y;
+        REQUIRE(std::hypot(dx, dy) > 1.0);
+        const double actual_angle = std::atan2(dy, dx) * 180.0 / PI;
+        const double wrapped_delta = std::remainder(actual_angle - angle, 360.0);
+        CHECK_THAT(wrapped_delta, Catch::Matchers::WithinAbs(0.0, 2.0));
+    }
+    REQUIRE(negative_half_turn.skirt.positive_xy_moves > 0);
+    REQUIRE(positive_half_turn.skirt.positive_xy_moves > 0);
+    CHECK_THAT(positive_half_turn.skirt.first_x,
+               Catch::Matchers::WithinAbs(negative_half_turn.skirt.first_x, 0.01));
+    CHECK_THAT(positive_half_turn.skirt.first_y,
+               Catch::Matchers::WithinAbs(negative_half_turn.skirt.first_y, 0.01));
+
+    const SkirtSample fallback = export_skirt(3.0, 0.0, 0.0);
+    require_same_loop_geometry(base.skirt, fallback.skirt);
+    CHECK_THAT(fallback.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(23.0, 0.05));
+    CHECK_THAT(base.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(37.0, 0.05));
+}

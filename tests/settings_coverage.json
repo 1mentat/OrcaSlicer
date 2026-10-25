@@ -5390,6 +5390,33 @@
         "interaction_matrix"
       ],
       "reason": "The four public macro scenario rows emit explicit extruder-change distance values 0 and 10 on a mapped two-tool print. Nullable nil behavior is deliberately unclaimed, and the values are not a physical extruder-change measurement. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
+    },
+    "skirt_distance": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim][SettingsVariance][SkirtDistance]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public exports exercise registered 0 mm and 60 mm endpoints plus 3 mm; each positive skirt G-code path is measured against the known translated 20 mm square model bounds, and all four emitted centerline clearances minus half the actual skirt-flow spacing must equal the configured distance. This does not claim other geometry/model interactions."
+    },
+    "skirt_start_angle": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim][SettingsVariance][SkirtAngle][SkirtSpeed]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public exports witness both registered endpoints -180 and +180 and interior bearings -90, 0, and +90 degrees: the first emitted skirt point must lie on the corresponding ray from the known model center while skirt loop extents, path length, and material remain invariant. The endpoints are treated as the same half-turn; no values outside the registered domain are claimed."
+    },
+    "skirt_speed": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim][SettingsVariance][SkirtAngle][SkirtSpeed]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zero exercises the registered minimum and must retain the first-layer generic extrusion fallback (explicitly pinned to 23 mm/s); a positive 37 mm/s value must override it, with high volumetric capacity and unchanged positive skirt geometry/material. The registry has no finite maximum, so no upper-bound claim is made."
     }
   }
 }

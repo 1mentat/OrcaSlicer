@@ -806,6 +806,14 @@ nil behavior remains unclaimed. The two bounded mutations are in
 `filament_cut_ec_placeholders.json`. Its CTest label also selects the existing
 mapped cut-distance override case.
 
+`[SkirtDistance]` measures emitted skirt clearances at 0, 3, and 60 mm against
+an explicitly placed square, accounting for half the public skirt-flow spacing.
+`[SkirtAngle]` checks -180, -90, 0, 90, and 180 degree start bearings while
+preserving loop extents, path length, and deposited material. `[SkirtSpeed]`
+checks the zero-speed fallback at an explicit 23 mm/s and a 37 mm/s override.
+The three bounded mutations are in `skirt_settings_geometry.json`. These are
+selected geometry and speed scenarios, not a full interaction matrix.
+
 `[ExtrusionRoleGCode]` checks machine, filament, and process hook ordering,
 role transitions, and layer placeholders against emitted motion roles.
 `[CalibrationTowerOutput]` checks temperature, outer-wall speed, junction
