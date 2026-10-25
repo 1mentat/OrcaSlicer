@@ -623,6 +623,11 @@ independent top/bottom projections. Their mutation manifests are
 complementary arc midpoints, synchronized endpoints and the nearest forward
 extension. Circular-cutter mutation probes are in `sketch_circular_cutters.json`.
 
+`[Int128Predicates]` checks the signs returned by public point cross-product and
+orientation predicates for collinear vectors, near-collinear determinants of
+one, well-separated vectors, and translated coordinates. Its mutation in
+`point_contracts.json` reverses the approximate determinant filter decision.
+
 `[LineContracts]` checks affine endpoint transforms, finite and infinite
 intersections, perpendicular distances, bounding-box clipping and 3D plane
 interpolation against analytic geometry. Its probes are in `line_geometry.json`.

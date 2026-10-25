@@ -5,6 +5,7 @@
 #include <Eigen/Geometry>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "libslic3r/Point.hpp"
@@ -148,4 +149,40 @@ TEST_CASE("Float point vectors preserve order and input while applying an affine
         CHECK_THAT((transformed[index] - expected[index]).norm(), WithinAbs(0.0, 1e-5));
         CHECK_THAT((points[index] - original_points[index]).norm(), WithinAbs(0.0, 1e-6));
     }
+}
+
+TEST_CASE("Exact orientation predicates preserve signs for collinear and near-collinear vectors", "[Point][Int128Predicates]")
+{
+    CHECK(int128::cross(Point(3, 0), Point(0, 2)) == 1);
+    CHECK(int128::cross(Point(-3, 0), Point(0, 2)) == -1);
+    CHECK(int128::cross(Point(3, 2), Point(6, 4)) == 0);
+
+    // The exact determinant is +1 although both rounded products are equal.
+    const std::int64_t magnitude = std::int64_t{1} << 40;
+    const Point near_collinear_v(magnitude, magnitude - 1);
+    const Point near_collinear_w(magnitude + 1, magnitude);
+    const Point origin(0, 0);
+    CHECK(int128::cross(near_collinear_v, near_collinear_w) == 1);
+    CHECK(int128::cross(near_collinear_w, near_collinear_v) == -1);
+    CHECK(int128::orient(origin, near_collinear_v, near_collinear_w) == 1);
+    CHECK(int128::orient(origin, near_collinear_w, near_collinear_v) == -1);
+
+    const Point collinear_w(2 * magnitude, 2 * (magnitude - 1));
+    CHECK(int128::cross(near_collinear_v, collinear_w) == 0);
+    CHECK(int128::orient(origin, near_collinear_v, collinear_w) == 0);
+
+    // Large orthogonal components put the rounded determinant well outside the error bound.
+    const std::int64_t separated = std::int64_t{1} << 50;
+    const Point separated_x(separated, 0);
+    const Point separated_y(0, separated);
+    CHECK(int128::cross(separated_x, separated_y) == 1);
+    CHECK(int128::cross(separated_y, separated_x) == -1);
+
+    // Large absolute coordinates are safe here: the predicate subtracts them to small deltas.
+    const std::int64_t translation = std::int64_t{1} << 60;
+    const Point translated_origin(translation, -translation);
+    const Point translated_v(translation + magnitude, -translation + magnitude - 1);
+    const Point translated_w(translation + magnitude + 1, -translation + magnitude);
+    CHECK(int128::orient(translated_origin, translated_v, translated_w) == 1);
+    CHECK(int128::orient(translated_origin, translated_w, translated_v) == -1);
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Four ordinary assertion mutations for Point coordinate and affine transform contracts.",
+  "description": "Ordinary assertion mutations for Point coordinates, affine transforms, and exact orientation predicates.",
   "mutants": [
     {
       "id": "point-distance-drops-height",
@@ -40,6 +40,16 @@
       "expected_matches": 1,
       "ordinary_assertion_only": true,
       "test_filter": "Float point vectors preserve order and input while applying an affine transform",
+      "expected_test_count": 1
+    },
+    {
+      "id": "point-exact-predicate-filter-inverted",
+      "path": "src/libslic3r/Int128.hpp",
+      "old": "return (std::abs(det) > err) ?",
+      "new": "return (std::abs(det) <= err) ?",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Exact orientation predicates preserve signs for collinear and near-collinear vectors",
       "expected_test_count": 1
     }
   ]
