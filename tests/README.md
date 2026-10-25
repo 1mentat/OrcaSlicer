@@ -703,6 +703,12 @@ checks actual pressure-advance state during matching deposited segments, and
 preserves their geometry and filament. Its setting-binding mutation is in
 `adaptive_pa_overhang_gate.json`.
 
+The paired `[H2C][Dynamic]` selector test toggles `enable_filament_dynamic_map`
+on the same sequential two-object plate. It checks the static result and empty
+plan cache when disabled, then stitched layers and cached plans when enabled,
+and exports both modes. Its mutation is in `h2c_dynamic_map.json`; this fixture
+does not claim physical nozzle migration.
+
 `[PrintValidationInteractions]` checks belt/raft/draft-shield constraints,
 sequential-print feature gates, and the full ooze-prevention/single-extruder
 multi-material truth table, including valid controls and blocking-error keys.

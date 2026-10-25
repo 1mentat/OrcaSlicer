@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Challenge the project flag selecting static or dynamic H2C processing during public sequential slicing.",
+  "mutants": [
+    {
+      "id": "h2c-enable-filament-dynamic-map-ignored-when-false",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "const bool  enabled = opt && opt->value;",
+      "new": "const bool  enabled = (opt && opt->value) || true;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Sequential selector flag selects the public static or dynamic process path",
+      "description": "Force the project flag on while retaining the auto-for-flush and multi-nozzle gates. The disabled half must retain a static result without cached plans; the enabled selector control remains valid.",
+      "expected_test_count": 1
+    }
+  ]
+}

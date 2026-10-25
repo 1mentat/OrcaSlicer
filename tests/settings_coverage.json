@@ -5288,6 +5288,15 @@
         "pipeline_oracle"
       ],
       "reason": "A public four-layer BBL cube export compares enabled and disabled scanning plus an enabled non-BBL control. The enabled row has exactly one parsed M976 S1 P1 command between positive deposition at configured Z=0.2 and Z=0.4 mm; inactive rows have no scan command. BBL on/off exports preserve deposited move count, XY path and filament length. Camera operation, other firmware and arbitrary layer-height interactions are not claimed."
+    },
+    "enable_filament_dynamic_map": {
+      "test": "tests/libslic3r/test_toolordering_nozzle_group.cpp",
+      "tag": "[Print][H2C][Dynamic]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Run the same two-object, two-nozzle sequential model with this project flag false and true. The false run must use the static path (dynamic gate false, zero-layer static result, no cached per-object plans); the true run must use the selector path (gate true, positive stitched layer count, two cached per-object plans, map write-back, and successful export). This proves the flag changes the public Print processing path. It does not claim the fixture migrates a filament between physical nozzles or that output bytes differ."
     }
   }
 }
