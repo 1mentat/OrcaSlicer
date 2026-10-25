@@ -153,6 +153,14 @@
       "new": "        } else if (NOZZLE_CONFIG(infill_jerk) > 0 && is_infill(path.role())) {\n            jerk = NOZZLE_CONFIG(default_jerk);",
       "test_filter": "SettingsSpeedAccelVariance",
       "description": "Sparse and internal solid infill jerk must honor the configured infill jerk."
+    },
+    {
+      "id": "gc-first-layer-infill-minimum",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            speed = use_first_layer_speed ? NOZZLE_CONFIG(initial_layer_speed) :\n                                            NOZZLE_CONFIG(initial_layer_infill_speed);",
+      "new": "            speed = use_first_layer_speed ? NOZZLE_CONFIG(initial_layer_speed) :\n                                            std::max(2.0, NOZZLE_CONFIG(initial_layer_infill_speed));",
+      "test_filter": "SettingsSpeedAccelVariance",
+      "description": "First-layer sparse infill honors the registered 1 mm/s minimum independently of wall and travel speeds. Clamping it to 2 mm/s must fail the minimum-speed export oracle while representative speeds remain unchanged."
     }
   ]
 }
