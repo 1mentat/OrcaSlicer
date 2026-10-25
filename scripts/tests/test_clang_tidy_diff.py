@@ -169,6 +169,104 @@ class TestSubprocessCalls(unittest.TestCase):
         self.assertEqual(call.kwargs["encoding"], "utf-8")
 
 
+class TestClangTidyCompileDatabase(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.build = os.path.join(self.dir.name, "build")
+        os.makedirs(self.build)
+        self.compile_commands = os.path.join(self.build, "compile_commands.json")
+
+    def write_database(self, entries):
+        with open(self.compile_commands, "w", encoding="utf-8") as f:
+            json.dump(entries, f)
+
+    def read_database_bytes(self):
+        with open(self.compile_commands, "rb") as f:
+            return f.read()
+
+    def test_strips_exact_marker_from_arguments_and_command_rows_only(self):
+        command = (r'"C:\Program Files\clang++" -c -DNOTE="keep --ccache-skip literal" '
+                   r'"--ccache-skip" -DESCAPED=\--ccache-skip --ccache-skip '
+                   r'-fprofile-filter-files=^C:\src\.* "C:\src\file with spaces.cpp"')
+        self.write_database([
+            {"directory": self.dir.name, "file": "one.cpp",
+             "arguments": ["g++", "-c", "--ccache-skip", "--ccache-skip-extra",
+                           "-fprofile-filter-files=^src/.*", "one.cpp"]},
+            {"directory": self.dir.name, "file": "two.cpp", "command": command},
+        ])
+        original = self.read_database_bytes()
+
+        with clang_tidy_diff.clang_tidy_build_dir(self.build) as tidy_build:
+            self.assertNotEqual(tidy_build, self.build)
+            with open(os.path.join(tidy_build, "compile_commands.json"), encoding="utf-8") as f:
+                entries = json.load(f)
+            self.assertEqual(entries[0]["arguments"],
+                             ["g++", "-c", "--ccache-skip-extra", "-fprofile-filter-files=^src/.*", "one.cpp"])
+            expected_command = (r'"C:\Program Files\clang++" -c -DNOTE="keep --ccache-skip literal" '
+                                r'"--ccache-skip" -DESCAPED=\--ccache-skip  '
+                                r'-fprofile-filter-files=^C:\src\.* "C:\src\file with spaces.cpp"')
+            self.assertEqual(entries[1]["command"], expected_command)
+            self.assertEqual(entries[1]["directory"], self.dir.name)
+        self.assertEqual(self.read_database_bytes(), original)
+
+    def test_unmarked_database_is_reused_without_rewriting_command_quoting(self):
+        command = 'clang++ -c -DNAME="two words" "src/file with spaces.cpp"'
+        self.write_database([{"directory": self.dir.name, "file": "src/file with spaces.cpp",
+                              "command": command}])
+        original = self.read_database_bytes()
+
+        with clang_tidy_diff.clang_tidy_build_dir(self.build) as tidy_build:
+            self.assertEqual(tidy_build, self.build)
+            self.assertEqual(self.read_database_bytes(), original)
+        self.assertEqual(self.read_database_bytes(), original)
+
+    def test_fake_clang_tidy_and_error_alone_use_one_sanitized_database(self):
+        header = os.path.join(self.dir.name, "Color.hpp")
+        with open(header, "w", encoding="utf-8") as f:
+            f.write("int existing;\nint changed;\n")
+        self.write_database([{
+            "directory": self.dir.name,
+            "file": header,
+            "arguments": ["g++", "-c", "--ccache-skip", "-fprofile-filter-files=^src/.*", header,
+                          "-o", "Color.hpp.o"],
+        }])
+        original = self.read_database_bytes()
+        cdb_paths = []
+
+        def fake_subprocess(command, **kwargs):
+            if command[0] == "git":
+                if command[1] == "merge-base":
+                    return subprocess.CompletedProcess(command, 0, "base\n", "")
+                if command[1] == "show":
+                    return subprocess.CompletedProcess(command, 0, "int existing;\nint old;\n", "")
+                self.fail("unexpected git command: " + repr(command))
+            self.assertEqual(command[0], "fake-clang-tidy")
+            tidy_build = command[command.index("-p") + 1]
+            cdb_paths.append(tidy_build)
+            with open(os.path.join(tidy_build, "compile_commands.json"), encoding="utf-8") as f:
+                entry = json.load(f)[0]
+            self.assertNotIn("--ccache-skip", entry["arguments"])
+            self.assertIn("-fprofile-filter-files=^src/.*", entry["arguments"])
+            source = command[-1]
+            output = f"{source}:1:1: error: legacy diagnostic [clang-diagnostic-error]\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with mock.patch.object(clang_tidy_diff, "changed_files", return_value={
+                 header: clang_tidy_diff.FileChange(lines=[[2, 2]], removed_includes={"old.hpp"})}), \
+             mock.patch.object(clang_tidy_diff, "compiled_sources", return_value={os.path.realpath(header)}), \
+             mock.patch.object(clang_tidy_diff.subprocess, "run", side_effect=fake_subprocess), \
+             mock.patch.object(sys, "argv", ["clang_tidy_diff.py", "-p", self.build,
+                                              "--base", "base", "--clang-tidy", "fake-clang-tidy",
+                                              "-j", "1"]):
+            self.assertEqual(clang_tidy_diff.main(), 0)
+
+        self.assertEqual(len(cdb_paths), 2)  # Current header and errors-alone baseline.
+        self.assertEqual(cdb_paths[0], cdb_paths[1])
+        self.assertNotEqual(cdb_paths[0], self.build)
+        self.assertEqual(self.read_database_bytes(), original)
+
+
 class TestCheckFileFix(unittest.TestCase):
     """check_file with -- --fix: what clang-tidy is run on, and what is reported afterwards."""
 
