@@ -5229,6 +5229,24 @@
         "pipeline_oracle"
       ],
       "reason": "Paired public Type2 multihead exports disable ramming and compare false/true. The parser captures the XY position at each actual Tx change and counts changes inside the physical XY envelope of positive extrusion measured inside the reserved wipe-tower tags; enabling the setting increases tool changes over the tower without changing total tool changes. Other macros and tower types are not claimed."
+    },
+    "support_object_skip_flush": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SupportObjectSkipFlush]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A public one-layer two-object/two-tool export checks both Boolean values on BBL printers and an enabled non-BBL/exclude-object-disabled control. The M624 immediately before the outgoing tool-0 end macro must select only the next object\u2019s generated label ID when enabled and must be absent in both inactive rows. The fixture distinguishes that tool-change macro from its later print-shutdown emission. It does not claim mixed slots, support-only layers, sequential printing, or arbitrary tool schedules."
+    },
+    "scan_first_layer": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[FirstLayerScan]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A public four-layer BBL cube export compares enabled and disabled scanning plus an enabled non-BBL control. The enabled row has exactly one parsed M976 S1 P1 command between positive deposition at configured Z=0.2 and Z=0.4 mm; inactive rows have no scan command. BBL on/off exports preserve deposited move count, XY path and filament length. Camera operation, other firmware and arbitrary layer-height interactions are not claimed."
     }
   }
 }

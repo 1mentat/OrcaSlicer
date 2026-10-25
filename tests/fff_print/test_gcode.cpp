@@ -33,6 +33,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <initializer_list>
 #include <iomanip>
@@ -50,6 +51,7 @@
 
 #include "libslic3r/GCode/PrintExtents.hpp"
 #include "libslic3r/Polyline.hpp"
+#include <boost/beast/core/detail/base64.hpp>
 
 #include "test_helpers.hpp"
 
@@ -6095,6 +6097,17 @@ struct RoutePoints
     double p3_y = 0.;
 };
 
+struct SkipFlushFixture
+{
+    bool enabled = false;
+    bool bbl_printer = true;
+    bool exclude_object = true;
+    size_t first_label_id = 0;
+    size_t second_label_id = 0;
+    std::vector<size_t> sorted_label_ids;
+    std::vector<unsigned int> used_extruders;
+};
+
 DynamicPrintConfig route_config(double end_x, double end_y, bool manual_filament_change = false)
 {
     // This is the validated fff_print helper: it sizes registered filament
@@ -6174,18 +6187,37 @@ DynamicPrintConfig route_config(double end_x, double end_y, bool manual_filament
 
 std::string export_with_object_rows(double object_y, double end_x, double end_y,
                                    GCodeProcessorResult *result = nullptr,
-                                   bool manual_filament_change = false)
+                                   bool manual_filament_change = false,
+                                   SkipFlushFixture *skip_flush = nullptr)
 {
     DynamicPrintConfig config = route_config(end_x, end_y, manual_filament_change);
+    if (skip_flush != nullptr) {
+        config.set_key_value("support_object_skip_flush", new ConfigOptionBool(skip_flush->enabled));
+        config.set_key_value("exclude_object", new ConfigOptionBool(skip_flush->exclude_object));
+        config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));
+        // The tool-change path emits the outgoing tool end macro, and non-SEMM print shutdown
+        // emits each configured end macro once more. This one-layer 0-to-1 fixture
+        // therefore contains exactly two END_TOOL_0 lines.
+        config.set_deserialize_strict({
+            {"toolchange_ordering", "cyclic"},
+            {"toolchange_cyclic_order", "1,2"},
+            {"toolchange_cyclic_first_layer", true},
+        });
+        config.set_key_value("filament_end_gcode", new ConfigOptionStrings({
+            "M117 END_TOOL_{filament_extruder_id}\n",
+            "M117 END_TOOL_{filament_extruder_id}\n"
+        }));
+    }
     Model model;
 
     ModelObject *first = model.add_object();
-    first->add_volume(make_cube(20., 20., 2.));
+    const double object_height = skip_flush != nullptr ? 0.2 : 2.;
+    first->add_volume(make_cube(20., 20., object_height));
     ModelInstance *first_instance = first->add_instance();
     first_instance->set_offset(Vec3d(0., object_y, 0.));
 
     ModelObject *second = model.add_object();
-    second->add_volume(make_cube(20., 20., 2.));
+    second->add_volume(make_cube(20., 20., object_height));
     ModelInstance *second_instance = second->add_instance();
     second_instance->set_offset(Vec3d(26., object_y, 0.));
     // `extruder` is the canonical 1-based object setting.  PrintApply
@@ -6195,7 +6227,7 @@ std::string export_with_object_rows(double object_y, double end_x, double end_y,
     second->config.set_key_value("extruder", new ConfigOptionInt(2));
 
     Print print;
-    print.is_BBL_printer() = true;
+    print.is_BBL_printer() = skip_flush != nullptr ? skip_flush->bbl_printer : true;
     for (ModelObject *object : model.objects) {
         object->ensure_on_bed();
         print.auto_assign_extruders(object);
@@ -6211,6 +6243,13 @@ std::string export_with_object_rows(double object_y, double end_x, double end_y,
     // reached both physical extruders before process/export; otherwise a
     // missing marker would only report a downstream symptom.
     const std::vector<unsigned int> used_extruders = print.extruders();
+    if (skip_flush != nullptr) {
+        skip_flush->first_label_id = first_instance->get_labeled_id();
+        skip_flush->second_label_id = second_instance->get_labeled_id();
+        skip_flush->sorted_label_ids = {skip_flush->first_label_id, skip_flush->second_label_id};
+        std::sort(skip_flush->sorted_label_ids.begin(), skip_flush->sorted_label_ids.end());
+        skip_flush->used_extruders = used_extruders;
+    }
     std::ostringstream used_extruder_info;
     used_extruder_info << "print.extruders count=" << used_extruders.size() << " ids=";
     constexpr std::size_t kMaxReportedExtruders = 8;
@@ -6331,6 +6370,65 @@ std::size_t complete_route_marker_count(const std::string &gcode)
     return count;
 }
 
+std::optional<std::string> previous_line_before_exact_line(const std::string &gcode,
+                                                             const std::string &target,
+                                                             size_t &target_count)
+{
+    target_count = 0;
+    std::optional<std::string> previous_line;
+    std::istringstream lines(gcode);
+    std::string line;
+    std::string previous;
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line == target) {
+            ++target_count;
+            if (target_count == 1)
+                previous_line = previous;
+        }
+        previous = line;
+    }
+    return previous_line;
+}
+
+std::optional<std::vector<size_t>> label_ids_from_m624_line(
+    const std::string &line, const std::vector<size_t> &sorted_label_ids)
+{
+    if (line.rfind("M624 ", 0) != 0 || sorted_label_ids.size() >= 64)
+        return std::nullopt;
+
+    const std::string payload = line.substr(5);
+    if (payload.size() != boost::beast::detail::base64::encoded_size(8)
+        || payload.back() != '=' || payload.find('=') != payload.size() - 1)
+        return std::nullopt;
+
+    // Beast's decoder requires decoded_size(payload.size()) output capacity,
+    // which is nine bytes for this 12-character padded encoding, although the
+    // final '=' means only eight bytes are written.
+    std::array<unsigned char, 9> bytes{};
+    const auto [decoded_bytes, consumed_chars] =
+        boost::beast::detail::base64::decode(bytes.data(), payload.data(), payload.size());
+    if (decoded_bytes != 8 || consumed_chars != payload.size() - 1)
+        return std::nullopt;
+
+    // GCode::_encode_label_ids_to_base64 serializes uint64_t byte i as
+    // (mask >> (8 * i)) & 0xff, so reconstruct the mask in little-endian order.
+    std::uint64_t mask = 0;
+    for (size_t index = 0; index < 8; ++index)
+        mask |= static_cast<std::uint64_t>(bytes[index]) << (8 * index);
+
+    const std::uint64_t valid_bits = (std::uint64_t{1} << sorted_label_ids.size()) - 1;
+    if ((mask & ~valid_bits) != 0)
+        return std::nullopt;
+
+    std::vector<size_t> selected_ids;
+    for (size_t index = 0; index < sorted_label_ids.size(); ++index)
+        if ((mask & (std::uint64_t{1} << index)) != 0)
+            selected_ids.push_back(sorted_label_ids[index]);
+    return selected_ids;
+}
+
 void require_finite(const RoutePoints &points)
 {
     const bool finite = std::isfinite(points.p1_x);
@@ -6348,6 +6446,50 @@ void require_finite(const RoutePoints &points)
 }
 
 } // namespace
+
+TEST_CASE("The skip-flush command names the next object before the outgoing filament end macro",
+          "[GCode][GCodeExportWorkflows][SettingsVariance][SupportObjectSkipFlush]")
+{
+    const auto [scenario, enabled, bbl_printer, exclude_object] =
+        GENERATE(table<std::string, bool, bool, bool>({
+            {"enabled BBL", true, true, true},
+            {"disabled BBL", false, true, true},
+            {"exclude-object gate disabled", true, false, false},
+        }));
+    INFO("scenario=" << scenario);
+
+    SkipFlushFixture fixture;
+    fixture.enabled = enabled;
+    fixture.bbl_printer = bbl_printer;
+    fixture.exclude_object = exclude_object;
+    const std::string output = export_with_object_rows(10., 30., 180., nullptr, false, &fixture);
+
+    REQUIRE(fixture.used_extruders.size() == 2);
+    CHECK(fixture.used_extruders[0] == 0u);
+    CHECK(fixture.used_extruders[1] == 1u);
+    REQUIRE(fixture.sorted_label_ids.size() == 2);
+    REQUIRE(fixture.first_label_id != fixture.second_label_id);
+
+    size_t end_macro_count = 0;
+    const auto previous_line = previous_line_before_exact_line(output, "M117 END_TOOL_0", end_macro_count);
+    // GCode emits END_TOOL_0 once during the 0-to-1 change and again at print shutdown.
+    REQUIRE(end_macro_count == 2);
+    REQUIRE(previous_line.has_value());
+    INFO("previous_line=" << *previous_line);
+
+    const bool injection_expected = enabled && (bbl_printer || exclude_object);
+    const bool has_pre_macro_mask = previous_line->rfind("M624 ", 0) == 0;
+    if (injection_expected) {
+        REQUIRE(has_pre_macro_mask);
+        const auto selected_label_ids = label_ids_from_m624_line(*previous_line, fixture.sorted_label_ids);
+        REQUIRE(selected_label_ids.has_value());
+        REQUIRE(selected_label_ids->size() == 1);
+        CHECK(selected_label_ids->front() == fixture.second_label_id);
+        CHECK(selected_label_ids->front() != fixture.first_label_id);
+    } else {
+        CHECK_FALSE(has_pre_macro_mask);
+    }
+}
 
 TEST_CASE("Manual filament change mode selects the exported BBL tool-change contract",
           "[GCode][GCodeManualFilamentChange][GCodeExportWorkflows]")
@@ -7432,4 +7574,81 @@ TEST_CASE("Print object extrusion extents honor layers, instances, widths, and n
     check_extents(get_print_object_extrusions_extents(*object, 0.2), true, 15.7, 28.5, 63.5, 84.5);
     check_extents(get_print_object_extrusions_extents(*object, 0.399), true, 15.7, 28.5, 63.5, 84.5);
     check_extents(get_print_object_extrusions_extents(*object, 0.4), true, 15.7, 23.6, 69.4, 84.5);
+}
+
+
+TEST_CASE("First-layer scan marker appears only when enabled on BBL printers",
+          "[GCode][GCodeExportWorkflows][FirstLayerScan]")
+{
+    struct ScanEvidence {
+        size_t markers = 0;
+        size_t depositions_before = 0;
+        size_t depositions_after = 0;
+        double max_deposition_z_before = -std::numeric_limits<double>::infinity();
+        std::optional<double> first_deposition_z_after;
+        bool   marker_words_valid = true;
+    };
+    const auto inspect = [](const std::string &text, const DynamicPrintConfig &config) {
+        ScanEvidence evidence;
+        GCodeReader reader;
+        reader.apply_config(config);
+        reader.parse_buffer(text, [&evidence](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.cmd_is("M976")) {
+                float scan = 0.f;
+                float mode = 0.f;
+                ++evidence.markers;
+                evidence.marker_words_valid = line.has_value('S', scan) && line.has_value('P', mode) &&
+                                              std::fabs(scan - 1.f) <= 1e-6f &&
+                                              std::fabs(mode - 1.f) <= 1e-6f;
+            }
+            if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
+                const double z = line.new_Z(self);
+                REQUIRE(std::isfinite(z));
+                if (evidence.markers == 0) {
+                    ++evidence.depositions_before;
+                    evidence.max_deposition_z_before = std::max(evidence.max_deposition_z_before, z);
+                } else {
+                    ++evidence.depositions_after;
+                    if (!evidence.first_deposition_z_after.has_value())
+                        evidence.first_deposition_z_after = z;
+                }
+            }
+        });
+        return evidence;
+    };
+    const auto export_scan_case = [](bool enabled, bool bbl) {
+        DynamicPrintConfig config = gcode_print_variance_contracts::base_config();
+        config.set_deserialize_strict({
+            {"scan_first_layer", enabled},
+            {"layer_height", 0.2},
+            {"initial_layer_print_height", 0.2},
+            {"z_offset", 0.0},
+        });
+        auto output = gcode_print_variance_contracts::fresh_custom_mesh_export(
+            config, make_cube(5., 5., 0.8), bbl);
+        return std::make_pair(std::move(config), std::move(output));
+    };
+
+    const auto [enabled_config, enabled] = export_scan_case(true, true);
+    const auto [disabled_config, disabled] = export_scan_case(false, true);
+    const auto [unsupported_config, unsupported] = export_scan_case(true, false);
+    const auto enabled_motion = gcode_print_variance_contracts::motion_evidence(enabled.text, enabled_config);
+    const auto disabled_motion = gcode_print_variance_contracts::motion_evidence(disabled.text, disabled_config);
+    gcode_print_variance_contracts::require_same_material(enabled_motion, disabled_motion);
+
+    const ScanEvidence enabled_scan = inspect(enabled.text, enabled_config);
+    const ScanEvidence disabled_scan = inspect(disabled.text, disabled_config);
+    const ScanEvidence unsupported_scan = inspect(unsupported.text, unsupported_config);
+    REQUIRE(enabled_scan.markers == 1);
+    CHECK(enabled_scan.marker_words_valid);
+    CHECK(enabled_scan.depositions_before > 0);
+    CHECK(enabled_scan.depositions_after > 0);
+    CHECK_THAT(enabled_scan.max_deposition_z_before, Catch::Matchers::WithinAbs(0.2, 1e-5));
+    REQUIRE(enabled_scan.first_deposition_z_after.has_value());
+    CHECK_THAT(*enabled_scan.first_deposition_z_after, Catch::Matchers::WithinAbs(0.4, 1e-5));
+    CHECK(disabled_scan.markers == 0);
+    CHECK(disabled_scan.depositions_before > 0);
+    CHECK(disabled_scan.depositions_after == 0);
+    CHECK(unsupported_scan.markers == 0);
+    CHECK(gcode_print_variance_contracts::motion_evidence(unsupported.text, unsupported_config).extrusion_moves > 0);
 }
