@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Bounded FanMover mutations for firmware command recognition, delayed insertion, and kickstart threshold contracts.",
+  "description": "Bounded FanMover mutations for firmware commands, delayed insertion, kickstart thresholds, timing, and extrusion conservation.",
   "mutants": [
     {
       "id": "fan-mover-generic-p-parameter",
@@ -32,6 +32,22 @@
       "old": "                            } else if(m_back_buffer_fan_speed < fan_speed - 10){",
       "new": "                            } else if(m_back_buffer_fan_speed <= fan_speed - 10){",
       "description": "Kick-start an exactly ten-percent increase even though the contract requires a strictly larger change.",
+      "test_filter": "FanMover"
+    },
+    {
+      "id": "fan-kickstart-split-time-fraction",
+      "old": "float percent = nb_sec_since_itemtosplit_start / item_to_split->time;",
+      "new": "float percent = 1.f - nb_sec_since_itemtosplit_start / item_to_split->time;",
+      "description": "Reverse the split fraction; the exact new root must report its kickstart placement timing CHECK_THAT failure.",
+      "path": "src/libslic3r/GCode/FanMover.cpp",
+      "test_filter": "FanMover"
+    },
+    {
+      "id": "fan-kickstart-relative-e-remainder",
+      "old": "                item_to_split->de = item_to_split->de * (1 - percent);\n                change_axis_value(item_to_split->raw, 'E', item_to_split->de, 5);",
+      "new": "                item_to_split->de = item_to_split->de * percent;\n                change_axis_value(item_to_split->raw, 'E', item_to_split->de, 5);",
+      "description": "Use the first fraction for both relative-E split segments; the exact new root must report its cumulative-material-path CHECK_THAT failure.",
+      "path": "src/libslic3r/GCode/FanMover.cpp",
       "test_filter": "FanMover"
     }
   ]
