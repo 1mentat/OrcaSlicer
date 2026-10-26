@@ -2193,9 +2193,10 @@
       "dimensions": [
         "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "An isolated row sets initial_layer_travel_speed to its registered 1 mm/s minimum while outer-wall/infill speeds remain 27/43 mm/s; eligible first-layer XY travel emits F60. Existing 50% representative checks remain; no upper bound is registered."
+      "reason": "An isolated row sets initial_layer_travel_speed to its registered 1 mm/s minimum while outer-wall/infill speeds remain 27/43 mm/s; eligible first-layer XY travel emits F60. Existing 50% representative checks remain; no upper bound is registered. A real child process preset resolves a nil High Flow slot from its parent and an explicit Standard slot to 25%; after reversed process-to-physical-tool mapping, exported T0/T1 first-layer XY moves emit F1200/F4500. Parent controls emit F2400/F4500. Both selected tools retain positive extrusion and unchanged deposited path and filament totals."
     },
     "initial_layer_travel_acceleration": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2203,9 +2204,10 @@
       "dimensions": [
         "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "At the registered zero minimum, first-layer travel emits no acceleration override while later travel uses the configured 4000 base. Existing 25% resolution remains; no upper bound is registered."
+      "reason": "At the registered zero minimum, first-layer travel emits no acceleration override while later travel uses the configured 4000 base. Existing 25% resolution remains; no upper bound is registered. A real child process preset inherits the nil High Flow slot and resolves a 30% Standard override against distinct travel-acceleration bases; exported T0/T1 first-layer XY motion emits M204 T1200/T1200, compared with parent T1000/T1200. Both selected tools retain positive extrusion and unchanged deposited path and filament totals."
     },
     "initial_layer_travel_jerk": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2213,9 +2215,10 @@
       "dimensions": [
         "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "At the registered zero minimum, first-layer travel jerk emits no override and preserves the explicit M205 X10 Y10 startup state; later travel emits travel_jerk 12. The parsed startup state is not a claim about firmware defaults when no command was sent. Existing 50% resolution remains; no upper bound is registered."
+      "reason": "At the registered zero minimum, first-layer travel jerk emits no override and preserves the explicit M205 X10 Y10 startup state; later travel emits travel_jerk 12. The parsed startup state is not a claim about firmware defaults when no command was sent. Existing 50% resolution remains; no upper bound is registered. A real child process preset inherits a nil High Flow slot and resolves a 25% Standard override against distinct travel-jerk bases; after reversed process-to-tool mapping, exported T0/T1 first-layer XY motion uses jerk3/12, compared with parent6/12. Both selected tools retain positive extrusion and unchanged deposited path and filament totals."
     },
     "initial_layer_acceleration": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2266,9 +2269,10 @@
       "dimensions": [
         "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "The registered zero minimum falls back to travel_speed and emits F4800 on pure-Z hops; the existing 9 mm/s control emits F540. No upper bound is registered."
+      "reason": "The registered zero minimum falls back to travel_speed and emits F4800 on pure-Z hops; the existing 9 mm/s control emits F540. No upper bound is registered. A real child process preset inherits the nil High Flow slot and explicitly sets Standard to6mm/s; reversed process-to-tool mapping and normal Z-hop export yield T0/T1 pure-Z F360/F480, compared with parentF540/F480. Both selected tools retain positive extrusion and unchanged deposited path and filament totals."
     },
     "bridge_speed": {
       "test": "tests/fff_print/test_gcode.cpp",

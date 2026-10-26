@@ -405,4 +405,74 @@ TEST_CASE("FanMover combines delayed overhang cooling with kickstart timing and 
     CHECK_THAT(g1.back().cumulative_e, Catch::Matchers::WithinAbs(2.f, 0.001));
 }
 
+TEST_CASE("FanMover places a delayed overhang kickstart at the near-end timing boundary", "[FanMover]")
+{
+    GCodeWriter writer;
+    writer.config.gcode_flavor.value = gcfMarlinFirmware;
+    writer.config.use_relative_e_distances.value = false;
+    FanMover mover(writer, 0.41f, false, false, true, 0.5f);
+
+    // The two F600 moves buffer 0.9 s. The delayed baseline belongs at 0.49 s,
+    // 98% through the first 0.5 s move, so the near-end rule keeps that move whole.
+    // The 50% target then follows 0.25 s of kickstart time in the second move.
+    const std::string output = mover.process_gcode(
+        ";TYPE:Overhang wall\n"
+        "G1 F600 X5 Y0 Z0 E1\n"
+        "G1 F600 X9 Y0 Z0 E2\n"
+        "M106 S128", true);
+    const std::vector<ParsedLine> lines = parse_output(output, writer.config);
+    const std::vector<ParsedLine> g1 = moves(lines);
+    const std::vector<std::size_t> move_positions = move_indices(lines);
+    const std::size_t baseline_position = first_line_containing(lines, "M106 S255");
+    const std::size_t target_position = first_line_containing(lines, "M106 S128");
+
+    REQUIRE(baseline_position < lines.size());
+    REQUIRE(target_position < lines.size());
+    REQUIRE(move_positions.size() >= 3);
+    REQUIRE(g1.size() >= 3);
+    CHECK(move_positions.front() < baseline_position);
+    CHECK(baseline_position < move_positions[1]);
+    CHECK(move_positions[1] < target_position);
+    CHECK(target_position < move_positions[2]);
+
+    double elapsed_motion_seconds = 0.0;
+    double baseline_elapsed_seconds = -1.0;
+    double target_elapsed_seconds = -1.0;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (i == baseline_position)
+            baseline_elapsed_seconds = elapsed_motion_seconds;
+        if (i == target_position)
+            target_elapsed_seconds = elapsed_motion_seconds;
+
+        const ParsedLine &line = lines[i];
+        if (line.command != "G1")
+            continue;
+
+        const double dx = double(line.x) - line.start_x;
+        const double dy = double(line.y) - line.start_y;
+        const double dz = double(line.z) - line.start_z;
+        const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        CHECK_THAT(line.feed_mm_min, Catch::Matchers::WithinAbs(600.0, 0.001));
+        if (distance > 0.0) {
+            REQUIRE(line.feed_mm_min > 0.f);
+            elapsed_motion_seconds += distance / (line.feed_mm_min / 60.0);
+        }
+    }
+
+    REQUIRE(baseline_elapsed_seconds >= 0.0);
+    REQUIRE(target_elapsed_seconds >= 0.0);
+    CHECK_THAT(baseline_elapsed_seconds, Catch::Matchers::WithinAbs(0.49, 0.051));
+    CHECK_THAT(target_elapsed_seconds, Catch::Matchers::WithinAbs(0.75, 0.001));
+
+    CHECK(move_positions.size() == 3);
+    CHECK(g1.size() == 3);
+    CHECK(target_position < move_positions[2]);
+    CHECK_THAT(g1[0].x, Catch::Matchers::WithinAbs(5.f, 0.001));
+    CHECK_THAT(g1[0].e, Catch::Matchers::WithinAbs(1.f, 0.001));
+    CHECK_THAT(g1[1].x, Catch::Matchers::WithinAbs(7.5f, 0.001));
+    CHECK_THAT(g1[1].e, Catch::Matchers::WithinAbs(1.625f, 0.001));
+    CHECK_THAT(g1[2].x, Catch::Matchers::WithinAbs(9.f, 0.001));
+    CHECK_THAT(g1[2].e, Catch::Matchers::WithinAbs(2.f, 0.001));
+}
+
 } // namespace Slic3r

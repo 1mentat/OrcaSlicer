@@ -161,6 +161,22 @@
       "new": "            speed = use_first_layer_speed ? NOZZLE_CONFIG(initial_layer_speed) :\n                                            std::max(2.0, NOZZLE_CONFIG(initial_layer_infill_speed));",
       "test_filter": "SettingsSpeedAccelVariance",
       "description": "First-layer sparse infill honors the registered 1 mm/s minimum independently of wall and travel speeds. Clamping it to 2 mm/s must fail the minimum-speed export oracle while representative speeds remain unchanged."
+    },
+    {
+      "description": "A swapped child\u2192parent index maps explicit slot 1 (25%) onto parent slot 0 (HF, base 100) and nil slot 0 leaves parent slot 1 (Standard, base 80) untouched: physical T1 feed becomes 1500 mm/min instead of 4500; physical T0 becomes 2400 instead of 1200.",
+      "id": "wrong-parent-child-travel-speed-slot",
+      "new": "                else {\n                    if (opt == \"initial_layer_travel_speed\" && variant_index.size() == 2) {\n                        std::vector<int> wrong_variant_index = variant_index;\n                        std::swap(wrong_variant_index[0], wrong_variant_index[1]);\n                        opt_vec_src->set_only_diff(opt_vec_dest, wrong_variant_index, stride);\n                    }\n                    else\n                        opt_vec_src->set_only_diff(opt_vec_dest, variant_index, stride);\n                }",
+      "old": "                else\n                    opt_vec_src->set_only_diff(opt_vec_dest, variant_index, stride);",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "test_filter": "NullableTravelSettings"
+    },
+    {
+      "id": "wrong-travel-speed-z-variant-index-v2",
+      "new": "            case coFloats:\n            {\n                ConfigOptionFloats * opt = this->option<ConfigOptionFloats>(key);\n                if (!opt) continue;\n                std::vector<double> new_values;\n\n                new_values.resize(variant_count * stride);\n                for (int e_index = 0; e_index < variant_count; e_index++)\n                {\n                    const int selected_variant = key == \"travel_speed_z\" ? e_index : variant_index[e_index];\n                    for (unsigned int i = 0; i < stride; i++)\n                        new_values[e_index*stride + i] = opt->get_at(selected_variant*stride + i);\n                }\n                opt->values = new_values;\n                break;\n            }",
+      "old": "            case coFloats:\n            {\n                ConfigOptionFloats * opt = this->option<ConfigOptionFloats>(key);\n                if (!opt) continue;\n                std::vector<double> new_values;\n\n                new_values.resize(variant_count * stride);\n                for (int e_index = 0; e_index < variant_count; e_index++)\n                {\n                    for (unsigned int i = 0; i < stride; i++)\n                        new_values[e_index*stride + i] = opt->get_at(variant_index[e_index]*stride + i);\n                }\n                opt->values = new_values;\n                break;\n            }",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "test_filter": "NullableTravelSettings",
+      "description": "Ignore the process variant index for travel_speed_z; the nonidentity compose must produce incorrect per-tool physical Z feeds."
     }
   ]
 }

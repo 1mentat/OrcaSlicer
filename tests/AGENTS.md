@@ -48,6 +48,7 @@ Check these before writing your own setup or output-parsing code.
 - Prefer a flat `TEST_CASE` per behavior, with `GENERATE` for parameterized cases. Reserve `SCENARIO` / `GIVEN` / `WHEN` / `THEN` for genuine shared setup that branches into a few close variations.
 - Set the config keys your test depends on, and derive the expected values from what you set. A 20mm cube sliced at `layer_height` 2 is 10 layers, and the test should state both parts. If a number in your assertion comes from a key you never set, the test is also testing that default.
 - Use registered canonical setting keys in behavior fixtures. `set_deserialize_strict()` may discard obsolete or unknown names; use legacy names only when migration is the behavior being tested.
+- Confirm which static config class owns a setting before testing overrides. A key registered as nullable may belong to `GCodeConfig` or `PrintConfig` and have no object-level override. Trace nil resolution through the actual preset or variant merge, then pass that resolved config to the pipeline; nil does not always mean inheritance or restoration.
 - Assert the defining property, not an incidental value. "Skirt present" or "at least 2 brim loops" survives a refactor; exact coordinates and byte counts do not.
 - Name a regression test for the behavior it protects, never for an issue or PR number.
 - When asserting on G-code, match the meaningful token such as `; skirt` rather than whole lines, whitespace or comment wording. Depend on ordering only when ordering is the contract.

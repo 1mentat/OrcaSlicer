@@ -48,6 +48,10 @@
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 
 #include "libslic3r/GCode/PrintExtents.hpp"
 #include "libslic3r/Polyline.hpp"
@@ -4672,6 +4676,327 @@ TEST_CASE("Nullable object acceleration overrides inherit parent values on expor
     require_first_role_accelerations(explicit_overrides, "Inner wall", 444);
     require_all_role_accelerations(explicit_overrides, "Inner wall", 701, 1);
     require_all_role_accelerations(explicit_overrides, "Top surface", 801);
+}
+
+
+struct NullableToolMotion
+{
+    std::vector<double> first_layer_xy_feeds;
+    std::vector<int>    first_layer_xy_accelerations;
+    std::vector<double> first_layer_xy_jerks;
+    std::vector<double> first_layer_z_feeds;
+    size_t              extrusion_moves = 0;
+    double              xy_path = 0.0;
+    double              filament = 0.0;
+};
+
+struct NullableToolMotionEvidence
+{
+    std::array<NullableToolMotion, 2> tools;
+    std::array<size_t, 2>             tool_selects{};
+};
+
+NullableToolMotionEvidence parse_nullable_tool_motion(const std::string &output,
+                                                       const DynamicPrintConfig &config)
+{
+    NullableToolMotionEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    int current_tool = 0;
+    int layer_index = -1;
+    int travel_acceleration = 0;
+    double travel_jerk = 0.0;
+    const double layer_height = config.opt_float("layer_height");
+    reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.comment().find("LAYER_CHANGE") != std::string_view::npos)
+            ++layer_index;
+        if (line.cmd_is("T0")) {
+            current_tool = 0;
+            ++evidence.tool_selects[0];
+        } else if (line.cmd_is("T1")) {
+            current_tool = 1;
+            ++evidence.tool_selects[1];
+        }
+
+        float value = 0.f;
+        if (line.cmd_is("M204") && line.has_value('T', value))
+            travel_acceleration = int(std::lround(value));
+        else if (line.cmd_is("M205") && line.has_value('X', value))
+            travel_jerk = value;
+
+        if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")))
+            return;
+        REQUIRE(current_tool >= 0);
+        REQUIRE(current_tool < int(evidence.tools.size()));
+        NullableToolMotion &tool = evidence.tools[size_t(current_tool)];
+        const double xy = line.dist_XY(self);
+        const double dz = std::abs(line.dist_Z(self));
+        if (line.extruding(self) && xy > EPSILON) {
+            ++tool.extrusion_moves;
+            tool.xy_path += xy;
+            tool.filament += std::abs(line.dist_E(self));
+        } else if (layer_index == 0 && xy > EPSILON && dz <= EPSILON) {
+            tool.first_layer_xy_feeds.push_back(line.new_F(self));
+            tool.first_layer_xy_accelerations.push_back(travel_acceleration);
+            tool.first_layer_xy_jerks.push_back(travel_jerk);
+        } else if (layer_index == 0 && xy <= EPSILON && dz > EPSILON &&
+                   line.new_Z(self) > layer_height + EPSILON) {
+            tool.first_layer_z_feeds.push_back(line.new_F(self));
+        }
+    });
+    return evidence;
+}
+
+void require_nullable_tool_motion(const NullableToolMotion &motion, double xy_feed,
+                                 int xy_acceleration, double xy_jerk, double z_feed)
+{
+    REQUIRE(motion.extrusion_moves > 0);
+    REQUIRE(std::isfinite(motion.xy_path));
+    REQUIRE(motion.xy_path > 0.0);
+    REQUIRE(std::isfinite(motion.filament));
+    REQUIRE(motion.filament > 0.0);
+
+    REQUIRE_FALSE(motion.first_layer_xy_feeds.empty());
+    for (double value : motion.first_layer_xy_feeds) {
+        CHECK(std::isfinite(value));
+        CHECK_THAT(value, Catch::Matchers::WithinAbs(xy_feed, 1e-3));
+    }
+    REQUIRE_FALSE(motion.first_layer_xy_accelerations.empty());
+    for (int value : motion.first_layer_xy_accelerations)
+        CHECK(value == xy_acceleration);
+    REQUIRE_FALSE(motion.first_layer_xy_jerks.empty());
+    for (double value : motion.first_layer_xy_jerks) {
+        CHECK(std::isfinite(value));
+        CHECK_THAT(value, Catch::Matchers::WithinAbs(xy_jerk, 1e-3));
+    }
+    REQUIRE_FALSE(motion.first_layer_z_feeds.empty());
+    for (double value : motion.first_layer_z_feeds) {
+        CHECK(std::isfinite(value));
+        CHECK_THAT(value, Catch::Matchers::WithinAbs(z_feed, 1e-3));
+    }
+}
+
+void set_nullable_parent_motion(DynamicPrintConfig &config)
+{
+    config.option<ConfigOptionInts>("print_extruder_id", true)->values = {2, 1};
+    config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = {
+        "Direct Drive High Flow", "Direct Drive Standard"};
+    config.option<ConfigOptionFloatsNullable>("travel_speed", true)->values = {100., 80.};
+    config.option<ConfigOptionFloatsNullable>("travel_acceleration", true)->values = {6000., 4000.};
+    config.option<ConfigOptionFloatsNullable>("travel_jerk", true)->values = {20., 12.};
+    config.option<ConfigOptionFloatsNullable>("travel_speed_z", true)->values = {8., 9.};
+    config.option<ConfigOptionFloatsNullable>("default_acceleration", true)->values = {1200., 1200.};
+    config.option<ConfigOptionFloatsNullable>("default_jerk", true)->values = {10., 10.};
+    config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_speed", true)->values = {
+        FloatOrPercent(75., true), FloatOrPercent(50., true)};
+    config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_acceleration", true)->values = {
+        FloatOrPercent(20., true), FloatOrPercent(25., true)};
+    config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_jerk", true)->values = {
+        FloatOrPercent(60., true), FloatOrPercent(50., true)};
+    config.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true)->value.clear();
+}
+
+void write_nullable_child_preset(const boost::filesystem::path &file)
+{
+    boost::filesystem::create_directories(file.parent_path());
+    std::ofstream out(file.string());
+    out << R"({"type":"process","name":"Nullable Child","from":"User","version":"1.0.0","inherits":"Nullable Parent",)"
+        << R"("print_extruder_id":["2","1"],"print_extruder_variant":["Direct Drive High Flow","Direct Drive Standard"],)"
+        << R"("initial_layer_travel_speed":["nil","25%"],)"
+        << R"("initial_layer_travel_acceleration":["nil","30%"],)"
+        << R"("initial_layer_travel_jerk":["nil","25%"],)"
+        << R"("travel_speed_z":["nil","6"]})";
+    REQUIRE(out.good());
+}
+
+DynamicPrintConfig nullable_full_config(Preset &printer, Preset &process,
+                                        const DynamicPrintConfig &project,
+                                        const std::vector<Preset> &filament_presets)
+{
+    std::vector<Preset> filaments = filament_presets;
+    return PresetBundle::construct_full_config(
+        printer, process, project, filaments, true,
+        std::vector<int>{1, 2}, std::vector<int>{int(nvtStandard), int(nvtHighFlow)});
+}
+
+std::string export_nullable_two_tool_motion(const DynamicPrintConfig &input_config)
+{
+    DynamicPrintConfig config = input_config;
+    config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfMarlinFirmware));
+    config.set_key_value("single_extruder_multi_material", new ConfigOptionBool(false));
+    config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));
+    config.set_key_value("z_hop", new ConfigOptionFloats({0.4, 0.4}));
+    config.set_key_value("z_hop_types",
+                         new ConfigOptionEnumsGeneric{ZHopType::zhtNormal, ZHopType::zhtNormal});
+    config.set_key_value("retraction_length", new ConfigOptionFloats({0.8, 0.8}));
+    config.set_key_value("retraction_minimum_travel", new ConfigOptionFloats({0., 0.}));
+    config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
+    config.set_key_value("skirt_loops", new ConfigOptionInt(0));
+    config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btNoBrim));
+    config.set_key_value("raft_layers", new ConfigOptionInt(0));
+    config.set_key_value("machine_start_gcode", new ConfigOptionString("T[initial_tool]\n"));
+    config.set_key_value("machine_end_gcode", new ConfigOptionString(""));
+    config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n"));
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+
+    Print print;
+    Model model;
+    for (int tool = 0; tool < 2; ++tool) {
+        ModelObject *object = model.add_object();
+        REQUIRE(object != nullptr);
+        object->add_volume(cube(12.));
+        ModelInstance *instance = object->add_instance();
+        REQUIRE(instance != nullptr);
+        instance->set_offset(Vec3d(double(tool) * 50., 0., 0.));
+        object->ensure_on_bed();
+        object->config.set_key_value("extruder", new ConfigOptionInt(tool + 1));
+    }
+
+    print.apply(model, config);
+    const auto validation = print.validate();
+    INFO("Print validation error: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    const std::string output = Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    return output;
+}
+
+TEST_CASE("Nullable process travel variants resolve through the parent preset and reach each selected tool",
+          "[GCode][SettingsSpeedAccelVariance][NullableTravelSettings]")
+{
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir temp("nullable-process-travel-resolver");
+    PresetBundle bundle;
+    const fs::path process_dir = temp.path() / PRESET_PRINT_NAME;
+    const fs::path parent_file = process_dir / "base" / "Nullable Parent.json";
+    const fs::path child_file = process_dir / "Nullable Child.json";
+
+    DynamicPrintConfig parent_raw = bundle.prints.default_preset().config;
+    set_nullable_parent_motion(parent_raw);
+    fs::create_directories(parent_file.parent_path());
+    parent_raw.save_to_json(parent_file.string(), "Nullable Parent", "User", "1.0.0");
+    write_nullable_child_preset(child_file);
+
+    PresetsConfigSubstitutions substitutions;
+    bundle.prints.load_presets(temp.path().string(), PRESET_PRINT_NAME, substitutions,
+                               ForwardCompatibilitySubstitutionRule::EnableSilent);
+    REQUIRE(bundle.prints.error_count() == 0);
+    Preset *parent = bundle.prints.find_preset("Nullable Parent");
+    Preset *child = bundle.prints.find_preset("Nullable Child");
+    REQUIRE(parent != nullptr);
+    REQUIRE(child != nullptr);
+    REQUIRE(child->inherits() == "Nullable Parent");
+
+    const auto *child_speed = child->config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_speed");
+    const auto *child_acceleration = child->config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_acceleration");
+    const auto *child_jerk = child->config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_jerk");
+    const auto *child_z_speed = child->config.option<ConfigOptionFloatsNullable>("travel_speed_z");
+    const auto *base_speed = child->config.option<ConfigOptionFloatsNullable>("travel_speed");
+    const auto *base_acceleration = child->config.option<ConfigOptionFloatsNullable>("travel_acceleration");
+    const auto *base_jerk = child->config.option<ConfigOptionFloatsNullable>("travel_jerk");
+    REQUIRE(child_speed != nullptr);
+    REQUIRE(child_acceleration != nullptr);
+    REQUIRE(child_jerk != nullptr);
+    REQUIRE(child_z_speed != nullptr);
+    REQUIRE(base_speed != nullptr);
+    REQUIRE(base_acceleration != nullptr);
+    REQUIRE(base_jerk != nullptr);
+    REQUIRE(child_speed->values.size() == 2);
+    REQUIRE(child_acceleration->values.size() == 2);
+    REQUIRE(child_jerk->values.size() == 2);
+    REQUIRE(child_z_speed->values.size() == 2);
+    REQUIRE(base_speed->values.size() == 2);
+    REQUIRE(base_acceleration->values.size() == 2);
+    REQUIRE(base_jerk->values.size() == 2);
+    for (size_t slot = 0; slot < 2; ++slot) {
+        REQUIRE_FALSE(child_speed->is_nil(slot));
+        REQUIRE_FALSE(child_acceleration->is_nil(slot));
+        REQUIRE_FALSE(child_jerk->is_nil(slot));
+        REQUIRE_FALSE(child_z_speed->is_nil(slot));
+        REQUIRE_FALSE(base_speed->is_nil(slot));
+        REQUIRE_FALSE(base_acceleration->is_nil(slot));
+        REQUIRE_FALSE(base_jerk->is_nil(slot));
+    }
+    CHECK_THAT(child_speed->get_at(0).get_abs_value(base_speed->get_at(0)), Catch::Matchers::WithinAbs(75., 1e-9));
+    CHECK_THAT(child_speed->get_at(1).get_abs_value(base_speed->get_at(1)), Catch::Matchers::WithinAbs(20., 1e-9));
+    CHECK_THAT(child_acceleration->get_at(0).get_abs_value(base_acceleration->get_at(0)), Catch::Matchers::WithinAbs(1200., 1e-9));
+    CHECK_THAT(child_acceleration->get_at(1).get_abs_value(base_acceleration->get_at(1)), Catch::Matchers::WithinAbs(1200., 1e-9));
+    CHECK_THAT(child_jerk->get_at(0).get_abs_value(base_jerk->get_at(0)), Catch::Matchers::WithinAbs(12., 1e-9));
+    CHECK_THAT(child_jerk->get_at(1).get_abs_value(base_jerk->get_at(1)), Catch::Matchers::WithinAbs(3., 1e-9));
+    CHECK_THAT(child_z_speed->get_at(0), Catch::Matchers::WithinAbs(8., 1e-9));
+    CHECK_THAT(child_z_speed->get_at(1), Catch::Matchers::WithinAbs(6., 1e-9));
+
+    Preset printer(Preset::TYPE_PRINTER, "Nullable Test Printer");
+    printer.config = bundle.printers.default_preset().config;
+    printer.config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.4};
+    printer.config.option<ConfigOptionFloats>("extruder_printable_height", true)->values = {0., 0.};
+    printer.config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values = {etDirectDrive, etDirectDrive};
+    printer.config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {nvtStandard, nvtHighFlow};
+    printer.config.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"};
+    printer.config.option<ConfigOptionInts>("printer_extruder_id", true)->values = {1, 2};
+    printer.config.option<ConfigOptionStrings>("printer_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"};
+    printer.config.option<ConfigOptionFloats>("machine_max_acceleration_travel", true)->values = {20000., 20000.};
+    printer.config.option<ConfigOptionFloats>("machine_max_acceleration_extruding", true)->values = {20000., 20000.};
+    printer.config.option<ConfigOptionFloats>("machine_max_acceleration_retracting", true)->values = {20000., 20000.};
+    printer.config.option<ConfigOptionFloats>("machine_max_jerk_x", true)->values = {20000., 20000.};
+    printer.config.option<ConfigOptionFloats>("machine_max_jerk_y", true)->values = {20000., 20000.};
+    printer.config.option<ConfigOptionFloats>("machine_max_speed_x", true)->values = {300., 300.};
+    printer.config.option<ConfigOptionFloats>("machine_max_speed_y", true)->values = {300., 300.};
+    printer.config.option<ConfigOptionFloats>("machine_max_speed_z", true)->values = {30., 30.};
+    printer.config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfMarlinFirmware));
+
+    std::vector<Preset> filaments;
+    for (int tool = 0; tool < 2; ++tool) {
+        Preset filament(Preset::TYPE_FILAMENT, "Nullable Test PLA " + std::to_string(tool + 1));
+        filament.config = bundle.filaments.default_preset().config;
+        filament.config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75};
+        filament.config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+            "Direct Drive Standard", "Direct Drive High Flow"};
+        filament.config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA"};
+        filament.config.option<ConfigOptionStrings>("filament_colour", true)->values = {tool == 0 ? "#FF0000" : "#00FF00"};
+        filament.filament_id = "nullable-test-pla-" + std::to_string(tool + 1);
+        filaments.emplace_back(std::move(filament));
+    }
+
+    DynamicPrintConfig project = bundle.project_config;
+    project.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values = {0., 140., 140., 0.};
+    project.option<ConfigOptionStrings>("filament_colour", true)->values = {"#FF0000", "#00FF00"};
+    project.option<ConfigOptionStrings>("filament_colour_type", true)->values = {"1", "1"};
+    project.option<ConfigOptionStrings>("filament_multi_colour", true)->values = {"#FF0000", "#00FF00"};
+    project.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {nvtStandard, nvtHighFlow};
+    project.option<ConfigOptionEnum<FilamentMapMode>>("filament_map_mode", true)->value = fmmManual;
+    project.option<ConfigOptionInts>("filament_map", true)->values = {1, 2};
+    project.option<ConfigOptionInts>("filament_volume_map", true)->values = {int(nvtStandard), int(nvtHighFlow)};
+
+    DynamicPrintConfig parent_full = nullable_full_config(printer, *parent, project, filaments);
+    DynamicPrintConfig child_full = nullable_full_config(printer, *child, project, filaments);
+    const std::string parent_output = export_nullable_two_tool_motion(parent_full);
+    const std::string child_output = export_nullable_two_tool_motion(child_full);
+    const NullableToolMotionEvidence parent_motion = parse_nullable_tool_motion(parent_output, parent_full);
+    const NullableToolMotionEvidence child_motion = parse_nullable_tool_motion(child_output, child_full);
+    const auto parent_material = gcode_print_variance_contracts::motion_evidence(parent_output, parent_full);
+    const auto child_material = gcode_print_variance_contracts::motion_evidence(child_output, child_full);
+    REQUIRE(parent_material.extrusion_moves > 0);
+    gcode_print_variance_contracts::require_same_material(parent_material, child_material);
+
+    REQUIRE(parent_motion.tool_selects[0] > 0);
+    REQUIRE(parent_motion.tool_selects[1] > 0);
+    REQUIRE(child_motion.tool_selects[0] > 0);
+    REQUIRE(child_motion.tool_selects[1] > 0);
+    require_nullable_tool_motion(parent_motion.tools[0], 2400., 1000, 6., 540.);
+    require_nullable_tool_motion(parent_motion.tools[1], 4500., 1200, 12., 480.);
+    require_nullable_tool_motion(child_motion.tools[0], 1200., 1200, 3., 360.);
+    require_nullable_tool_motion(child_motion.tools[1], 4500., 1200, 12., 480.);
+
+    for (size_t tool = 0; tool < parent_motion.tools.size(); ++tool) {
+        CHECK(parent_motion.tools[tool].extrusion_moves == child_motion.tools[tool].extrusion_moves);
+        CHECK_THAT(child_motion.tools[tool].xy_path,
+                   Catch::Matchers::WithinRel(parent_motion.tools[tool].xy_path, 1e-6));
+        CHECK_THAT(child_motion.tools[tool].filament,
+                   Catch::Matchers::WithinRel(parent_motion.tools[tool].filament, 1e-6));
+    }
 }
 
 } // namespace settings_speed_accel_contracts
