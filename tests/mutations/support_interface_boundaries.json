@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Support interface minimum-zero behavior checked through emitted base and interface material.",
+  "mutants": [
+    {
+      "id": "support-interface-minimum-zero-gate-ignored",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "const bool top_interfaces = support_params.num_top_interface_layers > 0;",
+      "new": "const bool top_interfaces = support_params.num_top_interface_layers >= 0;",
+      "test_filter": "SupportMaterial",
+      "description": "Treat a configured zero top-interface count as enabled; the public tunnel fixture must retain base support and emit no interface layers when both counts are zero."
+    }
+  ]
+}

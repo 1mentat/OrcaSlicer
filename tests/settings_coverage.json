@@ -527,19 +527,21 @@
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Configured top interface counts one, two, three, four, and six are checked against emitted support-interface layers; the full integer range is not claimed."
+      "reason": "Configured top interface counts one, two, three, four, and six match the emitted support-interface layer counts. The registered minimum is 0 in PrintConfig.cpp; the existing tunnel-fixture minimum case keeps base support present but emits exactly zero interface layers. The full integer range remains unclaimed."
     },
     "support_interface_bottom_layers": {
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Bottom interface counts zero, one, three, and six plus the top-count sentinel are checked in emitted support layers; full boundary coverage is not claimed."
+      "reason": "Bottom interface counts zero, one, three, and six plus the top-count sentinel are checked in emitted support layers. PrintConfig.cpp registers the minimum -1 sentinel (“same as top”); the existing public test compares top=3/bottom=-1 to top=3/bottom=3. The upper integer range remains unclaimed."
     },
     "support_interface_pattern": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -554,10 +556,11 @@
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Bottom interface spacing zero and four are compared across support styles and require denser output at zero; numeric boundaries are not claimed."
+      "reason": "Bottom interface spacing values 0.0 (registered minimum) and 4.0 are compared across normal and four tree styles and require denser emitted interface paths at zero. Higher values and broader interactions remain unclaimed."
     },
     "gcode_flavor": {
       "test": "tests/fff_print/test_gcodewriter.cpp",
@@ -3112,10 +3115,11 @@
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Top interface spacing values 0.0 and 4.0 are compared on the same capital fixture; both emit finite interface support and the solid case has more than 1.5 times the sparse case's interface length. The numeric boundary and broader interactions remain unclaimed."
+      "reason": "Top interface spacing values 0.0 (registered minimum) and 4.0 are compared on the same capital fixture; both emit finite interface support and the solid case has more than 1.5 times the sparse case's interface length. Higher spacing values and broader interactions remain unclaimed."
     },
     "support_object_xy_distance": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -3130,19 +3134,21 @@
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Top Z gaps 0.0 and 0.4 are compared with four top interface layers; both emit finite interface support and their maximum interface Z positions differ by more than 0.1. The numeric domain and independent-layer-height interactions remain unclaimed. The TreeSupport roof-contact cases also compare 0.0 and 0.2 mm gaps on broad and subminimum-area cap overhangs: zero-gap tips preserve an interface at the underside, while the subminimum positive-gap control emits regular support one layer below."
+      "reason": "Top Z gaps 0.0 (registered minimum) and 0.4 are compared with four top interface layers; both emit finite interface support and their maximum interface Z positions differ by more than 0.1. Existing TreeSupport roof-contact cases also compare 0.0 and 0.2 mm gaps on broad and subminimum-area cap overhangs: zero-gap tips preserve an interface at the underside, while the subminimum positive-gap control emits regular support one layer below. Higher values and independent-layer-height interactions remain unclaimed."
     },
     "support_bottom_z_distance": {
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Bottom Z gaps 0.0 and 0.4 are compared on the tunnel fixture with four bottom interface layers; both emit finite interface support and their minimum interface Z positions differ by more than 0.1. The numeric domain and top-gap interaction matrix remain unclaimed."
+      "reason": "Bottom Z gaps 0.0 (registered minimum) and 0.4 are compared on the tunnel fixture with four bottom interface layers; both emit finite interface support and their minimum interface Z positions differ by more than 0.1. The upper numeric range and top-gap interaction matrix remain unclaimed."
     },
     "support_filament": {
       "test": "tests/fff_print/test_support_material.cpp",
