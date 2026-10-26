@@ -362,32 +362,30 @@ TEST_CASE("Enabling separated infill recomputes body origins", "[PrintObject][In
 TEST_CASE("Surface centering survives changes to separated infill settings", "[PrintObject][SurfaceInfill][SurfaceCenteringMatrix][Regression]")
 {
     const std::string pattern = GENERATE("archimedeanchords", "octagramspiral");
-    const std::string initial_center = GENERATE("each_surface", "each_model", "each_assembly");
     const std::string final_center = GENERATE("each_surface", "each_model", "each_assembly");
     const bool separated = GENERATE(false, true);
     const std::string top_order = GENERATE("default", "outward", "inward");
     const std::string bottom_order = top_order == "outward" ? "inward" : top_order == "inward" ? "outward" : "default";
     const std::string density = GENERATE("80%", "100%");
-    const bool change_center = initial_center != final_center;
-    CAPTURE(pattern, initial_center, final_center, separated, top_order, bottom_order, density);
+    CAPTURE(pattern, final_center, separated, top_order, bottom_order, density);
 
-    auto config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({{"top_surface_pattern", pattern},
-                                   {"bottom_surface_pattern", pattern},
-                                   {"top_surface_fill_order", top_order},
-                                   {"bottom_surface_fill_order", bottom_order},
-                                   {"top_surface_density", density},
-                                   {"bottom_surface_density", density},
-                                   {"center_of_surface_pattern", initial_center},
-                                   {"separated_infills", change_center ? separated : !separated},
-                                   {"sparse_infill_pattern", "rectilinear"},
-                                   {"sparse_infill_density", "15%"},
-                                   {"top_shell_layers", 2},
-                                   {"bottom_shell_layers", 2},
-                                   {"top_shell_thickness", 0},
-                                   {"bottom_shell_thickness", 0},
-                                   {"layer_height", 0.2},
-                                   {"initial_layer_print_height", 0.2}});
+    auto final_config = DynamicPrintConfig::full_print_config();
+    final_config.set_deserialize_strict({{"top_surface_pattern", pattern},
+                                         {"bottom_surface_pattern", pattern},
+                                         {"top_surface_fill_order", top_order},
+                                         {"bottom_surface_fill_order", bottom_order},
+                                         {"top_surface_density", density},
+                                         {"bottom_surface_density", density},
+                                         {"center_of_surface_pattern", final_center},
+                                         {"separated_infills", separated},
+                                         {"sparse_infill_pattern", "rectilinear"},
+                                         {"sparse_infill_density", "15%"},
+                                         {"top_shell_layers", 2},
+                                         {"bottom_shell_layers", 2},
+                                         {"top_shell_thickness", 0},
+                                         {"bottom_shell_thickness", 0},
+                                         {"layer_height", 0.2},
+                                         {"initial_layer_print_height", 0.2}});
 
     // Orca: Two disconnected bodies exercise per-body centering. The offset tower also
     // makes each-surface and each-model centering differ on the top surfaces.
@@ -431,55 +429,68 @@ TEST_CASE("Surface centering survives changes to separated infill settings", "[P
         return result;
     };
 
-    Print print;
-    Model model;
-    init_print({mesh}, print, model, config, nullptr, false);
-    print.process();
-    const auto initial = surface_fills(print);
-    config.set_deserialize_strict({{"center_of_surface_pattern", final_center}, {"separated_infills", separated}});
-    print.apply(model, config);
-    // Orca: Preparation owns the body origins, and its invalidation must also force
-    // regeneration of top/bottom extrusion paths, even when sparse infill is unchanged.
-    CHECK_FALSE(print.objects().front()->is_step_done(posPrepareInfill));
-    CHECK_FALSE(print.objects().front()->is_step_done(posInfill));
-    print.process();
-    const auto resliced = surface_fills(print);
+    // Orca: The final-state reference depends only on the outer settings. Reuse it for
+    // each initial center instead of slicing the same target print three times.
+    const auto fresh = [&] {
+        Print fresh_print;
+        Model fresh_model;
+        init_print({mesh}, fresh_print, fresh_model, final_config, nullptr, false);
+        fresh_print.process();
+        return surface_fills(fresh_print);
+    }();
 
-    Print fresh_print;
-    Model fresh_model;
-    init_print({mesh}, fresh_print, fresh_model, config, nullptr, false);
-    fresh_print.process();
-    const auto fresh = surface_fills(fresh_print);
-    REQUIRE_FALSE(fresh.empty());
-    REQUIRE(resliced.size() == fresh.size());
-    std::set<ExtrusionRole> roles;
-    bool changed_paths = false;
-    for (const auto &entry : fresh) {
-        CAPTURE(entry.first.first, entry.first.second);
-        REQUIRE_FALSE(entry.second.paths.empty());
-        roles.insert(entry.first.second);
-        REQUIRE(resliced.count(entry.first) == 1);
-        REQUIRE(initial.count(entry.first) == 1);
-        const auto &actual = resliced.at(entry.first);
-        const auto &expected = entry.second;
-        const auto &before = initial.at(entry.first);
-        CHECK((actual.paths == expected.paths));
-        if (!change_center)
-            CHECK((actual.paths == before.paths));
-        if (top_order != "default") {
-            CHECK(expected.protected_order);
-            CHECK(actual.protected_order);
-            CHECK(before.protected_order);
+    for (const char *initial_center_value : {"each_surface", "each_model", "each_assembly"}) {
+        const std::string initial_center = initial_center_value;
+        const bool change_center = initial_center != final_center;
+        CAPTURE(initial_center, change_center);
+
+        auto config = final_config;
+        config.set_deserialize_strict({{"center_of_surface_pattern", initial_center},
+                                       {"separated_infills", change_center ? separated : !separated}});
+        Print print;
+        Model model;
+        init_print({mesh}, print, model, config, nullptr, false);
+        print.process();
+        const auto initial = surface_fills(print);
+        config.set_deserialize_strict({{"center_of_surface_pattern", final_center}, {"separated_infills", separated}});
+        print.apply(model, config);
+        // Orca: Preparation owns the body origins, and its invalidation must also force
+        // regeneration of top/bottom extrusion paths, even when sparse infill is unchanged.
+        CHECK_FALSE(print.objects().front()->is_step_done(posPrepareInfill));
+        CHECK_FALSE(print.objects().front()->is_step_done(posInfill));
+        print.process();
+        const auto resliced = surface_fills(print);
+
+        REQUIRE_FALSE(fresh.empty());
+        REQUIRE(resliced.size() == fresh.size());
+        std::set<ExtrusionRole> roles;
+        bool changed_paths = false;
+        for (const auto &entry : fresh) {
+            CAPTURE(entry.first.first, entry.first.second);
+            REQUIRE_FALSE(entry.second.paths.empty());
+            roles.insert(entry.first.second);
+            REQUIRE(resliced.count(entry.first) == 1);
+            REQUIRE(initial.count(entry.first) == 1);
+            const auto &actual = resliced.at(entry.first);
+            const auto &expected = entry.second;
+            const auto &before = initial.at(entry.first);
+            CHECK((actual.paths == expected.paths));
+            if (!change_center)
+                CHECK((actual.paths == before.paths));
+            if (top_order != "default") {
+                CHECK(expected.protected_order);
+                CHECK(actual.protected_order);
+                CHECK(before.protected_order);
+            }
+            changed_paths |= expected.paths != before.paths;
         }
-        changed_paths |= expected.paths != before.paths;
+        CHECK(roles.count(erTopSolidInfill) == 1);
+        CHECK(roles.count(erBottomSurface) == 1);
+        // Orca: Guard against a vacuous comparison: changing surface centering must change
+        // the printed pattern, while toggling separated sparse infill must leave it alone.
+        CHECK(changed_paths == change_center);
     }
-    CHECK(roles.count(erTopSolidInfill) == 1);
-    CHECK(roles.count(erBottomSurface) == 1);
-    // Orca: Guard against a vacuous comparison: changing surface centering must change
-    // the printed pattern, while toggling separated sparse infill must leave it alone.
-    CHECK(changed_paths == change_center);
 }
-
 TEST_CASE("Separated infill keeps fragmented and nested bodies independent", "[PrintObject][SurfaceInfill][Regression]")
 {
     constexpr size_t grid_size = 8;
