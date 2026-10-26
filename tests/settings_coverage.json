@@ -933,9 +933,11 @@
       "test": "tests/fff_print/test_layer_height_variance.cpp",
       "tag": "[LayerHeightVariance]",
       "dimensions": [
-        "representative_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The direct nozzle-bound contract checks configured 0.1 and 0.35 mm minimums and verifies they are returned for the corresponding extruders. It does not exercise numeric boundaries or a full Print pipeline."
+      "reason": "The option is registered with an inclusive 0 mm minimum and no maximum. The direct nozzle-bound contract checks configured minima of 0.1 and 0.35 mm; exact full-print exports cover 0.1, 0.2, and 0.3 mm layer heights. A separate adaptive Print case sets min_layer_height to the zero boundary and checks the emitted minimum layer physically. Raising the production 0.07 mm fallback to 0.09 mm fails the ordinary emitted_minimum_layer CHECK at test_layer_height_variance.cpp:177; the focused baseline and restored controls pass. No maximum-domain claim is made because the setting has no registered maximum."
     },
     "nozzle_diameter": {
       "test": "tests/fff_print/test_layer_height_variance.cpp",
@@ -4074,10 +4076,10 @@
       "test": "tests/fff_print/test_perimeters.cpp",
       "tag": "[FuzzySkinModePipeline]",
       "dimensions": [
-        "representative_values",
+        "enum_values",
         "pipeline_oracle"
       ],
-      "reason": "Accepted703 Arachne pipeline test runs displacement, extrusion and combined on the same four-layer cube with a disabled control. Displacement preserves the width range; extrusion increases width while preserving interior XY positions; combined increases width and offsets interior geometry. Displacement itself lacks a positive geometric-offset assertion, so exhaustive mode-specific behavior is not claimed."
+      "reason": "The three registered Arachne mode values (displacement, extrusion, combined) are each sliced on the same four-layer cube against a disabled-fuzzy control. Displacement preserves the control width range; extrusion increases width while preserving interior XY positions; combined increases width and offsets interior geometry. The extrusion-width regression is caught by the ordinary physical CHECK at test_perimeters.cpp:1556, with both focused roots passing before and after restoration. The separate Perlin displacement test requires a positive interior transverse offset, so the mode evidence does not lack a positive geometric displacement witness. Interactions across the noise and mode settings remain unclaimed."
     },
     "input_shaping_type": {
       "test": "tests/fff_print/test_gcode.cpp",

@@ -18,7 +18,9 @@
 #include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Point.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "test_helpers.hpp"
@@ -115,6 +117,64 @@ TEST_CASE("Layer-height settings derive safe nozzle bounds", "[LayerHeightVarian
                Catch::Matchers::WithinAbs(0.3, 1e-9)); // 3/4 of a 0.4 mm nozzle.
     CHECK_THAT(Slicing::max_layer_height_from_nozzle(config, 2),
                Catch::Matchers::WithinAbs(0.35, 1e-9)); // Never below the configured minimum.
+}
+
+TEST_CASE("Zero adaptive minimum reaches real sliced layers through PrintObject parameters",
+          "[LayerHeightVariance]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", "0.4"},
+        {"min_layer_height", "0"},
+        {"max_layer_height", "0.3"},
+        {"precise_z_height", false},
+        {"use_relative_e_distances", 1},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+
+    Model model;
+    ModelObject *object = model.add_object();
+    TriangleMesh sloped_pyramid = mesh(TestMesh::pyramid);
+    // Shallow facets request less than the nozzle minimum under highest adaptive quality.
+    sloped_pyramid.scale(Vec3f(1.f, 1.f, 0.05f));
+    object->add_volume(std::move(sloped_pyramid));
+    object->add_instance();
+
+    const SlicingParameters params = PrintObject::slicing_parameters(
+        config, *object, 0.f, Vec3d(1., 1., 1.));
+    REQUIRE(params.valid);
+    CHECK_THAT(params.min_layer_height, Catch::Matchers::WithinAbs(0.07, 1e-9));
+
+    const std::vector<double> profile = layer_height_profile_adaptive(params, *object, 0.f);
+    check_profile_shape(profile, params);
+    bool profile_uses_minimum = false;
+    for (size_t i = 1; i < profile.size(); i += 2)
+        profile_uses_minimum |= std::abs(profile[i] - params.min_layer_height) < EPSILON;
+    REQUIRE(profile_uses_minimum);
+
+    // The normal Print slice path consumes the same profile and parameter object.
+    object->layer_height_profile.set(profile);
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE_FALSE(print.objects().empty());
+    const auto layers = print.objects().front()->layers();
+    REQUIRE(layers.size() > 2);
+    bool emitted_minimum_layer = false;
+    for (const Layer *layer : layers) {
+        REQUIRE(std::isfinite(layer->height));
+        CHECK(layer->height >= params.min_layer_height - EPSILON);
+        CHECK(layer->height <= params.max_layer_height + EPSILON);
+        emitted_minimum_layer |= std::abs(layer->height - 0.07) < EPSILON;
+    }
+    CHECK(emitted_minimum_layer);
 }
 
 TEST_CASE("Layer-height ranges remain contiguous and generate bounded object layers", "[LayerHeightVariance]")

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Bounded layer-height mutants checked by nozzle limits, contiguous ranges, adaptive bounds, smoothing, and editing contracts.",
+  "description": "Bounded layer-height mutants checked by nozzle limits, contiguous ranges, adaptive bounds, smoothing, editing, and real sliced-layer contracts.",
   "mutants": [
     {
       "id": "layer-height-nozzle-default-max",
@@ -33,6 +33,14 @@
       "new": "out.push_back(print_z);\n        print_z += slicing_params.layer_height;\n        slice_z = print_z + 0.5 * slicing_params.min_layer_height;",
       "description": "Accumulate the fixed nominal layer height instead of the selected variable height.",
       "test_filter": "LayerHeightVariance"
+    },
+    {
+      "id": "min-layer-height-zero-default-fallback",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "static const coordf_t MIN_LAYER_HEIGHT_DEFAULT = 0.07;",
+      "new": "static const coordf_t MIN_LAYER_HEIGHT_DEFAULT = 0.09;",
+      "test_filter": "LayerHeightVariance",
+      "description": "Raise the zero min_layer_height fallback from 0.07 to 0.09 mm. The adaptive Print contract requires physical sliced layers to reach the documented 0.07 mm minimum."
     }
   ]
 }

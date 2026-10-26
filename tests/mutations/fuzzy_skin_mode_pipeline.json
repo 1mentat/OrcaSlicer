@@ -16,7 +16,7 @@
       "old": "                    out.emplace_back(pa, std::max(p1.w + r + min_extrusion_width,  min_extrusion_width), p1.perimeter_index); ",
       "new": "                    out.emplace_back(pa, p1.w, p1.perimeter_index);",
       "test_filter": "FuzzySkinModePipeline",
-      "description": "Remove the positive extrusion-mode width adjustment. The extrusion minimum-width oracle should reject this non-crash mutation."
+      "description": "Remove the positive extrusion-mode width adjustment. The physical maximum-width CHECK must reject this mutation before the interior-sample guard."
     },
     {
       "id": "fuzzy-mode-combined-offset-removed",
