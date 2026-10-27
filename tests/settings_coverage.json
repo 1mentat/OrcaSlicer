@@ -2272,9 +2272,10 @@
       "dimensions": [
         "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "With machine-limit emission disabled and short-travel thresholds set to zero, registered travel-acceleration zero emits no M204 T override; the parsed unset state is not physical firmware acceleration zero. A 4000 control emits on later travel. Existing 25% resolution and direct writer 1234 checks remain; no upper bound is registered."
+      "reason": "The public exported-motion case disables machine-limit emission and pins the initial-layer travel-acceleration override to zero. With travel_acceleration=4000, the inherited object state emits positive later-travel acceleration commands at 4000; a one-slot nil model-object override preserves the same commands, while an explicit object override emits 2500. The test compares parsed motion and preserves the same positive material evidence across inherited, nil, and explicit states. Existing zero-boundary, 25% resolution, and direct-writer 1234 checks remain; no upper bound is registered."
     },
     "travel_speed_z": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -3823,10 +3824,12 @@
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[GCode][SmallPerimeterSpeed]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "The accepted small-perimeter pipeline case compares threshold 8 mm against threshold 0 disabling, under both absolute and percent speed rows, and checks later-layer outer-wall feeds plus unchanged extrusion/path/material invariants. This is representative threshold output evidence only; numeric boundary coverage and nullable semantics are not claimed."
+      "reason": "The six-layer 12 mm cube exercises the registered zero minimum plus 7 mm and 8 mm threshold values around its approximately 46 mm outer loop: 7 mm maps below the loop boundary and retains 50 mm/s outer-wall speed, while 8 mm maps above it and selects the configured 15 mm/s small-perimeter speed; threshold 0 disables that speed. With parent threshold 8, a nil model-object small_perimeter_threshold inherits and emits 15 mm/s, while explicit object threshold 0 disables it and emits 50 mm/s. Absolute 15 and 35% representative rows remain. All rows retain positive parsed extrusion, XY path, and filament with equal material totals; the object option merges into the owning PrintRegionConfig."
     },
     "support_air_filtration": {
       "test": "tests/fff_print/test_gcode.cpp",

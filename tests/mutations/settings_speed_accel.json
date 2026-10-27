@@ -177,6 +177,22 @@
       "path": "src/libslic3r/PrintConfig.cpp",
       "test_filter": "NullableTravelSettings",
       "description": "Ignore the process variant index for travel_speed_z; the nonidentity compose must produce incorrect per-tool physical Z feeds."
+    },
+    {
+      "id": "printobject-travel-acceleration-object-nil-collapses-to-zero",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "        src_normalized.normalize_fdm();\n",
+      "new": "        src_normalized.normalize_fdm();\n        if (auto *travel_acceleration = src_normalized.opt<ConfigOptionFloatsNullable>(\"travel_acceleration\");\n            travel_acceleration != nullptr && travel_acceleration->size() == 1 &&\n            travel_acceleration->is_nil(0))\n            travel_acceleration->values[0] = 0.0;\n",
+      "description": "Treat a one-slot nil model-object travel_acceleration as explicit zero. The exported-motion oracle requires nil to retain parent travel acceleration 4000, with explicit 2500 as a distinct control.",
+      "test_filter": "SettingsSpeedAccelVariance"
+    },
+    {
+      "id": "printobject-small-perimeter-threshold-region-object-nil-collapses-to-zero",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "        if (it->first != key_extruder)\n            if (ConfigOption* my_opt = out.option(it->first, false); my_opt != nullptr) {\n                if (one_of(it->first, keys_extruders)) {\n",
+      "new": "        if (it->first != key_extruder)\n            if (ConfigOption* my_opt = out.option(it->first, false); my_opt != nullptr) {\n                if (it->first == \"small_perimeter_threshold\") {\n                    const auto *small_perimeter_threshold =\n                        static_cast<const ConfigOptionFloatsNullable *>(it->second.get());\n                    if (small_perimeter_threshold->size() == 1 && small_perimeter_threshold->is_nil(0)) {\n                        const ConfigOptionFloatsNullable zero_threshold({0.0});\n                        my_opt->set(&zero_threshold);\n                        continue;\n                    }\n                }\n                if (one_of(it->first, keys_extruders)) {\n",
+      "description": "Treat a one-slot nil small_perimeter_threshold as explicit zero in the PrintRegionConfig merge. The physical nil-inherits-8 row must retain 15 mm/s, while an explicit zero threshold emits the ordinary 50 mm/s feed.",
+      "test_filter": "SmallPerimeterSpeed"
     }
   ]
 }

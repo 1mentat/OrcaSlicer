@@ -3954,11 +3954,17 @@ TEST_CASE("Small perimeter speed resolves absolute and percent feeds and honors 
         const char *small_speed;
         double      threshold;
         double      expected_mm_s;
+        enum class ObjectThresholdOverride { None, Nil, Zero } object_threshold_override;
     };
-    const std::array<SpeedRow, 3> rows{{
-        {"absolute", "15", 8.0, 15.0},
-        {"percent", "35%", 8.0, 17.5},
-        {"threshold-disabled", "15", 0.0, 50.0},
+    using ObjectThresholdOverride = SpeedRow::ObjectThresholdOverride;
+    const std::array<SpeedRow, 6> rows{{
+        {"absolute", "15", 8.0, 15.0, ObjectThresholdOverride::None},
+        {"percent", "35%", 8.0, 17.5, ObjectThresholdOverride::None},
+        // A 12 mm square has an outer loop near 46 mm: 7 mm maps to 44 mm and 8 mm to 50 mm.
+        {"below-loop-boundary", "15", 7.0, 50.0, ObjectThresholdOverride::None},
+        {"threshold-disabled", "15", 0.0, 50.0, ObjectThresholdOverride::None},
+        {"nil-object-threshold-inherits-parent", "15", 8.0, 15.0, ObjectThresholdOverride::Nil},
+        {"zero-object-threshold-disables-small-speed", "15", 8.0, 50.0, ObjectThresholdOverride::Zero},
     }};
 
     DynamicPrintConfig shared = motion_config();
@@ -4021,10 +4027,30 @@ TEST_CASE("Small perimeter speed resolves absolute and percent feeds and honors 
         return result;
     };
 
-    const auto export_six_layer_cube = [](const DynamicPrintConfig &config) {
+    const auto export_six_layer_cube = [](const DynamicPrintConfig &config,
+                                          ObjectThresholdOverride object_threshold_override) {
         Model model;
         Print print;
         init_print({make_cube(12.0, 12.0, 1.2)}, print, model, config);
+        if (object_threshold_override != ObjectThresholdOverride::None) {
+            REQUIRE_FALSE(model.objects.empty());
+            ModelObject *object = model.objects.front();
+            REQUIRE(object != nullptr);
+            if (object_threshold_override == ObjectThresholdOverride::Nil) {
+                object->config.set_key_value("small_perimeter_threshold",
+                    new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value()}));
+                const ConfigOption *option = object->config.option("small_perimeter_threshold");
+                REQUIRE(option != nullptr);
+                REQUIRE(option->is_nil());
+            } else {
+                object->config.set_key_value(
+                    "small_perimeter_threshold", new ConfigOptionFloatsNullable({0.0}));
+                const ConfigOption *option = object->config.option("small_perimeter_threshold");
+                REQUIRE(option != nullptr);
+                REQUIRE_FALSE(option->is_nil());
+            }
+            (void)print.apply(model, config);
+        }
         const auto validation = print.validate();
         INFO(validation.string);
         REQUIRE(validation.string.empty());
@@ -4039,14 +4065,16 @@ TEST_CASE("Small perimeter speed resolves absolute and percent feeds and honors 
     };
 
     std::optional<MaterialEvidence> reference_material;
-    for (const SpeedRow &row : rows) {
+    std::optional<std::vector<double>> positive_parent_threshold_feeds;
+    for (size_t row_index = 0; row_index < rows.size(); ++row_index) {
+        const SpeedRow &row = rows[row_index];
         CAPTURE(row.name);
         DynamicPrintConfig config = shared;
         config.set_deserialize_strict({
             {"small_perimeter_speed", std::string(row.small_speed)},
             {"small_perimeter_threshold", row.threshold},
         });
-        const std::string output = export_six_layer_cube(config);
+        const std::string output = export_six_layer_cube(config, row.object_threshold_override);
         REQUIRE_FALSE(output.empty());
 
         const MaterialEvidence material = read_material(output, config);
@@ -4066,15 +4094,32 @@ TEST_CASE("Small perimeter speed resolves absolute and percent feeds and honors 
         REQUIRE(feeds.finite);
         REQUIRE(feeds.feeds.size() > 1);
         size_t samples = 0;
+        bool all_feeds_match_expected = true;
+        std::vector<double> observed_feeds;
         for (size_t layer = 1; layer < feeds.feeds.size(); ++layer) {
             INFO("row=" << row.name << " layer=" << layer);
             REQUIRE_FALSE(feeds.feeds[layer].empty());
             for (const double feed : feeds.feeds[layer]) {
-                CHECK_THAT(feed, Catch::Matchers::WithinAbs(row.expected_mm_s * 60.0, 0.25));
+                all_feeds_match_expected = all_feeds_match_expected &&
+                    std::abs(feed - row.expected_mm_s * 60.0) <= 0.25;
+                observed_feeds.push_back(feed);
                 ++samples;
             }
         }
         REQUIRE(samples > 0);
+        if (row_index == 0) {
+            positive_parent_threshold_feeds = observed_feeds;
+        } else if (row.object_threshold_override == ObjectThresholdOverride::Nil) {
+            bool same_as_positive_parent = positive_parent_threshold_feeds.has_value() &&
+                observed_feeds.size() == positive_parent_threshold_feeds->size();
+            if (same_as_positive_parent) {
+                for (size_t i = 0; i < observed_feeds.size(); ++i)
+                    same_as_positive_parent = same_as_positive_parent &&
+                        std::abs(observed_feeds[i] - (*positive_parent_threshold_feeds)[i]) <= 0.25;
+            }
+            all_feeds_match_expected = all_feeds_match_expected && same_as_positive_parent;
+        }
+        CHECK(all_feeds_match_expected);
     }
 }
 
@@ -4600,17 +4645,23 @@ TEST_CASE("Nullable object acceleration overrides inherit parent values on expor
     DynamicPrintConfig config = motion_config();
     config.set_deserialize_strict({
         {"default_acceleration", 1200},
+        {"travel_acceleration", 4000},
         {"outer_wall_acceleration", 611},
         {"initial_layer_acceleration", 333},
         {"inner_wall_acceleration", 777},
         {"top_surface_acceleration", 888},
+        {"initial_layer_travel_acceleration", "0"},
+        {"retraction_minimum_travel", 0.0},
+        {"emit_machine_limits_to_gcode", false},
     });
-    const std::array<std::pair<const char *, double>, 3> overrides{{
+    const std::array<std::pair<const char *, double>, 4> overrides{{
         {"initial_layer_acceleration", 444},
         {"inner_wall_acceleration", 701},
         {"top_surface_acceleration", 801},
+        {"travel_acceleration", 2500},
     }};
-    const auto export_object_state = [&config, &overrides](int state) {
+    std::optional<gcode_print_variance_contracts::MotionEvidence> reference_material;
+    const auto export_object_state = [&config, &overrides, &reference_material](int state) {
         Model model;
         Print print;
         TriangleMesh shape = cube(12.0);
@@ -4643,6 +4694,11 @@ TEST_CASE("Nullable object acceleration overrides inherit parent values on expor
         REQUIRE(validation.string.empty());
         const std::string output = gcode(print);
         REQUIRE_FALSE(output.empty());
+        const auto material = gcode_print_variance_contracts::motion_evidence(output, config);
+        if (!reference_material.has_value())
+            reference_material = material;
+        else
+            gcode_print_variance_contracts::require_same_material(*reference_material, material);
         return parse_motion(output, config);
     };
 
@@ -4676,6 +4732,14 @@ TEST_CASE("Nullable object acceleration overrides inherit parent values on expor
     require_first_role_accelerations(explicit_overrides, "Inner wall", 444);
     require_all_role_accelerations(explicit_overrides, "Inner wall", 701, 1);
     require_all_role_accelerations(explicit_overrides, "Top surface", 801);
+
+    REQUIRE_FALSE(inherited.travel_accelerations.empty());
+    CHECK(std::all_of(inherited.travel_accelerations.begin(), inherited.travel_accelerations.end(),
+                      [](int value) { return value == 4000; }));
+    CHECK(nil_overrides.travel_accelerations == inherited.travel_accelerations);
+    REQUIRE_FALSE(explicit_overrides.travel_accelerations.empty());
+    CHECK(std::all_of(explicit_overrides.travel_accelerations.begin(), explicit_overrides.travel_accelerations.end(),
+                      [](int value) { return value == 2500; }));
 }
 
 
