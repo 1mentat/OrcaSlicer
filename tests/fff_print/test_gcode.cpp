@@ -5013,6 +5013,95 @@ TEST_CASE("Farthest-point timelapse snapshots follow support deposition when no 
     CHECK(control_evidence.inline_snapshots == 0);
 }
 
+namespace {
+
+std::string process_adaptive_pa_bridge_case(const int bridge_role, const float bridge_override)
+{
+    TestGCode gcode;
+    PrintConfig config = direct_print_config();
+    config.gcode_flavor.value = gcfMarlinFirmware; // Serialized as "marlin2".
+    config.gcode_comments.value = true;
+    config.enable_pressure_advance.values = { true };
+    config.adaptive_pressure_advance.values = { true };
+    config.adaptive_pressure_advance_model.values = { "0.10,5,1000\n0.30,15,1000" };
+    config.adaptive_pressure_advance_bridges.values = { bridge_override };
+    gcode.apply_print_config(config);
+    gcode.set_extruders({ 0 });
+    gcode.writer().set_extruder(0);
+
+    AdaptivePAProcessor processor(gcode);
+    std::string layer = "; PA_CHANGE:T0 MM3MM:0.1 ACCEL:1000 BR:" +
+                        std::to_string(bridge_role) + " RC:0 OV:0\n";
+    layer += "G1 F6000\nG1 X10 Y0 E1\n";
+    return processor.process_layer(std::move(layer));
+}
+
+} // namespace
+
+TEST_CASE("Adaptive PA bridge override honors zero and maximum without changing motion",
+          "[GCode][AdaptivePABridgeOverride]")
+{
+    // GCodeConfig stores this as an ordinary per-extruder ConfigOptionFloats field.
+    const ConfigOptionDef *definition = print_config_def.get("adaptive_pressure_advance_bridges");
+    REQUIRE(definition != nullptr);
+    CHECK(definition->type == coFloats);
+    CHECK_THAT(definition->max, Catch::Matchers::WithinAbs(2.0, 1e-12));
+    CHECK(definition->is_value_valid(2.0));
+    CHECK_FALSE(definition->is_value_valid(2.01));
+
+    const PrintConfig defaults = direct_print_config();
+    REQUIRE(defaults.adaptive_pressure_advance_bridges.values.size() == 1);
+    CHECK_THAT(defaults.adaptive_pressure_advance_bridges.get_at(0),
+               Catch::Matchers::WithinAbs(0.0, 1e-12));
+
+    struct Case
+    {
+        int bridge_role;
+        float bridge_override;
+        double expected_pa;
+        bool expect_override_comment;
+    };
+    const std::array<Case, 4> cases{{
+        { 0, 0.f, 0.2, false },
+        { 0, 2.f, 0.2, false },
+        { 1, 0.f, 0.2, false },
+        { 1, 2.f, 2.0, true },
+    }};
+
+    std::vector<std::string> reference_motion;
+    for (size_t i = 0; i < cases.size(); ++i) {
+        const Case &test_case = cases[i];
+        CAPTURE(test_case.bridge_role, test_case.bridge_override);
+        const std::string output = process_adaptive_pa_bridge_case(
+            test_case.bridge_role, test_case.bridge_override);
+
+        const std::vector<std::string> motion = command_lines(output, "G1 ");
+        REQUIRE(motion.size() == 2);
+        CHECK(motion[0] == "G1 F6000");
+        CHECK(motion[1] == "G1 X10 Y0 E1");
+        if (i == 0)
+            reference_motion = motion;
+        else
+            CHECK(motion == reference_motion);
+
+        const std::vector<std::string> pa_commands = command_lines(output, "M900 K");
+        REQUIRE(pa_commands.size() == 1);
+        constexpr std::string_view pa_prefix = "M900 K";
+        const char *value_begin = pa_commands.front().c_str() + pa_prefix.size();
+        char *value_end = nullptr;
+        const double observed_pa = std::strtod(value_begin, &value_end);
+        REQUIRE(value_end != value_begin);
+        const bool value_end_is_boundary = *value_end == '\0' || *value_end == ';' ||
+                                           std::isspace(static_cast<unsigned char>(*value_end));
+        REQUIRE(value_end_is_boundary);
+        CHECK_THAT(observed_pa, Catch::Matchers::WithinAbs(test_case.expected_pa, 1e-6));
+
+        const bool has_override_comment =
+            output.find("APA Model Override (bridge)") != std::string::npos;
+        CHECK(has_override_comment == test_case.expect_override_comment);
+    }
+}
+
 } // namespace gcode_broad_contracts
 
 namespace belt_apron_contracts {

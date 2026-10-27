@@ -2063,6 +2063,230 @@ static Polylines layer_paths(const Layer &layer, ExtrusionRole role)
     return polylines;
 }
 
+namespace infill_setting_geometry_contracts {
+
+static std::vector<double> long_axis_line_positions(const Polylines &paths, bool vertical, bool reverse_normal = false)
+{
+    std::vector<double> positions;
+    for (const Polyline &path : paths)
+        for (size_t i = 1; i < path.points.size(); ++i) {
+            const Point &a = path.points[i - 1];
+            const Point &b = path.points[i];
+            const double dx = unscale<double>(std::abs(b.x() - a.x()));
+            const double dy = unscale<double>(std::abs(b.y() - a.y()));
+            if (vertical ? (dx <= 0.02 && dy >= 6.0) : (dy <= 0.02 && dx >= 6.0))
+                positions.push_back(unscale<double>((vertical ? a.x() : a.y()) * (reverse_normal ? -1 : 1)));
+        }
+    std::sort(positions.begin(), positions.end());
+    positions.erase(std::unique(positions.begin(), positions.end(), [](double a, double b) {
+        return std::abs(a - b) <= 0.04;
+    }), positions.end());
+    return positions;
+}
+
+static Polylines lateral_honeycomb_paths(double angle_degrees)
+{
+    const ConfigOptionDef *angle_definition = print_config_def.get("infill_overhang_angle");
+    REQUIRE(angle_definition != nullptr);
+    REQUIRE(angle_definition->type == coFloat);
+    CHECK_THAT(angle_definition->min, Catch::Matchers::WithinAbs(15., 1e-12));
+    CHECK_THAT(angle_definition->max, Catch::Matchers::WithinAbs(75., 1e-12));
+    REQUIRE(angle_definition->is_value_valid(15.));
+    REQUIRE(angle_definition->is_value_valid(75.));
+
+    // This setting belongs to PrintRegionConfig. Feed its canonical-key value
+    // into the public Fill API so the oracle sees emitted geometry, not a
+    // copied version of the period calculation.
+    PrintRegionConfig region_config;
+    region_config.set_deserialize_strict({{"infill_overhang_angle", angle_degrees}});
+    REQUIRE_THAT(region_config.infill_overhang_angle.value, Catch::Matchers::WithinAbs(angle_degrees, 1e-6));
+
+    ExPolygon expolygon({Point::new_scale(0., 0.), Point::new_scale(20., 0.),
+                         Point::new_scale(20., 20.), Point::new_scale(0., 20.)});
+    Surface surface(stInternal, expolygon);
+    std::unique_ptr<Fill> filler(Fill::new_from_type(ipLateralHoneycomb));
+    filler->angle = 0.f;
+    filler->fixed_angle = true;
+    filler->layer_id = 0;
+    filler->z = 0.45;
+    filler->spacing = 0.45;
+
+    FillParams params;
+    params.pattern = ipLateralHoneycomb;
+    params.density = 0.43f;
+    params.dont_adjust = true;
+    params.anchor_length_max = 0.f;
+    params.infill_overhang_angle = region_config.infill_overhang_angle;
+    params.config = &region_config;
+    return filler->fill_surface(&surface, params);
+}
+
+static DynamicPrintConfig crosszag_shift_config(double shift_step)
+{
+    const ConfigOptionDef *shift_step_definition = print_config_def.get("infill_shift_step");
+    REQUIRE(shift_step_definition != nullptr);
+    REQUIRE(shift_step_definition->type == coFloat);
+    CHECK_THAT(shift_step_definition->min, Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK_THAT(shift_step_definition->max, Catch::Matchers::WithinAbs(10., 1e-12));
+    REQUIRE(shift_step_definition->is_value_valid(0.));
+    REQUIRE(shift_step_definition->is_value_valid(10.));
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", "crosszag"},
+                                   {"sparse_infill_density", "43%"},
+                                   {"sparse_infill_line_width", 0.45},
+                                   {"nozzle_diameter", 0.4},
+                                   {"infill_direction", 0.},
+                                   {"infill_shift_step", shift_step},
+                                   {"infill_anchor", 0.},
+                                   {"infill_anchor_max", 0.},
+                                   {"infill_wall_overlap", 0.},
+                                   {"sparse_infill_rotate_template", ""},
+                                   {"wall_loops", 0},
+                                   {"top_shell_layers", 0},
+                                   {"bottom_shell_layers", 0},
+                                   {"top_shell_thickness", 0.},
+                                   {"bottom_shell_thickness", 0.},
+                                   {"layer_height", 0.2},
+                                   {"initial_layer_print_height", 0.2},
+                                   {"xy_contour_compensation", 0.}});
+    return config;
+}
+
+static DynamicPrintConfig lateral_honeycomb_print_config(double angle_degrees)
+{
+    DynamicPrintConfig config = crosszag_shift_config(0.);
+    config.set_deserialize_strict({{"sparse_infill_pattern", "lateral-honeycomb"},
+                                   {"infill_overhang_angle", angle_degrees}});
+    return config;
+}
+
+static double median_line_pitch(const std::vector<double> &positions)
+{
+    REQUIRE(positions.size() >= 5);
+    std::vector<double> gaps;
+    gaps.reserve(positions.size() - 1);
+    for (size_t i = 1; i < positions.size(); ++i)
+        gaps.push_back(positions[i] - positions[i - 1]);
+    std::sort(gaps.begin(), gaps.end());
+    return gaps[gaps.size() / 2];
+}
+
+static double lattice_phase(const std::vector<double> &positions, double origin, double pitch)
+{
+    REQUIRE(positions.size() >= 5);
+    REQUIRE(pitch > 0.1);
+    double cosine = 0., sine = 0.;
+    for (double position : positions) {
+        const double phase = 2. * M_PI * (position - origin) / pitch;
+        cosine += std::cos(phase);
+        sine += std::sin(phase);
+    }
+    REQUIRE(std::hypot(cosine, sine) > positions.size() * 0.5);
+    return pitch * std::atan2(sine, cosine) / (2. * M_PI);
+}
+
+} // namespace infill_setting_geometry_contracts
+
+TEST_CASE("Lateral honeycomb ridge spacing follows infill overhang angle", "[Fill][InfillOverhangAngle]")
+{
+    using namespace infill_setting_geometry_contracts;
+
+    // The registered bounds are 15 and 75 degrees. At this fixed physical z,
+    // the lower setting is in the one-family part of the lattice cycle and the
+    // upper setting is in the two-family part; their emitted line counts must
+    // therefore differ independently of implementation internals.
+    const size_t minimum_angle_lines = long_axis_line_positions(lateral_honeycomb_paths(15.), true).size();
+    const size_t maximum_angle_lines = long_axis_line_positions(lateral_honeycomb_paths(75.), true).size();
+    CAPTURE(minimum_angle_lines, maximum_angle_lines);
+    REQUIRE(minimum_angle_lines >= 8);
+    CHECK(maximum_angle_lines > minimum_angle_lines + 2);
+}
+
+TEST_CASE("Sliced lateral honeycomb tracks follow the region overhang angle", "[Fill][InfillOverhangForwarding]")
+{
+    using namespace infill_setting_geometry_contracts;
+
+    Print minimum_angle_print, maximum_angle_print;
+    slice_parts(minimum_angle_print, lateral_honeycomb_print_config(15.), {make_cube(20., 20., 1.6)});
+    slice_parts(maximum_angle_print, lateral_honeycomb_print_config(75.), {make_cube(20., 20., 1.6)});
+
+    REQUIRE(minimum_angle_print.objects().size() == 1);
+    REQUIRE(maximum_angle_print.objects().size() == 1);
+    const PrintObject &minimum_object = *minimum_angle_print.objects().front();
+    const PrintObject &maximum_object = *maximum_angle_print.objects().front();
+    REQUIRE(minimum_object.layer_count() > 4);
+    REQUIRE(maximum_object.layer_count() > 4);
+
+    const Layer *minimum_config_layer = minimum_object.get_layer(1);
+    const Layer *maximum_config_layer = maximum_object.get_layer(1);
+    REQUIRE(minimum_config_layer != nullptr);
+    REQUIRE(maximum_config_layer != nullptr);
+    REQUIRE_FALSE(minimum_config_layer->regions().empty());
+    REQUIRE_FALSE(maximum_config_layer->regions().empty());
+    const PrintRegionConfig &minimum_region_config = minimum_config_layer->regions().front()->region().config();
+    const PrintRegionConfig &maximum_region_config = maximum_config_layer->regions().front()->region().config();
+    CAPTURE(minimum_region_config.infill_overhang_angle.value, maximum_region_config.infill_overhang_angle.value);
+    REQUIRE_THAT(minimum_region_config.infill_overhang_angle.value, Catch::Matchers::WithinAbs(15., 1e-6));
+    REQUIRE_THAT(maximum_region_config.infill_overhang_angle.value, Catch::Matchers::WithinAbs(75., 1e-6));
+
+    // Layer 1 (Z=0.4 mm) and layer 4 (Z=1.0 mm) occupy the same single/double-line
+    // phase contrast at the registered 15 and 75 degree endpoints.
+    const std::array<int, 2> layer_ids{1, 4};
+    for (const int layer_id : layer_ids) {
+        const Polylines minimum_paths = layer_paths(*minimum_object.get_layer(layer_id), erInternalInfill);
+        const Polylines maximum_paths = layer_paths(*maximum_object.get_layer(layer_id), erInternalInfill);
+        const std::vector<double> minimum_lines = long_axis_line_positions(minimum_paths, true);
+        const std::vector<double> maximum_lines = long_axis_line_positions(maximum_paths, true);
+        CAPTURE(layer_id, minimum_lines.size(), maximum_lines.size());
+        REQUIRE(minimum_lines.size() >= 8);
+        CHECK(maximum_lines.size() > minimum_lines.size() + 2);
+    }
+}
+
+TEST_CASE("Crosszag shift step advances alternate layer-pair phases", "[Fill][InfillShiftStep]")
+{
+    using namespace infill_setting_geometry_contracts;
+
+    Print zero_step, maximum_step;
+    slice_parts(zero_step, crosszag_shift_config(0.), {make_cube(20., 20., 1.6)});
+    slice_parts(maximum_step, crosszag_shift_config(10.), {make_cube(20., 20., 1.6)});
+    REQUIRE(zero_step.objects().size() == 1);
+    REQUIRE(maximum_step.objects().size() == 1);
+    const PrintObject &zero_object = *zero_step.objects().front();
+    const PrintObject &maximum_object = *maximum_step.objects().front();
+    REQUIRE(zero_object.layer_count() >= 4);
+    REQUIRE(maximum_object.layer_count() >= 4);
+
+    for (size_t layer_id = 0; layer_id < 4; ++layer_id) {
+        const bool vertical = layer_id % 2 != 0;
+        const bool reverse_normal = vertical; // Odd layers rotate the local pattern normal onto negative global X.
+        const std::vector<double> zero_positions = long_axis_line_positions(
+            layer_paths(*zero_object.get_layer(int(layer_id)), erInternalInfill), vertical, reverse_normal);
+        const std::vector<double> maximum_positions = long_axis_line_positions(
+            layer_paths(*maximum_object.get_layer(int(layer_id)), erInternalInfill), vertical, reverse_normal);
+        CAPTURE(layer_id, vertical);
+        REQUIRE(zero_positions.size() >= 5);
+        REQUIRE(maximum_positions.size() >= 5);
+
+        const double pitch = median_line_pitch(zero_positions);
+        const double axis_center = unscale<double>(vertical ? -zero_object.bounding_box().center().x()
+                                                             : zero_object.bounding_box().center().y());
+        const double zero_phase = lattice_phase(zero_positions, axis_center, pitch);
+        const double maximum_phase = lattice_phase(maximum_positions, axis_center, pitch);
+        const double observed_delta = std::remainder(maximum_phase - zero_phase, pitch);
+        const double sign = (layer_id % 2 == 0) ? -1. : 1.;
+        const double expected_delta = std::remainder(sign * 10. * (layer_id / 2), pitch);
+        CAPTURE(pitch, observed_delta, expected_delta);
+        if (layer_id < 2)
+            CHECK_THAT(observed_delta, Catch::Matchers::WithinAbs(0., 0.04));
+        else {
+            REQUIRE(std::abs(expected_delta) > 0.15);
+            CHECK_THAT(observed_delta, Catch::Matchers::WithinAbs(expected_delta, 0.04));
+        }
+    }
+}
+
 // Orca: Share of the paths of a role that the other body does not repeat around its own center.
 static double unmatched_between_bodies(const Print &print, ExtrusionRole role)
 {

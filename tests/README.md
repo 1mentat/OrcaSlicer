@@ -522,6 +522,13 @@ checks selective solid promotion of a small component. `[TopBottomOverlap]`
 checks bottom, top, and interior terrace fill against fixed perimeters. Their
 mutations are in `infill_settings_active.json`.
 
+`[InfillOverhangAngle]` checks lateral-honeycomb tracks at the registered 15° and
+75° boundaries. `[InfillOverhangForwarding]` checks those values through region
+configuration and sliced infill on two layers. `[InfillShiftStep]` checks the
+0 mm and 10 mm Crosszag shift boundaries against emitted line phases, including
+the unchanged first layer pair and opposite shifts on the next pair. Their
+consumer and forwarding mutations are in `infill_geometry_settings.json`.
+
 `[ArachneWallTransitionMapping]` checks nozzle-relative and scaled parameter
 conversion. `[ArachneWallTransition]` checks physical width redistribution through
 narrow and wide regions. `[ArachneWallResolution]` checks circular wall sampling
@@ -1214,6 +1221,12 @@ blank lines, and strict PA/flow/acceleration ordering. `[TextureAtlas]` checks
 encoded PNG and raw RGB/RGBA conversion, material mapping, patterned tiled UVs,
 color swatches, cancellation, and truncated raw buffers. PNG decoding is exercised
 through the encoded-image route used by model importers.
+
+`[AdaptivePABridgeOverride]` checks zero and maximum bridge pressure advance on
+one selected tool, with bridge and ordinary extrusion roles. Numeric pressure
+advance commands must follow the setting while the ordered motion commands stay
+unchanged. Its role, zero-value, and assignment mutations are in
+`adaptive_pa_bridge_override.json`.
 
 `[TextureToColorExtended]` checks three-way vertex-color boundaries across cyclic
 face orderings, preserves oriented area, and verifies the adaptive palette limit

@@ -5465,6 +5465,33 @@
         "pipeline_oracle"
       ],
       "reason": "The direct public WallToolPaths fixture compares the registered 1\u00b0 and 59\u00b0 endpoints on the same tapered wedge, checks the configured values, requires finite positive-width paths within fixture bounds, and distinguishes integrated squared-width geometry with the other wall controls fixed. This covers the registered angle boundaries in direct wall generation; full Print-pipeline interactions are not claimed."
+    },
+    "adaptive_pressure_advance_bridges": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[AdaptivePABridgeOverride]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered GCodeConfig coFloats option defaults to 0 and declares a maximum of 2.0 (no minimum is declared). The test parses M900 K from AdaptivePAProcessor output: BR=0 with override 2.0 and BR=1 with override 0 both retain the model-derived 0.2; BR=1 with override 2.0 emits 2.0. It also checks the registered maximum, zero default, override comment, and identical ordered G1 motion across all four rows. The matrix covers the selected single config index."
+    },
+    "infill_overhang_angle": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[InfillOverhangForwarding]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The PrintRegionConfig option registers valid boundaries 15 and 75 degrees. The direct Fill consumer test compares emitted lateral-honeycomb geometry at both endpoints; the dedicated Print-to-Fill pipeline test keeps those region values and compares measured long vertical internal-infill tracks at layers 1 and 4, requiring at least three more tracks at 75 degrees. The direct geometry case is tagged [InfillOverhangAngle]; the forwarding oracle is tagged [InfillOverhangForwarding]."
+    },
+    "infill_shift_step": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[InfillShiftStep]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The PrintRegionConfig option registers 0 and 10 mm as valid boundaries. The test slices the same crosszag geometry at both endpoints and measures emitted line phase relative to the physical pitch on layers 0–3: layers 0–1 remain aligned, while layers 2–3 shift by the measured configured amount with opposite local-normal signs. Separate even- and odd-pair mutations target those assertions."
     }
   }
 }
