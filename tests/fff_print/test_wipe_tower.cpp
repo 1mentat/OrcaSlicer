@@ -2849,6 +2849,7 @@ TEST_CASE("WipeTower2 cooling delay appears as an independent wait command",
     const DirectRun two = with_delay(2.f);
     require_finite(zero);
     require_finite(two);
+    CHECK(cooling_park_motion(zero).find("G4") == std::string::npos);
     CHECK(cooling_park_motion(zero) != cooling_park_motion(two));
     CHECK(cooling_park_motion(two).find("G4") != std::string::npos);
 }

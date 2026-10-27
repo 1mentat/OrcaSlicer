@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary-assertion mutations for the registered zero boundaries of minimum sparse area, interlocking boundary avoidance, and filament toolchange delay.",
+  "mutants": [
+    {
+      "id": "minimum-sparse-area-zero-promote-all",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "            if (ex_polygon.area() <= min_area) {",
+      "new": "            if (min_area == 0 || ex_polygon.area() <= min_area) {",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "test_filter": "MinimumSparseArea",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "ad40b854052ccc25183d8b735e3b30a0783fd8662a01e6e4d73c045816a4f8da",
+      "description": "Treat zero as promote-all. The exact boundary case “Minimum sparse area promotes only the analytically small component” must fail its ordinary REQUIRE `baseline.small_internal > 0`; the registered 0 mm² row must retain the analytically small internal component."
+    },
+    {
+      "id": "interlocking-boundary-zero-falls-back-to-two",
+      "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
+      "old": "const int      boundary_avoidance = config.interlocking_boundary_avoidance;",
+      "new": "const int      boundary_avoidance = config.interlocking_boundary_avoidance.value == 0 ? 2 : config.interlocking_boundary_avoidance.value;",
+      "expected_matches": 1,
+      "expected_test_count": 10,
+      "test_filter": "InterlockingVariance",
+      "ordinary_assertion_only": true,
+      "description": "Treat explicit zero as the default value 2. The exact boundary case “Interlocking boundary avoidance changes outer geometry while preserving union” must fail both ordinary per-material CHECKs: `area_mm2(all_layer_symmetric_difference(..., 0)) > 0.01` and the corresponding region-1 assertion. Other interlocking cases selected by this CTest label remain controls."
+    },
+    {
+      "id": "filament-toolchange-zero-emits-dwell",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "        if (time==0.f)\n            return *this;",
+      "new": "        if (time<0.f)\n            return *this;",
+      "expected_matches": 1,
+      "expected_test_count": 18,
+      "test_filter": "WipeTowerVariance",
+      "ordinary_assertion_only": true,
+      "description": "Remove the zero-time early return so the exact case “WipeTower2 cooling delay appears as an independent wait command” emits a G4 at zero. Its new ordinary CHECK `cooling_park_motion(zero).find(\"G4\") == std::string::npos` must fail; the 2-second G4 control and other selected tower cases remain controls."
+    }
+  ]
+}

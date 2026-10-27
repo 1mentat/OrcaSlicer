@@ -1718,10 +1718,11 @@
       "test": "tests/fff_print/test_interlocking.cpp",
       "tag": "[InterlockingVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Values 0 and 2 change each material geometry by positive symmetric-difference area while conserving the combined union. Representative values only."
+      "reason": "The public two-material Print fixture checks the registered zero minimum and a value of 2 with all other settings fixed. Both regions retain positive area and combined union area is conserved, while each material\u2019s sliced geometry has positive all-layer symmetric-difference area. The minimum is the only declared numeric bound; broader interactions are not claimed."
     },
     "file_start_gcode": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2811,12 +2812,13 @@
     },
     "filament_toolchange_delay": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTower][MultimaterialWipe][WipeTowerVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Delays 0 and 2 are varied independently in the same cooling fixture; executable park motion changes and includes a dwell command for the positive delay. Scope is direct WipeTower2 output."
+      "reason": "The direct WipeTower2 cooling-park case checks the registered 0-second minimum against a 2-second representative. The zero row emits no dwell command, the positive row emits G4, and the park motion differs while both outputs remain finite. The setting has no declared maximum; other printer interactions are not claimed."
     },
     "filament_multitool_ramming": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -4301,10 +4303,11 @@
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SettingsVariance][MinimumSparseArea]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The public two-component fixture has analytically separated 8x8 mm (64 mm\u00b2) and 14x14 mm (196 mm\u00b2) components. At 0.0 mm\u00b2 the small component remains internal sparse fill; at 80.0 mm\u00b2 it becomes internal solid fill while the large component remains sparse and its solid-fill count is unchanged. The registered setting has a lower bound of zero and no declared upper bound; only these representative threshold controls are claimed."
+      "reason": "The public Print fixture checks the registered 0 mm\u00b2 minimum and an 80 mm\u00b2 representative threshold on analytically separated 8x8 mm and 14x14 mm components. At zero, the small component remains internal sparse fill; at 80 mm\u00b2 it becomes internal solid fill while the large component remains sparse with unchanged solid-fill count. The minimum is the only declared numeric bound; no upper-bound or broader interaction claim is made."
     },
     "wall_transition_length": {
       "test": "tests/libslic3r/test_arachne_walls.cpp",
