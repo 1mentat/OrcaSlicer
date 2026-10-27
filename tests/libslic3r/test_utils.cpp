@@ -15,6 +15,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/Preset.hpp"
 
 #include "test_utils.hpp"
 
@@ -570,6 +571,29 @@ struct DirectoryState
         set_data_dir(data);
     }
 };
+
+TEST_CASE("Removing an installed vendor removes its profile, cache, and presets", "[Utils][VendorInstall]")
+{
+    ScopedTemporaryDir temporary;
+    DirectoryState restore_directories;
+    set_data_dir(temporary.path().string());
+
+    const fs::path system = fs::path(data_dir()) / PRESET_SYSTEM_DIR;
+    const fs::path vendor_presets = system / "Acme";
+    fs::create_directories(vendor_presets / "machine");
+    write_bytes(system / "Acme.json", "profile bytes");
+    write_bytes(system / "Acme.opc", "cache bytes");
+    write_bytes(vendor_presets / "machine" / "printer.json", "preset bytes");
+    write_bytes(system / "Other.json", "unrelated vendor");
+
+    remove_installed_vendor("Acme");
+
+    CHECK_FALSE(fs::exists(system / "Acme.json"));
+    CHECK_FALSE(fs::exists(system / "Acme.opc"));
+    CHECK_FALSE(fs::exists(vendor_presets));
+    REQUIRE(fs::is_regular_file(system / "Other.json"));
+    CHECK(read_bytes(system / "Other.json") == "unrelated vendor");
+}
 
 TEST_CASE("Layer patterns use one-based interval starts and repeat bounded spans", "[Utils][UtilsIOContracts]")
 {
