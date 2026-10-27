@@ -62,11 +62,52 @@ class SettingsInventoryTests(unittest.TestCase):
                 self.assertEqual(option["origin"], "literal_axis_loop")
 
     def test_report_marks_only_declared_dimensions_as_evidence(self):
-        report = settings_inventory.build_report(
-            root=ROOT,
-            source_path=ROOT / "src/libslic3r/PrintConfig.cpp",
-            evidence_path=ROOT / "tests/settings_coverage.json",
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            evidence.write_text(json.dumps({
+                "schema_version": 1,
+                "default_uncovered_reason": (
+                    "No dedicated settings-variance evidence is declared for this registered option; "
+                    "full_print_config() construction, schema serialization, and source coverage do not establish behavior."
+                ),
+                "entries": {
+                    "sparse_infill_pattern": {
+                        "test": "tests/fff_print/test_settings_variance.cpp",
+                        "tag": "[SettingsVariance]",
+                        "dimensions": ["enum_values", "pipeline_oracle"],
+                        "reason": "Synthetic fixture declares enum and pipeline evidence.",
+                    },
+                    "layer_height": {
+                        "test": "tests/fff_print/test_layer_height_variance.cpp",
+                        "tag": "[LayerHeightVariance]",
+                        "dimensions": ["representative_values", "pipeline_oracle"],
+                        "reason": "Synthetic fixture declares representative and pipeline evidence.",
+                    },
+                    "gcode_comments": {
+                        "test": "tests/fff_print/test_gcode_settings_contracts.cpp",
+                        "tag": "[GCodeSettings]",
+                        "dimensions": ["boolean_values", "pipeline_oracle"],
+                        "reason": "Synthetic fixture declares boolean and pipeline evidence.",
+                    },
+                    "printer_technology": {
+                        "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+                        "tag": "[SLAPrint][SLAPipeline]",
+                        "dimensions": ["representative_values", "pipeline_oracle"],
+                        "reason": "Synthetic fixture declares representative and pipeline evidence.",
+                    },
+                    "supports_enable": {
+                        "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+                        "tag": "[SLAPrint][SLAFeatures][SLASupportsEnableVariance]",
+                        "dimensions": ["boolean_values", "pipeline_oracle"],
+                        "reason": "Synthetic fixture declares boolean and pipeline evidence.",
+                    },
+                },
+            }), encoding="utf-8")
+            report = settings_inventory.build_report(
+                root=ROOT,
+                source_path=ROOT / "src/libslic3r/PrintConfig.cpp",
+                evidence_path=evidence,
+            )
         self.assertEqual(report["option_count"], len(report["options"]))
         self.assertEqual(sum(report["counts"].values()), report["option_count"])
         options = {item["key"]: item for item in report["options"]}
