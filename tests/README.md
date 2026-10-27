@@ -269,6 +269,16 @@ For texture-bake stage diagnostics, use `libslic3r_texture_bake_debug_tests` and
 `--production-source src/libslic3r/TextureBake/TextureBakeDebug.cpp`.
 This target also stays outside default builds and CTest discovery.
 
+For motion-setting iteration, use `fff_print_motion_settings_tests` and
+`build/tests/fff_print/fff_print_motion_settings_tests` with
+`--test-source tests/fff_print/test_gcode_motion_settings.cpp`. This target
+compiles the 17 motion-setting cases separately from the other GCode tests.
+All cases remain in the canonical `fff_print_tests` suite; the focused target
+stays outside default builds and CTest discovery. The focused discovery option
+registers its cases with the distinct `FocusedMotionSettings::` prefix.
+Splitting the files adds
+work to a clean full build and reduces the scope of focused rebuilds.
+
 For faster Release iteration, enable `SLICER_FAST_FOCUSED_TEST_COMPILE` in a
 configured test build and build one focused target:
 
