@@ -126,37 +126,41 @@
       "test": "tests/fff_print/test_layer_height_variance.cpp",
       "tag": "[LayerHeightVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Direct Slicing contracts check range overrides, contiguous bounded layers, fixed profiles, smoothing, and editing. Full Print exports of a 1.2 mm fixture at 0.1, 0.2, and 0.3 mm check exact layer counts, HEIGHT tags, and extrusion Z values. The minimum-height substitution mutation is caught by the layer-count oracle. Initial-layer height is coupled to nominal height; independent interactions and numeric boundaries remain unclaimed."
+      "reason": "PrintConfig.cpp registers a 0 mm minimum, and DynamicPrintConfig rejects 0 for this key. The test verifies acceptance at the inclusive nozzle-derived 0.4 mm cap, rejection at 0.40001 mm, and emitted Print output containing a 0.4 mm layer. Existing 0.1, 0.2, and 0.3 mm values remain representative coverage. No explicit registered maximum or whole-domain claim is made."
     },
     "initial_layer_print_height": {
       "test": "tests/fff_print/test_layer_height_variance.cpp",
       "tag": "[LayerGeometrySettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "First extrusion Z follows the configured initial height, final extrusion Z stays at the fixed 1.2 mm fixture height, and the larger first layer reduces the finite extrusion-layer count. Representative values only; full numeric ranges and interactions remain unclaimed."
+      "reason": "PrintConfig.cpp registers a 0 mm minimum, and DynamicPrintConfig rejects 0 for this key. The test verifies acceptance at the inclusive nozzle-derived 0.4 mm cap, rejection at 0.40001 mm, and emitted Print output containing a 0.4 mm layer. Existing 0.2 mm values remain representative coverage. No explicit registered maximum or whole-domain claim is made."
     },
     "top_shell_thickness": {
       "test": "tests/fff_print/test_layer_height_variance.cpp",
       "tag": "[LayerGeometrySettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Independently changing top shell thickness changes Internal solid infill length while role presence, layer count, and first/max extrusion Z remain stable. Representative values only; full numeric ranges and interactions remain unclaimed."
+      "reason": "PrintConfig.cpp registers a 0 mm minimum, covered by the existing 0.0 mm baseline. A selected 0.6 mm value changes measured Internal solid infill length while preserving extrusion-layer count and first/max Z. The 0.6 mm comparison is representative; no registered maximum is claimed."
     },
     "bottom_shell_thickness": {
       "test": "tests/fff_print/test_layer_height_variance.cpp",
       "tag": "[LayerGeometrySettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Independently changing bottom shell thickness changes Internal solid infill length under the same fixed-height and layer/Z invariants. Representative values only; full numeric ranges and interactions remain unclaimed."
+      "reason": "PrintConfig.cpp registers a 0 mm minimum, covered by the existing 0.0 mm baseline. A selected 0.6 mm value changes measured Internal solid infill length while preserving extrusion-layer count and first/max Z. The 0.6 mm comparison is representative; no registered maximum is claimed."
     },
     "top_surface_density": {
       "test": "tests/fff_print/test_layer_height_variance.cpp",

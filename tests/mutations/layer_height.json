@@ -57,6 +57,22 @@
       "new": "inline coordf_t max_layer_height_from_nozzle(const PrintConfig &print_config, int idx_nozzle)\n{\n    coordf_t min_layer_height = min_layer_height_from_nozzle(print_config, idx_nozzle);\n    coordf_t max_layer_height = 0.;\n    coordf_t nozzle_dmr       = print_config.nozzle_diameter.get_at(idx_nozzle - 1);\n    return std::max(min_layer_height, (max_layer_height == 0.) ? (0.75 * nozzle_dmr) : max_layer_height);\n}",
       "description": "Accepted physical pipeline probe: ignoring the explicit per-nozzle maximum is detected by the adaptive Print 0.25 mm maximum oracle.",
       "test_filter": "LayerHeightVariance"
+    },
+    {
+      "id": "layer-height-nozzle-cap-inclusive",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (layer_height > min_nozzle_diameter)",
+      "new": "if (layer_height >= min_nozzle_diameter)",
+      "description": "Regression mutant: the inclusive comparison rejects a legal layer_height equal to the smallest nozzle diameter.",
+      "test_filter": "LayerHeightVariance"
+    },
+    {
+      "id": "initial-layer-nozzle-cap-inclusive",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (initial_layer_print_height > first_layer_min_nozzle_diameter)",
+      "new": "if (initial_layer_print_height >= first_layer_min_nozzle_diameter)",
+      "description": "Regression mutant: the inclusive comparison rejects a legal initial_layer_print_height equal to the smallest first-layer nozzle diameter.",
+      "test_filter": "LayerHeightVariance"
     }
   ]
 }

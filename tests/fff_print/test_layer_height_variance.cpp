@@ -334,11 +334,12 @@ void add_distinct_layer(std::vector<double> &layers, double z)
     layers.push_back(z);
 }
 
-LayerGeometryEvidence export_evidence(const DynamicPrintConfig &config)
+LayerGeometryEvidence export_evidence(const DynamicPrintConfig &config,
+                                      const TriangleMesh &fixture = layer_geometry_fixture())
 {
     Print print;
     Model model;
-    init_print({layer_geometry_fixture()}, print, model, config);
+    init_print({fixture}, print, model, config);
     const auto validation = print.validate();
     INFO("validation.string: " << validation.string);
     INFO("validation.opt_key: " << validation.opt_key);
@@ -651,3 +652,73 @@ TEST_CASE("Adaptive Print layers reach the configured or nozzle-derived maximum"
                    Catch::Matchers::WithinAbs(test.expected_maximum, EPSILON));
     }
 }
+
+namespace layer_geometry_settings_contracts {
+
+TEST_CASE("Nominal and initial layer heights accept the nozzle cap but reject zero and above-cap values",
+          "[LayerHeightVariance][LayerGeometrySettings][SettingsVariance][ValidationContracts]")
+{
+    TriangleMesh cap_fixture = cube(10.0);
+    cap_fixture.scale(Vec3f(1.0f, 1.0f, 0.14f));
+    constexpr double fixture_height = 1.4;
+    const auto validate_config = [&cap_fixture](const DynamicPrintConfig &config) {
+        Print print;
+        Model model;
+        init_print({cap_fixture}, print, model, config);
+        const StringObjectException validation = print.validate();
+        return std::pair<std::string, std::string>{validation.string, validation.opt_key};
+    };
+
+    DynamicPrintConfig valid_config = layer_geometry_config();
+    valid_config.set_deserialize_strict({
+        { "line_width",                       0.45 },
+        { "inner_wall_line_width",             0.45 },
+        { "outer_wall_line_width",             0.45 },
+        { "sparse_infill_line_width",           0.45 },
+        { "internal_solid_infill_line_width",  0.45 },
+        { "top_surface_line_width",             0.45 },
+        { "skin_infill_line_width",             0.45 },
+        { "skeleton_infill_line_width",         0.45 },
+        { "initial_layer_line_width",           0.45 },
+        { "bridge_line_width",                  0.0 },
+    });
+
+    const std::vector<std::string> keys{ "layer_height", "initial_layer_print_height" };
+    for (const std::string &key : keys) {
+        DYNAMIC_SECTION("setting " << key) {
+            // Validate zero directly; never build or process a zero-height Print.
+            DynamicPrintConfig at_minimum = valid_config;
+            at_minimum.set_deserialize_strict({{key, 0.0}});
+            const auto minimum_errors = at_minimum.validate();
+            REQUIRE(minimum_errors.find(key) != minimum_errors.end());
+
+            DynamicPrintConfig at_cap = valid_config;
+            at_cap.set_deserialize_strict({{key, 0.4}});
+            const auto cap_validation = validate_config(at_cap);
+            INFO("cap validation.string: " << cap_validation.first);
+            INFO("cap validation.opt_key: " << cap_validation.second);
+            REQUIRE(cap_validation.first.empty());
+
+            const LayerGeometryEvidence exact = export_evidence(at_cap, cap_fixture);
+            require_valid_evidence(exact);
+            const double expected_first_z = key == "initial_layer_print_height" ? 0.4 : 0.2;
+            CHECK_THAT(exact.first_extrusion_z,
+                       Catch::Matchers::WithinAbs(expected_first_z, 1e-4));
+            CHECK_THAT(exact.max_extrusion_z, Catch::Matchers::WithinAbs(fixture_height, 1e-3));
+            const std::size_t expected_layer_count = key == "initial_layer_print_height" ? 6 : 4;
+            CHECK(exact.extrusion_layers.size() == expected_layer_count);
+            CHECK(std::any_of(exact.emitted_heights.begin(), exact.emitted_heights.end(),
+                              [](double height) { return std::abs(height - 0.4) < EPSILON; }));
+
+            DynamicPrintConfig above_cap = valid_config;
+            above_cap.set_deserialize_strict({{key, 0.40001}});
+            const auto above_validation = validate_config(above_cap);
+            INFO("above-cap validation.string: " << above_validation.first);
+            INFO("above-cap validation.opt_key: " << above_validation.second);
+            CHECK_FALSE(above_validation.first.empty());
+            CHECK(above_validation.second == key);
+        }
+    }
+}
+
+} // namespace layer_geometry_settings_contracts
