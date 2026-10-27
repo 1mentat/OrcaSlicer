@@ -4314,30 +4314,32 @@
     },
     "wall_transition_length": {
       "test": "tests/libslic3r/test_arachne_walls.cpp",
-      "tag": "[ArachneWallTransition]",
+      "tag": "[Arachne][ArachneWallTransitionLength]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The direct public WallToolPaths fixture compares wall_transition_length at 100% and 300% with distribution count 3 and filter/angle/resolution/deviation pinned. Finite in-outline variable-width paths are required, and width-squared-length/maximum-width/width-area must change. This is direct wall generation evidence, not full Print-pipeline coverage; numeric boundaries and interactions remain unclaimed."
+      "reason": "The direct public WallToolPaths fixture compares the registered 0% minimum with 100% at an explicit 0.4 mm nozzle and fixed controls, verifies conversion to 0 and 0.4 mm, and requires finite positive-width paths within fixture bounds with a changed integrated squared-width signature. A separate 250% (1.0 mm), 1\u00b0 case requires finite positive-width output. The 59\u00b0 1.0 mm known-defect should-fail diagnostic is excluded from coverage credit. No upper bound is registered; this is direct wall generation evidence, not full Print-pipeline coverage."
     },
     "wall_distribution_count": {
       "test": "tests/libslic3r/test_arachne_walls.cpp",
       "tag": "[ArachneWallTransition]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The direct public WallToolPaths fixture compares wall_distribution_count 1 and 3 with transition/filter/angle/resolution/deviation pinned. Finite in-outline variable-width paths are required, and width-squared-length/maximum-width/width-area must change. This is representative direct wall-generation evidence; the complete integer domain and Print-pipeline interactions remain unclaimed."
+      "reason": "The direct public WallToolPaths fixture compares the registered minimum count 1 with representative count 3 while transition length, filter, angle, resolution, and deviation stay explicit and fixed. Both controls require finite variable-width paths within fixture bounds with positive width and length, and their integrated squared-width, maximum-width, and width-area signatures differ. No maximum is registered; this is direct wall generation evidence, not full Print-pipeline coverage."
     },
     "wall_maximum_resolution": {
       "test": "tests/libslic3r/test_arachne_walls.cpp",
       "tag": "[ArachneWallResolution]",
       "dimensions": [
-        "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "The direct rounded-wall fixture compares wall_maximum_resolution 0.005 and 0.5 mm while wall_maximum_deviation remains 0.005 mm. Both rows retain four finite in-outline paths with positive minimum width and length; the fine row must have more junctions. A separate comparison of the jointly coarse resolution/deviation row checks a circumference budget and positive width-area. This is representative direct wall-generation evidence; full numeric boundaries and Print-pipeline interactions remain unclaimed."
+      "reason": "The direct rounded-wall fixture compares the registered maximum-resolution endpoints 0.005 and 0.5 mm at fixed 0.005 mm deviation. All rows retain four finite paths within fixture bounds with positive widths and lengths, and the fine-resolution row retains more junctions. The jointly coarse resolution/deviation row also contributes the registered deviation endpoints and circumference-budget check. This is direct wall generation evidence; full Print-pipeline interactions are not claimed."
     },
     "extrusion_rate_smoothing_external_perimeter_only": {
       "test": "tests/fff_print/test_pressure_equalizer.cpp",
@@ -5445,6 +5447,24 @@
         "pipeline_oracle"
       ],
       "reason": "Zero exercises the registered minimum and must retain the first-layer generic extrusion fallback (explicitly pinned to 23 mm/s); a positive 37 mm/s value must override it, with high volumetric capacity and unchanged positive skirt geometry/material. The registry has no finite maximum, so no upper-bound claim is made."
+    },
+    "wall_maximum_deviation": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneWallResolution]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct rounded-wall fixtures include a radius-12 circle checking the registered deviation endpoints jointly with resolution controls, four finite tracks within fixture bounds, positive widths and lengths, and a circumference budget. A separate radius-4, 256-point circle compares deviation endpoints 0.005 and 0.05 mm at the registered 0.5 mm maximum resolution. The shallow-bump/flat fixture checks the boundary feature directly: all three rows require four finite tracks within fixture bounds with positive widths and lengths; the strict bump exceeds the flat control by more than 0.005 mm, while the permissive bump remains within 0.005 mm. Evidence is direct WallToolPaths output, not full Print-pipeline behavior."
+    },
+    "wall_transition_angle": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[Arachne][ArachneWallTransitionAngle]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct public WallToolPaths fixture compares the registered 1\u00b0 and 59\u00b0 endpoints on the same tapered wedge, checks the configured values, requires finite positive-width paths within fixture bounds, and distinguishes integrated squared-width geometry with the other wall controls fixed. This covers the registered angle boundaries in direct wall generation; full Print-pipeline interactions are not claimed."
     }
   }
 }

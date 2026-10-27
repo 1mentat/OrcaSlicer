@@ -227,6 +227,9 @@ target_include_directories(libslic3r_arachne_tests PRIVATE ${CMAKE_SOURCE_DIR}/s
 set_property(TARGET libslic3r_arachne_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_arachne_tests)
 slicer_enable_llvm_source_coverage(libslic3r_arachne_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(libslic3r_arachne_tests TEST_PREFIX "FocusedArachne::")
+endif()
 
 # Explicitly built texture-displacement contracts, without duplicate CTest registration.
 # Model import paths need the existing standalone NanoSVG implementation.

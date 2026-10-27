@@ -449,17 +449,40 @@ Polygon plus_outline()
     return outline;
 }
 
-Polygon round_outline()
+Polygon round_outline(double radius_mm = 12.)
 {
     Polygon outline;
     constexpr int points = 256;
-    constexpr double radius = 12.;
     for (int i = 0; i < points; ++i) {
         const double angle = 2. * M_PI * double(i) / double(points);
-        outline.points.emplace_back(Point::new_scale(12. + radius * std::cos(angle),
-                                                       12. + radius * std::sin(angle)));
+        outline.points.emplace_back(Point::new_scale(radius_mm + radius_mm * std::cos(angle),
+                                                       radius_mm + radius_mm * std::sin(angle)));
     }
     return outline;
+}
+
+Polygon shallow_bump_outline(bool bumped)
+{
+    Polygon outline;
+    outline.points.emplace_back(Point::new_scale(0., 0.));
+    outline.points.emplace_back(Point::new_scale(20., 0.));
+    outline.points.emplace_back(Point::new_scale(20., 10.));
+    if (bumped) {
+        outline.points.emplace_back(Point::new_scale(10.1, 10.));
+        outline.points.emplace_back(Point::new_scale(10., 10.02));
+        outline.points.emplace_back(Point::new_scale(9.9, 10.));
+    }
+    outline.points.emplace_back(Point::new_scale(0., 10.));
+    return outline;
+}
+
+Polygon transition_wedge_outline()
+{
+    Polygon wedge;
+    wedge.points.emplace_back(Point::new_scale(0., 0.));
+    wedge.points.emplace_back(Point::new_scale(20., -5.359));
+    wedge.points.emplace_back(Point::new_scale(20., 5.359));
+    return wedge;
 }
 
 struct WallSummary {
@@ -470,6 +493,7 @@ struct WallSummary {
     double width_squared_length_mm3 = 0.;
     double minimum_width_mm = 1e9;
     double maximum_width_mm = 0.;
+    double maximum_y_mm = -std::numeric_limits<double>::infinity();
     double width_span_mm = 0.;
     bool finite = true;
     bool inside_fixture = true;
@@ -495,6 +519,7 @@ WallSummary summarize(const std::vector<VariableWidthLines> &toolpaths,
                 const double w = unscaled<double>(junction.w);
                 summary.minimum_width_mm = std::min(summary.minimum_width_mm, w);
                 summary.maximum_width_mm = std::max(summary.maximum_width_mm, w);
+                summary.maximum_y_mm = std::max(summary.maximum_y_mm, y);
                 summary.finite &= std::isfinite(x) && std::isfinite(y) && std::isfinite(w);
                 summary.inside_fixture &= x >= fixture_min_x && x <= fixture_max_x &&
                                            y >= fixture_min_y && y <= fixture_max_y;
@@ -590,6 +615,22 @@ TEST_CASE("Arachne wall resolution preserves a rounded wall while simplifying it
     }
     CHECK(fine.junctions > coarse_resolution.junctions);
     CHECK(coarse_deviation.junctions > coarse.junctions);
+    CHECK(params_for(wall_config(100., 25., 10., 1, 0.5, 0.005)).wall_maximum_deviation == scaled<coord_t>(0.005));
+    CHECK(params_for(wall_config(100., 25., 10., 1, 0.5, 0.05)).wall_maximum_deviation == scaled<coord_t>(0.05));
+
+    // At radius 4 mm, a six-edge shortcut has about 0.0108 mm sagitta, between
+    // the registered 0.005 and 0.05 mm deviation endpoints.
+    const Polygon deviation_outline = round_outline(4.);
+    const WallSummary strict_deviation = generate(deviation_outline, params_for(wall_config(100., 25., 10., 1, 0.5, 0.005)));
+    const WallSummary permissive_deviation = generate(deviation_outline, params_for(wall_config(100., 25., 10., 1, 0.5, 0.05)));
+    for (const WallSummary &row : {strict_deviation, permissive_deviation}) {
+        REQUIRE(row.lines == 4);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.minimum_width_mm > 0.05);
+        CHECK(row.length_mm > 1.);
+    }
+    CHECK(strict_deviation.junctions > permissive_deviation.junctions);
 
     // Four convex circular tracks: their circumference changes by at most
     // 2*pi times a radial change. Include both rows' deviation budgets.
@@ -597,6 +638,63 @@ TEST_CASE("Arachne wall resolution preserves a rounded wall while simplifying it
     CHECK_THAT(fine.length_mm, Catch::Matchers::WithinAbs(coarse.length_mm, length_budget_mm));
     REQUIRE(fine.width_area_mm2 > 0.);
     REQUIRE(coarse.width_area_mm2 > 0.);
+}
+
+TEST_CASE("Arachne wall deviation preserves a shallow boundary feature", "[Arachne][ArachneWallResolution]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const Polygon bump_outline = shallow_bump_outline(true);
+    const Polygon flat_outline = shallow_bump_outline(false);
+    const WallToolPathsParams strict_params = params_for(wall_config(100., 25., 10., 1, 0.5, 0.005));
+    const WallToolPathsParams permissive_params = params_for(wall_config(100., 25., 10., 1, 0.5, 0.05));
+    const WallSummary strict_bump = generate(bump_outline, strict_params);
+    const WallSummary permissive_bump = generate(bump_outline, permissive_params);
+    const WallSummary flat_control = generate(flat_outline, strict_params);
+
+    CAPTURE(strict_bump.maximum_y_mm, permissive_bump.maximum_y_mm, flat_control.maximum_y_mm,
+            strict_bump.minimum_width_mm, permissive_bump.minimum_width_mm, flat_control.minimum_width_mm);
+    for (const WallSummary &row : {strict_bump, permissive_bump, flat_control}) {
+        REQUIRE(row.lines == 4);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.minimum_width_mm > 0.05);
+        CHECK(row.length_mm > 1.);
+    }
+    CHECK(strict_bump.maximum_y_mm > flat_control.maximum_y_mm + 0.005);
+    CHECK_THAT(permissive_bump.maximum_y_mm,
+               Catch::Matchers::WithinAbs(flat_control.maximum_y_mm, 0.005));
+}
+
+TEST_CASE("Arachne one millimeter transition keeps low-angle wedge widths positive",
+          "[Arachne][ArachneWallTransitionLength]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const WallToolPathsParams params = params_for(wall_config(250., 25., 1., 1, 0.005, 0.005));
+    const WallSummary summary = generate(transition_wedge_outline(), params);
+
+    CHECK_THAT(params.wall_transition_length, Catch::Matchers::WithinAbs(1., 1e-6));
+    REQUIRE(summary.lines > 0);
+    CHECK(summary.finite);
+    CHECK(summary.inside_fixture);
+    CHECK(summary.minimum_width_mm > 0.);
+}
+
+// Known baseline defect: the 1 mm transition at the high-angle endpoint currently
+// produces a negative generated width. Keep the positive-width contract executing.
+// Catch2's !shouldfail makes an unexpected pass fail too, requiring this marker to
+// be removed with the fix. This case is diagnostic evidence, not validated behavior.
+TEST_CASE("Arachne one millimeter high-angle transition keeps wedge widths positive",
+          "[Arachne][ArachneWallTransitionKnownDefect][KnownBaselineDefect][!shouldfail]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const WallToolPathsParams params = params_for(wall_config(250., 25., 59., 1, 0.005, 0.005));
+    const WallSummary summary = generate(transition_wedge_outline(), params);
+
+    CHECK_THAT(params.wall_transition_length, Catch::Matchers::WithinAbs(1., 1e-6));
+    REQUIRE(summary.lines > 0);
+    CHECK(summary.finite);
+    CHECK(summary.inside_fixture);
+    CHECK(summary.minimum_width_mm > 0.);
 }
 
 namespace arachne_skeletal_public_contracts {
@@ -958,4 +1056,56 @@ TEST_CASE("Arachne variable-width walls remain balanced through broad lobes and 
                Catch::Matchers::WithinRel(long_transition.right_lobe.width_area_mm2, 0.05));
     CHECK(std::abs(short_transition.width_squared_length_mm3 -
                    long_transition.width_squared_length_mm3) > 1e-3);
+}
+
+
+TEST_CASE("Arachne wall transition-angle boundaries change tapered-wall geometry", "[Arachne][ArachneWallTransitionAngle]")
+{
+    using namespace arachne_wall_transition_contracts;
+    Polygon wedge;
+    wedge.points.emplace_back(Point::new_scale(0., 0.));
+    wedge.points.emplace_back(Point::new_scale(20., -5.359));
+    wedge.points.emplace_back(Point::new_scale(20., 5.359));
+
+    const auto low_angle_config = wall_config(100., 25., 1., 1, 0.005, 0.005);
+    const auto high_angle_config = wall_config(100., 25., 59., 1, 0.005, 0.005);
+    const WallToolPathsParams low_angle_params = params_for(low_angle_config);
+    const WallToolPathsParams high_angle_params = params_for(high_angle_config);
+    CHECK_THAT(low_angle_params.wall_transition_angle, Catch::Matchers::WithinAbs(1., 1e-6));
+    CHECK_THAT(high_angle_params.wall_transition_angle, Catch::Matchers::WithinAbs(59., 1e-6));
+
+    const WallSummary low_angle = generate(wedge, low_angle_params);
+    const WallSummary high_angle = generate(wedge, high_angle_params);
+    for (const WallSummary &row : {low_angle, high_angle}) {
+        REQUIRE(row.lines > 0);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.minimum_width_mm > 0.05);
+        CHECK(row.length_mm > 1.);
+    }
+    CHECK(std::abs(low_angle.width_squared_length_mm3 - high_angle.width_squared_length_mm3) > 1e-4);
+}
+
+TEST_CASE("Arachne wall transition length honors its zero boundary", "[Arachne][ArachneWallTransitionLength]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const Polygon outline = plus_outline();
+    const auto zero_config = wall_config(0., 25., 10., 3, 0.005, 0.005);
+    const auto normal_config = wall_config(100., 25., 10., 3, 0.005, 0.005);
+    const WallToolPathsParams zero_params = params_for(zero_config);
+    const WallToolPathsParams normal_params = params_for(normal_config);
+    CHECK_THAT(zero_params.wall_transition_length, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(normal_params.wall_transition_length, Catch::Matchers::WithinAbs(0.4, 1e-6));
+
+    const WallSummary zero_length = generate(outline, zero_params);
+    const WallSummary normal_length = generate(outline, normal_params);
+    for (const WallSummary &row : {zero_length, normal_length}) {
+        REQUIRE(row.lines > 0);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.minimum_width_mm > 0.05);
+        CHECK(row.width_span_mm > 0.05);
+        CHECK(row.length_mm > 0.5);
+    }
+    CHECK(std::abs(zero_length.width_squared_length_mm3 - normal_length.width_squared_length_mm3) > 1e-4);
 }

@@ -515,9 +515,15 @@ mutations are in `infill_settings_active.json`.
 `[ArachneWallTransitionMapping]` checks nozzle-relative and scaled parameter
 conversion. `[ArachneWallTransition]` checks physical width redistribution through
 narrow and wide regions. `[ArachneWallResolution]` checks circular wall sampling
-with separate resolution and deviation controls and bounded circumference change.
-Their mutations are in `arachne_wall_transition.json`; parameter mapping alone
-does not establish full settings coverage.
+with separate resolution and deviation controls, bounded circumference change,
+and retention of a shallow boundary feature at strict deviation.
+`[ArachneWallTransitionAngle]` exercises the registered angle endpoints on a
+wedge; `[ArachneWallTransitionLength]` checks zero-length conversion and geometry
+plus a positive-width control at a longer transition. These exercise public wall
+generation directly. Their probes are in `arachne_wall_transition.json` and
+`arachne_settings_boundaries.json`; parameter mapping alone does not establish
+full settings coverage. The separate `[ArachneWallTransitionKnownDefect]` case
+marks a baseline negative-width defect and provides no positive coverage credit.
 
 `[PrintExtents]` checks planned extrusion bounds across layer cutoffs, two
 instances, unequal path widths, and nested infill collections without slicing.
