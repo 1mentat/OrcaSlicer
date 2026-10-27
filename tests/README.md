@@ -1228,6 +1228,12 @@ advance commands must follow the setting while the ordered motion commands stay
 unchanged. Its role, zero-value, and assignment mutations are in
 `adaptive_pa_bridge_override.json`.
 
+`[AdaptivePAModelVariance]` checks distinct nonlinear calibration models for two
+filament config indices. `[AdaptivePAMalformedFallback]` and
+`[AdaptivePANoCurveFallback]` require configured static pressure advance when a
+model cannot supply a prediction. All cases preserve the ordered motion commands;
+their probes are in `adaptive_pa_model_variance.json`.
+
 `[TextureToColorExtended]` checks three-way vertex-color boundaries across cyclic
 face orderings, preserves oriented area, and verifies the adaptive palette limit
 on a closed mesh. Its mutations are in `texture_to_color_extended.json`.

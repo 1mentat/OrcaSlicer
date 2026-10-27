@@ -1847,13 +1847,13 @@
       "reason": "Distinct static values 0.021, 0.037, 0.043 and 0.049 are selected across filament/extruder variants and checked in emitted Klipper commands. Numeric boundaries are not covered."
     },
     "adaptive_pressure_advance_model": {
-      "test": "tests/fff_print/test_multifilament.cpp",
-      "tag": "[MultiFilament]",
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[AdaptivePAModelVariance]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Several constant prediction tables produce distinct expected Klipper advance values in the enabled branch; these examples do not cover malformed or nonlinear models."
+      "reason": "The public AdaptivePAProcessor selects distinct nonlinear acceleration tables for config indices 0 and 1, with independently derived midpoint predictions 0.144 and 0.292 and unchanged ordered G1 motion. Separate malformed-model and no-curve cases require the configured static pressure advance 0.42 and conserved motion. These strengthen the earlier constant-table examples; they do not claim every possible calibration table or cross-layer cache transition."
     },
     "extruder_variant_list": {
       "test": "tests/fff_print/test_multifilament.cpp",

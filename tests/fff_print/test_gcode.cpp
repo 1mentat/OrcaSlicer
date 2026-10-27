@@ -5102,6 +5102,103 @@ TEST_CASE("Adaptive PA bridge override honors zero and maximum without changing 
     }
 }
 
+namespace {
+
+std::string process_adaptive_pa_model_case(const std::vector<std::string> &models, const size_t config_index)
+{
+    TestGCode gcode;
+    PrintConfig config = direct_print_config();
+    config.gcode_flavor.value = gcfMarlinFirmware; // Serialized as "marlin2".
+    config.gcode_comments.value = true;
+    config.enable_pressure_advance.values = { true, true };
+    config.adaptive_pressure_advance.values = { true, true };
+    config.adaptive_pressure_advance_model.values = models;
+    config.pressure_advance.values = { 0.42f, 0.42f };
+    config.adaptive_pressure_advance_bridges.values = { 0.f, 0.f };
+    config.extruder_offset.values = { Vec2d(1.25, -2.5), Vec2d(1.25, -2.5) };
+    config.filament_diameter.values = { 1.75f, 1.75f };
+    config.filament_flow_ratio.values = { 1.f, 1.f };
+    gcode.apply_print_config(config);
+    gcode.set_extruders({ 0, 1 });
+    gcode.writer().set_extruder(static_cast<unsigned int>(config_index));
+
+    AdaptivePAProcessor processor(gcode);
+    std::string layer = "; PA_CHANGE:T" + std::to_string(config_index) + " MM3MM:0.1 ACCEL:1500 BR:0 RC:0 OV:0\n";
+    layer += "G1 F6000\nG1 X10 Y0 E1\n";
+    return processor.process_layer(std::move(layer));
+}
+
+double adaptive_pa_command_value(const std::string &output)
+{
+    const std::vector<std::string> pa_commands = command_lines(output, "M900 K");
+    REQUIRE(pa_commands.size() == 1);
+    constexpr std::string_view prefix = "M900 K";
+    const char *value_begin = pa_commands.front().c_str() + prefix.size();
+    char *value_end = nullptr;
+    const double value = std::strtod(value_begin, &value_end);
+    REQUIRE(value_end != value_begin);
+    REQUIRE(std::isfinite(value));
+    const bool value_end_is_boundary = *value_end == '\0' || *value_end == ';' ||
+                                       std::isspace(static_cast<unsigned char>(*value_end));
+    REQUIRE(value_end_is_boundary);
+    return value;
+}
+
+void check_adaptive_pa_fallback(const std::string &output, const std::string &expected_diagnostic_token)
+{
+    CHECK(count_substring(output, expected_diagnostic_token) == 1);
+    CHECK_THAT(adaptive_pa_command_value(output), Catch::Matchers::WithinAbs(0.42, 1e-6));
+    const std::vector<std::string> motion = command_lines(output, "G1 ");
+    REQUIRE(motion.size() == 2);
+    CHECK(motion[0] == "G1 F6000");
+    CHECK(motion[1] == "G1 X10 Y0 E1");
+}
+
+} // namespace
+
+TEST_CASE("Adaptive PA selects each filament's nonlinear model without changing motion",
+          "[GCode][AdaptivePAModelVariance]")
+{
+    const std::vector<std::string> models{
+        "0.1,10,1000\n0.1,20,1000\n0.2,10,2000\n0.2,20,2000\n0.5,10,3000\n0.5,20,3000",
+        "0.2,10,1000\n0.2,20,1000\n0.4,10,2000\n0.4,20,2000\n0.8,10,3000\n0.8,20,3000",
+    };
+    // At t=0.5 the cubic Hermite basis is (.5, .125, .5, -.125). With 1000-unit
+    // spacing, endpoint slopes are the secants and the interior slope is their
+    // weighted harmonic mean: .00015 for model 0 and .0002666667 for model 1.
+    // The unrounded midpoint results are .14375 and .2916667; interpolation rounds to 3 decimals.
+    const std::array<double, 2> expected_pa{ 0.144, 0.292 };
+    std::vector<std::string> reference_motion;
+
+    for (size_t config_index = 0; config_index < models.size(); ++config_index) {
+        CAPTURE(config_index);
+        const std::string output = process_adaptive_pa_model_case(models, config_index);
+        const std::vector<std::string> motion = command_lines(output, "G1 ");
+        REQUIRE(motion.size() == 2);
+        CHECK(motion[0] == "G1 F6000");
+        CHECK(motion[1] == "G1 X10 Y0 E1");
+        if (config_index == 0)
+            reference_motion = motion;
+        else
+            CHECK(motion == reference_motion);
+        CHECK_THAT(adaptive_pa_command_value(output), Catch::Matchers::WithinAbs(expected_pa[config_index], 1e-6));
+    }
+}
+
+TEST_CASE("Adaptive PA falls back when a filament model cannot be parsed",
+          "[GCode][AdaptivePAMalformedFallback]")
+{
+    const std::string output = process_adaptive_pa_model_case({ "not-a-number,10,1000" }, 0);
+    check_adaptive_pa_fallback(output, "Interpolator setup failed");
+}
+
+TEST_CASE("Adaptive PA falls back when a model has no interpolatable curve",
+          "[GCode][AdaptivePANoCurveFallback]")
+{
+    const std::string output = process_adaptive_pa_model_case({ "0.1,10,1000" }, 0);
+    check_adaptive_pa_fallback(output, "Interpolation failed");
+}
+
 } // namespace gcode_broad_contracts
 
 namespace belt_apron_contracts {

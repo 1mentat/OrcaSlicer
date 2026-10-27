@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "description": "Per-filament nonlinear pressure-advance models and configured fallbacks for malformed or unusable model data.",
+  "mutants": [
+    {
+      "id": "adaptive-pa-per-index-model-lookup",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "it->second->parseAndSetData(m_config.adaptive_pressure_advance_model.get_at(config_index));",
+      "new": "it->second->parseAndSetData(m_config.adaptive_pressure_advance_model.get_at(0));",
+      "expected_matches": 1,
+      "test_filter": "AdaptivePAModelVariance",
+      "description": "Force every filament to use model zero; the second config index must retain its distinct calibration prediction."
+    },
+    {
+      "id": "adaptive-pa-acceleration-interpolation-ignored",
+      "path": "src/libslic3r/GCode/AdaptivePAInterpolator.cpp",
+      "old": "return std::round(pa_accel_interpolator.interpolate(acceleration) * 1000.0) / 1000.0; // Rounded to 3 decimal places",
+      "new": "return std::round(pa_values.front() * 1000.0) / 1000.0; // Rounded to 3 decimal places",
+      "expected_matches": 1,
+      "test_filter": "AdaptivePAModelVariance",
+      "description": "Use the first acceleration sample instead of interpolating at 1500; both configured midpoint predictions must remain correct."
+    },
+    {
+      "id": "adaptive-pa-malformed-fallback-hardwired",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "                    // Model failed or adaptive pressure advance not enabled - use default value from m_config\n                    predicted_pa = m_config.enable_pressure_advance.get_at(m_last_config_index) ? m_config.pressure_advance.get_at(m_last_config_index) : 0;\n                    if(m_config.gcode_comments) output << \"; APA: Interpolator setup failed, using default pressure advance\\n\";",
+      "new": "                    // Model failed or adaptive pressure advance not enabled - use default value from m_config\n                    predicted_pa = 0.1;\n                    if(m_config.gcode_comments) output << \"; APA: Interpolator setup failed, using default pressure advance\\n\";",
+      "expected_matches": 1,
+      "test_filter": "AdaptivePAMalformedFallback",
+      "description": "Replace configured fallback PA with 0.1 after malformed model data; the emitted numeric command must retain the configured 0.42."
+    },
+    {
+      "id": "adaptive-pa-empty-curve-return-is-not-an-error",
+      "path": "src/libslic3r/GCode/AdaptivePAInterpolator.cpp",
+      "old": "return -1; // Error: Not enough data points for interpolation",
+      "new": "return 0.0; // Error: Not enough data points for interpolation",
+      "expected_matches": 1,
+      "test_filter": "AdaptivePANoCurveFallback",
+      "description": "Treat a model with no usable curve as a zero prediction; the configured static fallback must remain 0.42."
+    }
+  ]
+}
