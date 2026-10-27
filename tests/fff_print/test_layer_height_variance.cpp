@@ -578,3 +578,76 @@ TEST_CASE("Configured layer heights reach exact full-print layers and HEIGHT tag
 }
 
 } // namespace layer_geometry_settings_contracts
+
+
+TEST_CASE("Adaptive Print layers reach the configured or nozzle-derived maximum",
+          "[LayerHeightVariance]")
+{
+    struct MaximumCase {
+        const char *nozzle_diameter;
+        const char *max_layer_height;
+        double expected_maximum;
+    };
+    const MaximumCase cases[] = {
+        { "0.4", "0",    0.30 }, // Zero uses three quarters of a 0.4 mm nozzle.
+        { "0.6", "0",    0.45 }, // The same sentinel follows the selected nozzle diameter.
+        { "0.4", "0.25", 0.25 }, // An explicit maximum overrides the nozzle-derived default.
+    };
+
+    for (const MaximumCase &test : cases) {
+        INFO("nozzle=" << test.nozzle_diameter << " max_layer_height=" << test.max_layer_height);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "layer_height",              0.2 },
+            { "initial_layer_print_height", 0.2 },
+            { "nozzle_diameter",            test.nozzle_diameter },
+            { "min_layer_height",           "0.1" },
+            { "max_layer_height",           test.max_layer_height },
+            { "precise_z_height",           false },
+            { "use_relative_e_distances",   true },
+            { "layer_change_gcode",         "G92 E0\n" },
+        });
+
+        Model model;
+        ModelObject *object = model.add_object();
+        object->add_volume(make_cube(10., 10., 4.));
+        object->add_instance();
+
+        const SlicingParameters params = PrintObject::slicing_parameters(
+            config, *object, 0.f, Vec3d(1., 1., 1.));
+        REQUIRE(params.valid);
+        CHECK_THAT(params.max_layer_height,
+                   Catch::Matchers::WithinAbs(test.expected_maximum, 1e-9));
+
+        // A flat-sided cube has vertical facets that allow the coarse quality path to
+        // reach the configured cap; the profile then feeds the normal Print slice path.
+        const std::vector<double> profile = layer_height_profile_adaptive(params, *object, 1.f);
+        check_profile_shape(profile, params);
+        bool profile_reaches_maximum = false;
+        for (size_t i = 1; i < profile.size(); i += 2)
+            profile_reaches_maximum |= std::abs(profile[i] - test.expected_maximum) < EPSILON;
+        CHECK(profile_reaches_maximum);
+
+        object->layer_height_profile.set(profile);
+        object->ensure_on_bed();
+        Print print;
+        print.auto_assign_extruders(object);
+        print.apply(model, config);
+        const auto validation = print.validate();
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        print.process();
+        REQUIRE_FALSE(print.objects().empty());
+        const auto layers = print.objects().front()->layers();
+        REQUIRE(layers.size() > 2);
+        double actual_maximum = 0.;
+        for (const Layer *layer : layers) {
+            REQUIRE(std::isfinite(layer->height));
+            CHECK(layer->height >= params.min_layer_height - EPSILON);
+            CHECK(layer->height <= params.max_layer_height + EPSILON);
+            actual_maximum = std::max(actual_maximum, layer->height);
+        }
+        CHECK_THAT(actual_maximum,
+                   Catch::Matchers::WithinAbs(test.expected_maximum, EPSILON));
+    }
+}

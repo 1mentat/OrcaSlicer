@@ -925,9 +925,11 @@
       "test": "tests/fff_print/test_layer_height_variance.cpp",
       "tag": "[LayerHeightVariance]",
       "dimensions": [
-        "representative_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The direct nozzle-bound contract checks the zero sentinel's 0.75-nozzle default and an explicit 0.3 mm maximum, including the minimum clamp. It does not claim all numeric boundaries or a full Print pipeline."
+      "reason": "The accepted adaptive Print case processes max_layer_height at its registered zero sentinel with 0.4 mm and 0.6 mm nozzles, measuring real layer maxima of 0.30 mm and 0.45 mm, then checks an explicit 0.25 mm maximum through Print::process. The accepted native and restored controls pass, both static PrintConfig mutation probes are detected by the physical maximum oracle, and changed-lines clang-tidy passes cleanly. This covers the zero boundary, representative values, and a physical pipeline, not the full numeric domain."
     },
     "min_layer_height": {
       "test": "tests/fff_print/test_layer_height_variance.cpp",
@@ -943,9 +945,10 @@
       "test": "tests/fff_print/test_layer_height_variance.cpp",
       "tag": "[LayerHeightVariance]",
       "dimensions": [
-        "representative_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "The direct nozzle-bound contract uses two configured diameters, 0.4 and 0.6 mm, to derive the corresponding layer-height limits. It does not exercise nozzle-diameter boundaries or a full Print pipeline."
+      "reason": "The accepted adaptive Print pipeline uses 0.4 mm and 0.6 mm nozzles with the zero max_layer_height sentinel and measures real layer maxima of 0.30 mm and 0.45 mm; it also processes the explicit 0.25 mm maximum row. This establishes representative-value and pipeline evidence. The registered nozzle_diameter maximum of 100 mm is not exercised, so boundary_values remains unclaimed. The separate 0.005 mm configuration-validation threshold is not a registered option bound."
     },
     "overhang_fan_speed": {
       "test": "tests/fff_print/test_cooling.cpp",

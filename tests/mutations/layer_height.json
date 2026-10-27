@@ -41,6 +41,22 @@
       "new": "static const coordf_t MIN_LAYER_HEIGHT_DEFAULT = 0.09;",
       "test_filter": "LayerHeightVariance",
       "description": "Raise the zero min_layer_height fallback from 0.07 to 0.09 mm. The adaptive Print contract requires physical sliced layers to reach the documented 0.07 mm minimum."
+    },
+    {
+      "id": "layer-height-max-nozzle-sentinel-070",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "inline coordf_t max_layer_height_from_nozzle(const PrintConfig &print_config, int idx_nozzle)\n{\n    coordf_t min_layer_height = min_layer_height_from_nozzle(print_config, idx_nozzle);\n    coordf_t max_layer_height = print_config.max_layer_height.get_at(idx_nozzle - 1);\n    coordf_t nozzle_dmr       = print_config.nozzle_diameter.get_at(idx_nozzle - 1);\n    return std::max(min_layer_height, (max_layer_height == 0.) ? (0.75 * nozzle_dmr) : max_layer_height);\n}",
+      "new": "inline coordf_t max_layer_height_from_nozzle(const PrintConfig &print_config, int idx_nozzle)\n{\n    coordf_t min_layer_height = min_layer_height_from_nozzle(print_config, idx_nozzle);\n    coordf_t max_layer_height = print_config.max_layer_height.get_at(idx_nozzle - 1);\n    coordf_t nozzle_dmr       = print_config.nozzle_diameter.get_at(idx_nozzle - 1);\n    return std::max(min_layer_height, (max_layer_height == 0.) ? (0.70 * nozzle_dmr) : max_layer_height);\n}",
+      "description": "Accepted physical pipeline probe: changing the static PrintConfig zero-sentinel fallback from 75% to 70% of nozzle diameter is detected by the adaptive Print maximum oracle.",
+      "test_filter": "LayerHeightVariance"
+    },
+    {
+      "id": "layer-height-max-ignore-explicit",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "inline coordf_t max_layer_height_from_nozzle(const PrintConfig &print_config, int idx_nozzle)\n{\n    coordf_t min_layer_height = min_layer_height_from_nozzle(print_config, idx_nozzle);\n    coordf_t max_layer_height = print_config.max_layer_height.get_at(idx_nozzle - 1);\n    coordf_t nozzle_dmr       = print_config.nozzle_diameter.get_at(idx_nozzle - 1);\n    return std::max(min_layer_height, (max_layer_height == 0.) ? (0.75 * nozzle_dmr) : max_layer_height);\n}",
+      "new": "inline coordf_t max_layer_height_from_nozzle(const PrintConfig &print_config, int idx_nozzle)\n{\n    coordf_t min_layer_height = min_layer_height_from_nozzle(print_config, idx_nozzle);\n    coordf_t max_layer_height = 0.;\n    coordf_t nozzle_dmr       = print_config.nozzle_diameter.get_at(idx_nozzle - 1);\n    return std::max(min_layer_height, (max_layer_height == 0.) ? (0.75 * nozzle_dmr) : max_layer_height);\n}",
+      "description": "Accepted physical pipeline probe: ignoring the explicit per-nozzle maximum is detected by the adaptive Print 0.25 mm maximum oracle.",
+      "test_filter": "LayerHeightVariance"
     }
   ]
 }
