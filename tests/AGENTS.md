@@ -26,6 +26,13 @@ Rebuild a single suite with `cmake --build build --config Release --target <suit
 
 Before a full Linux confidence run, follow the worker prerequisites in [README.md](README.md). Run `[LocalesUtils]` in the actual service environment and require zero skips. When using `SLICER_TEST_PROCESSORS`, verify a running test's CPU mask with the selected CTest executable; the JSON properties alone do not prove affinity works. Reuse the verified locale environment and affinity-capable CTest runtime.
 
+Worker launchers should reuse `scripts/slicer_process.py`'s `run_captured()` with
+an explicit environment copied from the parent, then apply private temp/profile
+paths. Preserve inherited executable, loader, and locale settings; do not clear
+the launcher's global environment. When compiling a source alias, retain the
+original quoted-header search directory and verify the staged headers before
+starting the compiler.
+
 ## Where a test goes
 
 - Pick the suite by the production code the test exercises, not by how the test is written.
