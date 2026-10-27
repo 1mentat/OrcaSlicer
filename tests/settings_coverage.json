@@ -3286,7 +3286,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Lengths 0, 4 and 12 mm distinguish zero and increasing scarf distance. The 4-to-12 mm positive-E path delta stays inside independently derived geometric bounds. A forced full-loop length breaks both distance and path oracles. No full numeric-domain claim."
+      "reason": "Lengths 0, 4 and 12 mm distinguish zero and increasing scarf distance. The zero-distance witness and 4-to-12 mm positive-E path bound are supported by the existing full-loop mutation kill. The consumer caps the configured length at the measured loop length. These cases do not assert behavior at or above that cap, so numeric boundary coverage remains incomplete."
     },
     "seam_slope_start_height": {
       "test": "tests/fff_print/test_precise_seam.cpp",
@@ -3295,7 +3295,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Start height 0 and 50% distinguish the minimum positive rising outer-wall flow while scarf distance, layer count and pre-export geometry remain stable. Ignoring the percent value makes the flows equal and fails the strict comparison. Absolute-height and full numeric domains remain unclaimed."
+      "reason": "Start heights 0 mm and 50% distinguish the minimum rising outer-wall flow while scarf distance, layer count and pre-export geometry remain stable; the forced-zero percent mutant fails this comparison. The consumer clamps ratios at or above 1 to 0.99. The declared evidence does not establish 100%/above or positive absolute-height behavior, so numeric boundary coverage remains incomplete."
     },
     "seam_slope_steps": {
       "test": "tests/fff_print/test_precise_seam.cpp",
@@ -5270,10 +5270,11 @@
       "test": "tests/fff_print/test_tree_support.cpp",
       "tag": "[TreeSupportInteractions]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The case \"Tree support brim width changes the first support footprint\" passes on the same proven tree_slim interaction fixture with auto brim disabled and one support wall. Configured widths 0 and 16 mm both require finite, nonempty support, positive first-layer paths, area and length; the 16 mm row must increase measured first-layer footprint area by more than 1 percent. The registry declares a minimum but no maximum, so this is representative value evidence, not complete boundary coverage. Broad interaction claims are not made. The tree_support_brim_width.json mutation catalog validates that forcing this width to zero fails the explicit-width footprint assertion; unique detection is not claimed."
+      "reason": "The case \"Tree support brim width changes the first support footprint\" runs the actual tree-support print pipeline at the registered 0 mm minimum and at 16 mm, with auto brim disabled and one support wall. Both rows require finite, nonempty support and positive physical first-layer paths, area, and length; the 16 mm row must increase measured first-layer support-footprint area by more than 1 percent over the 0 mm row. The accepted tree_support_brim_width.json forced-zero consumer mutation fails this physical comparison as an ordinary assertion, and the unmutated case passes in the accepted full 4139-case run. The registry declares a minimum of 0 and no maximum, so boundary_values covers only the registered minimum. Broader interaction and unique-detection claims are not made."
     },
     "flush_into_support": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
