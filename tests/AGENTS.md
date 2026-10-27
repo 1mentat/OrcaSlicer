@@ -24,6 +24,8 @@ Tests are off by default, so the build has to be told to include them.
 
 Rebuild a single suite with `cmake --build build --config Release --target <suite>_tests`. Visual Studio, Xcode and the Ninja Multi-Config generator that `build_linux.sh` uses are all multi-configuration, so `ctest` needs `-C` on every platform; without it, tests registered with plain `add_test()` lose their labels and report "Not Run".
 
+Before a full Linux confidence run, follow the worker prerequisites in [README.md](README.md). Run `[LocalesUtils]` in the actual service environment and require zero skips. When using `SLICER_TEST_PROCESSORS`, verify a running test's CPU mask with the selected CTest executable; the JSON properties alone do not prove affinity works. Reuse the verified locale environment and affinity-capable CTest runtime.
+
 ## Where a test goes
 
 - Pick the suite by the production code the test exercises, not by how the test is written.
@@ -62,4 +64,6 @@ Check these before writing your own setup or output-parsing code.
 - Keep tests self-contained: no shared state, green under `--order rand`.
 - Stage editable private candidates and inventory fixtures with independent file copies. Never hardlink them to tracked source files; a write through either path changes the checkout.
 - Count Catch2 JUnit `<testcase>` nodes and check their exact names. The bundled JUnit reporter's `tests` attribute counts assertions.
-- `DYNAMIC_SECTION` can emit additional JUnit entries for section paths. Declare the expected root and section names explicitly when validating a focused run.
+- BDD scenarios and `DYNAMIC_SECTION` can emit additional JUnit entries for section paths. Declare the expected root and section names explicitly when validating a focused run.
+- Catch normalizes tag order. Compare tag tokens rather than their source ordering when checking inventories.
+- Commas in case names are Catch filter separators. Do not concatenate unescaped names into a filter; use tags or an unfiltered run with an exact inventory check.
