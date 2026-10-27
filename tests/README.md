@@ -213,6 +213,10 @@ recorded in the retained Ninja configuration. Resolving a symlink alias or chang
 CMake versions can invalidate otherwise unchanged objects. Inspect a Ninja dry run
 before compiling: adding a focused test target should compile its test/support
 sources and link, without recompiling production objects.
+For GNU C++, `-DSLICER_TEST_GNU_LTO_JOBS=4` bounds LTO work to four jobs in
+Release test-executable links. The default `0` preserves existing linker flags.
+This option affects test links only; production targets, compile options, and
+other build configurations keep their existing settings.
 Before building, the runner checks that the compile database assigns the test
 source to the requested CMake target. Canonical and focused targets may both
 own the same source; selecting an unrelated target fails before compilation.

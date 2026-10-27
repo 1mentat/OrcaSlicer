@@ -35,6 +35,17 @@ if (NOT SLICER_TEST_PROCESSORS MATCHES "^[0-9]+$")
         "SLICER_TEST_PROCESSORS must be a non-negative integer (0 disables per-test affinity)")
 endif()
 
+set(SLICER_TEST_GNU_LTO_JOBS "0" CACHE STRING
+    "GNU LTO jobs for Release test links; 0 preserves existing linker flags")
+if (NOT "${SLICER_TEST_GNU_LTO_JOBS}" MATCHES "^[0-9]+$")
+    message(FATAL_ERROR
+        "SLICER_TEST_GNU_LTO_JOBS must be a non-negative integer (0 preserves existing linker flags)")
+endif ()
+if (SLICER_TEST_GNU_LTO_JOBS GREATER 0 AND
+    NOT "${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+    message(FATAL_ERROR "SLICER_TEST_GNU_LTO_JOBS requires the GNU C++ compiler")
+endif ()
+
 option(SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY
     "Register focused test targets with unique CTest names" OFF)
 
@@ -52,6 +63,10 @@ if (SLICER_FAST_FOCUSED_TEST_COMPILE)
 endif ()
 
 add_library(test_common INTERFACE)
+if (SLICER_TEST_GNU_LTO_JOBS GREATER 0)
+    target_link_options(test_common INTERFACE
+        "$<$<CONFIG:Release>:-flto=${SLICER_TEST_GNU_LTO_JOBS}>")
+endif ()
 target_compile_definitions(test_common INTERFACE TEST_DATA_DIR=R"\(${TEST_DATA_DIR}\)" PROFILES_DIR=R"\(${PROFILES_DIR}\)" CATCH_CONFIG_FAST_COMPILE)
 target_include_directories(test_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
