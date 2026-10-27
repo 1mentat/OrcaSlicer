@@ -3279,6 +3279,26 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_explicit_tmpdir() -> None:
+    """Reject an unusable explicit TMPDIR before starting expensive validation."""
+    configured = os.environ.get("TMPDIR")
+    if configured is None:
+        return
+    if not configured:
+        raise ValidationError("TMPDIR is set but empty")
+
+    directory = Path(configured)
+    if not directory.is_absolute():
+        raise ValidationError("TMPDIR must be an absolute path")
+    if not directory.is_dir():
+        raise ValidationError("TMPDIR must name an existing directory")
+    try:
+        with tempfile.TemporaryFile(dir=directory):
+            pass
+    except (OSError, ValueError) as exc:
+        raise ValidationError("TMPDIR is not usable for temporary files") from exc
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.jobs < 1:
@@ -3301,8 +3321,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("slicer_pr_validation: error: --test-regex must not be empty", file=sys.stderr)
         return 2
     args.targets = tuple(args.targets or DEFAULT_TARGETS)
-    args.uv = _resolve_uv(args.uv_executable)
     try:
+        _validate_explicit_tmpdir()
+        args.uv = _resolve_uv(args.uv_executable)
         return run_validation(args)
     except (ValidationError, OSError) as exc:
         print(f"slicer_pr_validation: error: {exc}", file=sys.stderr)

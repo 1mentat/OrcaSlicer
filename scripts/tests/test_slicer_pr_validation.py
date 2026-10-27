@@ -21,6 +21,91 @@ import slicer_pr_validation  # noqa: E402
 
 
 class ParsingTests(unittest.TestCase):
+    def test_explicit_tmpdir_must_be_an_existing_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            missing = root / "missing"
+            regular_file = root / "file"
+            regular_file.write_text("not a directory", encoding="utf-8")
+            for invalid in (missing, regular_file):
+                with self.subTest(path=invalid), \
+                     mock.patch.dict(os.environ, {"TMPDIR": str(invalid)}, clear=True), \
+                     self.assertRaisesRegex(
+                         slicer_pr_validation.ValidationError,
+                         "TMPDIR must name an existing directory",
+                     ):
+                    slicer_pr_validation._validate_explicit_tmpdir()
+
+    def test_empty_explicit_tmpdir_is_rejected(self):
+        with mock.patch.dict(os.environ, {"TMPDIR": ""}, clear=True), \
+             self.assertRaisesRegex(
+                 slicer_pr_validation.ValidationError,
+                 "TMPDIR is set but empty",
+             ):
+            slicer_pr_validation._validate_explicit_tmpdir()
+
+    def test_existing_relative_tmpdir_is_rejected(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            relative = os.path.relpath(temp, Path.cwd())
+            with tempfile.TemporaryFile(dir=relative):
+                pass
+            with mock.patch.dict(os.environ, {"TMPDIR": relative}, clear=True), \
+                 self.assertRaisesRegex(
+                     slicer_pr_validation.ValidationError,
+                     "TMPDIR must be an absolute path",
+                 ):
+                slicer_pr_validation._validate_explicit_tmpdir()
+
+    def test_explicit_tmpdir_must_allow_temporary_file_creation(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.dict(os.environ, {"TMPDIR": temp}, clear=True), \
+             mock.patch.object(slicer_pr_validation.tempfile, "TemporaryFile",
+                               side_effect=PermissionError("write denied")), \
+             self.assertRaisesRegex(
+                 slicer_pr_validation.ValidationError,
+                 "TMPDIR is not usable for temporary files",
+             ):
+            slicer_pr_validation._validate_explicit_tmpdir()
+
+    def test_valid_explicit_tmpdir_is_probed_without_leaving_files(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.dict(os.environ, {"TMPDIR": temp}, clear=True):
+            slicer_pr_validation._validate_explicit_tmpdir()
+            self.assertEqual(list(Path(temp).iterdir()), [])
+
+    def test_unset_tmpdir_keeps_the_platform_default(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(slicer_pr_validation.tempfile, "TemporaryFile") as probe:
+            slicer_pr_validation._validate_explicit_tmpdir()
+        probe.assert_not_called()
+
+    def test_invalid_explicit_tmpdir_fails_before_validation_or_uv_resolution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            invalid = Path(temp) / "missing"
+            argv = ["--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused"]
+            with mock.patch.dict(os.environ, {"TMPDIR": str(invalid)}, clear=True), \
+                 mock.patch.object(slicer_pr_validation, "run_validation") as run, \
+                 mock.patch.object(slicer_pr_validation, "_resolve_uv") as resolve_uv, \
+                 mock.patch("sys.stderr") as stderr:
+                result = slicer_pr_validation.main(argv)
+            self.assertEqual(result, 2)
+            run.assert_not_called()
+            resolve_uv.assert_not_called()
+            self.assertIn("TMPDIR", "".join(str(call.args[0]) for call in stderr.write.call_args_list))
+
+    def test_unset_tmpdir_reaches_validation_without_a_probe(self):
+        argv = ["--harness-base", "base", "--harness-ref", "ref",
+                "--deps-prefix", "/unused"]
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(slicer_pr_validation, "_resolve_uv", return_value="uv"), \
+             mock.patch.object(slicer_pr_validation, "run_validation", return_value=0) as run, \
+             mock.patch.object(slicer_pr_validation.tempfile, "TemporaryFile") as probe:
+            result = slicer_pr_validation.main(argv)
+        self.assertEqual(result, 0)
+        run.assert_called_once()
+        probe.assert_not_called()
+
     def test_test_regex_is_optional_and_preserved_by_parser(self):
         base = ["--harness-base", "base", "--harness-ref", "ref",
                 "--deps-prefix", "/unused"]
