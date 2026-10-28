@@ -5521,6 +5521,68 @@
         "interaction_matrix"
       ],
       "reason": "The registered 0.5 and 5 mm endpoints change ramp partition counts in the public PressureEqualizer for both absolute and relative E. A real Print export pairs both endpoints with disabled slope 0 and enabled slope 1, requiring segment-length independence only when disabled, changed active ramp response, and conserved deposited path/material. Unrelated volumetric-flow and cooling caps are explicitly controlled; interior lengths and other feature interactions are not exhaustive."
+    },
+    "print_settings_id": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[Published]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public published-3MF import receives print_settings_id=\"file process\" while the edited process identity is \"user process\". After load, the selected identity remains \"user process\" and the structural key is absent from skipped_keys. This is bounded to preserving the selected process identity during this import path."
+    },
+    "filename_format": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[Print]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A real Print applies filename_format and resolves {first_object_name} from printable model objects: it selects WidgetPart or the first printable object, skips an object outside the active plate, and emits an empty placeholder for an unnamed object. This covers those filename inputs and object-selection behavior, not the full placeholder language."
+    },
+    "top_surface_expansion": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[Perimeters]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered minimum is 0 mm; the real slice compares 0 and 2 mm for both classic and Arachne wall generation. The no-top-shell and zero-top-density controls keep perimeter/fill lengths equivalent, while a fixture with top fill requires a measurable fill-length change. No upper bound is declared."
+    },
+    "prime_tower_infill_gap": {
+      "test": "tests/libslic3r/test_wipe_tower_estimate.cpp",
+      "tag": "[WipeTowerEstimate]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The estimator fixture sets the registered 100% minimum, measures Type1 depth, then selects 150% and checks the stacked-depth formula; the Type2 control remains governed by its separate spacing option. This is a bounded estimator oracle for the two selected values, not a full wipe-tower print-export claim."
+    },
+    "post_process": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[Published]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "The published-import fixture offers a two-item script vector to a selected process with one existing item; the existing vector is preserved and post_process is reported in skipped_keys. This proves import rejection/preservation for that size mismatch only; it does not claim that external scripts are executed."
+    },
+    "nozzle_type": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[NozzleTypeSettings]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "All five registry enum values (undefine, hardened steel, stainless steel, tungsten carbide, brass) pass through public G-code file import into result.nozzle_type, with the configured HRC retained and the material-to-hardness lookup checked. The setting is nullable; nil behavior is not exercised."
+    },
+    "wiping_volumes_extruders": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[Published]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public published-import fixture replaces the selected two-entry vector {10,20} with the file vector {140,150} and confirms the key is applied rather than skipped. This establishes one vector handoff case; numeric boundary behavior is not tested."
     }
   }
 }

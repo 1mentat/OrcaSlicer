@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "description": "Keep the two wipe-tower planners bound to their own pre-slice spacing options.",
+  "test_filter": "^WipeTowerEstimate$",
+  "mutants": [
+    {
+      "id": "wipe-tower-estimate-type1-uses-type2-spacing",
+      "path": "src/libslic3r/GCode/WipeTowerEstimate.cpp",
+      "old": "    const double extra_spacing    = opt_float(type1 ? \"prime_tower_infill_gap\" : \"wipe_tower_extra_spacing\") / 100.;",
+      "new": "    const double extra_spacing    = opt_float(\"wipe_tower_extra_spacing\") / 100.;",
+      "expected_matches": 1,
+      "test_filter": "^WipeTowerEstimate$",
+      "ordinary_assertion_only": true,
+      "description": "Read the Type2 spacing option for Type1. The existing 100%-to-150% Type1 depth comparison and per-filament estimates detect this misrouting while normal Type2 controls pass. Scope is pre-slice footprint estimation.",
+      "source_anchor_sha256": "423864874fee70828cbdf819ff3c7de5b4809a3db0b415a4a7c6328bd81e2d7c"
+    }
+  ]
+}

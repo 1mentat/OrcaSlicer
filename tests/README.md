@@ -1047,6 +1047,11 @@ and feature metadata. Build `fff_print_gcodeprocessor_tests` for focused feedbac
 it includes both processor test files. Its probes are in
 `gcodeprocessor_producer_import.json`.
 
+`[WipeTowerEstimate]` checks pre-slice footprints for both planners. The Type1
+spacing case compares the registered 100% minimum with 150% and checks the
+scaled depth while Type2 follows its own spacing option. The setting-selection
+probe is in `wipe_tower_estimate_spacing.json`. Scope is footprint estimation.
+
 `[MultimaterialWipe]` checks direct WipeTower2 purge matrices, wall geometry,
 ramming, cooling, stamping, loading, and delay commands. Independent cooling
 variants change one setting at a time, with feedrates read from executable
