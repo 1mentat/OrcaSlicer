@@ -483,6 +483,12 @@ mutations are in `preset_cloud_selection.json`.
 against an internal-wall control in absolute and relative extrusion modes.
 The output must preserve extrusion, path length, and endpoint while reducing
 feedrates on the higher-flow moves. Its mutations are in `pressure_equalizer.json`.
+`[VolumetricRateSlope]` compares configured flow-rate slopes in both extrusion
+modes; `[VolumetricRateSlopeSegmentLength]` checks the registered 0.5 and 5 mm
+segment bounds. Their paired Print exports require segment-length independence
+at disabled slope zero and a changed ramp response when enabled, with conserved
+path and material. Independent flow and cooling limits are explicitly controlled.
+Two configuration-ignoring mutations challenge the direct and exported oracles.
 `[PressureEqualizerStateTransitions]` checks G92 logical-position resets and
 tool-specific filament cross sections through emitted moves and conserved
 extrusion (`pressure_equalizer_state_transitions.json`).

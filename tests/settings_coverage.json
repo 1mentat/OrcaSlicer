@@ -5501,6 +5501,26 @@
         "pipeline_oracle"
       ],
       "reason": "All five registered formats (PNG, JPG, QOI, BTT_TFT and COLPIC) are selected as the legacy default for an empty thumbnail suffix, passed through the public composite normalizer and thumbnail parser, then exported to G-code. Decoded image dimensions/pixels or RGB565 pixel streams must retain the selected format, including BTT special-black and ColPic transparency conversion. This does not claim rendering or interactions with explicit per-thumbnail format overrides."
+    },
+    "max_volumetric_extrusion_rate_slope": {
+      "test": "tests/fff_print/test_pressure_equalizer.cpp",
+      "tag": "[VolumetricRateSlope]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The zero boundary is exercised through real Print export: segment lengths 0.5 and 5 produce the same normalized executable motion when smoothing is disabled. At positive slope 1 those bounds change ramp output. Separate direct-processing rows at slopes 1, 10 and 100 require progressively faster flow transitions in both absolute and relative E modes while conserving path and material. The setting has no registered upper bound; arbitrary positive values are not exhaustively covered."
+    },
+    "max_volumetric_extrusion_rate_slope_segment_length": {
+      "test": "tests/fff_print/test_pressure_equalizer.cpp",
+      "tag": "[VolumetricRateSlopeSegmentLength]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The registered 0.5 and 5 mm endpoints change ramp partition counts in the public PressureEqualizer for both absolute and relative E. A real Print export pairs both endpoints with disabled slope 0 and enabled slope 1, requiring segment-length independence only when disabled, changed active ramp response, and conserved deposited path/material. Unrelated volumetric-flow and cooling caps are explicitly controlled; interior lengths and other feature interactions are not exhaustive."
     }
   }
 }

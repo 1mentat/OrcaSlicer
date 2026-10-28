@@ -9,11 +9,15 @@
 #include "libslic3r/GCode/PressureEqualizer.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/libslic3r.h"
+#include "test_helpers.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -40,13 +44,14 @@ std::string pressure_fixture(bool relative_e, Slic3r::ExtrusionRole role)
 }
 
 std::string equalize_pressure(const std::string &input, bool relative_e, bool external_only,
-                              const std::vector<double> &filament_diameters = {1.75})
+                              const std::vector<double> &filament_diameters = {1.75},
+                              double max_rate_slope = 1.0, double max_segment_length = 2.0)
 {
     Slic3r::GCodeConfig config;
     config.filament_diameter.values = filament_diameters;
     config.use_relative_e_distances.value = relative_e;
-    config.max_volumetric_extrusion_rate_slope.value = 1.0;
-    config.max_volumetric_extrusion_rate_slope_segment_length.value = 2.0;
+    config.max_volumetric_extrusion_rate_slope.value = max_rate_slope;
+    config.max_volumetric_extrusion_rate_slope_segment_length.value = max_segment_length;
     config.extrusion_rate_smoothing_external_perimeter_only.value = external_only;
 
     Slic3r::PressureEqualizer equalizer(config);
@@ -75,6 +80,126 @@ PressureObservation observe_pressure(const std::string &gcode, const Slic3r::GCo
         observation.final_x = line.new_X(state);
     });
     return observation;
+}
+
+void check_conserved_path(const PressureObservation &observation)
+{
+    CHECK(observation.extrusion_moves > 0);
+    CHECK_THAT(observation.total_extrusion, Catch::Matchers::WithinAbs(6.0, 0.001));
+    CHECK_THAT(observation.path_length, Catch::Matchers::WithinAbs(40.0, 0.001));
+    CHECK_THAT(observation.max_abs_y, Catch::Matchers::WithinAbs(0.0, 0.001));
+    CHECK_THAT(observation.final_x, Catch::Matchers::WithinAbs(40.0, 0.001));
+}
+
+struct PrintMotionObservation
+{
+    std::vector<std::array<double, 6>> moves;
+    std::vector<double> extrusion_feedrates;
+    std::size_t extrusion_moves = 0;
+    std::size_t outer_wall_moves = 0;
+    std::size_t inner_wall_moves = 0;
+    double total_extrusion = 0.0;
+    double path_length = 0.0;
+    double max_outer_wall_feedrate = 0.0;
+    double max_inner_wall_feedrate = 0.0;
+};
+
+Slic3r::DynamicPrintConfig pressure_print_config(double rate_slope, double segment_length)
+{
+    Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"max_volumetric_extrusion_rate_slope", rate_slope},
+        {"max_volumetric_extrusion_rate_slope_segment_length", segment_length},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"outer_wall_speed", 20.0},
+        {"inner_wall_speed", 80.0},
+        {"initial_layer_speed", 20.0},
+        {"initial_layer_infill_speed", 20.0},
+        {"filament_max_volumetric_speed", "200"},
+        {"filament_adaptive_volumetric_speed", false},
+        {"small_perimeter_threshold", 0.0},
+        {"gcode_comments", true},
+        {"enable_arc_fitting", false},
+        {"slow_down_for_layer_cooling", false},
+        {"slow_down_layer_time", 0.0},
+        {"fan_cooling_layer_time", 0.0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+    });
+    return config;
+}
+
+PrintMotionObservation observe_print_motion(const std::string &gcode,
+                                           const Slic3r::DynamicPrintConfig &config)
+{
+    enum class WallRole { Other, Outer, Inner };
+    PrintMotionObservation observation;
+    WallRole active_wall = WallRole::Other;
+    Slic3r::GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&observation, &active_wall](Slic3r::GCodeReader &state,
+                                                            const Slic3r::GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.rfind("TYPE:", 0) == 0) {
+            active_wall = comment == "TYPE:Outer wall" ? WallRole::Outer :
+                          comment == "TYPE:Inner wall" ? WallRole::Inner : WallRole::Other;
+        }
+        if (!line.cmd_is("G0") && !line.cmd_is("G1"))
+            return;
+        if (!line.has(Slic3r::X) && !line.has(Slic3r::Y) && !line.has(Slic3r::Z) &&
+            !line.has(Slic3r::E) && !line.has(Slic3r::F))
+            return;
+
+        const bool deposits_xy = line.extruding(state) && line.dist_XY(state) > EPSILON;
+        observation.moves.push_back({line.cmd_is("G0") ? 0.0 : 1.0, line.new_X(state), line.new_Y(state),
+                                     line.new_Z(state), line.dist_E(state), line.new_F(state)});
+        if (!deposits_xy)
+            return;
+
+        ++observation.extrusion_moves;
+        observation.extrusion_feedrates.push_back(line.new_F(state));
+        observation.total_extrusion += line.dist_E(state);
+        observation.path_length += line.dist_XY(state);
+        if (active_wall == WallRole::Outer) {
+            ++observation.outer_wall_moves;
+            observation.max_outer_wall_feedrate = std::max(observation.max_outer_wall_feedrate,
+                                                           double(line.new_F(state)));
+        } else if (active_wall == WallRole::Inner) {
+            ++observation.inner_wall_moves;
+            observation.max_inner_wall_feedrate = std::max(observation.max_inner_wall_feedrate,
+                                                           double(line.new_F(state)));
+        }
+    });
+    return observation;
+}
+
+bool same_print_motion_stream(const std::vector<std::array<double, 6>> &left,
+                              const std::vector<std::array<double, 6>> &right)
+{
+    if (left.size() != right.size())
+        return false;
+    const auto same_value = [](double a, double b) { return std::abs(a - b) <= 0.001; };
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        for (std::size_t axis = 0; axis < left[i].size(); ++axis)
+            if (!same_value(left[i][axis], right[i][axis]))
+                return false;
+    }
+    return true;
+}
+
+bool extrusion_feedrates_differ(const PrintMotionObservation &left, const PrintMotionObservation &right)
+{
+    if (left.extrusion_feedrates.size() != right.extrusion_feedrates.size())
+        return false;
+    for (std::size_t i = 0; i < left.extrusion_feedrates.size(); ++i)
+        if (std::abs(left.extrusion_feedrates[i] - right.extrusion_feedrates[i]) > 0.01)
+            return true;
+    return false;
 }
 
 } // namespace
@@ -164,6 +289,103 @@ TEST_CASE("Pressure smoothing honors the external-only setting for tagged roles"
             CHECK_THAT(feedrate, Catch::Matchers::WithinAbs(1200.f, 0.001f));
     } else {
         require_smoothed_transition(internal);
+    }
+}
+
+TEST_CASE("Positive volumetric-rate slopes allow progressively faster flow transitions", "[PressureEqualizer][VolumetricRateSlope]")
+{
+    const bool relative_e = GENERATE(false, true);
+    const std::string input = pressure_fixture(relative_e, Slic3r::erExternalPerimeter);
+    Slic3r::GCodeConfig reader_config;
+    reader_config.use_relative_e_distances.value = relative_e;
+
+    const PressureObservation gentle = observe_pressure(
+        equalize_pressure(input, relative_e, false, {1.75}, 1.0, 2.0), reader_config);
+    const PressureObservation medium = observe_pressure(
+        equalize_pressure(input, relative_e, false, {1.75}, 10.0, 2.0), reader_config);
+    const PressureObservation steep = observe_pressure(
+        equalize_pressure(input, relative_e, false, {1.75}, 100.0, 2.0), reader_config);
+
+    REQUIRE_FALSE(gentle.high_flow_feedrates.empty());
+    REQUIRE_FALSE(medium.high_flow_feedrates.empty());
+    REQUIRE_FALSE(steep.high_flow_feedrates.empty());
+    const auto minimum_high_flow_feedrate = [](const PressureObservation &observation) {
+        return *std::min_element(observation.high_flow_feedrates.begin(), observation.high_flow_feedrates.end());
+    };
+    const float gentle_min = minimum_high_flow_feedrate(gentle);
+    const float medium_min = minimum_high_flow_feedrate(medium);
+    const float steep_min = minimum_high_flow_feedrate(steep);
+    CAPTURE(relative_e, gentle_min, medium_min, steep_min);
+
+    CHECK(gentle_min < medium_min);
+    CHECK(medium_min < steep_min);
+    CHECK(steep_min <= 1200.f);
+
+    check_conserved_path(gentle);
+    check_conserved_path(medium);
+    check_conserved_path(steep);
+}
+
+TEST_CASE("Volumetric-rate segment limits change ramp partitioning without changing the path", "[PressureEqualizer][VolumetricRateSlopeSegmentLength]")
+{
+    const bool relative_e = GENERATE(false, true);
+    const std::string input = pressure_fixture(relative_e, Slic3r::erExternalPerimeter);
+    Slic3r::GCodeConfig reader_config;
+    reader_config.use_relative_e_distances.value = relative_e;
+
+    // These are the registered 0.5 mm minimum and 5 mm maximum. Keep the slope
+    // fixed so only the ramp partition length changes.
+    const PressureObservation fine = observe_pressure(
+        equalize_pressure(input, relative_e, false, {1.75}, 10.0, 0.5), reader_config);
+    const PressureObservation coarse = observe_pressure(
+        equalize_pressure(input, relative_e, false, {1.75}, 10.0, 5.0), reader_config);
+    CAPTURE(relative_e, fine.extrusion_moves, coarse.extrusion_moves);
+
+    CHECK(fine.extrusion_moves > coarse.extrusion_moves);
+    check_conserved_path(fine);
+    check_conserved_path(coarse);
+}
+
+TEST_CASE("Zero slope ignores segment length while positive smoothing changes exported ramps", "[PressureEqualizer][VolumetricRateSlope][VolumetricRateSlopeSegmentLength]")
+{
+    const auto export_print = [](double slope, double segment_length) {
+        const Slic3r::DynamicPrintConfig config = pressure_print_config(slope, segment_length);
+        const std::string gcode = Slic3r::Test::slice({Slic3r::Test::cube(4.0)}, config);
+        return observe_print_motion(gcode, config);
+    };
+
+    // With smoothing disabled, segment length must not affect the public Print
+    // export. With smoothing enabled, the same two bounds must affect the ramp.
+    const PrintMotionObservation zero_fine = export_print(0.0, 0.5);
+    const PrintMotionObservation zero_coarse = export_print(0.0, 5.0);
+    const PrintMotionObservation enabled_fine = export_print(1.0, 0.5);
+    const PrintMotionObservation enabled_coarse = export_print(1.0, 5.0);
+    CAPTURE(zero_fine.moves.size(), zero_coarse.moves.size(), enabled_fine.extrusion_moves,
+            enabled_coarse.extrusion_moves);
+
+    CHECK(same_print_motion_stream(zero_fine.moves, zero_coarse.moves));
+    REQUIRE(zero_fine.outer_wall_moves > 0);
+    REQUIRE(zero_fine.inner_wall_moves > 0);
+    CHECK(zero_fine.max_inner_wall_feedrate > zero_fine.max_outer_wall_feedrate);
+
+    const bool segmentation_changed = enabled_fine.extrusion_moves != enabled_coarse.extrusion_moves;
+    const bool feed_response_changed = extrusion_feedrates_differ(enabled_fine, enabled_coarse);
+    const bool positive_setting_changes_response = segmentation_changed || feed_response_changed;
+    CHECK(positive_setting_changes_response);
+
+    const auto check_nonempty_deposition = [](const PrintMotionObservation &observation) {
+        CHECK(observation.extrusion_moves > 0);
+        CHECK(observation.total_extrusion > 0.0);
+        CHECK(observation.path_length > 0.0);
+    };
+    check_nonempty_deposition(zero_fine);
+    check_nonempty_deposition(zero_coarse);
+    check_nonempty_deposition(enabled_fine);
+    check_nonempty_deposition(enabled_coarse);
+    for (const PrintMotionObservation *observation : {&zero_coarse, &enabled_fine, &enabled_coarse}) {
+        CHECK_THAT(observation->total_extrusion,
+                   Catch::Matchers::WithinAbs(zero_fine.total_extrusion, 0.05));
+        CHECK_THAT(observation->path_length, Catch::Matchers::WithinAbs(zero_fine.path_length, 0.05));
     }
 }
 

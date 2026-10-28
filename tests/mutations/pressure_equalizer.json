@@ -23,6 +23,26 @@
       "test_filter": "PressureEqualizer",
       "ordinary_assertion_only": true,
       "description": "Discard the public extrusion-role marker and force every tagged segment to an internal perimeter. The external-only row must then lose its smoothing split, failing its positive physical output assertions."
+    },
+    {
+      "id": "volumetric-slope-config-ignored",
+      "path": "src/libslic3r/GCode/PressureEqualizer.cpp",
+      "old": "\t\tm_max_volumetric_extrusion_rate_slope_positive = float(config.max_volumetric_extrusion_rate_slope.value) * 60.f * 60.f;\n    \tm_max_volumetric_extrusion_rate_slope_negative = float(config.max_volumetric_extrusion_rate_slope.value) * 60.f * 60.f;\n",
+      "new": "\t\tm_max_volumetric_extrusion_rate_slope_positive = 1.f * 60.f * 60.f;\n    \tm_max_volumetric_extrusion_rate_slope_negative = 1.f * 60.f * 60.f;\n",
+      "expected_matches": 1,
+      "test_filter": "VolumetricRateSlope",
+      "ordinary_assertion_only": true,
+      "description": "Hold both flow-rate slopes at 1 instead of honoring configured 1, 10 and 100; the measured feed responses must remain distinct."
+    },
+    {
+      "id": "volumetric-slope-segment-config-ignored",
+      "path": "src/libslic3r/GCode/PressureEqualizer.cpp",
+      "old": "m_max_segment_length = float(config.max_volumetric_extrusion_rate_slope_segment_length.value);",
+      "new": "m_max_segment_length = 2.f;",
+      "expected_matches": 1,
+      "test_filter": "VolumetricRateSlopeSegmentLength",
+      "ordinary_assertion_only": true,
+      "description": "Hardwire 2 mm ramp subdivisions; the configured 0.5 and 5 mm endpoints must change direct-processing and exported Print ramp partitioning."
     }
   ]
 }
