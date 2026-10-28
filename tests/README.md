@@ -1497,6 +1497,11 @@ root `CMakeLists.txt` and `.gitignore`. It excludes production bug fixes from
 the testing branch, and verifies the `src/` index hash is unchanged by the
 overlay. The report records every applied and excluded path.
 
+If `CCACHE_CONFIGPATH` is set, use an absolute path to a readable regular config
+file; symlink targets are accepted. The runner checks it before resolving tools
+or starting native work, because child commands use worktree and build directories
+where relative paths would change meaning.
+
 Use `--patch-scope integration` to also include the two source CMake files,
 or `--patch-scope full` for the full branch diff. Repeated `--patch-include`
 values add literal paths or directories explicitly. Results from these broader

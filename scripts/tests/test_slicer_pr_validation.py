@@ -79,6 +79,119 @@ class ParsingTests(unittest.TestCase):
             slicer_pr_validation._validate_explicit_tmpdir()
         probe.assert_not_called()
 
+    def test_explicit_ccache_configpath_rejects_missing_and_nonfile_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            missing = root / "missing.conf"
+            directory = root / "config-dir"
+            directory.mkdir()
+            for invalid in (missing, directory):
+                with self.subTest(path=invalid), \
+                     mock.patch.dict(os.environ, {"CCACHE_CONFIGPATH": str(invalid)}, clear=True), \
+                     self.assertRaisesRegex(
+                         slicer_pr_validation.ValidationError,
+                         "CCACHE_CONFIGPATH must name an existing readable regular file",
+                     ):
+                    slicer_pr_validation._validate_explicit_ccache_configpath()
+
+    def test_empty_explicit_ccache_configpath_is_rejected(self):
+        with mock.patch.dict(os.environ, {"CCACHE_CONFIGPATH": ""}, clear=True), \
+             self.assertRaisesRegex(
+                 slicer_pr_validation.ValidationError,
+                 "CCACHE_CONFIGPATH is set but empty",
+             ):
+            slicer_pr_validation._validate_explicit_ccache_configpath()
+
+    def test_relative_explicit_ccache_configpath_is_rejected_even_if_file_exists(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            config = Path(temp) / "ccache.conf"
+            config.write_text("cache_dir = /tmp/ccache\n", encoding="utf-8")
+            relative = os.path.relpath(config, Path.cwd())
+            self.assertTrue(Path(relative).is_file())
+            with mock.patch.dict(os.environ, {"CCACHE_CONFIGPATH": relative}, clear=True), \
+                 self.assertRaisesRegex(
+                     slicer_pr_validation.ValidationError,
+                     "CCACHE_CONFIGPATH must be an absolute path",
+                 ):
+                slicer_pr_validation._validate_explicit_ccache_configpath()
+
+    def test_valid_explicit_ccache_configpath_file_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ccache.conf"
+            config.write_text("cache_dir = /tmp/ccache\n", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"CCACHE_CONFIGPATH": str(config)}, clear=True):
+                slicer_pr_validation._validate_explicit_ccache_configpath()
+
+    def test_valid_explicit_ccache_configpath_symlink_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ccache.conf"
+            config.write_text("cache_dir = /tmp/ccache\n", encoding="utf-8")
+            alias = root / "ccache-link.conf"
+            try:
+                alias.symlink_to(config)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlinks are unavailable: {exc}")
+
+            with mock.patch.dict(os.environ, {"CCACHE_CONFIGPATH": str(alias)}, clear=True):
+                slicer_pr_validation._validate_explicit_ccache_configpath()
+
+    def test_invalid_explicit_ccache_configpath_fails_before_validation_or_uv_resolution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            missing = root / "missing.conf"
+            nonfile = root / "config-dir"
+            nonfile.mkdir()
+            relative = root / "relative.conf"
+            relative.write_text("cache_dir = /tmp/ccache\n", encoding="utf-8")
+            relative_path = os.path.relpath(relative, Path.cwd())
+            argv = ["--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused"]
+            for invalid, expected_error in (
+                (missing, "CCACHE_CONFIGPATH must name an existing readable regular file"),
+                (nonfile, "CCACHE_CONFIGPATH must name an existing readable regular file"),
+                (relative_path, "CCACHE_CONFIGPATH must be an absolute path"),
+            ):
+                with self.subTest(path=invalid), \
+                     mock.patch.dict(os.environ, {"CCACHE_CONFIGPATH": str(invalid)}, clear=True), \
+                     mock.patch.object(slicer_pr_validation, "run_validation") as run, \
+                     mock.patch.object(slicer_pr_validation, "_resolve_uv") as resolve_uv, \
+                     mock.patch("sys.stderr") as stderr:
+                    result = slicer_pr_validation.main(argv)
+                self.assertEqual(result, 2)
+                run.assert_not_called()
+                resolve_uv.assert_not_called()
+                self.assertIn(expected_error, "".join(str(call.args[0]) for call in stderr.write.call_args_list))
+
+    def test_unset_ccache_configpath_reaches_validation_without_file_probe(self):
+        argv = ["--harness-base", "base", "--harness-ref", "ref",
+                "--deps-prefix", "/unused"]
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(slicer_pr_validation, "_resolve_uv", return_value="uv"), \
+             mock.patch.object(slicer_pr_validation, "run_validation", return_value=0) as run, \
+             mock.patch.object(Path, "is_file") as is_file, \
+             mock.patch.object(os, "access") as access:
+            result = slicer_pr_validation.main(argv)
+        self.assertEqual(result, 0)
+        run.assert_called_once()
+        is_file.assert_not_called()
+        access.assert_not_called()
+
+    def test_valid_explicit_ccache_configpath_reaches_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "ccache.conf"
+            config.write_text("cache_dir = /tmp/ccache\n", encoding="utf-8")
+            argv = ["--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused"]
+            with mock.patch.dict(os.environ, {"CCACHE_CONFIGPATH": str(config)}, clear=True), \
+                 mock.patch.object(slicer_pr_validation, "_resolve_uv", return_value="uv"), \
+                 mock.patch.object(slicer_pr_validation, "run_validation", return_value=0) as run:
+                result = slicer_pr_validation.main(argv)
+            self.assertEqual(result, 0)
+            run.assert_called_once()
+
     def test_invalid_explicit_tmpdir_fails_before_validation_or_uv_resolution(self):
         with tempfile.TemporaryDirectory() as temp:
             invalid = Path(temp) / "missing"

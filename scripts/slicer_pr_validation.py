@@ -3299,6 +3299,28 @@ def _validate_explicit_tmpdir() -> None:
         raise ValidationError("TMPDIR is not usable for temporary files") from exc
 
 
+def _validate_explicit_ccache_configpath() -> None:
+    """Reject a missing or unreadable explicit ccache config before expensive validation."""
+    configured = os.environ.get("CCACHE_CONFIGPATH")
+    if configured is None:
+        return
+    if not configured:
+        raise ValidationError("CCACHE_CONFIGPATH is set but empty")
+
+    config_file = Path(configured)
+    if not config_file.is_absolute():
+        raise ValidationError("CCACHE_CONFIGPATH must be an absolute path")
+    try:
+        # Child commands run from linked worktrees/build directories, so pin an
+        # absolute path. These checks follow symlinks and do not read file content.
+        if not config_file.is_file() or not os.access(config_file, os.R_OK):
+            raise ValidationError(
+                "CCACHE_CONFIGPATH must name an existing readable regular file")
+    except (OSError, ValueError) as exc:
+        raise ValidationError(
+            "CCACHE_CONFIGPATH must name an existing readable regular file") from exc
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.jobs < 1:
@@ -3323,6 +3345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.targets = tuple(args.targets or DEFAULT_TARGETS)
     try:
         _validate_explicit_tmpdir()
+        _validate_explicit_ccache_configpath()
         args.uv = _resolve_uv(args.uv_executable)
         return run_validation(args)
     except (ValidationError, OSError) as exc:
