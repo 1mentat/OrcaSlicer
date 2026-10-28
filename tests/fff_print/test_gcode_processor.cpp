@@ -30,12 +30,14 @@
 #include "libslic3r/Preset.hpp"
 
 #include "test_utils.hpp"
+#include "test_helpers.hpp"
 
 #include <cstddef>
 #include <fstream>
 #include <string>
 #include <string_view>
 #include <sstream>
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/CustomGCode.hpp"
 #include <catch2/catch_message.hpp>
@@ -2504,7 +2506,44 @@ FullPrintConfig config_with_silent_mode(bool enabled)
     return config;
 }
 
+
+public_processor_contracts::TestResult export_with_typed_silent_mode(bool enabled)
+{
+    FullPrintConfig typed_config = config_with_silent_mode(enabled);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // Apply the typed PrintConfig directly. Do not serialize and deserialize silent_mode:
+    // the legacy config loader intentionally drops that key.
+    config.apply(typed_config);
+
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::A}, print, model, config);
+    public_processor_contracts::TestResult result;
+    const std::string exported_gcode = Test::gcode(print, &result);
+    REQUIRE_FALSE(exported_gcode.empty());
+    return result;
+}
+
 } // namespace silent_mode_variance_contracts
+
+TEST_CASE("Typed silent mode enables stealth estimates on a real G-code export",
+          "[GCodeProcessor][GCodeProcessorPublic][SilentModeVariance]")
+{
+    using namespace silent_mode_variance_contracts;
+    const auto normal = export_with_typed_silent_mode(false);
+    const auto silent = export_with_typed_silent_mode(true);
+
+    const float normal_mode_time = public_processor_contracts::normal_time(normal);
+    const float silent_config_normal_time = public_processor_contracts::normal_time(silent);
+    const float silent_mode_time = public_processor_contracts::stealth_time(silent);
+
+    REQUIRE(normal_mode_time > 0.0f);
+    REQUIRE(silent_config_normal_time > 0.0f);
+    CHECK_THAT(silent_config_normal_time, WithinAbs(normal_mode_time, 1e-5f));
+    CHECK_THAT(public_processor_contracts::stealth_time(normal), WithinAbs(0.0f, 1e-6f));
+    REQUIRE(std::isfinite(silent_mode_time));
+    CHECK(silent_mode_time > silent_config_normal_time);
+}
 
 TEST_CASE("Imported G-code ignores the obsolete silent_mode setting",
           "[GCodeProcessor][GCodeProcessorPublic][SilentModeVariance]")

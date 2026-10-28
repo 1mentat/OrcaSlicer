@@ -7,9 +7,10 @@
       "test": "tests/fff_print/test_gcode_processor.cpp",
       "tag": "[SilentModeVariance]",
       "dimensions": [
+        "boolean_values",
         "pipeline_oracle"
       ],
-      "reason": "Compatibility evidence only: the public G-code importer processes the same timed extrusion with silent_mode serialized false and true in Orca headers; both retain equal positive normal time and zero stealth time because legacy deserialization discards this key. The typed GCodeConfig flag still has live consumers. These import controls do not establish active Boolean variance through that typed path, which remains unclaimed."
+      "reason": "A real Marlin-firmware Print export applies typed silent_mode false/true directly, with explicit normal/stealth speed and acceleration limits. Both runs retain equal positive normal time; false has zero stealth time, while true has a finite stealth estimate greater than normal. Forcing the final export estimator gate off fails only this new live-case assertion; the imported-GCode compatibility control still passes. That separate importer intentionally ignores serialized false/true legacy keys. Other firmware flavors and broader interactions are not claimed."
     },
     "ooze_prevention": {
       "test": "tests/fff_print/test_gcodeprocessor.cpp",
