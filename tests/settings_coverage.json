@@ -5571,9 +5571,10 @@
       "tag": "[NozzleTypeSettings]",
       "dimensions": [
         "enum_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "All five registry enum values (undefine, hardened steel, stainless steel, tungsten carbide, brass) pass through public G-code file import into result.nozzle_type, with the configured HRC retained and the material-to-hardness lookup checked. The setting is nullable; nil behavior is not exercised."
+      "reason": "All five registry enum values (undefine, hardened steel, stainless steel, tungsten carbide, brass) pass through public G-code file import into result.nozzle_type, with configured HRC and the material-to-hardness lookup checked. A one-nozzle printer-preset journey resolves a nil child to inherited hardened steel, preserves explicit brass, and resolves root nil to the registered undefined default before full_config(false) and public file import; extrusion and positive-time controls remain intact. This does not cover multi-slot variant compaction or full print-export interactions."
     },
     "wiping_volumes_extruders": {
       "test": "tests/libslic3r/test_preset_bundle_loading.cpp",

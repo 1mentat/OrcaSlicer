@@ -34,6 +34,10 @@ command's output afterward, so its raw outcome survives an assessment error.
 Validate imported helper exports and reused receipt schemas before starting
 expensive commands. Preserve each successful command's output identities with its
 receipt so a later assessment can reuse those outputs.
+Require the native control's exit status and exact JUnit inventory to pass before
+compiling or running a mutant. Preserve raw assertion text when classifying a
+mutation; reporter punctuation alone must not turn an ordinary assertion failure
+into a survivor.
 Keep successful `SystemExit` outside failure-logging handlers. When compiling a
 source alias, retain the original quoted-header search directory and verify the
 staged headers before starting the compiler.

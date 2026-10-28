@@ -15,6 +15,8 @@
 #include <vector>
 #include <set>
 #include <boost/nowide/fstream.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/libslic3r.h"
@@ -24,6 +26,8 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Preset.hpp"
 
 #include "test_utils.hpp"
 
@@ -803,6 +807,118 @@ TEST_CASE("Nozzle type values reach processor metadata and hardness selection", 
         CHECK(result.nozzle_type[0] == row.type);
         CHECK(result.nozzle_hrc == 61);
         CHECK(Print::get_hrc_by_nozzle_type(row.type) == row.expected_hrc);
+    }
+}
+
+TEST_CASE("Nullable nozzle type resolves through printer presets before G-code import",
+          "[GCodeProcessor][NozzleTypeSettings][GCodeProcessorPublic]")
+{
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir temp("nullable-nozzle-preset");
+    PresetBundle bundle;
+    bundle.filament_presets = {bundle.filaments.default_preset().name};
+
+    const std::string parent_name = "Nullable Nozzle Parent";
+    const fs::path machine_dir = temp.path() / PRESET_PRINTER_NAME;
+    const fs::path parent_file = machine_dir / "base" / (parent_name + ".json");
+    fs::create_directories(parent_file.parent_path());
+
+    DynamicPrintConfig parent_config = bundle.printers.default_preset().config;
+    auto *parent_nozzle = parent_config.option<ConfigOptionEnumsGenericNullable>("nozzle_type");
+    REQUIRE(parent_nozzle != nullptr);
+    parent_nozzle->values = {int(ntHardenedSteel)};
+    parent_config.option<ConfigOptionFloats>("nozzle_diameter")->values = {0.4};
+    parent_config.option<ConfigOptionInt>("nozzle_hrc")->value = 61;
+    parent_config.option<ConfigOptionString>("inherits", true)->value.clear();
+    parent_config.option<ConfigOptionString>("printer_settings_id", true)->value = parent_name;
+    parent_config.save_to_json(parent_file.string(), parent_name, "User", "1.0.0");
+    REQUIRE(fs::is_regular_file(parent_file));
+
+    PresetsConfigSubstitutions substitutions;
+    bundle.printers.load_presets(temp.path().string(), PRESET_PRINTER_NAME, substitutions,
+                                 ForwardCompatibilitySubstitutionRule::EnableSilent);
+    REQUIRE(bundle.printers.error_count() == 0);
+    const Preset *loaded_parent = bundle.printers.find_preset(parent_name);
+    REQUIRE(loaded_parent != nullptr);
+    const auto *loaded_parent_nozzle = loaded_parent->config.option<ConfigOptionEnumsGenericNullable>("nozzle_type");
+    REQUIRE(loaded_parent_nozzle != nullptr);
+    REQUIRE(loaded_parent_nozzle->values.size() == 1);
+    REQUIRE_FALSE(loaded_parent_nozzle->is_nil(0));
+    CHECK(loaded_parent_nozzle->values[0] == int(ntHardenedSteel));
+
+    const auto write_child = [&](const std::string &name, NozzleType type, bool nil_value, bool inherits_parent) {
+        DynamicPrintConfig child_config = inherits_parent ? parent_config : bundle.printers.default_preset().config;
+        child_config.option<ConfigOptionString>("inherits", true)->value = inherits_parent ? parent_name : "";
+        child_config.option<ConfigOptionString>("printer_settings_id", true)->value = name;
+        child_config.option<ConfigOptionInt>("nozzle_hrc")->value = 61;
+        auto *nozzle = child_config.option<ConfigOptionEnumsGenericNullable>("nozzle_type");
+        REQUIRE(nozzle != nullptr);
+        nozzle->values = {int(type)};
+        if (nil_value)
+            nozzle->set_at_to_nil(0);
+        REQUIRE(nozzle->is_nil(0) == nil_value);
+        const fs::path file = machine_dir / (name + ".json");
+        child_config.save_to_json(file.string(), name, "User", "1.0.0");
+        REQUIRE(fs::is_regular_file(file));
+    };
+
+    const std::string inherited_name = "Nullable Nozzle Child";
+    const std::string explicit_name = "Explicit Brass Nozzle Child";
+    const std::string root_nil_name = "Root Nil Nozzle";
+    write_child(inherited_name, ntHardenedSteel, true, true);
+    write_child(explicit_name, ntBrass, false, true);
+    write_child(root_nil_name, ntUndefine, true, false);
+
+    bundle.printers.load_presets(temp.path().string(), PRESET_PRINTER_NAME, substitutions,
+                                 ForwardCompatibilitySubstitutionRule::EnableSilent);
+    REQUIRE(bundle.printers.error_count() == 0);
+
+    struct Row {
+        const char *name;
+        const char *parent;
+        NozzleType expected;
+    };
+    const std::array<Row, 3> rows = {{
+        {inherited_name.c_str(), parent_name.c_str(), ntHardenedSteel},
+        {explicit_name.c_str(), parent_name.c_str(), ntBrass},
+        {root_nil_name.c_str(), "", ntUndefine},
+    }};
+
+    for (const Row &row : rows) {
+        INFO("printer preset=" << row.name);
+        REQUIRE(bundle.printers.select_preset_by_name(row.name, true));
+        const Preset &selected = bundle.printers.get_edited_preset();
+        CHECK(selected.inherits() == row.parent);
+
+        const auto *selected_nozzle = selected.config.option<ConfigOptionEnumsGenericNullable>("nozzle_type");
+        REQUIRE(selected_nozzle != nullptr);
+        REQUIRE(selected_nozzle->values.size() == 1);
+        REQUIRE_FALSE(selected_nozzle->is_nil(0));
+        CHECK(selected_nozzle->values[0] == int(row.expected));
+
+        DynamicPrintConfig resolved = bundle.full_config(false);
+        const auto *resolved_nozzle = resolved.option<ConfigOptionEnumsGenericNullable>("nozzle_type");
+        const auto *resolved_diameter = resolved.option<ConfigOptionFloats>("nozzle_diameter");
+        REQUIRE(resolved_nozzle != nullptr);
+        REQUIRE(resolved_diameter != nullptr);
+        REQUIRE(resolved_nozzle->values.size() == 1);
+        REQUIRE(resolved_diameter->values.size() == 1);
+        REQUIRE_FALSE(resolved_nozzle->is_nil(0));
+        CHECK(resolved_nozzle->values[0] == int(row.expected));
+
+        FullPrintConfig processor_config;
+        // Printer bundles also contain host options outside FullPrintConfig.
+        processor_config.apply(resolved, true);
+        // The time planner needs both a travel block and an extrusion block.
+        const auto result = process_file(orca_header(processor_config) +
+            "M83\nG90\nG1 X0 Y0 Z0.2 F600\nG1 X10 Y0 E1 F600\n");
+        REQUIRE(result.nozzle_type.size() == 1);
+        CHECK(result.nozzle_type[0] == row.expected);
+        CHECK(result.nozzle_hrc == 61);
+        const auto extrusions = moves_of(result, EMoveType::Extrude);
+        REQUIRE(extrusions.size() == 1);
+        CHECK_THAT(extrusions.front()->delta_extruder, WithinAbs(1., 1e-4));
+        CHECK(normal_time(result) > 0.f);
     }
 }
 

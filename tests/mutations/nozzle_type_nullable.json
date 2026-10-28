@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "description": "Resolve nullable printer nozzle metadata before handing the full preset configuration to G-code import.",
+  "test_filter": "^NozzleTypeSettings$",
+  "mutants": [
+    {
+      "id": "nullable-nozzle-child-overwrites-parent",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        preset.config.update_diff_values_to_child_config(config, extruder_id_name, extruder_variant_name, *key_set1, *key_set2);",
+      "new": "        preset.config.apply(config);",
+      "expected_matches": 1,
+      "test_filter": "^NozzleTypeSettings$",
+      "ordinary_assertion_only": true,
+      "description": "Replace the variant-aware child merge with plain apply, allowing a nil child nozzle type to overwrite inherited hardened steel. The new preset journey fails its nonnil assertion before import; explicit brass and root-nil default rows are native controls. The mutation affects the general preset merge, while this probe establishes the one-nozzle inheritance contract.",
+      "source_anchor_sha256": "5cb8171351579d3be6cb43e3dc4ad4775da83df24209187e5f6d25c1845986c9"
+    }
+  ]
+}
