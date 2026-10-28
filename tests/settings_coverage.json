@@ -1000,6 +1000,26 @@
       ],
       "reason": "The organic cap-overhang pipeline runs the registered 0 and 100 layer endpoints plus a 4-layer repeated-base witness. Public support layers below the first object layer number exactly 0/4/100, and each raft top meets the first object layer at the pinned zero contact distance. First-layer density varies independently at 0 and 4 raft layers; broader support-mode interactions are not claimed."
     },
+    "raft_contact_distance": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportRaftContactDistance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered minimum is 0 mm with no maximum. On a four-layer organic raft, 0 and 0.4 mm give the measured clearance between the first object layer bottom and the fourth contiguous deposited raft layer top. Positive distance is also tested with no raft and with support_top_z_distance=0, where the respective object bottom and raft clearance stay at zero. Ignoring the positive distance or bypassing the zero-top-gap gate is caught by the corresponding ordinary physical-gap assertion. Other layer grids and broader gate combinations are not claimed."
+    },
+    "raft_first_layer_expansion": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportRaftFirstLayerExpansion]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered minimum is 0 mm with no maximum. The organic cap-overhang pipeline compares 0 and 1 mm with no raft and with four raft layers, holding global raft_expansion at zero. Positive finite extrusion-width footprints on the actual 0.2 mm first support layer must grow in area and both XY bounds. Zeroing the configured expansion consumer fails all six paired growth assertions while the other two selected cases pass. Other support styles, belt behavior, and broader combinations are not claimed."
+    },
     "raft_first_layer_density": {
       "test": "tests/fff_print/test_tree_support.cpp",
       "tag": "[TreeSupportRaftStackSettings]",
@@ -4223,10 +4243,11 @@
       "test": "tests/fff_print/test_tree_support.cpp",
       "tag": "[TreeSupport][TreeSupport3D][TreeSupportRaftContact]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Public tree-support contact cases compare raft_expansion 0 and 3 mm at the same contact Z. A plain cube checks footprint area and bounds; a cap-overhang fixture checks positive cap support and raft-contact interface extrusion in an analytic stem-expansion ring, excluding tree-base geometry. No numeric boundary or complete interaction claim is made."
+      "reason": "The registered minimum is 0 mm with no maximum. Public organic tree-support cases compare 0 and 3 mm at the same contact Z: a cube checks contact-footprint area and width/height growth, and a cap overhang requires positive physical support plus greater raft-contact interface coverage in an analytic stem-expansion ring. Both cases pass in the source-bound three-control run and survive the two independent first-layer density mutations. The minimum and this contrast are covered; broader setting interactions are not claimed."
     },
     "enable_wrapping_detection": {
       "test": "tests/fff_print/test_wipe_tower.cpp",

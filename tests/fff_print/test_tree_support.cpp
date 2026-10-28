@@ -2574,6 +2574,14 @@ TEST_CASE("Tree collision radius lookup returns the closest cached lower bound",
 
 namespace tree_support_raft_stack_settings_contracts {
 
+struct PublicSupportLayerEvidence {
+    double bottom_z = 0.0;
+    double print_z = 0.0;
+    double height = 0.0;
+    std::size_t positive_support_path_count = 0;
+    double positive_support_path_length_mm = 0.0;
+};
+
 struct RaftStackEvidence {
     std::size_t layers_below_first_object = 0;
     double first_object_print_z = std::numeric_limits<double>::quiet_NaN();
@@ -2581,10 +2589,21 @@ struct RaftStackEvidence {
     double highest_below_object_print_z = -std::numeric_limits<double>::infinity();
     std::size_t first_support_path_count = 0;
     double first_support_path_length_mm = 0.0;
+    double object_bottom_z = std::numeric_limits<double>::quiet_NaN();
+    std::vector<PublicSupportLayerEvidence> support_layer_geometry;
+    double first_support_print_z = std::numeric_limits<double>::quiet_NaN();
+    double first_support_footprint_area_mm2 = 0.0;
+    double first_support_footprint_width_mm = 0.0;
+    double first_support_footprint_height_mm = 0.0;
     bool finite = true;
 };
 
-static RaftStackEvidence observe(int raft_layers, double first_layer_density)
+// Preserve the published density fixture's former raft_first_layer_expansion default.
+static RaftStackEvidence observe(int raft_layers, double first_layer_density,
+                                 double raft_contact_distance = 0.0,
+                                 double support_top_z_distance = 0.2,
+                                 double first_layer_expansion = 2.0,
+                                 bool collect_first_layer_footprint = false)
 {
     Print print;
     slice_with_tree_support(tree_support_raft_overhang_contracts::raft_cap_overhang_fixture(),
@@ -2592,14 +2611,15 @@ static RaftStackEvidence observe(int raft_layers, double first_layer_density)
         { "printable_area",                    "-100x-100,200x-100,200x200,-100x200" },
         { "layer_height",                       0.2 },
         { "initial_layer_print_height",         0.2 },
-        { "support_top_z_distance",             0.2 },
+        { "support_top_z_distance",             support_top_z_distance },
         { "support_interface_top_layers",       3 },
         { "support_interface_bottom_layers",    0 },
         { "support_remove_small_overhang",      false },
         { "support_on_build_plate_only",        true },
         { "independent_support_layer_height",   false },
-        { "raft_contact_distance",              0.0 },
+        { "raft_contact_distance",              raft_contact_distance },
         { "raft_expansion",                     0.0 },
+        { "raft_first_layer_expansion",         first_layer_expansion },
         { "raft_first_layer_density",           first_layer_density },
         { "tree_support_auto_brim",             false },
         { "tree_support_brim_width",            0.0 },
@@ -2627,12 +2647,14 @@ static RaftStackEvidence observe(int raft_layers, double first_layer_density)
     const Layer &first_object_layer = *object.layers().front();
 
     RaftStackEvidence result;
+    result.object_bottom_z = double(first_object_layer.print_z - first_object_layer.height);
     result.first_object_print_z = double(first_object_layer.print_z);
     result.first_object_height = double(first_object_layer.height);
     REQUIRE(std::isfinite(result.first_object_print_z));
     REQUIRE(std::isfinite(result.first_object_height));
 
     const SupportLayer *first_support_layer = nullptr;
+    const SupportLayer *first_physical_support_layer = nullptr;
     for (const SupportLayer *layer : object.support_layers()) {
         if (layer == nullptr) {
             result.finite = false;
@@ -2640,6 +2662,18 @@ static RaftStackEvidence observe(int raft_layers, double first_layer_density)
         }
         const double layer_z = double(layer->print_z);
         result.finite = result.finite && std::isfinite(layer_z);
+        PublicSupportLayerEvidence public_layer;
+        public_layer.bottom_z = double(layer->bottom_z());
+        public_layer.print_z = layer_z;
+        public_layer.height = double(layer->height);
+        for_each_extrusion_path(layer->support_fills, [&](const ExtrusionPath &path) {
+            const double path_length_mm = unscale<double>(path.length());
+            if (std::isfinite(path_length_mm) && path_length_mm > 0.0) {
+                ++public_layer.positive_support_path_count;
+                public_layer.positive_support_path_length_mm += path_length_mm;
+            }
+        });
+        result.support_layer_geometry.emplace_back(std::move(public_layer));
         // With raft contact distance pinned to zero, physical raft layers sit below
         // the first object layer. Count those public layers without using the internal
         // base/interface split formula.
@@ -2650,7 +2684,16 @@ static RaftStackEvidence observe(int raft_layers, double first_layer_density)
         }
         if (first_support_layer == nullptr || layer_z < double(first_support_layer->print_z))
             first_support_layer = layer;
+        // Use the first layer with positive support deposition, not the later layer where support_islands are assigned.
+        if (collect_first_layer_footprint && public_layer.positive_support_path_count > 0 &&
+            (first_physical_support_layer == nullptr ||
+             layer->print_z < first_physical_support_layer->print_z))
+            first_physical_support_layer = layer;
     }
+    std::sort(result.support_layer_geometry.begin(), result.support_layer_geometry.end(),
+              [](const PublicSupportLayerEvidence &lhs, const PublicSupportLayerEvidence &rhs) {
+                  return lhs.print_z < rhs.print_z;
+              });
 
     if (first_support_layer != nullptr) {
         for_each_extrusion_path(first_support_layer->support_fills, [&](const ExtrusionPath &path) {
@@ -2664,7 +2707,72 @@ static RaftStackEvidence observe(int raft_layers, double first_layer_density)
             }
         });
     }
-    result.finite = result.finite && std::isfinite(result.first_support_path_length_mm);
+    result.finite = result.finite && std::isfinite(result.first_support_path_length_mm) &&
+                    std::isfinite(result.object_bottom_z);
+    if (collect_first_layer_footprint) {
+        REQUIRE(first_physical_support_layer != nullptr);
+        result.first_support_print_z = double(first_physical_support_layer->print_z);
+        const Polygons physical_footprints =
+            first_physical_support_layer->support_fills.polygons_covered_by_width();
+        const ExPolygons merged = union_ex(physical_footprints);
+        REQUIRE_FALSE(merged.empty());
+        double scaled_area = 0.0;
+        for (const ExPolygon &polygon : merged)
+            scaled_area += std::abs(polygon.area());
+        const BoundingBox footprint_bbox = get_extents(merged);
+        REQUIRE(footprint_bbox.defined);
+        result.first_support_footprint_area_mm2 = unscale<double>(unscale<double>(scaled_area));
+        result.first_support_footprint_width_mm = unscale<double>(footprint_bbox.max.x() - footprint_bbox.min.x());
+        result.first_support_footprint_height_mm = unscale<double>(footprint_bbox.max.y() - footprint_bbox.min.y());
+        result.finite = result.finite && std::isfinite(result.first_support_print_z) &&
+                        std::isfinite(result.first_support_footprint_area_mm2) &&
+                        std::isfinite(result.first_support_footprint_width_mm) &&
+                        std::isfinite(result.first_support_footprint_height_mm);
+    }
+    return result;
+}
+
+static std::string describe_public_support_layers(const RaftStackEvidence &evidence)
+{
+    std::ostringstream summary;
+    for (std::size_t i = 0; i < evidence.support_layer_geometry.size(); ++i) {
+        const PublicSupportLayerEvidence &layer = evidence.support_layer_geometry[i];
+        summary << "row " << i << ": bottom=" << layer.bottom_z
+                << " print=" << layer.print_z << " height=" << layer.height
+                << " positive_paths=" << layer.positive_support_path_count
+                << " positive_path_length_mm=" << layer.positive_support_path_length_mm << "; ";
+    }
+    return summary.str();
+}
+
+struct PhysicalRaftGapEvidence {
+    double gap_mm = std::numeric_limits<double>::quiet_NaN();
+};
+
+static PhysicalRaftGapEvidence identify_four_layer_raft(const RaftStackEvidence &evidence)
+{
+    PhysicalRaftGapEvidence result;
+    std::vector<const PublicSupportLayerEvidence *> deposited_layers;
+    for (const PublicSupportLayerEvidence &layer : evidence.support_layer_geometry)
+        if (layer.positive_support_path_count > 0 && layer.positive_support_path_length_mm > 0.0)
+            deposited_layers.push_back(&layer);
+
+    INFO("Public support rows: " << describe_public_support_layers(evidence));
+    REQUIRE(deposited_layers.size() >= 4);
+    // The first four deposited support rows are the configured raft stack. Later
+    // deposited rows can be branches that span the physical raft/object clearance.
+    double previous_raft_top = deposited_layers.front()->bottom_z;
+    CHECK_THAT(previous_raft_top, Catch::Matchers::WithinAbs(0.0, EPSILON));
+    for (std::size_t i = 0; i < 4; ++i) {
+        const PublicSupportLayerEvidence &layer = *deposited_layers[i];
+        REQUIRE(std::abs(layer.bottom_z - previous_raft_top) <= EPSILON);
+        REQUIRE(layer.print_z > previous_raft_top + EPSILON);
+        REQUIRE_THAT(layer.print_z - layer.bottom_z,
+                    Catch::Matchers::WithinAbs(layer.height, EPSILON));
+        REQUIRE(layer.print_z <= evidence.object_bottom_z + EPSILON);
+        previous_raft_top = layer.print_z;
+    }
+    result.gap_mm = evidence.object_bottom_z - previous_raft_top;
     return result;
 }
 
@@ -2707,4 +2815,67 @@ TEST_CASE("Raft layer endpoints and first-layer density reach public support geo
           no_raft_sparse.first_support_path_length_mm * 1.5);
     CHECK(four_raft_solid.first_support_path_length_mm >
           four_raft_sparse.first_support_path_length_mm * 1.5);
+}
+
+
+TEST_CASE("Raft contact distance sets object clearance above the raft",
+          "[TreeSupport][SupportSettingsVariance][TreeSupportRaftContactDistance]")
+{
+    using namespace tree_support_raft_stack_settings_contracts;
+    // A no-raft object has no raft surface to separate from, even with a positive configured distance.
+    const RaftStackEvidence no_raft_positive = observe(0, 90.0, 0.4, 0.2, 0.0);
+    const RaftStackEvidence raft_zero = observe(4, 90.0, 0.0, 0.2, 0.0);
+    const RaftStackEvidence raft_positive = observe(4, 90.0, 0.4, 0.2, 0.0);
+    // The registered tooltip says Support Top Z Distance = 0 forces raft contact.
+    const RaftStackEvidence raft_top_zero = observe(4, 90.0, 0.4, 0.0, 0.0);
+
+    for (const RaftStackEvidence *evidence :
+         { &no_raft_positive, &raft_zero, &raft_positive, &raft_top_zero })
+        REQUIRE(evidence->finite);
+
+    CHECK_THAT(no_raft_positive.object_bottom_z, Catch::Matchers::WithinAbs(0.0, EPSILON));
+    const PhysicalRaftGapEvidence raft_zero_gap = identify_four_layer_raft(raft_zero);
+    INFO("Zero-gap raft public rows: " << describe_public_support_layers(raft_zero));
+    CHECK_THAT(raft_zero_gap.gap_mm, Catch::Matchers::WithinAbs(0.0, EPSILON));
+    const PhysicalRaftGapEvidence raft_positive_gap = identify_four_layer_raft(raft_positive);
+    INFO("Positive-gap raft public rows: " << describe_public_support_layers(raft_positive));
+    CHECK_THAT(raft_positive_gap.gap_mm, Catch::Matchers::WithinAbs(0.4, EPSILON));
+    const PhysicalRaftGapEvidence raft_top_zero_gap = identify_four_layer_raft(raft_top_zero);
+    INFO("Zero-top-gap public rows: " << describe_public_support_layers(raft_top_zero));
+    CHECK_THAT(raft_top_zero_gap.gap_mm, Catch::Matchers::WithinAbs(0.0, EPSILON));
+}
+
+TEST_CASE("Raft first-layer expansion grows the physical support footprint",
+          "[TreeSupport][SupportSettingsVariance][TreeSupportRaftFirstLayerExpansion]")
+{
+    using namespace tree_support_raft_stack_settings_contracts;
+    const RaftStackEvidence no_raft_zero = observe(0, 90.0, 0.0, 0.2, 0.0, true);
+    const RaftStackEvidence no_raft_expanded = observe(0, 90.0, 0.0, 0.2, 1.0, true);
+    const RaftStackEvidence raft_zero = observe(4, 90.0, 0.0, 0.2, 0.0, true);
+    const RaftStackEvidence raft_expanded = observe(4, 90.0, 0.0, 0.2, 1.0, true);
+
+    for (const RaftStackEvidence *evidence :
+         { &no_raft_zero, &no_raft_expanded, &raft_zero, &raft_expanded }) {
+        REQUIRE(evidence->finite);
+        REQUIRE(evidence->first_support_path_count > 0);
+        REQUIRE(evidence->first_support_footprint_area_mm2 > 0.0);
+        REQUIRE(evidence->first_support_footprint_width_mm > 0.0);
+        REQUIRE(evidence->first_support_footprint_height_mm > 0.0);
+    }
+
+    for (const RaftStackEvidence *evidence :
+         { &no_raft_zero, &no_raft_expanded, &raft_zero, &raft_expanded })
+        CHECK_THAT(evidence->first_support_print_z, Catch::Matchers::WithinAbs(0.2, EPSILON));
+    CHECK(no_raft_expanded.first_support_footprint_area_mm2 >
+          no_raft_zero.first_support_footprint_area_mm2 + 0.1);
+    CHECK(raft_expanded.first_support_footprint_area_mm2 >
+          raft_zero.first_support_footprint_area_mm2 + 0.1);
+    CHECK(no_raft_expanded.first_support_footprint_width_mm >
+          no_raft_zero.first_support_footprint_width_mm + 0.2);
+    CHECK(no_raft_expanded.first_support_footprint_height_mm >
+          no_raft_zero.first_support_footprint_height_mm + 0.2);
+    CHECK(raft_expanded.first_support_footprint_width_mm >
+          raft_zero.first_support_footprint_width_mm + 0.2);
+    CHECK(raft_expanded.first_support_footprint_height_mm >
+          raft_zero.first_support_footprint_height_mm + 0.2);
 }
