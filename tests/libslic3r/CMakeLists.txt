@@ -231,6 +231,20 @@ if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
     orcaslicer_discover_tests(libslic3r_arachne_tests TEST_PREFIX "FocusedArachne::")
 endif()
 
+# Focused filesystem and utility contracts, without duplicate default CTest registration.
+# Reuse the standalone NanoSVG implementation needed by linked libslic3r objects.
+add_executable(libslic3r_utils_tests EXCLUDE_FROM_ALL
+    test_utils.cpp
+    libslic3r_tests.cpp)
+target_link_libraries(libslic3r_utils_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_utils_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_utils_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_utils_tests)
+slicer_enable_llvm_source_coverage(libslic3r_utils_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(libslic3r_utils_tests TEST_PREFIX "FocusedUtils::")
+endif()
+
 # Explicitly built texture-displacement contracts, without duplicate CTest registration.
 # Model import paths need the existing standalone NanoSVG implementation.
 add_executable(libslic3r_texture_displacement_tests EXCLUDE_FROM_ALL

@@ -68,6 +68,9 @@ target_link_libraries(fff_print_gcodeprocessor_tests test_common libslic3r Catch
 set_property(TARGET fff_print_gcodeprocessor_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_gcodeprocessor_tests)
 slicer_enable_llvm_source_coverage(fff_print_gcodeprocessor_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_gcodeprocessor_tests TEST_PREFIX "FocusedGCodeProcessor::")
+endif()
 
 # Explicitly built TimelapsePosPicker contract tests, without duplicate CTest registration.
 add_executable(fff_print_timelapse_pos_picker_tests EXCLUDE_FROM_ALL
@@ -158,6 +161,35 @@ target_link_libraries(fff_print_fill_tests test_common libslic3r Catch2::Catch2W
 set_property(TARGET fff_print_fill_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_fill_tests)
 slicer_enable_llvm_source_coverage(fff_print_fill_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_fill_tests TEST_PREFIX "FocusedFill::")
+endif()
+
+# Focused pressure-equalizer behavior, without duplicate default CTest registration.
+add_executable(fff_print_pressure_equalizer_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_pressure_equalizer.cpp)
+target_link_libraries(fff_print_pressure_equalizer_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_pressure_equalizer_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_pressure_equalizer_tests)
+slicer_enable_llvm_source_coverage(fff_print_pressure_equalizer_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_pressure_equalizer_tests TEST_PREFIX "FocusedPressureEqualizer::")
+endif()
+
+# Focused thumbnail encoding and export contracts, without duplicate default CTest registration.
+add_executable(fff_print_thumbnails_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_thumbnails.cpp)
+target_link_libraries(fff_print_thumbnails_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_thumbnails_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_thumbnails_tests)
+slicer_enable_llvm_source_coverage(fff_print_thumbnails_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_thumbnails_tests TEST_PREFIX "FocusedThumbnails::")
+endif()
 
 # Focused TreeSupport pipeline tests, without duplicate CTest registration.
 add_executable(fff_print_tree_support_tests EXCLUDE_FROM_ALL
