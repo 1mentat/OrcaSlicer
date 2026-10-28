@@ -2542,10 +2542,11 @@
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[GCodeBroad]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Direct GCode mass-limit consumer checks force 0 fallback and force 0.001 cap using explicit bed and accumulated masses. This is direct consumer evidence, not a full force-domain or load evolution sweep."
+      "reason": "The registered minimum is 0 N (PrintConfig.cpp:5373); no maximum is declared. The direct mass-load checks cover the zero-force fallback and the 0.001 N positive-force cap. The new paired rows hold 100 g bed mass, 100 g printed mass, and 777 configured Y acceleration constant while varying only force (0 vs 0.001 N), requiring acceleration limits 777 and 5 and equal positive printed mass. The isolated force-gate mutant fails the zero-force assertion while its two prior controls pass. This covers the registered lower boundary and a positive witness, not the full force domain or load evolution."
     },
     "machine_bed_mass_Y": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -3288,10 +3289,11 @@
       "test": "tests/fff_print/test_precise_seam.cpp",
       "tag": "[SeamSlopeSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Lengths 0, 4 and 12 mm distinguish zero and increasing scarf distance. The zero-distance witness and 4-to-12 mm positive-E path bound are supported by the existing full-loop mutation kill. The consumer caps the configured length at the measured loop length. These cases do not assert behavior at or above that cap, so numeric boundary coverage remains incomplete."
+      "reason": "The registered minimum is 0 mm (PrintConfig.cpp:6520\u20136527); no maximum is declared. With whole-loop mode disabled, the contract covers 0, 4, and 12 mm plus scarf lengths at 0.5, 1.0, and 1.5 times the independently measured active external-loop length. The reported scarf-distance statistic is checked against active-layer count times min(configured length, measured loop length), including the at/above-cap rows; the above-cap assertion detects removal of the caller cap. The caller value also feeds segment subdivision before ExtrusionLoopSloped clamps local geometry, so this evidence does not claim invariant emitted segmentation or geometry under mutation."
     },
     "seam_slope_start_height": {
       "test": "tests/fff_print/test_precise_seam.cpp",

@@ -3887,6 +3887,40 @@ TEST_CASE("GCode mass load acceleration falls back to configured limit without f
     CHECK_THAT(limit, Catch::Matchers::WithinAbs(777.0, 1e-6));
 }
 
+TEST_CASE("GCode zero Y force keeps the configured acceleration with printed mass", "[GCode][GCodeBroad]")
+{
+    struct Acceleration {
+        double limit = 0.0;
+        double printed_mass = 0.0;
+    };
+    const auto measure = [](double force) {
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({
+            {"machine_max_acceleration_y", "777"},
+            {"machine_max_force_Y", force},
+            {"machine_bed_mass_Y", 100.0},
+        });
+        Print print;
+        Model model;
+        init_print({cube(10)}, print, model, config);
+        TestGCode gcode;
+        PrintStatistics stats;
+        stats.total_weight = 100.0;
+        Acceleration observed;
+        gcode.mass_load_limited_machine_acceleration(stats, print, observed.limit, observed.printed_mass);
+        return observed;
+    };
+
+    // Both rows share the bed mass, configured limit, and positive printed mass.
+    const Acceleration no_force = measure(0.0);
+    const Acceleration with_force = measure(0.001);
+    REQUIRE_THAT(no_force.printed_mass, Catch::Matchers::WithinAbs(100.0, 1e-6));
+    REQUIRE_THAT(with_force.printed_mass, Catch::Matchers::WithinAbs(no_force.printed_mass, 1e-6));
+    CHECK_THAT(no_force.limit, Catch::Matchers::WithinAbs(777.0, 1e-6));
+    // 0.001 N gives 1000 g*mm/s^2; divide by 100 g bed + 100 g print.
+    CHECK_THAT(with_force.limit, Catch::Matchers::WithinAbs(5.0, 1e-6));
+}
+
 TEST_CASE("GCode object metadata selects the supported firmware label protocol", "[GCode][GCodeBroad]")
 {
     const std::vector<std::pair<std::string, std::string>> flavors = {

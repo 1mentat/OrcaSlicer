@@ -1535,6 +1535,7 @@ DynamicPrintConfig seam_slope_config(const std::string &type,
 struct SeamSlopeEvidence {
     size_t layer_changes = 0;
     size_t outer_moves = 0;
+    double outer_loop_length_mm = 0.0;
     double output_outer_xy = 0.0;
     double print_outer_geometry = 0.0;
     size_t rising_outer_moves = 0;
@@ -1573,6 +1574,24 @@ double pre_export_outer_geometry(const Print &print)
     return length;
 }
 
+double pre_export_first_active_outer_loop_length(const Print &print)
+{
+    for (const PrintObject *object : print.objects())
+        for (const Layer *layer : object->layers()) {
+            if (layer->id() == 0)
+                continue;
+            double length = 0.0;
+            for (const LayerRegion *region : layer->regions())
+                for_each_extrusion_path(region->perimeters, [&length](const ExtrusionPath &path) {
+                    if (path.role() == erExternalPerimeter)
+                        length += unscale<double>(path.length());
+                });
+            if (length > 0.0)
+                return length;
+        }
+    return 0.0;
+}
+
 SeamSlopeEvidence export_seam_slope(const DynamicPrintConfig &config)
 {
     Model model;
@@ -1589,8 +1608,11 @@ SeamSlopeEvidence export_seam_slope(const DynamicPrintConfig &config)
     print.process();
     SeamSlopeEvidence evidence;
     evidence.print_outer_geometry = pre_export_outer_geometry(print);
+    evidence.outer_loop_length_mm = pre_export_first_active_outer_loop_length(print);
     REQUIRE(std::isfinite(evidence.print_outer_geometry));
     REQUIRE(evidence.print_outer_geometry > 0.0);
+    REQUIRE(std::isfinite(evidence.outer_loop_length_mm));
+    REQUIRE(evidence.outer_loop_length_mm > 0.0);
 
     GCodeProcessorResult result;
     const std::string output = Test::gcode(print, &result);
@@ -1684,14 +1706,40 @@ TEST_CASE("Scarf length and steps have independent geometric witnesses", "[SeamS
         seam_slope_config("external", false, "0", 4.0, 4));
     const SeamSlopeEvidence length_twelve = export_seam_slope(
         seam_slope_config("external", false, "0", 12.0, 4));
-    for (const SeamSlopeEvidence &observed : {length_zero, length_four, length_twelve}) {
+    const double loop_length_mm = length_four.outer_loop_length_mm;
+    const double below_loop_mm = loop_length_mm * 0.5;
+    const double above_loop_mm = loop_length_mm * 1.5;
+    const SeamSlopeEvidence length_below_loop = export_seam_slope(
+        seam_slope_config("external", false, "0", below_loop_mm, 4, 155, false));
+    const SeamSlopeEvidence length_at_loop = export_seam_slope(
+        seam_slope_config("external", false, "0", loop_length_mm, 4, 155, false));
+    const SeamSlopeEvidence length_above_loop = export_seam_slope(
+        seam_slope_config("external", false, "0", above_loop_mm, 4, 155, false));
+    for (const SeamSlopeEvidence &observed : {length_zero, length_four, length_twelve,
+                                              length_below_loop, length_at_loop, length_above_loop}) {
         REQUIRE(observed.layer_changes == inactive.layer_changes);
         CHECK_THAT(observed.print_outer_geometry,
                    Catch::Matchers::WithinAbs(inactive.print_outer_geometry, 1e-6));
+        CHECK_THAT(observed.outer_loop_length_mm,
+                   Catch::Matchers::WithinAbs(loop_length_mm, 1e-6));
     }
     CHECK_THAT(length_zero.scarf_distance, Catch::Matchers::WithinAbs(0.0, 1e-6));
     CHECK(length_four.scarf_distance > 0.0);
     CHECK(length_twelve.scarf_distance > length_four.scarf_distance);
+
+    const double active_layers = static_cast<double>(length_four.layer_changes - 1);
+    REQUIRE(active_layers > 0.0);
+    for (const SeamSlopeEvidence &observed : {length_below_loop, length_at_loop, length_above_loop})
+        REQUIRE(observed.outer_moves > 0);
+    CHECK_THAT(length_below_loop.scarf_distance,
+               Catch::Matchers::WithinAbs(below_loop_mm * active_layers, 0.05));
+    CHECK_THAT(length_at_loop.scarf_distance,
+               Catch::Matchers::WithinAbs(loop_length_mm * active_layers, 0.05));
+    CHECK_THAT(length_above_loop.scarf_distance,
+               Catch::Matchers::WithinAbs(loop_length_mm * active_layers, 0.05));
+    CHECK(length_above_loop.scarf_distance > length_below_loop.scarf_distance);
+    CHECK_THAT(length_above_loop.output_outer_xy,
+               Catch::Matchers::WithinAbs(length_at_loop.output_outer_xy, 0.05));
 
     // A longer scarf repeats more of the wall. The terminal falling segment
     // has zero E and is excluded from positive extrusion. With four steps its
@@ -1699,7 +1747,6 @@ TEST_CASE("Scarf length and steps have independent geometric witnesses", "[SeamS
     // shorter; it is not necessarily an equal quarter. A ramp endpoint can
     // also snap forward by at most 1 mm. These independent geometric bounds
     // give [8 - 1 - 3, 8 + 1 + 1] mm extra positive-E XY per active layer.
-    const double active_layers = static_cast<double>(length_twelve.layer_changes - 1);
     const double observed_delta_xy = length_twelve.output_outer_xy - length_four.output_outer_xy;
     const double minimum_delta_xy = active_layers * ((12.0 - 4.0) - 1.0 - 12.0 / 4.0);
     const double maximum_delta_xy = active_layers * ((12.0 - 4.0) + 1.0 + 4.0 / 4.0);
