@@ -72,6 +72,11 @@ for the service process and a compiler child. `AllowedCPUs` requires the cgroup
 cpuset controller, which some containers do not expose; CPU quota still limits
 total CPU use but does not select particular cores.
 
+When a worker will assess output after a command exits, use
+`scripts/slicer_process.py:run_recorded` with explicit `cwd`, `env`, timeout,
+combined-log path, and a fresh receipt path. It atomically records the raw
+process outcome before returning; callers assess test acceptance separately.
+
 Check a suspected build conflict using the service's `MainPID`, `SubState`, and
 `ControlGroup`, then inspect the live compiler's working directory and cgroup.
 A service with `SubState=exited` and `MainPID=0` has completed. An old
