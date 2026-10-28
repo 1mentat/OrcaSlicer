@@ -3304,10 +3304,11 @@
       "test": "tests/fff_print/test_precise_seam.cpp",
       "tag": "[SeamSlopeSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "At fixed 12 mm scarf length, 1 versus 8 subdivisions increases positive outer-wall move count while scarf distance, pre-export geometry and layer counts remain unchanged. Forcing a single subdivision makes both counts 49 and fails. Four steps are also exercised as a held control; no full numeric-domain claim."
+      "reason": "The registered minimum of 1 step is exercised at fixed 12 mm scarf length against 8 steps: 8 produces more positive outer-wall moves while scarf distance and pre-export geometry remain unchanged. Four steps are also a held control. No registered maximum exists, so this does not claim an upper bound or full integer domain."
     },
     "seam_slope_type": {
       "test": "tests/fff_print/test_precise_seam.cpp",
