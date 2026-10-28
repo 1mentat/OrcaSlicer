@@ -1386,6 +1386,9 @@ struct ProfileOptions {
     double classic_branch_diameter_mm = 5.0;
     double classic_branch_distance_mm = 5.0;
     bool support_enabled = true;
+    double support_line_width_mm = 0.4;
+    double layer_height_mm = 0.2;
+    double initial_layer_print_height_mm = 0.2;
 };
 
 static ExPolygons profile_geometry(const SupportLayer &layer, const ProfileOptions &options)
@@ -1412,7 +1415,9 @@ static DynamicPrintConfig config_for(const ProfileOptions &options)
         { "layer_change_gcode",              "G92 E0\n" },
         { "support_on_build_plate_only",     0 },
         { "support_top_z_distance",          0.2 },
-        { "support_line_width",              0.4 },
+        { "layer_height",                   options.layer_height_mm },
+        { "initial_layer_print_height",     options.initial_layer_print_height_mm },
+        { "support_line_width",              options.support_line_width_mm },
         { "line_width",                      0.4 },
         { "nozzle_diameter",                 "0.4" },
         { "brim_type",                       "no_brim" },
@@ -1433,8 +1438,6 @@ static DynamicPrintConfig config_for(const ProfileOptions &options)
         { "support_base_pattern",            "hollow" },
         { "support_interface_top_layers",    0 },
         { "support_interface_bottom_layers", 0 },
-        { "initial_layer_print_height",      0.2 },
-        { "layer_height",                   0.2 },
         { "support_threshold_angle",         30 },
         { "skirt_loops",                     0 },
         { "enable_arc_fitting",              false },
@@ -1548,6 +1551,7 @@ TEST_CASE("Organic branch diameter changes lower public support geometry",
     using namespace tree_support_organic_profile_contracts;
     const ProfileEvidence narrow = observe(1.0, 0.8);
     const ProfileEvidence wide   = observe(4.0, 0.8);
+    const ProfileEvidence registered_maximum = observe(10.0, 0.8);
 
     REQUIRE(narrow.active_layers > 0);
     REQUIRE(narrow.physical_extrusion_paths > 0);
@@ -1557,33 +1561,72 @@ TEST_CASE("Organic branch diameter changes lower public support geometry",
     REQUIRE(wide.physical_extrusion_paths > 0);
     REQUIRE(wide.top_contact_area_mm2 > 0.0);
     REQUIRE(wide.largest_lower_branch_area_mm2 > 0.0);
+    REQUIRE(registered_maximum.active_layers > 0);
+    REQUIRE(registered_maximum.physical_extrusion_paths > 0);
+    REQUIRE(registered_maximum.top_contact_area_mm2 > 0.0);
+    REQUIRE(registered_maximum.largest_lower_branch_area_mm2 > 0.0);
     CHECK_THAT(narrow.highest_support_z, Catch::Matchers::WithinAbs(wide.highest_support_z, EPSILON));
-    // The radius also changes branch merging and routing, so total island area need
-    // not grow monotonically. With the same tip and angle, the lower public geometry
-    // must still respond to the configured branch diameter, beyond a numerical sliver.
+    CHECK_THAT(registered_maximum.highest_support_z, Catch::Matchers::WithinAbs(wide.highest_support_z, EPSILON));
+    // Keep the 1/4 mm representative contrast and extend it to the registered 10 mm
+    // maximum. Branch merging can make total area non-monotone, so compare slices.
     REQUIRE(sliced_geometry_difference_mm2(wide, narrow, lower_region_ceiling_mm) > 0.01);
+    REQUIRE(sliced_geometry_difference_mm2(registered_maximum, wide, lower_region_ceiling_mm) > 0.01);
 }
 
 TEST_CASE("Organic tip diameter changes valid public support contact geometry",
           "[TreeSupport][TreeSupportOrganicProfileSettings][SupportSettingsVariance]")
 {
     using namespace tree_support_organic_profile_contracts;
-    const ProfileEvidence narrow_tip = observe(2.0, 0.4);
-    const ProfileEvidence wide_tip   = observe(2.0, 1.6);
+    const ProfileEvidence narrow_control = observe(2.0, 0.4);
+    const ProfileEvidence wide_control = observe(2.0, 1.6);
+    REQUIRE(narrow_control.active_layers > 0);
+    REQUIRE(narrow_control.physical_extrusion_paths > 0);
+    REQUIRE(narrow_control.top_contact_area_mm2 > 0.0);
+    REQUIRE(wide_control.active_layers > 0);
+    REQUIRE(wide_control.physical_extrusion_paths > 0);
+    REQUIRE(wide_control.top_contact_area_mm2 > 0.0);
+    CHECK_THAT(wide_control.highest_support_z,
+               Catch::Matchers::WithinAbs(narrow_control.highest_support_z, EPSILON));
+    REQUIRE(sliced_geometry_difference_mm2(wide_control, narrow_control) > 0.01);
+    REQUIRE(wide_control.top_contact_area_mm2 > narrow_control.top_contact_area_mm2 + 0.01);
+
+    ProfileOptions minimum_tip_options;
+    minimum_tip_options.organic_branch_diameter_mm = 10.0;
+    minimum_tip_options.tip_diameter_mm = 0.1;
+    minimum_tip_options.support_line_width_mm = 0.1;
+    minimum_tip_options.layer_height_mm = 0.09;
+    minimum_tip_options.initial_layer_print_height_mm = 0.05;
+    const ProfileEvidence narrow_tip = observe(minimum_tip_options);
+
+    ProfileOptions maximum_supported_tip_options = minimum_tip_options;
+    maximum_supported_tip_options.tip_diameter_mm = 10.0;
+    const ProfileEvidence maximum_supported_tip = observe(maximum_supported_tip_options);
 
     REQUIRE(narrow_tip.active_layers > 0);
     REQUIRE(narrow_tip.physical_extrusion_paths > 0);
     REQUIRE(narrow_tip.top_contact_area_mm2 > 0.0);
-    REQUIRE(wide_tip.active_layers > 0);
-    REQUIRE(wide_tip.physical_extrusion_paths > 0);
-    REQUIRE(wide_tip.top_contact_area_mm2 > 0.0);
-    CHECK_THAT(wide_tip.highest_support_z, Catch::Matchers::WithinAbs(narrow_tip.highest_support_z, EPSILON));
-    // Both rows pass print validation: the smaller tip equals the 0.4 mm extrusion width,
-    // and both tips remain below the 2 mm branch diameter. Compare public slices at
-    // matching Z (unmatched slices differ from empty geometry), then check the top
-    // contact footprint grows for the larger tip.
-    REQUIRE(sliced_geometry_difference_mm2(wide_tip, narrow_tip) > 0.01);
-    REQUIRE(wide_tip.top_contact_area_mm2 > narrow_tip.top_contact_area_mm2 + 0.01);
+    REQUIRE(maximum_supported_tip.active_layers > 0);
+    REQUIRE(maximum_supported_tip.physical_extrusion_paths > 0);
+    REQUIRE(maximum_supported_tip.top_contact_area_mm2 > 0.0);
+    CHECK_THAT(maximum_supported_tip.highest_support_z,
+               Catch::Matchers::WithinAbs(narrow_tip.highest_support_z, EPSILON));
+    // Preserve the 0.4/1.6 mm representative contrast above. At the declared
+    // 0.1 mm minimum, set support width to 0.1 mm and layer heights below it so
+    // Print::validate accepts a real pipeline row. At the largest valid pair
+    // (10 mm tip inside a 10 mm branch), public contact/slice geometry responds.
+    REQUIRE(sliced_geometry_difference_mm2(maximum_supported_tip, narrow_tip) > 0.01);
+    REQUIRE(maximum_supported_tip.top_contact_area_mm2 > narrow_tip.top_contact_area_mm2 + 0.01);
+
+    ProfileOptions declared_maximum_tip_options = minimum_tip_options;
+    declared_maximum_tip_options.tip_diameter_mm = 100.0;
+    const DynamicPrintConfig declared_maximum_config = config_for(declared_maximum_tip_options);
+    Print invalid_pair;
+    Model invalid_model;
+    init_cap_overhang_print(invalid_pair, invalid_model, declared_maximum_config);
+    const StringObjectException validation = invalid_pair.validate();
+    INFO(validation.string);
+    REQUIRE_FALSE(validation.string.empty());
+    CHECK(validation.opt_key == "tree_support_branch_diameter_organic");
 }
 
 

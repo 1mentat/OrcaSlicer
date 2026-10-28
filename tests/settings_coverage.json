@@ -1180,19 +1180,21 @@
       "test": "tests/fff_print/test_tree_support.cpp",
       "tag": "[TreeSupportOrganicProfileSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Valid 0.4 and 1.6 mm tips with a fixed 2 mm branch diameter pass Print::validate and Print::process on the same cap overhang. Public support-slice XOR geometry differs and the larger tip grows the highest contact footprint; both rows emit positive physical support paths. Unsafe dimension rejection also remains covered by ValidationContracts in test_print.cpp. Numeric boundary completeness and broad setting interactions are not claimed."
+      "reason": "Public organic support slicing retains the 0.4/1.6 mm controls and adds the registered 0.1 mm minimum plus the largest legal 10 mm tip inside a 10 mm branch. The minimum uses 0.1 mm support width and 0.09/0.05 mm layer heights with a 0.4 mm nozzle; both valid rows emit physical paths and distinguish contact/slice geometry. The registered 100 mm endpoint is rejected with the precise branch-diameter validation key at the 10 mm branch maximum. Bypassing that rejection is caught by the added assertion while the prior two diameter cases pass. Broader interactions are not claimed."
     },
     "tree_support_branch_diameter_organic": {
       "test": "tests/fff_print/test_tree_support.cpp",
       "tag": "[TreeSupportOrganicProfileSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Valid 1 and 4 mm branch diameters with a fixed 0.8 mm tip pass Print::validate and Print::process on the same cap overhang. Lower public support-slice geometry must differ while both rows preserve support height and positive physical support paths. Branch merging can make total island area non-monotone. Unsafe dimension rejection also remains covered by ValidationContracts in test_print.cpp. Numeric boundary completeness and broad setting interactions are not claimed."
+      "reason": "The registered 1 mm minimum and 10 mm maximum, with a 4 mm control and fixed 0.8 mm tip, pass public validation and slicing on one cap overhang. Lower support slices distinguish 1/4 and 4/10 while all rows retain matched support height and positive physical paths. Capping the diameter at 4 mm is caught by the added 10 mm witness; the prior two diameter cases survive that probe. Branch merging need not make total island area monotone; broad setting interactions are not claimed."
     },
     "support_base_pattern": {
       "test": "tests/fff_print/test_support_material.cpp",

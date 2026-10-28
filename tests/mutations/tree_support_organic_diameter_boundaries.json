@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Organic branch/tip registered-endpoint geometry and validation; focused-case comparisons establish two added boundary witnesses and one existing equality control.",
+  "mutants": [
+    {
+      "id": "organic-branch-registered-maximum-clamped-to-representative",
+      "path": "src/libslic3r/Support/TreeSupportCommon.hpp",
+      "old": "        this->support_tree_branch_diameter = scaled<coord_t>(config.tree_support_branch_diameter_organic.value);",
+      "new": "        this->support_tree_branch_diameter = std::min(scaled<coord_t>(config.tree_support_branch_diameter_organic.value), scaled<coord_t>(4.0));",
+      "expected_matches": 1,
+      "description": "The 10 mm registered branch maximum must change lower public slices relative to the 4 mm representative control. Capping the configured branch diameter at 4 mm makes those rows geometrically equivalent.",
+      "test_filter": "^TreeSupportOrganicProfileSettings$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "67dd9e1b9aca9ab375bc3030432ad15a24559ad832a29ab2c9519f1da1f07088"
+    },
+    {
+      "id": "organic-tip-registered-minimum-rejected-at-equal-support-width",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                        if (object->config().tree_support_tip_diameter < extrusion_width - EPSILON)",
+      "new": "                        if (object->config().tree_support_tip_diameter <= extrusion_width + EPSILON)",
+      "expected_matches": 1,
+      "description": "Reject a tip equal to its support line width. The pre-existing 0.4 mm representative row already catches this, so the probe is an existing-coverage control; it is not credited as a new minimum-boundary kill. The 0.1 mm row has separate native pipeline evidence with a 0.4 mm nozzle.",
+      "test_filter": "^TreeSupportOrganicProfileSettings$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "818cab711f301d5cba6ad123b6708bfb0cc75bb1ff3b812c90e58a80e6f7c37e"
+    },
+    {
+      "id": "organic-tip-registered-maximum-branch-constraint-bypassed",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                        if (object->config().tree_support_branch_diameter_organic < object->config().tree_support_tip_diameter)",
+      "new": "                        if (object->config().tree_support_branch_diameter_organic < object->config().tree_support_tip_diameter && object->config().tree_support_tip_diameter < 100.0)",
+      "expected_matches": 1,
+      "description": "A 100 mm tip paired with the 10 mm branch maximum must return the branch-diameter validation key. Skipping that rejection exactly at the registered tip maximum makes the assertion fail.",
+      "test_filter": "^TreeSupportOrganicProfileSettings$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "b380f47eb9d6c458ae45dd595bda8d041c0007711fc679340a4c3774f6c4b094"
+    }
+  ]
+}
