@@ -1035,9 +1035,10 @@
       "tag": "[SupportMaterial]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "A configured 2.5 mm base spacing is compared against dense bottom-interface output; numeric boundaries are not claimed."
+      "reason": "Normal support with raft disabled compares the registered zero minimum against 3 mm spacing. Aggregate base-role G-code path length over at least two shared non-first layers is over 1.5 times greater at zero spacing. Forcing the normal base-density consumer solid fails this physical contrast; no numeric maximum is registered."
     },
     "support_line_width": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -3399,18 +3400,20 @@
       "tag": "[SupportFlowRatio]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "Base-support flow ratios 0.75, 1 and 1.25 scale parsed base-support extrusion with an analytic export/parser error bound. Interface-support and ordinary-object deposition, path lengths, moves and layers remain unchanged. Removing the base multiplier fails both representative ratios. Numeric boundaries and combined role-ratio interactions remain unclaimed."
+      "reason": "Base-support flow ratios 0.75, 1 and 1.25 plus registered endpoints 0 and 2 scale parsed base-role extrusion with an analytic export/parser error bound. At zero, explicitly labeled positive XY moves without E prove geometry remains. Interface and object deposition stay unchanged; both zero role ratios retain baseline extrusion with set_other_flow_ratios disabled. Removing the base multiplier fails representative and endpoint assertions."
     },
     "support_interface_flow_ratio": {
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportFlowRatio]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "Interface-support ratios 0.75, 1 and 1.25 scale parsed interface extrusion with an analytic error bound. Base-support and ordinary-object deposition, geometry, moves and layers remain unchanged. Removing the interface multiplier fails both representative ratios. Numeric boundaries and combined role-ratio interactions remain unclaimed."
+      "reason": "Interface-support ratios 0.75, 1 and 1.25 plus registered endpoints 0 and 2 scale parsed interface extrusion with an analytic export/parser error bound. At zero, explicitly labeled positive XY moves without E prove geometry remains. Base and object deposition stay unchanged; both zero role ratios retain baseline extrusion with set_other_flow_ratios disabled. Removing the interface multiplier fails representative and endpoint assertions."
     },
     "support_ironing_flow": {
       "test": "tests/fff_print/test_support_material.cpp",

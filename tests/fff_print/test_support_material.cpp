@@ -570,6 +570,7 @@ struct SupportStats {
     std::size_t base_segments = 0;
     std::size_t interface_segments = 0;
     std::set<double> base_layers;
+    std::map<double, double> base_length_by_layer;
     std::set<double> interface_layers;
     std::set<int> support_tools;
     double base_length = 0.0;
@@ -651,6 +652,7 @@ SupportStats inspect_support(const std::string &gcode)
         } else {
             ++out.base_segments;
             out.base_length += length;
+            out.base_length_by_layer[z] += length;
             out.base_layers.insert(z);
             out.base_min_z = std::min(out.base_min_z, z);
             out.base_max_z = std::max(out.base_max_z, z);
@@ -800,7 +802,13 @@ SupportFlowStats inspect_support_flow(const std::string &gcode)
         if (marker.recognized)
             active_role = marker.role;
 
-        if (!line.extruding(self))
+        const bool extruding = line.extruding(self);
+        const bool zero_flow_support_move = !extruding && line.cmd() == "G1" && !line.has('E') && marker.recognized &&
+            (marker.role == SupportFlowRole::base || marker.role == SupportFlowRole::interface);
+        // A zero role ratio still emits a G1 XY move with the exact support-role comment,
+        // but GCodeWriter omits E. Count only that explicit no-E support move so a labeled
+        // retract cannot masquerade as zero-flow path geometry.
+        if (!extruding && !zero_flow_support_move)
             return;
         const double xy = static_cast<double>(line.dist_XY(self));
         if (xy <= EPSILON)
@@ -1556,6 +1564,103 @@ TEST_CASE("Support flow ratios scale only their labeled support roles",
             require_scaled_support_role(baseline.interface, changed.interface, test_case.ratio);
         }
     }
+}
+
+TEST_CASE("Zero base pattern spacing densifies normal support paths",
+          "[SupportSettingsVariance][SupportMaterial][SupportBasePatternSpacing]")
+{
+    const SupportStats dense = inspect_support(slice_capital({
+        {"support_type", "normal(auto)"}, {"support_style", "default"},
+        {"support_base_pattern", "rectilinear"}, {"support_base_pattern_spacing", 0.0},
+        {"support_interface_top_layers", 3}, {"raft_layers", 0}
+    }));
+    const SupportStats sparse = inspect_support(slice_capital({
+        {"support_type", "normal(auto)"}, {"support_style", "default"},
+        {"support_base_pattern", "rectilinear"}, {"support_base_pattern_spacing", 3.0},
+        {"support_interface_top_layers", 3}, {"raft_layers", 0}
+    }));
+    REQUIRE(dense.finite);
+    REQUIRE(sparse.finite);
+    REQUIRE(dense.base_segments > 0);
+    REQUIRE(sparse.base_segments > 0);
+
+    std::vector<double> matched_base_z;
+    for (const auto &entry : dense.base_length_by_layer)
+        if (sparse.base_length_by_layer.count(entry.first) != 0)
+            matched_base_z.push_back(entry.first);
+    CAPTURE(matched_base_z.size());
+    REQUIRE(matched_base_z.size() >= 3);
+
+    const double first_base_z = matched_base_z.front();
+    std::size_t nonfirst_layer_count = 0;
+    double dense_nonfirst_length = 0.0;
+    double sparse_nonfirst_length = 0.0;
+    for (const double z : matched_base_z) {
+        if (z <= first_base_z + 1e-4)
+            continue;
+        ++nonfirst_layer_count;
+        dense_nonfirst_length += dense.base_length_by_layer.at(z);
+        sparse_nonfirst_length += sparse.base_length_by_layer.at(z);
+    }
+    CAPTURE(first_base_z, nonfirst_layer_count, dense_nonfirst_length, sparse_nonfirst_length);
+    REQUIRE(nonfirst_layer_count >= 2);
+    REQUIRE(dense_nonfirst_length > 0.0);
+    REQUIRE(sparse_nonfirst_length > 0.0);
+    CHECK(dense_nonfirst_length > sparse_nonfirst_length * 1.5);
+}
+
+TEST_CASE("Support flow ratio endpoints affect only their labeled roles",
+          "[SupportSettingsVariance][SupportMaterial][SupportFlowRatio]")
+{
+    const DynamicPrintConfig baseline_config = support_flow_ratio_config();
+    const std::string baseline_gcode = slice_checked(capital_fixture(), baseline_config);
+    const SupportFlowStats baseline = inspect_support_flow(baseline_gcode);
+    REQUIRE(baseline.finite);
+    REQUIRE(baseline.base.moves > 0);
+    REQUIRE(baseline.interface.moves > 0);
+    REQUIRE(baseline.object.moves > 0);
+
+    const ConfigOptionDef *base_ratio_def = print_config_def.get("support_flow_ratio");
+    const ConfigOptionDef *interface_ratio_def = print_config_def.get("support_interface_flow_ratio");
+    REQUIRE(base_ratio_def != nullptr);
+    REQUIRE(interface_ratio_def != nullptr);
+    REQUIRE(base_ratio_def->is_value_valid(0.0));
+    REQUIRE(base_ratio_def->is_value_valid(2.0));
+    REQUIRE(interface_ratio_def->is_value_valid(0.0));
+    REQUIRE(interface_ratio_def->is_value_valid(2.0));
+
+    for (const double ratio : {0.0, 2.0}) {
+        CAPTURE(ratio);
+        DynamicPrintConfig base_ratio_config = baseline_config;
+        base_ratio_config.set_deserialize_strict("support_flow_ratio", std::to_string(ratio));
+        const SupportFlowStats base_changed = inspect_support_flow(slice_checked(capital_fixture(), base_ratio_config));
+        REQUIRE(base_changed.finite);
+        require_scaled_support_role(baseline.base, base_changed.base, ratio);
+        require_unchanged_support_role(baseline.interface, base_changed.interface);
+        require_unchanged_support_role(baseline.object, base_changed.object);
+
+        DynamicPrintConfig interface_ratio_config = baseline_config;
+        interface_ratio_config.set_deserialize_strict("support_interface_flow_ratio", std::to_string(ratio));
+        const SupportFlowStats interface_changed = inspect_support_flow(slice_checked(capital_fixture(), interface_ratio_config));
+        REQUIRE(interface_changed.finite);
+        require_unchanged_support_role(baseline.base, interface_changed.base);
+        require_scaled_support_role(baseline.interface, interface_changed.interface, ratio);
+        require_unchanged_support_role(baseline.object, interface_changed.object);
+    }
+
+    DynamicPrintConfig gate_off_config = baseline_config;
+    gate_off_config.set_deserialize_strict({
+        {"support_flow_ratio", 0.0},
+        {"support_interface_flow_ratio", 0.0},
+        {"set_other_flow_ratios", false}
+    });
+    const SupportFlowStats gate_off = inspect_support_flow(slice_checked(capital_fixture(), gate_off_config));
+    REQUIRE(gate_off.finite);
+    REQUIRE(gate_off.base.moves > 0);
+    REQUIRE(gate_off.interface.moves > 0);
+    require_unchanged_support_role(baseline.base, gate_off.base);
+    require_unchanged_support_role(baseline.interface, gate_off.interface);
+    require_unchanged_support_role(baseline.object, gate_off.object);
 }
 
 struct BasePatternObservation {
