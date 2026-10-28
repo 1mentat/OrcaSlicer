@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Normal-support raft-base direction endpoints and the zero-width configured fallback, with physical path and emitted-GCode witnesses.",
+  "mutants": [
+    {
+      "id": "raft-base-angle-forced-zero",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "filler->angle = support_params.raft_angle_base;",
+      "new": "filler->angle = 0.f;",
+      "expected_matches": 1,
+      "description": "Force raft-base deposition direction to zero; both the 359 degree wrap witness and 90 degree contrast must remain visible.",
+      "test_filter": "^SupportAngle$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "d87487548e12c871f06d446290b235ceca1926e0a1187fb1764d2a8d29b57f90"
+    },
+    {
+      "id": "support-line-width-zero-boundary-included",
+      "path": "src/libslic3r/Flow.cpp",
+      "old": "object->config().support_line_width.value > 0",
+      "new": "object->config().support_line_width.value >= 0",
+      "expected_matches": 1,
+      "description": "Treat the registered zero support width as explicit instead of inheriting line_width; the auto row must still resolve to the configured 0.5 mm rather than the 0.4 mm nozzle.",
+      "test_filter": "^SupportLineWidth$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "535f0dcbca6202f19d4a369f10a1f6b17cc5f6583658d661e2ba949c57503611"
+    }
+  ]
+}

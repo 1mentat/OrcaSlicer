@@ -2122,6 +2122,174 @@ TEST_CASE("Independent support layer height preserves a non-grid top Z gap",
 }
 
 } // namespace independent_support_layer_height_contracts
+namespace support_angle_settings_contracts {
+
+struct RaftRasterEvidence {
+    double print_z = 0.0;
+    size_t paths = 0;
+    size_t long_segments = 0;
+    double long_length = 0.0;
+    double direction_cos2 = 0.0;
+    double direction_sin2 = 0.0;
+    double width_length = 0.0;
+    double width_weighted_length = 0.0;
+    double direction = 0.0;
+    double direction_coherence = 0.0;
+    double mean_width = 0.0;
+    double emitted_direction = 0.0;
+};
+
+static RaftRasterEvidence observe_raft_base(double support_angle, double support_line_width, double line_width = 0.4)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"support_type", "normal(auto)"},
+        {"support_style", "default"},
+        {"support_angle", support_angle},
+        {"support_base_pattern", "rectilinear"},
+        {"support_base_pattern_spacing", 0.0},
+        {"support_line_width", support_line_width},
+        {"line_width", line_width},
+        {"nozzle_diameter", "0.4"},
+        {"raft_layers", 4},
+        {"raft_expansion", 0.0},
+        {"support_interface_top_layers", 3}
+    });
+
+    Print print;
+    Model model;
+    init_print({capital_fixture()}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+
+    const PrintObject &object = *print.objects().front();
+    REQUIRE_FALSE(object.layers().empty());
+    const double object_bottom_z = object.get_layer(0)->bottom_z();
+    std::map<double, RaftRasterEvidence> rows_by_print_z;
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (!(double(layer->print_z) < object_bottom_z - 1e-4))
+            continue;
+
+        RaftRasterEvidence &row = rows_by_print_z[double(layer->print_z)];
+        row.print_z = double(layer->print_z);
+        for_each_extrusion_path(layer->support_fills, [&row](const ExtrusionPath &path) {
+            if (path.role() != erSupportMaterial || path.is_closed())
+                return;
+            bool has_long_segment = false;
+            for (size_t i = 1; i < path.polyline.points.size(); ++i) {
+                const Point3 &a = path.polyline.points[i - 1];
+                const Point3 &b = path.polyline.points[i];
+                const double dx = unscale<double>(double(b.x()) - double(a.x()));
+                const double dy = unscale<double>(double(b.y()) - double(a.y()));
+                const double length = std::hypot(dx, dy);
+                if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(length) || length < 3.0)
+                    continue;
+                has_long_segment = true;
+                ++row.long_segments;
+                row.long_length += length;
+                const double axial_angle = 2.0 * std::atan2(dy, dx);
+                row.direction_cos2 += length * std::cos(axial_angle);
+                row.direction_sin2 += length * std::sin(axial_angle);
+                if (std::isfinite(path.width) && path.width > 0.0f) {
+                    row.width_length += length;
+                    row.width_weighted_length += length * double(path.width);
+                }
+            }
+            if (has_long_segment)
+                ++row.paths;
+        });
+    }
+
+    std::vector<RaftRasterEvidence> rows;
+    for (auto &[z, row] : rows_by_print_z) {
+        (void)z;
+        if (row.long_length <= 0.0 || row.width_length <= 0.0)
+            continue;
+        const double magnitude = std::hypot(row.direction_cos2, row.direction_sin2);
+        row.direction = 0.5 * std::atan2(row.direction_sin2, row.direction_cos2);
+        if (row.direction < 0.0)
+            row.direction += M_PI;
+        row.direction_coherence = magnitude / row.long_length;
+        row.mean_width = row.width_weighted_length / row.width_length;
+        rows.push_back(row);
+    }
+    REQUIRE(rows.size() >= 2);
+
+    // The first two distinct physical support-material rows below the measured object bottom are
+    // the raft first layer and a later raft base layer. Selecting by public Z/role avoids copying
+    // the internal raft split calculation into the test oracle.
+    RaftRasterEvidence selected = rows[1];
+    REQUIRE(selected.print_z > rows[0].print_z);
+    REQUIRE(selected.print_z < object_bottom_z);
+    REQUIRE(selected.paths > 0);
+    REQUIRE(selected.long_segments > 0);
+    REQUIRE(selected.long_length > 10.0);
+    REQUIRE(selected.width_length > 0.0);
+    REQUIRE(std::isfinite(selected.mean_width));
+    REQUIRE(selected.mean_width > 0.0);
+    REQUIRE(std::isfinite(selected.direction));
+    REQUIRE(selected.direction_coherence > 0.8);
+
+    const SupportStats emitted = inspect_support(gcode(print));
+    REQUIRE_FALSE(emitted.base_direction_by_layer.empty());
+    const auto nearest = std::min_element(emitted.base_direction_by_layer.begin(), emitted.base_direction_by_layer.end(),
+        [&selected](const auto &a, const auto &b) {
+            return std::fabs(a.first - selected.print_z) < std::fabs(b.first - selected.print_z);
+        });
+    REQUIRE(std::fabs(nearest->first - selected.print_z) < 0.02);
+    selected.emitted_direction = nearest->second;
+    REQUIRE(axial_angle_diff_deg(selected.direction, selected.emitted_direction) < 5.0);
+    return selected;
+}
+
+} // namespace support_angle_settings_contracts
+
+TEST_CASE("Support angle rotates raft base deposition",
+          "[SupportSettingsVariance][SupportMaterial][SupportAngle]")
+{
+    using support_angle_settings_contracts::observe_raft_base;
+    const auto zero = observe_raft_base(0.0, 0.0);
+    const auto near_wrap = observe_raft_base(359.0, 0.0);
+    const auto quarter_turn = observe_raft_base(90.0, 0.0);
+
+    for (const auto &evidence : {zero, near_wrap, quarter_turn}) {
+        REQUIRE(evidence.long_length > 10.0);
+        REQUIRE(evidence.direction_coherence > 0.8);
+        REQUIRE(evidence.width_length > 0.0);
+        REQUIRE(std::isfinite(evidence.mean_width));
+        REQUIRE(evidence.mean_width > 0.0);
+        CHECK(axial_angle_diff_deg(evidence.direction, evidence.emitted_direction) < 5.0);
+    }
+    CHECK_THAT(near_wrap.print_z, Catch::Matchers::WithinAbs(zero.print_z, 1e-4));
+    CHECK_THAT(quarter_turn.print_z, Catch::Matchers::WithinAbs(zero.print_z, 1e-4));
+    CHECK_THAT(axial_angle_diff_deg(zero.direction, near_wrap.direction),
+               Catch::Matchers::WithinAbs(1.0, 0.2));
+    CHECK_THAT(axial_angle_diff_deg(zero.emitted_direction, near_wrap.emitted_direction),
+               Catch::Matchers::WithinAbs(1.0, 0.2));
+    CHECK(axial_angle_diff_deg(zero.emitted_direction, quarter_turn.emitted_direction) > 75.0);
+}
+
+TEST_CASE("Support line width reaches raft base extrusion paths",
+          "[SupportSettingsVariance][SupportMaterial][SupportLineWidth]")
+{
+    using support_angle_settings_contracts::observe_raft_base;
+    const auto automatic = observe_raft_base(0.0, 0.0, 0.5);
+    const auto explicit_width = observe_raft_base(0.0, 0.8, 0.5);
+
+    for (const auto &evidence : {automatic, explicit_width}) {
+        REQUIRE(evidence.paths > 0);
+        REQUIRE(evidence.long_length > 10.0);
+        REQUIRE(evidence.width_length > 0.0);
+        REQUIRE(std::isfinite(evidence.mean_width));
+    }
+    CHECK_THAT(automatic.mean_width, Catch::Matchers::WithinAbs(0.5, 0.03));
+    CHECK_THAT(explicit_width.mean_width, Catch::Matchers::WithinAbs(0.8, 0.03));
+    CHECK(explicit_width.mean_width > automatic.mean_width + 0.2);
+    CHECK_THAT(explicit_width.print_z, Catch::Matchers::WithinAbs(automatic.print_z, 1e-4));
+}
 
 } // namespace support_settings_variance_contracts
 

@@ -1041,12 +1041,13 @@
     },
     "support_line_width": {
       "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "tag": "[SupportLineWidth]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "A concrete support line-width value reaches emitted support geometry and role-specific checks; the numeric domain is not claimed."
+      "reason": "The registered minimum 0 selects automatic support width with no maximum declared. On a physical raft-base row, auto 0 resolves to the independently configured 0.5 mm line width with a 0.4 mm nozzle; explicit 0.8 mm reaches the measured ExtrusionPath width. Both retain positive long deposition and matched Z. Changing the Flow fallback gate from >0 to >=0 incorrectly resolves zero via the 0.4 mm nozzle and fails the new auto-width assertion while the angle case passes. Other support styles and broader interactions are not claimed."
     },
     "support_style": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -5621,6 +5622,16 @@
         "pipeline_oracle"
       ],
       "reason": "The public published-import fixture replaces the selected two-entry vector {10,20} with the file vector {140,150} and confirms the key is applied rather than skipped. This establishes one vector handoff case; numeric boundary behavior is not tested."
+    },
+    "support_angle": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportAngle]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The normal-support cap fixture with four raft layers runs the registered 0 and 359 degree endpoints and a 90 degree representative. Long public raft-base extrusion segments and emitted GCode agree in axial direction; 359 differs from 0 by 1 degree within 0.2 degree, while 90 rotates by more than 75 degrees. Forcing the raft-base angle to zero fails the wrap-boundary and quarter-turn assertions while the independent width case passes. Other support patterns and broader interactions are not claimed."
     }
   }
 }

@@ -263,7 +263,8 @@ add_executable(fff_print_composite_focused_tests EXCLUDE_FROM_ALL
     ../libslic3r/test_utils.cpp
     test_gcode_processor.cpp
     test_precise_seam.cpp
-    test_tree_support.cpp)
+    test_tree_support.cpp
+    test_support_material.cpp)
 target_link_libraries(fff_print_composite_focused_tests test_common libslic3r Catch2::Catch2WithMain)
 target_include_directories(fff_print_composite_focused_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set_property(TARGET fff_print_composite_focused_tests PROPERTY FOLDER "tests")
