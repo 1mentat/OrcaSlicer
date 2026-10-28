@@ -490,6 +490,13 @@ The E-only reset contract compares equivalent physical blocks at two logical
 extrusion origins. `[PressureEqualizerCoordinateResetDefect]` separately retains
 the combined XY/E reset regression described under known baseline defects.
 
+`[ThumbnailFormatSetting]` checks all five registered legacy default formats
+through config normalization, parsing, and encoded G-code export. PNG, JPEG,
+and QOI payloads are decoded to dimensions and pixels; BTT and ColPic output
+is checked as RGB565 pixel streams, including reserved-black and transparent
+pixel conversion. Its three mutations are in `thumbnails.json`. These checks
+do not exercise the renderer or explicit per-thumbnail format overrides.
+
 `[GCodeReaderFileStreaming]` checks long-line buffering, mixed line endings,
 numbered commands, final unterminated moves, cancellation and reuse, and
 empty/missing files. Its mutations are in `gcode_reader_file_streaming.json`.

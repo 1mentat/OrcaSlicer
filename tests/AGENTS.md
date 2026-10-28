@@ -29,9 +29,11 @@ Before a full Linux confidence run, follow the worker prerequisites in [README.m
 Worker launchers should reuse `scripts/slicer_process.py`'s `run_captured()` with
 an explicit environment copied from the parent, then apply private temp/profile
 paths. Preserve inherited executable, loader, and locale settings; do not clear
-the launcher's global environment. When compiling a source alias, retain the
-original quoted-header search directory and verify the staged headers before
-starting the compiler.
+the launcher's global environment. Use `run_recorded()` when interpreting a
+command's output afterward, so its raw outcome survives an assessment error.
+Keep successful `SystemExit` outside failure-logging handlers. When compiling a
+source alias, retain the original quoted-header search directory and verify the
+staged headers before starting the compiler.
 
 ## Where a test goes
 

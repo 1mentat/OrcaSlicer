@@ -5491,7 +5491,16 @@
         "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "The PrintRegionConfig option registers 0 and 10 mm as valid boundaries. The test slices the same crosszag geometry at both endpoints and measures emitted line phase relative to the physical pitch on layers 0–3: layers 0–1 remain aligned, while layers 2–3 shift by the measured configured amount with opposite local-normal signs. Separate even- and odd-pair mutations target those assertions."
+      "reason": "The PrintRegionConfig option registers 0 and 10 mm as valid boundaries. The test slices the same crosszag geometry at both endpoints and measures emitted line phase relative to the physical pitch on layers 0\u20133: layers 0\u20131 remain aligned, while layers 2\u20133 shift by the measured configured amount with opposite local-normal signs. Separate even- and odd-pair mutations target those assertions."
+    },
+    "thumbnails_format": {
+      "test": "tests/fff_print/test_thumbnails.cpp",
+      "tag": "[ThumbnailFormatSetting]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle"
+      ],
+      "reason": "All five registered formats (PNG, JPG, QOI, BTT_TFT and COLPIC) are selected as the legacy default for an empty thumbnail suffix, passed through the public composite normalizer and thumbnail parser, then exported to G-code. Decoded image dimensions/pixels or RGB565 pixel streams must retain the selected format, including BTT special-black and ColPic transparency conversion. This does not claim rendering or interactions with explicit per-thumbnail format overrides."
     }
   }
 }

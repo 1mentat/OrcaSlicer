@@ -1,9 +1,13 @@
+#include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <jpeglib.h>
+#include <boost/beast/core/detail/base64.hpp>
 #include <csetjmp>
 #include <cmath>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Config.hpp"
@@ -20,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -414,6 +419,213 @@ TEST_CASE("JPEG thumbnail output has a complete decodable stream", "[Thumbnails]
         CHECK(decoded.rows == height);
         CHECK(decoded.pixels_match);
         CHECK(decoded.complete);
+    }
+}
+
+TEST_CASE("Configured thumbnail format reaches encoded G-code export",
+          "[Thumbnails][ThumbnailFormatSetting][ThumbnailGCodeExport]")
+{
+    const std::vector<std::string> expected_names = {"PNG", "JPG", "QOI", "BTT_TFT", "COLPIC"};
+    const auto &registered_names = ConfigOptionEnum<GCodeThumbnailsFormat>::get_enum_names();
+    REQUIRE(registered_names == expected_names);
+
+    for (size_t index = 0; index < registered_names.size(); ++index) {
+        INFO("selected thumbnail format: " << registered_names[index]);
+        const auto format = static_cast<GCodeThumbnailsFormat>(index);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            {"thumbnails", "4x3/"},
+            {"thumbnails_format", registered_names[index].c_str()},
+        });
+        config.handle_legacy_composite();
+
+        CHECK(config.opt_string("thumbnails") == "4x3/" + registered_names[index]);
+        const auto [definitions, errors] = GCodeThumbnails::make_and_check_thumbnail_list(config);
+        REQUIRE(errors == ThumbnailErrors());
+        REQUIRE(definitions.size() == 1);
+        REQUIRE(definitions.front().first == format);
+        CHECK(definitions.front().second == Vec2d(4, 3));
+
+        ThumbnailData image;
+        image.set(4, 3);
+        for (size_t pixel = 0; pixel < image.pixels.size(); pixel += 4) {
+            image.pixels[pixel + 0] = 40;
+            image.pixels[pixel + 1] = 120;
+            image.pixels[pixel + 2] = 220;
+            image.pixels[pixel + 3] = 255;
+        }
+        if (format == GCodeThumbnailsFormat::BTT_TFT) {
+            // RGB565 0x0020 is one of the firmware colors that must be emitted as black.
+            for (unsigned int y = 0; y < image.height; ++y) {
+                const size_t pixel = 4 * (size_t(y) * image.width);
+                image.pixels[pixel + 0] = 0;
+                image.pixels[pixel + 1] = 4;
+                image.pixels[pixel + 2] = 0;
+            }
+        } else if (format == GCodeThumbnailsFormat::ColPic) {
+            // The ColPic format substitutes a documented background color for transparent pixels.
+            const size_t pixel = 4 * (size_t(image.height - 1) * image.width);
+            image.pixels[pixel + 0] = 255;
+            image.pixels[pixel + 1] = 0;
+            image.pixels[pixel + 2] = 0;
+            image.pixels[pixel + 3] = 0;
+        }
+
+        ThumbnailsGeneratorCallback callback = [image](const ThumbnailsParams &) {
+            return ThumbnailsList{image};
+        };
+        std::string output;
+        GCodeThumbnails::export_thumbnails_to_file(callback, 7, definitions,
+            [&](const char *text) { output += text; }, []() {});
+
+        if (format == GCodeThumbnailsFormat::BTT_TFT) {
+            std::string expected = ";00040003\r\n";
+            for (int row = 0; row < 3; ++row)
+                expected += ";00002bdb2bdb2bdb\r\n";
+            expected += "; bigtree thumbnail end\r\n\r\n";
+            CHECK(output == expected);
+            continue;
+        }
+
+        if (format == GCodeThumbnailsFormat::ColPic) {
+            const size_t marker = output.find(";gimage:");
+            REQUIRE(marker != std::string::npos);
+            const size_t payload_begin = marker + std::string(";gimage:").size();
+            const size_t payload_end = output.find('\n', payload_begin);
+            REQUIRE(payload_end != std::string::npos);
+            const std::string text = output.substr(payload_begin, payload_end - payload_begin);
+            REQUIRE_FALSE(text.empty());
+            REQUIRE(text.size() % 4 == 0);
+
+            std::vector<unsigned char> encoded;
+            for (size_t i = 0; i < text.size(); i += 4) {
+                int values[4] = {};
+                for (size_t j = 0; j < 4; ++j) {
+                    const unsigned char ch = static_cast<unsigned char>(text[i + j]);
+                    values[j] = ch == '~' ? 44 : int(ch) - 48;
+                    REQUIRE(values[j] >= 0);
+                    REQUIRE(values[j] < 64);
+                }
+                encoded.push_back(static_cast<unsigned char>((values[0] << 2) | (values[1] >> 4)));
+                encoded.push_back(static_cast<unsigned char>((values[1] << 4) | (values[2] >> 2)));
+                encoded.push_back(static_cast<unsigned char>((values[2] << 6) | values[3]));
+            }
+            REQUIRE(encoded.size() >= 32);
+            const auto read_le16 = [&](size_t offset) {
+                return std::uint16_t(encoded[offset + 0]) |
+                       (std::uint16_t(encoded[offset + 1]) << 8);
+            };
+            const auto read_le32 = [&](size_t offset) {
+                return std::uint32_t(encoded[offset + 0]) |
+                       (std::uint32_t(encoded[offset + 1]) << 8) |
+                       (std::uint32_t(encoded[offset + 2]) << 16) |
+                       (std::uint32_t(encoded[offset + 3]) << 24);
+            };
+            CHECK(encoded[0] == 3);                 // ColPic stream version.
+            CHECK(read_le32(4) == 4);               // Encoded width.
+            CHECK(read_le32(8) == 3);               // Encoded height.
+            CHECK(read_le32(12) == 0x05DDC33C);     // ColPic header marker.
+
+            const size_t palette_bytes = read_le32(16);
+            const size_t color_data_bytes = read_le32(20);
+            REQUIRE(palette_bytes > 0);
+            REQUIRE(palette_bytes % 2 == 0);
+            REQUIRE(palette_bytes <= encoded.size() - 32);
+            const size_t color_data_begin = 32 + palette_bytes;
+            REQUIRE(color_data_bytes <= encoded.size() - color_data_begin);
+            const size_t color_data_end = color_data_begin + color_data_bytes;
+            const size_t palette_size = palette_bytes / 2;
+            std::vector<std::uint16_t> palette;
+            palette.reserve(palette_size);
+            for (size_t i = 0; i < palette_size; ++i)
+                palette.push_back(read_le16(32 + 2 * i));
+
+            // ColPic color data stores a five-bit palette slot and three-bit run length.
+            // A zero run code takes its length from the following byte; code seven changes palette bank.
+            std::vector<std::uint16_t> decoded_pixels;
+            size_t cursor = color_data_begin;
+            size_t palette_bank = 0;
+            while (cursor < color_data_end) {
+                const unsigned char token = encoded[cursor++];
+                const size_t code = token >> 5;
+                const size_t slot = token & 0x1f;
+                if (code == 7) {
+                    palette_bank = slot;
+                    continue;
+                }
+                const size_t run = code == 0 ? (cursor < color_data_end ? encoded[cursor++] : 0) : code;
+                const size_t palette_index = palette_bank * 32 + slot;
+                REQUIRE(run > 0);
+                REQUIRE(palette_index < palette.size());
+                REQUIRE(decoded_pixels.size() + run <= 12);
+                decoded_pixels.insert(decoded_pixels.end(), run, palette[palette_index]);
+            }
+            REQUIRE(decoded_pixels.size() == 12);
+            CHECK(decoded_pixels.front() == 0x2989); // Transparent-pixel fallback RGB565.
+            CHECK(std::all_of(decoded_pixels.begin() + 1, decoded_pixels.end(),
+                              [](std::uint16_t pixel) { return pixel == 0x2bdb; }));
+            continue;
+        }
+
+        const char *tag = format == GCodeThumbnailsFormat::PNG ? "thumbnail" :
+                          format == GCodeThumbnailsFormat::JPG ? "thumbnail_JPG" : "thumbnail_QOI";
+        const std::string begin = std::string("; ") + tag + " begin 4x3 ";
+        const size_t header = output.find(begin);
+        REQUIRE(header != std::string::npos);
+        const size_t header_end = output.find('\n', header);
+        REQUIRE(header_end != std::string::npos);
+        size_t declared_size = 0;
+        const char *size_begin = output.data() + header + begin.size();
+        const char *size_end = output.data() + header_end;
+        const auto parsed_size = std::from_chars(size_begin, size_end, declared_size);
+        REQUIRE(parsed_size.ec == std::errc{});
+        REQUIRE(parsed_size.ptr == size_end);
+        const size_t block_end = output.find(std::string("; ") + tag + " end", header_end);
+        REQUIRE(block_end != std::string::npos);
+        std::string base64;
+        for (size_t pos = header_end + 1; pos < block_end;) {
+            size_t line_end = output.find('\n', pos);
+            if (line_end == std::string::npos || line_end > block_end)
+                line_end = block_end;
+            if (line_end - pos >= 2 && output[pos] == ';' && output[pos + 1] == ' ')
+                base64.append(output, pos + 2, line_end - pos - 2);
+            pos = line_end + 1;
+        }
+        REQUIRE_FALSE(base64.empty());
+        REQUIRE(base64.size() % 4 == 0);
+        const size_t padding = base64.back() == '=' ?
+            (base64.size() >= 2 && base64[base64.size() - 2] == '=' ? 2 : 1) : 0;
+        std::vector<unsigned char> payload(boost::beast::detail::base64::decoded_size(base64.size()));
+        const auto [payload_size, consumed] = boost::beast::detail::base64::decode(
+            payload.data(), base64.data(), base64.size());
+        REQUIRE(consumed == base64.size() - padding);
+        REQUIRE(payload_size == (base64.size() / 4) * 3 - padding);
+        REQUIRE(declared_size == base64.size());
+        payload.resize(payload_size);
+
+        if (format == GCodeThumbnailsFormat::PNG) {
+            png::ImageColorscale decoded;
+            REQUIRE(png::decode_colored_png(png::ReadBuf{payload.data(), payload.size()}, decoded));
+            CHECK(decoded.cols == 4);
+            CHECK(decoded.rows == 3);
+            CHECK(decoded.bytes_per_pixel == 4);
+            CHECK(decoded.buf == image.pixels);
+        } else if (format == GCodeThumbnailsFormat::JPG) {
+            const JpegDecodeResult decoded = decode_jpeg(payload.data(), payload.size(), 4, 3);
+            CHECK(decoded.width == 4);
+            CHECK(decoded.height == 3);
+            CHECK(decoded.rows == 3);
+            CHECK(decoded.pixels_match);
+            CHECK(decoded.complete);
+        } else {
+            qoi_desc desc{};
+            std::unique_ptr<unsigned char, decltype(&std::free)> decoded(
+                static_cast<unsigned char *>(qoi_decode(payload.data(), int(payload.size()), &desc, 4)), &std::free);
+            REQUIRE(decoded != nullptr);
+            REQUIRE(desc.width == 4);
+            REQUIRE(desc.height == 3);
+            CHECK(std::equal(image.pixels.begin(), image.pixels.end(), decoded.get()));
+        }
     }
 }
 

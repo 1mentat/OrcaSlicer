@@ -49,6 +49,33 @@
       "new": "const uint8_t rv = px.r;",
       "description": "Ignore alpha premultiplication in BTT RGB565 conversion; the transparent-red fixture must retain black output.",
       "test_filter": "ThumbnailsExtended"
+    },
+    {
+      "id": "thumbnail-format-setting-hardcoded-png",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                extention = opt->enum_values.at(config.option(\"thumbnails_format\")->getInt());",
+      "new": "                extention = \"PNG\";",
+      "expected_matches": 1,
+      "test_filter": "ThumbnailFormatSetting",
+      "description": "Ignore the configured legacy default format; the exported JPG, QOI, BTT and ColPic paths must preserve the selected encoding."
+    },
+    {
+      "id": "thumbnail-btt-special-rgb565-not-black",
+      "path": "src/libslic3r/GCode/Thumbnails.cpp",
+      "old": "            if (color_565 == \"0020\" || color_565 == \"0841\" || color_565 == \"0861\")\n                color_565 = \"0000\";",
+      "new": "            if (false)\n                color_565 = \"0000\";",
+      "expected_matches": 1,
+      "test_filter": "ThumbnailFormatSetting",
+      "description": "Stop converting firmware-reserved RGB565 colors to black; the emitted BTT rows must retain the special-black mapping."
+    },
+    {
+      "id": "thumbnail-colpic-transparent-fallback-ignored",
+      "path": "src/libslic3r/GCode/Thumbnails.cpp",
+      "old": "            if (a == 0) {\n                r = 46 >> 3;\n                g = 51 >> 2;\n                b = 72 >> 3;\n            }",
+      "new": "            if (false) {\n                r = 46 >> 3;\n                g = 51 >> 2;\n                b = 72 >> 3;\n            }",
+      "expected_matches": 1,
+      "test_filter": "ThumbnailFormatSetting",
+      "description": "Ignore the ColPic transparent-pixel background substitution; the independently decoded RGB565 stream must retain the fallback color."
     }
   ]
 }
