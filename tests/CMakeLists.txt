@@ -133,7 +133,8 @@ endfunction()
 set(SLICER_TEST_TARGETS_WITH_PARALLEL
     libslic3r_tests
     fff_print_tests
-    slic3rutils_tests)
+    slic3rutils_tests
+    fff_print_composite_focused_tests)
 
 function(orcaslicer_discover_tests TARGET)
     cmake_parse_arguments(REGISTER "" "TEST_PREFIX" "" ${ARGN})

@@ -238,6 +238,27 @@ It also registers `fff_print_tree_support_tests` and
 `fff_print_multifilament_tests` with `FocusedTreeSupport::` and
 `FocusedMultiFilament::` prefixes. These excluded targets compile only their
 respective test source and shared setup for support and filament iteration.
+
+`fff_print_composite_focused_tests` combines existing G-code, motion-settings,
+fill, Arachne, pressure-equalizer, thumbnail, utility, and G-code-processor
+tests with Precise Seam and TreeSupport. It keeps one FFF main and one copy of
+the shared test helpers. The target is excluded from the default build; enabling
+`SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY` registers its source cases with the
+`FocusedComposite::` prefix. It is added to the parallel-test target list so
+`[Parallel]` cases retain the normal two-slot partition when
+`SLICER_TEST_PROCESSORS=1`.
+
+Configure an existing test build with focused discovery enabled, build the
+composite target, and run its full source inventory with:
+
+```sh
+cmake -S . -B build -DBUILD_TESTS=ON \
+  -DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=ON
+cmake --build build --config Release --target fff_print_composite_focused_tests --parallel 8
+ctest --test-dir build/tests -C Release --output-on-failure \
+  -R '^FocusedComposite::' --no-tests=error
+```
+
 `[RoleFilamentEndpoints]` checks default, available IDs 1–3, and the first
 unavailable ID in a three-filament configuration against the emitted tools,
 including each role's inheritance peers and the invalid-ID fallback. The

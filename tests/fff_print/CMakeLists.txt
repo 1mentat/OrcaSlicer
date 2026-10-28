@@ -248,3 +248,27 @@ target_link_libraries(fff_print_extrusion_entity_tests test_common libslic3r Cat
 set_property(TARGET fff_print_extrusion_entity_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_extrusion_entity_tests)
 slicer_enable_llvm_source_coverage(fff_print_extrusion_entity_tests)
+
+# Opt-in composite target for the current focused PR selection. Keep one FFF
+# main (and therefore one NanoSVG implementation) and register shared helpers once.
+add_executable(fff_print_composite_focused_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_gcode.cpp
+    test_gcode_motion_settings.cpp
+    test_fill.cpp
+    ../libslic3r/test_arachne_walls.cpp
+    test_pressure_equalizer.cpp
+    test_thumbnails.cpp
+    ../libslic3r/test_utils.cpp
+    test_gcode_processor.cpp
+    test_precise_seam.cpp
+    test_tree_support.cpp)
+target_link_libraries(fff_print_composite_focused_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(fff_print_composite_focused_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET fff_print_composite_focused_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_composite_focused_tests)
+slicer_enable_llvm_source_coverage(fff_print_composite_focused_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_composite_focused_tests TEST_PREFIX "FocusedComposite::")
+endif()
