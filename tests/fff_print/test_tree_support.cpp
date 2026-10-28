@@ -37,6 +37,9 @@
 #include "libslic3r/Slicing.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/TriangleSelector.hpp"
+#include "libslic3r/BuildVolume.hpp"
+#include "libslic3r/Support/TreeModelVolumes.hpp"
+#include "libslic3r/Support/TreeSupportCommon.hpp"
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -2507,4 +2510,64 @@ TEST_CASE("Organic raft expansion preserves support under a cap overhang",
     // raft expansion. Only raft-contact interface extrusion is measured here;
     // cap-generated tree bases cannot inflate this local witness.
     REQUIRE(expanded.raft_contact_witness_area_mm2 > unexpanded.raft_contact_witness_area_mm2 + 20.0);
+}
+
+TEST_CASE("Tree collision radius lookup returns the closest cached lower bound",
+          "[TreeSupport][TreeModelVolumes]")
+{
+    Print print;
+    slice_with_tree_support(Slic3r::Test::cube(20.0), print, "organic", 30, 0, 0, {
+        { "support_interface_top_layers", 0 },
+    });
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.layer_count() > 3);
+
+    const std::vector<Vec2d> bed = { { 0., 0. }, { 200., 0. }, { 200., 200. }, { 0., 200. } };
+    const BuildVolume build_volume{ bed, print.config().printable_height.value, {}, {} };
+    TreeSupport3D::TreeModelVolumes volumes{
+        object, build_volume, Slic3r::scaled<coord_t>(1.), Slic3r::scaled<coord_t>(0.5), 0, {}};
+
+    const TreeSupport3D::LayerIndex layer_idx = 3;
+    const coord_t small_request = Slic3r::scaled<coord_t>(0.5);
+    const coord_t large_request = Slic3r::scaled<coord_t>(5.0);
+    const coord_t small_radius = volumes.ceilRadius(small_request, false);
+    const coord_t large_radius = volumes.ceilRadius(large_request, false);
+    REQUIRE(small_radius > 1);
+    REQUIRE(large_radius > small_radius + 2);
+
+    // A fresh volume has no collision-radius cache entry for this layer.
+    CHECK_FALSE(volumes.get_collision_lower_bound_area(layer_idx, large_radius).has_value());
+
+    // These calls insert only their snapped radius, leaving a deliberate gap for the
+    // lower-bound lookup to resolve.
+    const Polygons &small_collision = volumes.getCollision(small_request, layer_idx, false);
+    const Polygons &large_collision = volumes.getCollision(large_request, layer_idx, false);
+    REQUIRE_FALSE(small_collision.empty());
+    REQUIRE_FALSE(large_collision.empty());
+    REQUIRE(&small_collision != &large_collision);
+
+    CHECK_FALSE(volumes.get_collision_lower_bound_area(layer_idx, small_radius - 1).has_value());
+
+    const auto exact_small = volumes.get_collision_lower_bound_area(layer_idx, small_radius);
+    REQUIRE(exact_small.has_value());
+    CHECK(exact_small->first == small_radius);
+    CHECK(&exact_small->second.get() == &small_collision);
+
+    const coord_t between_radii = small_radius + (large_radius - small_radius) / 2;
+    const auto between = volumes.get_collision_lower_bound_area(layer_idx, between_radii);
+    REQUIRE(between.has_value());
+    CHECK(between->first == small_radius);
+    CHECK(&between->second.get() == &small_collision);
+
+    const auto exact_large = volumes.get_collision_lower_bound_area(layer_idx, large_radius);
+    REQUIRE(exact_large.has_value());
+    CHECK(exact_large->first == large_radius);
+    CHECK(&exact_large->second.get() == &large_collision);
+
+    const auto above_large = volumes.get_collision_lower_bound_area(layer_idx, large_radius + 1);
+    REQUIRE(above_large.has_value());
+    CHECK(above_large->first == large_radius);
+    CHECK(&above_large->second.get() == &large_collision);
 }

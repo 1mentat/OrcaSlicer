@@ -1201,6 +1201,14 @@ Its probes are in `geometry_transform_components.json`.
 
 `[TreeSupportPaintedEnforcer]` checks support extrusion near an independently
 located painted vertical facet, with an unpainted control.
+
+`[TreeSupport][TreeModelVolumes]` checks empty, below-first, exact, between, and
+above-last collision-cache radius lookups. Returned radii and polygon references
+must identify the closest cached area no larger than the request. The probe in
+[`tree_model_volumes_lower_bound.json`](mutations/tree_model_volumes_lower_bound.json)
+replaces the requested maximum radius with zero; the exact-radius assertion
+detects the error.
+
 `[TreeSupportBottomInterface]` checks emitted base/interface roles and alternating
 directions above a lower model surface. Build `fff_print_tree_support_tests` for
 focused feedback; the same cases run in the canonical FFF suite without duplicate
