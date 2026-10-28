@@ -1788,7 +1788,7 @@ struct Evidence {
     double expected_z_mm = 0.0;
 };
 
-static Evidence observe(bool paint_vertical_facet)
+static Evidence observe(bool paint_vertical_facet, const char *support_style = "tree_slim")
 {
     Model model = Slic3r::Test::model("tree-vertical-enforcer", make_cube(20.0, 20.0, 20.0));
     REQUIRE(model.objects.size() == 1);
@@ -1835,7 +1835,7 @@ static Evidence observe(bool paint_vertical_facet)
         { "printable_area",               "-100x-100,200x-100,200x200,-100x200" },
         { "enable_support",                1 },
         { "support_type",                  "tree(auto)" },
-        { "support_style",                 "tree_slim" },
+        { "support_style",                 support_style },
         { "support_on_build_plate_only",   0 },
         { "support_threshold_angle",       30 },
         { "support_remove_small_overhang", 0 },
@@ -1845,6 +1845,10 @@ static Evidence observe(bool paint_vertical_facet)
         { "tree_support_branch_distance",  5.0 },
         { "tree_support_branch_diameter",  2.0 },
         { "tree_support_branch_angle",     40.0 },
+        { "tree_support_branch_angle_organic", 40.0 },
+        { "tree_support_branch_diameter_organic", 2.0 },
+        { "tree_support_branch_distance_organic", 5.0 },
+        { "tree_support_tip_diameter",     0.8 },
         { "support_line_width",            0.4 },
         { "line_width",                    0.4 },
         { "nozzle_diameter",               "0.4" },
@@ -1906,6 +1910,21 @@ TEST_CASE("Painted vertical enforcers create support at the selected facet",
     using namespace tree_support_vertical_enforcer_contracts;
     const Evidence plain = observe(false);
     const Evidence painted = observe(true);
+
+    REQUIRE(plain.local_paths == 0);
+    REQUIRE(painted.support_paths_near_target_z > 0);
+    REQUIRE(painted.local_paths > 0);
+    CHECK_THAT(painted.expected_x_mm, Catch::Matchers::WithinAbs(0.0, 1e-4));
+    CHECK(painted.expected_z_mm > 5.0);
+    CHECK(painted.expected_z_mm < 9.0);
+}
+
+TEST_CASE("Organic painted vertical enforcers create support at the selected facet",
+          "[TreeSupport][TreeSupport3D][TreeSupportPaintedEnforcer]")
+{
+    using namespace tree_support_vertical_enforcer_contracts;
+    const Evidence plain = observe(false, "organic");
+    const Evidence painted = observe(true, "organic");
 
     REQUIRE(plain.local_paths == 0);
     REQUIRE(painted.support_paths_near_target_z > 0);
