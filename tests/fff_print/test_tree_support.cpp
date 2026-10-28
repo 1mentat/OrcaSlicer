@@ -2571,3 +2571,140 @@ TEST_CASE("Tree collision radius lookup returns the closest cached lower bound",
     CHECK(above_large->first == large_radius);
     CHECK(&above_large->second.get() == &large_collision);
 }
+
+namespace tree_support_raft_stack_settings_contracts {
+
+struct RaftStackEvidence {
+    std::size_t layers_below_first_object = 0;
+    double first_object_print_z = std::numeric_limits<double>::quiet_NaN();
+    double first_object_height = std::numeric_limits<double>::quiet_NaN();
+    double highest_below_object_print_z = -std::numeric_limits<double>::infinity();
+    std::size_t first_support_path_count = 0;
+    double first_support_path_length_mm = 0.0;
+    bool finite = true;
+};
+
+static RaftStackEvidence observe(int raft_layers, double first_layer_density)
+{
+    Print print;
+    slice_with_tree_support(tree_support_raft_overhang_contracts::raft_cap_overhang_fixture(),
+                            print, "organic", 30, 1, raft_layers, {
+        { "printable_area",                    "-100x-100,200x-100,200x200,-100x200" },
+        { "layer_height",                       0.2 },
+        { "initial_layer_print_height",         0.2 },
+        { "support_top_z_distance",             0.2 },
+        { "support_interface_top_layers",       3 },
+        { "support_interface_bottom_layers",    0 },
+        { "support_remove_small_overhang",      false },
+        { "support_on_build_plate_only",        true },
+        { "independent_support_layer_height",   false },
+        { "raft_contact_distance",              0.0 },
+        { "raft_expansion",                     0.0 },
+        { "raft_first_layer_density",           first_layer_density },
+        { "tree_support_auto_brim",             false },
+        { "tree_support_brim_width",            0.0 },
+        { "tree_support_top_rate",               "30%" },
+        { "tree_support_branch_distance_organic", 1.0 },
+        { "tree_support_branch_angle_organic",   40.0 },
+        { "tree_support_branch_diameter_angle",  5.0 },
+        { "tree_support_tip_diameter",           0.8 },
+        { "tree_support_branch_diameter_organic", 2.0 },
+        { "tree_support_wall_count",              1 },
+        { "support_base_pattern",                 "hollow" },
+        { "support_line_width",                   0.4 },
+        { "line_width",                           0.4 },
+        { "nozzle_diameter",                      "0.4" },
+        { "skirt_loops",                          0 },
+        { "brim_type",                            "no_brim" },
+        { "brim_width",                           0.0 },
+        { "enable_arc_fitting",                   false },
+        { "resolution",                           0.01 },
+    });
+
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE_FALSE(object.layers().empty());
+    const Layer &first_object_layer = *object.layers().front();
+
+    RaftStackEvidence result;
+    result.first_object_print_z = double(first_object_layer.print_z);
+    result.first_object_height = double(first_object_layer.height);
+    REQUIRE(std::isfinite(result.first_object_print_z));
+    REQUIRE(std::isfinite(result.first_object_height));
+
+    const SupportLayer *first_support_layer = nullptr;
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer == nullptr) {
+            result.finite = false;
+            continue;
+        }
+        const double layer_z = double(layer->print_z);
+        result.finite = result.finite && std::isfinite(layer_z);
+        // With raft contact distance pinned to zero, physical raft layers sit below
+        // the first object layer. Count those public layers without using the internal
+        // base/interface split formula.
+        if (layer_z < result.first_object_print_z - EPSILON) {
+            ++result.layers_below_first_object;
+            result.highest_below_object_print_z =
+                std::max(result.highest_below_object_print_z, layer_z);
+        }
+        if (first_support_layer == nullptr || layer_z < double(first_support_layer->print_z))
+            first_support_layer = layer;
+    }
+
+    if (first_support_layer != nullptr) {
+        for_each_extrusion_path(first_support_layer->support_fills, [&](const ExtrusionPath &path) {
+            if (path.role() != erSupportMaterial && path.role() != erSupportMaterialInterface)
+                return;
+            const double length_mm = unscale<double>(path.length());
+            result.finite = result.finite && std::isfinite(length_mm) && length_mm > 0.0;
+            if (std::isfinite(length_mm) && length_mm > 0.0) {
+                ++result.first_support_path_count;
+                result.first_support_path_length_mm += length_mm;
+            }
+        });
+    }
+    result.finite = result.finite && std::isfinite(result.first_support_path_length_mm);
+    return result;
+}
+
+} // namespace tree_support_raft_stack_settings_contracts
+
+TEST_CASE("Raft layer endpoints and first-layer density reach public support geometry",
+          "[TreeSupport][SupportSettingsVariance][TreeSupportRaftStackSettings]")
+{
+    using namespace tree_support_raft_stack_settings_contracts;
+    // Density also affects a no-raft first support flange (SupportCommon.cpp), so
+    // observe that path rather than treating the density option as inert at raft 0.
+    const RaftStackEvidence no_raft_sparse = observe(0, 10.0);
+    const RaftStackEvidence no_raft_solid  = observe(0, 100.0);
+    // Four layers are the minimum configuration that includes first, repeated base,
+    // interface, and contact raft layers.
+    const RaftStackEvidence four_raft_sparse = observe(4, 10.0);
+    const RaftStackEvidence four_raft_solid  = observe(4, 100.0);
+    const RaftStackEvidence max_raft         = observe(100, 90.0);
+
+    for (const RaftStackEvidence *evidence :
+         { &no_raft_sparse, &no_raft_solid, &four_raft_sparse, &four_raft_solid, &max_raft }) {
+        REQUIRE(evidence->finite);
+        REQUIRE(evidence->first_support_path_count > 0);
+        REQUIRE(evidence->first_support_path_length_mm > 0.0);
+    }
+
+    CHECK(no_raft_sparse.layers_below_first_object == 0);
+    CHECK(no_raft_solid.layers_below_first_object == 0);
+    CHECK(four_raft_sparse.layers_below_first_object == 4);
+    CHECK(four_raft_solid.layers_below_first_object == 4);
+    CHECK(max_raft.layers_below_first_object == 100);
+
+    for (const RaftStackEvidence *evidence : { &four_raft_sparse, &four_raft_solid, &max_raft }) {
+        CHECK_THAT(evidence->highest_below_object_print_z,
+                   Catch::Matchers::WithinAbs(
+                       evidence->first_object_print_z - evidence->first_object_height, EPSILON));
+    }
+
+    CHECK(no_raft_solid.first_support_path_length_mm >
+          no_raft_sparse.first_support_path_length_mm * 1.5);
+    CHECK(four_raft_solid.first_support_path_length_mm >
+          four_raft_sparse.first_support_path_length_mm * 1.5);
+}

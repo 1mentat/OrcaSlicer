@@ -991,13 +991,24 @@
       "reason": "The SLA pipeline contracts select the SLA technology and require successful SLAPrint processing with valid slices and statistics. The FFF/SLA enum transition and other technology values are not independently exercised."
     },
     "raft_layers": {
-      "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportRaftStackSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Support-material tests exercise zero and three raft layers through emitted support geometry and layer-count or placement oracles; the numeric range and interactions with every support mode remain unclaimed."
+      "reason": "The organic cap-overhang pipeline runs the registered 0 and 100 layer endpoints plus a 4-layer repeated-base witness. Public support layers below the first object layer number exactly 0/4/100, and each raft top meets the first object layer at the pinned zero contact distance. First-layer density varies independently at 0 and 4 raft layers; broader support-mode interactions are not claimed."
+    },
+    "raft_first_layer_density": {
+      "test": "tests/fff_print/test_tree_support.cpp",
+      "tag": "[TreeSupportRaftStackSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered 10 and 100 percent endpoints change positive public first-support-layer path lengths with both 0 and 4 organic raft layers; the 100-layer row uses a 90 percent control. Two independent SupportCommon density-consumer mutations fail the corresponding new public path-length comparison while all three prior raft controls pass. These observations cover both the raft-base and no-raft bed-flange paths; arbitrary setting combinations are not claimed."
     },
     "support_base_pattern_spacing": {
       "test": "tests/fff_print/test_support_material.cpp",

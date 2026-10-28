@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Organic raft layer endpoints and the distinct raft/no-raft first-layer density consumers, observed through public layer counts and path lengths.",
+  "mutants": [
+    {
+      "id": "organic-raft-first-layer-density-uses-generic-support-density",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "                filler->angle = support_params.raft_angle_1st_layer;\n                filler->spacing = support_params.first_layer_flow.spacing();\n                density       = float(config.raft_first_layer_density.value * 0.01);",
+      "new": "                filler->angle = support_params.raft_angle_1st_layer;\n                filler->spacing = support_params.first_layer_flow.spacing();\n                density       = float(support_params.support_density);",
+      "expected_matches": 1,
+      "description": "Using generic support density for the first raft-base layer removes the 10/100 percent public path-length difference with four raft layers. The added assertion fails while the three prior raft controls pass.",
+      "test_filter": "^TreeSupportRaftStackSettings$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "1343bdac5ba09b8f2ce7b1453918d05d0860931c539da335e6b74296a2fbcc73"
+    },
+    {
+      "id": "organic-no-raft-first-support-density-uses-generic-support-density",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "                    filler->angle = Geometry::deg2rad(float(config.support_angle.value + 90.));\n                    density = float(config.raft_first_layer_density.value * 0.01);\n                    flow = support_params.first_layer_flow;",
+      "new": "                    filler->angle = Geometry::deg2rad(float(config.support_angle.value + 90.));\n                    density = float(support_params.support_density);\n                    flow = support_params.first_layer_flow;",
+      "expected_matches": 1,
+      "description": "Using generic support density for the no-raft bed flange removes the 10/100 percent public path-length difference with zero raft layers. The added assertion fails while the three prior raft controls pass.",
+      "test_filter": "^TreeSupportRaftStackSettings$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "40c0c11521ea606857422bcbf4d76c4e4fb7aab463321ecd67746498ad7bdbbc"
+    }
+  ]
+}

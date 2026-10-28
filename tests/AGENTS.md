@@ -38,6 +38,9 @@ Require the native control's exit status and exact JUnit inventory to pass befor
 compiling or running a mutant. Preserve raw assertion text when classifying a
 mutation; reporter punctuation alone must not turn an ordinary assertion failure
 into a survivor.
+Direct bundled Catch2 binaries return `TestFailureExitCode` (42) for failed
+assertions; see `catch2/src/catch2/catch_session.hpp`. Do not assume exit 1 or
+confuse the direct binary status with CTest's status when classifying a kill.
 Keep successful `SystemExit` outside failure-logging handlers. When compiling a
 source alias, retain the original quoted-header search directory and verify the
 staged headers before starting the compiler.
