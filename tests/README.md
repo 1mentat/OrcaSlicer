@@ -1882,3 +1882,16 @@ falling through to infill jerk before default jerk.
 `tests/mutations/motion_nullable_boundaries.json` supplies four reproducible
 selector/fallback probes. Its `test_filter` values are CTest label expressions (`-L`);
 direct Catch runs use tags or test-case selectors.
+
+`[MotionRoleFallback]` checks zero outer-wall and internal-solid acceleration,
+plus zero outer-wall, inner-wall and infill jerk, against distinct positive
+controls and explicit fallback commands. `[NullableMotionObject]` exercises
+absent, nil and explicit object overrides on those roles and on actual internal
+bridges, preserving positive deposited material and geometry.
+
+`[NullableFirstLayerSpeed]` resolves nil and explicit first-layer perimeter and
+infill speeds through real parent/child process presets. Reversed tool mapping
+requires nonempty role feeds on both tools to match their resolved slots.
+`tests/mutations/motion_object_boundaries.json` probes the zero-acceleration
+fallback source and first-layer tool-slot selection; its filters are CTest label
+expressions.

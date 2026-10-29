@@ -1349,28 +1349,37 @@
       "reason": "The nullable preset export requires bottom-surface M205 jerk 10 on inherited T1 and 17 on explicit T0, with 10 on both parent tools. Existing limit validation and writer contracts remain. The registered zero value additionally preserves explicitly seeded M205 X7 Y7 when all role and travel jerks are disabled; default 10 is the positive control on actual outer-wall deposition."
     },
     "outer_wall_jerk": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
-        "representative_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed outer-wall extrusion on every observed layer carries jerk 23 while default jerk is 19. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "[MotionRoleFallback] independently compares outer-wall jerk 23 with its registered zero minimum falling back to default 10. [NullableMotionObject] exports absent, typed-nil and explicit object overrides: nil preserves 23 and explicit 11 reaches every outer-wall extrusion, with command-state witnesses and equal positive material/geometry. No upper bound is registered; arbitrary interactions are unclaimed."
     },
     "inner_wall_jerk": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
-        "representative_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed inner-wall extrusion on every observed layer carries jerk 29. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "[MotionRoleFallback] independently compares inner-wall jerk 29 with registered zero falling back to default 10. [NullableMotionObject] exports absent, typed-nil and explicit object overrides: nil preserves 29 and explicit 13 reaches every inner-wall extrusion, with command-state witnesses and equal positive material/geometry. No upper bound is registered; arbitrary interactions are unclaimed."
     },
     "infill_jerk": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
-        "representative_values"
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed sparse-infill and internal-solid-infill extrusion on every observed layer carries jerk 37, independent of default jerk 19. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "[MotionRoleFallback] independently compares sparse-infill jerk 37 with registered zero falling back to default 10. [NullableMotionObject] exports absent, typed-nil and explicit object overrides: nil preserves 37 and explicit 17 reaches every sparse-infill extrusion, with command-state witnesses and equal positive material/geometry. Existing role-specific representative checks remain. No upper bound is registered; arbitrary interactions are unclaimed."
     },
     "top_surface_jerk": {
       "test": "tests/fff_print/test_gcode_motion_settings.cpp",
@@ -1467,13 +1476,15 @@
       "reason": "Parent and child process presets resolve nil slot 0 and explicit slot 1 through PresetBundle. Reversed two-tool variant mapping emits the parent-derived F4500 on T1 and child-derived F2250 on T0 for first-layer travel; both tools retain positive and equal deposited geometry/material. The earlier 70/180 mm/s matrix and zero travel_speed_z fallback remain in the suite. The registered 1 mm/s lower bound additionally emits first-layer XY travel F60 at 100% travel scaling, with the 80 mm/s F4800 positive control and unchanged deposited material."
     },
     "outer_wall_acceleration": {
-      "test": "tests/fff_print/test_motion_flow_variance.cpp",
-      "tag": "[MotionFlowVariance]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "The matrix varies 250 and 1000 mm/s\u00b2 outer-wall acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed outer-wall extrusion on every observed layer carries acceleration 611 while the default is 1200. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "[MotionRoleFallback] independently compares outer-wall acceleration 611 with its registered zero minimum falling back to default 1200, with command-state witnesses. [NullableMotionObject] exports absent, typed-nil and explicit object overrides: nil preserves parent 611 and explicit 733 reaches every outer-wall extrusion. Positive/equal material and geometry are required. No upper bound is registered; arbitrary interactions are unclaimed."
     },
     "sparse_infill_acceleration": {
       "test": "tests/fff_print/test_gcode_motion_settings.cpp",
@@ -2150,13 +2161,15 @@
       "reason": "The nullable preset export requires external-bridge M204 acceleration 400 on inherited T1 and 600 on explicit T0, resolved from distinct per-slot outer-wall acceleration bases and 50%/60% bridge values. Parent controls require 400/500. Existing 432 and 1500 role contracts remain. The registered zero value additionally selects default acceleration 1200 on actual bridge extrusion, against the 432 positive override and distinct 611 non-target acceleration settings."
     },
     "internal_solid_infill_acceleration": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets internal solid acceleration to 60%, resolves analytically to 2400, and requires parsed role accelerations to match. One percent representative; no boundary claim. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed internal-solid-infill extrusion on every observed layer carries acceleration 666. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "[MotionRoleFallback] independently compares internal-solid acceleration 666 with registered zero falling back to default 1200. [NullableMotionObject] exports absent, typed-nil and explicit object overrides: parent 55% of 1200 resolves to 660, nil preserves it, and explicit 75% resolves to 900. Parsed role commands have state-change witnesses and material/geometry remain equal. No upper bound is registered; arbitrary percentages and interactions are unclaimed."
     },
     "default_acceleration": {
       "test": "tests/fff_print/test_gcode_motion_settings.cpp",
@@ -2256,9 +2269,10 @@
       "dimensions": [
         "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "An isolated row sets initial_layer_speed to its registered 1 mm/s minimum while first-layer infill remains 43 mm/s and travel remains 100%; outer walls emit F60. Existing 27 mm/s representative checks remain; no upper bound is registered."
+      "reason": "An isolated row sets initial_layer_speed to its registered 1 mm/s minimum while first-layer infill remains 43 mm/s and travel remains 100%; outer walls emit F60. Existing 27 mm/s representative checks remain; no upper bound is registered. [NullableFirstLayerSpeed] loads real parent/child process presets with parent slots 30/40 and raw child nil/24. Raw nil is verified before inheritance; resolved slots 30/24 are mapped in reversed physical-tool order. Per-tool first-layer outer-wall feeds are nonempty and match parent F2400/F1800 and child F1440/F1800, with equal positive per-tool material and geometry."
     },
     "initial_layer_infill_speed": {
       "test": "tests/fff_print/test_gcode_motion_settings.cpp",
@@ -2266,9 +2280,10 @@
       "dimensions": [
         "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "An isolated row sets initial_layer_infill_speed to its registered 1 mm/s minimum while outer-wall speed remains 27 mm/s and travel remains 100%; sparse infill emits F60. Existing 43 mm/s representative checks remain; no upper bound is registered."
+      "reason": "An isolated row sets initial_layer_infill_speed to its registered 1 mm/s minimum while outer-wall speed remains 27 mm/s and travel remains 100%; sparse infill emits F60. Existing 43 mm/s representative checks remain; no upper bound is registered. [NullableFirstLayerSpeed] loads real parent/child process presets with parent slots 50/60 and raw child nil/38. Raw nil is verified before inheritance; resolved slots 50/38 are mapped in reversed physical-tool order. Per-tool first-layer bottom-surface feeds are nonempty and match parent F3600/F3000 and child F2280/F3000, with equal positive per-tool material and geometry."
     },
     "initial_layer_travel_speed": {
       "test": "tests/fff_print/test_gcode_motion_settings.cpp",
@@ -2375,9 +2390,10 @@
       "dimensions": [
         "boundary_values",
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "With external bridge_speed held at 21 mm/s, the registered 1 mm/s absolute minimum emits F60 on actual internal-bridge extrusion. The existing internal-bridge 150% case remains; no upper bound is registered."
+      "reason": "With external bridge_speed held at 21 mm/s, the registered 1 mm/s absolute minimum emits F60 on actual internal-bridge extrusion. The existing internal-bridge 150% case remains; no upper bound is registered. [NullableMotionObject] uses actual internal-bridge paths and exports absent, typed-nil and explicit object overrides. Parent 150% of bridge_speed 21 emits F1890; nil preserves those nonempty internal-bridge feeds and explicit 60% emits F756, with equal positive material and geometry."
     },
     "accel_to_decel_enable": {
       "test": "tests/fff_print/test_gcode_motion_settings.cpp",

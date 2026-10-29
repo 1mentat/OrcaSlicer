@@ -1408,6 +1408,8 @@ struct NullableToolMotion
     std::vector<int>    first_layer_xy_accelerations;
     std::vector<double> first_layer_xy_jerks;
     std::vector<double> first_layer_z_feeds;
+    std::vector<double> first_layer_outer_wall_feeds;
+    std::vector<double> first_layer_bottom_surface_feeds;
     std::vector<double> bridge_feeds;
     std::vector<int>    bridge_accelerations;
     std::vector<int>    sparse_infill_accelerations;
@@ -1453,6 +1455,8 @@ NullableToolMotionEvidence parse_nullable_tool_motion(const std::string &output,
                 role = "Bridge";
             else if (comment.find("Sparse infill") != std::string_view::npos)
                 role = "Sparse infill";
+            else if (comment.find("Outer wall") != std::string_view::npos)
+                role = "Outer wall";
             else if (comment.find("Bottom surface") != std::string_view::npos)
                 role = "Bottom surface";
             else if (comment.find("Top surface") != std::string_view::npos)
@@ -1490,6 +1494,10 @@ NullableToolMotionEvidence parse_nullable_tool_motion(const std::string &output,
             ++tool.extrusion_moves;
             tool.xy_path += xy;
             tool.filament += std::abs(line.dist_E(self));
+            if (layer_index == 0 && role == "Outer wall")
+                tool.first_layer_outer_wall_feeds.push_back(line.new_F(self));
+            else if (layer_index == 0 && role == "Bottom surface")
+                tool.first_layer_bottom_surface_feeds.push_back(line.new_F(self));
             if (role == "Bridge") {
                 tool.bridge_feeds.push_back(line.new_F(self));
                 tool.bridge_accelerations.push_back(print_acceleration);
@@ -1542,7 +1550,8 @@ void require_nullable_tool_motion(const NullableToolMotion &motion, double xy_fe
     }
 }
 
-void set_nullable_parent_motion(DynamicPrintConfig &config, bool motion_batch)
+void set_nullable_parent_motion(DynamicPrintConfig &config, bool motion_batch,
+                               bool first_layer_speed_batch = false)
 {
     config.option<ConfigOptionInts>("print_extruder_id", true)->values = {2, 1};
     config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = {
@@ -1560,6 +1569,10 @@ void set_nullable_parent_motion(DynamicPrintConfig &config, bool motion_batch)
     config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_jerk", true)->values = {
         FloatOrPercent(60., true), FloatOrPercent(50., true)};
     config.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true)->value.clear();
+    if (first_layer_speed_batch) {
+        config.option<ConfigOptionFloatsNullable>("initial_layer_speed", true)->values = {30., 40.};
+        config.option<ConfigOptionFloatsNullable>("initial_layer_infill_speed", true)->values = {50., 60.};
+    }
     if (motion_batch) {
         config.option<ConfigOptionFloatsNullable>("bridge_speed", true)->values = {21., 26.};
         config.option<ConfigOptionFloatsNullable>("outer_wall_acceleration", true)->values = {800., 1000.};
@@ -1576,7 +1589,8 @@ void set_nullable_parent_motion(DynamicPrintConfig &config, bool motion_batch)
     }
 }
 
-void write_nullable_child_preset(const boost::filesystem::path &file, bool motion_batch)
+void write_nullable_child_preset(const boost::filesystem::path &file, bool motion_batch,
+                                 bool first_layer_speed_batch = false)
 {
     boost::filesystem::create_directories(file.parent_path());
     std::ofstream out(file.string());
@@ -1588,6 +1602,8 @@ void write_nullable_child_preset(const boost::filesystem::path &file, bool motio
         << R"("travel_speed_z":["nil","6"])";
     if (motion_batch)
         out << R"(,"travel_speed":["nil","150"],"travel_jerk":["nil","18"],"default_acceleration":["nil","1800"],"default_jerk":["nil","17"],"bridge_speed":["nil","37"],"bridge_acceleration":["nil","60%"],"sparse_infill_acceleration":["nil","75%"],"top_surface_jerk":["nil","31"])";
+    if (first_layer_speed_batch)
+        out << R"(,"initial_layer_speed":["nil","24"],"initial_layer_infill_speed":["nil","38"])";
     out << "}";
     REQUIRE(out.good());
 }
@@ -1670,20 +1686,24 @@ std::string export_nullable_two_tool_motion(const DynamicPrintConfig &input_conf
     return output;
 }
 
-void run_nullable_process_motion_variants(bool motion_batch)
+void run_nullable_process_motion_variants(bool motion_batch, bool first_layer_speed_batch = false)
 {
     namespace fs = boost::filesystem;
-    ScopedTemporaryDir temp(motion_batch ? "nullable-process-motion-batch" : "nullable-process-travel-resolver");
+    if (first_layer_speed_batch)
+        REQUIRE(motion_batch);
+    const char *temp_name = first_layer_speed_batch ? "nullable-process-first-layer-speed" :
+                            motion_batch ? "nullable-process-motion-batch" : "nullable-process-travel-resolver";
+    ScopedTemporaryDir temp(temp_name);
     PresetBundle bundle;
     const fs::path process_dir = temp.path() / PRESET_PRINT_NAME;
     const fs::path parent_file = process_dir / "base" / "Nullable Parent.json";
     const fs::path child_file = process_dir / "Nullable Child.json";
 
     DynamicPrintConfig parent_raw = bundle.prints.default_preset().config;
-    set_nullable_parent_motion(parent_raw, motion_batch);
+    set_nullable_parent_motion(parent_raw, motion_batch, first_layer_speed_batch);
     fs::create_directories(parent_file.parent_path());
     parent_raw.save_to_json(parent_file.string(), "Nullable Parent", "User", "1.0.0");
-    write_nullable_child_preset(child_file, motion_batch);
+    write_nullable_child_preset(child_file, motion_batch, first_layer_speed_batch);
 
     PresetsConfigSubstitutions substitutions;
     bundle.prints.load_presets(temp.path().string(), PRESET_PRINT_NAME, substitutions,
@@ -1739,6 +1759,56 @@ void run_nullable_process_motion_variants(bool motion_batch)
         CHECK_THAT(child_jerk->get_at(1).get_abs_value(base_jerk->get_at(1)), Catch::Matchers::WithinAbs(3., 1e-9));
     CHECK_THAT(child_z_speed->get_at(0), Catch::Matchers::WithinAbs(8., 1e-9));
     CHECK_THAT(child_z_speed->get_at(1), Catch::Matchers::WithinAbs(6., 1e-9));
+
+    if (first_layer_speed_batch) {
+        const auto *parent_first_layer_speed = parent->config.option<ConfigOptionFloatsNullable>("initial_layer_speed");
+        const auto *parent_first_layer_infill_speed =
+            parent->config.option<ConfigOptionFloatsNullable>("initial_layer_infill_speed");
+        const auto *child_first_layer_speed = child->config.option<ConfigOptionFloatsNullable>("initial_layer_speed");
+        const auto *child_first_layer_infill_speed =
+            child->config.option<ConfigOptionFloatsNullable>("initial_layer_infill_speed");
+        REQUIRE(parent_first_layer_speed != nullptr);
+        REQUIRE(parent_first_layer_infill_speed != nullptr);
+        REQUIRE(child_first_layer_speed != nullptr);
+        REQUIRE(child_first_layer_infill_speed != nullptr);
+        REQUIRE(parent_first_layer_speed->values.size() == 2);
+        REQUIRE(parent_first_layer_infill_speed->values.size() == 2);
+        REQUIRE(child_first_layer_speed->values.size() == 2);
+        REQUIRE(child_first_layer_infill_speed->values.size() == 2);
+        CHECK_THAT(parent_first_layer_speed->get_at(0), Catch::Matchers::WithinAbs(30., 1e-9));
+        CHECK_THAT(parent_first_layer_speed->get_at(1), Catch::Matchers::WithinAbs(40., 1e-9));
+        CHECK_THAT(parent_first_layer_infill_speed->get_at(0), Catch::Matchers::WithinAbs(50., 1e-9));
+        CHECK_THAT(parent_first_layer_infill_speed->get_at(1), Catch::Matchers::WithinAbs(60., 1e-9));
+        for (size_t slot = 0; slot < 2; ++slot) {
+            REQUIRE_FALSE(child_first_layer_speed->is_nil(slot));
+            REQUIRE_FALSE(child_first_layer_infill_speed->is_nil(slot));
+        }
+        CHECK_THAT(child_first_layer_speed->get_at(0), Catch::Matchers::WithinAbs(30., 1e-9));
+        CHECK_THAT(child_first_layer_speed->get_at(1), Catch::Matchers::WithinAbs(24., 1e-9));
+        CHECK_THAT(child_first_layer_infill_speed->get_at(0), Catch::Matchers::WithinAbs(50., 1e-9));
+        CHECK_THAT(child_first_layer_infill_speed->get_at(1), Catch::Matchers::WithinAbs(38., 1e-9));
+
+        DynamicPrintConfig raw_child_config = DynamicPrintConfig::full_print_config();
+        std::map<std::string, std::string> child_json_values;
+        std::string child_json_reason;
+        (void)raw_child_config.load_from_json(child_file.string(),
+                                              ForwardCompatibilitySubstitutionRule::EnableSilent,
+                                              child_json_values, child_json_reason);
+        REQUIRE(child_json_reason.empty());
+        const auto *raw_first_layer_speed = raw_child_config.option<ConfigOptionFloatsNullable>("initial_layer_speed");
+        const auto *raw_first_layer_infill_speed =
+            raw_child_config.option<ConfigOptionFloatsNullable>("initial_layer_infill_speed");
+        REQUIRE(raw_first_layer_speed != nullptr);
+        REQUIRE(raw_first_layer_infill_speed != nullptr);
+        REQUIRE(raw_first_layer_speed->values.size() == 2);
+        REQUIRE(raw_first_layer_infill_speed->values.size() == 2);
+        REQUIRE(raw_first_layer_speed->is_nil(0));
+        REQUIRE(raw_first_layer_infill_speed->is_nil(0));
+        REQUIRE_FALSE(raw_first_layer_speed->is_nil(1));
+        REQUIRE_FALSE(raw_first_layer_infill_speed->is_nil(1));
+        CHECK_THAT(raw_first_layer_speed->get_at(1), Catch::Matchers::WithinAbs(24., 1e-9));
+        CHECK_THAT(raw_first_layer_infill_speed->get_at(1), Catch::Matchers::WithinAbs(38., 1e-9));
+    }
 
     Preset printer(Preset::TYPE_PRINTER, "Nullable Test Printer");
     printer.config = bundle.printers.default_preset().config;
@@ -1847,6 +1917,23 @@ void run_nullable_process_motion_variants(bool motion_batch)
             require_feed_values(parent_motion.tools[tool].top_surface_jerks, parent_top_surface_jerks[tool]);
             require_feed_values(child_motion.tools[tool].top_surface_jerks, child_top_surface_jerks[tool]);
         }
+        if (first_layer_speed_batch) {
+            const std::array<double, 2> parent_outer_wall_feeds{{40. * 60., 30. * 60.}};
+            const std::array<double, 2> parent_bottom_surface_feeds{{60. * 60., 50. * 60.}};
+            const std::array<double, 2> child_outer_wall_feeds{{24. * 60., 30. * 60.}};
+            const std::array<double, 2> child_bottom_surface_feeds{{38. * 60., 50. * 60.}};
+            for (size_t tool = 0; tool < parent_motion.tools.size(); ++tool) {
+                CAPTURE(tool);
+                require_feed_values(parent_motion.tools[tool].first_layer_outer_wall_feeds,
+                                    parent_outer_wall_feeds[tool]);
+                require_feed_values(parent_motion.tools[tool].first_layer_bottom_surface_feeds,
+                                    parent_bottom_surface_feeds[tool]);
+                require_feed_values(child_motion.tools[tool].first_layer_outer_wall_feeds,
+                                    child_outer_wall_feeds[tool]);
+                require_feed_values(child_motion.tools[tool].first_layer_bottom_surface_feeds,
+                                    child_bottom_surface_feeds[tool]);
+            }
+        }
     }
 
     for (size_t tool = 0; tool < parent_motion.tools.size(); ++tool) {
@@ -1868,6 +1955,12 @@ TEST_CASE("Nullable process motion variants inherit selectively across two tools
           "[GCode][SettingsSpeedAccelVariance][NullableMotionBatch]")
 {
     run_nullable_process_motion_variants(true);
+}
+
+TEST_CASE("Nullable process first-layer speeds inherit and override per-tool role feeds",
+          "[GCode][SettingsSpeedAccelVariance][NullableFirstLayerSpeed]")
+{
+    run_nullable_process_motion_variants(true, true);
 }
 
 TEST_CASE("Registered travel speed and jerk boundaries reach emitted travel moves",
@@ -2078,6 +2171,197 @@ TEST_CASE("Zero acceleration and jerk settings preserve their role fallbacks in 
     gcode_print_variance_contracts::require_same_material(
         bridge_control_material, gcode_print_variance_contracts::motion_evidence(zero_bridge_acceleration_output,
                                                                                  zero_bridge_acceleration));
+}
+
+TEST_CASE("Zero role acceleration and jerk values fall back on matching exported motion",
+          "[GCode][SettingsSpeedAccelVariance][MotionRoleFallback]")
+{
+    struct BoundaryRow { const char *key; const char *role; bool acceleration; int configured_value; };
+    const std::array<BoundaryRow, 5> rows{{
+        {"outer_wall_acceleration", "Outer wall", true, 611},
+        {"internal_solid_infill_acceleration", "Internal solid infill", true, 666},
+        {"outer_wall_jerk", "Outer wall", false, 23},
+        {"inner_wall_jerk", "Inner wall", false, 29},
+        {"infill_jerk", "Sparse infill", false, 37},
+    }};
+    DynamicPrintConfig control = motion_config();
+    control.set_deserialize_strict({
+        {"default_acceleration", 1200}, {"initial_layer_acceleration", 0},
+        {"outer_wall_acceleration", 611}, {"inner_wall_acceleration", 777},
+        {"top_surface_acceleration", 888}, {"sparse_infill_acceleration", 555},
+        {"internal_solid_infill_acceleration", 666}, {"bridge_acceleration", 432},
+        {"default_jerk", 10}, {"initial_layer_jerk", 0}, {"outer_wall_jerk", 23},
+        {"inner_wall_jerk", 29}, {"infill_jerk", 37}, {"top_surface_jerk", 31},
+        {"machine_start_gcode", "M204 P1500\nM205 X7 Y7\n"},
+        {"emit_machine_limits_to_gcode", false}, {"sparse_infill_density", "35%"},
+    });
+    const std::string control_output = export_cube(control);
+    const ParsedMotion control_motion = parse_motion(control_output, control);
+    const auto control_material = gcode_print_variance_contracts::motion_evidence(control_output, control);
+    REQUIRE(control_material.extrusion_moves > 0);
+
+    for (const BoundaryRow &row : rows) {
+        CAPTURE(row.key);
+        DynamicPrintConfig zero = control;
+        zero.set_deserialize_strict(row.key, "0");
+        const std::string output = export_cube(zero);
+        const ParsedMotion motion = parse_motion(output, zero);
+        const auto material = gcode_print_variance_contracts::motion_evidence(output, zero);
+        REQUIRE(material.extrusion_moves > 0);
+        gcode_print_variance_contracts::require_same_material(control_material, material);
+        if (row.acceleration) {
+            require_all_role_accelerations(control_motion, row.role, row.configured_value);
+            require_role_acceleration_update_from_other_value(motion, row.role, 1200);
+            require_all_role_accelerations(motion, row.role, 1200);
+        } else {
+            require_all_role_jerks(control_motion, row.role, row.configured_value);
+            require_role_jerk_update_from_other_value(motion, row.role, 10);
+            require_all_role_jerks(motion, row.role, 10);
+        }
+    }
+}
+
+TEST_CASE("Nullable object motion overrides inherit parent values on exported roles",
+          "[GCode][SettingsSpeedAccelVariance][NullableMotionObject]")
+{
+    enum class ObjectState { Parent, Nil, Explicit };
+    struct FloatOverride { const char *key; double value; };
+    const std::array<FloatOverride, 4> float_overrides{{
+        {"outer_wall_acceleration", 733}, {"outer_wall_jerk", 11},
+        {"inner_wall_jerk", 13}, {"infill_jerk", 17},
+    }};
+    DynamicPrintConfig parent = motion_config();
+    parent.set_deserialize_strict({
+        {"default_acceleration", 1200}, {"initial_layer_acceleration", 0},
+        {"outer_wall_acceleration", 611}, {"inner_wall_acceleration", 777},
+        {"top_surface_acceleration", 888}, {"sparse_infill_acceleration", 555},
+        {"internal_solid_infill_acceleration", "55%"}, {"bridge_acceleration", 432},
+        {"default_jerk", 10}, {"initial_layer_jerk", 0}, {"outer_wall_jerk", 23},
+        {"inner_wall_jerk", 29}, {"infill_jerk", 37}, {"top_surface_jerk", 31},
+        {"initial_layer_speed", 30}, {"initial_layer_infill_speed", 50},
+        {"sparse_infill_density", "35%"}, {"machine_start_gcode", "M204 P1500\nM205 X7 Y7\n"},
+        {"emit_machine_limits_to_gcode", false},
+    });
+
+    const auto export_object_state = [&parent, &float_overrides](ObjectState state) {
+        Model model;
+        Print print;
+        TriangleMesh shape = cube(12.0);
+        shape.scale(Vec3f(1.f, 1.f, 0.55f));
+        init_print({std::move(shape)}, print, model, parent);
+        REQUIRE_FALSE(model.objects.empty());
+        ModelObject *object = model.objects.front();
+        REQUIRE(object != nullptr);
+        if (state != ObjectState::Parent) {
+            for (const FloatOverride &entry : float_overrides) {
+                ConfigOptionFloatsNullable option = state == ObjectState::Nil
+                    ? ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value()})
+                    : ConfigOptionFloatsNullable({entry.value});
+                object->config.set_key_value(entry.key, option.clone());
+                const ConfigOption *stored = object->config.option(entry.key);
+                REQUIRE(stored != nullptr);
+                CHECK(stored->is_nil() == (state == ObjectState::Nil));
+            }
+            ConfigOptionFloatsOrPercentsNullable solid_acceleration = state == ObjectState::Nil
+                ? ConfigOptionFloatsOrPercentsNullable({ConfigOptionFloatsOrPercentsNullable::nil_value()})
+                : ConfigOptionFloatsOrPercentsNullable({FloatOrPercent(75., true)});
+            object->config.set_key_value("internal_solid_infill_acceleration", solid_acceleration.clone());
+            const ConfigOption *stored_solid = object->config.option("internal_solid_infill_acceleration");
+            REQUIRE(stored_solid != nullptr);
+            CHECK(stored_solid->is_nil() == (state == ObjectState::Nil));
+        }
+        (void)print.apply(model, parent);
+        const auto validation = print.validate();
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        const std::string output = gcode(print);
+        REQUIRE_FALSE(output.empty());
+        return std::make_pair(parse_motion(output, parent),
+                              gcode_print_variance_contracts::motion_evidence(output, parent));
+    };
+
+    const auto inherited = export_object_state(ObjectState::Parent);
+    const auto nil_overrides = export_object_state(ObjectState::Nil);
+    const auto explicit_overrides = export_object_state(ObjectState::Explicit);
+    REQUIRE(inherited.second.extrusion_moves > 0);
+    gcode_print_variance_contracts::require_same_material(inherited.second, nil_overrides.second);
+    gcode_print_variance_contracts::require_same_material(inherited.second, explicit_overrides.second);
+    require_all_role_accelerations(inherited.first, "Outer wall", 611);
+    require_all_role_accelerations(inherited.first, "Internal solid infill", 660);
+    require_all_role_jerks(inherited.first, "Outer wall", 23);
+    require_all_role_jerks(inherited.first, "Inner wall", 29);
+    require_all_role_jerks(inherited.first, "Sparse infill", 37);
+    CHECK(nil_overrides.first.role_accelerations == inherited.first.role_accelerations);
+    CHECK(nil_overrides.first.role_jerks == inherited.first.role_jerks);
+    CHECK(nil_overrides.first.first_layer_feeds == inherited.first.first_layer_feeds);
+    CHECK(nil_overrides.first.extrusions == inherited.first.extrusions);
+    CHECK(nil_overrides.first.travels == inherited.first.travels);
+    require_role_acceleration_update_from_other_value(explicit_overrides.first, "Outer wall", 733);
+    require_all_role_accelerations(explicit_overrides.first, "Outer wall", 733);
+    require_role_acceleration_update_from_other_value(explicit_overrides.first, "Internal solid infill", 900);
+    require_all_role_accelerations(explicit_overrides.first, "Internal solid infill", 900);
+    require_role_jerk_update_from_other_value(explicit_overrides.first, "Outer wall", 11);
+    require_role_jerk_update_from_other_value(explicit_overrides.first, "Inner wall", 13);
+    require_role_jerk_update_from_other_value(explicit_overrides.first, "Sparse infill", 17);
+    require_all_role_jerks(explicit_overrides.first, "Outer wall", 11);
+    require_all_role_jerks(explicit_overrides.first, "Inner wall", 13);
+    require_all_role_jerks(explicit_overrides.first, "Sparse infill", 17);
+
+    DynamicPrintConfig bridge_parent = motion_config();
+    bridge_parent.set_deserialize_strict({
+        {"bridge_speed", 21}, {"internal_bridge_speed", "150%"},
+        {"initial_layer_acceleration", 0}, {"default_acceleration", 1200},
+        {"sparse_infill_density", "15%"}, {"top_shell_layers", 3},
+        {"bottom_shell_layers", 2}, {"thick_internal_bridges", false},
+    });
+    const auto export_internal_bridge_state = [&bridge_parent](ObjectState state) {
+        Model model;
+        Print print;
+        init_print({internal_bridge_fixture()}, print, model, bridge_parent, nullptr, false);
+        REQUIRE_FALSE(model.objects.empty());
+        ModelObject *object = model.objects.front();
+        REQUIRE(object != nullptr);
+        if (state != ObjectState::Parent) {
+            ConfigOptionFloatsOrPercentsNullable option = state == ObjectState::Nil
+                ? ConfigOptionFloatsOrPercentsNullable({ConfigOptionFloatsOrPercentsNullable::nil_value()})
+                : ConfigOptionFloatsOrPercentsNullable({FloatOrPercent(60., true)});
+            object->config.set_key_value("internal_bridge_speed", option.clone());
+            const ConfigOption *stored = object->config.option("internal_bridge_speed");
+            REQUIRE(stored != nullptr);
+            CHECK(stored->is_nil() == (state == ObjectState::Nil));
+        }
+        (void)print.apply(model, bridge_parent);
+        const auto validation = print.validate();
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        print.process();
+        size_t internal_paths = 0;
+        for (const Layer *layer : print.objects().front()->layers())
+            for (const LayerRegion *region : layer->regions())
+                for_each_extrusion_path(region->fills, [&internal_paths](const ExtrusionPath &path) {
+                    if (path.role() == erInternalBridgeInfill)
+                        ++internal_paths;
+                });
+        REQUIRE(internal_paths > 0);
+        const std::string output = gcode(print);
+        REQUIRE_FALSE(output.empty());
+        return std::make_pair(parse_motion(output, bridge_parent),
+                              gcode_print_variance_contracts::motion_evidence(output, bridge_parent));
+    };
+    const auto bridge_inherited = export_internal_bridge_state(ObjectState::Parent);
+    const auto bridge_nil = export_internal_bridge_state(ObjectState::Nil);
+    const auto bridge_explicit = export_internal_bridge_state(ObjectState::Explicit);
+    REQUIRE_FALSE(bridge_inherited.first.internal_bridge_feeds.empty());
+    REQUIRE_FALSE(bridge_nil.first.internal_bridge_feeds.empty());
+    REQUIRE_FALSE(bridge_explicit.first.internal_bridge_feeds.empty());
+    REQUIRE(bridge_inherited.second.extrusion_moves > 0);
+    gcode_print_variance_contracts::require_same_material(bridge_inherited.second, bridge_nil.second);
+    gcode_print_variance_contracts::require_same_material(bridge_inherited.second, bridge_explicit.second);
+    CHECK(bridge_nil.first.internal_bridge_feeds == bridge_inherited.first.internal_bridge_feeds);
+    CHECK(std::all_of(bridge_inherited.first.internal_bridge_feeds.begin(), bridge_inherited.first.internal_bridge_feeds.end(),
+                      [](double value) { return std::abs(value - 1890.) < 1e-3; }));
+    CHECK(std::all_of(bridge_explicit.first.internal_bridge_feeds.begin(), bridge_explicit.first.internal_bridge_feeds.end(),
+                      [](double value) { return std::abs(value - 756.) < 1e-3; }));
 }
 
 } // namespace settings_speed_accel_contracts
