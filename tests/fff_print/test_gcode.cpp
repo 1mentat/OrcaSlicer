@@ -5817,9 +5817,12 @@ DynamicPrintConfig route_config(double end_x, double end_y, bool manual_filament
 std::string export_with_object_rows(double object_y, double end_x, double end_y,
                                    GCodeProcessorResult *result = nullptr,
                                    bool manual_filament_change = false,
-                                   SkipFlushFixture *skip_flush = nullptr)
+                                   SkipFlushFixture *skip_flush = nullptr,
+                                   const DynamicPrintConfig *config_override = nullptr,
+                                   double object_height_override = 2.0)
 {
-    DynamicPrintConfig config = route_config(end_x, end_y, manual_filament_change);
+    DynamicPrintConfig config = config_override != nullptr
+        ? *config_override : route_config(end_x, end_y, manual_filament_change);
     if (skip_flush != nullptr) {
         config.set_key_value("support_object_skip_flush", new ConfigOptionBool(skip_flush->enabled));
         config.set_key_value("exclude_object", new ConfigOptionBool(skip_flush->exclude_object));
@@ -5840,7 +5843,7 @@ std::string export_with_object_rows(double object_y, double end_x, double end_y,
     Model model;
 
     ModelObject *first = model.add_object();
-    const double object_height = skip_flush != nullptr ? 0.2 : 2.;
+    const double object_height = skip_flush != nullptr ? 0.2 : object_height_override;
     first->add_volume(make_cube(20., 20., object_height));
     ModelInstance *first_instance = first->add_instance();
     first_instance->set_offset(Vec3d(0., object_y, 0.));
@@ -5902,6 +5905,98 @@ std::string export_with_object_rows(double object_y, double end_x, double end_y,
     REQUIRE_FALSE(output.empty());
     REQUIRE(output.size() < kMaxOutputBytes);
     return output;
+}
+
+struct FilamentLifecycleMarker
+{
+    size_t line = 0;
+    std::string raw;
+};
+
+struct FilamentToolSelection
+{
+    size_t line = 0;
+    std::string raw;
+    bool has_filament_id = false;
+    float filament_id = 0.f;
+    bool has_nozzle_id = false;
+    float nozzle_id = 0.f;
+};
+
+struct FilamentLifecycleTrace
+{
+    std::vector<FilamentLifecycleMarker> start_0;
+    std::vector<FilamentLifecycleMarker> start_1;
+    std::vector<FilamentLifecycleMarker> end_0;
+    std::vector<FilamentLifecycleMarker> end_1;
+    std::vector<FilamentLifecycleMarker> change;
+    std::vector<FilamentToolSelection> tool_1_select;
+    std::vector<size_t> positive_xy_extrusions;
+};
+
+bool m117_message_equals(std::string_view line, std::string_view expected)
+{
+    const auto trim = [](std::string_view value) {
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+            value.remove_prefix(1);
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+            value.remove_suffix(1);
+        return value;
+    };
+    line = trim(line);
+    constexpr std::string_view kCommand = "M117";
+    if (line.size() < kCommand.size() || line.substr(0, kCommand.size()) != kCommand)
+        return false;
+    if (line.size() > kCommand.size() && !std::isspace(static_cast<unsigned char>(line[kCommand.size()])))
+        return false;
+    return trim(line.substr(kCommand.size())) == expected;
+}
+
+std::string executable_gcode_block(const std::string &gcode)
+{
+    constexpr std::string_view kExecutableStart = "; EXECUTABLE_BLOCK_START";
+    constexpr std::string_view kExecutableEnd = "; EXECUTABLE_BLOCK_END";
+    const size_t start = gcode.find(kExecutableStart);
+    REQUIRE(start != std::string::npos);
+    const size_t content = start + kExecutableStart.size();
+    const size_t end = gcode.find(kExecutableEnd, content);
+    REQUIRE(end != std::string::npos);
+    return gcode.substr(content, end - content);
+}
+
+FilamentLifecycleTrace parse_filament_lifecycle_trace(const std::string &gcode,
+                                                      const DynamicPrintConfig &config)
+{
+    FilamentLifecycleTrace trace;
+    GCodeReader reader;
+    reader.apply_config(config);
+    size_t line_index = 0;
+    reader.parse_buffer(executable_gcode_block(gcode), [&trace, &line_index](GCodeReader &state,
+                                                                              const GCodeReader::GCodeLine &line) {
+        const std::string &raw = line.raw();
+        const auto remember = [&line_index, &raw](std::string_view token,
+                                                  std::vector<FilamentLifecycleMarker> &markers) {
+            if (raw.find(token.data(), 0, token.size()) != std::string::npos)
+                markers.push_back({line_index, raw});
+        };
+        remember("LSTART0_", trace.start_0);
+        remember("LSTART1_", trace.start_1);
+        remember("LEND0_", trace.end_0);
+        remember("LEND1_", trace.end_1);
+        remember("LCHANGE_", trace.change);
+        if (line.cmd_is("M1020")) {
+            FilamentToolSelection selection;
+            selection.line = line_index;
+            selection.raw = raw;
+            selection.has_filament_id = line.has_value('S', selection.filament_id);
+            selection.has_nozzle_id = line.has_value('H', selection.nozzle_id);
+            trace.tool_1_select.push_back(std::move(selection));
+        }
+        if (line.extruding(state) && line.dist_XY(state) > 1e-4f)
+            trace.positive_xy_extrusions.push_back(line_index);
+        ++line_index;
+    });
+    return trace;
 }
 
 // Keep a missing-toolchange failure actionable without copying the full G-code
@@ -6075,6 +6170,118 @@ void require_finite(const RoutePoints &points)
 }
 
 } // namespace
+
+TEST_CASE("Filament lifecycle scripts follow the outgoing and incoming tools",
+          "[GCode][GCodeExportWorkflows][FilamentLifecycleVariance]")
+{
+    struct Scenario
+    {
+        const char *name;
+        bool empty_start_0;
+        bool empty_start_1;
+        bool empty_end_0;
+        bool empty_end_1;
+        bool empty_change;
+    };
+    const std::array<Scenario, 6> scenarios{{
+        {"distinct custom scripts", false, false, false, false, false},
+        {"empty start script for tool 0", true, false, false, false, false},
+        {"empty start script for tool 1", false, true, false, false, false},
+        {"empty end script for tool 0", false, false, true, false, false},
+        {"empty end script for tool 1", false, false, false, true, false},
+        {"empty change script uses the tool command", false, false, false, false, true},
+    }};
+
+    for (const Scenario &scenario : scenarios) {
+        INFO("scenario=" << scenario.name);
+        DynamicPrintConfig config = route_config(30., 180.);
+        std::array<std::string, 2> start_scripts{{
+            "M117 LSTART0_[filament_extruder_id]\n",
+            "M117 LSTART1_[filament_extruder_id]\n",
+        }};
+        std::array<std::string, 2> end_scripts{{
+            "M117 LEND0_[filament_extruder_id]\n",
+            "M117 LEND1_[filament_extruder_id]\n",
+        }};
+        std::string change_script = "M117 LCHANGE_[previous_extruder]_[next_extruder]\n";
+        if (scenario.empty_start_0)
+            start_scripts[0].clear();
+        if (scenario.empty_start_1)
+            start_scripts[1].clear();
+        if (scenario.empty_end_0)
+            end_scripts[0].clear();
+        if (scenario.empty_end_1)
+            end_scripts[1].clear();
+        if (scenario.empty_change)
+            change_script.clear();
+
+        config.set_key_value("filament_start_gcode", new ConfigOptionStrings({start_scripts[0], start_scripts[1]}));
+        config.set_key_value("filament_end_gcode", new ConfigOptionStrings({end_scripts[0], end_scripts[1]}));
+        config.set_key_value("change_filament_gcode", new ConfigOptionString(change_script));
+
+        // One 0.2 mm layer keeps the BBL route fixture to one real 0-to-1 tool change.
+        // This path emits M1020 S1 H1, and its initial BBL start hook exercises slot 0.
+        const std::string output = export_with_object_rows(10., 30., 180., nullptr, false, nullptr, &config, 0.2);
+        const FilamentLifecycleTrace trace = parse_filament_lifecycle_trace(output, config);
+        REQUIRE(trace.tool_1_select.size() == 1);
+        const FilamentToolSelection &tool_change = trace.tool_1_select.front();
+        REQUIRE(tool_change.has_filament_id);
+        CHECK_THAT(tool_change.filament_id, Catch::Matchers::WithinAbs(1.f, 1e-4f));
+        REQUIRE(tool_change.has_nozzle_id);
+        CHECK_THAT(tool_change.nozzle_id, Catch::Matchers::WithinAbs(1.f, 1e-4f));
+        const auto body = std::find_if(trace.positive_xy_extrusions.begin(), trace.positive_xy_extrusions.end(),
+                                       [&tool_change](size_t line) { return line > tool_change.line; });
+        REQUIRE(body != trace.positive_xy_extrusions.end());
+        REQUIRE(body != trace.positive_xy_extrusions.begin());
+        const size_t first_extrusion = trace.positive_xy_extrusions.front();
+        const size_t last_outgoing_extrusion = *(body - 1);
+        const size_t final_extrusion = trace.positive_xy_extrusions.back();
+
+        if (scenario.empty_start_0) {
+            CHECK(trace.start_0.empty());
+        } else {
+            REQUIRE(trace.start_0.size() == 1);
+            CHECK(m117_message_equals(trace.start_0.front().raw, "LSTART0_0"));
+            CHECK(trace.start_0.front().line < first_extrusion);
+            CHECK(trace.start_0.front().line < tool_change.line);
+        }
+        if (scenario.empty_start_1) {
+            CHECK(trace.start_1.empty());
+        } else {
+            REQUIRE(trace.start_1.size() == 1);
+            CHECK(m117_message_equals(trace.start_1.front().raw, "LSTART1_1"));
+            CHECK(trace.start_1.front().line > tool_change.line);
+            CHECK(trace.start_1.front().line < *body);
+        }
+
+        if (scenario.empty_end_0) {
+            CHECK(trace.end_0.empty());
+        } else {
+            REQUIRE(trace.end_0.size() == 2);
+            CHECK(m117_message_equals(trace.end_0.front().raw, "LEND0_0"));
+            CHECK(trace.end_0.front().line > last_outgoing_extrusion);
+            CHECK(trace.end_0.front().line < tool_change.line);
+            CHECK(trace.end_0.back().line > final_extrusion);
+        }
+        if (scenario.empty_end_1) {
+            CHECK(trace.end_1.empty());
+        } else {
+            REQUIRE(trace.end_1.size() == 1);
+            CHECK(m117_message_equals(trace.end_1.front().raw, "LEND1_1"));
+            CHECK(trace.end_1.front().line > final_extrusion);
+        }
+
+        if (scenario.empty_change) {
+            CHECK(trace.change.empty());
+        } else {
+            REQUIRE(trace.change.size() == 1);
+            CHECK(m117_message_equals(trace.change.front().raw, "LCHANGE_0_1"));
+            CHECK(trace.change.front().line < tool_change.line);
+            if (!scenario.empty_end_0)
+                CHECK(trace.end_0.front().line < trace.change.front().line);
+        }
+    }
+}
 
 TEST_CASE("The skip-flush command names the next object before the outgoing filament end macro",
           "[GCode][GCodeExportWorkflows][SettingsVariance][SupportObjectSkipFlush]")

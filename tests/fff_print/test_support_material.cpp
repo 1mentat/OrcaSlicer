@@ -718,6 +718,51 @@ std::string slice_tunnel(std::initializer_list<ConfigBase::SetDeserializeItem> i
     return slice_checked(tunnel_fixture(), config);
 }
 
+// A 45-degree underside ramps outward from a narrow bed footprint. Per 0.2 mm layer,
+// its unsupported edge advances 0.2 mm: below a 30-degree threshold it stays supported
+// by the prior slice, while the 90-degree endpoint detects it. Its 120 object layers make
+// the 5000-layer endpoint reach beyond the old representative value of 100.
+TriangleMesh support_boundary_ramp()
+{
+    std::vector<Vec3f> vertices{
+        {24.f, 0.f, 0.f}, {32.f, 0.f, 0.f}, {32.f, 0.f, 24.f}, {0.f, 0.f, 24.f},
+        {24.f, 24.f, 0.f}, {32.f, 24.f, 0.f}, {32.f, 24.f, 24.f}, {0.f, 24.f, 24.f}
+    };
+    std::vector<Vec3i32> faces{
+        {0, 1, 2}, {0, 2, 3}, {4, 6, 5}, {4, 7, 6},
+        {0, 4, 5}, {0, 5, 1}, {1, 5, 6}, {1, 6, 2},
+        {3, 2, 6}, {3, 6, 7}, {0, 3, 7}, {0, 7, 4}
+    };
+    return TriangleMesh(std::move(vertices), std::move(faces));
+}
+
+SupportStats inspect_support_boundary_ramp(const int threshold_angle,
+                                           const char *threshold_overlap,
+                                           const double xy_distance,
+                                           const int enforced_layers,
+                                           const bool support_enabled)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"enable_support", support_enabled},
+        {"support_type", "normal(auto)"},
+        {"support_style", "default"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"support_threshold_angle", threshold_angle},
+        {"support_threshold_overlap", threshold_overlap},
+        {"support_object_xy_distance", xy_distance},
+        {"enforce_support_layers", enforced_layers},
+        {"support_on_build_plate_only", false},
+        {"support_remove_small_overhang", false},
+        {"support_expansion", 0.0},
+        {"support_interface_top_layers", 0},
+        {"support_interface_bottom_layers", 0},
+        {"raft_layers", 0}
+    });
+    return inspect_support(slice_checked(support_boundary_ramp(), config));
+}
+
 enum class SupportFlowRole { none, base, interface, object };
 
 struct ParsedSupportRoleMarker {
@@ -1447,6 +1492,50 @@ TEST_CASE("Support XY gap changes clipped support geometry", "[SupportSettingsVa
     const bool changed = std::fabs(tight.base_length - open.base_length) > 1e-3 ||
                          std::fabs(tight.interface_length - open.interface_length) > 1e-3;
     CHECK(changed);
+}
+
+TEST_CASE("Support threshold classes separate ramp contact extrusion",
+          "[SupportSettingsVariance][SupportMaterial][SupportThresholdAngle]")
+{
+    // Zero selects the overlap fallback; 100% overlap requests support for the ramp.
+    const SupportStats overlap_fallback = inspect_support_boundary_ramp(0, "100%", 0.0, 0, true);
+    // The ramp advances 0.2 mm per 0.2 mm layer. A 30-degree threshold permits that
+    // advance; the registered 90-degree endpoint detects it as unsupported.
+    const SupportStats below_ramp = inspect_support_boundary_ramp(30, "0%", 0.0, 0, true);
+    const SupportStats maximum_angle = inspect_support_boundary_ramp(90, "0%", 0.0, 0, true);
+    for (const SupportStats *stats : {&overlap_fallback, &below_ramp, &maximum_angle})
+        REQUIRE(stats->finite);
+
+    CHECK(overlap_fallback.base_segments + overlap_fallback.interface_segments > 0);
+    CHECK(below_ramp.base_segments + below_ramp.interface_segments == 0);
+    CHECK(maximum_angle.base_segments + maximum_angle.interface_segments > 0);
+}
+
+TEST_CASE("Maximum enforced support layers reach exported support extrusion",
+          "[SupportSettingsVariance][SupportMaterial][EnforceSupportLayers]")
+{
+    const SupportStats disabled = inspect_support_boundary_ramp(30, "0%", 0.0, 0, false);
+    const SupportStats maximum = inspect_support_boundary_ramp(30, "0%", 0.0, 5000, false);
+    REQUIRE(disabled.finite);
+    REQUIRE(maximum.finite);
+
+    CHECK(disabled.base_segments + disabled.interface_segments == 0);
+    CHECK(maximum.base_segments + maximum.interface_segments > 0);
+    CHECK(maximum.base_max_z > 21.0);
+}
+
+TEST_CASE("Maximum support object XY distance trims ramp extrusion",
+          "[SupportSettingsVariance][SupportMaterial][SupportObjectXYDistance]")
+{
+    const SupportStats zero_gap = inspect_support_boundary_ramp(90, "0%", 0.0, 0, true);
+    const SupportStats maximum_gap = inspect_support_boundary_ramp(90, "0%", 10.0, 0, true);
+    REQUIRE(zero_gap.finite);
+    REQUIRE(maximum_gap.finite);
+
+    const double zero_gap_length = zero_gap.base_length + zero_gap.interface_length;
+    const double maximum_gap_length = maximum_gap.base_length + maximum_gap.interface_length;
+    REQUIRE(zero_gap_length > 0.0);
+    CHECK(maximum_gap_length < zero_gap_length);
 }
 
 TEST_CASE("Support top and bottom Z gaps move their interface contact", "[SupportSettingsVariance][SupportMaterial]")

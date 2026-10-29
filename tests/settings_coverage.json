@@ -753,12 +753,12 @@
     },
     "enforce_support_layers": {
       "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "tag": "[EnforceSupportLayers]",
       "dimensions": [
-        "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "The support contract compares enforcement at 0 and 100 and requires absent versus nonempty support on the same overhang fixture; the declared 0..5000 numeric range is not exhausted."
+      "reason": "With support disabled, the registered 0 and 5000 endpoints are compared on the same 120-object-layer ramp (24 mm at 0.2 mm layers). Zero emits no support; 5000 emits support above z=21 mm, showing the forced region reaches beyond 100 layers. Intermediate counts and geometry taller than this fixture are not claimed."
     },
     "exposure_time": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
@@ -1061,12 +1061,12 @@
     },
     "support_threshold_angle": {
       "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "tag": "[SupportThresholdAngle]",
       "dimensions": [
-        "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "A 30 degree support threshold is exercised on overhang fixtures with emitted support evidence; angle boundaries are not claimed."
+      "reason": "On the same 120-layer ramp, the 0-degree endpoint with 100% overlap exercises the overlap fallback and emits support; with 0% overlap, 30 degrees emits none while the registered 90-degree endpoint emits support. This covers the fallback and selected angle classes on this fixture, not intermediate angles or all support geometries."
     },
     "support_type": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -1526,6 +1526,24 @@
         "pipeline_oracle"
       ],
       "reason": "Lifecycle hooks are emitted at their intended boundaries; layer hooks resolve each layer index in order. Incremental export matches a fresh export for hook counts and deposited material. Arbitrary template syntax is not claimed."
+    },
+    "filament_start_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[FilamentLifecycleVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A bounded one-layer BBL export exercises empty and distinct custom start scripts in slots 0 and 1. The test reads only the executable G-code block and anchors the outgoing start before the first positive-XY deposition, and the incoming start after M1020 S1 H1 but before the first incoming deposited move. The claim covers these selected empty/custom strings and one 0-to-1 transition; it does not claim exhaustive script text, all placeholders, or every firmware path."
+    },
+    "filament_end_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[FilamentLifecycleVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A bounded one-layer BBL export exercises empty and distinct custom end scripts in slots 0 and 1. The executable-block trace places the outgoing slot-0 end after the last outgoing positive-XY deposition and before M1020 S1 H1, then places print-shutdown end hooks after final deposition. The claim covers these selected empty/custom strings and one 0-to-1 transition; it does not claim exhaustive script text or every firmware path."
     },
     "before_layer_change_gcode": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -3175,12 +3193,12 @@
     },
     "support_object_xy_distance": {
       "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "tag": "[SupportObjectXYDistance]",
       "dimensions": [
-        "representative_values",
+        "boundary_values",
         "pipeline_oracle"
       ],
-      "reason": "Support/object XY distances 0.0 and 3.0 are sliced on the same capital fixture; both emit finite support and their base or interface aggregate lengths differ. The declared 0..10 range and contact geometry beyond this pair remain unclaimed."
+      "reason": "The registered 0 and 10 mm endpoints are sliced on the same 120-layer 45-degree ramp. Zero produces positive support extrusion; at 10 mm the aggregate base/interface extrusion is shorter. Non-finite support moves fail the parser checks. Intermediate distances, other support styles, and other contact geometries are not claimed."
     },
     "support_top_z_distance": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -5129,6 +5147,15 @@
         "pipeline_oracle"
       ],
       "reason": "The public FFF exporter compares empty hooks with distinct machine, filament, and process M117 templates. Every observed role transition must emit the configured filament marker in order with independently checked current/previous roles and layer number/Z; deposition is conserved. This is bounded single-filament template behavior, not all expressions or filament mappings."
+    },
+    "change_filament_gcode": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[FilamentLifecycleVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A bounded one-layer BBL export checks a distinct custom change macro using previous/next filament placeholders and an empty macro. The custom marker precedes the real M1020 S1 H1 selection; the empty case emits no change marker while preserving the same tool transition. The claim covers these selected empty/custom strings and one 0-to-1 transition, not all macro contents or tool transitions."
     },
     "process_change_extrusion_role_gcode": {
       "test": "tests/fff_print/test_gcode.cpp",

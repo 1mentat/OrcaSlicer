@@ -449,6 +449,9 @@ material and volumetric feedrate limits, including fresh/incremental agreement.
 and both registered surface-density bounds through emitted extrusion roles.
 `[GCodeTravelPointReachable]` checks the six toolchange route placeholders
 against bounded obstacle geometry and configured endpoints.
+`[FilamentLifecycleVariance]` checks empty and distinct custom filament start,
+end, and change scripts around one real BBL 0-to-1 tool transition. Its
+mutations are in `filament_lifecycle_variance.json`.
 `[ValidationContracts]` exercises rejected configurations and warning gates;
 that evidence is declared separately from sliced-output coverage.
 `[PrintValidationPublicBoundary]` checks printable-height and spiral-copy
@@ -983,6 +986,13 @@ motion or geometry. Its mutation manifest retains two `known_survivors`
 for requested infill-anchor length and clamping. They are documented gaps,
 excluded from the executable `mutants` list and from coverage claims for
 those dimensions; they must not be reported as assertion kills.
+
+`[SupportThresholdAngle]`, `[EnforceSupportLayers]`, and
+`[SupportObjectXYDistance]` check the 0/30/90 degree threshold classes, the 0/5000
+support-layer endpoints, and the 0/10 mm XY-gap endpoints on a 120-layer ramp.
+Their CTest labels select only these three new cases; the probes are in
+`tests/mutations/support_boundaries.json`. They exercise selected endpoints and
+classes on this fixture, not an exhaustive sweep of each numeric domain.
 
 `[UtilsIOContracts]` checks layer-pattern boundaries, file content across buffer
 boundaries, recursive copy filtering, UTF-8 byte spans, and formatting contracts.
