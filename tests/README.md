@@ -1868,3 +1868,17 @@ including duplicates within a record and header mappings across translation
 units. The report records source hashes and the matching GCC/gcov versions.
 Threshold status applies only to the gcov physical-line metric; a valid result
 below threshold is still a measurement, not an LLVM result.
+
+## Nullable motion variants and boundaries
+
+The `[NullableMotionBatch]` contract loads real parent/child process presets, maps
+inherited and explicit values to two tools, and checks travel, bridge, infill and
+surface commands without changing deposited geometry or material. The
+`[MotionBoundaries]` contracts exercise the registered travel-speed minimum and zero
+acceleration/jerk values against distinct positive controls. They distinguish an
+inherited printer state from an explicit role fallback, including top-surface jerk
+falling through to infill jerk before default jerk.
+
+`tests/mutations/motion_nullable_boundaries.json` supplies four reproducible
+selector/fallback probes. Its `test_filter` values are CTest label expressions (`-L`);
+direct Catch runs use tags or test-case selectors.

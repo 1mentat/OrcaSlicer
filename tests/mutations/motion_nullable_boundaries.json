@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "description": "Two-tool nullable process inheritance and registered motion boundary fallback contracts. Test filters select CTest labels.",
+  "mutants": [
+    {
+      "id": "bridge-speed-fixed-slot0",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "speed = NOZZLE_CONFIG(bridge_speed);",
+      "new": "speed = m_config.bridge_speed.get_at(0);",
+      "expected_matches": 1,
+      "description": "Read bridge speed from the first slot instead of the selected tool variant.",
+      "test_filter": "^SettingsSpeedAccelVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "103f88182b9a097026431460210e53a57420daa375698af9b997814048b80719"
+    },
+    {
+      "id": "top-surface-jerk-fixed-slot0",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "jerk = NOZZLE_CONFIG(top_surface_jerk);",
+      "new": "jerk = m_config.top_surface_jerk.get_at(0);",
+      "expected_matches": 1,
+      "description": "Read top-surface jerk from the first slot instead of the selected tool variant.",
+      "test_filter": "^SettingsSpeedAccelVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "54105be63bae273498f50f4a4ba520ffaee9949bdb044d4fa972e715c9b5314f"
+    },
+    {
+      "id": "zero-bridge-acceleration-uses-wall-fallback",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else {\n            acceleration = m_config.default_acceleration.get_at(nozzle);\n        }\n        acceleration_i",
+      "new": "        } else {\n            acceleration = is_bridge(role) ? m_config.outer_wall_acceleration.get_at(nozzle) : m_config.default_acceleration.get_at(nozzle);\n        }\n        acceleration_i",
+      "expected_matches": 1,
+      "description": "Use outer-wall acceleration instead of default acceleration when the bridge override is zero.",
+      "test_filter": "^SettingsSpeedAccelVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "d0d36fc40729409158455308c1c104cb01aab0c07c4c9de9261036dbf3803bb9"
+    },
+    {
+      "id": "zero-top-surface-jerk-bypasses-infill-fallback",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "} else if (NOZZLE_CONFIG(top_surface_jerk) > 0 && is_top_surface(path.role())) {",
+      "new": "} else if (NOZZLE_CONFIG(top_surface_jerk) >= 0 && is_top_surface(path.role())) {",
+      "expected_matches": 1,
+      "description": "Select zero top-surface jerk directly instead of falling through to infill jerk.",
+      "test_filter": "^SettingsSpeedAccelVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "55c49c1d2dcd503980252bdf33d9c8a9648d3032a451984b4b92aefaa206f0ec"
+    }
+  ]
+}

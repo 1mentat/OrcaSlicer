@@ -1338,12 +1338,15 @@
       "reason": "The BedTemperaturePipeline cases select this registered ordinary-layer key through each matching bed family and independently parse its M140 value at layer 2 at nominal, zero, and registered maximum rows; validation claims remain separate."
     },
     "default_jerk": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
+        "nullable_behavior",
+        "pipeline_oracle",
         "representative_values"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Direct Marlin2 GCodeWriter output contains the exact M205 X10 Y10 command. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The nullable preset export requires bottom-surface M205 jerk 10 on inherited T1 and 17 on explicit T0, with 10 on both parent tools. Existing limit validation and writer contracts remain. The registered zero value additionally preserves explicitly seeded M205 X7 Y7 when all role and travel jerks are disabled; default 10 is the positive control on actual outer-wall deposition."
     },
     "outer_wall_jerk": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1370,12 +1373,15 @@
       "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed sparse-infill and internal-solid-infill extrusion on every observed layer carries jerk 37, independent of default jerk 19. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "top_surface_jerk": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
+        "nullable_behavior",
+        "pipeline_oracle",
         "representative_values"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed top-surface extrusion on every observed layer carries jerk 31. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The nullable preset export requires top-surface M205 jerk 11 on inherited T1 and 31 on explicit T0; parent controls require 11/13. Both tools retain positive and equal geometry/material. Existing validation and single-tool 31 role contracts remain. The registered zero value additionally falls through to infill jerk 7 before default jerk 10, against the 31 positive top-surface override. Parsed command-state witnesses establish a prior positive different jerk state."
     },
     "initial_layer_jerk": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1386,12 +1392,15 @@
       "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
     },
     "travel_jerk": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
+        "boundary_values",
+        "nullable_behavior",
+        "pipeline_oracle",
         "representative_values"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Direct Marlin2 GCodeWriter output contains exact M205 X6 Y6. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The real nullable preset export resolves inherited versus explicit travel jerk across two mapped tools, emitting initial-layer XY travel jerk 12 on T1 and 4.5 on T0; parent controls emit 12 and 6. Existing validation and writer contracts remain. The registered zero value additionally preserves emitted jerk 10 on first-layer XY travel, against the 12 positive control with printing-role jerks disabled and seeded M205 state."
     },
     "default_junction_deviation": {
       "test": "tests/fff_print/test_print.cpp",
@@ -1447,13 +1456,15 @@
       "reason": "Public FFF export exercises the registered minimum 1 and 52 mm/s on actual top-solid-infill paths; maximum parsed role modal F is checked while positive geometry and material remain stable. Per-object nil values inherit across an explicit 24 mm/s override. The existing ObjectSpeedNullable control additionally checks standard and high-flow nozzle variants through fresh/incremental exports. The minimum-speed control uses a fixed standard fixture; full numeric ranges and other variant mappings are not claimed."
     },
     "travel_speed": {
-      "test": "tests/fff_print/test_motion_flow_variance.cpp",
-      "tag": "[MotionFlowVariance]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle"
+        "boundary_values",
+        "nullable_behavior",
+        "pipeline_oracle",
+        "representative_values"
       ],
-      "reason": "The matrix varies 70 and 180 mm/s travel feedrate with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: The zero travel_speed_z fallback uses the configured 80 mm/s travel speed and emits Z-hop feedrate F4800. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "Parent and child process presets resolve nil slot 0 and explicit slot 1 through PresetBundle. Reversed two-tool variant mapping emits the parent-derived F4500 on T1 and child-derived F2250 on T0 for first-layer travel; both tools retain positive and equal deposited geometry/material. The earlier 70/180 mm/s matrix and zero travel_speed_z fallback remain in the suite. The registered 1 mm/s lower bound additionally emits first-layer XY travel F60 at 100% travel scaling, with the 80 mm/s F4800 positive control and unchanged deposited material."
     },
     "outer_wall_acceleration": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -1465,13 +1476,15 @@
       "reason": "The matrix varies 250 and 1000 mm/s\u00b2 outer-wall acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed outer-wall extrusion on every observed layer carries acceleration 611 while the default is 1200. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "sparse_infill_acceleration": {
-      "test": "tests/fff_print/test_motion_flow_variance.cpp",
-      "tag": "[MotionFlowVariance]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle"
+        "boundary_values",
+        "nullable_behavior",
+        "pipeline_oracle",
+        "representative_values"
       ],
-      "reason": "The matrix varies 500 and 12000 mm/s\u00b2 sparse-infill acceleration commands with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed sparse-infill extrusion on every observed layer carries acceleration 555, independent of default acceleration 1200. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The nullable preset export requires sparse-infill M204 acceleration 600 on inherited T1 and 1350 on explicit T0, resolving 50%/75% against the inherited 1200 or explicit 1800 default acceleration. Parent controls require 600 on both tools. Existing 500/12000 and 555 role contracts remain. The registered zero value additionally selects default acceleration 1200 on sparse infill, against the 555 positive override and distinct 611 wall acceleration settings."
     },
     "print_flow_ratio": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -2126,13 +2139,15 @@
       "reason": "Full a44 native run passes the exact case \"Each filament cools with the fan speeds of its extruder variant\" once. The false control emits no positive auxiliary-fan M106 P2 S speeds, while true emits the configured per-variant additional speeds 10/20/40 percent. This records both boolean states and retains a public output oracle; no numeric auxiliary-fan range claim is made."
     },
     "bridge_acceleration": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle"
+        "boundary_values",
+        "nullable_behavior",
+        "pipeline_oracle",
+        "representative_values"
       ],
-      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets bridge acceleration to 50%, resolves analytically to 1500, and requires every parsed bridge extrusion role to carry exactly that M204 S value. One percent representative; no boundary claim. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: External bridge extrusion commands carry acceleration 432. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The nullable preset export requires external-bridge M204 acceleration 400 on inherited T1 and 600 on explicit T0, resolved from distinct per-slot outer-wall acceleration bases and 50%/60% bridge values. Parent controls require 400/500. Existing 432 and 1500 role contracts remain. The registered zero value additionally selects default acceleration 1200 on actual bridge extrusion, against the 432 positive override and distinct 611 non-target acceleration settings."
     },
     "internal_solid_infill_acceleration": {
       "test": "tests/fff_print/test_gcodewriter.cpp",
@@ -2144,13 +2159,15 @@
       "reason": "Percent accelerations resolve against the option they are a percentage of. Sets internal solid acceleration to 60%, resolves analytically to 2400, and requires parsed role accelerations to match. One percent representative; no boundary claim. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Every parsed internal-solid-infill extrusion on every observed layer carries acceleration 666. Representative values only; full numeric ranges and interactions are not claimed."
     },
     "default_acceleration": {
-      "test": "tests/fff_print/test_gcodewriter.cpp",
-      "tag": "[GCodeWriter]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle"
+        "boundary_values",
+        "nullable_behavior",
+        "pipeline_oracle",
+        "representative_values"
       ],
-      "reason": "Percent accelerations resolve against the option they are a percentage of. Sets default acceleration to 4000 as the ratio base for sparse/internal solid percent settings; analytical get_abs_value_at results and parsed role M204 values must agree. One absolute base value; this is dependency evidence, not a full default-acceleration sweep. Additional [SettingsSpeedAccelVariance] contracts in tests/fff_print/test_gcode_motion_settings.cpp: Direct Marlin2 GCodeWriter output contains the exact M204 P1200 command. Representative values only; full numeric ranges and interactions are not claimed."
+      "reason": "The nullable preset export requires exact bottom-surface M204 acceleration 1200 on inherited T1 and 1800 on explicit T0, versus 1200 on both parent tools. Positive deposited paths and material agree across presets. Existing percent dependency and writer contracts remain. The registered zero value additionally preserves the explicitly seeded M204 P1500 when all role accelerations are disabled; default 1200 is the positive control on actual outer-wall deposition."
     },
     "wipe_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -2346,10 +2363,11 @@
       "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
         "boundary_values",
-        "representative_values",
-        "pipeline_oracle"
+        "nullable_behavior",
+        "pipeline_oracle",
+        "representative_values"
       ],
-      "reason": "The registered 1 mm/s minimum emits F60 on external bridge extrusion. The existing exports retain external 21/37 mm/s and internal 150% representative checks; no upper bound is registered."
+      "reason": "The existing registered 1 mm/s minimum contract emits external-bridge F60; representative 21/37 mm/s and internal 150% checks remain. The new real preset export resolves nil parent inheritance and explicit child values through reversed two-tool mapping, requiring bridge F1260 on T1 and F2220 on T0 with unchanged deposited geometry/material. No upper bound is registered."
     },
     "internal_bridge_speed": {
       "test": "tests/fff_print/test_gcode_motion_settings.cpp",

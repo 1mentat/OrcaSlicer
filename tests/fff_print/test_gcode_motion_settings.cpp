@@ -130,9 +130,19 @@ std::string export_cube(const DynamicPrintConfig& config)
 
 struct ParsedMotion
 {
+    struct RoleMotionEvent
+    {
+        std::string role;
+        int         acceleration;
+        double      jerk;
+        int         prior_acceleration_update;
+        double      prior_jerk_update;
+    };
+
     std::map<std::string, std::vector<double>> first_layer_feeds;
     std::map<std::string, std::map<int, std::vector<int>>> role_accelerations;
     std::map<std::string, std::map<int, std::vector<double>>> role_jerks;
+    std::vector<RoleMotionEvent> role_motion_events;
     std::vector<double> first_layer_xy_travel_feeds;
     std::vector<double> first_layer_z_travel_feeds;
     std::vector<int> first_layer_xy_travel_accelerations;
@@ -163,8 +173,11 @@ ParsedMotion parse_motion(const std::string& output, const DynamicPrintConfig& c
     int layer_index         = -1;
     int print_acceleration  = 0;
     int travel_acceleration = 0;
+    int prior_acceleration_update = 0;
     double jerk             = 0;
-    reader.parse_buffer(output, [&parsed, &role, &layer_index, &print_acceleration, &travel_acceleration, &jerk,
+    double prior_jerk_update = 0;
+    reader.parse_buffer(output, [&parsed, &role, &layer_index, &print_acceleration, &travel_acceleration,
+                                 &prior_acceleration_update, &jerk, &prior_jerk_update,
                                  layer_height](GCodeReader& self, const GCodeReader::GCodeLine& line) {
         const std::string_view comment = line.comment();
         if (comment.find("LAYER_CHANGE") != std::string_view::npos) {
@@ -195,11 +208,14 @@ ParsedMotion parse_motion(const std::string& output, const DynamicPrintConfig& c
 
         float value = 0;
         if (line.cmd_is("M204")) {
-            if (line.has_value('S', value) || line.has_value('P', value))
+            if (line.has_value('S', value) || line.has_value('P', value)) {
+                prior_acceleration_update = print_acceleration;
                 print_acceleration = int(std::lround(value));
+            }
             if (line.has_value('T', value))
                 travel_acceleration = int(std::lround(value));
         } else if (line.cmd_is("M205") && line.has_value('X', value)) {
+            prior_jerk_update = jerk;
             jerk = value;
         }
 
@@ -219,6 +235,8 @@ ParsedMotion parse_motion(const std::string& output, const DynamicPrintConfig& c
             else if (role == "Internal bridge")
                 parsed.internal_bridge_feeds.push_back(line.new_F(self));
             if (layer_index >= 0 && !role.empty()) {
+                parsed.role_motion_events.push_back(
+                    {role, print_acceleration, jerk, prior_acceleration_update, prior_jerk_update});
                 parsed.role_accelerations[role][layer_index].push_back(print_acceleration);
                 parsed.role_jerks[role][layer_index].push_back(jerk);
             }
@@ -293,6 +311,52 @@ void require_all_role_jerks(const ParsedMotion& motion, const std::string& role,
         }
     }
     REQUIRE(samples > 0);
+}
+
+void require_role_acceleration_update_from_other_value(const ParsedMotion& motion, const std::string& role,
+                                                       int expected_acceleration)
+{
+    bool found_update = false;
+    std::set<int> prior_values;
+    for (const auto& event : motion.role_motion_events) {
+        if (event.role != role || event.acceleration != expected_acceleration)
+            continue;
+        prior_values.insert(event.prior_acceleration_update);
+        if (event.prior_acceleration_update > 0 && event.prior_acceleration_update != expected_acceleration)
+            found_update = true;
+    }
+    std::ostringstream observed;
+    bool first = true;
+    for (int value : prior_values) {
+        observed << (first ? "" : ",") << value;
+        first = false;
+    }
+    INFO("role=" << role << " expected M204 state=" << expected_acceleration
+                  << " prior update values=" << (prior_values.empty() ? "none" : observed.str()));
+    CHECK(found_update);
+}
+
+void require_role_jerk_update_from_other_value(const ParsedMotion& motion, const std::string& role,
+                                               double expected_jerk)
+{
+    bool found_update = false;
+    std::set<int> prior_values;
+    for (const auto& event : motion.role_motion_events) {
+        if (event.role != role || std::abs(event.jerk - expected_jerk) > 1e-3)
+            continue;
+        prior_values.insert(int(std::lround(event.prior_jerk_update)));
+        if (event.prior_jerk_update > 0 && std::abs(event.prior_jerk_update - expected_jerk) > 1e-3)
+            found_update = true;
+    }
+    std::ostringstream observed;
+    bool first = true;
+    for (int value : prior_values) {
+        observed << (first ? "" : ",") << value;
+        first = false;
+    }
+    INFO("role=" << role << " expected M205 X=" << expected_jerk
+                  << " prior update values=" << (prior_values.empty() ? "none" : observed.str()));
+    CHECK(found_update);
 }
 
 DynamicPrintConfig support_motion_config(double base_speed, double interface_speed)
@@ -1344,6 +1408,12 @@ struct NullableToolMotion
     std::vector<int>    first_layer_xy_accelerations;
     std::vector<double> first_layer_xy_jerks;
     std::vector<double> first_layer_z_feeds;
+    std::vector<double> bridge_feeds;
+    std::vector<int>    bridge_accelerations;
+    std::vector<int>    sparse_infill_accelerations;
+    std::vector<int>    bottom_surface_accelerations;
+    std::vector<double> bottom_surface_jerks;
+    std::vector<double> top_surface_jerks;
     size_t              extrusion_moves = 0;
     double              xy_path = 0.0;
     double              filament = 0.0;
@@ -1364,11 +1434,32 @@ NullableToolMotionEvidence parse_nullable_tool_motion(const std::string &output,
     int current_tool = 0;
     int layer_index = -1;
     int travel_acceleration = 0;
+    int print_acceleration = 0;
     double travel_jerk = 0.0;
+    double print_jerk = 0.0;
+    std::string role;
     const double layer_height = config.opt_float("layer_height");
     reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
-        if (line.comment().find("LAYER_CHANGE") != std::string_view::npos)
+        const std::string_view comment = line.comment();
+        if (comment.find("LAYER_CHANGE") != std::string_view::npos) {
             ++layer_index;
+            role.clear();
+        }
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos) {
+            if (comment.find("Internal bridge") != std::string_view::npos ||
+                comment.find("Internal Bridge") != std::string_view::npos)
+                role = "Internal bridge";
+            else if (comment.find("Bridge") != std::string_view::npos)
+                role = "Bridge";
+            else if (comment.find("Sparse infill") != std::string_view::npos)
+                role = "Sparse infill";
+            else if (comment.find("Bottom surface") != std::string_view::npos)
+                role = "Bottom surface";
+            else if (comment.find("Top surface") != std::string_view::npos)
+                role = "Top surface";
+            else
+                role.clear();
+        }
         if (line.cmd_is("T0")) {
             current_tool = 0;
             ++evidence.tool_selects[0];
@@ -1378,10 +1469,15 @@ NullableToolMotionEvidence parse_nullable_tool_motion(const std::string &output,
         }
 
         float value = 0.f;
-        if (line.cmd_is("M204") && line.has_value('T', value))
-            travel_acceleration = int(std::lround(value));
-        else if (line.cmd_is("M205") && line.has_value('X', value))
+        if (line.cmd_is("M204")) {
+            if (line.has_value('T', value))
+                travel_acceleration = int(std::lround(value));
+            if (line.has_value('S', value) || line.has_value('P', value))
+                print_acceleration = int(std::lround(value));
+        } else if (line.cmd_is("M205") && line.has_value('X', value)) {
             travel_jerk = value;
+            print_jerk = value;
+        }
 
         if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")))
             return;
@@ -1394,6 +1490,17 @@ NullableToolMotionEvidence parse_nullable_tool_motion(const std::string &output,
             ++tool.extrusion_moves;
             tool.xy_path += xy;
             tool.filament += std::abs(line.dist_E(self));
+            if (role == "Bridge") {
+                tool.bridge_feeds.push_back(line.new_F(self));
+                tool.bridge_accelerations.push_back(print_acceleration);
+            } else if (role == "Sparse infill") {
+                tool.sparse_infill_accelerations.push_back(print_acceleration);
+            } else if (role == "Bottom surface") {
+                tool.bottom_surface_accelerations.push_back(print_acceleration);
+                tool.bottom_surface_jerks.push_back(print_jerk);
+            } else if (role == "Top surface") {
+                tool.top_surface_jerks.push_back(print_jerk);
+            }
         } else if (layer_index == 0 && xy > EPSILON && dz <= EPSILON) {
             tool.first_layer_xy_feeds.push_back(line.new_F(self));
             tool.first_layer_xy_accelerations.push_back(travel_acceleration);
@@ -1435,7 +1542,7 @@ void require_nullable_tool_motion(const NullableToolMotion &motion, double xy_fe
     }
 }
 
-void set_nullable_parent_motion(DynamicPrintConfig &config)
+void set_nullable_parent_motion(DynamicPrintConfig &config, bool motion_batch)
 {
     config.option<ConfigOptionInts>("print_extruder_id", true)->values = {2, 1};
     config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = {
@@ -1453,9 +1560,23 @@ void set_nullable_parent_motion(DynamicPrintConfig &config)
     config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_jerk", true)->values = {
         FloatOrPercent(60., true), FloatOrPercent(50., true)};
     config.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true)->value.clear();
+    if (motion_batch) {
+        config.option<ConfigOptionFloatsNullable>("bridge_speed", true)->values = {21., 26.};
+        config.option<ConfigOptionFloatsNullable>("outer_wall_acceleration", true)->values = {800., 1000.};
+        config.option<ConfigOptionFloatsOrPercentsNullable>("bridge_acceleration", true)->values = {
+            FloatOrPercent(50., true), FloatOrPercent(50., true)};
+        config.option<ConfigOptionFloatsOrPercentsNullable>("sparse_infill_acceleration", true)->values = {
+            FloatOrPercent(50., true), FloatOrPercent(50., true)};
+        config.option<ConfigOptionFloatsNullable>("top_surface_jerk", true)->values = {11., 13.};
+        config.option<ConfigOptionFloatsNullable>("outer_wall_jerk", true)->values = {0., 0.};
+        config.option<ConfigOptionFloatsNullable>("inner_wall_jerk", true)->values = {0., 0.};
+        config.option<ConfigOptionFloatsNullable>("infill_jerk", true)->values = {0., 0.};
+        config.option<ConfigOptionFloatsNullable>("initial_layer_acceleration", true)->values = {0., 0.};
+        config.option<ConfigOptionFloatsNullable>("initial_layer_jerk", true)->values = {0., 0.};
+    }
 }
 
-void write_nullable_child_preset(const boost::filesystem::path &file)
+void write_nullable_child_preset(const boost::filesystem::path &file, bool motion_batch)
 {
     boost::filesystem::create_directories(file.parent_path());
     std::ofstream out(file.string());
@@ -1464,7 +1585,10 @@ void write_nullable_child_preset(const boost::filesystem::path &file)
         << R"("initial_layer_travel_speed":["nil","25%"],)"
         << R"("initial_layer_travel_acceleration":["nil","30%"],)"
         << R"("initial_layer_travel_jerk":["nil","25%"],)"
-        << R"("travel_speed_z":["nil","6"]})";
+        << R"("travel_speed_z":["nil","6"])";
+    if (motion_batch)
+        out << R"(,"travel_speed":["nil","150"],"travel_jerk":["nil","18"],"default_acceleration":["nil","1800"],"default_jerk":["nil","17"],"bridge_speed":["nil","37"],"bridge_acceleration":["nil","60%"],"sparse_infill_acceleration":["nil","75%"],"top_surface_jerk":["nil","31"])";
+    out << "}";
     REQUIRE(out.good());
 }
 
@@ -1478,7 +1602,7 @@ DynamicPrintConfig nullable_full_config(Preset &printer, Preset &process,
         std::vector<int>{1, 2}, std::vector<int>{int(nvtStandard), int(nvtHighFlow)});
 }
 
-std::string export_nullable_two_tool_motion(const DynamicPrintConfig &input_config)
+std::string export_nullable_two_tool_motion(const DynamicPrintConfig &input_config, bool motion_batch)
 {
     DynamicPrintConfig config = input_config;
     config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfMarlinFirmware));
@@ -1497,6 +1621,20 @@ std::string export_nullable_two_tool_motion(const DynamicPrintConfig &input_conf
     config.set_key_value("machine_end_gcode", new ConfigOptionString(""));
     config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n"));
     config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    if (motion_batch) {
+        config.set_deserialize_strict({
+            {"slow_down_for_layer_cooling", false},
+            {"slow_down_layers", 0},
+            {"slow_down_layer_time", 0},
+            {"slow_down_min_speed", 1},
+            {"fan_cooling_layer_time", 0},
+            {"filament_max_volumetric_speed", "200"},
+            {"filament_adaptive_volumetric_speed", false},
+            {"bottom_shell_layers", 2},
+            {"top_shell_layers", 2},
+            {"sparse_infill_density", "20%"},
+        });
+    }
 
     Print print;
     Model model;
@@ -1510,6 +1648,18 @@ std::string export_nullable_two_tool_motion(const DynamicPrintConfig &input_conf
         object->ensure_on_bed();
         object->config.set_key_value("extruder", new ConfigOptionInt(tool + 1));
     }
+    if (motion_batch) {
+        for (int tool = 0; tool < 2; ++tool) {
+            ModelObject *object = model.add_object();
+            REQUIRE(object != nullptr);
+            object->add_volume(mesh(TestMesh::bridge));
+            ModelInstance *instance = object->add_instance();
+            REQUIRE(instance != nullptr);
+            instance->set_offset(Vec3d(tool == 0 ? 70. : 130., 0., 0.));
+            object->ensure_on_bed();
+            object->config.set_key_value("extruder", new ConfigOptionInt(tool + 1));
+        }
+    }
 
     print.apply(model, config);
     const auto validation = print.validate();
@@ -1520,21 +1670,20 @@ std::string export_nullable_two_tool_motion(const DynamicPrintConfig &input_conf
     return output;
 }
 
-TEST_CASE("Nullable process travel variants resolve through the parent preset and reach each selected tool",
-          "[GCode][SettingsSpeedAccelVariance][NullableTravelSettings]")
+void run_nullable_process_motion_variants(bool motion_batch)
 {
     namespace fs = boost::filesystem;
-    ScopedTemporaryDir temp("nullable-process-travel-resolver");
+    ScopedTemporaryDir temp(motion_batch ? "nullable-process-motion-batch" : "nullable-process-travel-resolver");
     PresetBundle bundle;
     const fs::path process_dir = temp.path() / PRESET_PRINT_NAME;
     const fs::path parent_file = process_dir / "base" / "Nullable Parent.json";
     const fs::path child_file = process_dir / "Nullable Child.json";
 
     DynamicPrintConfig parent_raw = bundle.prints.default_preset().config;
-    set_nullable_parent_motion(parent_raw);
+    set_nullable_parent_motion(parent_raw, motion_batch);
     fs::create_directories(parent_file.parent_path());
     parent_raw.save_to_json(parent_file.string(), "Nullable Parent", "User", "1.0.0");
-    write_nullable_child_preset(child_file);
+    write_nullable_child_preset(child_file, motion_batch);
 
     PresetsConfigSubstitutions substitutions;
     bundle.prints.load_presets(temp.path().string(), PRESET_PRINT_NAME, substitutions,
@@ -1577,11 +1726,17 @@ TEST_CASE("Nullable process travel variants resolve through the parent preset an
         REQUIRE_FALSE(base_jerk->is_nil(slot));
     }
     CHECK_THAT(child_speed->get_at(0).get_abs_value(base_speed->get_at(0)), Catch::Matchers::WithinAbs(75., 1e-9));
-    CHECK_THAT(child_speed->get_at(1).get_abs_value(base_speed->get_at(1)), Catch::Matchers::WithinAbs(20., 1e-9));
+    if (motion_batch)
+        CHECK_THAT(child_speed->get_at(1).get_abs_value(base_speed->get_at(1)), Catch::Matchers::WithinAbs(37.5, 1e-9));
+    else
+        CHECK_THAT(child_speed->get_at(1).get_abs_value(base_speed->get_at(1)), Catch::Matchers::WithinAbs(20., 1e-9));
     CHECK_THAT(child_acceleration->get_at(0).get_abs_value(base_acceleration->get_at(0)), Catch::Matchers::WithinAbs(1200., 1e-9));
     CHECK_THAT(child_acceleration->get_at(1).get_abs_value(base_acceleration->get_at(1)), Catch::Matchers::WithinAbs(1200., 1e-9));
     CHECK_THAT(child_jerk->get_at(0).get_abs_value(base_jerk->get_at(0)), Catch::Matchers::WithinAbs(12., 1e-9));
-    CHECK_THAT(child_jerk->get_at(1).get_abs_value(base_jerk->get_at(1)), Catch::Matchers::WithinAbs(3., 1e-9));
+    if (motion_batch)
+        CHECK_THAT(child_jerk->get_at(1).get_abs_value(base_jerk->get_at(1)), Catch::Matchers::WithinAbs(4.5, 1e-9));
+    else
+        CHECK_THAT(child_jerk->get_at(1).get_abs_value(base_jerk->get_at(1)), Catch::Matchers::WithinAbs(3., 1e-9));
     CHECK_THAT(child_z_speed->get_at(0), Catch::Matchers::WithinAbs(8., 1e-9));
     CHECK_THAT(child_z_speed->get_at(1), Catch::Matchers::WithinAbs(6., 1e-9));
 
@@ -1631,8 +1786,8 @@ TEST_CASE("Nullable process travel variants resolve through the parent preset an
 
     DynamicPrintConfig parent_full = nullable_full_config(printer, *parent, project, filaments);
     DynamicPrintConfig child_full = nullable_full_config(printer, *child, project, filaments);
-    const std::string parent_output = export_nullable_two_tool_motion(parent_full);
-    const std::string child_output = export_nullable_two_tool_motion(child_full);
+    const std::string parent_output = export_nullable_two_tool_motion(parent_full, motion_batch);
+    const std::string child_output = export_nullable_two_tool_motion(child_full, motion_batch);
     const NullableToolMotionEvidence parent_motion = parse_nullable_tool_motion(parent_output, parent_full);
     const NullableToolMotionEvidence child_motion = parse_nullable_tool_motion(child_output, child_full);
     const auto parent_material = gcode_print_variance_contracts::motion_evidence(parent_output, parent_full);
@@ -1646,8 +1801,53 @@ TEST_CASE("Nullable process travel variants resolve through the parent preset an
     REQUIRE(child_motion.tool_selects[1] > 0);
     require_nullable_tool_motion(parent_motion.tools[0], 2400., 1000, 6., 540.);
     require_nullable_tool_motion(parent_motion.tools[1], 4500., 1200, 12., 480.);
-    require_nullable_tool_motion(child_motion.tools[0], 1200., 1200, 3., 360.);
+    if (motion_batch)
+        require_nullable_tool_motion(child_motion.tools[0], 2250., 1200, 4.5, 360.);
+    else
+        require_nullable_tool_motion(child_motion.tools[0], 1200., 1200, 3., 360.);
     require_nullable_tool_motion(child_motion.tools[1], 4500., 1200, 12., 480.);
+
+    if (motion_batch) {
+        const auto require_int_values = [](const std::vector<int> &values, int expected) {
+            REQUIRE_FALSE(values.empty());
+            for (int value : values)
+                CHECK(value == expected);
+        };
+        const auto require_feed_values = [](const std::vector<double> &values, double expected) {
+            REQUIRE_FALSE(values.empty());
+            for (double value : values) {
+                CHECK(std::isfinite(value));
+                CHECK_THAT(value, Catch::Matchers::WithinAbs(expected, 1e-3));
+            }
+        };
+        const std::array<int, 2> parent_defaults{{1200, 1200}};
+        const std::array<int, 2> child_defaults{{1800, 1200}};
+        const std::array<int, 2> parent_sparse_accelerations{{600, 600}};
+        const std::array<int, 2> child_sparse_accelerations{{1350, 600}};
+        const std::array<int, 2> parent_bridge_accelerations{{500, 400}};
+        const std::array<int, 2> child_bridge_accelerations{{600, 400}};
+        const std::array<double, 2> parent_bridge_feeds{{26. * 60., 21. * 60.}};
+        const std::array<double, 2> child_bridge_feeds{{37. * 60., 21. * 60.}};
+        const std::array<double, 2> parent_top_surface_jerks{{13., 11.}};
+        const std::array<double, 2> child_top_surface_jerks{{31., 11.}};
+        const std::array<double, 2> default_jerks{{10., 10.}};
+        for (size_t tool = 0; tool < parent_motion.tools.size(); ++tool) {
+            CAPTURE(tool);
+            require_feed_values(parent_motion.tools[tool].bridge_feeds, parent_bridge_feeds[tool]);
+            require_feed_values(child_motion.tools[tool].bridge_feeds, child_bridge_feeds[tool]);
+            require_int_values(parent_motion.tools[tool].bridge_accelerations, parent_bridge_accelerations[tool]);
+            require_int_values(child_motion.tools[tool].bridge_accelerations, child_bridge_accelerations[tool]);
+            require_int_values(parent_motion.tools[tool].bottom_surface_accelerations, parent_defaults[tool]);
+            require_int_values(child_motion.tools[tool].bottom_surface_accelerations, child_defaults[tool]);
+            require_int_values(parent_motion.tools[tool].sparse_infill_accelerations, parent_sparse_accelerations[tool]);
+            require_int_values(child_motion.tools[tool].sparse_infill_accelerations, child_sparse_accelerations[tool]);
+            require_feed_values(parent_motion.tools[tool].bottom_surface_jerks, default_jerks[tool]);
+            require_feed_values(child_motion.tools[tool].bottom_surface_jerks,
+                                tool == 0 ? 17. : default_jerks[tool]);
+            require_feed_values(parent_motion.tools[tool].top_surface_jerks, parent_top_surface_jerks[tool]);
+            require_feed_values(child_motion.tools[tool].top_surface_jerks, child_top_surface_jerks[tool]);
+        }
+    }
 
     for (size_t tool = 0; tool < parent_motion.tools.size(); ++tool) {
         CHECK(parent_motion.tools[tool].extrusion_moves == child_motion.tools[tool].extrusion_moves);
@@ -1656,6 +1856,228 @@ TEST_CASE("Nullable process travel variants resolve through the parent preset an
         CHECK_THAT(child_motion.tools[tool].filament,
                    Catch::Matchers::WithinRel(parent_motion.tools[tool].filament, 1e-6));
     }
+}
+
+TEST_CASE("Nullable process travel variants resolve through the parent preset and reach each selected tool",
+          "[GCode][SettingsSpeedAccelVariance][NullableTravelSettings]")
+{
+    run_nullable_process_motion_variants(false);
+}
+
+TEST_CASE("Nullable process motion variants inherit selectively across two tools and reach role G-code",
+          "[GCode][SettingsSpeedAccelVariance][NullableMotionBatch]")
+{
+    run_nullable_process_motion_variants(true);
+}
+
+TEST_CASE("Registered travel speed and jerk boundaries reach emitted travel moves",
+          "[GCode][SettingsSpeedAccelVariance][MotionBoundaries]")
+{
+    DynamicPrintConfig control = motion_config();
+    control.set_deserialize_strict({
+        {"travel_speed", 80},
+        {"initial_layer_travel_speed", "100%"},
+        {"travel_jerk", 12},
+        {"initial_layer_travel_jerk", "100%"},
+        {"default_jerk", 10},
+        {"initial_layer_jerk", 0},
+        {"outer_wall_jerk", 0},
+        {"inner_wall_jerk", 0},
+        {"infill_jerk", 0},
+        {"top_surface_jerk", 0},
+        {"emit_machine_limits_to_gcode", false},
+        {"machine_start_gcode", "M205 X10 Y10\n"},
+    });
+    const std::string control_output = export_cube(control);
+    const ParsedMotion control_motion = parse_motion(control_output, control);
+    REQUIRE_FALSE(control_motion.first_layer_xy_travel_feeds.empty());
+    REQUIRE_FALSE(control_motion.first_layer_xy_travel_jerks.empty());
+    CHECK(std::all_of(control_motion.first_layer_xy_travel_feeds.begin(),
+                      control_motion.first_layer_xy_travel_feeds.end(),
+                      [](double feed) { return std::abs(feed - 4800.0) < 1e-3; }));
+    CHECK(std::all_of(control_motion.first_layer_xy_travel_jerks.begin(),
+                      control_motion.first_layer_xy_travel_jerks.end(),
+                      [](double jerk) { return std::abs(jerk - 12.0) < 1e-3; }));
+    const auto control_material = gcode_print_variance_contracts::motion_evidence(control_output, control);
+    REQUIRE(control_material.extrusion_moves > 0);
+
+    DynamicPrintConfig minimum_speed = control;
+    minimum_speed.set_deserialize_strict("travel_speed", "1");
+    const std::string minimum_speed_output = export_cube(minimum_speed);
+    const ParsedMotion minimum_speed_motion = parse_motion(minimum_speed_output, minimum_speed);
+    REQUIRE_FALSE(minimum_speed_motion.first_layer_xy_travel_feeds.empty());
+    CHECK(std::all_of(minimum_speed_motion.first_layer_xy_travel_feeds.begin(),
+                      minimum_speed_motion.first_layer_xy_travel_feeds.end(),
+                      [](double feed) { return std::abs(feed - 60.0) < 1e-3; }));
+    CHECK(std::all_of(minimum_speed_motion.first_layer_xy_travel_jerks.begin(),
+                      minimum_speed_motion.first_layer_xy_travel_jerks.end(),
+                      [](double jerk) { return std::abs(jerk - 12.0) < 1e-3; }));
+    gcode_print_variance_contracts::require_same_material(
+        control_material, gcode_print_variance_contracts::motion_evidence(minimum_speed_output, minimum_speed));
+
+    DynamicPrintConfig zero_travel_jerk = control;
+    zero_travel_jerk.set_deserialize_strict("travel_jerk", "0");
+    const std::string zero_travel_jerk_output = export_cube(zero_travel_jerk);
+    const ParsedMotion zero_travel_jerk_motion = parse_motion(zero_travel_jerk_output, zero_travel_jerk);
+    REQUIRE_FALSE(zero_travel_jerk_motion.first_layer_xy_travel_jerks.empty());
+    CHECK(std::all_of(zero_travel_jerk_motion.first_layer_xy_travel_jerks.begin(),
+                      zero_travel_jerk_motion.first_layer_xy_travel_jerks.end(),
+                      [](double jerk) { return std::abs(jerk - 10.0) < 1e-3; }));
+    gcode_print_variance_contracts::require_same_material(
+        control_material, gcode_print_variance_contracts::motion_evidence(zero_travel_jerk_output, zero_travel_jerk));
+}
+
+TEST_CASE("Zero acceleration and jerk settings preserve their role fallbacks in emitted G-code",
+          "[GCode][SettingsSpeedAccelVariance][MotionBoundaries]")
+{
+    DynamicPrintConfig default_acceleration_control = motion_config();
+    default_acceleration_control.set_deserialize_strict({
+        {"default_acceleration", 1200},
+        {"initial_layer_acceleration", 0},
+        {"outer_wall_acceleration", 0},
+        {"inner_wall_acceleration", 0},
+        {"top_surface_acceleration", 0},
+        {"bridge_acceleration", 0},
+        {"sparse_infill_acceleration", 0},
+        {"internal_solid_infill_acceleration", 0},
+        {"travel_acceleration", 4000},
+        {"emit_machine_limits_to_gcode", false},
+        {"machine_start_gcode", "M204 P1500\n"},
+    });
+    const std::string default_acceleration_control_output = export_cube(default_acceleration_control);
+    const ParsedMotion default_acceleration_control_motion =
+        parse_motion(default_acceleration_control_output, default_acceleration_control);
+    require_all_role_accelerations(default_acceleration_control_motion, "Outer wall", 1200);
+    const auto default_acceleration_control_material =
+        gcode_print_variance_contracts::motion_evidence(default_acceleration_control_output,
+                                                        default_acceleration_control);
+    REQUIRE(default_acceleration_control_material.extrusion_moves > 0);
+
+    DynamicPrintConfig zero_default_acceleration = default_acceleration_control;
+    zero_default_acceleration.set_deserialize_strict("default_acceleration", "0");
+    const std::string zero_default_acceleration_output = export_cube(zero_default_acceleration);
+    const ParsedMotion zero_default_acceleration_motion =
+        parse_motion(zero_default_acceleration_output, zero_default_acceleration);
+    require_all_role_accelerations(zero_default_acceleration_motion, "Outer wall", 1500);
+    gcode_print_variance_contracts::require_same_material(
+        default_acceleration_control_material,
+        gcode_print_variance_contracts::motion_evidence(zero_default_acceleration_output,
+                                                        zero_default_acceleration));
+
+    DynamicPrintConfig default_jerk_control = motion_config();
+    default_jerk_control.set_deserialize_strict({
+        {"default_jerk", 10},
+        {"initial_layer_jerk", 0},
+        {"outer_wall_jerk", 0},
+        {"inner_wall_jerk", 0},
+        {"top_surface_jerk", 0},
+        {"infill_jerk", 0},
+        {"travel_jerk", 0},
+        {"initial_layer_travel_jerk", "0"},
+        {"emit_machine_limits_to_gcode", false},
+        {"machine_start_gcode", "M205 X7 Y7\n"},
+    });
+    const std::string default_jerk_control_output = export_cube(default_jerk_control);
+    const ParsedMotion default_jerk_control_motion = parse_motion(default_jerk_control_output,
+                                                                    default_jerk_control);
+    require_all_role_jerks(default_jerk_control_motion, "Outer wall", 10);
+    const auto default_jerk_control_material =
+        gcode_print_variance_contracts::motion_evidence(default_jerk_control_output, default_jerk_control);
+    REQUIRE(default_jerk_control_material.extrusion_moves > 0);
+
+    DynamicPrintConfig zero_default_jerk = default_jerk_control;
+    zero_default_jerk.set_deserialize_strict("default_jerk", "0");
+    const std::string zero_default_jerk_output = export_cube(zero_default_jerk);
+    const ParsedMotion zero_default_jerk_motion = parse_motion(zero_default_jerk_output, zero_default_jerk);
+    require_all_role_jerks(zero_default_jerk_motion, "Outer wall", 7);
+    gcode_print_variance_contracts::require_same_material(
+        default_jerk_control_material,
+        gcode_print_variance_contracts::motion_evidence(zero_default_jerk_output, zero_default_jerk));
+
+    DynamicPrintConfig control = motion_config();
+    control.set_deserialize_strict({
+        {"default_acceleration", 1200},
+        {"initial_layer_acceleration", 0},
+        {"outer_wall_acceleration", 611},
+        {"inner_wall_acceleration", 611},
+        {"top_surface_acceleration", 611},
+        {"bridge_acceleration", 432},
+        {"sparse_infill_acceleration", 555},
+        {"internal_solid_infill_acceleration", 611},
+        {"default_jerk", 10},
+        {"initial_layer_jerk", 0},
+        {"outer_wall_jerk", 7},
+        {"inner_wall_jerk", 7},
+        {"infill_jerk", 7},
+        {"travel_jerk", 12},
+        {"initial_layer_travel_jerk", "100%"},
+        {"top_surface_jerk", 31},
+        {"sparse_infill_density", "35%"},
+        {"emit_machine_limits_to_gcode", false},
+        {"machine_start_gcode", "M204 P1500\nM205 X7 Y7\n"},
+    });
+    const std::string control_output = export_cube(control);
+    const ParsedMotion control_motion = parse_motion(control_output, control);
+    require_all_role_accelerations(control_motion, "Outer wall", 611);
+    require_all_role_accelerations(control_motion, "Inner wall", 611);
+    require_all_role_accelerations(control_motion, "Top surface", 611);
+    require_all_role_accelerations(control_motion, "Internal solid infill", 611);
+    require_all_role_accelerations(control_motion, "Sparse infill", 555);
+    require_all_role_jerks(control_motion, "Outer wall", 7);
+    require_all_role_jerks(control_motion, "Inner wall", 7);
+    require_all_role_jerks(control_motion, "Sparse infill", 7);
+    require_all_role_jerks(control_motion, "Top surface", 31);
+    const auto control_material = gcode_print_variance_contracts::motion_evidence(control_output, control);
+    REQUIRE(control_material.extrusion_moves > 0);
+
+    DynamicPrintConfig zero_sparse_acceleration = control;
+    zero_sparse_acceleration.set_deserialize_strict("sparse_infill_acceleration", "0");
+    const std::string zero_sparse_acceleration_output = export_cube(zero_sparse_acceleration);
+    const ParsedMotion zero_sparse_acceleration_motion =
+        parse_motion(zero_sparse_acceleration_output, zero_sparse_acceleration);
+    require_all_role_accelerations(zero_sparse_acceleration_motion, "Outer wall", 611);
+    require_all_role_accelerations(zero_sparse_acceleration_motion, "Inner wall", 611);
+    require_role_acceleration_update_from_other_value(zero_sparse_acceleration_motion, "Sparse infill", 1200);
+    require_all_role_accelerations(zero_sparse_acceleration_motion, "Sparse infill", 1200);
+    gcode_print_variance_contracts::require_same_material(
+        control_material, gcode_print_variance_contracts::motion_evidence(zero_sparse_acceleration_output,
+                                                                          zero_sparse_acceleration));
+
+    DynamicPrintConfig zero_top_surface_jerk = control;
+    // Top surfaces also satisfy is_infill(), so zero selects infill_jerk before default_jerk.
+    zero_top_surface_jerk.set_deserialize_strict("top_surface_jerk", "0");
+    const std::string zero_top_surface_jerk_output = export_cube(zero_top_surface_jerk);
+    const ParsedMotion zero_top_surface_jerk_motion = parse_motion(zero_top_surface_jerk_output, zero_top_surface_jerk);
+    require_all_role_jerks(zero_top_surface_jerk_motion, "Outer wall", 7);
+    require_all_role_jerks(zero_top_surface_jerk_motion, "Inner wall", 7);
+    require_all_role_jerks(zero_top_surface_jerk_motion, "Sparse infill", 7);
+    require_role_jerk_update_from_other_value(zero_top_surface_jerk_motion, "Top surface", 7);
+    require_all_role_jerks(zero_top_surface_jerk_motion, "Top surface", 7);
+    gcode_print_variance_contracts::require_same_material(
+        control_material, gcode_print_variance_contracts::motion_evidence(zero_top_surface_jerk_output,
+                                                                          zero_top_surface_jerk));
+
+    const std::string bridge_control_output = slice({TestMesh::bridge}, control);
+    const ParsedMotion bridge_control_motion = parse_motion(bridge_control_output, control);
+    require_all_role_accelerations(bridge_control_motion, "Outer wall", 611);
+    require_all_role_accelerations(bridge_control_motion, "Inner wall", 611);
+    require_all_role_accelerations(bridge_control_motion, "Bridge", 432);
+    const auto bridge_control_material =
+        gcode_print_variance_contracts::motion_evidence(bridge_control_output, control);
+    REQUIRE(bridge_control_material.extrusion_moves > 0);
+
+    DynamicPrintConfig zero_bridge_acceleration = control;
+    zero_bridge_acceleration.set_deserialize_strict("bridge_acceleration", "0");
+    const std::string zero_bridge_acceleration_output = slice({TestMesh::bridge}, zero_bridge_acceleration);
+    const ParsedMotion zero_bridge_acceleration_motion = parse_motion(zero_bridge_acceleration_output,
+                                                                       zero_bridge_acceleration);
+    require_all_role_accelerations(zero_bridge_acceleration_motion, "Outer wall", 611);
+    require_all_role_accelerations(zero_bridge_acceleration_motion, "Inner wall", 611);
+    require_role_acceleration_update_from_other_value(zero_bridge_acceleration_motion, "Bridge", 1200);
+    require_all_role_accelerations(zero_bridge_acceleration_motion, "Bridge", 1200);
+    gcode_print_variance_contracts::require_same_material(
+        bridge_control_material, gcode_print_variance_contracts::motion_evidence(zero_bridge_acceleration_output,
+                                                                                 zero_bridge_acceleration));
 }
 
 } // namespace settings_speed_accel_contracts
