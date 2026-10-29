@@ -2436,22 +2436,26 @@
       "reason": "Unit correction and nonuniform correction (Y=0.8, Z=1.2) are applied to rotated, unequally scaled SLA geometry; drain-hole normals are checked analytically and for perpendicularity to transformed surface tangents. Numeric boundaries are not claimed."
     },
     "support_speed": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsFamilyVariance]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
+        "nullable_behavior",
         "pipeline_oracle"
       ],
-      "reason": "A real overhang fixture emits both support roles; configured 18 mm/s is observed as 1080 mm/min on base support, and role isolation rejects the interface feed from base paths."
+      "reason": "Zero is rejected by validation and the registered minimum 1 mm/s reaches every later-layer base-support deposition at 60 mm/min; no numeric maximum is registered. Nil ModelObject overrides resolve through Print::apply to parent 18 mm/s and match unoverridden parent G-code, while explicit child 26 mm/s reaches 1560 mm/min. First-layer support is checked separately at pinned initial-layer infill speed 50 mm/s; stationary unretractions and transition roles are excluded from deposition samples. Swapping the base/interface speed key fails the nil/explicit witness while the equal-minimum control passes."
     },
     "support_interface_speed": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsFamilyVariance]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SettingsSpeedAccelVariance]",
       "dimensions": [
         "representative_values",
+        "boundary_values",
+        "nullable_behavior",
         "pipeline_oracle"
       ],
-      "reason": "The same fixture observes configured 31 mm/s as 1860 mm/min on interface support and rejects the base feed from interface paths. Other support fallback speeds are intentionally not claimed."
+      "reason": "Zero is rejected by validation and the registered minimum 1 mm/s reaches every later-layer interface-support deposition at 60 mm/min; no numeric maximum is registered. Nil ModelObject overrides resolve through Print::apply to parent 31 mm/s and match unoverridden parent G-code, while explicit child 38 mm/s reaches 2280 mm/min. First-layer speed and slowdown interpolation are isolated from the later-layer role contract. Swapping the interface/base speed key fails the nil/explicit witness while the equal-minimum control passes."
     },
     "internal_bridge_flow": {
       "test": "tests/fff_print/test_settings_variance.cpp",

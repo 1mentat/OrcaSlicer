@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Support speed minimum validation and actual ModelObject nil inheritance with role-isolated G-code feedrates and the separate first-layer speed policy.",
+  "mutants": [
+    {
+      "id": "support-base-speed-routed-to-interface-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "} else if (path.role() == erSupportMaterial) {\n            speed = NOZZLE_CONFIG(support_speed);",
+      "new": "} else if (path.role() == erSupportMaterial) {\n            speed = NOZZLE_CONFIG(support_interface_speed);",
+      "expected_matches": 1,
+      "description": "Select the other support-role speed. Nil child overrides must preserve distinct parent speeds and explicit child values on exported later-layer support; the equal minimum-speed control remains unchanged.",
+      "test_filter": "^(SupportSpeedMinimum|SupportSpeedNil)$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "3a8b38db358f284bce1d22cf0beb2065bec941c016a1326a38c247e163981516"
+    },
+    {
+      "id": "support-interface-speed-routed-to-base-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "} else if (path.role() == erSupportMaterialInterface) {\n            speed = NOZZLE_CONFIG(support_interface_speed);",
+      "new": "} else if (path.role() == erSupportMaterialInterface) {\n            speed = NOZZLE_CONFIG(support_speed);",
+      "expected_matches": 1,
+      "description": "Select the other support-role speed. Nil child overrides must preserve distinct parent speeds and explicit child values on exported later-layer support; the equal minimum-speed control remains unchanged.",
+      "test_filter": "^(SupportSpeedMinimum|SupportSpeedNil)$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "738d7b449c5bce3de0ef78e433c5c095bcef63cddf585cfa3458831e6e043b4d"
+    }
+  ]
+}

@@ -295,6 +295,193 @@ void require_all_role_jerks(const ParsedMotion& motion, const std::string& role,
     REQUIRE(samples > 0);
 }
 
+DynamicPrintConfig support_motion_config(double base_speed, double interface_speed)
+{
+    DynamicPrintConfig config = motion_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"support_on_build_plate_only", false},
+        {"support_interface_top_layers", 3},
+        {"support_interface_bottom_layers", 0},
+        {"support_speed", base_speed},
+        {"support_interface_speed", interface_speed},
+        {"initial_layer_speed", 30.0},
+        {"initial_layer_infill_speed", 50.0},
+        {"slow_down_layers", 1},
+        {"small_support_perimeter_threshold", 0.0},
+        {"slow_down_for_layer_cooling", false},
+        {"slow_down_layer_time", 0.0},
+        {"slow_down_min_speed", 1.0},
+        {"fan_cooling_layer_time", 0.0},
+        {"filament_max_volumetric_speed", "200"},
+        {"filament_adaptive_volumetric_speed", false},
+        {"machine_max_speed_x", 300.0},
+        {"machine_max_speed_y", 300.0},
+        {"machine_max_speed_z", 30.0},
+        {"machine_max_speed_e", 120.0},
+    });
+    return config;
+}
+
+struct SupportFeedEvidence
+{
+    struct Sample
+    {
+        double z;
+        double xy;
+        double feed;
+    };
+
+    std::vector<Sample> base;
+    std::vector<Sample> interface;
+    double first_layer_z;
+};
+
+SupportFeedEvidence parse_support_feeds(const std::string &output, const DynamicPrintConfig &config,
+                                        double first_layer_z)
+{
+    SupportFeedEvidence result{{}, {}, first_layer_z};
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string role;
+    reader.parse_buffer(output, [&result, &role](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        const size_t feature = comment.find("FEATURE:");
+        const size_t type = comment.find("TYPE:");
+        if (feature != std::string_view::npos || type != std::string_view::npos) {
+            std::string label = feature != std::string_view::npos
+                                    ? std::string(comment.substr(feature + 8))
+                                    : (type != std::string_view::npos
+                                           ? std::string(comment.substr(type + 5))
+                                           : std::string{});
+            const size_t first = label.find_first_not_of(" \t");
+            if (first == std::string::npos)
+                label.clear();
+            else
+                label.erase(0, first);
+            const size_t last = label.find_last_not_of(" \t\r\n");
+            if (last != std::string::npos)
+                label.erase(last + 1);
+            std::transform(label.begin(), label.end(), label.begin(), [](unsigned char ch) {
+                return ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch - 'A' + 'a') : static_cast<char>(ch);
+            });
+            if (label == "support interface" || label == "support material interface")
+                role = "interface";
+            else if (label == "support" || label == "support material")
+                role = "base";
+            else
+                role.clear();
+        }
+        if (!line.extruding(self))
+            return;
+        const double xy = line.dist_XY(self);
+        if (xy <= EPSILON)
+            return;
+        const SupportFeedEvidence::Sample sample{line.new_Z(self), xy, line.new_F(self)};
+        if (role == "interface")
+            result.interface.push_back(sample);
+        else if (role == "base")
+            result.base.push_back(sample);
+    });
+    return result;
+}
+
+enum class SupportObjectOverride { None, Nil, Explicit };
+
+SupportFeedEvidence export_support_with_object_override(const DynamicPrintConfig &config,
+                                                       SupportObjectOverride override_state)
+{
+    Model model;
+    Print print;
+    init_print({mesh(TestMesh::overhang)}, print, model, config);
+    REQUIRE_FALSE(model.objects.empty());
+    ModelObject *model_object = model.objects.front();
+    REQUIRE(model_object != nullptr);
+
+    if (override_state == SupportObjectOverride::Nil) {
+        model_object->config.set_key_value(
+            "support_speed", new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value()}));
+        model_object->config.set_key_value(
+            "support_interface_speed", new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value()}));
+        const ConfigOption *base_source = model_object->config.option("support_speed");
+        const ConfigOption *interface_source = model_object->config.option("support_interface_speed");
+        REQUIRE(base_source != nullptr);
+        REQUIRE(interface_source != nullptr);
+        REQUIRE(base_source->is_nil());
+        REQUIRE(interface_source->is_nil());
+    } else if (override_state == SupportObjectOverride::Explicit) {
+        model_object->config.set_key_value("support_speed", new ConfigOptionFloatsNullable({26.0}));
+        model_object->config.set_key_value("support_interface_speed", new ConfigOptionFloatsNullable({38.0}));
+        const ConfigOption *base_source = model_object->config.option("support_speed");
+        const ConfigOption *interface_source = model_object->config.option("support_interface_speed");
+        REQUIRE(base_source != nullptr);
+        REQUIRE(interface_source != nullptr);
+        REQUIRE_FALSE(base_source->is_nil());
+        REQUIRE_FALSE(interface_source->is_nil());
+    }
+
+    // Print::apply maps nullable ModelObject overrides over the selected print variant.
+    // Nil slots are skipped there; inspect the resolved static object config after the merge.
+    (void)print.apply(model, config);
+    REQUIRE_FALSE(print.objects().empty());
+    const PrintObjectConfig &resolved = print.objects().front()->config();
+    REQUIRE_FALSE(resolved.support_speed.is_nil(0));
+    REQUIRE_FALSE(resolved.support_interface_speed.is_nil(0));
+    const double resolved_base = resolved.support_speed.get_at(0);
+    const double resolved_interface = resolved.support_interface_speed.get_at(0);
+    const double expected_base = override_state == SupportObjectOverride::Explicit
+                                     ? 26.0
+                                     : config.opt_float_nullable("support_speed", 0);
+    const double expected_interface = override_state == SupportObjectOverride::Explicit
+                                          ? 38.0
+                                          : config.opt_float_nullable("support_interface_speed", 0);
+    CHECK_THAT(resolved_base, Catch::Matchers::WithinAbs(expected_base, 1e-9));
+    CHECK_THAT(resolved_interface, Catch::Matchers::WithinAbs(expected_interface, 1e-9));
+
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE_FALSE(print.objects().empty());
+    const PrintObject *print_object = print.objects().front();
+    REQUIRE(print_object->get_layer(0) != nullptr);
+    return parse_support_feeds(output, config, print_object->get_layer(0)->print_z);
+}
+
+void require_support_role_feeds(const std::vector<SupportFeedEvidence::Sample> &feeds,
+                                double expected_role_feed, double first_layer_z,
+                                double expected_first_layer_feed)
+{
+    REQUIRE_FALSE(feeds.empty());
+    bool has_non_first_layer_feed = false;
+    for (const auto &sample : feeds) {
+        CHECK(std::isfinite(sample.feed));
+        CHECK(sample.xy > EPSILON);
+        if (std::abs(sample.z - first_layer_z) <= EPSILON) {
+            CHECK_THAT(sample.feed, Catch::Matchers::WithinAbs(expected_first_layer_feed, 1e-3));
+        } else {
+            CHECK(sample.z > first_layer_z + EPSILON);
+            CHECK_THAT(sample.feed, Catch::Matchers::WithinAbs(expected_role_feed, 1e-3));
+            has_non_first_layer_feed = true;
+        }
+    }
+    REQUIRE(has_non_first_layer_feed);
+}
+
+void require_same_support_feeds(const std::vector<SupportFeedEvidence::Sample> &expected,
+                                const std::vector<SupportFeedEvidence::Sample> &actual)
+{
+    REQUIRE_FALSE(expected.empty());
+    REQUIRE(actual.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+    {
+        CHECK_THAT(actual[i].z, Catch::Matchers::WithinAbs(expected[i].z, EPSILON));
+        CHECK_THAT(actual[i].xy, Catch::Matchers::WithinAbs(expected[i].xy, EPSILON));
+        CHECK_THAT(actual[i].feed, Catch::Matchers::WithinAbs(expected[i].feed, 1e-3));
+    }
+}
+
 } // namespace
 
 TEST_CASE("Initial layer print and solid-infill speeds reach their role feedrates", "[GCode][SettingsSpeedAccelVariance]")
@@ -1106,6 +1293,50 @@ TEST_CASE("Nullable object acceleration overrides inherit parent values on expor
                       [](int value) { return value == 2500; }));
 }
 
+
+TEST_CASE("Support speed rejects zero and emits the valid minimum on both support roles",
+          "[GCode][SettingsSpeedAccelVariance][SupportSpeedMinimum]")
+{
+    // Runtime zero selects a volumetric fallback in GCode.cpp, but these registered
+    // options have min=1. Keep zero as a validation boundary and slice only valid input.
+    DynamicPrintConfig zero = support_motion_config(0.0, 0.0);
+    const auto zero_errors = zero.validate();
+    CHECK(zero_errors.find("support_speed") != zero_errors.end());
+    CHECK(zero_errors.find("support_interface_speed") != zero_errors.end());
+
+    DynamicPrintConfig minimum = support_motion_config(1.0, 1.0);
+    REQUIRE(minimum.validate().empty());
+    const SupportFeedEvidence evidence =
+        export_support_with_object_override(minimum, SupportObjectOverride::None);
+    require_support_role_feeds(evidence.base, 60.0, evidence.first_layer_z, 3000.0);
+    require_support_role_feeds(evidence.interface, 60.0, evidence.first_layer_z, 3000.0);
+}
+
+TEST_CASE("Nil object support speed overrides inherit parent rates on exported support",
+          "[GCode][SettingsSpeedAccelVariance][SupportSpeedNil]")
+{
+    DynamicPrintConfig parent = support_motion_config(18.0, 31.0);
+    REQUIRE(parent.validate().empty());
+
+    const SupportFeedEvidence parent_output =
+        export_support_with_object_override(parent, SupportObjectOverride::None);
+    const SupportFeedEvidence nil_output =
+        export_support_with_object_override(parent, SupportObjectOverride::Nil);
+    const SupportFeedEvidence explicit_output =
+        export_support_with_object_override(parent, SupportObjectOverride::Explicit);
+
+    // The parent output is the independent fallback witness for both nil object slots.
+    require_support_role_feeds(parent_output.base, 18.0 * 60.0, parent_output.first_layer_z, 3000.0);
+    require_support_role_feeds(parent_output.interface, 31.0 * 60.0, parent_output.first_layer_z, 3000.0);
+    require_support_role_feeds(nil_output.base, 18.0 * 60.0, nil_output.first_layer_z, 3000.0);
+    require_support_role_feeds(nil_output.interface, 31.0 * 60.0, nil_output.first_layer_z, 3000.0);
+    require_same_support_feeds(parent_output.base, nil_output.base);
+    require_same_support_feeds(parent_output.interface, nil_output.interface);
+
+    // Explicit object values are a separate witness that each selected role reads its own key.
+    require_support_role_feeds(explicit_output.base, 26.0 * 60.0, explicit_output.first_layer_z, 3000.0);
+    require_support_role_feeds(explicit_output.interface, 38.0 * 60.0, explicit_output.first_layer_z, 3000.0);
+}
 
 struct NullableToolMotion
 {
