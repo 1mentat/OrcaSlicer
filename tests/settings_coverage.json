@@ -3204,21 +3204,25 @@
     },
     "support_filament": {
       "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "tag": "[SupportFilamentRouting]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
+        "interaction_matrix",
         "pipeline_oracle"
       ],
-      "reason": "Support base filament selections 0 (current/default) and 1 are exercised in the same two-filament slice; the same-selection case reaches one support tool while the split-selection comparison reaches at least two support tools. The open integer selector domain and isolated base-only oracle remain unclaimed."
+      "reason": "The accepted SupportFilamentRouting G-code case uses a two-tool fixture. It checks schema-valid selectors 0, 1, and 2, rejects -1, and verifies default/current-object routing plus explicit base selectors 1 and 2 against parsed positive-XY support deposition. Independent rows hold the interface selector fixed while changing the base selector; selector 3 is the first unavailable ID and checks base fallback to tool 0 while interface and object routes remain unchanged. This bounded domain through count+1 is covered; arbitrary positive integers and INT_MAX are not."
     },
     "support_interface_filament": {
       "test": "tests/fff_print/test_support_material.cpp",
-      "tag": "[SupportMaterial]",
+      "tag": "[SupportFilamentRouting]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
+        "interaction_matrix",
         "pipeline_oracle"
       ],
-      "reason": "Support-interface filament selections 0 (current/default) and 2 are exercised in the same two-filament slice; the same-selection case reaches one support tool while the split-selection comparison reaches at least two support tools. The open integer selector domain and isolated interface-only oracle remain unclaimed."
+      "reason": "The accepted SupportFilamentRouting G-code case uses a two-tool fixture. It checks schema-valid selectors 0, 1, and 2, rejects -1, and verifies default/current-object routing plus explicit interface selectors 1 and 2 against parsed positive-XY support-interface deposition. Independent rows hold the base selector fixed while changing the interface selector; selector 3 is the first unavailable ID and checks interface fallback to tool 0 while base and object routes remain unchanged. This bounded domain through count+1 is covered; arbitrary positive integers and INT_MAX are not."
     },
     "start_end_points": {
       "test": "tests/fff_print/test_gcode.cpp",

@@ -265,6 +265,14 @@ including each role's inheritance peers and the invalid-ID fallback. The
 `role_filament_routing.json` mutation redirects top-surface collections to the
 bottom-surface filament. Its filter also selects the two equal-ID feature
 controls, which preserve their tool assignments under that substitution.
+The `[SupportFilamentRouting]` case checks support-base and interface selectors
+independently in a two-tool fixture, including zero/default, IDs 1 and 2, the
+invalid negative boundary, and ID 3 as the first unavailable selector. The
+`support_filament_routing.json` catalog records two validated faults: reading
+the interface selector for base deposition, and clamping an unavailable ID to
+the last tool instead of the default. Its exact filter includes the new case
+and both existing support-routing controls. Numeric inputs beyond this bounded
+count+1 case are not claimed.
 Use `--filter 'Case A,Case B'` instead of `--tag` to select an explicit Catch
 expression. Keep the entire expression in one argument. The same source,
 expected-count, and JUnit checks apply.

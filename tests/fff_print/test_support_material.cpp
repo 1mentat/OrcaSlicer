@@ -2779,17 +2779,40 @@ TEST_CASE("Normal support expansion removes and grows overhang footprints",
 namespace gcode_process_layer_support_contracts {
 namespace {
 
-std::set<int> tools_for_support_role(const std::string &gcode, const DynamicPrintConfig &config,
-                                     const bool interface_role,
-                                     std::map<double, std::set<int>> *tools_by_layer = nullptr)
+enum class ToolPathRole { none, support_base, support_interface, object_outer_wall };
+
+std::set<int> tools_for_gcode_role(const std::string &gcode, const DynamicPrintConfig &config,
+                                   const ToolPathRole role,
+                                   std::map<double, std::set<int>> *tools_by_layer = nullptr)
 {
     std::set<int> tools;
     int current_tool = -1;
+    ToolPathRole current_role = ToolPathRole::none;
     double nominal_z = std::numeric_limits<double>::quiet_NaN();
+    const auto classify_role = [](std::string_view label) {
+        const auto label_start = label.find_first_not_of(" \t");
+        if (label_start == std::string_view::npos)
+            return ToolPathRole::none;
+        label.remove_prefix(label_start);
+        const auto label_end = label.find_last_not_of(" \t\r\n");
+        if (label_end != std::string_view::npos)
+            label = label.substr(0, label_end + 1);
+        std::string normalized_label(label);
+        std::transform(normalized_label.begin(), normalized_label.end(), normalized_label.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (normalized_label == "support interface" || normalized_label == "support material interface")
+            return ToolPathRole::support_interface;
+        if (normalized_label == "support" || normalized_label == "support material")
+            return ToolPathRole::support_base;
+        if (normalized_label == "outer wall" || normalized_label == "external perimeter")
+            return ToolPathRole::object_outer_wall;
+        return ToolPathRole::none;
+    };
     GCodeReader reader;
     reader.apply_config(config);
-    reader.parse_buffer(gcode, [&tools, &current_tool, &nominal_z, interface_role, tools_by_layer](GCodeReader &self,
-                                                                       const GCodeReader::GCodeLine &line) {
+    reader.parse_buffer(gcode, [&tools, &current_tool, &current_role, &nominal_z, &classify_role,
+                                role, tools_by_layer](GCodeReader &self,
+                                                                      const GCodeReader::GCodeLine &line) {
         std::string_view comment = line.comment();
         const auto comment_start = comment.find_first_not_of(" \t");
         if (comment_start != std::string_view::npos)
@@ -2800,21 +2823,36 @@ std::set<int> tools_for_support_role(const std::string &gcode, const DynamicPrin
             nominal_z = std::stod(std::string(comment.substr(2)));
         else if (comment.rfind("Z_HEIGHT:", 0) == 0)
             nominal_z = std::stod(std::string(comment.substr(9)));
+
+        // Persistent role markers follow the exact-label rules used by the support
+        // feed helpers. Inline role comments override only this motion line.
+        const bool has_feature_marker = comment.rfind("FEATURE:", 0) == 0;
+        const bool has_type_marker = !has_feature_marker && comment.rfind("TYPE:", 0) == 0;
+        const bool has_role_marker = has_feature_marker || has_type_marker;
+        std::string_view label = comment;
+        if (has_feature_marker)
+            label = comment.substr(8);
+        else if (has_type_marker)
+            label = comment.substr(5);
+        const ToolPathRole comment_role = classify_role(label);
+        if (has_role_marker)
+            current_role = comment_role;
+        const ToolPathRole line_role = !has_role_marker && comment_role != ToolPathRole::none
+                                           ? comment_role
+                                           : current_role;
+
         const std::string_view command = line.cmd();
         if (command.size() >= 2 && command.front() == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
             current_tool = std::stoi(std::string(command.substr(1)));
-        if (!line.extruding(self) || current_tool < 0)
+        // Positive E alone includes E-only unretract/prime commands; require deposited XY path.
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON || current_tool < 0 || line_role != role)
             return;
-        const bool is_interface = comment.find("support material interface") != std::string_view::npos;
-        const bool is_base = !is_interface && comment.find("support material") != std::string_view::npos;
-        if ((interface_role ? is_interface : is_base)) {
-            tools.insert(current_tool);
-            if (tools_by_layer != nullptr) {
-                // Motion Z is rounded and need not identify the exact nominal
-                // layer used by ToolOrdering. The layer metadata does.
-                REQUIRE(std::isfinite(nominal_z));
-                (*tools_by_layer)[nominal_z].insert(current_tool);
-            }
+        tools.insert(current_tool);
+        if (tools_by_layer != nullptr) {
+            // Motion Z is rounded and need not identify the exact nominal
+            // layer used by ToolOrdering. The layer metadata does.
+            REQUIRE(std::isfinite(nominal_z));
+            (*tools_by_layer)[nominal_z].insert(current_tool);
         }
     });
     return tools;
@@ -2856,13 +2894,94 @@ DynamicPrintConfig support_tool_selection_config(const int support_filament,
 
 } // namespace
 
+TEST_CASE("Support filament defaults and explicit IDs route independently",
+          "[SupportSettingsVariance][SupportMaterial][GCode][SupportFilamentRouting]")
+{
+    for (const char *key : {"support_filament", "support_interface_filament"}) {
+        const ConfigOptionDef *definition = print_config_def.get(key);
+        REQUIRE(definition != nullptr);
+        for (const double value : {0.0, 1.0, 2.0})
+            REQUIRE(definition->is_value_valid(value));
+        CHECK_FALSE(definition->is_value_valid(-1.0));
+    }
+
+    struct ToolRouteEvidence {
+        std::set<int> base;
+        std::set<int> interface;
+        std::set<int> object;
+    };
+    const auto observe = [](const int base_selector, const int interface_selector,
+                            const char *object_filament) {
+        CAPTURE(base_selector, interface_selector, object_filament);
+        DynamicPrintConfig config = support_tool_selection_config(
+            base_selector, interface_selector, object_filament, object_filament, "0,0");
+        config.set_deserialize_strict("support_interface_not_for_body", "1");
+        const std::string gcode = slice({TestMesh::overhang}, config);
+        REQUIRE(!gcode.empty());
+        ToolRouteEvidence evidence{
+            tools_for_gcode_role(gcode, config, ToolPathRole::support_base),
+            tools_for_gcode_role(gcode, config, ToolPathRole::support_interface),
+            tools_for_gcode_role(gcode, config, ToolPathRole::object_outer_wall),
+        };
+        REQUIRE(!evidence.base.empty());
+        REQUIRE(!evidence.interface.empty());
+        REQUIRE(!evidence.object.empty());
+        return evidence;
+    };
+
+    const std::set<int> tool_0{0};
+    const std::set<int> tool_1{1};
+    const ToolRouteEvidence auto_t0 = observe(0, 0, "1");
+    const ToolRouteEvidence explicit_t0 = observe(1, 1, "1");
+    const ToolRouteEvidence auto_t1 = observe(0, 0, "2");
+    const ToolRouteEvidence explicit_t1 = observe(2, 2, "2");
+
+    // Both zero selectors follow the object/current tool; explicit selector IDs 1 and 2
+    // route both support roles to the corresponding physical tool.
+    CHECK(auto_t0.object == tool_0);
+    CHECK(auto_t0.base == auto_t0.object);
+    CHECK(auto_t0.interface == auto_t0.object);
+    CHECK(explicit_t0.base == tool_0);
+    CHECK(explicit_t0.interface == tool_0);
+    CHECK(explicit_t0.object == auto_t0.object);
+    CHECK(auto_t1.object == tool_1);
+    CHECK(auto_t1.base == auto_t1.object);
+    CHECK(auto_t1.interface == auto_t1.object);
+    CHECK(explicit_t1.base == tool_1);
+    CHECK(explicit_t1.interface == tool_1);
+    CHECK(explicit_t1.object == auto_t1.object);
+
+    // Hold the non-target selector explicitly at 1 while changing only one role to 2.
+    const ToolRouteEvidence &explicit_t0_control = explicit_t0;
+    const ToolRouteEvidence base_t1_only = observe(2, 1, "1");
+    CHECK(base_t1_only.base == tool_1);
+    CHECK(base_t1_only.interface == explicit_t0_control.interface);
+    CHECK(base_t1_only.object == explicit_t0_control.object);
+
+    const ToolRouteEvidence interface_t1_only = observe(1, 2, "1");
+    CHECK(interface_t1_only.base == explicit_t0_control.base);
+    CHECK(interface_t1_only.interface == tool_1);
+    CHECK(interface_t1_only.object == explicit_t0_control.object);
+
+    // Selectors above the available two-tool range clamp to ID 1.
+    const ToolRouteEvidence base_out_of_range = observe(3, 2, "2");
+    CHECK(base_out_of_range.base == tool_0);
+    CHECK(base_out_of_range.interface == explicit_t1.interface);
+    CHECK(base_out_of_range.object == explicit_t1.object);
+
+    const ToolRouteEvidence interface_out_of_range = observe(2, 3, "2");
+    CHECK(interface_out_of_range.base == explicit_t1.base);
+    CHECK(interface_out_of_range.interface == tool_0);
+    CHECK(interface_out_of_range.object == explicit_t1.object);
+}
+
 TEST_CASE("Support dont-care base avoids an explicitly selected interface tool",
           "[SupportMaterial][GCode][GCodePipeline][GCodeSupportDontCareInterface]")
 {
     const DynamicPrintConfig config = support_tool_selection_config(0, 1, "2", "2", "0,0");
     const std::string gcode = slice({TestMesh::overhang}, config);
-    const std::set<int> base_tools = tools_for_support_role(gcode, config, false);
-    const std::set<int> interface_tools = tools_for_support_role(gcode, config, true);
+    const std::set<int> base_tools = tools_for_gcode_role(gcode, config, ToolPathRole::support_base);
+    const std::set<int> interface_tools = tools_for_gcode_role(gcode, config, ToolPathRole::support_interface);
 
     REQUIRE(!gcode.empty());
     REQUIRE(!base_tools.empty());
@@ -2894,8 +3013,8 @@ TEST_CASE("Unspecified support roles avoid the currently soluble filament",
     const std::string soluble_gcode = gcode(print);
     std::map<double, std::set<int>> base_by_layer;
     std::map<double, std::set<int>> interface_by_layer;
-    const std::set<int> soluble_base_tools = tools_for_support_role(soluble_gcode, soluble_config, false, &base_by_layer);
-    const std::set<int> soluble_interface_tools = tools_for_support_role(soluble_gcode, soluble_config, true, &interface_by_layer);
+    const std::set<int> soluble_base_tools = tools_for_gcode_role(soluble_gcode, soluble_config, ToolPathRole::support_base, &base_by_layer);
+    const std::set<int> soluble_interface_tools = tools_for_gcode_role(soluble_gcode, soluble_config, ToolPathRole::support_interface, &interface_by_layer);
 
     REQUIRE(!soluble_gcode.empty());
     REQUIRE(!soluble_base_tools.empty());
