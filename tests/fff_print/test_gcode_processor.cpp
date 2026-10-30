@@ -5,12 +5,14 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
 
 #include <cstddef>
 #include <fstream>
 #include <initializer_list>
+#include <sstream>
 #include <string>
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -165,4 +167,56 @@ TEST_CASE("Non-belt start G-code moves keep the first-layer Z in the processor",
     // first-layer height.
     CHECK_THAT(result.moves[first_extrude].position.z(),     WithinAbs(50., 1e-3));
     CHECK_THAT(result.moves[first_extrude - 1].position.z(), WithinAbs(0.3, 1e-3));
+}
+
+TEST_CASE("Disabling M73 also suppresses remaining-time-to-stop lines in the last minute", "[GCodeProcessor]")
+{
+    // Two printer stops a little over a minute apart, so post-processing reaches the
+    // sub-minute "M73 C<minutes>" branch before the first stop.
+    const std::string gcode =
+        ";_GP_FIRST_LINE_M73_PLACEHOLDER\n"
+        "M83\n"
+        "G1 X10 Y0 Z0.2 E0.5 F600\n"
+        "G4 S80\n"
+        "G1 X10.05 Y0 E0.01 F600\n"
+        "G1 X10.10 Y0 E0.01 F600\n"
+        "; PAUSE_PRINTING\n"
+        "G1 X20 Y0 E0.5 F600\n"
+        "G4 S80\n"
+        "G1 X20.05 Y0 E0.01 F600\n"
+        "G1 X20.10 Y0 E0.01 F600\n"
+        "; COLOR_CHANGE,T0,#112233\n"
+        "G1 X30 Y0 E0.5 F600\n"
+        ";_GP_LAST_LINE_M73_PLACEHOLDER\n";
+
+    auto post_process = [&gcode](bool disable_m73) {
+        ScopedTemporaryFile file(".gcode");
+        {
+            std::ofstream out(file.string());
+            out << gcode;
+        }
+        FullPrintConfig config;
+        config.disable_m73.value = disable_m73;
+        Print print;
+        GCodeProcessor processor;
+        const bool old_bbl = GCodeProcessor::s_IsBBLPrinter;
+        GCodeProcessor::s_IsBBLPrinter = true;
+        const ScopeGuard restore_bbl([old_bbl] { GCodeProcessor::s_IsBBLPrinter = old_bbl; });
+        processor.apply_config(config);
+        processor.set_print(&print);
+        processor.initialize(file.string());
+        processor.initialize_result_moves();
+        processor.process_buffer(gcode);
+        processor.finalize(true);
+        std::ifstream in(file.string());
+        std::ostringstream out;
+        out << in.rdbuf();
+        return out.str();
+    };
+
+    // The fixture does produce a fractional stop line when M73 is enabled.
+    CHECK(post_process(false).find("M73 C0.") != std::string::npos);
+    const std::string disabled = post_process(true);
+    CHECK(disabled.find("M73 C") == std::string::npos);
+    CHECK(disabled.find("M73 P") == std::string::npos);
 }
