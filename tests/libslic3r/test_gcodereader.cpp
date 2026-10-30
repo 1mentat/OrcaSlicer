@@ -5,7 +5,11 @@
 #include <catch2/matchers/catch_matchers.hpp>
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Exception.hpp"
+
+#include <boost/filesystem.hpp>
 
 using namespace Slic3r;
 
@@ -52,4 +56,19 @@ TEST_CASE("A G-code reader without a config uses the default one", "[GCodeReader
     GCodeReader reader;
     CHECK(reader.config().use_relative_e_distances.value == relative);
     CHECK_THAT(second_move_extrusion(reader), Catch::Matchers::WithinAbs(relative ? 1.f : 0.f, 1e-6));
+}
+
+TEST_CASE("Reading a G-code file that cannot be opened fails instead of crashing", "[GCodeReader]")
+{
+    const std::string missing = (boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("missing-%%%%-%%%%.gcode")).string();
+    REQUIRE_FALSE(boost::filesystem::exists(missing));
+
+    GCodeReader reader;
+    bool        called = false;
+    CHECK_FALSE(reader.parse_file(missing, [&called](GCodeReader &, const GCodeReader::GCodeLine &) { called = true; }));
+    CHECK_FALSE(reader.parse_file_raw(missing, [&called](GCodeReader &, const char *, const char *) { called = true; }));
+    CHECK_FALSE(called);
+
+    GCodeProcessor processor;
+    CHECK_THROWS_AS(processor.process_file(missing), Slic3r::RuntimeError);
 }
