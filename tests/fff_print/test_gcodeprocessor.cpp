@@ -886,3 +886,21 @@ TEST_CASE("A cube on the 64th nozzle of a 64-nozzle printer slices, and fails th
     REQUIRE(result.limit_filament_maps.size() == 1);
     CHECK(result.limit_filament_maps[0] == uint64_t(expected) << (nozzles - 1));
 }
+
+TEST_CASE("A move after Repetier M402 starts from the restored position", "[GCodeProcessor][Regression]")
+{
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfRepetier));
+    GCodeProcessorResult result;
+    // M401 saves X10 Y20, the travel moves away, and M402 restores X10 Y20.
+    process_gcode("M83\nG90\nG1 X10 Y20 Z0.2 F600\nM401\nG1 X30 Y40 Z1.2 F1200\nM402\nG1 X15 Y25 Z0.2 E1\n", result, overrides);
+
+    const auto extrusion = std::find_if(result.moves.begin(), result.moves.end(),
+                                        [](const GCodeProcessorResult::MoveVertex &move) { return move.type == EMoveType::Extrude; });
+    REQUIRE(extrusion != result.moves.end());
+    CHECK_THAT(extrusion->position.x(), Catch::Matchers::WithinAbs(15., 1e-4));
+    CHECK_THAT(extrusion->position.y(), Catch::Matchers::WithinAbs(25., 1e-4));
+    // The move runs from X10 Y20, not from X30 Y40, at the restored F600.
+    CHECK_THAT(extrusion->travel_dist, Catch::Matchers::WithinAbs(std::sqrt(50.), 1e-4));
+    CHECK_THAT(extrusion->feedrate, Catch::Matchers::WithinAbs(10., 1e-4));
+}
