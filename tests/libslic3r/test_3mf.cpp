@@ -2695,3 +2695,58 @@ SCENARIO("a rendered no-light thumbnail does not suppress the plate thumbnail", 
         }
     }
 }
+
+TEST_CASE("Font descriptor attributes with XML special characters survive a 3MF round-trip", "[3mf]")
+{
+    ScopedSlic3rTemporaryDir temporary_dir("orca_text_font");
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *volume = object->add_volume(make_cube(10.0, 10.0, 10.0));
+    object->add_instance();
+    model.set_backup_path((temporary_dir.path() / "backup").string());
+
+    TextConfiguration text;
+    text.text = "Hi";
+    text.style.name = "Style";
+    text.style.path = "font.ttf";
+    text.style.type = EmbossStyle::Type::file_path;
+    text.style.prop.family = "Sans \"Quoted\" & Co <1>";
+    text.style.prop.face_name = "Face \"A\" & B";
+    text.style.prop.style = "Ital\"ic";
+    text.style.prop.weight = "Bold & \"Heavy\"";
+    volume->text_configuration = text;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.plate_index = 0;
+    const std::string path = (temporary_dir.path() / "text_font.3mf").string();
+    StoreParams params;
+    params.path = path.c_str();
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list.push_back(&plate);
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    Model reloaded_model;
+    DynamicPrintConfig reloaded;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs reloaded_plates;
+    std::vector<Preset *> project_presets;
+    bool is_bbl_3mf = false;
+    bool is_orca_3mf = false;
+    Semver file_version;
+    const bool loaded = load_bbs_3mf(path.c_str(), &reloaded, &substitutions, &reloaded_model, &reloaded_plates,
+                                     &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    release_PlateData_list(reloaded_plates);
+    REQUIRE(loaded);
+    REQUIRE(reloaded_model.objects.size() == 1);
+    REQUIRE(reloaded_model.objects.front()->volumes.size() == 1);
+    const std::optional<TextConfiguration> &loaded_text = reloaded_model.objects.front()->volumes.front()->text_configuration;
+    REQUIRE(loaded_text.has_value());
+    CHECK(loaded_text->style.prop.family == text.style.prop.family);
+    CHECK(loaded_text->style.prop.face_name == text.style.prop.face_name);
+    CHECK(loaded_text->style.prop.style == text.style.prop.style);
+    CHECK(loaded_text->style.prop.weight == text.style.prop.weight);
+}

@@ -9949,13 +9949,13 @@ void TextConfigurationSerialization::to_xml(std::stringstream &stream, const Tex
         stream << COLLECTION_NUMBER_ATTR << "=\"" << *fp.collection_number << "\" ";
     // font descriptor
     if (fp.family.has_value())
-        stream << FONT_FAMILY_ATTR << "=\"" << *fp.family << "\" ";
+        stream << FONT_FAMILY_ATTR << "=\"" << xml_escape_double_quotes_attribute_value(*fp.family) << "\" ";
     if (fp.face_name.has_value())
-        stream << FONT_FACE_NAME_ATTR << "=\"" << *fp.face_name << "\" ";
+        stream << FONT_FACE_NAME_ATTR << "=\"" << xml_escape_double_quotes_attribute_value(*fp.face_name) << "\" ";
     if (fp.style.has_value())
-        stream << FONT_STYLE_ATTR << "=\"" << *fp.style << "\" ";
+        stream << FONT_STYLE_ATTR << "=\"" << xml_escape_double_quotes_attribute_value(*fp.style) << "\" ";
     if (fp.weight.has_value())
-        stream << FONT_WEIGHT_ATTR << "=\"" << *fp.weight << "\" ";
+        stream << FONT_WEIGHT_ATTR << "=\"" << xml_escape_double_quotes_attribute_value(*fp.weight) << "\" ";
 
     stream << "/>\n"; // end TEXT_TAG
 }
