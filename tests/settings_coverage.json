@@ -214,18 +214,21 @@
       "tag": "[Fill]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "The test compares zero and sub-minimum spacing with IRONING_SPACING_MIN in emitted ironing paths; it establishes the lower clamp behavior without claiming the full numeric boundary domain."
+      "reason": "The existing test generates spacing 0 and 0.001 and compares emitted path count and length with IRONING_SPACING_MIN. The process consumer applies std::max(IRONING_SPACING_MIN, config.ironing_spacing.value), so the test directly proves this lower clamp."
     },
     "filament_ironing_spacing": {
       "test": "tests/fff_print/test_fill.cpp",
-      "tag": "[Fill]",
+      "tag": "[IroningOptionBoundaries]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values",
+        "nullable_behavior"
       ],
-      "reason": "The filament override path is compared at zero and sub-minimum spacing with IRONING_SPACING_MIN in emitted ironing paths; upper and per-filament boundary coverage is not claimed."
+      "reason": "The existing lower-clamp case exercises explicit filament spacing 0 and 0.001 against IRONING_SPACING_MIN. The new multi-layer Print case sets process spacing to 0.4 mm and compares nil filament override with explicit 0.4 mm (same total ironing path length), then explicit 0.2 mm (greater total ironing path length). Non-ironing model path count, XY length, and extrusion volume remain stable across the three rows. Both positive override values exceed the 0.05 mm consumer floor. The inheritance claim is limited to selected filament slot 1 and this rectilinear fixture."
     },
     "solid_infill_rotate_template": {
       "test": "tests/fff_print/test_fill.cpp",
@@ -2567,40 +2570,46 @@
       "reason": "Both registered ironing patterns, rectilinear and concentric, produce nonempty ironing paths on the same cube; the path topology changes between them. This covers the complete registered pattern domain."
     },
     "ironing_flow": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsFamilyVariance]",
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[IroningOptionBoundaries]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Process ironing flow 10% versus 20% preserves XY path length and doubles summed ironing E within tolerance."
+      "reason": "The registered 0% endpoint and the existing positive 10% default are processed through a top-surface ironing print. Ironing path count and XY length stay equal while summed path length times mm3/mm is zero at 0% and positive at 10%. This claims the selected consumer minimum, not the full percentage range."
     },
     "ironing_speed": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsFamilyVariance]",
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[IroningOptionBoundaries]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Process ironing speed 20 versus 35 mm/s is observed as exact 1200 versus 2100 mm/min ironing feeds."
+      "reason": "The registered 1 mm/s minimum emits ironing moves at 60 mm/min, while the 20 mm/s process control emits 1200 mm/min. Cooling slowdown is disabled for both rows. This claims the selected minimum and G-code consumer only."
     },
     "filament_ironing_flow": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsFamilyVariance]",
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[IroningOptionBoundaries]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values",
+        "nullable_behavior"
       ],
-      "reason": "With top-surface filament 1 selected, 25% versus 10% filament ironing flow preserves path count and changes summed E by 2.5; per-filament vector bounds are not claimed."
+      "reason": "With top-surface filament 1 selected, an explicit 0% override produces zero ironing volume while a nil override inherits process 10%; both retain equal ironing path count and XY length. The registered minimum and nil inheritance are covered for this selected filament slot only; vector shape and other slots are not claimed."
     },
     "filament_ironing_speed": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsFamilyVariance]",
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[IroningOptionBoundaries]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values",
+        "nullable_behavior"
       ],
-      "reason": "The active filament's 35 mm/s ironing override is observed as 2100 mm/min, independently of the process 20 mm/s default."
+      "reason": "With top-surface filament 1 selected, an explicit 1 mm/s override emits 60 mm/min ironing moves while a nil override inherits process 20 mm/s and emits 1200 mm/min. The registered minimum and nil inheritance are covered for this selected slot; vector bounds and other slots are not claimed."
     },
     "infill_anchor_max": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -5806,6 +5815,27 @@
         "pipeline_oracle"
       ],
       "reason": "A direct two-filament T0-to-T1 G-code buffer compares the registered 0-second endpoint with 17.75 seconds. One physical slot change records that delay in tool-change statistics and the normal estimate. This claims only the selected two-slot Marlin case."
+    },
+    "ironing_inset": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[IroningOptionBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "For a 0.4 mm nozzle, the registered 0 mm process inset produces the same path count and XY length as explicit 0.2 mm; a positive 0.4 mm inset shortens ironing paths. This checks the documented zero sentinel in one top-surface rectilinear print and does not claim the full inset range."
+    },
+    "filament_ironing_inset": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[IroningOptionBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "With top-surface filament 1 selected, explicit 0 mm override matches nil inheritance from process 0.2 mm, showing the zero sentinel maps to half of a 0.4 mm nozzle. Nil inheritance from process 0.4 mm produces shorter paths. This is one selected slot and geometry fixture; vector bounds and other configurations are not claimed."
     }
   }
 }

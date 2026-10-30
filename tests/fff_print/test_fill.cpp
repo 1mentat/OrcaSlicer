@@ -26,6 +26,7 @@
 #include <memory>
 #include <math.h>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -3543,4 +3544,266 @@ TEST_CASE("Rotation-template duration units advance across the same eight physic
             CHECK_THAT(distance, Catch::Matchers::WithinAbs(0., 1.01));
         }
     }
+}
+
+namespace fill_ironing_option_boundaries {
+
+struct IroningEvidence {
+    size_t paths = 0;
+    double length_mm = 0.;
+    double filament_mm3 = 0.;
+};
+
+DynamicPrintConfig config(bool two_filaments = false)
+{
+    DynamicPrintConfig result = two_filaments ? Slic3r::Test::multifilament_config(2, {})
+                                              : DynamicPrintConfig::full_print_config();
+    result.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", "0.4"},
+        {"line_width", 0.4},
+        {"wall_loops", 1},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"sparse_infill_density", "15%"},
+        {"top_surface_pattern", "monotonic"},
+        {"top_surface_filament_id", 1},
+        {"ironing_type", "top"},
+        {"ironing_pattern", "rectilinear"},
+        {"ironing_spacing", 0.2},
+        {"ironing_flow", "10%"},
+        {"ironing_speed", 20.},
+        {"ironing_inset", 0.4},
+        {"slow_down_for_layer_cooling", false},
+        {"slow_down_layer_time", 0.},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_arc_fitting", false},
+        {"gcode_comments", true},
+    });
+    if (two_filaments)
+        result.set_deserialize_strict({
+            {"filament_ironing_flow", "nil,nil"},
+            {"filament_ironing_spacing", "nil,nil"},
+            {"filament_ironing_speed", "nil,nil"},
+            {"filament_ironing_inset", "nil,nil"},
+        });
+    return result;
+}
+
+IroningEvidence evidence(const DynamicPrintConfig &config)
+{
+    Print print;
+    Slic3r::Test::init_and_process_print({Slic3r::Test::cube(10.)}, print, config);
+    IroningEvidence result;
+    const std::pair<size_t, double> extent = ironing_extent(print);
+    result.paths = extent.first;
+    result.length_mm = extent.second;
+    for (const Layer *layer : print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions())
+            for_each_extrusion_path(region->fills, [&result](const ExtrusionPath &path) {
+                if (path.role() != erIroning)
+                    return;
+                const double length_mm = unscale<double>(path.length());
+                result.filament_mm3 += length_mm * path.mm3_per_mm;
+            });
+    return result;
+}
+
+std::set<int> ironing_feeds(const DynamicPrintConfig &config)
+{
+    Print print;
+    Slic3r::Test::init_and_process_print({Slic3r::Test::cube(10.)}, print, config);
+    const std::string output = Slic3r::Test::gcode(print);
+    std::set<int> result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&result](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self) || line.dist_XY(self) <= 0. ||
+            line.comment().find("ironing") == std::string_view::npos)
+            return;
+        result.insert(int(std::lround(line.new_F(self))));
+    });
+    return result;
+}
+
+struct ModelDepositionEvidence {
+    size_t paths = 0;
+    double length_mm = 0.;
+    double filament_mm3 = 0.;
+};
+
+ModelDepositionEvidence non_ironing_model_deposition(const Print &print)
+{
+    ModelDepositionEvidence result;
+    auto collect = [&result](const ExtrusionPath &path) {
+        if (path.role() == erIroning)
+            return;
+        ++result.paths;
+        const double length_mm = unscale<double>(path.length());
+        result.length_mm += length_mm;
+        result.filament_mm3 += length_mm * path.mm3_per_mm;
+    };
+    for (const Layer *layer : print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->perimeters, collect);
+            for_each_extrusion_path(region->fills, collect);
+        }
+    return result;
+}
+
+struct SpacingEvidence {
+    std::pair<size_t, double> ironing;
+    ModelDepositionEvidence model;
+};
+
+SpacingEvidence spacing_evidence(const DynamicPrintConfig &config)
+{
+    Print print;
+    Slic3r::Test::init_and_process_print({Slic3r::Test::cube(10.)}, print, config);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->layer_count() > 1);
+    return {ironing_extent(print), non_ironing_model_deposition(print)};
+}
+
+} // namespace fill_ironing_option_boundaries
+
+TEST_CASE("Zero ironing flow retains fill geometry without extrusion volume",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig zero = config();
+    zero.set_deserialize_strict("ironing_flow", "0%");
+    const IroningEvidence disabled = evidence(zero);
+    const IroningEvidence positive = evidence(config());
+
+    REQUIRE(disabled.paths > 0);
+    REQUIRE(positive.paths > 0);
+    CHECK(disabled.paths == positive.paths);
+    CHECK_THAT(disabled.length_mm, Catch::Matchers::WithinAbs(positive.length_mm, 1e-9));
+    CHECK_THAT(disabled.filament_mm3, Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK(positive.filament_mm3 > 0.1);
+}
+
+TEST_CASE("Zero filament ironing flow overrides the process flow",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig zero_override = config(true);
+    zero_override.set_deserialize_strict("filament_ironing_flow", "0%,nil");
+    const IroningEvidence disabled = evidence(zero_override);
+
+    DynamicPrintConfig inherited = config(true);
+    const IroningEvidence positive = evidence(inherited);
+
+    REQUIRE(disabled.paths > 0);
+    REQUIRE(positive.paths > 0);
+    CHECK(disabled.paths == positive.paths);
+    CHECK_THAT(disabled.length_mm, Catch::Matchers::WithinAbs(positive.length_mm, 1e-9));
+    CHECK_THAT(disabled.filament_mm3, Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK(positive.filament_mm3 > 0.1);
+}
+
+TEST_CASE("Minimum ironing speed emits the configured 1 mm per second feed",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig minimum = config();
+    minimum.set_deserialize_strict({{"ironing_speed", 1.}});
+    const std::set<int> minimum_feeds = ironing_feeds(minimum);
+    const std::set<int> positive_feeds = ironing_feeds(config());
+
+    REQUIRE(minimum_feeds == std::set<int>{60});
+    CHECK(positive_feeds == std::set<int>{1200});
+}
+
+TEST_CASE("Minimum filament ironing speed overrides process speed",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig minimum = config(true);
+    minimum.set_deserialize_strict("filament_ironing_speed", "1,nil");
+    const std::set<int> minimum_feeds = ironing_feeds(minimum);
+    const std::set<int> inherited_feeds = ironing_feeds(config(true));
+
+    REQUIRE(minimum_feeds == std::set<int>{60});
+    CHECK(inherited_feeds == std::set<int>{1200});
+}
+
+TEST_CASE("Zero ironing inset keeps half a nozzle diameter from the edge",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig zero = config();
+    zero.set_deserialize_strict({{"ironing_inset", 0.}});
+    const IroningEvidence half_nozzle = evidence(zero);
+
+    DynamicPrintConfig explicit_half_nozzle = config();
+    explicit_half_nozzle.set_deserialize_strict({{"ironing_inset", 0.2}});
+    const IroningEvidence explicit_half = evidence(explicit_half_nozzle);
+
+    const IroningEvidence positive_inset = evidence(config());
+    REQUIRE(half_nozzle.paths > 0);
+    REQUIRE(explicit_half.paths > 0);
+    REQUIRE(positive_inset.paths > 0);
+    CHECK(half_nozzle.paths == explicit_half.paths);
+    CHECK_THAT(half_nozzle.length_mm, Catch::Matchers::WithinAbs(explicit_half.length_mm, 1e-9));
+    CHECK(half_nozzle.length_mm > positive_inset.length_mm + 0.1);
+}
+
+TEST_CASE("Zero filament ironing inset uses half-nozzle geometry over inherited inset",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig zero_override = config(true);
+    zero_override.set_deserialize_strict("filament_ironing_inset", "0,nil");
+    const IroningEvidence half_nozzle = evidence(zero_override);
+
+    DynamicPrintConfig inherited_half_nozzle = config(true);
+    inherited_half_nozzle.set_deserialize_strict({{"ironing_inset", 0.2}});
+    const IroningEvidence explicit_half = evidence(inherited_half_nozzle);
+
+    const IroningEvidence inherited_process = evidence(config(true));
+    REQUIRE(half_nozzle.paths > 0);
+    REQUIRE(explicit_half.paths > 0);
+    REQUIRE(inherited_process.paths > 0);
+    CHECK(half_nozzle.paths == explicit_half.paths);
+    CHECK_THAT(half_nozzle.length_mm, Catch::Matchers::WithinAbs(explicit_half.length_mm, 1e-9));
+    CHECK(half_nozzle.length_mm > inherited_process.length_mm + 0.1);
+}
+
+TEST_CASE("Nil filament ironing spacing inherits process geometry",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig inherited = config(true);
+    inherited.set_deserialize_strict({{"ironing_spacing", 0.4},
+                                      {"filament_ironing_spacing", "nil,nil"}});
+    const SpacingEvidence from_process = spacing_evidence(inherited);
+
+    DynamicPrintConfig explicit_process = config(true);
+    explicit_process.set_deserialize_strict({{"ironing_spacing", 0.4},
+                                             {"filament_ironing_spacing", "0.4,nil"}});
+    const SpacingEvidence same_as_process = spacing_evidence(explicit_process);
+
+    DynamicPrintConfig explicit_distinct = config(true);
+    explicit_distinct.set_deserialize_strict({{"ironing_spacing", 0.4},
+                                              {"filament_ironing_spacing", "0.2,nil"}});
+    const SpacingEvidence from_filament = spacing_evidence(explicit_distinct);
+
+    REQUIRE(from_process.ironing.first > 0);
+    REQUIRE(same_as_process.ironing.first > 0);
+    REQUIRE(from_filament.ironing.first > 0);
+    CHECK(from_process.ironing.first == same_as_process.ironing.first);
+    CHECK_THAT(from_process.ironing.second, Catch::Matchers::WithinAbs(same_as_process.ironing.second, 1e-9));
+    CHECK(from_filament.ironing.second > from_process.ironing.second + 0.1);
+
+    CHECK(from_process.model.paths == same_as_process.model.paths);
+    CHECK(from_process.model.paths == from_filament.model.paths);
+    CHECK_THAT(from_process.model.length_mm, Catch::Matchers::WithinAbs(same_as_process.model.length_mm, 1e-9));
+    CHECK_THAT(from_process.model.length_mm, Catch::Matchers::WithinAbs(from_filament.model.length_mm, 1e-9));
+    CHECK_THAT(from_process.model.filament_mm3, Catch::Matchers::WithinAbs(same_as_process.model.filament_mm3, 1e-9));
+    CHECK_THAT(from_process.model.filament_mm3, Catch::Matchers::WithinAbs(from_filament.model.filament_mm3, 1e-9));
 }
