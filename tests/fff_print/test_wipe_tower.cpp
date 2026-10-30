@@ -673,3 +673,66 @@ TEST_CASE("Without sparse layers the filament change starts at the tallest print
         CHECK(tower_z < printed_z - EPSILON);
     }
 }
+
+TEST_CASE("Sparse infill whose filament is absent from the layer is overridden to the last printing filament",
+          "[WipeTower][WipingExtrusions]")
+{
+    // Walls use filament 3 and sparse infill uses filament 4, but the layer only prints
+    // filaments 1-3. ensure_perimeters_infills_order() must then force the infill onto the
+    // last non-soluble filament, otherwise nothing prints it.
+    const DynamicPrintConfig config = multifilament_config(4, {
+        {"single_extruder_multi_material", true},
+        {"enable_prime_tower", false},
+        {"flush_into_objects", false},
+        {"flush_into_infill", true},
+        {"flush_into_support", false},
+        {"filament_soluble", "0,0,0,0"},
+        {"filament_is_support", "0,0,0,0"},
+        {"outer_wall_filament_id", 3},
+        {"inner_wall_filament_id", 3},
+        {"sparse_infill_filament_id", 4},
+        {"internal_solid_filament_id", 4},
+        {"top_surface_filament_id", 4},
+        {"bottom_surface_filament_id", 4},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "20%"},
+        {"is_infill_first", false},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{make_cube(10., 10., 1.2)}, print, model, config, nullptr, true, 2);
+    print.process();
+    const PrintObject *object = print.objects().front();
+    const Layer *layer = object->get_layer(0);
+    REQUIRE(object->instances().size() == 2);
+
+    LayerTools tools(layer->print_z);
+    tools.extruders = {0, 1, 2};
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+    size_t infills = 0;
+    for (const LayerRegion *layerm : layer->regions())
+        for (const ExtrusionEntity *entity : layerm->fills.entities)
+            if (const auto *fill = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+                fill != nullptr && fill->role() == erInternalInfill &&
+                wiping.is_overriddable_and_mark(*fill, print.config(), *object, layerm->region()))
+                ++infills;
+    REQUIRE(infills > 0);
+
+    wiping.ensure_perimeters_infills_order(print);
+
+    for (const LayerRegion *layerm : layer->regions())
+        for (const ExtrusionEntity *entity : layerm->fills.entities) {
+            const auto *fill = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+            if (fill == nullptr || fill->role() != erInternalInfill)
+                continue;
+            const auto *overrides = wiping.get_extruder_overrides(fill, object, 3, object->instances().size());
+            REQUIRE(overrides != nullptr);
+            for (size_t copy = 0; copy < object->instances().size(); ++copy)
+                CHECK((*overrides)[copy] == 2);
+        }
+}
