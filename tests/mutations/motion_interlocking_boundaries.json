@@ -47,7 +47,7 @@
       "source_anchor_sha256": "f771a27afa17c5e074b2e404cdf307706aee27937e4da41e47ed41851ebcee44"
     },
     {
-      "id": "interlocking-width-minimum-disabled-at-001",
+      "id": "interlocking-width-minimum-disabled-at-001-double",
       "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
       "old": "config.interlocking_beam_width < EPSILON",
       "new": "config.interlocking_beam_width <= 0.01",
