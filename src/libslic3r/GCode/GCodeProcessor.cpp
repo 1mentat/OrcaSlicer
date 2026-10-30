@@ -7027,6 +7027,9 @@ void GCodeProcessor::process_M402(const GCodeReader::GCodeLine& line)
 
     if (p != FLT_MAX)
         m_feedrate = p;
+
+    // The next move starts from m_end_position, so it has to see the restored position too.
+    m_end_position = m_start_position;
 }
 
 void GCodeProcessor::process_M566(const GCodeReader::GCodeLine& line)
