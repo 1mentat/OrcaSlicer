@@ -5716,6 +5716,33 @@
         "pipeline_oracle"
       ],
       "reason": "The normal-support cap fixture with four raft layers runs the registered 0 and 359 degree endpoints and a 90 degree representative. Long public raft-base extrusion segments and emitted GCode agree in axial direction; 359 differs from 0 by 1 degree within 0.2 degree, while 90 rotates by more than 75 degrees. Forcing the raft-base angle to zero fails the wrap-boundary and quarter-turn assertions while the independent width case passes. Other support patterns and broader interactions are not claimed."
+    },
+    "filament_mixed_gradient": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[MixedFilament]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With mixed-color sublayer processing disabled, enabled and disabled gradient flags independently toggle the Print::validate warning on a used mixed slot. Active gradient fixtures record independent object/volume runs and assert emitted extrusion ratios. The exported modes cover enabled linear per-object and curved per-volume gradients plus a disabled-process control; they do not isolate every gradient-flag x process-option combination."
+    },
+    "filament_mixed_gradient_range": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[MixedFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A three-filament mixed slot uses the representative range 0.8,0.2. The processed Print records its start/end ratios and independent short/tall volume runs. Emitted extrusion and Z samples must follow that linear range across object-level layers and the configured curved per-volume case. Other range strings are outside this claim."
+    },
+    "filament_mixed_gradient_curve": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[MixedFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The emitted-volume-flow case compares an empty linear curve with representative anchors at normalized heights 0,0.5,1 and ratios 0.8,0.9,0.2. Parsed positive extrusions must match the smoothstep ratios over independent short and tall volume runs. This covers the selected curve and linear control, not arbitrary anchor strings or every curve x volume-mode combination."
     }
   }
 }
