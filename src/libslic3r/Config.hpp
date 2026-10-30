@@ -2977,7 +2977,8 @@ public:
             else {
                 assert(it->second->type() == kvp.second->type());
                 if (it->second->type() == kvp.second->type())
-                    *it->second = *kvp.second;
+                    // ConfigOption::operator= is the base class copy, which copies no value.
+                    it->second->set(kvp.second.get());
                 else
                     it->second.reset(kvp.second->clone());
             }
