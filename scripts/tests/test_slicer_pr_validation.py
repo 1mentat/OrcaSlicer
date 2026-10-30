@@ -1478,6 +1478,176 @@ class JUnitEvidenceTests(unittest.TestCase):
             "suite::skip": "skipped",
         })
 
+    def test_catch2_direct_profile_separates_case_and_assertion_totals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            control = self._write(
+                root, "catch-control.xml",
+                """<testsuites><testsuite name='catch' tests='9' failures='0' errors='0' skipped='0'>
+                <testcase classname='suite.global' name='one'/>
+                <testcase classname='suite.global' name='two'/>
+                </testsuite></testsuites>""",
+            )
+            mutant = self._write(
+                root, "catch-mutant.xml",
+                """<testsuites><testsuite name='catch' tests='20' failures='6' errors='1' skipped='2'>
+                <testcase classname='suite.global' name='passed'/>
+                <testcase classname='suite.global' name='mutated'>
+                  <failure type='CHECK_THAT'/><failure type='CHECK_THAT'/>
+                  <failure type='CHECK_THAT'/><failure type='REQUIRE'/>
+                </testcase>
+                <testcase classname='suite.global' name='mixed'>
+                  <failure/><failure/><error/><skipped/>
+                </testcase>
+                <testcase classname='suite.global' name='explicit-skip'><skipped/></testcase>
+                </testsuite></testsuites>""",
+            )
+            strict_control = slicer_pr_validation.read_junit_evidence(control)
+            control_evidence = slicer_pr_validation.read_junit_evidence(
+                control, reporter_profile="catch2_direct")
+            mutant_evidence = slicer_pr_validation.read_junit_evidence(
+                mutant, reporter_profile="catch2_direct")
+
+        self.assertFalse(strict_control["usable"])
+        self.assertIn("tests total differs from testcase evidence", strict_control["errors"])
+        self.assertTrue(control_evidence["usable"], control_evidence["errors"])
+        self.assertEqual(control_evidence["counts"], {
+            "tests": 2, "failures": 0, "errors": 0, "skipped": 0, "timeouts": 0,
+        })
+        self.assertEqual(control_evidence["reporter_totals"], {
+            "assertions": {"tests": 9, "failures": 0, "errors": 0, "skipped": 0},
+            "result_elements": {"failures": 0, "errors": 0, "skipped": 0},
+        })
+        self.assertTrue(mutant_evidence["usable"], mutant_evidence["errors"])
+        self.assertEqual(mutant_evidence["counts"], {
+            "tests": 4, "failures": 1, "errors": 1, "skipped": 1, "timeouts": 0,
+        })
+        self.assertEqual(mutant_evidence["cases"]["mutated"], "failed")
+        self.assertEqual(mutant_evidence["cases"]["mixed"], "error")
+        self.assertEqual(mutant_evidence["cases"]["explicit-skip"], "skipped")
+        self.assertEqual(mutant_evidence["reporter_totals"], {
+            "assertions": {"tests": 20, "failures": 6, "errors": 1, "skipped": 2},
+            "result_elements": {"failures": 6, "errors": 1, "skipped": 2},
+        })
+        self.assertEqual(mutant_evidence["assertion_failure_types_by_case"]["mutated"], {
+            "CHECK_THAT": 3, "REQUIRE": 1,
+        })
+        self.assertEqual(mutant_evidence["case_result_elements"]["mutated"], {
+            "failure": 4, "error": 0, "skipped": 0,
+        })
+        self.assertEqual(mutant_evidence["case_result_elements"]["mixed"], {
+            "failure": 2, "error": 1, "skipped": 1,
+        })
+
+    def test_catch2_direct_rejects_bad_totals_and_duplicate_case_identities(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bad_totals = self._write(
+                root, "bad-totals.xml",
+                """<testsuites><testsuite name='catch' tests='8' failures='2' errors='0' skipped='0'>
+                <testcase classname='suite.global' name='mutated'><failure/></testcase>
+                </testsuite></testsuites>""",
+            )
+            impossible_total = self._write(
+                root, "impossible-total.xml",
+                """<testsuites><testsuite name='catch' tests='2' failures='2' errors='0' skipped='1'>
+                <testcase classname='suite.global' name='mutated'><failure/><failure/></testcase>
+                <testcase classname='suite.global' name='skipped'><skipped/></testcase>
+                </testsuite></testsuites>""",
+            )
+            duplicate = self._write(
+                root, "duplicate.xml",
+                """<testsuites><testsuite name='catch' tests='8' failures='0' errors='0' skipped='0'>
+                <testcase classname='suite.global' name='same'/>
+                <testcase classname='suite.global' name='same'/>
+                </testsuite></testsuites>""",
+            )
+            bad = slicer_pr_validation.read_junit_evidence(
+                bad_totals, reporter_profile="catch2_direct")
+            impossible = slicer_pr_validation.read_junit_evidence(
+                impossible_total, reporter_profile="catch2_direct")
+            repeated = slicer_pr_validation.read_junit_evidence(
+                duplicate, reporter_profile="catch2_direct")
+
+        self.assertFalse(bad["usable"])
+        self.assertIn("Catch2 failures total differs from assertion elements", bad["errors"])
+        self.assertFalse(impossible["usable"])
+        self.assertIn(
+            "Catch2 tests total is smaller than reported assertion outcomes",
+            impossible["errors"],
+        )
+        self.assertFalse(repeated["usable"])
+        self.assertEqual(repeated["duplicate_testcase_identities"], ["same"])
+
+    def test_catch2_direct_rejects_mayfail_markers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            mixed_failures = self._write(
+                root, "mixed-mayfail.xml",
+                """<testsuites><testsuite name='catch' tests='2' failures='0' errors='0' skipped='0'>
+                <testcase classname='suite.global' name='expected'>
+                  <skipped message='TEST_CASE tagged with !mayfail'/><failure type='CHECK'/>
+                </testcase>
+                <testcase classname='suite.global' name='unexpected'><failure type='CHECK'/></testcase>
+                </testsuite></testsuites>""",
+            )
+            tagged_exception = self._write(
+                root, "mayfail-exception.xml",
+                """<testsuites><testsuite name='catch' tests='1' failures='0' errors='0' skipped='0'>
+                <testcase classname='suite.global' name='throws'>
+                  <skipped message='TEST_CASE tagged with !mayfail'/><error type='REQUIRE'/>
+                </testcase>
+                </testsuite></testsuites>""",
+            )
+            mixed = slicer_pr_validation.read_junit_evidence(
+                mixed_failures, reporter_profile="catch2_direct")
+            exception = slicer_pr_validation.read_junit_evidence(
+                tagged_exception, reporter_profile="catch2_direct")
+
+        for evidence in (mixed, exception):
+            self.assertFalse(evidence["usable"])
+            self.assertTrue(any(
+                "unsupported !mayfail testcase marker" in error
+                for error in evidence["errors"]))
+        self.assertEqual(mixed["reporter_totals"]["result_elements"], {
+            "failures": 2, "errors": 0, "skipped": 1,
+        })
+        self.assertEqual(mixed["assertion_failure_types_by_case"]["unexpected"], {
+            "CHECK": 1,
+        })
+        self.assertEqual(exception["reporter_totals"]["result_elements"], {
+            "failures": 0, "errors": 1, "skipped": 1,
+        })
+
+    def test_catch2_direct_rejects_missing_totals_and_unknown_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            missing_total = self._write(
+                root, "missing-total.xml",
+                """<testsuites><testsuite name='catch' failures='0' errors='0' skipped='0'>
+                <testcase classname='suite.global' name='one'/>
+                </testsuite></testsuites>""",
+            )
+            valid = self._write(
+                root, "valid.xml",
+                """<testsuites><testsuite name='catch' tests='1' failures='0' errors='0' skipped='0'>
+                <testcase classname='suite.global' name='one'/>
+                </testsuite></testsuites>""",
+            )
+            missing = slicer_pr_validation.read_junit_evidence(
+                missing_total, reporter_profile="catch2_direct")
+            unknown = slicer_pr_validation.read_junit_evidence(
+                valid, reporter_profile="catch2_unknown")
+
+        self.assertFalse(missing["usable"])
+        self.assertTrue(any(
+            "invalid or missing Catch2 tests total" in error
+            for error in missing["errors"]))
+        self.assertFalse(unknown["usable"])
+        self.assertTrue(any(
+            "unknown JUnit reporter profile" in error
+            for error in unknown["errors"]))
+
     def test_ctest_crash_encoded_as_failure_is_error_but_assertion_is_failed(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1807,6 +1977,31 @@ class CompleteTestLogEvidenceTests(unittest.TestCase):
 
 
 class ProcessCaptureTests(unittest.TestCase):
+    def test_command_json_marks_truncated_streams_at_the_exact_limit(self):
+        limit = slicer_pr_validation.MAX_OUTPUT
+        cases = (
+            ("", "", False, False),
+            ("x" * limit, "y" * limit, False, False),
+            ("x" * (limit + 1), "", True, False),
+            ("", "y" * (limit + 1), False, True),
+        )
+        for stdout, stderr, stdout_truncated, stderr_truncated in cases:
+            with self.subTest(stdout_truncated=stdout_truncated,
+                              stderr_truncated=stderr_truncated):
+                evidence = slicer_pr_validation.CommandResult(
+                    ["command"], 0, 0.01, stdout, stderr).json()
+
+                self.assertEqual(evidence["stdout_truncated"], stdout_truncated)
+                self.assertEqual(evidence["stderr_truncated"], stderr_truncated)
+                if stdout_truncated:
+                    self.assertIn("...[output truncated]...", evidence["stdout"])
+                else:
+                    self.assertEqual(evidence["stdout"], stdout)
+                if stderr_truncated:
+                    self.assertIn("...[output truncated]...", evidence["stderr"])
+                else:
+                    self.assertEqual(evidence["stderr"], stderr)
+
     def test_run_phase_keeps_large_output_on_disk_and_bounds_result(self):
         with tempfile.TemporaryDirectory() as temp:
             log = Path(temp) / "phase.log"
@@ -1819,6 +2014,19 @@ class ProcessCaptureTests(unittest.TestCase):
             self.assertLessEqual(
                 len(result.stdout), slicer_pr_validation.MAX_OUTPUT + 80)
             self.assertGreater(log.stat().st_size, 190000)
+
+    def test_run_phase_marks_utf8_byte_tail_as_truncated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "phase.log"
+            code = "import sys; sys.stdout.buffer.write('😀'.encode() * 20000)"
+            result = slicer_pr_validation._run_phase(
+                [sys.executable, "-c", code], cwd=Path(temp), timeout=10, log=log)
+
+            self.assertGreater(log.stat().st_size, slicer_pr_validation.MAX_OUTPUT)
+            self.assertLess(len(result.stdout), slicer_pr_validation.MAX_OUTPUT)
+            evidence = result.json()
+            self.assertTrue(evidence["stdout_truncated"])
+            self.assertFalse(evidence["stderr_truncated"])
 
 
 class CleanupTests(unittest.TestCase):

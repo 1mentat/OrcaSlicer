@@ -35,6 +35,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import copy
 from dataclasses import asdict, dataclass
 import hashlib
@@ -84,9 +85,15 @@ class CommandResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    stdout_truncated: bool | None = None
+    stderr_truncated: bool | None = None
 
     def json(self) -> dict[str, Any]:
         value = asdict(self)
+        value["stdout_truncated"] = (
+            bool(self.stdout_truncated) or len(self.stdout) > MAX_OUTPUT)
+        value["stderr_truncated"] = (
+            bool(self.stderr_truncated) or len(self.stderr) > MAX_OUTPUT)
         value["stdout"] = _truncate(value["stdout"])
         value["stderr"] = _truncate(value["stderr"])
         return value
@@ -626,12 +633,23 @@ def _junit_timeout(case: ElementTree.Element) -> bool:
     return False
 
 
-def read_junit_evidence(junit: Path) -> dict[str, Any]:
-    """Require complete, internally consistent testcase identities and totals."""
+def read_junit_evidence(junit: Path, *, reporter_profile: str = "ctest") -> dict[str, Any]:
+    """Parse testcase statuses under the selected JUnit reporter contract.
+
+    CTest is the default and requires suite totals to match testcase nodes.
+    Direct Catch2 keeps testcase counts separate from assertion totals because
+    successful assertions are omitted from its XML result elements. Direct
+    reports with a !mayfail marker are rejected because their aggregate totals
+    cannot be safely reconciled with the emitted testcase results.
+    """
     evidence: dict[str, Any] = {
         "usable": False, "errors": [], "duplicate_testcase_identities": [], "counts": {
             "tests": 0, "failures": 0, "errors": 0, "skipped": 0, "timeouts": 0}, "cases": {},
+        "reporter_profile": reporter_profile,
     }
+    if reporter_profile not in {"ctest", "catch2_direct"}:
+        evidence["errors"].append(f"unknown JUnit reporter profile: {reporter_profile}")
+        return evidence
     try:
         if junit.stat().st_size > 64 * 1024 * 1024:
             raise ValueError("JUnit exceeds the 64 MiB evidence limit")
@@ -642,13 +660,76 @@ def read_junit_evidence(junit: Path) -> dict[str, Any]:
     if _xml_tag(root) not in {"testsuite", "testsuites"}:
         evidence["errors"].append("JUnit root is not a test suite")
         return evidence
+    catch2_suite: ElementTree.Element | None = None
+    if reporter_profile == "catch2_direct":
+        suites = [child for child in root if _xml_tag(child) == "testsuite"]
+        if _xml_tag(root) != "testsuites" or len(suites) != 1 or len(root) != 1:
+            evidence["errors"].append(
+                "direct Catch2 JUnit must have one testsuite under a testsuites root")
+            return evidence
+        catch2_suite = suites[0]
+        reporter_totals: dict[str, int] = {}
+        for key in ("tests", "failures", "errors", "skipped"):
+            raw = catch2_suite.get(key)
+            try:
+                value = int(raw) if raw is not None else -1
+                if value < 0:
+                    raise ValueError(f"invalid or missing Catch2 {key} total: {raw!r}")
+                reporter_totals[key] = value
+            except ValueError as exc:
+                evidence["errors"].append(str(exc))
+        case_nodes = [case for case in root.iter() if _xml_tag(case) == "testcase"]
+        result_elements = {
+            "failures": sum(_xml_tag(child) == "failure" for case in case_nodes for child in case),
+            "errors": sum(_xml_tag(child) == "error" for case in case_nodes for child in case),
+            "skipped": sum(_xml_tag(child) == "skipped" for case in case_nodes for child in case),
+        }
+        has_mayfail_case = any(
+            _xml_tag(child) == "skipped" and
+            child.get("message", "") == "TEST_CASE tagged with !mayfail"
+            for case in case_nodes for child in case
+        )
+        if has_mayfail_case:
+            evidence["errors"].append(
+                "direct Catch2 JUnit contains an unsupported !mayfail testcase marker")
+        evidence["reporter_totals"] = {
+            "assertions": reporter_totals,
+            "result_elements": result_elements,
+        }
+        evidence["case_result_elements"] = {
+            case.get("name", ""): {
+                kind: sum(_xml_tag(child) == kind for child in case)
+                for kind in ("failure", "error", "skipped")
+            }
+            for case in case_nodes if case.get("name")
+        }
+        if len(reporter_totals) == 4:
+            if reporter_totals["tests"] < sum(
+                    reporter_totals[key] for key in ("failures", "errors", "skipped")):
+                evidence["errors"].append(
+                    "Catch2 tests total is smaller than reported assertion outcomes")
+            for key in ("failures", "errors", "skipped"):
+                if reporter_totals[key] != result_elements[key]:
+                    evidence["errors"].append(
+                        f"Catch2 {key} total differs from assertion elements")
+        evidence["assertion_failure_types_by_case"] = {
+            case.get("name", ""): dict(Counter(
+                child.get("type", "") for child in case if _xml_tag(child) == "failure"))
+            for case in case_nodes if case.get("name")
+        }
+        if evidence["errors"]:
+            return evidence
     statuses: dict[ElementTree.Element, str] = {}
     for case in root.iter():
         if _xml_tag(case) != "testcase":
             continue
         name = case.get("name", "")
         classname = case.get("classname", "")
-        identity = f"{classname}::{name}" if classname else name
+        # Catch2 embeds the selected reporter name in classname, which changes
+        # between direct mutant runs. Its testcase name is the stable identity
+        # used by exact selection counters.
+        identity = name if reporter_profile == "catch2_direct" else (
+            f"{classname}::{name}" if classname else name)
         if not name:
             evidence["errors"].append("testcase lacks a name")
         if identity in evidence["cases"]:
@@ -675,45 +756,46 @@ def read_junit_evidence(junit: Path) -> dict[str, Any]:
         "skipped": sum(s == "skipped" for s in statuses.values()),
         "timeouts": sum(s == "timeout" for s in statuses.values()),
     }
-    for suite in root.iter():
-        if _xml_tag(suite) not in {"testsuite", "testsuites"}:
-            continue
-        for key in ("tests", "failures", "errors", "skipped", "disabled"):
-            if key in suite.attrib:
+    if reporter_profile == "ctest":
+        for suite in root.iter():
+            if _xml_tag(suite) not in {"testsuite", "testsuites"}:
+                continue
+            for key in ("tests", "failures", "errors", "skipped", "disabled"):
+                if key in suite.attrib:
+                    try:
+                        value = int(suite.attrib[key])
+                        if value < 0 or (key == "disabled" and value != 0):
+                            raise ValueError(f"invalid or incomplete {key} total: {value}")
+                    except ValueError as exc:
+                        evidence["errors"].append(str(exc))
+            children = [statuses[case] for case in suite.iter() if case in statuses]
+            # CTest encodes crashes in <failure>, while Catch may use <error>.
+            # Verify the reported failure/error sum, then retain the stronger
+            # execution-error classification above.
+            expected = {"tests": len(children), "skipped": children.count("skipped")}
+            for key, actual in expected.items():
+                if key in suite.attrib:
+                    try:
+                        if int(suite.attrib[key]) != actual:
+                            raise ValueError(f"{key} total differs from testcase evidence")
+                    except ValueError as exc:
+                        evidence["errors"].append(str(exc))
+            if "failures" in suite.attrib or "errors" in suite.attrib:
                 try:
-                    value = int(suite.attrib[key])
-                    if value < 0 or (key == "disabled" and value != 0):
-                        raise ValueError(f"invalid or incomplete {key} total: {value}")
+                    total = int(suite.get("failures", "0")) + int(suite.get("errors", "0"))
+                    if total != (children.count("failed") + children.count("error") +
+                                 children.count("timeout")):
+                        raise ValueError("failure/error total differs from testcase evidence")
                 except ValueError as exc:
                     evidence["errors"].append(str(exc))
-        children = [statuses[case] for case in suite.iter() if case in statuses]
-        # CTest encodes crashes in <failure>, while Catch may use <error>.
-        # Verify the reported failure/error sum, then retain the stronger
-        # execution-error classification above.
-        expected = {"tests": len(children), "skipped": children.count("skipped")}
-        for key, actual in expected.items():
-            if key in suite.attrib:
-                try:
-                    if int(suite.attrib[key]) != actual:
-                        raise ValueError(f"{key} total differs from testcase evidence")
-                except ValueError as exc:
-                    evidence["errors"].append(str(exc))
-        if "failures" in suite.attrib or "errors" in suite.attrib:
-            try:
-                total = int(suite.get("failures", "0")) + int(suite.get("errors", "0"))
-                if total != (children.count("failed") + children.count("error") +
-                             children.count("timeout")):
-                    raise ValueError("failure/error total differs from testcase evidence")
-            except ValueError as exc:
-                evidence["errors"].append(str(exc))
     if not statuses:
         evidence["errors"].append("JUnit contains no testcases")
     evidence["usable"] = not evidence["errors"]
     return evidence
 
 
-def junit_case_statuses(junit: Path) -> dict[str, str]:
-    evidence = read_junit_evidence(junit)
+def junit_case_statuses(junit: Path, *, reporter_profile: str = "ctest") -> dict[str, str]:
+    evidence = read_junit_evidence(junit, reporter_profile=reporter_profile)
     return evidence["cases"] if evidence["usable"] else {}
 
 
@@ -2192,7 +2274,7 @@ def _run_phase(argv: Sequence[str], *, cwd: Path, timeout: float, log: Path) -> 
     if size > MAX_OUTPUT:
         tail = "...[earlier output retained in log]...\n" + tail
     return CommandResult(list(argv), returncode, time.monotonic() - started,
-                         tail, "", timed_out)
+                         tail, "", timed_out, size > MAX_OUTPUT, False)
 
 
 def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Namespace,
