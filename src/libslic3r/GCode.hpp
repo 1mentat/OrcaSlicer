@@ -100,6 +100,10 @@ public:
     void update_path(const ExtrusionPaths &paths, bool reverse = false);
 };
 
+// Rotates and translates the X/Y of the G1 moves in a wipe tower nozzle change, given in tower
+// coordinates and starting at pos, into print coordinates.
+std::string transform_gcode(const std::string &gcode, Vec2f pos, const Vec2f &translation, float angle);
+
 class WipeTowerIntegration {
 public:
     WipeTowerIntegration(
