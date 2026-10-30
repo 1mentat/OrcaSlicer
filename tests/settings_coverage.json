@@ -2977,39 +2977,43 @@
     },
     "filament_loading_speed": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTowerFilamentSpeedBoundaries]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "A configured speed of 12 is checked through the resulting parsed feedrates in an active loading path. Other loading parameters are explicit; independent numeric variation remains unclaimed."
+      "reason": "The full Print export maps zero loading and zero start speed into two positive-E XY moves plus the initial E-only move without new F tokens; those moves inherit the positive modal feed from preceding emitted G-code. The positive 12 mm/s control independently derives 12 and 1.2 mm/s load E rates. The direct WipeTower2 companion isolates each zero setting. No maximum is registered; wider cross-printer behavior is not claimed."
     },
     "filament_loading_speed_start": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTowerFilamentSpeedBoundaries]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Initial loading speeds 12 and 24 are varied independently; loading motion changes and the 12 mm/s case includes a parsed 720 mm/min feedrate. Scope is direct WipeTower2 output."
+      "reason": "In the full Print export, the first positive-E-only loading stroke has no F token and inherits the modal feed captured immediately before the load marker; the companion direct case confirms the same. The 12 mm/s control derives to 720 mm/min. This documents public G-code modal-feed behavior, not a zero-rate move. No maximum is registered."
     },
     "filament_unloading_speed": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTowerFilamentSpeedBoundaries]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "A configured unloading speed of 35 mm/s produces a parsed 2100 mm/min feedrate in the direct unload path. Numeric boundaries and independent speed variation remain unclaimed."
+      "reason": "With both unload speeds zero in the full Print export, all four initial/base E-only retracts suppress F updates and inherit the prior positive ramming feed. The positive control checks explicit 55/35/17.5/10.5 mm/s phases; the direct companion isolates zero base speed inheriting F3300 from the 55 mm/s initial retract. No maximum is registered."
     },
     "filament_unloading_speed_start": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
-      "tag": "[MultimaterialWipe]",
+      "tag": "[WipeTowerFilamentSpeedBoundaries]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "A configured initial unloading speed of 55 mm/s produces a parsed 3300 mm/min feedrate in the direct unload path. Numeric boundaries remain unclaimed."
+      "reason": "In the full Print export, the first unload retract has no F token and its effective feed equals the last explicit ramming feed; the remaining zero phases inherit that same rate. Positive settings retain explicit 55/35/17.5/10.5 mm/s phases. The direct companion verifies zero initial speed against the immediately preceding feed. No maximum is registered."
     },
     "high_current_on_filament_swap": {
       "test": "tests/fff_print/test_wipe_tower.cpp",

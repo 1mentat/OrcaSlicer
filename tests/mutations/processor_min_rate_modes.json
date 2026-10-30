@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "description": "Native-validated independent Normal/Stealth minimum-rate index regressions. Each is killed by the asymmetric-mode timing case while the other three controls pass.",
+  "selection": {
+    "case_names": [
+      "FocusedGCodeProcessor::Filament changes add configured load, unload, and tool delays",
+      "FocusedGCodeProcessor::Filament summaries use diameter, density, and price settings",
+      "FocusedGCodeProcessor::Machine minimum feed rates select independent Normal and Stealth floors",
+      "FocusedGCodeProcessor::Machine minimum feed rates set independent estimator floors"
+    ],
+    "expected_filtered_case_count": 4,
+    "label_filter": "^ProcessorMachineSettingsVariance$"
+  },
+  "mutants": [
+    {
+      "description": "Select the Stealth slot for the Normal travel estimator. The 30 mm/s Normal floor disappears while the zero Stealth row should continue to use commanded F90.",
+      "expected_matches": 1,
+      "expected_test_count": 4,
+      "id": "gcp-min-travel-rate-normal-index-collapses-to-stealth",
+      "intended_failed_case": "FocusedGCodeProcessor::Machine minimum feed rates select independent Normal and Stealth floors",
+      "intended_failure_assertion": "CHECK_THAT(travels[i]->time[0], WithinAbs(100.f / 30.f, 0.2f));",
+      "intended_failure_line": 2642,
+      "new": "return std::max(feedrate, get_option_value(m_time_processor.machine_limits.machine_min_travel_rate, static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)));",
+      "old": "return std::max(feedrate, get_option_value(m_time_processor.machine_limits.machine_min_travel_rate, static_cast<size_t>(mode)));",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "test_filter": "^ProcessorMachineSettingsVariance$"
+    },
+    {
+      "description": "Select the Normal slot for the Stealth extrusion estimator. The 24 mm/s Stealth floor disappears while the zero Normal row should continue to use commanded F90.",
+      "expected_matches": 1,
+      "expected_test_count": 4,
+      "id": "gcp-min-extruding-rate-stealth-index-collapses-to-normal",
+      "intended_failed_case": "FocusedGCodeProcessor::Machine minimum feed rates select independent Normal and Stealth floors",
+      "intended_failure_assertion": "CHECK_THAT(extrusions[i]->time[1], WithinAbs(100.f / 24.f, 0.2f));",
+      "intended_failure_line": 2649,
+      "new": "return std::max(feedrate, get_option_value(m_time_processor.machine_limits.machine_min_extruding_rate, static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)));",
+      "old": "return std::max(feedrate, get_option_value(m_time_processor.machine_limits.machine_min_extruding_rate, static_cast<size_t>(mode)));",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "test_filter": "^ProcessorMachineSettingsVariance$"
+    }
+  ]
+}

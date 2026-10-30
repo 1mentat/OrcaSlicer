@@ -237,10 +237,11 @@ FullPrintConfig stealth_config()
     return config;
 }
 
-TestResult process_buffer_with_stealth(const std::string &gcode)
+TestResult process_buffer_with_stealth(const std::string &gcode,
+                                       FullPrintConfig config = stealth_config())
 {
     GCodeProcessor processor;
-    processor.apply_config(stealth_config());
+    processor.apply_config(config);
     processor.enable_stealth_time_estimator(true);
     processor.initialize("gcode_processor_stealth_contract.gcode");
     processor.initialize_result_moves();
@@ -2617,6 +2618,37 @@ TEST_CASE("Machine minimum feed rates set independent estimator floors",
     CHECK_THAT(floor_extrusion_move->delta_extruder, WithinAbs(20.f, 1e-4f));
     CHECK(floor_extrusion_move->time[0] < default_extrusion_move->time[0] * 0.1f);
     CHECK_THAT(floor_extrusion_move->time[0], WithinAbs(100.f / 24.f, 0.2f));
+}
+
+TEST_CASE("Machine minimum feed rates select independent Normal and Stealth floors",
+          "[GCodeProcessor][ProcessorMachineSettingsVariance]")
+{
+    FullPrintConfig config = public_processor_contracts::stealth_config();
+    config.machine_min_travel_rate.values = {30., 0.};
+    config.machine_min_extruding_rate.values = {0., 24.};
+
+    const std::string gcode =
+        "G90\nM83\n"
+        "G1 X100 Y0 Z0.2 F90\nG1 X200 Y0 Z0.2 F90\n"
+        "G1 X300 Y0 Z0.2 E20 F90\nG1 X400 Y0 Z0.2 E20 F90\n";
+    const auto result = public_processor_contracts::process_buffer_with_stealth(gcode, config);
+    const auto travels = public_processor_contracts::moves_of(result, EMoveType::Travel);
+    const auto extrusions = public_processor_contracts::moves_of(result, EMoveType::Extrude);
+
+    REQUIRE(travels.size() == 2);
+    REQUIRE(extrusions.size() == 2);
+    for (size_t i = 0; i < 2; ++i) {
+        CHECK_THAT(travels[i]->position.x(), WithinAbs(100.f * static_cast<float>(i + 1), 1e-4f));
+        CHECK_THAT(travels[i]->time[0], WithinAbs(100.f / 30.f, 0.2f));
+        CHECK_THAT(travels[i]->time[1], WithinAbs(100.f / 1.5f, 0.2f));
+        CHECK(travels[i]->time[0] < travels[i]->time[1] * 0.1f);
+
+        CHECK_THAT(extrusions[i]->position.x(), WithinAbs(300.f + 100.f * static_cast<float>(i), 1e-4f));
+        CHECK_THAT(extrusions[i]->delta_extruder, WithinAbs(20.f, 1e-4f));
+        CHECK_THAT(extrusions[i]->time[0], WithinAbs(100.f / 1.5f, 0.2f));
+        CHECK_THAT(extrusions[i]->time[1], WithinAbs(100.f / 24.f, 0.2f));
+        CHECK(extrusions[i]->time[1] < extrusions[i]->time[0] * 0.1f);
+    }
 }
 
 TEST_CASE("Filament changes add configured load, unload, and tool delays",

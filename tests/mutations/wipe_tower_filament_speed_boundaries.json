@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "description": "Two native-validated filament-speed regressions, each killed by its direct motion oracle and the full SEMM Print export. Zero cooling/stamping boundaries remain incomplete.",
+  "selection": {
+    "healthy_test_filter": "^WipeTowerFilamentSpeedBoundaries$",
+    "healthy_expected_test_count": 5,
+    "expected_suite_case_count_without_known_broken": 143,
+    "expected_suite_case_count_with_known_broken_selected": 144,
+    "existing_healthy_case_count": 138,
+    "existing_known_broken_case": "Zero tower interface purge length removes only interface tower material"
+  },
+  "source_pins": {
+    "src/libslic3r/GCode/WipeTower2.cpp": "ea1f1216ea367f01596e2315df20ce2e14bbfbe6a442258c1b3254f346fd59ac"
+  },
+  "mutants": [
+    {
+      "id": "wipe-loading-speed-zero-defaults-to-one",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].loading_speed           = float(config.filament_loading_speed.get_at(idx));",
+      "new": "m_filpar[idx].loading_speed           = (float(config.filament_loading_speed.get_at(idx)) == 0.f ? 1.f : float(config.filament_loading_speed.get_at(idx)));",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "expected_test_count": 5,
+      "test_filter": "^WipeTowerFilamentSpeedBoundaries$",
+      "intended_failed_case": "Loading zero speeds inherit the active modal feed and positive rates remain observable",
+      "ordinary_assertion_only": true,
+      "description": "Turn only zero loading speed into 1 mm/s. The zero row should omit new feed tokens and inherit the explicit 12 mm/s start feed for both XY loading moves."
+    },
+    {
+      "id": "wipe-stamping-positive-edge-clamped",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].filament_stamping_loading_speed     = float(config.filament_stamping_loading_speed.get_at(idx));",
+      "new": "m_filpar[idx].filament_stamping_loading_speed     = std::max(2.f, float(config.filament_stamping_loading_speed.get_at(idx)));",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "expected_test_count": 5,
+      "test_filter": "^WipeTowerFilamentSpeedBoundaries$",
+      "intended_failed_case": "Stamping speed at the lowest positive rate reaches its physical return strokes",
+      "ordinary_assertion_only": true,
+      "description": "Clamp the configured positive 1 mm/s stamping edge to 2 mm/s while preserving the 20 mm/s control. The two physical E/XY return strokes must no longer derive to 1 mm/s."
+    }
+  ],
+  "deferred_zero_boundaries": {
+    "filament_cooling_initial_speed": "Keep registered min0 unclaimed: the consumer divides by this speed; only positive 1 mm/s and 2 mm/s controls are tested.",
+    "filament_cooling_final_speed": "Keep registered min0 unclaimed: the consumer divides by this speed and prior zero-final evidence serialized F0; only positive 1 mm/s and 2 mm/s controls are tested.",
+    "filament_stamping_loading_speed": "Keep registered min0 unclaimed: the stamping movement divides by this speed; only positive 1 mm/s and 20 mm/s controls are tested."
+  }
+}

@@ -2749,6 +2749,10 @@ TEST_CASE("WipeTower2 positive cooling speed representatives reach physical moti
         float initial_speed;
         float final_speed;
     };
+    // Zero is registered but is not a safe cooling witness: the emitter divides
+    // by the speed, and the separate zero-final diagnostic produced F0. These
+    // rows exercise the lowest positive rate while leaving zero-boundary credit
+    // open.
     constexpr std::array<Row, 2> rows{{
         {"representative initial speed", 4.f, 6.f},
         {"representative final speed", 2.f, 8.f},
@@ -3452,6 +3456,314 @@ TEST_CASE("Soluble toolchanges on the next layer produce denser wipe-tower finis
 }
 
 } // namespace wipe_tower_solid_finish_contracts
+
+} // namespace multimaterial_wipe_variance_contracts
+
+namespace multimaterial_wipe_variance_contracts {
+using namespace Slic3r;
+using namespace Slic3r::Test;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+struct FilamentSpeedMove {
+    double rate_mm_s = 0.;
+    double feed_mm_min = 0.;
+    double previous_feed_mm_min = 0.;
+    double e_mm = 0.;
+    double xy_mm = 0.;
+    bool has_xy = false;
+    bool explicit_feed = false;
+};
+
+struct FilamentSpeedSection {
+    double incoming_feed_mm_min = 0.;
+    std::vector<FilamentSpeedMove> e_only;
+    std::vector<FilamentSpeedMove> xy_extrusions;
+    std::size_t nonfinite_extrusions = 0;
+    std::size_t nonpositive_feed_extrusions = 0;
+};
+
+FilamentSpeedSection filament_speed_section(const DirectRun &run,
+                                             const DynamicPrintConfig &config,
+                                             const std::string_view begin_comment,
+                                             const std::string_view end_comment = {})
+{
+    FilamentSpeedSection section;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool active = false;
+    bool complete = false;
+    double last_explicit_feed_mm_min = 0.;
+    reader.parse_buffer(run.gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (complete)
+            return;
+        if (comment == begin_comment && !active) {
+            active = true;
+            section.incoming_feed_mm_min = last_explicit_feed_mm_min;
+            return;
+        }
+        if (active && !end_comment.empty() && comment == end_comment) {
+            active = false;
+            complete = true;
+            return;
+        }
+        if (active && end_comment.empty() && comment.rfind(" CP TOOLCHANGE ", 0) == 0) {
+            active = false;
+            complete = true;
+            return;
+        }
+        if (active && line.cmd_is("G1") && line.has_e()) {
+            const double e = line.dist_E(self);
+            const double xy = line.dist_XY(self);
+            const double previous_feed = last_explicit_feed_mm_min;
+            const double feed = line.has_f() ? line.f() : previous_feed;
+            if (!std::isfinite(e) || !std::isfinite(xy) || !std::isfinite(feed))
+                ++section.nonfinite_extrusions;
+            else if (std::abs(e) > EPSILON && feed <= 0.)
+                ++section.nonpositive_feed_extrusions;
+            if (std::isfinite(e) && std::isfinite(xy) && std::isfinite(feed) &&
+                std::abs(e) > EPSILON && xy >= 0.) {
+                const bool has_xy = xy > EPSILON;
+                const double rate = has_xy ? std::abs(e) * feed / (xy * 60.) : feed / 60.;
+                FilamentSpeedMove move{rate, feed, previous_feed, e, xy, has_xy, line.has_f()};
+                if (has_xy)
+                    section.xy_extrusions.push_back(move);
+                else
+                    section.e_only.push_back(move);
+            }
+        }
+        if (line.has_f() && std::isfinite(line.f()))
+            last_explicit_feed_mm_min = line.f();
+    });
+    if (!end_comment.empty())
+        REQUIRE(complete);
+    REQUIRE(section.nonfinite_extrusions == 0);
+    REQUIRE(section.nonpositive_feed_extrusions == 0);
+    return section;
+}
+
+bool has_rate(const std::vector<FilamentSpeedMove> &moves, const double target_mm_s,
+              const double tolerance_mm_s = 0.04)
+{
+    return std::any_of(moves.begin(), moves.end(), [target_mm_s, tolerance_mm_s](const FilamentSpeedMove &move) {
+        return std::abs(move.rate_mm_s - target_mm_s) <= tolerance_mm_s;
+    });
+}
+
+std::size_t count_rate(const std::vector<FilamentSpeedMove> &moves, const double target_mm_s,
+                       const double tolerance_mm_s = 0.04)
+{
+    return static_cast<std::size_t>(std::count_if(moves.begin(), moves.end(), [target_mm_s, tolerance_mm_s](const FilamentSpeedMove &move) {
+        return std::abs(move.rate_mm_s - target_mm_s) <= tolerance_mm_s;
+    }));
+}
+
+DynamicPrintConfig semm_loading_config(const double loading_speed, const double loading_speed_start)
+{
+    const std::string load = std::to_string(loading_speed) + "," + std::to_string(loading_speed);
+    const std::string start = std::to_string(loading_speed_start) + "," + std::to_string(loading_speed_start);
+    return tower_dynamic({
+        {"enable_filament_ramming", true},
+        {"filament_ramming_parameters", "100 100 30 30 30 30"},
+        {"filament_cooling_moves", "0,0"},
+        {"cooling_tube_length", 40},
+        {"cooling_tube_retraction", 10},
+        {"parking_pos_retraction", 4},
+        {"extra_loading_move", 8},
+        {"filament_loading_speed", load},
+        {"filament_loading_speed_start", start},
+        {"use_relative_e_distances", true},
+    });
+}
+
+DynamicPrintConfig semm_unloading_config(const double unloading_speed, const double unloading_speed_start)
+{
+    const std::string unload = std::to_string(unloading_speed) + "," + std::to_string(unloading_speed);
+    const std::string start = std::to_string(unloading_speed_start) + "," + std::to_string(unloading_speed_start);
+    return tower_dynamic({
+        {"enable_filament_ramming", true},
+        {"filament_ramming_parameters", "100 100 30 30 30 30"},
+        {"filament_cooling_moves", "0,0"},
+        {"cooling_tube_length", 40},
+        {"cooling_tube_retraction", 10},
+        {"parking_pos_retraction", 0},
+        {"extra_loading_move", 0},
+        {"filament_unloading_speed", unload},
+        {"filament_unloading_speed_start", start},
+        {"use_relative_e_distances", true},
+    });
+}
+
+} // namespace
+
+TEST_CASE("Cooling speed positive edges reach physical cooling strokes",
+          "[WipeTower][MultimaterialWipe][WipeTowerFilamentSpeedBoundaries]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 60.f}, {0.4f, 0.2f, 1, 0, 60.f}};
+    struct Row {
+        const char *name;
+        float initial_speed;
+        float final_speed;
+    };
+    constexpr std::array<Row, 2> rows{{
+        {"initial at 1 mm/s", 1.f, 6.f},
+        {"final at 1 mm/s", 2.f, 1.f},
+    }};
+    const DynamicPrintConfig reference_config = cooling_motion_config(2, 2.f, 6.f);
+    const DirectRun reference = run_tower(reference_config, plan);
+    require_finite(reference);
+    const CoolingMotionEvidence reference_evidence = cooling_motion_evidence(reference, reference_config);
+    require_same_material_motion(reference, reference, reference_evidence, 2);
+
+    for (const Row &row : rows) {
+        CAPTURE(row.name, row.initial_speed, row.final_speed);
+        const DynamicPrintConfig config = cooling_motion_config(2, row.initial_speed, row.final_speed);
+        const DirectRun run = run_tower(config, plan);
+        require_finite(run);
+        const CoolingMotionEvidence evidence = cooling_motion_evidence(run, config);
+        require_same_material_motion(reference, run, evidence, 2);
+        require_endpoint_cooling_rates(evidence, row.initial_speed, row.final_speed);
+    }
+}
+
+TEST_CASE("Loading zero speeds inherit the active modal feed and positive rates remain observable",
+          "[WipeTower][MultimaterialWipe][WipeTowerFilamentSpeedBoundaries]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 50.f}};
+    const DynamicPrintConfig positive_config = semm_loading_config(12., 12.);
+    const DirectRun positive = run_tower(positive_config, plan);
+    const DynamicPrintConfig zero_loading_config = semm_loading_config(0., 12.);
+    const DirectRun zero_loading = run_tower(zero_loading_config, plan);
+    const DynamicPrintConfig zero_start_config = semm_loading_config(12., 0.);
+    const DirectRun zero_start = run_tower(zero_start_config, plan);
+    require_finite(positive);
+    require_finite(zero_loading);
+    require_finite(zero_start);
+
+    const FilamentSpeedSection positive_section = filament_speed_section(
+        positive, positive_config, " CP TOOLCHANGE LOAD", " CP TOOLCHANGE WIPE");
+    const FilamentSpeedSection zero_loading_section = filament_speed_section(
+        zero_loading, zero_loading_config, " CP TOOLCHANGE LOAD", " CP TOOLCHANGE WIPE");
+    const FilamentSpeedSection zero_start_section = filament_speed_section(
+        zero_start, zero_start_config, " CP TOOLCHANGE LOAD", " CP TOOLCHANGE WIPE");
+
+    REQUIRE(positive_section.e_only.size() >= 1);
+    REQUIRE(positive_section.xy_extrusions.size() >= 2);
+    REQUIRE(zero_loading_section.e_only.size() >= 1);
+    REQUIRE(zero_loading_section.xy_extrusions.size() >= 2);
+    REQUIRE(zero_start_section.e_only.size() >= 1);
+    CHECK_THAT(positive_section.e_only.front().rate_mm_s, WithinAbs(12., 0.01));
+    CHECK(has_rate(positive_section.xy_extrusions, 12.));
+    CHECK(has_rate(positive_section.xy_extrusions, 1.2));
+
+    // A zero loading speed suppresses a new F token. The preceding 12 mm/s
+    // start stroke establishes F720; both positive-E XY load moves inherit it.
+    CHECK_THAT(zero_loading_section.e_only.front().feed_mm_min, WithinAbs(720., 0.5));
+    for (const FilamentSpeedMove &move : zero_loading_section.xy_extrusions) {
+        CHECK_FALSE(move.explicit_feed);
+        CHECK_THAT(move.feed_mm_min, WithinAbs(720., 0.5));
+        CHECK(std::isfinite(move.rate_mm_s));
+        CHECK(move.rate_mm_s > 0.);
+    }
+
+    // With a zero start speed, the first E-only stroke keeps the feed already
+    // active at the load marker instead of writing F0 or replacing that feed.
+    CHECK_FALSE(zero_start_section.e_only.front().explicit_feed);
+    REQUIRE(zero_start_section.incoming_feed_mm_min > 0.);
+    CHECK_THAT(zero_start_section.e_only.front().feed_mm_min,
+               WithinAbs(zero_start_section.incoming_feed_mm_min, 0.5));
+}
+
+TEST_CASE("Unloading zero speeds inherit modal feed while positive phases retain their rates",
+          "[WipeTower][MultimaterialWipe][WipeTowerFilamentSpeedBoundaries]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 50.f}};
+    const DynamicPrintConfig positive_config = semm_unloading_config(35., 55.);
+    const DirectRun positive = run_tower(positive_config, plan);
+    const DynamicPrintConfig zero_unloading_config = semm_unloading_config(0., 55.);
+    const DirectRun zero_unloading = run_tower(zero_unloading_config, plan);
+    const DynamicPrintConfig zero_start_config = semm_unloading_config(35., 0.);
+    const DirectRun zero_start = run_tower(zero_start_config, plan);
+    require_finite(positive);
+    require_finite(zero_unloading);
+    require_finite(zero_start);
+
+    const FilamentSpeedSection positive_section = filament_speed_section(
+        positive, positive_config, " CP TOOLCHANGE UNLOAD");
+    const FilamentSpeedSection zero_unloading_section = filament_speed_section(
+        zero_unloading, zero_unloading_config, " CP TOOLCHANGE UNLOAD");
+    const FilamentSpeedSection zero_start_section = filament_speed_section(
+        zero_start, zero_start_config, " CP TOOLCHANGE UNLOAD");
+    REQUIRE(positive_section.e_only.size() >= 4);
+    REQUIRE(zero_unloading_section.e_only.size() >= 4);
+    REQUIRE(zero_start_section.e_only.size() >= 4);
+
+    const std::array<double, 4> expected_positive{{55., 35., 17.5, 10.5}};
+    for (std::size_t i = 0; i < expected_positive.size(); ++i)
+        CHECK_THAT(positive_section.e_only[i].rate_mm_s, WithinAbs(expected_positive[i], 0.01));
+
+    // The initial 55 mm/s retract establishes F3300. All three zero-speed
+    // unload phases omit a new feed token and inherit that finite modal rate.
+    CHECK_THAT(zero_unloading_section.e_only.front().rate_mm_s, WithinAbs(55., 0.01));
+    for (std::size_t i = 1; i < 4; ++i) {
+        CHECK_FALSE(zero_unloading_section.e_only[i].explicit_feed);
+        CHECK_THAT(zero_unloading_section.e_only[i].rate_mm_s, WithinAbs(55., 0.01));
+    }
+
+    // A zero initial-unload speed inherits the last ramming feed. Later phases
+    // still use the separately configured positive unload speed and its ratios.
+    const FilamentSpeedMove &first_zero_start = zero_start_section.e_only.front();
+    CHECK_FALSE(first_zero_start.explicit_feed);
+    REQUIRE(first_zero_start.previous_feed_mm_min > 0.);
+    CHECK_THAT(first_zero_start.feed_mm_min,
+               WithinAbs(first_zero_start.previous_feed_mm_min, 0.5));
+    CHECK_THAT(zero_start_section.e_only[1].rate_mm_s, WithinAbs(35., 0.01));
+    CHECK_THAT(zero_start_section.e_only[2].rate_mm_s, WithinAbs(17.5, 0.01));
+    CHECK_THAT(zero_start_section.e_only[3].rate_mm_s, WithinAbs(10.5, 0.01));
+}
+
+TEST_CASE("Stamping speed at the lowest positive rate reaches its physical return strokes",
+          "[WipeTower][MultimaterialWipe][WipeTowerFilamentSpeedBoundaries]")
+{
+    // The registered zero value is not exercised here: stamping computes travel
+    // time by dividing by this speed. This checks a finite low positive rate.
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 60.f}};
+    const auto run_at_speed = [&](const float stamping_speed) {
+        return tower_dynamic({
+            {"enable_filament_ramming", true},
+            {"filament_ramming_parameters", "100 100 30 30 30 30"},
+            {"filament_cooling_moves", "2,2"},
+            {"filament_cooling_initial_speed", "2,2"},
+            {"filament_cooling_final_speed", "6,6"},
+            {"filament_stamping_distance", "10,10"},
+            {"filament_stamping_loading_speed", std::to_string(stamping_speed) + "," + std::to_string(stamping_speed)},
+            {"cooling_tube_length", 4},
+            {"cooling_tube_retraction", 20},
+            {"travel_speed", "60,60"},
+            {"use_relative_e_distances", true},
+        });
+    };
+    const DynamicPrintConfig low_config = run_at_speed(1.f);
+    const DynamicPrintConfig positive_config = run_at_speed(20.f);
+    const DirectRun low = run_tower(low_config, plan);
+    const DirectRun positive = run_tower(positive_config, plan);
+    require_finite(low);
+    require_finite(positive);
+    require_same_wipe_geometry(positive, low);
+
+    const FilamentSpeedSection low_cooling = filament_speed_section(low, low_config, " Cooling", " Cooling park");
+    const FilamentSpeedSection positive_cooling = filament_speed_section(positive, positive_config, " Cooling", " Cooling park");
+    REQUIRE(low_cooling.xy_extrusions.size() >= 4);
+    REQUIRE(positive_cooling.xy_extrusions.size() >= 4);
+    CHECK(count_rate(low_cooling.xy_extrusions, 1.) == 2);
+    CHECK(count_rate(positive_cooling.xy_extrusions, 20.) == 2);
+}
 
 } // namespace multimaterial_wipe_variance_contracts
 
@@ -7768,6 +8080,144 @@ TEST_CASE("Type2 tool-change-on-tower forces travel before public multihead tool
     REQUIRE(on.tool_changes == off.tool_changes);
     CHECK(on.tool_changes_over_tower > off.tool_changes_over_tower);
     CHECK(on.tool_changes_over_tower > 0);
+}
+
+} // namespace prime_tower_boolean_family_contracts
+
+namespace prime_tower_boolean_family_contracts {
+using namespace Slic3r;
+using namespace Slic3r::Test;
+using namespace multimaterial_wipe_variance_contracts;
+using namespace wipe_tower_prime_public_contracts;
+using Catch::Matchers::WithinAbs;
+
+TEST_CASE("Public SEMM export propagates filament speed boundaries into tower G-code",
+          "[WipeTower][MultimaterialWipe][SettingsBoundary][WipeTowerFilamentSpeedBoundaries]")
+{
+    const auto export_with_speeds = [](const bool boundary, const double stamping_speed_override) {
+        const std::string stamping_speed = std::to_string(
+            stamping_speed_override >= 0. ? stamping_speed_override : (boundary ? 1. : 20.));
+        DynamicPrintConfig config = prime_dynamic(2, true, false, false);
+        config.set_deserialize_strict({
+            {"wipe_tower_type", "type2"},
+            {"wipe_tower_x", 50},
+            {"wipe_tower_y", 50},
+            {"prime_tower_width", 35},
+            {"single_extruder_multi_material", true},
+            {"single_extruder_multi_material_priming", false},
+            {"enable_filament_ramming", true},
+            {"filament_cooling_moves", "2,2"},
+            {"filament_cooling_initial_speed", boundary ? "1,1" : "2,2"},
+            {"filament_cooling_final_speed", boundary ? "1,1" : "6,6"},
+            {"filament_stamping_distance", "10,10"},
+            {"filament_stamping_loading_speed", stamping_speed + "," + stamping_speed},
+            {"filament_loading_speed", boundary ? "0,0" : "12,12"},
+            {"filament_loading_speed_start", boundary ? "0,0" : "12,12"},
+            {"filament_unloading_speed", boundary ? "0,0" : "35,35"},
+            {"filament_unloading_speed_start", boundary ? "0,0" : "55,55"},
+            {"cooling_tube_length", 4},
+            {"cooling_tube_retraction", 20},
+            {"parking_pos_retraction", 4},
+            {"extra_loading_move", 8},
+            {"filament_toolchange_delay", "1,1"},
+            {"change_filament_gcode", "T[next_extruder]\n"},
+            {"toolchange_ordering", "cyclic"},
+            {"toolchange_cyclic_order", "1,2"},
+            {"toolchange_cyclic_first_layer", true},
+            {"use_relative_e_distances", true},
+            {"layer_change_gcode", "G92 E0\n"},
+            {"gcode_comments", true},
+        });
+
+        TriangleMesh first = make_cube(10., 10., 2.);
+        TriangleMesh second = make_cube(10., 10., 2.);
+        second.translate(Vec3f(60.f, 0.f, 0.f));
+        const PublicPrintRun result = run_public_print(
+            config, {std::move(first), std::move(second)},
+            {{{"extruder", 1}}, {{"extruder", 2}}}, false);
+        return std::make_pair(config, result);
+    };
+
+    auto [boundary_config, boundary_export] = export_with_speeds(true, -1.);
+    auto [positive_config, positive_export] = export_with_speeds(false, -1.);
+    auto [stamp_boundary_config, stamp_boundary_export] = export_with_speeds(false, 1.);
+    REQUIRE_FALSE(boundary_export.gcode.empty());
+    REQUIRE_FALSE(positive_export.gcode.empty());
+    REQUIRE_FALSE(stamp_boundary_export.gcode.empty());
+
+    const ExportMotion boundary_metrics = inspect_export(boundary_export.gcode, boundary_config);
+    const ExportMotion positive_metrics = inspect_export(positive_export.gcode, positive_config);
+    const ExportMotion stamp_boundary_metrics = inspect_export(stamp_boundary_export.gcode, stamp_boundary_config);
+    REQUIRE(boundary_metrics.tool_changes > 0);
+    REQUIRE(positive_metrics.tool_changes > 0);
+    REQUIRE(boundary_metrics.tower_extrusion_moves > 0);
+    REQUIRE(positive_metrics.tower_extrusion_moves > 0);
+    CHECK(boundary_metrics.model_extrusion_moves == positive_metrics.model_extrusion_moves);
+    CHECK(boundary_metrics.tower_extrusion_moves == positive_metrics.tower_extrusion_moves);
+    CHECK_THAT(boundary_metrics.tower_e_length, WithinAbs(positive_metrics.tower_e_length, 0.02));
+    CHECK(stamp_boundary_metrics.model_extrusion_moves == positive_metrics.model_extrusion_moves);
+    CHECK(stamp_boundary_metrics.tower_extrusion_moves == positive_metrics.tower_extrusion_moves);
+    CHECK_THAT(stamp_boundary_metrics.tower_e_length, WithinAbs(positive_metrics.tower_e_length, 0.02));
+
+    DirectRun boundary_run;
+    boundary_run.gcode = boundary_export.gcode;
+    DirectRun positive_run;
+    positive_run.gcode = positive_export.gcode;
+    DirectRun stamp_boundary_run;
+    stamp_boundary_run.gcode = stamp_boundary_export.gcode;
+
+    const CoolingMotionEvidence boundary_cooling = cooling_motion_evidence(boundary_run, boundary_config);
+    const CoolingMotionEvidence positive_cooling = cooling_motion_evidence(positive_run, positive_config);
+    require_endpoint_cooling_rates(boundary_cooling, 1., 1.);
+    require_endpoint_cooling_rates(positive_cooling, 2., 6.);
+
+    const FilamentSpeedSection boundary_loading = filament_speed_section(
+        boundary_run, boundary_config, " CP TOOLCHANGE LOAD", " CP TOOLCHANGE WIPE");
+    const FilamentSpeedSection positive_loading = filament_speed_section(
+        positive_run, positive_config, " CP TOOLCHANGE LOAD", " CP TOOLCHANGE WIPE");
+    REQUIRE(boundary_loading.e_only.size() >= 1);
+    REQUIRE(boundary_loading.xy_extrusions.size() >= 2);
+    REQUIRE(positive_loading.e_only.size() >= 1);
+    REQUIRE(positive_loading.xy_extrusions.size() >= 2);
+    REQUIRE(std::isfinite(boundary_loading.incoming_feed_mm_min));
+    REQUIRE(boundary_loading.incoming_feed_mm_min > 0.);
+    CHECK_FALSE(boundary_loading.e_only.front().explicit_feed);
+    CHECK_THAT(boundary_loading.e_only.front().feed_mm_min,
+               WithinAbs(boundary_loading.incoming_feed_mm_min, 0.5));
+    for (const FilamentSpeedMove &move : boundary_loading.xy_extrusions) {
+        CHECK_FALSE(move.explicit_feed);
+        CHECK_THAT(move.feed_mm_min, WithinAbs(boundary_loading.incoming_feed_mm_min, 0.5));
+    }
+    CHECK_THAT(positive_loading.e_only.front().rate_mm_s, WithinAbs(12., 0.01));
+    CHECK(has_rate(positive_loading.xy_extrusions, 12.));
+    CHECK(has_rate(positive_loading.xy_extrusions, 1.2));
+
+    const FilamentSpeedSection boundary_unloading = filament_speed_section(
+        boundary_run, boundary_config, " CP TOOLCHANGE UNLOAD");
+    const FilamentSpeedSection positive_unloading = filament_speed_section(
+        positive_run, positive_config, " CP TOOLCHANGE UNLOAD");
+    REQUIRE(boundary_unloading.e_only.size() >= 4);
+    REQUIRE(positive_unloading.e_only.size() >= 4);
+    REQUIRE(boundary_unloading.e_only.front().previous_feed_mm_min > 0.);
+    for (std::size_t i = 0; i < 4; ++i) {
+        CHECK_FALSE(boundary_unloading.e_only[i].explicit_feed);
+        CHECK_THAT(boundary_unloading.e_only[i].feed_mm_min,
+                   WithinAbs(boundary_unloading.e_only.front().previous_feed_mm_min, 0.5));
+    }
+    const std::array<double, 4> positive_unload_rates{{55., 35., 17.5, 10.5}};
+    for (std::size_t i = 0; i < positive_unload_rates.size(); ++i)
+        CHECK_THAT(positive_unloading.e_only[i].rate_mm_s, WithinAbs(positive_unload_rates[i], 0.01));
+
+    const FilamentSpeedSection boundary_stamp = filament_speed_section(
+        stamp_boundary_run, stamp_boundary_config, " Cooling", " Cooling park");
+    const FilamentSpeedSection positive_stamp = filament_speed_section(
+        positive_run, positive_config, " Cooling", " Cooling park");
+    CHECK(count_rate(boundary_stamp.xy_extrusions, 1.) == 2);
+    CHECK(count_rate(boundary_stamp.xy_extrusions, 2.) == 1);
+    CHECK(count_rate(boundary_stamp.xy_extrusions, 6.) == 1);
+    CHECK(count_rate(positive_stamp.xy_extrusions, 20.) == 2);
+    CHECK(count_rate(positive_stamp.xy_extrusions, 2.) == 1);
+    CHECK(count_rate(positive_stamp.xy_extrusions, 6.) == 1);
 }
 
 } // namespace prime_tower_boolean_family_contracts
