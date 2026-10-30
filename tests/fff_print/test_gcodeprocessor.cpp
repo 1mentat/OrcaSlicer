@@ -886,3 +886,19 @@ TEST_CASE("A cube on the 64th nozzle of a 64-nozzle printer slices, and fails th
     REQUIRE(result.limit_filament_maps.size() == 1);
     CHECK(result.limit_filament_maps[0] == uint64_t(expected) << (nozzles - 1));
 }
+
+TEST_CASE("M702 C adds the filament unload time once", "[GCodeProcessor][Regression]")
+{
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("machine_unload_filament_time", new ConfigOptionFloat(12.));
+    const std::string loaded = "M83\nG90\nT0\nG1 X10 Y0 Z0.2 E1 F600\n";
+
+    GCodeProcessorResult before_unload;
+    process_gcode(loaded, before_unload, overrides);
+    GCodeProcessorResult unloaded;
+    // The second M702 C finds the filament already unloaded and adds nothing.
+    process_gcode(loaded + "M702 C\nM702 C\n", unloaded, overrides);
+
+    CHECK_THAT(unloaded.print_statistics.total_filament_unload_time, Catch::Matchers::WithinAbs(12., 1e-4));
+    CHECK_THAT(unloaded.print_statistics.modes[0].time - before_unload.print_statistics.modes[0].time, Catch::Matchers::WithinAbs(12., 1e-3));
+}
