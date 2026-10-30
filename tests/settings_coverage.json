@@ -2740,27 +2740,30 @@
       "tag": "[MultimaterialWipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "A complete matrix for two nozzles and three filaments has zero diagonals and asymmetric off-diagonal values; folded entries are checked independently. Empty or malformed matrices and full purge geometry remain unclaimed."
+      "reason": "The existing asymmetric multi-nozzle matrix case remains the representative-value oracle. The new consumer case checks an all-zero matrix against positive off-diagonal values with a zero floor, while keeping the positive matrix control and guarding the returned 2x2 shape before indexing. The option has no registered minimum, so zero is documented as a consumer boundary rather than a registered bound."
     },
     "flush_multiplier": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[MultimaterialWipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Nozzle multipliers 1 and 2 produce independently calculated folded flush entries. Scope is the direct configuration consumer; numeric boundaries remain unclaimed."
+      "reason": "The new direct consumer case compares zero scaling with a positive scale on the same nonzero matrix and zero destination floors. A zero-only default-to-one mutation distinguishes the zero boundary while preserving positive scaling. The option has no registered minimum; zero is a consumer scaling boundary, not a claimed registration limit."
     },
     "filament_minimal_purge_on_wipe_tower": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[MultimaterialWipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Destination floors 3, 7, and 17 are checked against zero diagonals and against scaled nonzero flush entries. Full numeric-domain and Print pipeline coverage remain unclaimed."
+      "reason": "With an all-zero matrix and zero matrix contribution, the consumer returns zero for a zero floor and the destination-specific values 3 and 7 for positive floors. The registered minimum is zero."
     },
     "wipe_tower_max_purge_speed": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -2943,18 +2946,20 @@
       "tag": "[MultimaterialWipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Volumes 4 and 16 are exercised and the larger fixture extrudes more. Flow also varies; independent volume variation and numeric boundaries remain unclaimed."
+      "reason": "The existing positive rows vary volume and flow together. The new direct WipeTower2 case holds flow positive, compares zero volume with an explicitly disabled-ramming control, and retains a positive-volume control. The registered minimum is zero."
     },
     "filament_multitool_ramming_flow": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[MultimaterialWipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Flows 2 and 8 at fixed volume 16 produce different executable unloading motion and elapsed times. Scope is direct WipeTower2 output; numeric boundaries remain unclaimed."
+      "reason": "At a fixed positive volume, the new direct WipeTower2 case compares zero flow with an explicitly disabled-ramming control, and retains a positive-flow control. The registered minimum is zero."
     },
     "filament_loading_speed": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
@@ -3614,9 +3619,10 @@
       "tag": "[WipeTowerVariance]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Real two-filament Print runs compare 35 and 120 cubic millimeters of prime volume. Positive transition counts and emitted extrusion are required; the larger value increases extrusion while retaining transition count, pairs and tools. Full numeric bounds are not claimed."
+      "reason": "The existing public Print rows compare 35 and 120 mm^3. The new public Print rows exercise the registered 1 mm^3 minimum against the meaningful 120 mm^3 positive control, requiring positive extrusion at the minimum and unchanged transition identities while extrusion increases. This avoids claiming a strict effect between adjacent valid volumes when tower geometry may quantize them to equal output."
     },
     "bridge_no_support": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -3649,9 +3655,11 @@
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[PrimeTowerFlatIroning]",
       "dimensions": [
-        "representative_values"
+        "representative_values",
+        "boundary_values",
+        "pipeline_oracle"
       ],
-      "reason": "Direct legacy WipeTower generation compares 4 and 16 square millimeter ironing areas with the gate enabled. The larger area increases parsed non-extruding XY travel commands while retaining positive extrusion and the same extrusion command count. Numeric bounds and Print wiring are not exercised."
+      "reason": "The existing direct legacy case compares positive areas. The new public Type1 Print rows keep the flat-ironing gate enabled and compare zero area with 16 mm^2, plus a 16 mm^2 gate-disabled control. The zero-area and gate-disabled rows retain equal total tower-travel XY distance even though their travel-command counts may differ; positive area adds travel-path length while tower-extrusion and model-extrusion counts stay equal. The registered minimum is zero."
     },
     "prime_tower_skip_points": {
       "test": "tests/fff_print/test_wipe_tower.cpp",

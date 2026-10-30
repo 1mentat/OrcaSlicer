@@ -927,6 +927,22 @@ TEST_CASE("Increasing prime volume increases extrusion without changing tool tra
     CHECK(high.gcode_tools == low.gcode_tools);
 }
 
+TEST_CASE("Minimum prime volume preserves a positive tower transition",
+          "[WipeTower][WipeTowerVariance][SettingsBoundary][WipeTowerTransitionBoundaries]")
+{
+    // prime_volume is registered with a minimum of 1 mm^3.  Keep both rows
+    // valid while exercising that endpoint through Print and emitted G-code.
+    const TowerMetrics minimum = process_tower(tower_config(1.));
+    const TowerMetrics positive_control = process_tower(tower_config(120.));
+
+    REQUIRE(minimum.transition_events > 0);
+    REQUIRE(positive_control.transition_events > 0);
+    CHECK(minimum.extrusion_length > 0.);
+    CHECK(positive_control.extrusion_length > minimum.extrusion_length);
+    CHECK(positive_control.transition_events == minimum.transition_events);
+    CHECK(positive_control.transition_pairs == minimum.transition_pairs);
+}
+
 TEST_CASE("Sparse tower blocks retain same-tool layers beside real changes", "[WipeTower][WipeTowerVariance]")
 {
     const TowerMetrics metrics = process_tower(tower_config(80., false, true));
@@ -2217,6 +2233,49 @@ TEST_CASE("SEMM flush matrix folds every nozzle block and keeps destination purg
     CHECK_THAT(minimum_only[2][0], WithinAbs(3.f, 1e-5f));
 }
 
+TEST_CASE("Zero purge scaling and destination floor follow the tower volume rules",
+          "[WipeTower][MultimaterialWipe][SettingsBoundary][WipeTowerTransitionBoundaries]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        {"single_extruder_multi_material", true},
+        {"purge_in_prime_tower", true},
+        {"flush_volumes_matrix", "0,10,20,0"},
+        {"flush_multiplier", 0.0},
+        {"filament_minimal_purge_on_wipe_tower", "0,0"},
+    });
+
+    const auto require_two_by_two = [](const std::vector<std::vector<float>> &matrix) {
+        REQUIRE(matrix.size() == 2);
+        REQUIRE(matrix[0].size() == 2);
+        REQUIRE(matrix[1].size() == 2);
+    };
+
+    const auto scaled_to_zero = folded_flush_config(config);
+    require_two_by_two(scaled_to_zero);
+    CHECK_THAT(scaled_to_zero[0][1], WithinAbs(0.f, 1e-5f));
+    CHECK_THAT(scaled_to_zero[1][0], WithinAbs(0.f, 1e-5f));
+
+    config.set_deserialize_strict({{"flush_multiplier", 1.0}});
+    const auto matrix_values = folded_flush_config(config);
+    require_two_by_two(matrix_values);
+    CHECK_THAT(matrix_values[0][1], WithinAbs(10.f, 1e-5f));
+    CHECK_THAT(matrix_values[1][0], WithinAbs(20.f, 1e-5f));
+
+    config.set_deserialize_strict({{"flush_volumes_matrix", "0,0,0,0"}});
+    const auto zero_matrix = folded_flush_config(config);
+    require_two_by_two(zero_matrix);
+    CHECK_THAT(zero_matrix[0][1], WithinAbs(0.f, 1e-5f));
+    CHECK_THAT(zero_matrix[1][0], WithinAbs(0.f, 1e-5f));
+
+    config.set_deserialize_strict({{"filament_minimal_purge_on_wipe_tower", "3,7"}});
+    const auto minimum_only = folded_flush_config(config);
+    require_two_by_two(minimum_only);
+    CHECK_THAT(minimum_only[0][1], WithinAbs(7.f, 1e-5f));
+    CHECK_THAT(minimum_only[1][0], WithinAbs(3.f, 1e-5f));
+}
+
 TEST_CASE("WipeTower2 purge flow and spacing alter emitted tower geometry", "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
 {
     const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
@@ -2315,6 +2374,42 @@ TEST_CASE("WipeTower2 multi-tool ramming uses volume and flow as a finite purge 
     require_finite(high);
     CHECK(high.extrusion_length > low.extrusion_length);
     CHECK(high.elapsed >= low.elapsed);
+}
+
+TEST_CASE("Zero multi-tool ramming inputs suppress the ramming move",
+          "[WipeTower][MultimaterialWipe][SettingsBoundary][WipeTowerTransitionBoundaries]")
+{
+    const auto plan = std::vector<std::tuple<float, float, unsigned int, unsigned int, float>>{
+        {0.2f, 0.2f, 0, 1, 50.f}};
+    const auto run = [&plan](const char *volume, const char *flow, bool enabled = true) {
+        return run_tower(tower_dynamic({
+            {"single_extruder_multi_material", false},
+            {"filament_multitool_ramming", enabled},
+            {"filament_multitool_ramming_volume", volume},
+            {"filament_multitool_ramming_flow", flow},
+        }), plan);
+    };
+
+    const DirectRun positive = run("16,16", "8,8");
+    const DirectRun zero_volume = run("0,0", "8,8");
+    const DirectRun zero_flow = run("16,16", "0,0");
+    const DirectRun disabled_zero_volume = run("0,0", "8,8", false);
+    const DirectRun disabled_zero_flow = run("16,16", "0,0", false);
+    require_finite(positive);
+    require_finite(zero_volume);
+    require_finite(zero_flow);
+    require_finite(disabled_zero_volume);
+    require_finite(disabled_zero_flow);
+    CHECK(positive.depth > zero_volume.depth);
+    CHECK(positive.depth > zero_flow.depth);
+    CHECK(positive.extrusion_length > zero_volume.extrusion_length);
+    CHECK(positive.extrusion_length > zero_flow.extrusion_length);
+    CHECK_THAT(zero_volume.depth, WithinAbs(disabled_zero_volume.depth, 1e-5f));
+    CHECK_THAT(zero_volume.extrusion_length, WithinAbs(disabled_zero_volume.extrusion_length, 1e-6));
+    CHECK(zero_volume.extrusion_count == disabled_zero_volume.extrusion_count);
+    CHECK_THAT(zero_flow.depth, WithinAbs(disabled_zero_flow.depth, 1e-5f));
+    CHECK_THAT(zero_flow.extrusion_length, WithinAbs(disabled_zero_flow.extrusion_length, 1e-6));
+    CHECK(zero_flow.extrusion_count == disabled_zero_flow.extrusion_count);
 }
 
 TEST_CASE("SEMM optional loading moves use parking and configured load rates", "[WipeTower][MultimaterialWipe][WipeTowerVariance]")
@@ -4865,6 +4960,7 @@ struct PipelineTrace {
     std::size_t model_extrusions = 0;
     double prewipe_xy_path = 0.;
     double prewipe_filament = 0.;
+    double tower_filament = 0.;
     double model_xy_path = 0.;
     double model_filament = 0.;
     bool saw_incoming_tool_wait = false;
@@ -4919,7 +5015,8 @@ DynamicPrintConfig contact_pipeline_config(bool enabled, bool cooldown_during_to
     return config;
 }
 
-std::string export_contact_pipeline(const DynamicPrintConfig &config)
+std::string export_contact_pipeline(const DynamicPrintConfig &config,
+                                    std::vector<double> *applied_interface_purge_lengths = nullptr)
 {
     Print print;
     Model model;
@@ -4932,7 +5029,10 @@ std::string export_contact_pipeline(const DynamicPrintConfig &config)
     const auto validation = print.validate();
     INFO("Print validation: " << validation.string << " [" << validation.opt_key << "]");
     REQUIRE(validation.string.empty());
-    return gcode(print);
+    const std::string output = gcode(print);
+    if (applied_interface_purge_lengths != nullptr)
+        *applied_interface_purge_lengths = print.config().filament_tower_interface_purge_volume.values;
+    return output;
 }
 
 struct LegacyContactPipelineRun {
@@ -5047,6 +5147,7 @@ PipelineTrace trace_contact_pipeline(const std::string &gcode, const DynamicPrin
         if (line.extruding(self) && line.dist_XY(self) > 0.f) {
             if (in_tower) {
                 ++result.tower_extrusions;
+                result.tower_filament += line.dist_E(self);
                 if (before_wipe) {
                     result.prewipe_xy_path += line.dist_XY(self);
                     result.prewipe_filament += line.dist_E(self);
@@ -5401,6 +5502,40 @@ TEST_CASE("Zero tower interface pre-extrusion length removes its emitted materia
                Catch::Matchers::WithinAbs(2. * double(positive.interface_waits), 1e-3));
     CHECK_THAT(positive.prewipe_filament - zero.prewipe_filament,
                Catch::Matchers::WithinAbs(3. * double(positive.interface_waits), 1e-3));
+    check_model_deposition_unchanged(zero, positive);
+}
+
+// Known baseline defect: Type2 plans required_depth before adding interface purge
+// length, then clips emitted wiping at that planned box boundary.
+TEST_CASE("Zero tower interface purge length removes only interface tower material",
+          "[WipeTower][WipeTowerContact][WipeTowerContactPipeline][SettingsBoundary][BaselineDefect][NotWorking]")
+{
+    DynamicPrintConfig zero_config = contact_pipeline_config(true);
+    zero_config.set_deserialize_strict({{"filament_tower_interface_purge_volume", "0,0"}});
+    DynamicPrintConfig positive_config = contact_pipeline_config(true);
+    positive_config.set_deserialize_strict({{"filament_tower_interface_purge_volume", "20,20"}});
+
+    std::vector<double> applied_zero_purge_lengths;
+    std::vector<double> applied_positive_purge_lengths;
+    const std::string zero_gcode = export_contact_pipeline(zero_config, &applied_zero_purge_lengths);
+    const std::string positive_gcode = export_contact_pipeline(positive_config, &applied_positive_purge_lengths);
+    const PipelineTrace zero = trace_contact_pipeline(zero_gcode, zero_config);
+    const PipelineTrace positive = trace_contact_pipeline(positive_gcode, positive_config);
+
+    REQUIRE_FALSE(applied_zero_purge_lengths.empty());
+    REQUIRE_FALSE(applied_positive_purge_lengths.empty());
+    CAPTURE(applied_zero_purge_lengths, applied_positive_purge_lengths);
+    CHECK(std::all_of(applied_zero_purge_lengths.begin(), applied_zero_purge_lengths.end(),
+                      [](double length) { return std::abs(length) <= 1e-6; }));
+    CHECK(std::all_of(applied_positive_purge_lengths.begin(), applied_positive_purge_lengths.end(),
+                      [](double length) { return std::abs(length - 20.) <= 1e-6; }));
+    REQUIRE(zero.interface_waits > 0);
+    REQUIRE(positive.interface_waits == zero.interface_waits);
+    REQUIRE(positive.tower_blocks == zero.tower_blocks);
+    REQUIRE(zero.tower_extrusions > 0);
+    REQUIRE(positive.tower_extrusions > 0);
+    REQUIRE(zero.tower_filament > 0.);
+    CHECK(positive.tower_filament > zero.tower_filament);
     check_model_deposition_unchanged(zero, positive);
 }
 
@@ -7489,6 +7624,44 @@ TEST_CASE("Type1 tower gap and ironing flags change emitted public tower motion"
     CHECK(open_motion.tool_commands == closed_motion.tool_commands);
     CHECK(ironing_motion.tower_travel_moves > open_motion.tower_travel_moves);
     CHECK(ironing_motion.tower_extrusion_moves == open_motion.tower_extrusion_moves);
+}
+
+TEST_CASE("Zero tower ironing area removes the public ironing travel",
+          "[WipeTower][PrimeTowerFlatIroning][SettingsBoundary][WipeTowerTransitionBoundaries]")
+{
+    const auto run = [](const char *ironing_area, bool flat_ironing_enabled) {
+        DynamicPrintConfig config = role_tower_config();
+        config.set_deserialize_strict({
+            {"prime_tower_skip_points", true},
+            {"prime_tower_flat_ironing", flat_ironing_enabled},
+            {"filament_tower_ironing_area", ironing_area},
+        });
+        const PublicPrintRun exported = run_public_print(config, {make_cube(10., 10., 2.)});
+        return inspect_export(exported.gcode, config);
+    };
+
+    const ExportMotion zero = run("0,0", true);
+    const ExportMotion positive = run("16,16", true);
+    const ExportMotion disabled = run("16,16", false);
+    REQUIRE(zero.tower_extrusion_moves > 0);
+    REQUIRE(positive.tower_extrusion_moves > 0);
+    REQUIRE(disabled.tower_extrusion_moves > 0);
+    const auto tower_travel_path = [](const ExportMotion &motion) {
+        double path = 0.;
+        for (const std::vector<TowerXYMove> &region : motion.tower_regions)
+            for (const TowerXYMove &move : region)
+                if (!move.extruding)
+                    path += std::hypot(move.x1 - move.x0, move.y1 - move.y0);
+        return path;
+    };
+    CHECK(positive.tower_travel_moves > zero.tower_travel_moves);
+    CHECK(tower_travel_path(positive) > tower_travel_path(zero));
+    CHECK(zero.tower_travel_moves >= disabled.tower_travel_moves);
+    CHECK_THAT(tower_travel_path(zero), Catch::Matchers::WithinAbs(tower_travel_path(disabled), 1e-3));
+    CHECK(positive.tower_extrusion_moves == disabled.tower_extrusion_moves);
+    CHECK(zero.tower_extrusion_moves == disabled.tower_extrusion_moves);
+    CHECK(positive.model_extrusion_moves == disabled.model_extrusion_moves);
+    CHECK(zero.model_extrusion_moves == disabled.model_extrusion_moves);
 }
 
 TEST_CASE("Flushing into support routes emitted paths and reduces tower filament",
