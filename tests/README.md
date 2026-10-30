@@ -1417,6 +1417,9 @@ of command strings. Each file contains a JSON array of literal arguments; paths
 are relative to `--root` unless absolute. The same `{root}`, `{build}`, and
 `{filter}` placeholders apply. Empty arguments after the executable are retained,
 and the preflight report records each argument file's path and SHA-256.
+For a CTest command launched through a wrapper such as `env`, include
+`--output-on-failure` and `-L {filter}` explicitly in its argument array.
+Automatic CTest option insertion inspects the first executable.
 
 Pin a reviewed catalog with `--mutants-sha256 <64-character SHA-256>`.
 Repeat this option once per `--mutants`, in the same order. The runner checks
