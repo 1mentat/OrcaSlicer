@@ -20,6 +20,7 @@
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/ProjectTask.hpp"
 #include "libslic3r/PublishSettings.hpp"
+#include "libslic3r/PNGReadWrite.hpp"
 
 #include "test_utils.hpp"
 
@@ -2694,4 +2695,66 @@ SCENARIO("a rendered no-light thumbnail does not suppress the plate thumbnail", 
             }
         }
     }
+}
+
+TEST_CASE("The small plate thumbnail averages each block of a non-square thumbnail", "[3mf]")
+{
+    ScopedSlic3rTemporaryDir temporary_dir("orca_small_thumbnail");
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10.0, 10.0, 10.0));
+    object->add_instance();
+    model.set_backup_path((temporary_dir.path() / "backup").string());
+
+    // 384x256 downsamples to 128x128 with 3x2 pixel blocks. Every block has one colour that
+    // encodes its position, so the small image must reproduce the block grid exactly.
+    const int sw = 384 / PLATE_THUMBNAIL_SMALL_WIDTH;
+    const int sh = 256 / PLATE_THUMBNAIL_SMALL_HEIGHT;
+    ThumbnailData thumbnail;
+    thumbnail.set(384, 256);
+    for (int y = 0; y < thumbnail.height; ++y)
+        for (int x = 0; x < thumbnail.width; ++x) {
+            unsigned char *pixel = &thumbnail.pixels[4 * (size_t(y) * thumbnail.width + x)];
+            pixel[0] = (unsigned char) (2 * (x / sw));
+            pixel[1] = (unsigned char) (2 * (y / sh));
+            pixel[2] = 7;
+            pixel[3] = 255;
+        }
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.plate_index = 0;
+    const std::string path = (temporary_dir.path() / "small_thumbnail.3mf").string();
+    StoreParams params;
+    params.path = path.c_str();
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list.push_back(&plate);
+    params.thumbnail_data.push_back(&thumbnail);
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    REQUIRE(open_zip_reader(&archive, path));
+    size_t size = 0;
+    void *data = mz_zip_reader_extract_file_to_heap(&archive, "Metadata/plate_1_small.png", &size, 0);
+    close_zip_reader(&archive);
+    REQUIRE(data != nullptr);
+    png::ImageColorscale small;
+    const bool decoded = png::decode_colored_png(png::ReadBuf{data, size}, small);
+    mz_free(data);
+    REQUIRE(decoded);
+    REQUIRE(small.cols == PLATE_THUMBNAIL_SMALL_WIDTH);
+    REQUIRE(small.rows == PLATE_THUMBNAIL_SMALL_HEIGHT);
+    REQUIRE(small.bytes_per_pixel == 4);
+
+    size_t mismatches = 0;
+    for (size_t y = 0; y < small.rows; ++y)
+        for (size_t x = 0; x < small.cols; ++x) {
+            const unsigned char *pixel = &small.buf[4 * (y * small.cols + x)];
+            if (pixel[0] != 2 * x || pixel[1] != 2 * y || pixel[2] != 7 || pixel[3] != 255)
+                ++mismatches;
+        }
+    CHECK(mismatches == 0);
 }
