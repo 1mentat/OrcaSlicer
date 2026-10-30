@@ -6998,10 +6998,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     g = std::clamp(0, g / sw / sh, 255);
                     b = std::clamp(0, b / sw / sh, 255);
                     a = std::clamp(0, a / sw / sh, 255);
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 0] = (unsigned char)r;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 1] = (unsigned char)g;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 2] = (unsigned char)b;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 3] = (unsigned char)a;
+                    small_pixels[4 * (i / sh * PLATE_THUMBNAIL_SMALL_WIDTH + j / sw) + 0] = (unsigned char)r;
+                    small_pixels[4 * (i / sh * PLATE_THUMBNAIL_SMALL_WIDTH + j / sw) + 1] = (unsigned char)g;
+                    small_pixels[4 * (i / sh * PLATE_THUMBNAIL_SMALL_WIDTH + j / sw) + 2] = (unsigned char)b;
+                    small_pixels[4 * (i / sh * PLATE_THUMBNAIL_SMALL_WIDTH + j / sw) + 3] = (unsigned char)a;
                     //memcpy((void*)&small_pixels[4*(i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh)], thumbnail_data.pixels.data() + 4*(i * thumbnail_data.width + j), 4);
                 }
             }
