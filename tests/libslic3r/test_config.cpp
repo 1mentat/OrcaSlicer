@@ -1180,6 +1180,17 @@ TEST_CASE("read_cli applies valid values and collects non-option arguments", "[C
     REQUIRE(keys == t_config_option_keys{"nozzle_temperature", "reduce_crossing_wall"});
 }
 
+TEST_CASE("read_cli reads --load_slicedata as the single directory the CLI expects", "[Config]") {
+    // The CLI reads this option with opt_string(), so it has to be stored as a ConfigOptionString.
+    Slic3r::DynamicPrintAndCLIConfig config;
+    t_config_option_keys extra, keys;
+    const char* argv[] = {"orca-slicer", "--load_slicedata", "cached_data_dir"};
+    REQUIRE(config.read_cli(3, argv, &extra, &keys));
+    const auto *option = config.option<ConfigOptionString>("load_slicedata");
+    REQUIRE(option != nullptr);
+    CHECK(option->value == "cached_data_dir");
+}
+
 TEST_CASE("read_cli rejects nil for a non-nullable vector option", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
