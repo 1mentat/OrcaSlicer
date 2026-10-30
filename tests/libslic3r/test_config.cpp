@@ -1922,3 +1922,23 @@ TEST_CASE("An empty list applied by index replaces the target list", "[Config][R
     edited.apply_only(saved, {"filament_ids#0"});
     CHECK(edited.option<ConfigOptionStrings>("filament_ids")->values.empty());
 }
+
+TEST_CASE("Machine-gated cut retraction distance ignores filament values but follows the filament map", "[Config]")
+{
+    // Unless long retraction is enabled per filament, the filament values are replaced by nils,
+    // so each filament takes the machine value of the extruder it is mapped to.
+    DynamicPrintConfig full_config;
+    full_config.set_key_value("enable_long_retraction_when_cut", new ConfigOptionInt(int(LongRectrationLevel::EnableMachine)));
+    const ConfigOptionFloats machine({11., 17.});
+    const ConfigOptionFloatsNullable filament({12., 16.});
+    std::vector<int> filament_to_extruder{1, 0};
+    t_config_option_keys diff_keys;
+    DynamicPrintConfig overrides;
+
+    compute_filament_override_value("retraction_distances_when_cut", &machine, &machine, &filament, full_config,
+                                    diff_keys, overrides, filament_to_extruder);
+
+    const auto *result = overrides.option<ConfigOptionFloats>("retraction_distances_when_cut");
+    REQUIRE(result != nullptr);
+    CHECK(result->values == std::vector<double>{17., 11.});
+}
