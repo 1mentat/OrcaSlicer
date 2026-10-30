@@ -82,9 +82,10 @@ std::unique_ptr<CompressedImageBuffer> compress_thumbnail_jpg(const ThumbnailDat
         rows_ptrs.emplace_back(&rgba_pixels[y * row_size]);
     }
 
-    std::vector<unsigned char> compressed_data(data.pixels.size());
-    unsigned char* compressed_data_ptr = compressed_data.data();
-    unsigned long compressed_data_size = data.pixels.size();
+    // Let libjpeg allocate the output buffer. jpeg_mem_dest() grows it with malloc() as
+    // needed and reports the final buffer and size when compression finishes.
+    unsigned char* compressed_data_ptr = nullptr;
+    unsigned long compressed_data_size = 0;
 
     jpeg_error_mgr err;
     jpeg_compress_struct info;
@@ -107,10 +108,10 @@ std::unique_ptr<CompressedImageBuffer> compress_thumbnail_jpg(const ThumbnailDat
 
     // FIXME -> Add error checking
 
+    // CompressedJPG releases the libjpeg buffer with free().
     auto out = std::make_unique<CompressedJPG>();
-    out->data = malloc(compressed_data_size);
+    out->data = compressed_data_ptr;
     out->size = size_t(compressed_data_size);
-    ::memcpy(out->data, (const void*)compressed_data.data(), out->size);
     return out;
 }
 
