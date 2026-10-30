@@ -3864,7 +3864,7 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
     // pre-processing
     // parse the gcode file to detect its producer
     {
-        m_parser.parse_file_raw(filename, [this](GCodeReader& reader, const char *begin, const char *end) {
+        const bool read_ok = m_parser.parse_file_raw(filename, [this](GCodeReader& reader, const char *begin, const char *end) {
             begin = skip_whitespaces(begin, end);
             if (begin != end && *begin == ';') {
                 // Comment.
@@ -3881,6 +3881,8 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
                 }
             }
         });
+        if (!read_ok)
+            throw Slic3r::RuntimeError(std::string("Cannot read G-code file: ") + filename);
         m_parser.reset();
 
         // if the gcode was produced by OrcaSlicer,
@@ -3919,7 +3921,7 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
     m_result.id = ++s_result_id;
     initialize_result_moves();
     size_t parse_line_callback_cntr = 10000;
-    m_parser.parse_file(filename, [this, cancel_callback, &parse_line_callback_cntr](GCodeReader& reader, const GCodeReader::GCodeLine& line) {
+    const bool read_ok = m_parser.parse_file(filename, [this, cancel_callback, &parse_line_callback_cntr](GCodeReader& reader, const GCodeReader::GCodeLine& line) {
         if (-- parse_line_callback_cntr == 0) {
             // Don't call the cancel_callback() too often, do it every at every 10000'th line.
             parse_line_callback_cntr = 10000;
@@ -3928,6 +3930,8 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
         }
         this->process_gcode_line(line, true);
     }, m_result.lines_ends);
+    if (!read_ok)
+        throw Slic3r::RuntimeError(std::string("Cannot read G-code file: ") + filename);
 
     // Don't post-process the G-code to update time stamps.
     this->finalize(false);
