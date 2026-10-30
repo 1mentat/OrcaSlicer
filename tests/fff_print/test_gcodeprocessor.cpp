@@ -1,3 +1,7 @@
+#include "libslic3r/CustomGCode.hpp"
+#include <cmath>
+#include <map>
+#include "libslic3r/ExtrusionEntity.hpp"
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_message.hpp>
@@ -38,6 +42,979 @@
 #include <vector>
 
 using namespace Slic3r;
+
+namespace elegoo_command_contracts {
+
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+void process_gcode(const std::string &gcode, const std::string &printer_model,
+                   GCodeProcessorResult &result)
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    config.printer_model.value = printer_model;
+
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+
+    GCodeProcessor processor;
+    processor.apply_config(config);
+    processor.initialize("elegoo-command-contract.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+    result = std::move(processor.extract_result());
+}
+
+void run_m6211(const std::string &printer_model, const std::string &command,
+               GCodeProcessorResult &result)
+{
+    process_gcode("M83\nG90\n"
+                  "G1 X10 Y20 Z0.2 F600\n"
+                  + command + "\n"
+                  "G1 X20 Y20 E1 F600\n",
+                  printer_model, result);
+}
+
+const GCodeProcessorResult::MoveVertex *last_extrusion(const GCodeProcessorResult &result)
+{
+    for (auto it = result.moves.rbegin(); it != result.moves.rend(); ++it)
+        if (!it->internal_only && it->type == EMoveType::Extrude)
+            return &*it;
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("Elegoo M6211 is ignored for other printer models", "[GCodeProcessor][Elegoo]")
+{
+    GCodeProcessorResult result;
+    run_m6211("Generic Marlin", "M6211 L80 T0 P20000", result);
+
+    CHECK_THAT(result.print_statistics.total_filament_load_time, WithinAbs(0.0, 1e-5));
+    CHECK(result.print_statistics.total_filament_changes == 0);
+    CHECK(last_extrusion(result) != nullptr);
+}
+
+TEST_CASE("Elegoo Carbon M6211 records clamped flush timing and cooling parameter", "[GCodeProcessor][Elegoo]")
+{
+    GCodeProcessorResult short_flush, minimum_flush, maximum_flush, over_maximum, cooled;
+    run_m6211("Elegoo Centauri Carbon", "M6211 L1 T0 P0 S210", short_flush);
+    run_m6211("elegoo centauri carbon", "M6211 L10 T0 P0 S210", minimum_flush);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L1000 T0 P0 S210", maximum_flush);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L1200 T0 P0 S210", over_maximum);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L10 T0 P20000 S210", cooled);
+
+    REQUIRE(short_flush.print_statistics.total_filament_load_time > 0.0f);
+    CHECK_THAT(short_flush.print_statistics.total_filament_load_time,
+               WithinAbs(minimum_flush.print_statistics.total_filament_load_time, 1e-4));
+    CHECK_THAT(maximum_flush.print_statistics.total_filament_load_time,
+               WithinAbs(over_maximum.print_statistics.total_filament_load_time, 1e-4));
+    CHECK_THAT(cooled.print_statistics.total_filament_load_time - minimum_flush.print_statistics.total_filament_load_time,
+               WithinAbs(20.0, 1e-3));
+
+    const auto *move = last_extrusion(cooled);
+    REQUIRE(move != nullptr);
+    CHECK_THAT(move->temperature, WithinAbs(210.0, 1e-4));
+}
+
+TEST_CASE("Elegoo Centauri Carbon 2 uses its distinct flush and cooling model", "[GCodeProcessor][Elegoo]")
+{
+    GCodeProcessorResult base, alias, extra_cooling, more_flush;
+    run_m6211("Elegoo Centauri Carbon 2", "M6211 L10 T0 P0 S250 R270", base);
+    run_m6211("Elegoo Centauri 2", "M6211 L10 T0 P0 S250 R270", alias);
+    run_m6211("Elegoo Centauri 2", "M6211 L10 T0 P20000 S250 R270", extra_cooling);
+    run_m6211("Elegoo Centauri Carbon 2", "M6211 L160 T0 K20 M100 N100 P0 S250 R270", more_flush);
+
+    REQUIRE(base.print_statistics.total_filament_load_time > 0.0f);
+    CHECK_THAT(alias.print_statistics.total_filament_load_time,
+               WithinAbs(base.print_statistics.total_filament_load_time, 1e-4));
+    CHECK(extra_cooling.print_statistics.total_filament_load_time > base.print_statistics.total_filament_load_time);
+    CHECK(more_flush.print_statistics.total_filament_load_time > base.print_statistics.total_filament_load_time);
+    REQUIRE(last_extrusion(extra_cooling) != nullptr);
+    CHECK_THAT(last_extrusion(extra_cooling)->temperature, WithinAbs(250.0, 1e-4));
+}
+
+TEST_CASE("Elegoo M6211 rejects incomplete and out-of-range filament commands", "[GCodeProcessor][Elegoo]")
+{
+    GCodeProcessorResult no_length, no_filament, invalid_filament;
+    run_m6211("Elegoo Centauri Carbon", "M6211 T0 P20000", no_length);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L40", no_filament);
+    // The fixture has one filament: both a negative slot and the first slot
+    // beyond the configured count must be rejected.
+    const int invalid_slot = GENERATE(-1, 1, 99);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L40 T" + std::to_string(invalid_slot), invalid_filament);
+
+    CHECK_THAT(no_length.print_statistics.total_filament_load_time, WithinAbs(0.0, 1e-5));
+    CHECK_THAT(no_filament.print_statistics.total_filament_load_time, WithinAbs(0.0, 1e-5));
+    CHECK_THAT(invalid_filament.print_statistics.total_filament_load_time, WithinAbs(0.0, 1e-5));
+    CHECK(no_length.print_statistics.total_filament_changes == 0);
+    CHECK(no_filament.print_statistics.total_filament_changes == 0);
+    CHECK(invalid_filament.print_statistics.total_filament_changes == 0);
+}
+
+} // namespace elegoo_command_contracts
+
+namespace extended_command_contracts {
+
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+void process_buffer(const std::string &gcode, GCodeProcessorResult &result,
+                    GCodeFlavor flavor = gcfMarlinFirmware, bool bbl_printer = false,
+                    float retract_length = 0.f)
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = flavor;
+    if (retract_length > 0.f)
+        config.retraction_length.values = {retract_length};
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = bbl_printer;
+
+    GCodeProcessor processor;
+    processor.apply_config(config);
+    processor.initialize("gcode-processor-contract.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+    result = std::move(processor.extract_result());
+}
+
+void process_file(const std::string &gcode, GCodeProcessorResult &result,
+                  GCodeFlavor flavor = gcfMarlinFirmware, bool bbl_printer = false)
+{
+    ScopedTemporaryFile temp(".gcode");
+    {
+        std::ofstream output(temp.string());
+        REQUIRE(output.good());
+        output << gcode;
+        output.flush();
+        REQUIRE(output.good());
+    }
+
+    FullPrintConfig config;
+    config.gcode_flavor.value = flavor;
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = bbl_printer;
+
+    GCodeProcessor processor;
+    processor.apply_config(config);
+    processor.process_file(temp.string());
+    result = std::move(processor.extract_result());
+}
+
+std::string orca_header_with_defaults()
+{
+    const FullPrintConfig config;
+    std::string header = "; generated by OrcaSlicer\n; BambuStudio\n; CONFIG_BLOCK_START\n";
+    for (const std::string &key : config.keys()) {
+        const ConfigOption *option = config.option(key);
+        if (option != nullptr)
+            header += "; " + key + " = " + option->serialize() + "\n";
+    }
+    header += "; CONFIG_BLOCK_END\n";
+    return header;
+}
+
+std::vector<const GCodeProcessorResult::MoveVertex *> moves_of(const GCodeProcessorResult &result, EMoveType type)
+{
+    std::vector<const GCodeProcessorResult::MoveVertex *> moves;
+    for (const auto &move : result.moves)
+        if (!move.internal_only && move.type == type)
+            moves.push_back(&move);
+    return moves;
+}
+
+} // namespace
+
+TEST_CASE("G-code line helpers select the last complete motion and tool records", "[GCodeProcessor][GCodeProcessorExtended][Parser]")
+{
+    const std::string gcode =
+        "T1\n"
+        "G1 X1 Y2 Z0.2 E0.4\n"
+        "T4\n"
+        "G2 X3 Y4 I1 J0\n"
+        "G1 X5 Y6\n";
+
+    CHECK(GCodeProcessor::get_gcode_last_filament(gcode) == 4);
+
+    double z = -1.;
+    REQUIRE(GCodeProcessor::get_last_z_from_gcode(gcode, z));
+    CHECK_THAT(z, WithinAbs(0.2, 1e-6));
+
+    Vec3f position = Vec3f::Zero();
+    REQUIRE(GCodeProcessor::get_last_position_from_gcode(gcode, position));
+    CHECK_THAT(position.x(), WithinAbs(5., 1e-6));
+    CHECK_THAT(position.y(), WithinAbs(6., 1e-6));
+    CHECK_THAT(position.z(), WithinAbs(0.2, 1e-6));
+
+    double unchanged_z = 17.;
+    CHECK_FALSE(GCodeProcessor::get_last_z_from_gcode("; only a comment\n", unchanged_z));
+    CHECK_THAT(unchanged_z, WithinAbs(17., 1e-6));
+}
+
+TEST_CASE("Absolute XYZ and relative E preserve analytic endpoints and extrusion deltas", "[GCodeProcessor][GCodeProcessorExtended][Modal]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "G90\nM83\n"
+        "G1 X1 Y2 Z0.2 F600\n"
+        "G1 X11 Y2 E2 F600\n"
+        "G91\n"
+        "G1 X1 Y-2 E0.5\n"
+        "G90\n"
+        "G1 X20 Y0 E3\n", result);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 3);
+
+    CHECK_THAT(extrusions[0]->position.x(), WithinAbs(11., 1e-4));
+    CHECK_THAT(extrusions[0]->position.y(), WithinAbs(2., 1e-4));
+    CHECK_THAT(extrusions[0]->delta_extruder, WithinAbs(2., 1e-4));
+    CHECK_THAT(extrusions[1]->position.x(), WithinAbs(12., 1e-4));
+    CHECK_THAT(extrusions[1]->position.y(), WithinAbs(0., 1e-4));
+    CHECK_THAT(extrusions[1]->delta_extruder, WithinAbs(0.5, 1e-4));
+    CHECK_THAT(extrusions[2]->position.x(), WithinAbs(20., 1e-4));
+    CHECK_THAT(extrusions[2]->position.y(), WithinAbs(0., 1e-4));
+    CHECK_THAT(extrusions[2]->delta_extruder, WithinAbs(3., 1e-4));
+}
+
+TEST_CASE("G92 and unit changes reset coordinates without changing physical millimeters", "[GCodeProcessor][GCodeProcessorExtended][Modal]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "G90\nM82\nG20\n"
+        "G1 X1 Y1 Z0.1 E1 F60\n"
+        "G92 X0 Y0 Z0 E0\n"
+        "G21\n"
+        "G1 X10 Y0 Z0.2 E1 F600\n", result);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 2);
+    CHECK_THAT(extrusions[0]->position.x(), WithinAbs(25.4, 1e-4));
+    CHECK_THAT(extrusions[0]->position.y(), WithinAbs(25.4, 1e-4));
+    CHECK_THAT(extrusions[0]->delta_extruder, WithinAbs(25.4, 1e-4));
+    CHECK_THAT(extrusions[1]->position.x(), WithinAbs(35.4, 1e-4));
+    CHECK_THAT(extrusions[1]->position.y(), WithinAbs(25.4, 1e-4));
+    CHECK_THAT(extrusions[1]->position.z(), WithinAbs(2.74, 1e-4));
+    CHECK_THAT(extrusions[1]->delta_extruder, WithinAbs(1., 1e-4));
+}
+
+TEST_CASE("Thermal, fan, and pressure commands are stamped onto following moves", "[GCodeProcessor][GCodeProcessorExtended][State]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\nM104 S205\nM106 S128\nM900 K0.42\n"
+        "G1 X10 Y0 Z0.2 E1 F600\n"
+        "M107\nM572 S0.18\nM109 S210\n"
+        "G1 X20 Y0 E1 F600\n", result);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 2);
+    CHECK_THAT(extrusions[0]->temperature, WithinAbs(205., 1e-4));
+    CHECK_THAT(extrusions[0]->fan_speed, WithinAbs(100. * 128. / 255., 1e-4));
+    CHECK_THAT(extrusions[0]->pressure_advance, WithinAbs(0.42, 1e-4));
+    CHECK_THAT(extrusions[1]->temperature, WithinAbs(210., 1e-4));
+    CHECK_THAT(extrusions[1]->fan_speed, WithinAbs(0., 1e-4));
+    CHECK_THAT(extrusions[1]->pressure_advance, WithinAbs(0.18, 1e-4));
+}
+
+TEST_CASE("Klipper pressure and acceleration commands update the next move's metadata", "[GCodeProcessor][GCodeProcessorExtended][Firmware]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\nSET_PRESSURE_ADVANCE ADVANCE=0.31\n"
+        "SET_VELOCITY_LIMIT ACCEL=500\n"
+        "G1 X10 Y0 Z0.2 E1 F600\n", result, gcfKlipper);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 1);
+    CHECK_THAT(extrusions.front()->pressure_advance, WithinAbs(0.31, 1e-4));
+    CHECK_THAT(extrusions.front()->acceleration, WithinAbs(500., 1e-3));
+}
+
+TEST_CASE("Role geometry and layer tags are carried to extrusion vertices", "[GCodeProcessor][GCodeProcessorExtended][Tags]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\n"
+        ";LAYER_CHANGE\n"
+        "; Z_HEIGHT: 0.2\n"
+        ";TYPE:Outer wall\n"
+        ";WIDTH:0.80\n"
+        ";HEIGHT:0.30\n"
+        "G1 X10 Y0 Z0.2 E1 F600\n"
+        ";LAYER_CHANGE\n"
+        ";TYPE:Inner wall\n"
+        "G1 X20 Y0 E1\n", result);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 2);
+    CHECK(extrusions[0]->extrusion_role == erExternalPerimeter);
+    CHECK_THAT(extrusions[0]->width, WithinAbs(0.80, 1e-4));
+    CHECK_THAT(extrusions[0]->height, WithinAbs(0.30, 1e-4));
+    CHECK(extrusions[0]->layer_id == 0);
+    CHECK_THAT(extrusions[0]->print_z, WithinAbs(0.2, 1e-4));
+    CHECK(extrusions[1]->extrusion_role == erPerimeter);
+    CHECK(extrusions[1]->layer_id == 1);
+}
+
+TEST_CASE("Arc extrusion ends at its declared endpoint and remains an extrusion", "[GCodeProcessor][GCodeProcessorExtended][Arcs]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\n"
+        "G1 X0 Y0 Z0.2 F600\n"
+        "G1 X10 Y0 E1 F600\n"
+        "G2 X0 Y10 I-5 J5 E1 F600\n", result);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() > 2);
+    CHECK_THAT(extrusions.back()->position.x(), WithinAbs(0., 1e-3));
+    CHECK_THAT(extrusions.back()->position.y(), WithinAbs(10., 1e-3));
+    float arc_extrusion = 0.f;
+    for (size_t i = 1; i < extrusions.size(); ++i)
+        arc_extrusion += extrusions[i]->delta_extruder;
+    CHECK_THAT(arc_extrusion, WithinAbs(1., 1e-3));
+}
+
+TEST_CASE("Firmware retract, homing, and explicit retract markers classify moves", "[GCodeProcessor][GCodeProcessorExtended][Commands]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\n"
+        "G1 X10 Y0 Z0.2 E1 F600\n"
+        "G10\nG11\nG22\nG23\nG28 X Y\n"
+        "G1 X20 Y0 E1 F600\n", result, gcfMarlinFirmware, false, 1.0f);
+    const auto retracts = moves_of(result, EMoveType::Retract);
+    const auto unretracts = moves_of(result, EMoveType::Unretract);
+    REQUIRE(retracts.size() >= 2);
+    REQUIRE(unretracts.size() >= 2);
+    CHECK(retracts.front()->delta_extruder < 0.f);
+    CHECK(unretracts.front()->delta_extruder > 0.f);
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() >= 2);
+    CHECK_THAT(extrusions.back()->position.x(), WithinAbs(20., 1e-3));
+    CHECK_THAT(extrusions.back()->position.y(), WithinAbs(0., 1e-3));
+}
+
+TEST_CASE("Bambu producer comments retain standard roles during file processing", "[GCodeProcessor][GCodeProcessorExtended][Producer]")
+{
+    GCodeProcessorResult result;
+    process_file(
+        orca_header_with_defaults() +
+        "M83\nG90\n"
+        "; FEATURE: Outer wall\n"
+        "G1 X10 Y0 Z0.2 E1 F600\n"
+        "; CHANGE_LAYER\n"
+        "; FEATURE: Inner wall\n"
+        "G1 X20 Y0 E1 F600\n", result, gcfMarlinFirmware, true);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 2);
+    CHECK(extrusions[0]->extrusion_role == erExternalPerimeter);
+    CHECK(extrusions[1]->extrusion_role == erPerimeter);
+    CHECK(extrusions[0]->layer_id == 0);
+    CHECK(extrusions[1]->layer_id == 0);
+}
+
+TEST_CASE("Skippable tags contribute only time inside the requested region", "[GCodeProcessor][GCodeProcessorExtended][Tags]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\n"
+        ";TYPE:Outer wall\n"
+        "; SKIPPABLE_START\n"
+        "; SKIPTYPE: timelapse\n"
+        "G1 X10 Y0 Z0.2 E1 F600\n"
+        "; SKIPPABLE_END\n"
+        "G1 X20 Y0 E1 F600\n", result);
+    REQUIRE(result.print_statistics.modes[0].time > 0.f);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 2);
+    CHECK(extrusions[0]->time[0] > 0.f);
+    CHECK(extrusions[1]->time[0] > 0.f);
+
+    // The result exposes the estimator's partition explicitly.  Check that the
+    // marked move contributes to the timelapse bucket and the following move does
+    // not, rather than merely checking that both moves took nonzero time.
+    const auto skipped = result.skippable_part_time.find(SkipType::stTimelapse);
+    REQUIRE(skipped != result.skippable_part_time.end());
+    CHECK(skipped->second > 0.f);
+    CHECK_THAT(skipped->second, WithinAbs(extrusions[0]->time[0], 1e-3));
+    CHECK(skipped->second < result.print_statistics.modes[0].time);
+}
+
+TEST_CASE("G1 retains tagged height at zero Z and classifies E-only recovery",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\n"
+        ";TYPE:Inner wall\n;HEIGHT:0.30\n"
+        "G1 X10 Y0 Z0 E1 F600\n"
+        "G1 X20 Y0 E-0.25\n"
+        "G1 X20 Y0 E0.25\n", result);
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    const auto travels = moves_of(result, EMoveType::Travel);
+    const auto unretracts = moves_of(result, EMoveType::Unretract);
+    REQUIRE(extrusions.size() == 1);
+    REQUIRE(travels.size() == 1);
+    REQUIRE(unretracts.size() == 1);
+    CHECK_THAT(extrusions.front()->position.z(), WithinAbs(0.30, 1e-4));
+    CHECK_THAT(travels.front()->position.x(), WithinAbs(20.0, 1e-4));
+    CHECK_THAT(travels.front()->delta_extruder, WithinAbs(-0.25, 1e-4));
+    CHECK_THAT(unretracts.front()->position.z(), WithinAbs(0.30, 1e-4));
+    CHECK_THAT(unretracts.front()->delta_extruder, WithinAbs(0.25, 1e-4));
+}
+
+TEST_CASE("VG1 relative motion advances the next saved move without recording virtual moves",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\n"
+        "VG1 X10 Y0 E1 F600\n"
+        "G91\n"
+        "VG1 X5 Y5 E0.5\n"
+        "G1 X5 Y5 E2 F600\n", result);
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 1);
+    CHECK_THAT(extrusions.front()->position.x(), WithinAbs(20.0, 1e-4));
+    CHECK_THAT(extrusions.front()->position.y(), WithinAbs(10.0, 1e-4));
+    CHECK_THAT(extrusions.front()->delta_extruder, WithinAbs(2.0, 1e-4));
+}
+
+TEST_CASE("IJ arcs accept a single center offset axis and preserve quarter-circle geometry",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    struct ArcFixture {
+        std::string gcode;
+        float end_x;
+        float end_y;
+    };
+    const std::vector<ArcFixture> fixtures{
+        { "M83\nG90\nG1 X10 Y0 Z0.2 F600\nG3 X0 Y10 I-10 E1 F600\n", 0.0f, 10.0f },
+        { "M83\nG90\nG1 X0 Y10 Z0.2 F600\nG3 X-10 Y0 J-10 E1 F600\n", -10.0f, 0.0f },
+    };
+
+    for (const ArcFixture &fixture : fixtures) {
+        INFO(fixture.gcode);
+        GCodeProcessorResult result;
+        process_buffer(fixture.gcode, result);
+        const auto extrusions = moves_of(result, EMoveType::Extrude);
+        REQUIRE(extrusions.size() > 2);
+        CHECK_THAT(extrusions.back()->position.x(), WithinAbs(fixture.end_x, 1e-3));
+        CHECK_THAT(extrusions.back()->position.y(), WithinAbs(fixture.end_y, 1e-3));
+
+        float total_extrusion = 0.0f;
+        for (const auto *move : extrusions) {
+            CHECK_THAT(std::hypot(double(move->position.x()), double(move->position.y())),
+                       WithinAbs(10.0, 1e-2));
+            total_extrusion += move->delta_extruder;
+        }
+        CHECK_THAT(total_extrusion, WithinAbs(1.0, 1e-3));
+    }
+}
+
+TEST_CASE("Full-circle IJ arcs in inch mode traverse the whole radius and retain extrusion",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\nG20\n"
+        "G1 X1 Y0 Z0.2 F600\n"
+        "G3 X1 Y0 I-1 J0 E0.1 F600\n", result);
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() > 20);
+    float min_x = extrusions.front()->position.x();
+    float max_x = min_x;
+    float min_y = extrusions.front()->position.y();
+    float max_y = min_y;
+    float total_extrusion = 0.0f;
+    for (const auto *move : extrusions) {
+        CHECK_THAT(std::hypot(double(move->position.x()), double(move->position.y())),
+                   WithinAbs(25.4, 0.05));
+        min_x = std::min(min_x, move->position.x());
+        max_x = std::max(max_x, move->position.x());
+        min_y = std::min(min_y, move->position.y());
+        max_y = std::max(max_y, move->position.y());
+        total_extrusion += move->delta_extruder;
+    }
+    CHECK(min_x < -24.5f);
+    CHECK(max_x > 24.5f);
+    CHECK(min_y < -24.5f);
+    CHECK(max_y > 24.5f);
+    CHECK_THAT(total_extrusion, WithinAbs(2.54, 1e-3));
+    CHECK_THAT(extrusions.back()->position.x(), WithinAbs(25.4, 1e-3));
+    CHECK_THAT(extrusions.back()->position.y(), WithinAbs(0.0, 1e-3));
+}
+
+TEST_CASE("Incomplete and malformed arcs leave the following linear move intact",
+          "[GCodeProcessor][GCodeMotionGap]")
+{
+    GCodeProcessorResult result;
+    process_buffer(
+        "M83\nG90\nG1 X10 Y0 Z0.2 F600\n"
+        "G2 X0 Y10\n"
+        "G3 X0 Y10 Ibad J0\n"
+        "G3 X0 Y10 I-10 Jbad\n"
+        "G1 X20 Y0 E1 F600\n", result);
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 1);
+    CHECK_THAT(extrusions.front()->position.x(), WithinAbs(20.0, 1e-4));
+    CHECK_THAT(extrusions.front()->position.y(), WithinAbs(0.0, 1e-4));
+    CHECK_THAT(extrusions.front()->delta_extruder, WithinAbs(1.0, 1e-4));
+}
+
+} // namespace extended_command_contracts
+
+namespace gcode_processor_deep_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
+
+namespace {
+
+struct RunOptions {
+    GCodeFlavor flavor = gcfMarlinFirmware;
+    bool bbl_printer = false;
+    double retract_length = 0.0;
+    double unload_time = 0.0;
+    double max_speed_e = 0.0;
+    std::vector<double> filament_diameters;
+    std::vector<int> filament_map;
+};
+
+struct TestResult : GCodeProcessorResult {
+    TestResult() = default;
+    TestResult(TestResult&& other) noexcept { GCodeProcessorResult::operator=(std::move(other)); }
+    TestResult& operator=(TestResult&& other) noexcept
+    {
+        GCodeProcessorResult::operator=(std::move(other));
+        return *this;
+    }
+    TestResult& operator=(GCodeProcessorResult&& other) noexcept
+    {
+        GCodeProcessorResult::operator=(std::move(other));
+        return *this;
+    }
+};
+
+TestResult process_buffer(const std::string& gcode, RunOptions options = {})
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = options.flavor;
+    if (options.retract_length > 0.0)
+        config.retraction_length.values = {options.retract_length};
+    if (options.unload_time > 0.0)
+        config.machine_unload_filament_time.value = options.unload_time;
+    if (!options.filament_diameters.empty())
+        config.filament_diameter.values = options.filament_diameters;
+    if (!options.filament_map.empty())
+        config.filament_map.values = options.filament_map;
+    if (options.max_speed_e > 0.0)
+        config.machine_max_speed_e.values = {options.max_speed_e, options.max_speed_e,
+                                              options.max_speed_e, options.max_speed_e};
+
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = options.bbl_printer;
+
+    GCodeProcessor processor;
+    processor.apply_config(config);
+    processor.initialize("gcode_processor_contract.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+    TestResult result;
+    result = std::move(processor.extract_result());
+    return result;
+}
+
+TestResult process_file(const std::string& gcode, RunOptions options = {})
+{
+    ScopedTemporaryFile temp(".gcode");
+    {
+        std::ofstream output(temp.string());
+        REQUIRE(output.good());
+        output << gcode;
+        output.flush();
+        REQUIRE(output.good());
+    }
+
+    FullPrintConfig config;
+    config.gcode_flavor.value = options.flavor;
+    if (options.filament_diameters.empty() == false)
+        config.filament_diameter.values = options.filament_diameters;
+    if (options.filament_map.empty() == false)
+        config.filament_map.values = options.filament_map;
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = options.bbl_printer;
+
+    GCodeProcessor processor;
+    processor.apply_config(config);
+    processor.process_file(temp.string());
+    TestResult result;
+    result = std::move(processor.extract_result());
+    return result;
+}
+
+std::vector<const GCodeProcessorResult::MoveVertex *> moves_of(const GCodeProcessorResult& result, EMoveType type)
+{
+    std::vector<const GCodeProcessorResult::MoveVertex *> out;
+    for (const auto& move : result.moves)
+        if (!move.internal_only && move.type == type)
+            out.push_back(&move);
+    return out;
+}
+
+const GCodeProcessorResult::MoveVertex *last_move_of(const GCodeProcessorResult& result, EMoveType type)
+{
+    for (auto it = result.moves.rbegin(); it != result.moves.rend(); ++it)
+        if (!it->internal_only && it->type == type)
+            return &*it;
+    return nullptr;
+}
+
+double total_extruded_mm(const GCodeProcessorResult& result)
+{
+    double total = 0.0;
+    for (const auto& move : result.moves)
+        if (!move.internal_only && move.type == EMoveType::Extrude)
+            total += move.delta_extruder;
+    return total;
+}
+
+} // namespace
+
+TEST_CASE("Custom markers create typed events and preserve per-Z metadata", "[GCodeProcessor][GCodeProcessorDeep][Metadata]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\nG1 X5 Y0 Z0.2 E0.5 F600\nG1 X10 E0.5\n"
+        "; COLOR_CHANGE,T0,#112233\n"
+        "G1 X15 E0.5\nG1 X20 E0.5\n"
+        "; PAUSE_PRINTING\n"
+        "G1 X25 E0.5\nG1 X30 E0.5\n"
+        "; CUSTOM_GCODE\n"
+        "G1 X35 E0.5\nG1 X40 E0.5\n", RunOptions{gcfMarlinFirmware, true});
+
+    const auto color = moves_of(result, EMoveType::Color_change);
+    const auto pause = moves_of(result, EMoveType::Pause_Print);
+    const auto custom = moves_of(result, EMoveType::Custom_GCode);
+    REQUIRE(color.size() == 1);
+    REQUIRE(pause.size() == 1);
+    REQUIRE(custom.size() == 1);
+    REQUIRE(result.custom_gcode_per_print_z.size() == 3);
+    CHECK(result.custom_gcode_per_print_z[0].type == CustomGCode::ColorChange);
+    CHECK(result.custom_gcode_per_print_z[0].extruder == 1);
+    CHECK(result.custom_gcode_per_print_z[0].color == "#112233");
+    CHECK(result.custom_gcode_per_print_z[1].type == CustomGCode::PausePrint);
+    CHECK(result.custom_gcode_per_print_z[2].type == CustomGCode::Custom);
+    CHECK_THAT(result.custom_gcode_per_print_z[0].print_z, WithinAbs(0.2, 1e-4));
+    CHECK_THAT(result.custom_gcode_per_print_z[1].print_z, WithinAbs(0.2, 1e-4));
+    CHECK_THAT(result.custom_gcode_per_print_z[2].print_z, WithinAbs(0.2, 1e-4));
+    // Two planned moves precede each timed marker so the estimator flushes a
+    // nonempty partition. A single move would leave only the synthetic final
+    // ColorChange bucket and could hide a misclassified marker.
+    const auto &times = result.print_statistics.modes[0].custom_gcode_times;
+    REQUIRE(times.size() == 3);
+    CHECK(times[0].first == CustomGCode::ColorChange);
+    CHECK(times[1].first == CustomGCode::PausePrint);
+    CHECK(times[2].first == CustomGCode::ColorChange);
+    CHECK(times[0].second.first >= 1.f); // 10 mm at 600 mm/min, plus acceleration.
+    CHECK(times[1].second.first >= 1.f);
+    CHECK(times[2].second.first >= 2.f);
+    const double partition_sum = times[0].second.first + times[1].second.first + times[2].second.first;
+    CHECK_THAT(partition_sum, WithinAbs(result.print_statistics.modes[0].time, 1e-5));
+    CHECK_THAT(times[1].second.second, WithinAbs(times[1].second.first + times[2].second.first, 1e-5));
+    REQUIRE(result.print_statistics.volumes_per_color_change.size() == 2);
+    CHECK(result.print_statistics.volumes_per_color_change.front() > 0.0);
+    CHECK(result.print_statistics.volumes_per_color_change.back() > 0.0);
+}
+
+TEST_CASE("Wipe, wipe tower, and flush regions partition move and filament statistics", "[GCodeProcessor][GCodeProcessorDeep][Metadata]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\nG1 X0 Y0 Z0.2 F600\n"
+        "; FEATURE: Outer wall\nG1 X10 Y0 E1 F600\n"
+        "; WIPE_START\nG1 X20 Y0 E1\n; WIPE_END\n"
+        "; FEATURE: Prime tower\n; WIPE_TOWER_START\nG1 X30 Y0 E1\n; WIPE_TOWER_END\n"
+        "; FLUSH_START\nG10\nG11\n; FLUSH_END\n"
+        "; VFLUSH_START\nG10\nG11\n; VFLUSH_END\n",
+        RunOptions{gcfMarlinFirmware, true, 1.0});
+
+    const auto wipes = moves_of(result, EMoveType::Wipe);
+    REQUIRE(wipes.size() == 1);
+    CHECK_THAT(wipes.front()->width, WithinAbs(GCodeProcessor::Wipe_Width, 1e-6));
+    CHECK_THAT(wipes.front()->height, WithinAbs(GCodeProcessor::Wipe_Height, 1e-6));
+
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 2);
+    REQUIRE(result.print_statistics.wipe_tower_volumes_per_extruder.count(0) == 1);
+    REQUIRE(result.print_statistics.flush_per_filament.count(0) == 1);
+    CHECK(result.print_statistics.wipe_tower_volumes_per_extruder.at(0) > 0.0);
+    CHECK(result.print_statistics.flush_per_filament.at(0) > 0.0);
+    CHECK(result.print_statistics.total_volumes_per_extruder.at(0) >
+          result.print_statistics.model_volumes_per_extruder.at(0));
+}
+
+TEST_CASE("External purge contributes to flush filament without creating a motion", "[GCodeProcessor][GCodeProcessorDeep][Metadata]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\nG1 X10 Y0 Z0.2 E1 F600\n"
+        "; EXTERNAL_PURGE 2.5\nG1 X20 Y0 E1 F600\n");
+    REQUIRE(result.print_statistics.flush_per_filament.count(0) == 1);
+    const double filament_area = PI * 0.25 * 1.75 * 1.75;
+    CHECK_THAT(result.print_statistics.flush_per_filament.at(0),
+               WithinAbs(2.5 * filament_area, 1e-3));
+    CHECK(moves_of(result, EMoveType::Extrude).size() == 2);
+}
+
+TEST_CASE("M221 scales planned extrusion feed without changing geometric E", "[GCodeProcessor][GCodeProcessorDeep][Flow]")
+{
+    const std::string prefix = "M83\nG90\nG1 X0 Y0 Z0.2 F600\n";
+    RunOptions constrained;
+    constrained.max_speed_e = 0.75;
+    const auto full = process_buffer(prefix + "M221 S100\nG1 X20 Y0 E2 F600\n", constrained);
+    const auto half = process_buffer(prefix + "M221 S50\nG1 X20 Y0 E2 F600\n", constrained);
+    const auto full_move = last_move_of(full, EMoveType::Extrude);
+    const auto half_move = last_move_of(half, EMoveType::Extrude);
+    REQUIRE(full_move != nullptr);
+    REQUIRE(half_move != nullptr);
+    CHECK_THAT(full_move->delta_extruder, WithinAbs(2.0, 1e-5));
+    CHECK_THAT(half_move->delta_extruder, WithinAbs(2.0, 1e-5));
+    CHECK(full_move->time[0] > half_move->time[0]);
+    CHECK(full.print_statistics.modes[0].time > half.print_statistics.modes[0].time);
+}
+
+TEST_CASE("M204, M205, and M566 stamp acceleration and jerk limits", "[GCodeProcessor][GCodeProcessorDeep][Limits]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\nM204 P420 R310 T280\nM205 X7 Y8 Z9 E10 J0.03\nM566 X1 Y2 Z3 E4\n"
+        "G1 X10 Y0 Z0.2 E1 F600\nG1 X20 Y0 E1 F600\n", RunOptions{gcfRepRapSprinter});
+    const auto extrusion = last_move_of(result, EMoveType::Extrude);
+    REQUIRE(extrusion != nullptr);
+    CHECK_THAT(extrusion->acceleration, WithinAbs(420.0, 1e-3));
+    CHECK_THAT(extrusion->jerk, WithinAbs(1.0 / 60.0, 1e-4));
+    CHECK(extrusion->time[0] > 0.0f);
+}
+
+TEST_CASE("Legacy M204 S/T forms set extrusion, travel, and retract acceleration", "[GCodeProcessor][GCodeProcessorDeep][Limits]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\nM204 S330 T220\nG1 X10 Y0 Z0.2 E1 F600\nG1 X20 Y0 F600\n"
+        "G10\nG11\n", RunOptions{gcfMarlinLegacy, false, 1.0});
+    const auto extrusion = moves_of(result, EMoveType::Extrude);
+    const auto travels = moves_of(result, EMoveType::Travel);
+    const auto retracts = moves_of(result, EMoveType::Retract);
+    REQUIRE(!extrusion.empty());
+    REQUIRE(!travels.empty());
+    REQUIRE(!retracts.empty());
+    CHECK_THAT(extrusion.back()->acceleration, WithinAbs(330.0, 1e-3));
+    CHECK_THAT(travels.back()->acceleration, WithinAbs(330.0, 1e-3));
+    CHECK_THAT(retracts.back()->acceleration, WithinAbs(220.0, 1e-3));
+}
+
+TEST_CASE("Klipper velocity limit accepts acceleration, velocity, and corner speed independently", "[GCodeProcessor][GCodeProcessorDeep][Klipper]")
+{
+    const auto baseline = process_buffer(
+        "M83\nG90\nG1 X10 Y0 Z0.2 E1 F2400\nG1 X20 Y0 E1 F2400\n", RunOptions{gcfKlipper});
+    const auto result = process_buffer(
+        "M83\nG90\nSET_VELOCITY_LIMIT VELOCITY=12 ACCEL=480 SQUARE_CORNER_VELOCITY=3\n"
+        "G1 X10 Y0 Z0.2 E1 F2400\nG1 X20 Y0 E1 F2400\n", RunOptions{gcfKlipper});
+    const auto extrusion = last_move_of(result, EMoveType::Extrude);
+    REQUIRE(extrusion != nullptr);
+    CHECK_THAT(extrusion->acceleration, WithinAbs(480.0, 1e-3));
+    CHECK(extrusion->jerk > 0.0f);
+    CHECK(result.print_statistics.modes[0].time > baseline.print_statistics.modes[0].time);
+}
+
+TEST_CASE("G29 timing is gated by BBL mode and M622/M623 measurement state", "[GCodeProcessor][GCodeProcessorDeep][Timing]")
+{
+    const std::string prefix = "M83\nG90\nG1 X1 Y0 Z0.2 E0.1 F600\n";
+    const auto generic = process_buffer(prefix + "G29\nG1 X2 Y0 E0.1 F600\n", RunOptions{gcfMarlinFirmware, false});
+    const auto bbl_off = process_buffer(prefix + "G29\nG1 X2 Y0 E0.1 F600\n", RunOptions{gcfMarlinFirmware, true});
+    const auto bbl_on = process_buffer(prefix + "M622 J1\nG29\nM623\nG1 X2 Y0 E0.1 F600\n", RunOptions{gcfMarlinFirmware, true});
+    CHECK(generic.print_statistics.modes[0].time > 200.0f);
+    CHECK(bbl_off.print_statistics.modes[0].time < 1.0f);
+    CHECK(bbl_on.print_statistics.modes[0].time > bbl_off.print_statistics.modes[0].time + 200.0f);
+}
+
+TEST_CASE("M1020 selects valid mapped filaments and rejects out-of-range IDs", "[GCodeProcessor][GCodeProcessorDeep][Firmware]")
+{
+    RunOptions options;
+    options.filament_diameters = {1.75, 1.75};
+    options.filament_map = {1, 2};
+    const auto result = process_buffer(
+        "M83\nG90\nM1020 S0 H0\nG1 X10 Y0 Z0.2 E1 F600\n"
+        "M1020 S1 H1\nG1 X20 Y0 E1 F600\nM1020 S99 H0\nG1 X30 Y0 E1 F600\n", options);
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    const auto changes = moves_of(result, EMoveType::Tool_change);
+    REQUIRE(extrusions.size() == 3);
+    REQUIRE(changes.size() >= 2);
+    CHECK(extrusions[1]->extruder_id != extrusions[0]->extruder_id);
+    CHECK(extrusions[2]->extruder_id == extrusions[1]->extruder_id);
+}
+
+TEST_CASE("M132 resets only the selected absolute axis origin", "[GCodeProcessor][GCodeProcessorDeep][Modal]")
+{
+    const auto reset_x = process_buffer(
+        "M83\nG90\nG1 X5 Y2 Z0.2 E1 F600\nG92 X0\nM132 X\nG1 X10 Y2 E1 F600\n");
+    const auto ordinary = process_buffer(
+        "M83\nG90\nG1 X5 Y2 Z0.2 E1 F600\nG92 X0\nG1 X10 Y2 E1 F600\n");
+    const auto reset_move = last_move_of(reset_x, EMoveType::Extrude);
+    const auto ordinary_move = last_move_of(ordinary, EMoveType::Extrude);
+    REQUIRE(reset_move != nullptr);
+    REQUIRE(ordinary_move != nullptr);
+    CHECK_THAT(reset_move->position.x(), WithinAbs(10.0, 1e-4));
+    CHECK_THAT(ordinary_move->position.x(), WithinAbs(15.0, 1e-4));
+    CHECK_THAT(reset_move->position.y(), WithinAbs(2.0, 1e-4));
+}
+
+TEST_CASE("M400, M191, and SYNC add exactly their modeled delays", "[GCodeProcessor][GCodeProcessorDeep][Timing]")
+{
+    const std::string base = "M83\nG90\nG1 X10 Y0 Z0.2 E1 F600\nG1 X20 Y0 E1 F600\n";
+    const auto no_wait = process_buffer(base);
+    const auto waits = process_buffer(base + "M400 S2 P500\nM191 S41\nSYNC T3\n");
+    const float delta = waits.print_statistics.modes[0].time - no_wait.print_statistics.modes[0].time;
+    CHECK_THAT(delta, WithinAbs(2.0 + 720.0 + 3.0, 1e-2));
+    CHECK(waits.print_statistics.modes[0].time > no_wait.print_statistics.modes[0].time);
+}
+
+TEST_CASE("Object labels attach to moves until the matching stop tag", "[GCodeProcessor][GCodeProcessorDeep][Metadata]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\n; start printing object: 7\n"
+        "G1 X10 Y0 Z0.2 E1 F600\n; stop printing object\n"
+        "G1 X20 Y0 E1 F600\n");
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 2);
+    CHECK(extrusions[0]->object_label_id == 7);
+    CHECK(extrusions[1]->object_label_id == -1);
+}
+
+TEST_CASE("Unknown skippable types are isolated from timelapse accounting", "[GCodeProcessor][GCodeProcessorDeep][Timing]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\n; SKIPPABLE_START\n; SKIPTYPE: vendor_extra\n"
+        "G1 X10 Y0 Z0.2 E1 F600\n; SKIPPABLE_END\nG1 X20 Y0 E1 F600\n");
+    REQUIRE(result.print_statistics.modes[0].time > 0.0f);
+    const auto other = result.skippable_part_time.find(SkipType::stOther);
+    REQUIRE(other != result.skippable_part_time.end());
+    CHECK(other->second > 0.0f);
+    CHECK(result.skippable_part_time.find(SkipType::stTimelapse) == result.skippable_part_time.end());
+}
+
+TEST_CASE("M108 and M135 tool aliases are flavor-gated", "[GCodeProcessor][GCodeProcessorDeep][Firmware]")
+{
+    const std::string body = "M83\nG90\nT0\nG1 X10 Y0 Z0.2 E1 F600\nM108 T1\nM135 T1\nG1 X20 Y0 E1 F600\n";
+    RunOptions mapped;
+    mapped.filament_diameters = {1.75, 1.75};
+    mapped.filament_map = {1, 2};
+    mapped.flavor = gcfSailfish;
+    const auto sailfish = process_buffer(body, mapped);
+    mapped.flavor = gcfMakerWare;
+    const auto makerware = process_buffer(body, mapped);
+    mapped.flavor = gcfMarlinFirmware;
+    const auto marlin = process_buffer(body, mapped);
+    CHECK(sailfish.print_statistics.total_extruder_changes >= 1);
+    CHECK(makerware.print_statistics.total_extruder_changes >= 1);
+    CHECK(marlin.print_statistics.total_extruder_changes == 0);
+}
+
+TEST_CASE("Malformed and unknown commands do not corrupt later valid motion", "[GCodeProcessor][GCodeProcessorDeep][Recovery]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\nG1 X10 Y0 Z0.2 E1 F600\n"
+        "G1 Xbad Y?? Eoops\nUNKNOWN FOO BAR\n; malformed tag WIDTH:not-a-number\n"
+        ";VUNKNOWN FOO\nG1 X20 Y0 E1 F600\n");
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() == 2);
+    CHECK_THAT(extrusions.back()->position.x(), WithinAbs(20.0, 1e-4));
+    CHECK_THAT(extrusions.back()->delta_extruder, WithinAbs(1.0, 1e-4));
+    CHECK(std::isfinite(result.print_statistics.modes[0].time));
+}
+
+TEST_CASE("File import keeps a valid Orca config block and ignores malformed body lines", "[GCodeProcessor][GCodeProcessorDeep][Import]")
+{
+    const FullPrintConfig defaults;
+    std::string gcode = "; generated by OrcaSlicer\n; CONFIG_BLOCK_START\n";
+    for (const std::string& key : defaults.keys()) {
+        const ConfigOption* option = defaults.option(key);
+        if (option != nullptr)
+            gcode += "; " + key + " = " + option->serialize() + "\n";
+    }
+    gcode += "; CONFIG_BLOCK_END\n";
+    gcode += "M83\nG90\nG1 X10 Y0 Z0.2 E1 F600\nG1 Xbad Eoops\nG1 X20 Y0 E1 F600\n";
+    const auto result = process_file(gcode, RunOptions{gcfMarlinFirmware, true});
+    REQUIRE(moves_of(result, EMoveType::Extrude).size() == 2);
+    CHECK_THAT(total_extruded_mm(result), WithinAbs(2.0, 1e-4));
+    CHECK(result.filament_diameters.size() >= defaults.filament_diameter.values.size());
+}
+
+TEST_CASE("M702 without C has no unloading side effect", "[GCodeProcessor][GCodeProcessorUnloadRegression]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\nT0\nG1 X10 Y0 Z0.2 E1 F600\nM702\n",
+        RunOptions{gcfMarlinFirmware, false, 0.0, 12.0});
+    CHECK_THAT(result.print_statistics.total_filament_unload_time, WithinAbs(0.0, 1e-4));
+}
+
+TEST_CASE("Unknown-axis G92 preserves XYZ origins while bare G92 resets them", "[GCodeProcessor][GCodeProcessorDeep][GCodeProcessorUnknownAxis]")
+{
+    const std::string prefix = "M83\nG90\nG1 X10 Y20 Z0.2 E1 F600\n";
+    const auto unknown_axis = process_buffer(prefix + "G92 A0 B0\nG1 X11 Y21 E2 F600\n");
+    const auto bare = process_buffer(prefix + "G92\nG1 X11 Y21 E2 F600\n");
+    const auto unknown_extrusions = moves_of(unknown_axis, EMoveType::Extrude);
+    const auto bare_extrusions = moves_of(bare, EMoveType::Extrude);
+    REQUIRE(unknown_extrusions.size() == 2);
+    REQUIRE(bare_extrusions.size() == 2);
+
+    CHECK_THAT(unknown_extrusions.front()->position.x(), WithinAbs(10.0, 1e-4));
+    CHECK_THAT(unknown_extrusions.front()->position.y(), WithinAbs(20.0, 1e-4));
+    CHECK_THAT(unknown_extrusions.back()->position.x(), WithinAbs(11.0, 1e-4));
+    CHECK_THAT(unknown_extrusions.back()->position.y(), WithinAbs(21.0, 1e-4));
+    CHECK_THAT(unknown_extrusions.back()->position.z(), WithinAbs(0.2, 1e-4));
+    CHECK_THAT(unknown_extrusions.back()->delta_extruder, WithinAbs(2.0, 1e-4));
+
+    // A bare G92 is the contrasting, documented reset-to-machine-position form.
+    CHECK_THAT(bare_extrusions.back()->position.x(), WithinAbs(21.0, 1e-4));
+    CHECK_THAT(bare_extrusions.back()->position.y(), WithinAbs(41.0, 1e-4));
+}
+
+TEST_CASE("R-form clockwise arcs preserve the declared radius and endpoint", "[GCodeProcessor][GCodeProcessorDeep][GCodeProcessorArcR]")
+{
+    const auto result = process_buffer(
+        "M83\nG90\n"
+        "G1 X9 Y0 Z0.2 F600\n"
+        "G1 X10 Y0 E1 F600\n"
+        "G2 X0 Y10 R10 E1 F600\n");
+    const auto extrusions = moves_of(result, EMoveType::Extrude);
+    REQUIRE(extrusions.size() > 2);
+
+    CHECK_THAT(extrusions.back()->position.x(), WithinAbs(0.0, 1e-3));
+    CHECK_THAT(extrusions.back()->position.y(), WithinAbs(10.0, 1e-3));
+    // The first extrusion ends at the arc start; all later ones are arc segments.
+    CHECK_THAT(extrusions.front()->position.x(), WithinAbs(10.0, 1e-4));
+    CHECK_THAT(extrusions.front()->position.y(), WithinAbs(0.0, 1e-4));
+    float arc_extrusion = 0.f;
+    for (size_t i = 1; i < extrusions.size(); ++i) {
+        CHECK(extrusions[i]->delta_extruder > 0.f);
+        arc_extrusion += extrusions[i]->delta_extruder;
+        const double radius = std::hypot(double(extrusions[i]->position.x()) - 10.0,
+                                         double(extrusions[i]->position.y()) - 10.0);
+        CHECK_THAT(radius, WithinAbs(10.0, 0.05));
+    }
+    CHECK_THAT(arc_extrusion, WithinAbs(1.0, 1e-3));
+}
+
+} // namespace gcode_processor_deep_contracts
 
 // Bambu firmware uses the " FEATURE: " style reserved tags, everything else the Slic3r-compatible
 // "TYPE:" style, so which list applies depends on the printer kind passed in.
