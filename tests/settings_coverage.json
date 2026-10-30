@@ -1393,12 +1393,15 @@
       "reason": "The nullable preset export requires top-surface M205 jerk 11 on inherited T1 and 31 on explicit T0; parent controls require 11/13. Both tools retain positive and equal geometry/material. Existing validation and single-tool 31 role contracts remain. The registered zero value additionally falls through to infill jerk 7 before default jerk 10, against the 31 positive top-surface override. Parsed command-state witnesses establish a prior positive different jerk state."
     },
     "initial_layer_jerk": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[GCode][SettingsSpeedAccelVariance]",
       "dimensions": [
-        "representative_values"
+        "representative_values",
+        "boundary_values",
+        "pipeline_oracle",
+        "nullable_behavior"
       ],
-      "reason": "Each jerk option is independently tested at 5 and 30 mm/s against explicit 20 mm/s X/Y limits; only the above-limit value identifies that option in a warning. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "The emitted first-layer Outer wall jerk uses outer_wall_jerk=23 mm/s when initial_layer_jerk is zero and uses the positive initial_layer value 14 mm/s when set. A real ModelObject case verifies typed nil inherits parent 15 mm/s and explicit object 17 mm/s reaches emitted first-layer extrusion. The parser checks role/layer jerk commands while deposited extrusion count, XY path, and filament totals remain equal across the inheritance cases. These are selected zero/positive/inheritance cases, not a full jerk-domain or all-role sweep."
     },
     "travel_jerk": {
       "test": "tests/fff_print/test_gcode_motion_settings.cpp",
@@ -1760,18 +1763,20 @@
       "tag": "[InterlockingVariance]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Zero width preserves baseline geometry. Positive 0.65, 0.8, and 1.35 mm widths alter the periodic interface while conserving union area; a partial cell exercises unequal ownership. Representative values only."
+      "reason": "The test checks the registered minimum width 0.01 mm against the disabled baseline in a bounded two-material 2.41 mm-per-half fixture; 0.02 mm cells span about 121 cells per half and leave a partial outer cell. Both regions stay nonempty, total union area is conserved, and each region's physical symmetric difference exceeds 0.001 mm2. Existing zero and representative positive-width cases remain. This does not claim arbitrary geometry or an unbounded grid."
     },
     "interlocking_orientation": {
       "test": "tests/fff_print/test_interlocking.cpp",
       "tag": "[InterlockingVariance]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Zero and 90-degree orientations change per-region area/boundary signatures while conserving the total material union. Other angles remain outside this claim."
+      "reason": "The test checks registered orientation endpoints 0 and 360 degrees plus 90 degrees: 0 and 360 have per-region accumulated physical symmetric difference within 0.01 mm2, 90 differs from 0 by more than 0.01 mm2 in each region, and the total material union is conserved. Other angles are outside this bounded periodicity/orientation claim."
     },
     "interlocking_beam_layer_count": {
       "test": "tests/fff_print/test_interlocking.cpp",
@@ -1787,9 +1792,10 @@
       "tag": "[InterlockingVariance]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Zero depth preserves the baseline geometry by symmetric difference; depth 2 produces interlocking between adjacent materials. Representative values only."
+      "reason": "The test checks registered minimum depth 1 against the disabled baseline: both material regions remain nonempty, combined union area is conserved, and each region's physical symmetric difference exceeds 0.01 mm2. Existing zero-depth equality and positive depth 2 evidence remain. No registered maximum or broad depth sweep is claimed."
     },
     "interlocking_boundary_avoidance": {
       "test": "tests/fff_print/test_interlocking.cpp",
@@ -2069,13 +2075,15 @@
     },
     "small_perimeter_speed": {
       "test": "tests/fff_print/test_gcode_motion_settings.cpp",
-      "tag": "[GCode][SmallPerimeterSpeed]",
+      "tag": "[GCode]",
       "dimensions": [
         "representative_values",
         "interaction_matrix",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values",
+        "nullable_behavior"
       ],
-      "reason": "The accepted GCode pipeline case checks absolute 15 mm/s, percent 35% against a 50 mm/s wall speed, and threshold-disabled output at threshold 0. It parses later-layer outer-wall feeds and preserves extrusion/path/material invariants. The prior config-only FloatOrPercent mapping evidence is retained by this entry; numeric boundaries and nullable semantics are not claimed."
+      "reason": "Eight bounded six-layer cube cases parse later-layer Outer wall feeds for absolute 15 mm/s, 35% of a 50 mm/s wall (17.5 mm/s), registered minimum 1 mm/s, zero-auto half-wall 25 mm/s, threshold 7 and disabled threshold 0 at the 50 mm/s wall feed, nil object-threshold inheritance, and zero object-threshold disabling. A separate two-tool process-preset case checks typed nil inheritance for one selected tool and explicit 15 mm/s on the other, with per-tool feeds and unchanged material/path evidence. This is a bounded fixture and selected two-tool preset case, not the full speed-format x threshold x tool Cartesian product."
     },
     "wipe_inward": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -2127,9 +2135,10 @@
       "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Wipe retraction preserves fractional speed with inward wipe disabled. GENERATE values 25.25,25.5,25.75 and relative/absolute-E modes; parsed retraction during wipe equals speed*distance/time and the remainder is emitted before wipe. Three fractional representatives, not the full speed domain. Additional retraction-variance cases: Separated cubes use 13 and 47 mm/s with deretraction held at 7 mm/s. Parsed retract feedrates must equal speed*60, keeping the retract writer path independent from the deretraction fallback."
+      "reason": "Existing Wipe checks retain fractional 25.25/25.5/25.75 mm/s behavior in relative and absolute E modes. The exported-motion case checks the machine retraction consumer transition 1.49 to F60 and 1.5 to F120, with paired deretraction-zero fallback cases; observed retract and deretract feed vectors and deposition/count invariants are compared across the bounded rows. The 1.49/1.5 values are a consumer quantization edge, not a registered min/max or full numeric sweep."
     },
     "fan_cooling_layer_time": {
       "test": "tests/fff_print/test_cooling.cpp",
@@ -2193,12 +2202,13 @@
     },
     "deretraction_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[SettingsRetractionVariance][Pipeline]",
+      "tag": "[Wipe][SettingsRetractionVariance]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Parsed unretract feedrates cover explicit 13 and 51 mm/s values plus zero, which must fall back to the configured 30 mm/s retraction speed. This is a selected fallback contract, not a full numeric sweep."
+      "reason": "Existing exported-motion checks retain explicit 13/51 mm/s deretraction and zero fallback to machine retraction 30 mm/s. The exported-motion case independently checks machine deretraction 1.49 to F60 and 1.5 to F120 while retraction remains 30 mm/s, plus zero deretraction falling back to machine retraction 1.49/1.5 and producing F60/F120. This is a semantic-zero and consumer-rounding boundary, not a registered range or full numeric sweep."
     },
     "retract_before_wipe": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -3796,23 +3806,25 @@
     },
     "filament_retraction_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[FilamentRetractionOverrides]",
+      "tag": "[Wipe][SettingsRetractionVariance]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "nullable_behavior"
+        "nullable_behavior",
+        "boundary_values"
       ],
-      "reason": "Nil inherits 30 mm/s; explicit 13 and 47 mm/s overrides are checked through emitted retraction feedrates with stable deposition. Full numeric boundaries and multiple-filament combinations are not claimed."
+      "reason": "Existing emitted-motion checks retain typed nil inheritance at machine 30 mm/s and explicit filament 13/47 mm/s values. The exported-motion case checks explicit filament retraction 1.49 to F60 and 1.5 to F120, alongside nil inheritance and distinct retraction/deretraction feed roles; emitted feed vectors and deposition/count invariants are compared across the bounded rows. This is a consumer rounding edge, not a registered range, full numeric sweep, or multiple-filament matrix."
     },
     "filament_deretraction_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[FilamentRetractionOverrides]",
+      "tag": "[Wipe][SettingsRetractionVariance]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "nullable_behavior"
+        "nullable_behavior",
+        "boundary_values"
       ],
-      "reason": "Nil inherits 7 mm/s, explicit zero falls back to the 30 mm/s retraction speed, and explicit 13 and 51 mm/s values are checked through emitted unretraction feedrates with stable deposition. Full numeric boundaries and multiple-filament combinations are not claimed."
+      "reason": "Existing emitted-motion checks retain typed nil inheritance at machine 7 mm/s, explicit zero fallback to machine retraction 30 mm/s, and explicit 13/51 mm/s values. The exported-motion case checks filament deretraction zero falling back to positive filament retraction 1.49 mm/s (F60), then explicit filament deretraction 1.49/1.5 producing F60/F120 while retraction inherits machine 30 mm/s. This is a semantic-zero and consumer-rounding boundary, not a registered range or full numeric sweep."
     },
     "filament_retract_when_changing_layer": {
       "test": "tests/fff_print/test_wipe.cpp",

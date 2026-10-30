@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "description": "Boundary contracts for initial-layer jerk, zero-auto small-perimeter speed, retraction rounding, and minimum/periodic interlocking geometry. Filters select CTest labels.",
+  "mutants": [
+    {
+      "id": "initial-layer-jerk-wrong-selected-value",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "jerk = NOZZLE_CONFIG(initial_layer_jerk);",
+      "new": "jerk = NOZZLE_CONFIG(default_jerk);",
+      "expected_matches": 1,
+      "description": "Use default jerk on first-layer extrusion instead of the configured initial-layer jerk; the selected zero/positive and nullable inheritance cases require 23/14 and 15/17 mm/s respectively.",
+      "test_filter": "^(SettingsSpeedAccelVariance|SmallPerimeterSpeed|Wipe)$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "431fe3884034d9802467304ad9ecbb0ec91df0e03d0877a97042722aa1260c8c"
+    },
+    {
+      "id": "small-perimeter-zero-auto-half-wall",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "small_peri_speed = NOZZLE_CONFIG(outer_wall_speed) * 0.5;",
+      "new": "small_peri_speed = NOZZLE_CONFIG(outer_wall_speed) * 1.0;",
+      "expected_matches": 1,
+      "description": "Resolve zero-auto small perimeter speed to the full outer-wall feed instead of half; the bounded 50 mm/s wall fixture expects 25 mm/s.",
+      "test_filter": "^(SettingsSpeedAccelVariance|SmallPerimeterSpeed|Wipe)$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "a2c209cffeb573f9902691fd7906ba4bff96b32cd994c2a1f105876fd84384ef"
+    },
+    {
+      "id": "retraction-speed-drop-rounding-offset",
+      "path": "src/libslic3r/Extruder.cpp",
+      "old": "return int(floor(m_config->retraction_speed.get_at(m_config_index)+0.5));",
+      "new": "return int(floor(m_config->retraction_speed.get_at(m_config_index)));",
+      "expected_matches": 1,
+      "description": "Drop the positive rounding offset when converting retraction speed; the 1.5 mm/s consumer boundary expects F120 rather than F60.",
+      "test_filter": "^(SettingsSpeedAccelVariance|SmallPerimeterSpeed|Wipe)$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "a1e532a622d9c349d81b5aeb75608086da781f18da4e996feb8a3a04d3e5fecb"
+    },
+    {
+      "id": "interlocking-depth-minimum-disabled-at-1",
+      "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
+      "old": "config.interlocking_depth < 1",
+      "new": "config.interlocking_depth < 2",
+      "expected_matches": 1,
+      "description": "Treat the registered minimum depth 1 as disabled; the minimum-depth fixture expects both regions to remain nonempty and redistribute the interface.",
+      "test_filter": "^InterlockingVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "f771a27afa17c5e074b2e404cdf307706aee27937e4da41e47ed41851ebcee44"
+    },
+    {
+      "id": "interlocking-width-minimum-disabled-at-001",
+      "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
+      "old": "config.interlocking_beam_width < EPSILON",
+      "new": "config.interlocking_beam_width <= 0.01",
+      "expected_matches": 1,
+      "description": "Treat the registered minimum width 0.01 mm as disabled; the bounded fine-grid fixture requires nonempty regions, conserved total union, and changed material ownership.",
+      "test_filter": "^InterlockingVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "4a84e4b510b7b6a464ba72a38dbfda5d220f5fac34986c789e47ff0ca9620f33"
+    },
+    {
+      "id": "interlocking-orientation-360-clamped-to-359",
+      "path": "src/libslic3r/Feature/Interlocking/InterlockingGenerator.cpp",
+      "old": "const float    rotation           = Geometry::deg2rad(config.interlocking_orientation.value);",
+      "new": "const float    rotation           = Geometry::deg2rad(std::min(config.interlocking_orientation.value, 359.0));",
+      "expected_matches": 1,
+      "description": "Clamp the 360-degree endpoint to 359 degrees; the 0/360 periodicity and per-region ownership assertions should fail ordinarily.",
+      "test_filter": "^InterlockingVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "301a48206df8b0444cc2ab6fe064847fff56300906409c4c020f9bda59abde6b"
+    }
+  ]
+}

@@ -776,15 +776,13 @@ RetractionStats retraction_stats(const std::string &output, const DynamicPrintCo
             stats.lift_zs.insert(line.new_Z(self));
         if (line.retracting(self)) {
             stats.retract_lengths.push_back(-line.dist_E(self));
-            if (line.has_f())
-                stats.retract_feedrates.push_back(line.f());
+            stats.retract_feedrates.push_back(line.new_F(self));
             return;
         }
         if ((line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) &&
             line.has_e() && line.dist_E(self) > EPSILON && line.dist_XY(self) <= EPSILON) {
             ++stats.unretractions;
-            if (line.has_f())
-                stats.deretract_feedrates.push_back(line.f());
+            stats.deretract_feedrates.push_back(line.new_F(self));
         }
     });
     return stats;
@@ -1416,6 +1414,82 @@ TEST_CASE("Nullable filament deretraction speed preserves zero fallback and expl
         REQUIRE_FALSE(stats.deretract_feedrates.empty());
         for (const double feedrate : stats.deretract_feedrates)
             CHECK_THAT(feedrate, Catch::Matchers::WithinAbs(expected * 60., 0.01));
+    }
+}
+
+TEST_CASE("Retraction speed rounding and deretraction fallback reach emitted feeds",
+          "[Wipe][SettingsRetractionVariance][RetractionSpeedRounding][Pipeline]")
+{
+    struct SpeedCase
+    {
+        const char *label;
+        const char *retraction_speed;
+        const char *deretraction_speed;
+        const char *filament_retraction_speed;
+        const char *filament_deretraction_speed;
+        double expected_retract_feed;
+        double expected_deretract_feed;
+    };
+    const std::vector<SpeedCase> cases{
+        {"machine value below positive rounding threshold", "1.49", "0", "nil", "nil", 60., 60.},
+        {"machine value at positive rounding threshold", "1.5", "0", "nil", "nil", 120., 120.},
+        {"machine deretraction below positive rounding threshold", "30", "1.49", "nil", "nil", 1800., 60.},
+        {"machine deretraction at positive rounding threshold", "30", "1.5", "nil", "nil", 1800., 120.},
+        {"filament value below positive rounding threshold", "30", "7", "1.49", "0", 60., 60.},
+        {"filament deretraction below positive rounding threshold", "30", "7", "nil", "1.49", 1800., 60.},
+        {"filament deretraction at positive rounding threshold", "30", "7", "nil", "1.5", 1800., 120.},
+        {"filament nil inherits both machine speeds", "30", "7", "nil", "nil", 1800., 420.},
+        {"filament positive values at rounding threshold remain independent", "30", "7", "1.5", "1.5", 120., 120.},
+    };
+
+    DepositionStats baseline_deposition;
+    size_t baseline_retract_count = 0;
+    size_t baseline_deretract_count = 0;
+    bool have_baseline = false;
+    for (const SpeedCase &setting : cases) {
+        CAPTURE(setting.label, setting.retraction_speed, setting.deretraction_speed,
+                setting.filament_retraction_speed, setting.filament_deretraction_speed);
+        DynamicPrintConfig config = filament_retraction_config(
+            "filament_retraction_speed", setting.filament_retraction_speed,
+            "retraction_speed", setting.retraction_speed);
+        config.set_deserialize_strict({
+            {"deretraction_speed", setting.deretraction_speed},
+            {"filament_deretraction_speed", setting.filament_deretraction_speed},
+        });
+        const ConfigOption *filament_deretraction = config.option("filament_deretraction_speed", true);
+        REQUIRE(filament_deretraction != nullptr);
+        if (std::string(setting.filament_deretraction_speed) == "nil")
+            REQUIRE(filament_deretraction->is_nil());
+        else
+            REQUIRE_FALSE(filament_deretraction->is_nil());
+
+        const std::string output = bounded_retraction_export(separated_cubes(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        const RetractionStats stats = retraction_stats(output, config);
+        REQUIRE_FALSE(stats.retract_feedrates.empty());
+        REQUIRE_FALSE(stats.deretract_feedrates.empty());
+
+        if (!have_baseline) {
+            baseline_deposition = deposition;
+            baseline_retract_count = stats.retract_feedrates.size();
+            baseline_deretract_count = stats.deretract_feedrates.size();
+            REQUIRE(baseline_deposition.positive_xy_moves > 0);
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline_deposition, deposition);
+            CHECK(stats.retract_feedrates.size() == baseline_retract_count);
+            CHECK(stats.deretract_feedrates.size() == baseline_deretract_count);
+        }
+
+        for (const double feed : stats.retract_feedrates) {
+            CHECK(feed > 0.);
+            CHECK_THAT(feed, Catch::Matchers::WithinAbs(setting.expected_retract_feed, 0.01));
+        }
+        for (const double feed : stats.deretract_feedrates) {
+            CHECK(feed > 0.);
+            CHECK_THAT(feed, Catch::Matchers::WithinAbs(setting.expected_deretract_feed, 0.01));
+        }
     }
 }
 

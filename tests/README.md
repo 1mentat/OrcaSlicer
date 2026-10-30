@@ -1895,3 +1895,13 @@ requires nonempty role feeds on both tools to match their resolved slots.
 `tests/mutations/motion_object_boundaries.json` probes the zero-acceleration
 fallback source and first-layer tool-slot selection; its filters are CTest label
 expressions.
+
+`[InitialLayerJerk]` and `[NullableInitialLayerJerk]` check first-layer jerk
+fallbacks and object inheritance. `[SmallPerimeterSpeed]` includes minimum and
+zero-auto speeds; `[NullableSmallPerimeterSpeed]` resolves inherited and explicit
+values across two tools. `[RetractionSpeedRounding]` checks machine and filament
+speeds around their integer rounding transition, including modal G-code feeds
+and zero deretraction fallback. `[InterlockingVariance]` includes minimum depth
+and beam width on bounded geometry, plus physical equivalence at 0/360 degrees.
+`tests/mutations/motion_interlocking_boundaries.json` supplies six assertion-based
+probes for these contracts, using CTest label expressions.

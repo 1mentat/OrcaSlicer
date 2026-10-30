@@ -45,7 +45,7 @@ struct InterlockingFixture {
     explicit InterlockingFixture(bool enabled, double gap = 0., int boundary_avoidance = 2,
                                  int beam_layers = 2, int depth = 2, double beam_width = 0.8,
                                  double orientation = 22.5, bool different_extruders = true,
-                                 double height = 4., double part_width = 10.)
+                                 double height = 4., double part_width = 10., double part_depth = 20.)
         : config(multifilament_config(2, {
             {"layer_height", 0.2},
             {"initial_layer_print_height", 0.2},
@@ -68,8 +68,8 @@ struct InterlockingFixture {
         }))
     {
         ModelObject *object = model.add_object();
-        auto *left = object->add_volume(make_cube(part_width, 20., height), ModelVolumeType::MODEL_PART, false);
-        TriangleMesh right_mesh = make_cube(part_width, 20., height);
+        auto *left = object->add_volume(make_cube(part_width, part_depth, height), ModelVolumeType::MODEL_PART, false);
+        TriangleMesh right_mesh = make_cube(part_width, part_depth, height);
         right_mesh.translate(float(part_width + gap), 0.f, 0.f);
         auto *right = object->add_volume(std::move(right_mesh), ModelVolumeType::MODEL_PART, false);
         left->config.set("extruder", 1);
@@ -254,6 +254,46 @@ TEST_CASE("Interlocking gate rejects zero beam depth and width without changing 
     }
 }
 
+TEST_CASE("Minimum interlocking depth redistributes a nonempty shared interface", "[Interlocking][InterlockingVariance]")
+{
+    InterlockingFixture baseline(false, 0., 0, 2, 2, 0.8, 0.);
+    InterlockingFixture minimum_depth(true, 0., 0, 2, 1, 0.8, 0.);
+    const auto *before = baseline.print.objects().front();
+    const auto *after = minimum_depth.print.objects().front();
+    REQUIRE(before->num_printing_regions() == 2);
+    REQUIRE(after->num_printing_regions() == 2);
+    const auto before_regions = evidence(*before);
+    const auto after_regions = evidence(*after);
+    REQUIRE(before_regions.size() == 2);
+    REQUIRE(after_regions.size() == 2);
+    CHECK(after_regions[0].area > 0.);
+    CHECK(after_regions[1].area > 0.);
+    CHECK_THAT(total_union_area(*after), Catch::Matchers::WithinRel(total_union_area(*before), 1e-5));
+    CHECK(area_mm2(all_layer_symmetric_difference(*before, *after, 0)) > 0.01);
+    CHECK(area_mm2(all_layer_symmetric_difference(*before, *after, 1)) > 0.01);
+}
+
+TEST_CASE("Minimum interlocking beam width redistributes a bounded fine-grid interface", "[Interlocking][InterlockingVariance]")
+{
+    // At 0.01 mm, cells are 0.02 mm wide. Each 2.41 mm half spans about 121
+    // cells, with a partial outer cell, instead of a dense grid over 20 mm.
+    InterlockingFixture baseline(false, 0., 0, 2, 2, 0.8, 0., true, 0.8, 2.41, 2.41);
+    InterlockingFixture minimum_width(true, 0., 0, 2, 2, 0.01, 0., true, 0.8, 2.41, 2.41);
+    const auto *before = baseline.print.objects().front();
+    const auto *after = minimum_width.print.objects().front();
+    REQUIRE(before->num_printing_regions() == 2);
+    REQUIRE(after->num_printing_regions() == 2);
+    const auto before_regions = evidence(*before);
+    const auto after_regions = evidence(*after);
+    REQUIRE(before_regions.size() == 2);
+    REQUIRE(after_regions.size() == 2);
+    CHECK(after_regions[0].area > 0.);
+    CHECK(after_regions[1].area > 0.);
+    CHECK_THAT(total_union_area(*after), Catch::Matchers::WithinRel(total_union_area(*before), 1e-5));
+    CHECK(area_mm2(all_layer_symmetric_difference(*before, *after, 0)) > 0.001);
+    CHECK(area_mm2(all_layer_symmetric_difference(*before, *after, 1)) > 0.001);
+}
+
 TEST_CASE("Interlocking beam layer count changes the vertical ownership pattern", "[Interlocking][InterlockingVariance]")
 {
     InterlockingFixture one_layer(true, 0., 0, 1, 2, 0.8);
@@ -286,11 +326,19 @@ TEST_CASE("Interlocking orientation changes the ownership partition without chan
 {
     InterlockingFixture horizontal(true, 0., 0, 2, 2, 0.8, 0.);
     InterlockingFixture rotated(true, 0., 0, 2, 2, 0.8, 90.);
+    InterlockingFixture full_turn(true, 0., 0, 2, 2, 0.8, 360.);
     const auto h = evidence(*horizontal.print.objects().front());
     const auto r = evidence(*rotated.print.objects().front());
+    const auto f = evidence(*full_turn.print.objects().front());
     REQUIRE(h.size() == 2);
     REQUIRE(r.size() == 2);
+    REQUIRE(f.size() == 2);
     CHECK_THAT(total_union_area(*horizontal.print.objects().front()), Catch::Matchers::WithinRel(total_union_area(*rotated.print.objects().front()), 1e-5));
+    CHECK_THAT(total_union_area(*horizontal.print.objects().front()), Catch::Matchers::WithinRel(total_union_area(*full_turn.print.objects().front()), 1e-5));
+    for (size_t region_idx = 0; region_idx < 2; ++region_idx) {
+        CHECK_THAT(area_mm2(all_layer_symmetric_difference(*horizontal.print.objects().front(), *full_turn.print.objects().front(), region_idx)), Catch::Matchers::WithinAbs(0., 0.01));
+        CHECK(area_mm2(all_layer_symmetric_difference(*horizontal.print.objects().front(), *rotated.print.objects().front(), region_idx)) > 0.01);
+    }
     const auto h_a = layer_signatures(*horizontal.print.objects().front(), 0);
     const auto h_b = layer_signatures(*horizontal.print.objects().front(), 1);
     const auto r_a = layer_signatures(*rotated.print.objects().front(), 0);
