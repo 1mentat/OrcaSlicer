@@ -257,6 +257,7 @@ add_executable(fff_print_composite_focused_tests EXCLUDE_FROM_ALL
     test_gcode.cpp
     test_gcode_motion_settings.cpp
     test_wipe.cpp
+    test_wipe_tower.cpp
     test_interlocking.cpp
     test_fill.cpp
     ../libslic3r/test_arachne_walls.cpp

@@ -1415,8 +1415,14 @@ python3 scripts/slicer_mutation.py run \
 Automated launchers can use `--build-argv-file` and `--test-argv-file` instead
 of command strings. Each file contains a JSON array of literal arguments; paths
 are relative to `--root` unless absolute. The same `{root}`, `{build}`, and
-`{filter}` placeholders apply. Empty arguments after the executable are retained,
-and the preflight report records each argument file's path and SHA-256.
+`{filter}` placeholders apply. A test command can also pass `{junit}` to CTest's
+`--output-junit` option. The runner replaces it with a unique retained XML path
+beside that test command's captured log and records the artifact path, SHA-256,
+size, testcase counts, and validation result. A missing, malformed, incomplete,
+or count-mismatched requested JUnit file makes that test evidence incomplete and
+cannot classify a mutation as killed. Omitting `{junit}` preserves the existing
+command behavior. Empty arguments after the executable are retained, and the
+preflight report records each argument file's path and SHA-256.
 For a CTest command launched through a wrapper such as `env`, include
 `--output-on-failure` and `-L {filter}` explicitly in its argument array.
 Automatic CTest option insertion inspects the first executable.

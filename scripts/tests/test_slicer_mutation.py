@@ -182,9 +182,14 @@ class MutationArgvFileTests(unittest.TestCase):
                 "pathlib.Path(args[0]).write_text(json.dumps(args[1:]), encoding='utf-8')\n"
                 "if '--report-test-evidence' in args[1:]:\n"
                 "    root = next(value.split('=', 1)[1] for value in args if value.startswith('--root='))\n"
-                "    if (pathlib.Path(root) / 'source.cpp').read_text(encoding='utf-8') == 'after\\n':\n"
+                "    junit = pathlib.Path(next(value.split('=', 1)[1] for value in args if value.startswith('--output-junit=')))\n"
+                "    failed = (pathlib.Path(root) / 'source.cpp').read_text(encoding='utf-8') == 'after\\n'\n"
+                "    junit.parent.mkdir(parents=True, exist_ok=True)\n"
+                "    if failed:\n"
+                "        junit.write_text('<testsuite name=\"probe\" tests=\"1\" failures=\"1\" errors=\"0\" skipped=\"0\"><testcase classname=\"probe\" name=\"one\"><failure message=\"assertion\">assert</failure></testcase></testsuite>', encoding='utf-8')\n"
                 "        print('test cases: 1 | 1 failed\\nassertions: 1 | 1 failed')\n"
                 "        sys.exit(1)\n"
+                "    junit.write_text('<testsuite name=\"probe\" tests=\"1\" failures=\"0\" errors=\"0\" skipped=\"0\"><testcase classname=\"probe\" name=\"one\"/></testsuite>', encoding='utf-8')\n"
                 "    print('test cases: 1 | 1 passed')\n",
                 encoding="utf-8")
             subprocess.run(["git", "-C", str(repo), "add", "argv_probe.py"], check=True)
@@ -203,6 +208,7 @@ class MutationArgvFileTests(unittest.TestCase):
             test_tokens = [
                 sys.executable, "{root}/argv_probe.py", "{build}/test-argv-seen.json",
                 "--report-test-evidence", "--filter={filter}", "--root={root}",
+                "--output-junit={junit}",
                 "--build={build}", "test value with spaces", "-another-leading-option",
                 "literal;touch {build}/test-marker", "$(touch {build}/test-substitution-marker)", "",
             ]
@@ -234,6 +240,10 @@ class MutationArgvFileTests(unittest.TestCase):
             report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
             root_token = str(repo.resolve())
             build_token = str((repo / "build").resolve())
+            evidence_root = output.resolve()
+            baseline_junit = evidence_root / "command-logs" / (
+                "0002-baseline-test-Flow-with-spaces.junit.xml")
+            mutant_junit = evidence_root / "command-logs" / "0004-mutant-test-one.junit.xml"
             expected_build = [
                 sys.executable, f"{root_token}/argv_probe.py", f"{build_token}/build-argv-seen.json",
                 "build value with spaces", "-leading-option", f"literal;touch {build_token}/semicolon-marker",
@@ -242,6 +252,7 @@ class MutationArgvFileTests(unittest.TestCase):
             expected_test = [
                 sys.executable, f"{root_token}/argv_probe.py", f"{build_token}/test-argv-seen.json",
                 "--report-test-evidence", "--filter=Flow with spaces", f"--root={root_token}",
+                f"--output-junit={baseline_junit}",
                 f"--build={build_token}", "test value with spaces", "-another-leading-option",
                 f"literal;touch {build_token}/test-marker",
                 f"$(touch {build_token}/test-substitution-marker)", "",
@@ -256,11 +267,28 @@ class MutationArgvFileTests(unittest.TestCase):
             self.assertEqual(report["baseline_build"]["argv"], expected_build)
             self.assertEqual(report["mutants"][0]["build"]["argv"], expected_build)
             self.assertEqual(report["baseline_tests"][0]["result"]["argv"], expected_test)
-            self.assertEqual(report["mutants"][0]["test"]["argv"], expected_test)
+            mutant_test_argv = list(expected_test)
+            mutant_test_argv[6] = f"--output-junit={mutant_junit}"
+            self.assertEqual(report["mutants"][0]["test"]["argv"], mutant_test_argv)
             self.assertEqual(json.loads((repo / "build" / "build-argv-seen.json").read_text()),
                              expected_build[3:])
             self.assertEqual(json.loads((repo / "build" / "test-argv-seen.json").read_text()),
-                             expected_test[3:])
+                             mutant_test_argv[3:])
+            baseline_artifact = report["baseline_tests"][0]["result"]["junit_artifact"]
+            mutant_artifact = report["mutants"][0]["test"]["junit_artifact"]
+            self.assertEqual(baseline_artifact["path"], str(baseline_junit))
+            self.assertEqual(mutant_artifact["path"], str(mutant_junit))
+            self.assertNotEqual(baseline_artifact["path"], mutant_artifact["path"])
+            for artifact, junit_path, failures in (
+                    (baseline_artifact, baseline_junit, 0), (mutant_artifact, mutant_junit, 1)):
+                self.assertEqual(junit_path.parent, evidence_root / "command-logs")
+                self.assertTrue(junit_path.is_file())
+                self.assertEqual(artifact["size_bytes"], junit_path.stat().st_size)
+                self.assertEqual(artifact["sha256"], hashlib.sha256(junit_path.read_bytes()).hexdigest())
+                self.assertTrue(artifact["usable"])
+                self.assertEqual(artifact["counts"], {
+                    "tests": 1, "failures": failures, "errors": 0, "skipped": 0, "timeouts": 0,
+                })
             for marker in ("semicolon-marker", "substitution-marker", "test-marker",
                            "test-substitution-marker"):
                 self.assertFalse((repo / "build" / marker).exists())
@@ -511,6 +539,8 @@ class MutationReuseCheckoutTests(unittest.TestCase):
             self.assertEqual(report["git"]["commit"], commit)
             self.assertTrue(report["worktree"]["reused_detached_checkout"])
             self.assertIn("explicitly rebuild the baseline", report["worktree"]["binary_warning"])
+            self.assertNotIn("junit_artifact", report["baseline_tests"][0]["result"])
+            self.assertNotIn("junit_artifact", report["mutants"][0]["test"])
             self.assertEqual((repo / "source.cpp").read_text(encoding="utf-8"), "before\n")
             self.assertEqual((build / "preserve.txt").read_text(encoding="utf-8"), "warm build")
             self.assertTrue(all(cwd.resolve() == repo.resolve() for _, cwd in calls))
@@ -704,6 +734,177 @@ class MutationResultTests(unittest.TestCase):
             0,
         )
         self.assertEqual(slicer_mutation.test_evidence("test cases: 0 | 2 skipped"), 0)
+
+
+class MutationJUnitArtifactTests(unittest.TestCase):
+    @staticmethod
+    def _junit_xml(failures=0, cases=1):
+        failed_case = '<failure message="assertion">assert</failure>' if failures else ""
+        testcases = '<testcase classname="probe" name="one">' + failed_case + '</testcase>'
+        if cases == 2:
+            testcases += '<testcase classname="probe" name="two"/>'
+        return (f'<testsuite name="probe" tests="{cases}" failures="{failures}" '
+                f'errors="0" skipped="0">{testcases}</testsuite>')
+
+    def _run_with_bad_requested_junit(self, *, invalid_phase, artifact_kind):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, commit = MutationReuseCheckoutTests().make_detached_repo(temp)
+            output = Path(temp) / "evidence"
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--out", str(output), "--build-dir", "build",
+                "--build-command", "fake-build {build}",
+                "--test-command", "fake-test --output-junit {junit}",
+                "--reuse-detached-checkout", "--max-mutants", "1",
+            ])
+            mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "")
+            real_run_command = slicer_mutation.run_command
+            test_count = 0
+            calls = []
+
+            def recorded(argv, *, cwd, timeout, output_file=None):
+                nonlocal test_count
+                if argv[0] == "git":
+                    return real_run_command(argv, cwd=cwd, timeout=timeout,
+                                            output_file=output_file)
+                phase = "build"
+                code = 0
+                text = ""
+                if argv[0] == "fake-test":
+                    test_count += 1
+                    phase = "baseline" if test_count == 1 else "mutant"
+                    calls.append((phase, list(argv)))
+                    failed = phase == "mutant"
+                    code = 8 if failed else 0
+                    text = ("test cases: 1 | 1 failed\nassertions: 1 | 1 failed\n"
+                            "0% tests passed, 1 tests failed out of 1\n" if failed else
+                            "test cases: 1 | 1 passed\n100% tests passed, 0 tests failed out of 1\n")
+                    junit = Path(argv[argv.index("--output-junit") + 1])
+                    if not (phase == invalid_phase and artifact_kind == "missing"):
+                        junit.parent.mkdir(parents=True, exist_ok=True)
+                        if phase == invalid_phase and artifact_kind == "malformed":
+                            junit.write_bytes(b"<testsuite tests=\"1\">")
+                        else:
+                            junit.write_text(self._junit_xml(failures=int(failed)), encoding="utf-8")
+                if output_file is not None:
+                    output_file.parent.mkdir(parents=True, exist_ok=True)
+                    output_file.write_text(text, encoding="utf-8")
+                    digest, size = slicer_mutation._log_metadata(output_file)
+                    return slicer_mutation.CommandResult(
+                        list(argv), code, .01, text, "", log_path=str(output_file.resolve()),
+                        log_sha256=digest, log_size_bytes=size)
+                return slicer_mutation.CommandResult(list(argv), code, .01, text, "")
+
+            with mock.patch.object(slicer_mutation, "_load_mutants", return_value=[mutant]), \
+                    mock.patch.object(slicer_mutation, "run_command", side_effect=recorded):
+                code = slicer_mutation.run_mutation(args)
+
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            return code, report, (repo / "source.cpp").read_bytes(), calls, commit
+
+    def test_bad_baseline_junit_aborts_before_running_mutants(self):
+        for artifact_kind in ("missing", "malformed"):
+            with self.subTest(artifact_kind=artifact_kind):
+                code, report, source, calls, commit = self._run_with_bad_requested_junit(
+                    invalid_phase="baseline", artifact_kind=artifact_kind)
+                self.assertEqual(code, 2)
+                self.assertEqual(report["status"], "baseline_test_evidence_incomplete")
+                self.assertEqual(report["mutants"], [])
+                self.assertEqual([phase for phase, _ in calls], ["baseline"])
+                self.assertEqual(source, b"before\n")
+                self.assertTrue(report["worktree"]["postflight_tracked_clean"])
+                artifact = report["baseline_tests"][0]["result"]["junit_artifact"]
+                self.assertFalse(artifact["usable"])
+                self.assertTrue(artifact["errors"])
+                self.assertEqual(report["git"]["commit"], commit)
+
+    def test_bad_mutant_junit_is_incomplete_and_restores_source(self):
+        for artifact_kind in ("missing", "malformed"):
+            with self.subTest(artifact_kind=artifact_kind):
+                code, report, source, calls, _commit = self._run_with_bad_requested_junit(
+                    invalid_phase="mutant", artifact_kind=artifact_kind)
+                self.assertEqual(code, 2)
+                self.assertEqual(report["status"], "infrastructure_error")
+                self.assertEqual([phase for phase, _ in calls], ["baseline", "mutant"])
+                self.assertEqual(source, b"before\n")
+                self.assertTrue(report["worktree"]["postflight_tracked_clean"])
+                mutant = report["mutants"][0]
+                self.assertEqual(mutant["status"], "test_junit_evidence_incomplete")
+                self.assertTrue(mutant["restoration"]["restored"])
+                self.assertTrue(mutant["postflight_tracked_clean"])
+                self.assertFalse(mutant["test"]["junit_artifact"]["usable"])
+                self.assertTrue(mutant["test"]["junit_artifact"]["errors"])
+
+    def test_missing_or_invalid_requested_junit_cannot_be_a_mutation_kill(self):
+        log_evidence = slicer_mutation.LogEvidence(test_count=1, assertion_failure=True)
+        for kind in ("missing", "invalid"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                log_root = Path(temp) / "command-logs"
+                log_root.mkdir()
+                path = log_root / f"mutant-{kind}.junit.xml"
+                if kind == "invalid":
+                    path.write_bytes(b"<testsuite tests=\"1\">")
+                result = slicer_mutation.CommandResult(["ctest"], 8, .01, "", "")
+
+                artifact = slicer_mutation._capture_junit_artifact(
+                    result, path, log_root=log_root, console_test_count=1,
+                    log_evidence=log_evidence)
+
+                self.assertEqual(artifact["path"], str(path))
+                self.assertFalse(artifact["usable"])
+                self.assertTrue(artifact["errors"])
+                if kind == "missing":
+                    self.assertIsNone(artifact["sha256"])
+                    self.assertIsNone(artifact["size_bytes"])
+                else:
+                    self.assertEqual(artifact["size_bytes"], path.stat().st_size)
+                    self.assertEqual(artifact["sha256"],
+                                     hashlib.sha256(path.read_bytes()).hexdigest())
+                self.assertEqual(slicer_mutation._classify_test(
+                    result, 1, 1, log_evidence=log_evidence,
+                    junit_artifact=artifact), "test_junit_evidence_incomplete")
+
+    def test_oversized_requested_junit_is_hashed_but_rejected_without_parsing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_root = Path(temp) / "command-logs"
+            log_root.mkdir()
+            path = log_root / "large.junit.xml"
+            path.write_text(self._junit_xml(), encoding="utf-8")
+            result = slicer_mutation.CommandResult(["ctest"], 0, .01, "", "")
+            log_evidence = slicer_mutation.LogEvidence(test_count=1)
+
+            with mock.patch.object(slicer_mutation, "MAX_JUNIT_BYTES", 1), \
+                    mock.patch.object(slicer_mutation, "read_junit_evidence") as reader:
+                artifact = slicer_mutation._capture_junit_artifact(
+                    result, path, log_root=log_root, console_test_count=1,
+                    log_evidence=log_evidence)
+
+            reader.assert_not_called()
+            self.assertFalse(artifact["usable"])
+            self.assertTrue(any("evidence limit" in error for error in artifact["errors"]))
+            self.assertEqual(artifact["size_bytes"], path.stat().st_size)
+            self.assertEqual(artifact["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_valid_junit_case_count_must_match_console_count(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_root = Path(temp) / "command-logs"
+            log_root.mkdir()
+            path = log_root / "count-mismatch.junit.xml"
+            path.write_text(self._junit_xml(cases=2), encoding="utf-8")
+            parsed = slicer_mutation.read_junit_evidence(path, reporter_profile="ctest")
+            self.assertTrue(parsed["usable"])
+            self.assertEqual(parsed["counts"]["tests"], 2)
+            result = slicer_mutation.CommandResult(["ctest"], 0, .01, "", "")
+            log_evidence = slicer_mutation.LogEvidence(test_count=1)
+
+            artifact = slicer_mutation._capture_junit_artifact(
+                result, path, log_root=log_root, console_test_count=1,
+                log_evidence=log_evidence)
+
+            self.assertFalse(artifact["usable"])
+            self.assertTrue(any("count differs" in error for error in artifact["errors"]))
+            self.assertEqual(slicer_mutation._classify_test(
+                result, 1, 1, log_evidence=log_evidence,
+                junit_artifact=artifact), "test_junit_evidence_incomplete")
 
 
 class MutationEvidenceHardeningTests(unittest.TestCase):

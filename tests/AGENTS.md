@@ -38,6 +38,8 @@ Require the native control's exit status and exact JUnit inventory to pass befor
 compiling or running a mutant. Preserve raw assertion text when classifying a
 mutation; reporter punctuation alone must not turn an ordinary assertion failure
 into a survivor.
+Bind discovery to the executable's identity after rebuilding; an inventory copied
+from an earlier build can have correct names but identify the wrong executable.
 Direct bundled Catch2 binaries return `TestFailureExitCode` (42) for failed
 assertions; see `catch2/src/catch2/catch_session.hpp`. Do not assume exit 1 or
 confuse the direct binary status with CTest's status when classifying a kill.
@@ -68,9 +70,12 @@ Check these before writing your own setup or output-parsing code.
 - Add further tags where they help: a narrower one to slice a large file (`[Rotcalip]`, `[Placer]`), a shared one for something spanning files (`[Python]`, `[H2C]`, `[Regression]`), or `[NotWorking]` / `[.]` to disable or hide a test. Say why in a comment if you disable or hide.
 - Prefer a flat `TEST_CASE` per behavior, with `GENERATE` for parameterized cases. Reserve `SCENARIO` / `GIVEN` / `WHEN` / `THEN` for genuine shared setup that branches into a few close variations.
 - Set the config keys your test depends on, and derive the expected values from what you set. A 20mm cube sliced at `layer_height` 2 is 10 layers, and the test should state both parts. If a number in your assertion comes from a key you never set, the test is also testing that default.
+- For numeric or Boolean `DynamicPrintConfig` values, use the initializer-list overload, such as `config.set_deserialize_strict({{"layer_height", 0.2}})`. The two-argument overload takes serialized text.
+- Use at least two real motion blocks per flush interval in GCodeProcessor fixtures that compare motion estimates with configured feed floors or filament delays. Single-block zero-delay and positive-delay histories can take different buffering paths; test that short-stream behavior separately when it is the contract.
 - Use registered canonical setting keys in behavior fixtures. `set_deserialize_strict()` may discard obsolete or unknown names; use legacy names only when migration is the behavior being tested.
 - Confirm which static config class owns a setting before testing overrides. A key registered as nullable may belong to `GCodeConfig` or `PrintConfig` and have no object-level override. Trace nil resolution through the actual preset or variant merge, then pass that resolved config to the pipeline; nil does not always mean inheritance or restoration.
 - Assert the defining property, not an incidental value. "Skirt present" or "at least 2 brim loops" survives a refactor; exact coordinates and byte counts do not.
+- Compare total path length when checking ironing spacing. A connected serpentine can remain one extrusion path at different spacings.
 - Name a regression test for the behavior it protects, never for an issue or PR number.
 - When asserting on G-code, match the meaningful token such as `; skirt` rather than whole lines, whitespace or comment wording. Depend on ordering only when ordering is the contract.
 
@@ -83,6 +88,7 @@ Check these before writing your own setup or output-parsing code.
 - Keep tests self-contained: no shared state, green under `--order rand`.
 - Stage editable private candidates and inventory fixtures with independent file copies. Never hardlink them to tracked source files; a write through either path changes the checkout.
 - Count Catch2 JUnit `<testcase>` nodes and check their exact names. The bundled JUnit reporter's `tests` attribute counts assertions.
+- Derive runtime inventories from the built executable and CTest, not a source regex: declarations inside `#if 0` are not registered. Focused targets that link `test_helpers.cpp` also include `Scenario: init_print functionality`.
 - BDD scenarios and `DYNAMIC_SECTION` can emit additional JUnit entries for section paths. Declare the expected root and section names explicitly when validating a focused run.
 - Catch normalizes tag order. Compare tag tokens rather than their source ordering when checking inventories.
 - Commas in case names are Catch filter separators. Do not concatenate unescaped names into a filter; use tags or an unfiltered run with an exact inventory check.

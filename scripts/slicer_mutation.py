@@ -8,9 +8,13 @@ place, restores source bytes, and verifies HEAD and tracked cleanliness. Retaine
 worktree and reuse modes may leave the last mutant in build artifacts; explicitly
 rebuild the baseline before using those artifacts.
 
-Commands are split with ``shlex`` and executed with ``shell=False``.  Use
-``{root}``, ``{build}``, and ``{filter}`` placeholders in command strings.  A
-CTest command automatically receives ``-L <filter>`` for a mutant that names a
+Commands are split with ``shlex`` and executed with ``shell=False``. Use
+``{root}``, ``{build}``, and ``{filter}`` placeholders in command strings. A
+test command may also use ``{junit}`` in its CTest ``--output-junit`` argument;
+each baseline and mutant gets a unique retained XML path beside its command log.
+That requested artifact is validated and recorded before the result can be
+classified. Without ``{junit}``, existing test-command behavior is unchanged.
+A CTest command automatically receives ``-L <filter>`` for a mutant that names a
 test filter unless the command already has a label selector.
 
 Example::
@@ -41,8 +45,10 @@ from typing import Any, Sequence
 
 
 from slicer_process import run_captured
+from slicer_pr_validation import read_junit_evidence
 
 MAX_OUTPUT = 64 * 1024
+MAX_JUNIT_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_MUTANTS = 5
 
 
@@ -121,12 +127,18 @@ def _command_arguments(command: str | None, argv_file: str | None, *, root: Path
     return split_command(command), None
 
 
-def _expand(argv: Sequence[str], *, root: Path, build: Path, test_filter: str = "") -> list[str]:
+def _expand(argv: Sequence[str], *, root: Path, build: Path, test_filter: str = "",
+            junit: Path | None = None) -> list[str]:
     values = {"root": str(root), "build": str(build), "filter": test_filter}
-    return [value.replace("{root}", values["root"])
-                 .replace("{build}", values["build"])
-                 .replace("{filter}", values["filter"])
-             for value in argv]
+    expanded = []
+    for value in argv:
+        value = (value.replace("{root}", values["root"])
+                      .replace("{build}", values["build"])
+                      .replace("{filter}", values["filter"]))
+        if junit is not None:
+            value = value.replace("{junit}", str(junit))
+        expanded.append(value)
+    return expanded
 
 
 def _truncate(value: str) -> str:
@@ -204,11 +216,14 @@ class CommandResult:
     log_path: str | None = None
     log_sha256: str | None = None
     log_size_bytes: int | None = None
+    junit_artifact: dict[str, Any] | None = None
 
     def json(self) -> dict[str, Any]:
         result = asdict(self)
         result["stdout"] = _truncate(result["stdout"])
         result["stderr"] = _truncate(result["stderr"])
+        if self.junit_artifact is None:
+            result.pop("junit_artifact", None)
         if self.log_path is not None:
             result["log"] = {
                 "path": self.log_path,
@@ -515,7 +530,8 @@ def _test_timed_out(result: CommandResult) -> bool:
 
 def _classify_test(result: CommandResult, evidence: int,
                    expected_tests: int | None = None,
-                   *, log_evidence: LogEvidence | None = None) -> str:
+                   *, log_evidence: LogEvidence | None = None,
+                   junit_artifact: dict[str, Any] | None = None) -> str:
     if log_evidence is not None:
         if not log_evidence.complete:
             return "test_evidence_incomplete"
@@ -538,6 +554,8 @@ def _classify_test(result: CommandResult, evidence: int,
                                    output, re.IGNORECASE | re.MULTILINE)))
     if infrastructure_failure:
         return "test_infrastructure_failure"
+    if junit_artifact is not None and not junit_artifact.get("usable", False):
+        return "test_junit_evidence_incomplete"
     if evidence <= 0:
         return "test_no_evidence"
     if expected_tests is not None and evidence != expected_tests:
@@ -1083,6 +1101,71 @@ def _result_log_evidence(result: CommandResult) -> LogEvidence | None:
     return scan_log_evidence(Path(result.log_path))
 
 
+def _capture_junit_artifact(result: CommandResult, path: Path, *, log_root: Path,
+                            console_test_count: int,
+                            log_evidence: LogEvidence | None) -> dict[str, Any]:
+    """Validate and bind a requested CTest JUnit result to its command log."""
+    artifact: dict[str, Any] = {
+        "path": str(path), "sha256": None, "size_bytes": None,
+        "reporter_profile": "ctest", "usable": False, "counts": None, "errors": [],
+    }
+
+    errors: list[str] = artifact["errors"]
+    try:
+        if path.is_symlink():
+            errors.append("JUnit path is a symlink")
+        elif not _path_under(path, log_root):
+            errors.append("JUnit path escapes the command log directory")
+        elif not path.is_file():
+            errors.append("JUnit file was not created")
+        else:
+            size = path.stat().st_size
+            digest, observed_size = _log_metadata(path)
+            artifact["sha256"] = digest
+            artifact["size_bytes"] = observed_size
+            if observed_size != size:
+                errors.append("JUnit size changed while its hash was recorded")
+            if size > MAX_JUNIT_BYTES:
+                errors.append(f"JUnit exceeds the {MAX_JUNIT_BYTES}-byte evidence limit")
+            else:
+                try:
+                    evidence = read_junit_evidence(path, reporter_profile="ctest")
+                except Exception as exc:  # Treat malformed evidence as incomplete, never as a kill.
+                    evidence = {"usable": False, "errors": [f"JUnit reader failed: {exc}"],
+                                "counts": {}}
+                errors.extend(str(error) for error in evidence.get("errors", []))
+                counts = evidence.get("counts", {})
+                if isinstance(counts, dict):
+                    artifact["counts"] = {
+                        key: counts.get(key, 0)
+                        for key in ("tests", "failures", "errors", "skipped", "timeouts")
+                    }
+                else:
+                    artifact["counts"] = None
+                    errors.append("JUnit reader returned invalid counts")
+                if not evidence.get("usable", False) and not errors:
+                    errors.append("JUnit reader did not accept the result")
+                if artifact["counts"] is not None:
+                    result_counts = artifact["counts"]
+                    if result_counts["tests"] != console_test_count:
+                        errors.append(
+                            "JUnit testcase count differs from command-log test count "
+                            f"({result_counts['tests']} != {console_test_count})")
+                    if any(result_counts[key] for key in ("errors", "skipped", "timeouts")):
+                        errors.append("JUnit contains errored, skipped, or timed-out testcases")
+                    if result.returncode == 0 and result_counts["failures"]:
+                        errors.append("JUnit reports failures despite a successful command exit")
+                    if (log_evidence is not None and log_evidence.assertion_failure and
+                            not result_counts["failures"]):
+                        errors.append("command log reports assertion failures absent from JUnit")
+                artifact["usable"] = not errors and evidence.get("usable", False)
+    except OSError as exc:
+        errors.append(f"cannot inspect JUnit file: {exc}")
+
+    result.junit_artifact = artifact
+    return artifact
+
+
 def _command_log(log_root: Path, serial: int, phase: str, label: str = "") -> Path:
     safe_phase = re.sub(r"[^A-Za-z0-9_.-]+", "-", phase).strip("-") or "command"
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-")
@@ -1164,6 +1247,16 @@ def run_mutation(args: argparse.Namespace) -> int:
         command_serial += 1
         return _command_log(log_root, command_serial, phase, label)
 
+    test_requests_junit = any("{junit}" in value for value in test_argv)
+
+    def junit_for_log(log_path: Path) -> Path | None:
+        if not test_requests_junit:
+            return None
+        path = log_path.with_suffix(".junit.xml")
+        if not _path_under(path, log_root):
+            raise MutationError(f"requested JUnit path escapes command log directory: {path}")
+        return path
+
     with _mutation_worktree_with_report(repo, commit, work_parent, persistent_path,
                                         report_path, report,
                                         args.reuse_detached_checkout) as worktree:
@@ -1200,18 +1293,27 @@ def run_mutation(args: argparse.Namespace) -> int:
         for test_filter in filters:
             baseline_mutant = Mutant("baseline", "", "x", "y", "", test_filter)
             selected = _test_command(test_argv, baseline_mutant)
+            baseline_log = next_log("baseline-test", test_filter)
+            baseline_junit = junit_for_log(baseline_log)
             baseline_test = run_command(_expand(selected, root=worktree,
-                                                 build=(worktree / args.build_dir).resolve()),
+                                                 build=(worktree / args.build_dir).resolve(),
+                                                 test_filter=test_filter,
+                                                 junit=baseline_junit),
                                         cwd=worktree, timeout=args.timeout,
-                                        output_file=next_log("baseline-test", test_filter))
+                                        output_file=baseline_log)
             if args.reuse_detached_checkout:
                 _verify_reuse_checkout(repo, commit)
             log_evidence = _result_log_evidence(baseline_test)
             evidence = (log_evidence.test_count if log_evidence is not None
                         else test_evidence(baseline_test.stdout + baseline_test.stderr))
+            if baseline_junit is not None:
+                _capture_junit_artifact(baseline_test, baseline_junit, log_root=log_root,
+                                        console_test_count=evidence,
+                                        log_evidence=log_evidence)
             baseline_counts[test_filter] = evidence
             classification = _classify_test(baseline_test, evidence,
-                                            log_evidence=log_evidence)
+                                            log_evidence=log_evidence,
+                                            junit_artifact=baseline_test.junit_artifact)
             baseline_tests.append({
                 "filter": test_filter,
                 "test_evidence": evidence,
@@ -1223,11 +1325,14 @@ def run_mutation(args: argparse.Namespace) -> int:
             report["baseline_tests"] = baseline_tests
             _checkpoint(report_path, report, f"baseline_test:{test_filter or 'all'}")
             if classification != "survived":
-                report["status"] = ("baseline_test_timeout" if
-                                     (log_evidence is not None and log_evidence.timed_out) or
-                                     _test_timed_out(baseline_test) else
-                                     "baseline_test_failed" if evidence > 0 else
-                                     "baseline_no_evidence")
+                report["status"] = (
+                    "baseline_test_timeout" if
+                    (log_evidence is not None and log_evidence.timed_out) or
+                    _test_timed_out(baseline_test) else
+                    "baseline_test_evidence_incomplete" if
+                    classification == "test_junit_evidence_incomplete" else
+                    "baseline_test_failed" if evidence > 0 else
+                    "baseline_no_evidence")
                 _checkpoint(report_path, report, "baseline_test_failed")
                 return 2
         report["baseline_tests"] = baseline_tests
@@ -1257,13 +1362,21 @@ def run_mutation(args: argparse.Namespace) -> int:
                     _checkpoint(report_path, report, f"mutant:{mutant.id}:build")
                     continue
                 selected_test = _test_command(test_argv, mutant)
+                mutant_log = next_log("mutant-test", mutant.id)
+                mutant_junit = junit_for_log(mutant_log)
                 mutant_test = run_command(_expand(selected_test, root=worktree,
-                                                   build=(worktree / args.build_dir).resolve()),
+                                                   build=(worktree / args.build_dir).resolve(),
+                                                   test_filter=mutant.test_filter,
+                                                   junit=mutant_junit),
                                           cwd=worktree, timeout=args.timeout,
-                                          output_file=next_log("mutant-test", mutant.id))
+                                          output_file=mutant_log)
                 log_evidence = _result_log_evidence(mutant_test)
                 mutant_evidence = (log_evidence.test_count if log_evidence is not None
                                    else test_evidence(mutant_test.stdout + mutant_test.stderr))
+                if mutant_junit is not None:
+                    _capture_junit_artifact(mutant_test, mutant_junit, log_root=log_root,
+                                            console_test_count=mutant_evidence,
+                                            log_evidence=log_evidence)
                 entry["test"] = mutant_test.json()
                 entry["test_evidence"] = mutant_evidence
                 if log_evidence is not None:
@@ -1271,7 +1384,8 @@ def run_mutation(args: argparse.Namespace) -> int:
                 entry["expected_test_count"] = baseline_counts[mutant.test_filter]
                 entry["status"] = _classify_test(
                     mutant_test, mutant_evidence, baseline_counts[mutant.test_filter],
-                    log_evidence=log_evidence)
+                    log_evidence=log_evidence,
+                    junit_artifact=mutant_test.junit_artifact)
                 _checkpoint(report_path, report, f"mutant:{mutant.id}:test")
             except MutationError as exc:
                 entry["status"] = "mutation_error"
@@ -1331,9 +1445,11 @@ def _parser() -> argparse.ArgumentParser:
     build_command.add_argument("--build-argv-file",
                                help="JSON argv array file, relative to --root unless absolute")
     test_command = run.add_mutually_exclusive_group(required=True)
-    test_command.add_argument("--test-command", help="test argv as a shell-like command string")
+    test_command.add_argument(
+        "--test-command",
+        help="test argv as a shell-like command string; optional {junit} retains and validates CTest JUnit output")
     test_command.add_argument("--test-argv-file",
-                              help="JSON argv array file, relative to --root unless absolute")
+                              help="JSON argv array file, relative to --root unless absolute; test argv may use {junit}")
     run.add_argument("--mutants", action="append",
                      help="JSON mutant manifest; repeat to share one build across manifests (default: three Flow smoke mutants)")
     run.add_argument("--mutants-sha256", action="append",
