@@ -1915,3 +1915,10 @@ and zero deretraction fallback. `[InterlockingVariance]` includes minimum depth
 and beam width on bounded geometry, plus physical equivalence at 0/360 degrees.
 `tests/mutations/motion_interlocking_boundaries.json` supplies six assertion-based
 probes for these contracts, using CTest label expressions.
+
+The Wipe fixtures check zero retraction length as a disable value and an exact
+5 mm minimum-travel decision before G-code coordinate rounding. The Z-hop cases
+compare inclusive layer-plane bounds with adjacent blocked controls, retaining
+unaffected lifts and deposited material. Each boundary exercises machine values
+and nullable filament overrides. `tests/mutations/retraction_boundaries.json`
+challenges the three inclusive comparisons using the `Wipe` CTest label.

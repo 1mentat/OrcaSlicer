@@ -16,6 +16,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
+#include "libslic3r/GCode.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include <map>
@@ -788,6 +789,27 @@ RetractionStats retraction_stats(const std::string &output, const DynamicPrintCo
     return stats;
 }
 
+bool has_lift_target(const RetractionStats &stats, double target_z)
+{
+    return std::any_of(stats.lift_zs.begin(), stats.lift_zs.end(), [target_z](double z) {
+        return std::abs(z - target_z) < 0.001;
+    });
+}
+
+bool minimum_travel_retracts(const DynamicPrintConfig &config, const Polyline &travel)
+{
+    Print print;
+    Model model;
+    init_print({short_cube()}, print, model, config);
+
+    GCode generator;
+    generator.apply_print_config(print.config());
+    generator.writer().set_extruders({0});
+    generator.writer().init_extruder(0);
+    LiftType lift_type = LiftType::NormalLift;
+    return generator.needs_retraction(travel, erPerimeter, lift_type);
+}
+
 struct WipeStats {
     double before = 0.;
     double during = 0.;
@@ -1344,6 +1366,154 @@ std::set<double> lift_height_deltas(const std::string &output, const DynamicPrin
         }
     });
     return heights;
+}
+
+TEST_CASE("Zero machine and filament retraction lengths suppress emitted retracts", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    struct LengthCase {
+        const char *label;
+        const char *machine_length;
+        const char *filament_length;
+        bool expects_retraction;
+    };
+    const std::vector<LengthCase> cases{
+        {"inherited positive machine length", "0.8", "nil", true},
+        {"zero machine length", "0", "nil", false},
+        {"zero filament override", "0.8", "0", false},
+    };
+
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const LengthCase &test : cases) {
+        CAPTURE(test.label, test.machine_length, test.filament_length);
+        DynamicPrintConfig config = filament_retraction_config(
+            "filament_retraction_length", test.filament_length,
+            "retraction_length", test.machine_length);
+        const std::string output = bounded_retraction_export(separated_cubes(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+
+        const RetractionStats stats = retraction_stats(output, config);
+        if (test.expects_retraction) {
+            REQUIRE_FALSE(stats.retract_lengths.empty());
+            for (const double actual : stats.retract_lengths)
+                CHECK_THAT(actual, Catch::Matchers::WithinAbs(0.8, 0.0001));
+        } else {
+            CHECK(stats.retract_lengths.empty());
+            CHECK(stats.unretractions == 0);
+        }
+    }
+}
+
+TEST_CASE("Minimum travel equality retains machine and filament retractions", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    struct BoundaryCase {
+        const char *label;
+        const char *filament_value;
+        const char *machine_value;
+        bool expects_retraction;
+    };
+    const std::vector<BoundaryCase> cases{
+        {"machine threshold just below travel", "nil", "4.9999", true},
+        {"machine threshold at travel", "nil", "5", true},
+        {"machine threshold just above travel", "nil", "5.0001", false},
+        {"filament threshold just below travel", "4.9999", "0", true},
+        {"filament threshold at travel", "5", "0", true},
+        {"filament threshold just above travel", "5.0001", "0", false},
+    };
+    // The consumer compares scaled integer geometry before G-code coordinate rounding.
+    const Polyline travel(Point(0, 0), Point(static_cast<coord_t>(scale_(5.)), coord_t(0)));
+    REQUIRE_THAT(travel.length(), Catch::Matchers::WithinAbs(static_cast<double>(scale_(5.)), 0.));
+
+    for (const BoundaryCase &test : cases) {
+        CAPTURE(test.label, test.filament_value, test.machine_value, test.expects_retraction);
+        DynamicPrintConfig equality = filament_retraction_config(
+            "filament_retraction_minimum_travel", test.filament_value,
+            "retraction_minimum_travel", test.machine_value);
+        equality.set_deserialize_strict("reduce_crossing_wall", "0");
+        const bool actual = minimum_travel_retracts(equality, travel);
+        CHECK(actual == test.expects_retraction);
+    }
+}
+
+TEST_CASE("Z-hop lower boundary includes its exact layer plane", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    struct BoundaryCase {
+        const char *label;
+        const char *filament_value;
+        const char *machine_value;
+        bool expects_boundary_lift;
+    };
+    const std::vector<BoundaryCase> cases{
+        {"machine equality", "nil", "0.4", true},
+        {"machine just above", "nil", "0.4001", false},
+        {"filament equality", "0.4", "0", true},
+        {"filament just above overrides machine equality", "0.4001", "0.4", false},
+    };
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const BoundaryCase &test : cases) {
+        CAPTURE(test.label);
+        DynamicPrintConfig config = filament_retraction_config(
+            "filament_retract_lift_above", test.filament_value,
+            "retract_lift_above", test.machine_value);
+        config.set_deserialize_strict({{"retract_lift_below", "0"}, {"z_offset", "0"}, {"z_hop", "0.4"}});
+        const std::string output = bounded_retraction_export(short_cube(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const RetractionStats stats = retraction_stats(output, config);
+        CHECK(has_lift_target(stats, 0.8) == test.expects_boundary_lift);
+        CHECK(has_lift_target(stats, 1.0));
+    }
+}
+
+TEST_CASE("Z-hop upper boundary includes its exact layer plane", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    struct BoundaryCase {
+        const char *label;
+        const char *filament_value;
+        const char *machine_value;
+        bool expects_boundary_lift;
+    };
+    const std::vector<BoundaryCase> cases{
+        {"machine equality", "nil", "0.4", true},
+        {"machine just below", "nil", "0.3999", false},
+        {"filament equality", "0.4", "0", true},
+        {"filament just below overrides machine equality", "0.3999", "0.4", false},
+    };
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const BoundaryCase &test : cases) {
+        CAPTURE(test.label);
+        DynamicPrintConfig config = filament_retraction_config(
+            "filament_retract_lift_below", test.filament_value,
+            "retract_lift_below", test.machine_value);
+        config.set_deserialize_strict({{"retract_lift_above", "0"}, {"z_offset", "0"}, {"z_hop", "0.4"}});
+        const std::string output = bounded_retraction_export(short_cube(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        const RetractionStats stats = retraction_stats(output, config);
+        CHECK(has_lift_target(stats, 0.8) == test.expects_boundary_lift);
+        CHECK(has_lift_target(stats, 0.6));
+    }
 }
 
 TEST_CASE("Nullable filament retraction length inherits or overrides the machine length", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")

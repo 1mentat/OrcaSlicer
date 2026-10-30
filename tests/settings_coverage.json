@@ -1864,13 +1864,14 @@
       "reason": "Wipe off/on exports require zero versus positive parsed negative-E XY moves while preserving deposited path length, material, and extrusion move count. Retraction, wipe distance, and linear-motion settings are explicit."
     },
     "retraction_minimum_travel": {
-      "test": "tests/fff_print/test_gcode.cpp",
-      "tag": "[GCodeExportWorkflows]",
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Zero and 1000 mm travel thresholds produce a strict decrease in emitted retraction moves on a separated two-object fixture. Numeric bounds and intermediate thresholds remain unclaimed."
+      "reason": "Print::apply supplies the resolved config to the public GCode::needs_retraction consumer. An exact axis-aligned 5 mm scaled path retracts at thresholds 4.9999 and 5 mm and skips at 5.0001 mm, with the filament override nil. This tests the inclusive decision boundary before output-coordinate rounding; it does not claim a full distance domain."
     },
     "skirt_loops": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -2123,12 +2124,13 @@
     },
     "retraction_length": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[SettingsRetractionVariance][Pipeline]",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Separated cubes are sliced with 0.35 and 1.25 mm. Every parsed negative-E motion is required to equal the selected length. These are two positive representatives, not a full length domain or firmware-retraction claim."
+      "reason": "Separated-cube exports retain the positive 0.35/1.25 mm cases. The zero-disable case compares inherited 0.8 mm machine retraction with machine zero: every positive-control retract is 0.8 mm, zero emits no retract/unretract E moves, and deposition stays equal. Zero is the documented consumer disable value, not a registered numeric minimum."
     },
     "retraction_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -2212,21 +2214,23 @@
     },
     "retract_before_wipe": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[SettingsRetractionVariance][Pipeline]",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "The first Wipe_Start interval parses the contiguous pre-marker retract, during-wipe retract, and immediate post-marker retract. 0% and 100% are checked alongside the after-wipe cases; placement totals remain 0.8 mm."
+      "reason": "The first wipe interval distinguishes contiguous before/during/after retraction. The 0% and 100% consumer endpoints move the configured 0.8 mm before or during the wipe while preserving total retraction. These are consumer endpoints, not registered range limits; the paired table covers (0,0), (100,0), and (0,100), not every two-setting combination."
     },
     "retract_after_wipe": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[SettingsRetractionVariance][Pipeline]",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "The first wipe uses after-wipe values 0% and 100% and requires the immediate post-marker placement to move accordingly. The parser terminates at the first non-retracting move so later wipe cycles cannot satisfy the assertion."
+      "reason": "The first wipe uses after values 0% and 100% and checks the immediate post-marker retraction, stopping at the first non-retracting move. Placement totals remain 0.8 mm across (before,after) pairs (0,0), (100,0), and (0,100). These are consumer endpoints, not registered range limits or a complete interaction matrix."
     },
     "role_based_wipe_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -2248,21 +2252,23 @@
     },
     "retract_lift_above": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[SettingsRetractionVariance][Pipeline]",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "With retract_lift_above=0 lifts are present; setting the upper gate to 2 mm suppresses all parsed lift-Z comments on the 1 mm fixture. This is a selected gate pair, not a numeric domain claim."
+      "reason": "The five-layer 0.2 mm fixture with 0.4 mm lift and zero Z offset emits the 0.8 mm lift target at lower-bound equality 0.4 mm; 0.4001 mm suppresses that target while the later 1.0 mm target remains. Existing zero/unbounded and high-bound controls remain. Deposited motion is equal across rows."
     },
     "retract_lift_below": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[SettingsRetractionVariance][Pipeline]",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "With retract_lift_below=0 lifts are present; setting the lower gate to 0.1 mm suppresses all parsed lift-Z comments. This is a selected gate pair, not a numeric domain claim."
+      "reason": "The five-layer 0.2 mm fixture with 0.4 mm lift and zero Z offset includes the 0.8 mm target at upper-bound equality 0.4 mm; 0.3999 mm suppresses that target while the earlier 0.6 mm target remains. Existing zero/unbounded and 0.1 mm suppression controls remain. Deposited motion is equal across rows."
     },
     "retract_lift_enforce": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -3796,13 +3802,14 @@
     },
     "filament_retraction_length": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[FilamentRetractionOverrides]",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "nullable_behavior"
+        "nullable_behavior",
+        "boundary_values"
       ],
-      "reason": "Nil inherits the machine retraction length of 0.8 mm; explicit 0.35 and 1.25 mm overrides are checked against every parsed retraction length while preserving deposition. Full numeric boundaries and multiple-filament combinations are not claimed."
+      "reason": "Typed nil inherits machine 0.8 mm, explicit 0.35/1.25 mm values reach emitted retracts, and explicit zero suppresses retract/unretract E moves while preserving deposited geometry/material. This covers the zero-disable boundary on one filament, not all lengths or multiple-filament combinations."
     },
     "filament_retraction_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -3838,13 +3845,14 @@
     },
     "filament_retraction_minimum_travel": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[FilamentRetractionOverrides]",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "nullable_behavior"
+        "nullable_behavior",
+        "boundary_values"
       ],
-      "reason": "Nil and explicit zero preserve nonempty retractions from the machine zero threshold; an explicit 1000 mm threshold reduces the parsed retraction count while preserving deposition. The exact travel threshold boundary and multiple-filament combinations are not claimed."
+      "reason": "Print::apply resolves explicit filament thresholds over a machine-zero control. The public GCode consumer retracts an exact 5 mm path at 4.9999/5 mm and skips at 5.0001 mm. Existing emitted-motion cases cover nil/zero inheritance and a 1000 mm suppression control with stable deposition. Multiple-filament combinations are outside this bounded claim."
     },
     "filament_z_hop": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -3858,23 +3866,25 @@
     },
     "filament_retract_lift_above": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[FilamentRetractionOverrides]",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "nullable_behavior"
+        "nullable_behavior",
+        "boundary_values"
       ],
-      "reason": "Nil inherits the machine zero bound and explicit zero retains positive lift events; explicit 2 mm suppresses them on the short fixture while preserving deposition. The exact height threshold boundary and multiple-filament combinations are not claimed."
+      "reason": "Nil machine-bound inheritance and explicit filament values traverse Print::apply into emitted lifts. Explicit 0.4 mm includes the 0.8 mm target; 0.4001 mm overrides machine equality and suppresses it, preserving the later 1.0 mm target and deposition. Existing nil/zero and 2 mm suppression cases remain."
     },
     "filament_retract_lift_below": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[FilamentRetractionOverrides]",
+      "tag": "[Wipe]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle",
-        "nullable_behavior"
+        "nullable_behavior",
+        "boundary_values"
       ],
-      "reason": "Nil inherits the machine zero bound and explicit zero retains positive lift events; explicit 0.1 mm suppresses them on the short fixture while preserving deposition. The exact height threshold boundary and multiple-filament combinations are not claimed."
+      "reason": "Nil machine-bound inheritance and explicit filament values traverse Print::apply into emitted lifts. Explicit 0.4 mm includes the 0.8 mm target; 0.3999 mm overrides machine equality and suppresses it, preserving the earlier 0.6 mm target and deposition. Existing nil/zero and 0.1 mm suppression cases remain."
     },
     "reduce_crossing_wall": {
       "test": "tests/fff_print/test_wipe.cpp",
