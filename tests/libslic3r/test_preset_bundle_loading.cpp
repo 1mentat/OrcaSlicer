@@ -9003,3 +9003,39 @@ TEST_CASE("The cloud diff force-emits a disabled override only where the cloud w
     // An ironing override defaults to nil: an absent key stays nil, so it is not sent.
     CHECK(key_values.count("filament_ironing_flow") == 0);
 }
+
+TEST_CASE("Removing a preset from a physical printer keeps the printer's other settings", "[PresetBundleLoading][PhysicalPrinter]")
+{
+    // delete_preset_from_printers() saves printers that are elements of the collection itself,
+    // so save_printer() must not move the printer's config onto itself.
+    ScopedTemporaryDir dir("physical-printer-self-save");
+    PhysicalPrinterCollection collection(PhysicalPrinter::printer_options());
+    {
+        PhysicalPrinter printer("Shared", collection.default_config());
+        printer.file = (dir.path() / "Shared.json").string();
+        REQUIRE(printer.add_preset("Removed"));
+        REQUIRE(printer.add_preset("Keep"));
+        printer.config.opt<ConfigOptionString>("print_host")->value = "shared.local";
+        printer.update_preset_names_in_config();
+        printer.save(nullptr);
+    }
+    PresetsConfigSubstitutions substitutions;
+    collection.load_printers(dir.path().string(), "", substitutions, ForwardCompatibilitySubstitutionRule::Disable);
+    REQUIRE(collection.find_printer("Shared") != nullptr);
+
+    REQUIRE(collection.delete_preset_from_printers("Removed"));
+
+    const PhysicalPrinter *shared = collection.find_printer("Shared");
+    REQUIRE(shared != nullptr);
+    CHECK(shared->preset_names == std::set<std::string>{"Keep"});
+    REQUIRE(shared->config.opt<ConfigOptionString>("print_host") != nullptr);
+    CHECK(shared->config.opt_string("print_host") == "shared.local");
+
+    PhysicalPrinterCollection reloaded(PhysicalPrinter::printer_options());
+    reloaded.load_printers(dir.path().string(), "", substitutions, ForwardCompatibilitySubstitutionRule::Disable);
+    const PhysicalPrinter *persisted = reloaded.find_printer("Shared");
+    REQUIRE(persisted != nullptr);
+    CHECK(persisted->preset_names == std::set<std::string>{"Keep"});
+    REQUIRE(persisted->config.opt<ConfigOptionString>("print_host") != nullptr);
+    CHECK(persisted->config.opt_string("print_host") == "shared.local");
+}
