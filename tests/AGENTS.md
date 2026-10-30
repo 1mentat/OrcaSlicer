@@ -79,6 +79,13 @@ Check these before writing your own setup or output-parsing code.
 - Name a regression test for the behavior it protects, never for an issue or PR number.
 - When asserting on G-code, match the meaningful token such as `; skirt` rather than whole lines, whitespace or comment wording. Depend on ordering only when ordering is the contract.
 
+For configured focused mutation runs, use `scripts/slicer_mutation.py run
+--target ...` with an explicit expected control inventory. It derives build
+outputs and test commands from CMake/CTest and restores the normal target.
+Reuse this path with catalogs and arguments instead of copying private Python
+controllers or guessing archive/generated-header paths. Update inventories
+only for intentional case changes; retain every existing control.
+
 ## Catch2 rules that cause real breakage
 
 - Never reuse a `SECTION` name inside a loop. Use `DYNAMIC_SECTION` so each iteration is unique.

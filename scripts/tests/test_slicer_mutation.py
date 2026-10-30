@@ -1735,6 +1735,283 @@ class PersistentMutationWorktreeTests(unittest.TestCase):
             self.assertEqual(report["status"], "postflight_dirty")
             self.assertEqual(self._git(repo, "rev-parse", "HEAD"), current)
 
+
+class MutationTargetModeTests(unittest.TestCase):
+    def _write_file_api(self, build, *, configurations):
+        reply = build / ".cmake" / "api" / "v1" / "reply"
+        reply.mkdir(parents=True, exist_ok=True)
+        config_rows = []
+        for config_name, relative_artifact in configurations:
+            target_file = f"target-{config_name or 'single'}.json"
+            artifact = build / relative_artifact
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("normal", encoding="utf-8")
+            artifact.chmod(0o755)
+            (reply / target_file).write_text(json.dumps({
+                "name": "fake_tests", "type": "EXECUTABLE",
+                "artifacts": [{"path": relative_artifact}],
+            }), encoding="utf-8")
+            config_rows.append({"name": config_name, "targets": [
+                {"name": "fake_tests", "jsonFile": target_file}]})
+        (reply / "codemodel-v2.json").write_text(json.dumps({"configurations": config_rows}), encoding="utf-8")
+        (reply / "index-20261030T120000.json").write_text(json.dumps({
+            "reply": {"codemodel-v2": {"jsonFile": "codemodel-v2.json"}}}), encoding="utf-8")
+        return artifact
+
+    def test_file_api_resolves_single_and_multi_configuration_artifact_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            single_build = root / "single"
+            single_build.mkdir()
+            single_artifact = single_build / "bin" / "fake_tests"
+            self._write_file_api(single_build, configurations=[("", "bin/fake_tests")])
+            single = slicer_mutation._file_api_target(single_build, "fake_tests", "Release")
+            self.assertEqual(single["artifact"], str(single_artifact.resolve()))
+            self.assertEqual(single["configuration"], "")
+
+            multi_build = root / "multi"
+            multi_build.mkdir()
+            release_artifact = multi_build / "Release" / "fake_tests"
+            self._write_file_api(multi_build, configurations=[
+                ("Debug", "Debug/fake_tests"), ("Release", "Release/fake_tests")])
+            multi = slicer_mutation._file_api_target(multi_build, "fake_tests", "Release")
+            self.assertEqual(multi["artifact"], str(release_artifact.resolve()))
+            self.assertEqual(multi["configuration"], "Release")
+
+    def test_ctest_label_strings_and_lists_select_exact_tests_and_reject_bad_bindings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            build = Path(temp) / "build"
+            binary = build / "bin" / "test"
+            other = build / "bin" / "other"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("binary")
+            other.write_text("other")
+            tests = slicer_mutation._ctest_tests({"tests": [
+                {"name": "Focused::one", "command": [str(binary)], "properties": [
+                    {"name": "LABELS", "value": ["Group", "Other"]}]},
+                {"name": "Focused::two", "command": [str(binary)], "properties": {
+                    "LABELS": "Group;Settings"}},
+                {"name": "other_NOT_BUILT", "properties": {
+                    "WORKING_DIRECTORY": str(build)}},
+            ]})
+            selected = slicer_mutation._selected_ctest_names(
+                tests, control_regex="^Focused::", exclude_label_regex="NotWorking",
+                test_filter="^Group$")
+            self.assertEqual(selected, ["Focused::one", "Focused::two"])
+            inventory = slicer_mutation._compare_inventory(
+                selected, ["Focused::one", "Focused::two"], "control")
+            self.assertEqual(inventory["count"], 2)
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "inventory differs"):
+                slicer_mutation._compare_inventory(
+                    selected, ["Focused::one", "Focused::missing"], "control")
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "executable mismatch"):
+                slicer_mutation._verify_ctest_executables(
+                    tests, {"Focused::one"}, build, other)
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "has no executable command"):
+                slicer_mutation._verify_ctest_executables(
+                    tests, {"other_NOT_BUILT"}, build, other)
+
+    def _fixture(self, root, *, first_control_fails=False, failed_restore_build=False):
+        repo = root / "repo"
+        repo.mkdir()
+        build = repo / "build"
+        build.mkdir()
+        (build / "CMakeCache.txt").write_text(
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={repo}\nCMAKE_BUILD_TYPE:STRING=Release\n",
+            encoding="utf-8")
+        source = repo / "source.cpp"
+        source.write_text("before\n", encoding="utf-8")
+        output = root / "evidence"
+        expected = root / "expected.json"
+        expected.write_text(json.dumps(["Focused::one"]), encoding="utf-8")
+        first = root / "first.json"
+        second = root / "second.json"
+        for path, ident in ((first, "first"), (second, "second")):
+            path.write_text(json.dumps({"mutants": [{
+                "id": ident, "path": "source.cpp", "old": "before", "new": "after",
+                "description": ident, "test_filter": "^MutationLabel$",
+            }]}), encoding="utf-8")
+        cmake = root / "cmake"
+        ctest = root / "ctest"
+        cmake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,os,pathlib,sys\n"
+            "args=sys.argv[1:]; repo=pathlib.Path(os.environ['TARGET_REPO']); build=pathlib.Path(args[args.index('-B')+1]) if '-B' in args else pathlib.Path(args[args.index('--build')+1])\n"
+            "if '--build' in args:\n"
+            " c=build/'build-count'; n=int(c.read_text())+1 if c.exists() else 1; c.write_text(str(n))\n"
+            " if os.environ.get('FAIL_RESTORE_BUILD')=='1' and n==4: print('restore build failed'); sys.exit(17)\n"
+            " artifact=build/'Release'/'fake_tests'; artifact.parent.mkdir(parents=True,exist_ok=True); artifact.write_text('mutant' if (repo/'source.cpp').read_text()=='after\\n' else 'normal'); artifact.chmod(0o755)\n"
+            " reply=build/'.cmake/api/v1/reply'; reply.mkdir(parents=True,exist_ok=True)\n"
+            " (reply/'target.json').write_text(json.dumps({'name':'fake_tests','type':'EXECUTABLE','artifacts':[{'path':'Release/fake_tests'}]}))\n"
+            " (reply/'codemodel-v2.json').write_text(json.dumps({'configurations':[{'name':'Release','targets':[{'name':'fake_tests','jsonFile':'target.json'}]}]}))\n"
+            " (reply/'index-20261030T120000.json').write_text(json.dumps({'reply':{'codemodel-v2':{'jsonFile':'codemodel-v2.json'}}}))\n"
+            "print('cmake ok')\n", encoding="utf-8")
+        ctest.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,os,pathlib,sys\n"
+            "args=sys.argv[1:]; build=pathlib.Path(args[args.index('--test-dir')+1]); artifact=build/'Release'/'fake_tests'\n"
+            "record=pathlib.Path(os.environ['TARGET_ENV_LOG']); record.parent.mkdir(parents=True,exist_ok=True)\n"
+            "with record.open('a') as f: f.write(json.dumps({k:os.environ.get(k) for k in ['PATH','LC_ALL','LD_LIBRARY_PATH','KEEP_ENV','GIT_DIR','GIT_WORK_TREE','TMPDIR','TEMP','TEMPDIR','LLVM_PROFILE_FILE']})+'\\n')\n"
+            "if '--show-only=json-v1' in args:\n"
+            " print(json.dumps({'tests':[{'name':'Focused::one','command':[str(artifact)],'properties':[{'name':'LABELS','value':['MutationLabel']},{'name':'WORKING_DIRECTORY','value':str(build)}]}]})); sys.exit(0)\n"
+            "junit=pathlib.Path(args[args.index('--output-junit')+1]); junit.parent.mkdir(parents=True,exist_ok=True)\n"
+            "has_label='-L' in args; countfile=record.with_suffix('.controls'); count=int(countfile.read_text())+1 if countfile.exists() else 1\n"
+            "if not has_label: countfile.write_text(str(count))\n"
+            "fail=(has_label and pathlib.Path(os.environ['TARGET_SOURCE']).read_text()=='after\\n') or (os.environ.get('FAIL_FIRST_CONTROL')=='1' and not has_label and count==1)\n"
+            "failure='<failure message=\"assertion\" type=\"ASSERTION\">ordinary failed assertion</failure>' if fail else ''\n"
+            "junit.write_text(f'<testsuite name=\"Focused::one\" tests=\"1\" failures=\"{int(fail)}\" errors=\"0\" skipped=\"0\"><testcase classname=\"Focused::one\" name=\"Focused::one\">{failure}</testcase></testsuite>')\n"
+            "print('assertions: 1 | 1 failed\\n0% tests passed, 1 tests failed out of 1' if fail else '100% tests passed, 0 tests failed out of 1')\n"
+            "sys.exit(8 if fail else 0)\n", encoding="utf-8")
+        cmake.chmod(0o755)
+        ctest.chmod(0o755)
+        args = slicer_mutation._parser().parse_args([
+            "run", "--root", str(repo), "--build-dir", "build", "--target", "fake_tests",
+            "--config", "Release", "--jobs", "2", "--cmake", str(cmake), "--ctest", str(ctest),
+            "--control-regex", "^Focused::", "--expected-control-inventory", str(expected),
+            "--mutants", str(first), "--mutants", str(second), "--max-mutants", "2",
+            "--timeout", "30", "--out", str(output),
+        ])
+        env = {"TARGET_REPO": str(repo), "TARGET_SOURCE": str(source),
+               "TARGET_ENV_LOG": str(root / "child-env.jsonl")}
+        if first_control_fails:
+            env["FAIL_FIRST_CONTROL"] = "1"
+        if failed_restore_build:
+            env["FAIL_RESTORE_BUILD"] = "1"
+        return repo, source, output, args, env
+
+    def _run_fake_target(self, root, **options):
+        repo, source, output, args, child_env = self._fixture(root, **options)
+
+        @contextmanager
+        def use_repo(*_args, **_kwargs):
+            yield repo
+
+        inherited = {"TARGET_REPO": child_env["TARGET_REPO"],
+                     "TARGET_SOURCE": child_env["TARGET_SOURCE"],
+                     "TARGET_ENV_LOG": child_env["TARGET_ENV_LOG"],
+                     "PATH": os.environ["PATH"], "LC_ALL": "C.UTF-8",
+                     "KEEP_ENV": "preserved", "GIT_DIR": "/external/snapshot.git",
+                     "GIT_WORK_TREE": "/external/worktree", "TMPDIR": str(root),
+                     "TMP": str(root), "TEMP": str(root), "TEMPDIR": str(root)}
+        if "FAIL_FIRST_CONTROL" in child_env:
+            inherited["FAIL_FIRST_CONTROL"] = child_env["FAIL_FIRST_CONTROL"]
+        if "FAIL_RESTORE_BUILD" in child_env:
+            inherited["FAIL_RESTORE_BUILD"] = child_env["FAIL_RESTORE_BUILD"]
+        inherited["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH", "/usr/lib")
+        with mock.patch.dict(os.environ, inherited), \
+                mock.patch.object(slicer_mutation, "validate_clean_repo", return_value="a" * 40), \
+                mock.patch.object(slicer_mutation, "_mutation_worktree_with_report", side_effect=use_repo):
+            code = slicer_mutation.run_mutation(args)
+        return code, repo, source, output, root / "child-env.jsonl"
+
+    def test_target_mode_batches_catalogs_with_one_filter_baseline_and_restores_normal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            code, _repo, source, output, env_log = self._run_fake_target(root)
+            self.assertEqual(code, 0)
+            self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["focused_control"]["test_evidence"], 1)
+            self.assertEqual([row["status"] for row in report["mutants"]], ["killed", "killed"])
+            self.assertTrue(all(row["log_evidence"]["assertion_failure"]
+                                for row in report["mutants"]))
+            self.assertEqual(len(report["baseline_tests"]), 1)
+            self.assertEqual(report["normal_restore"]["status"], "passed")
+            self.assertEqual(report["normal_restore"]["control"]["status"], "passed")
+            preserved = sorted(path.name for path in (output / "artifacts").iterdir())
+            self.assertEqual(preserved, [
+                "first-fake_tests", "normal-baseline-fake_tests",
+                "normal-restored-fake_tests", "second-fake_tests",
+            ])
+            self.assertEqual((output / "artifacts" / "first-fake_tests").read_text(), "mutant")
+            self.assertEqual((output / "artifacts" / "second-fake_tests").read_text(), "mutant")
+            self.assertEqual((output / "artifacts" / "normal-restored-fake_tests").read_text(), "normal")
+            child_rows = [json.loads(line) for line in env_log.read_text().splitlines()]
+            self.assertGreater(len(child_rows), 6)
+            self.assertTrue(all(row["PATH"] == os.environ["PATH"] for row in child_rows))
+            self.assertTrue(all(row["LC_ALL"] == "C.UTF-8" and row["KEEP_ENV"] == "preserved"
+                                for row in child_rows))
+            self.assertTrue(all(row["LD_LIBRARY_PATH"] == os.environ.get("LD_LIBRARY_PATH", "/usr/lib")
+                                for row in child_rows))
+            self.assertTrue(all(row["GIT_DIR"] is None and row["GIT_WORK_TREE"] is None
+                                for row in child_rows))
+            self.assertTrue(all(Path(row["TMPDIR"]).resolve().is_relative_to((output / "tmp").resolve())
+                                and Path(row["LLVM_PROFILE_FILE"]).resolve().is_relative_to(
+                                    (output / "profiles").resolve())
+                                for row in child_rows))
+            self.assertGreater(len({row["TMPDIR"] for row in child_rows}), 1)
+
+    def test_failed_focused_control_stops_before_any_mutant_and_runs_restore_control(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            code, _repo, source, output, _env_log = self._run_fake_target(
+                root, first_control_fails=True)
+            self.assertEqual(code, 2)
+            self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "focused_control_failed")
+            self.assertEqual(report["focused_control"]["classification"], "killed")
+            self.assertEqual(report["mutants"], [])
+            self.assertEqual(report["normal_restore"]["status"], "passed")
+
+    def test_normal_restore_build_failure_is_recorded_and_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, source, output, args, child_env = self._fixture(root, failed_restore_build=True)
+
+            @contextmanager
+            def use_repo(*_args, **_kwargs):
+                yield repo
+
+            inherited = {**child_env, "PATH": os.environ["PATH"], "TMPDIR": str(root),
+                         "TMP": str(root), "TEMP": str(root), "TEMPDIR": str(root)}
+            with mock.patch.dict(os.environ, inherited), \
+                    mock.patch.object(slicer_mutation, "validate_clean_repo", return_value="a" * 40), \
+                    mock.patch.object(slicer_mutation, "_mutation_worktree_with_report", side_effect=use_repo):
+                with self.assertRaisesRegex(slicer_mutation.MutationError, "normal target rebuild failed"):
+                    slicer_mutation.run_mutation(args)
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "normal_restore_failed")
+            self.assertEqual(report["normal_restore"]["status"], "failed")
+            self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
+
+    def test_keyboard_interrupt_runs_normal_restore_after_source_restoration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, source, output, args, child_env = self._fixture(root)
+
+            @contextmanager
+            def use_repo(*_args, **_kwargs):
+                yield repo
+
+            real_run_recorded = slicer_mutation.run_recorded
+            label_runs = 0
+
+            def interrupt_mutant(argv, **kwargs):
+                nonlocal label_runs
+                if "-L" in argv:
+                    label_runs += 1
+                    if label_runs == 2:
+                        raise KeyboardInterrupt
+                return real_run_recorded(argv, **kwargs)
+
+            inherited = {**child_env, "PATH": os.environ["PATH"], "TMPDIR": str(root),
+                         "TMP": str(root), "TEMP": str(root), "TEMPDIR": str(root)}
+            with mock.patch.dict(os.environ, inherited), \
+                    mock.patch.object(slicer_mutation, "validate_clean_repo", return_value="a" * 40), \
+                    mock.patch.object(slicer_mutation, "_mutation_worktree_with_report", side_effect=use_repo), \
+                    mock.patch.object(slicer_mutation, "run_recorded", side_effect=interrupt_mutant):
+                with self.assertRaises(KeyboardInterrupt):
+                    slicer_mutation.run_mutation(args)
+            self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["normal_restore"]["status"], "passed")
+
+class PersistentMutationWorktreeEdgeTests(unittest.TestCase):
+    _git = PersistentMutationWorktreeTests._git
+    _repo = PersistentMutationWorktreeTests._repo
+
     def test_missing_git_metadata_stops_before_the_next_persistent_mutant(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

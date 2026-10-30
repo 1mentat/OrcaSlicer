@@ -1470,10 +1470,40 @@ Git directory. It cannot be combined with `--persistent-worktree` or
 `--work-root`. An existing lock stops the run for inspection. The default
 continues to use a disposable worktree.
 
-Both `--persistent-worktree` and `--reuse-detached-checkout` restore source
-bytes while retaining build outputs, which may still contain the last mutant.
-Explicitly rebuild the baseline before using those outputs for other tests or
-coverage; tracked source cleanliness alone does not prove binary restoration.
+In explicit build/test argv mode, `--persistent-worktree` and
+`--reuse-detached-checkout` restore source bytes while retaining build outputs,
+which may still contain the last mutant. Rebuild the baseline before using
+those outputs for other tests or coverage; tracked source cleanliness alone
+does not prove binary restoration.
+
+For an already configured worker build, target mode derives its executable
+from CMake File API and its test commands from post-build CTest discovery.
+Enable `SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY` when configuring the focused
+targets. From a clean detached checkout, a Wipe Tower run is:
+
+```sh
+python3 scripts/slicer_mutation.py run --root . --build-dir build \
+  --reuse-detached-checkout --target fff_print_wipe_tower_tests \
+  --config Release --jobs 2 --control-regex '^FocusedWipeTower::' \
+  --exclude-label-regex 'NotWorking|RequiresApp' \
+  --expected-control-inventory tests/controls/wipe_tower.json \
+  --mutants tests/mutations/wipe_tower_filament_speed_boundaries.json \
+  --max-mutants 2 --out build/mutations/wipe-filament-speeds
+```
+
+Use `fff_print_gcodeprocessor_tests`, `^FocusedGCodeProcessor::`,
+`tests/controls/gcode_processor.json`, and
+`tests/mutations/processor_min_rate_modes.json` for the processor cohort.
+Pass `--cmake` and `--ctest` when the configured worker needs specific tools.
+Keep the worker's existing CPU, memory, swap, and locale limits.
+
+Target mode runs the exact focused control before any mutant, shares one
+baseline per catalog filter, and finishes by rebuilding and checking the normal
+executable and full control. A failed restore fails the run. It retains command
+receipts, JUnit, and baseline/mutant/restored executable identities in the report.
+Do not combine target mode with explicit build/test commands. Update the
+checked-in control inventory only for intentional case additions or removals;
+fresh discovery is checked against that specification, not used to redefine it.
 
 The settings inventory keeps schema accounting separate from source coverage.
 It derives the effective `PrintConfigDef` option set from

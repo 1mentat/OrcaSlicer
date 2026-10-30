@@ -37,6 +37,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,7 +45,7 @@ import time
 from typing import Any, Sequence
 
 
-from slicer_process import run_captured
+from slicer_process import run_captured, run_recorded
 from slicer_pr_validation import read_junit_evidence
 
 MAX_OUTPUT = 64 * 1024
@@ -217,6 +218,7 @@ class CommandResult:
     log_sha256: str | None = None
     log_size_bytes: int | None = None
     junit_artifact: dict[str, Any] | None = None
+    process_receipt_path: str | None = None
 
     def json(self) -> dict[str, Any]:
         result = asdict(self)
@@ -224,6 +226,8 @@ class CommandResult:
         result["stderr"] = _truncate(result["stderr"])
         if self.junit_artifact is None:
             result.pop("junit_artifact", None)
+        if self.process_receipt_path is None:
+            result.pop("process_receipt_path", None)
         if self.log_path is not None:
             result["log"] = {
                 "path": self.log_path,
@@ -284,6 +288,35 @@ def run_command(argv: Sequence[str], *, cwd: Path, timeout: float,
         command.log_path = str(output_file.resolve())
         command.log_sha256, command.log_size_bytes = _log_metadata(output_file)
     return command
+
+
+def _run_recorded_command(argv: Sequence[str], *, cwd: Path, timeout: float,
+                          output_file: Path, env: dict[str, str]) -> CommandResult:
+    """Run a target-mode command through the shared durable process recorder."""
+    started = time.monotonic()
+    receipt_dir = output_file.parent / "receipts"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt = receipt_dir / f"{output_file.name}.receipt.json"
+    try:
+        result = run_recorded(argv, cwd=cwd, env=env, timeout=timeout,
+                              log_path=output_file, receipt_path=receipt)
+        returncode = result.returncode
+        timed_out = False
+        stderr = ""
+    except subprocess.TimeoutExpired as exc:
+        returncode = getattr(exc, "returncode", None)
+        timed_out = True
+        stderr = str(exc)
+    except FileNotFoundError as exc:
+        return CommandResult(list(argv), 127, time.monotonic() - started, "", str(exc),
+                             process_receipt_path=str(receipt))
+    log_path = str(output_file.resolve()) if output_file.is_file() else None
+    log_sha256 = log_size = None
+    if log_path is not None:
+        log_sha256, log_size = _log_metadata(output_file)
+    return CommandResult(list(argv), returncode, time.monotonic() - started,
+                         "", stderr, timed_out, log_path, log_sha256, log_size,
+                         process_receipt_path=str(receipt))
 
 
 _TEST_COUNT_PATTERNS = (
@@ -494,6 +527,294 @@ def _apply(mutant: Mutant, root: Path) -> tuple[Path, bytes]:
 
 def _is_ctest(executable: str) -> bool:
     return executable.replace("\\", "/").rsplit("/", 1)[-1].lower() in {"ctest", "ctest.exe"}
+
+
+def _expected_control_names(argument: str, root: Path) -> tuple[list[str], dict[str, str]]:
+    path = Path(argument)
+    if not path.is_absolute():
+        path = root / path
+    try:
+        path = path.resolve(strict=True)
+        raw = path.read_bytes()
+        value = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MutationError(f"cannot read expected control inventory {argument!r}: {exc}") from exc
+    names = value if isinstance(value, list) else value.get("names") if isinstance(value, dict) else None
+    if not isinstance(names, list) or not names or any(not isinstance(name, str) or not name for name in names):
+        raise MutationError("expected control inventory must be a nonempty array of test names")
+    if len(set(names)) != len(names):
+        raise MutationError("expected control inventory contains duplicate test names")
+    return names, {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _resolve_executable(argument: str, label: str) -> str:
+    path = Path(argument)
+    has_path = path.is_absolute() or os.sep in argument or (os.altsep and os.altsep in argument)
+    try:
+        resolved = path.resolve(strict=True) if has_path else None
+    except OSError as exc:
+        raise MutationError(f"{label} is not an executable: {argument}: {exc}") from exc
+    candidate = str(resolved) if resolved is not None else shutil.which(argument)
+    if not candidate or not Path(candidate).is_file() or not os.access(candidate, os.X_OK):
+        raise MutationError(f"{label} is not an executable: {argument}")
+    return str(Path(candidate).resolve())
+
+
+def _configured_source(build: Path, root: Path, config: str | None = None) -> None:
+    cache = build / "CMakeCache.txt"
+    try:
+        lines = cache.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise MutationError(f"build directory has no readable CMakeCache.txt: {cache}") from exc
+    home = next((line.split("=", 1)[1] for line in lines
+                 if line.startswith("CMAKE_HOME_DIRECTORY:INTERNAL=")), None)
+    if not home:
+        raise MutationError(f"CMakeCache does not identify its source directory: {cache}")
+    try:
+        if Path(home).resolve(strict=True) != root.resolve(strict=True):
+            raise MutationError(f"configured CMake source {Path(home).resolve()} differs from {root}")
+    except OSError as exc:
+        raise MutationError(f"cannot resolve configured CMake source {home!r}: {exc}") from exc
+    if config is not None:
+        multi = next((line.split("=", 1)[1] for line in lines
+                      if line.startswith("CMAKE_CONFIGURATION_TYPES:STRING=")), None)
+        if multi is not None:
+            configurations = [item for item in multi.split(";") if item]
+            if config not in configurations:
+                raise MutationError(f"configured CMake build does not contain {config!r}: {configurations}")
+        else:
+            build_type = next((line.split("=", 1)[1] for line in lines
+                               if line.startswith("CMAKE_BUILD_TYPE:STRING=")), "")
+            if build_type != config:
+                raise MutationError(f"configured single-configuration build is {build_type!r}, expected {config!r}")
+
+
+def _file_api_query(build: Path) -> None:
+    query = build / ".cmake" / "api" / "v1" / "query"
+    _reject_symlink_components(query, label="CMake File API query")
+    query_file = query / "codemodel-v2"
+    if query_file.is_symlink():
+        raise MutationError(f"CMake File API query must not be a symlink: {query_file}")
+    query.mkdir(parents=True, exist_ok=True)
+    query_file.touch(exist_ok=True)
+
+
+def _file_api_reply_path(reply_dir: Path, value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise MutationError(f"CMake File API {label} path is invalid")
+    path = Path(value)
+    if path.is_absolute():
+        raise MutationError(f"CMake File API {label} path must be relative: {value!r}")
+    try:
+        resolved = (reply_dir / path).resolve(strict=True)
+        resolved.relative_to(reply_dir.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise MutationError(f"CMake File API {label} path escapes its reply directory: {value!r}") from exc
+    return resolved
+
+
+def _file_api_target(build: Path, target: str, config: str) -> dict[str, Any]:
+    """Resolve one built executable from CMake's post-build File API reply."""
+    reply_dir = build / ".cmake" / "api" / "v1" / "reply"
+    indexes = sorted(reply_dir.glob("index-*.json"), reverse=True) if reply_dir.is_dir() else []
+    if not indexes:
+        raise MutationError(f"CMake File API has no index under {reply_dir}")
+    try:
+        index_path = indexes[0]
+        index_path.resolve(strict=True).relative_to(reply_dir.resolve(strict=True))
+        if index_path.is_symlink():
+            raise MutationError("CMake File API index must not be a symlink")
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        codemodel_path = _file_api_reply_path(
+            reply_dir, index["reply"]["codemodel-v2"]["jsonFile"], "codemodel")
+        codemodel = json.loads(codemodel_path.read_text(encoding="utf-8"))
+        configurations = codemodel["configurations"]
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise MutationError(f"cannot read CMake File API codemodel: {exc}") from exc
+    if not isinstance(configurations, list) or not configurations:
+        raise MutationError("CMake File API codemodel has no configurations")
+    named = [row for row in configurations if isinstance(row, dict) and row.get("name") == config]
+    if named:
+        selected = named[0]
+    elif len(configurations) == 1 and isinstance(configurations[0], dict):
+        # Single-configuration generators report an empty configuration name;
+        # --config is still accepted by CMake's generic build interface.
+        selected = configurations[0]
+    else:
+        available = [row.get("name") for row in configurations if isinstance(row, dict)]
+        raise MutationError(f"CMake File API has no {config!r} configuration; found {available}")
+    entries = [row for row in selected.get("targets", [])
+               if isinstance(row, dict) and row.get("name") == target]
+    if len(entries) != 1:
+        raise MutationError(f"CMake File API target {target!r} is missing or ambiguous")
+    try:
+        target_path = _file_api_reply_path(reply_dir, entries[0]["jsonFile"], "target")
+        target_info = json.loads(target_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise MutationError(f"cannot read CMake File API target {target!r}: {exc}") from exc
+    if target_info.get("name") != target or target_info.get("type") != "EXECUTABLE":
+        raise MutationError(f"CMake target {target!r} is not an executable")
+    artifacts = target_info.get("artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 1 or not isinstance(artifacts[0], dict):
+        raise MutationError(f"CMake target {target!r} has no unique executable artifact")
+    artifact_value = artifacts[0].get("path")
+    if not isinstance(artifact_value, str) or not artifact_value:
+        raise MutationError(f"CMake target {target!r} has an invalid artifact path")
+    artifact = Path(artifact_value)
+    if not artifact.is_absolute():
+        artifact = build / artifact
+    try:
+        artifact = artifact.resolve(strict=True)
+        artifact.relative_to(build.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise MutationError(f"CMake artifact resolves outside the build tree: {artifact_value!r}") from exc
+    if not artifact.is_file() or not os.access(artifact, os.X_OK):
+        raise MutationError(f"CMake artifact is not an executable file: {artifact}")
+    digest, size = _log_metadata(artifact)
+    return {"configuration": selected.get("name", ""), "target": target,
+            "artifact": str(artifact), "sha256": digest, "size_bytes": size,
+            "file_api_index": str(index_path.resolve()),
+            "file_api_index_sha256": _log_metadata(index_path)[0]}
+
+
+def _preserve_executable(out: Path, role: str, target: str,
+                         artifact: dict[str, Any]) -> dict[str, Any]:
+    """Copy a built target before the next build can replace its ELF/image."""
+    source = Path(artifact["artifact"])
+    directory = out / "artifacts"
+    directory.mkdir(parents=True, exist_ok=True)
+    safe_role = re.sub(r"[^A-Za-z0-9_.-]+", "-", role).strip("-._") or "artifact"
+    safe_target = re.sub(r"[^A-Za-z0-9_.-]+", "-", target).strip("-._") or "target"
+    destination = directory / f"{safe_role}-{safe_target}{source.suffix}"
+    if destination.exists() or destination.is_symlink():
+        raise MutationError(f"refusing to replace preserved executable: {destination}")
+    try:
+        shutil.copy2(source, destination)
+    except OSError as exc:
+        raise MutationError(f"cannot preserve target executable {source}: {exc}") from exc
+    digest, size = _log_metadata(destination)
+    if digest != artifact.get("sha256") or size != artifact.get("size_bytes"):
+        raise MutationError(f"preserved executable identity differs from build output: {destination}")
+    return {"path": str(destination.resolve()), "sha256": digest, "size_bytes": size}
+
+
+def _ctest_label_value(value: Any) -> list[str]:
+    if isinstance(value, list) and all(isinstance(label, str) for label in value):
+        return [label for item in value for label in item.split(";") if label]
+    if isinstance(value, str):
+        return [label for label in value.split(";") if label]
+    raise MutationError("CTest discovery contains invalid LABELS property")
+
+
+def _ctest_tests(discovery: Any) -> list[dict[str, Any]]:
+    if not isinstance(discovery, dict) or not isinstance(discovery.get("tests"), list):
+        raise MutationError("CTest discovery JSON has no tests array")
+    tests: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for item in discovery["tests"]:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
+            raise MutationError("CTest discovery contains a test without a name")
+        name = item["name"]
+        if name in names:
+            raise MutationError(f"CTest discovery contains duplicate test name {name!r}")
+        names.add(name)
+        command = item.get("command")
+        # CTest includes NOT_BUILT placeholders for unrelated executable
+        # targets. Keep their names and properties so selectors can ignore
+        # them, then reject a missing command if a placeholder is selected.
+        if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+            command = []
+        properties = item.get("properties", [])
+        if isinstance(properties, dict):
+            label_value = properties.get("LABELS", [])
+            working_dir = properties.get("WORKING_DIRECTORY")
+        elif isinstance(properties, list):
+            values = {prop.get("name"): prop.get("value") for prop in properties
+                      if isinstance(prop, dict) and isinstance(prop.get("name"), str)}
+            label_value = values.get("LABELS", [])
+            working_dir = values.get("WORKING_DIRECTORY")
+        else:
+            raise MutationError(f"CTest discovery test {name!r} has invalid properties")
+        labels = _ctest_label_value(label_value) if label_value else []
+        tests.append({"name": name, "command": command, "labels": labels,
+                      "working_directory": working_dir if isinstance(working_dir, str) else None})
+    return tests
+
+
+def _selected_ctest_names(tests: list[dict[str, Any]], *, control_regex: str,
+                          exclude_label_regex: str, test_filter: str = "") -> list[str]:
+    control = re.compile(control_regex)
+    excluded = re.compile(exclude_label_regex) if exclude_label_regex else None
+    selected_label = re.compile(test_filter) if test_filter else None
+    names = []
+    for test in tests:
+        labels = test["labels"]
+        if not control.search(test["name"]):
+            continue
+        if excluded is not None and any(excluded.search(label) for label in labels):
+            continue
+        if selected_label is not None and not any(selected_label.search(label) for label in labels):
+            continue
+        names.append(test["name"])
+    if not names:
+        selection = f"control regex {control_regex!r}"
+        if test_filter:
+            selection += f" and label regex {test_filter!r}"
+        raise MutationError(f"CTest selection is empty for {selection}")
+    return names
+
+
+def _compare_inventory(actual: Sequence[str], expected: Sequence[str], label: str) -> dict[str, Any]:
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    if missing or extra:
+        raise MutationError(f"{label} inventory differs: missing={missing}, extra={extra}")
+    return {"expected": list(expected), "actual": list(actual), "count": len(actual),
+            "sha256": hashlib.sha256("\n".join(actual).encode("utf-8")).hexdigest()}
+
+
+def _verify_ctest_executables(tests: list[dict[str, Any]], names: set[str],
+                              build: Path, artifact: Path) -> None:
+    expected = artifact.resolve(strict=True)
+    for test in tests:
+        if test["name"] not in names:
+            continue
+        if not test["command"]:
+            raise MutationError(f"CTest selected test {test['name']!r} has no executable command")
+        command = Path(test["command"][0])
+        if not command.is_absolute():
+            candidates = []
+            if test["working_directory"]:
+                candidates.append(Path(test["working_directory"]) / command)
+            candidates.append(build / command)
+            resolved = next((path.resolve(strict=False) for path in candidates
+                             if path.resolve(strict=False) == expected), candidates[0].resolve(strict=False))
+        else:
+            resolved = command.resolve(strict=False)
+        if resolved != expected:
+            raise MutationError(
+                f"CTest executable mismatch for {test['name']!r}: {resolved} != {expected}")
+
+
+def _expected_junit_identities(test_names: Sequence[str]) -> set[str]:
+    # CTest's JUnit reporter emits the discovered test name in both fields.
+    return {f"{name}::{name}" for name in test_names}
+
+
+def _validate_target_junit(path: Path, expected_names: Sequence[str]) -> dict[str, Any]:
+    evidence = read_junit_evidence(path, reporter_profile="ctest")
+    expected = _expected_junit_identities(expected_names)
+    actual = set(evidence.get("cases", {}))
+    missing, extra = sorted(expected - actual), sorted(actual - expected)
+    evidence["identity_match"] = not missing and not extra and evidence.get("usable", False)
+    evidence["missing_identities"] = missing
+    evidence["extra_identities"] = extra
+    if missing or extra:
+        evidence.setdefault("errors", []).append(
+            f"JUnit identity set differs: missing={missing}, extra={extra}")
+        evidence["usable"] = False
+        evidence["identity_match"] = False
+    return evidence
 
 
 def _test_command(argv: Sequence[str], mutant: Mutant) -> list[str]:
@@ -1095,6 +1416,16 @@ def _mutation_worktree_with_report(repo: Path, commit: str, work_parent: Path | 
         raise
 
 
+@contextmanager
+def _with_finalizer(manager: Any, finalizer: Any):
+    """Run target-mode restoration while the selected checkout is still live."""
+    with manager as value:
+        try:
+            yield value
+        finally:
+            finalizer(value)
+
+
 def _result_log_evidence(result: CommandResult) -> LogEvidence | None:
     if result.log_path is None:
         return None
@@ -1103,7 +1434,8 @@ def _result_log_evidence(result: CommandResult) -> LogEvidence | None:
 
 def _capture_junit_artifact(result: CommandResult, path: Path, *, log_root: Path,
                             console_test_count: int,
-                            log_evidence: LogEvidence | None) -> dict[str, Any]:
+                            log_evidence: LogEvidence | None,
+                            expected_names: Sequence[str] | None = None) -> dict[str, Any]:
     """Validate and bind a requested CTest JUnit result to its command log."""
     artifact: dict[str, Any] = {
         "path": str(path), "sha256": None, "size_bytes": None,
@@ -1145,6 +1477,18 @@ def _capture_junit_artifact(result: CommandResult, path: Path, *, log_root: Path
                     errors.append("JUnit reader returned invalid counts")
                 if not evidence.get("usable", False) and not errors:
                     errors.append("JUnit reader did not accept the result")
+                if expected_names is not None and evidence.get("usable", False):
+                    expected_identities = _expected_junit_identities(expected_names)
+                    actual_identities = set(evidence.get("cases", {}))
+                    missing = sorted(expected_identities - actual_identities)
+                    extra = sorted(actual_identities - expected_identities)
+                    artifact["expected_identities"] = sorted(expected_identities)
+                    artifact["observed_identities"] = sorted(actual_identities)
+                    artifact["missing_identities"] = missing
+                    artifact["extra_identities"] = extra
+                    if missing or extra:
+                        errors.append(
+                            f"JUnit identity set differs: missing={missing}, extra={extra}")
                 if artifact["counts"] is not None:
                     result_counts = artifact["counts"]
                     if result_counts["tests"] != console_test_count:
@@ -1185,10 +1529,56 @@ def run_mutation(args: argparse.Namespace) -> int:
         raise MutationError("--max-mutants must be positive")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise MutationError("--timeout must be finite and positive")
-    build_argv, build_argv_file = _command_arguments(
-        args.build_command, args.build_argv_file, root=repo, command_name="build")
-    test_argv, test_argv_file = _command_arguments(
-        args.test_command, args.test_argv_file, root=repo, command_name="test")
+    target_mode = getattr(args, "target", None) is not None
+    target_spec: dict[str, Any] | None = None
+    expected_control: list[str] | None = None
+    expected_control_file: dict[str, str] | None = None
+    if target_mode:
+        explicit_build = args.build_command is not None or args.build_argv_file is not None
+        explicit_test = args.test_command is not None or args.test_argv_file is not None
+        if explicit_build or explicit_test:
+            raise MutationError("CMake/CTest target mode cannot be combined with explicit build/test argv")
+        if args.configure_command:
+            raise MutationError("CMake/CTest target mode uses the existing configured build and cannot configure it")
+        for name in ("cmake", "ctest", "config", "jobs", "control_regex", "expected_control_inventory"):
+            if not getattr(args, name, None):
+                raise MutationError(f"target mode requires --{name.replace('_', '-')}")
+        if isinstance(args.jobs, bool) or args.jobs <= 0:
+            raise MutationError("--jobs must be a positive integer")
+        try:
+            re.compile(args.control_regex)
+            if args.exclude_label_regex:
+                re.compile(args.exclude_label_regex)
+        except re.error as exc:
+            raise MutationError(f"invalid CTest selection regex: {exc}") from exc
+        target_spec = {
+            "target": args.target,
+            "config": args.config,
+            "jobs": args.jobs,
+            "cmake": _resolve_executable(args.cmake, "CMake"),
+            "ctest": _resolve_executable(args.ctest, "CTest"),
+            "control_regex": args.control_regex,
+            "exclude_label_regex": ("NotWorking|RequiresApp" if args.exclude_label_regex is None
+                                     else args.exclude_label_regex),
+        }
+        expected_control, expected_control_file = _expected_control_names(
+            args.expected_control_inventory, repo)
+        build_argv: list[str] | None = None
+        test_argv: list[str] | None = None
+        build_argv_file = test_argv_file = None
+    else:
+        if (args.build_command is None) == (args.build_argv_file is None):
+            raise MutationError("explicit mode requires exactly one of --build-command/--build-argv-file")
+        if (args.test_command is None) == (args.test_argv_file is None):
+            raise MutationError("explicit mode requires exactly one of --test-command/--test-argv-file")
+        if any(getattr(args, name, None) is not None for name in
+               ("cmake", "ctest", "target", "config", "jobs", "control_regex",
+                "expected_control_inventory", "exclude_label_regex")):
+            raise MutationError("CMake/CTest target flags require --target and cannot be mixed with explicit mode")
+        build_argv, build_argv_file = _command_arguments(
+            args.build_command, args.build_argv_file, root=repo, command_name="build")
+        test_argv, test_argv_file = _command_arguments(
+            args.test_command, args.test_argv_file, root=repo, command_name="test")
     manifest_digests = getattr(args, "mutants_sha256", None)
     guarded_mutants = (_load_mutants(args.mutants, repo, expected_sha256=manifest_digests)
                        if manifest_digests is not None else None)
@@ -1226,12 +1616,18 @@ def run_mutation(args: argparse.Namespace) -> int:
                   if source is not None}
     if argv_files:
         preflight["argv_files"] = argv_files
+    report_commands: dict[str, Any] = ({"mode": "cmake_ctest_target", **target_spec}
+                                       if target_mode else
+                                       {"configure": configure_argv, "build": build_argv,
+                                        "test": test_argv})
+    if target_mode and expected_control_file is not None:
+        preflight["expected_control_inventory"] = expected_control_file
     report: dict[str, Any] = {
         "schema_version": 1,
         "status": "in_progress",
         "git": {"commit": commit, "root": str(repo)},
         "limits": {"max_mutants": args.max_mutants, "timeout_seconds": args.timeout},
-        "commands": {"configure": configure_argv, "build": build_argv, "test": test_argv},
+        "commands": report_commands,
         "preflight": preflight,
         "mutants": [],
     }
@@ -1247,7 +1643,32 @@ def run_mutation(args: argparse.Namespace) -> int:
         command_serial += 1
         return _command_log(log_root, command_serial, phase, label)
 
-    test_requests_junit = any("{junit}" in value for value in test_argv)
+    def target_environment(phase: str) -> dict[str, str]:
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", phase).strip("-") or "command"
+        env = os.environ.copy()
+        # External Git snapshots may set these for their own commands. Only
+        # build and test children must see a normal worktree Git environment.
+        env.pop("GIT_DIR", None)
+        env.pop("GIT_WORK_TREE", None)
+        temp_dir = out / "tmp" / safe
+        profile_dir = out / "profiles" / safe
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        for variable in _temp_environment_variables():
+            env[variable] = str(temp_dir)
+        env["LLVM_PROFILE_FILE"] = str(profile_dir / "%m-%p.profraw")
+        return env
+
+    def execute(argv: Sequence[str], *, cwd: Path, phase: str, label: str = "",
+                output_file: Path | None = None) -> CommandResult:
+        log_path = output_file if output_file is not None else next_log(phase, label)
+        if target_mode:
+            return _run_recorded_command(argv, cwd=cwd, timeout=args.timeout,
+                                         output_file=log_path,
+                                         env=target_environment(phase + ("-" + label if label else "")))
+        return run_command(argv, cwd=cwd, timeout=args.timeout, output_file=log_path)
+
+    test_requests_junit = target_mode or any("{junit}" in value for value in (test_argv or []))
 
     def junit_for_log(log_path: Path) -> Path | None:
         if not test_requests_junit:
@@ -1257,9 +1678,114 @@ def run_mutation(args: argparse.Namespace) -> int:
             raise MutationError(f"requested JUnit path escapes command log directory: {path}")
         return path
 
-    with _mutation_worktree_with_report(repo, commit, work_parent, persistent_path,
-                                        report_path, report,
-                                        args.reuse_detached_checkout) as worktree:
+    target_selection: dict[str, list[str]] = {}
+    target_artifact: dict[str, Any] | None = None
+    target_discovery_outputs: dict[str, dict[str, Any]] = {}
+
+    def target_discovery(worktree: Path, build_dir: Path, phase: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        assert target_spec is not None and expected_control is not None
+        _file_api_query(build_dir)
+        result = execute([target_spec["ctest"], "--test-dir", str(build_dir),
+                          "-C", target_spec["config"], "--show-only=json-v1"],
+                         cwd=worktree, phase=phase, output_file=next_log(phase))
+        target_discovery_outputs[phase] = result.json()
+        if result.timed_out or result.returncode != 0 or not result.log_path:
+            raise MutationError(f"CTest discovery failed with exit {result.returncode}")
+        try:
+            discovery = json.loads(Path(result.log_path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise MutationError(f"CTest discovery JSON is invalid: {exc}") from exc
+        tests = _ctest_tests(discovery)
+        names = _selected_ctest_names(tests,
+                                      control_regex=target_spec["control_regex"],
+                                      exclude_label_regex=target_spec["exclude_label_regex"])
+        inventory = _compare_inventory(
+            names, expected_control, "expected control against post-build CTest discovery")
+        binary = _file_api_target(build_dir, target_spec["target"], target_spec["config"])
+        artifact_path = Path(binary["artifact"])
+        _verify_ctest_executables(tests, set(names), build_dir, artifact_path)
+        target_discovery_outputs[phase]["inventory"] = inventory
+        return tests, binary
+
+    def run_target_control(worktree: Path, build_dir: Path, *, phase: str,
+                           names: Sequence[str], artifact: dict[str, Any]) -> dict[str, Any]:
+        assert target_spec is not None
+        log_path = next_log(phase)
+        junit_path = log_path.with_suffix(".junit.xml")
+        argv = [target_spec["ctest"], "--test-dir", str(build_dir),
+                "-C", target_spec["config"], "-R", target_spec["control_regex"]]
+        if target_spec["exclude_label_regex"]:
+            argv.extend(["-LE", target_spec["exclude_label_regex"]])
+        argv.extend(["--no-tests=error", "--output-on-failure", "--parallel",
+                     str(target_spec["jobs"]), "--timeout", str(math.ceil(args.timeout)),
+                     "--output-junit", str(junit_path)])
+        result = execute(argv, cwd=worktree, phase=phase, output_file=log_path)
+        log_evidence = _result_log_evidence(result)
+        count = log_evidence.test_count if log_evidence is not None else 0
+        artifact_junit = _capture_junit_artifact(
+            result, junit_path, log_root=log_root, console_test_count=count,
+            log_evidence=log_evidence, expected_names=names)
+        result_json = result.json()
+        result_json["junit_artifact"] = artifact_junit
+        classification = _classify_test(result, count, log_evidence=log_evidence,
+                                        junit_artifact=artifact_junit)
+        junit_evidence = _validate_target_junit(junit_path, names) if junit_path.is_file() else {
+            "usable": False, "errors": ["JUnit file was not created"], "cases": {},
+            "counts": {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "timeouts": 0},
+        }
+        return {
+            "classification": classification,
+            "status": "passed" if classification == "survived" else "failed",
+            "expected_test_names": list(names),
+            "test_evidence": count,
+            "junit_evidence": junit_evidence,
+            "executable": artifact,
+            "result": result_json,
+            "log_evidence": asdict(log_evidence) if log_evidence is not None else None,
+        }
+
+    def restore_normal_target(worktree: Path) -> None:
+        if not target_mode:
+            return
+        assert target_spec is not None and expected_control is not None
+        build_dir = (worktree / args.build_dir).resolve()
+        restore: dict[str, Any] = {"status": "in_progress"}
+        report["normal_restore"] = restore
+        _checkpoint(report_path, report, "normal_restore_started")
+        try:
+            build_result = execute(
+                [target_spec["cmake"], "--build", str(build_dir), "--config", target_spec["config"],
+                 "--target", target_spec["target"], "--parallel", str(target_spec["jobs"])],
+                cwd=worktree, phase="normal-restore-build", output_file=next_log("normal-restore-build"))
+            restore["build"] = build_result.json()
+            if build_result.timed_out or build_result.returncode != 0:
+                raise MutationError(
+                    f"normal target rebuild failed with exit {build_result.returncode}")
+            tests, binary = target_discovery(worktree, build_dir, "normal-restore-ctest-discovery")
+            binary["preserved_copy"] = _preserve_executable(
+                out, "normal-restored", target_spec["target"], binary)
+            restore["executable"] = binary
+            restore["discovered_test_count"] = len(tests)
+            control = run_target_control(worktree, build_dir, phase="normal-restore-control",
+                                         names=expected_control, artifact=binary)
+            restore["control"] = control
+            if control["status"] != "passed":
+                raise MutationError("normal target control failed after rebuilding")
+            restore["status"] = "passed"
+            restore["ended_utc"] = time.time()
+            _checkpoint(report_path, report, "normal_restore_complete")
+        except BaseException as exc:
+            restore["status"] = "failed"
+            restore["error"] = str(exc)
+            report["status"] = "normal_restore_failed"
+            report["error"] = f"normal target rebuild/control failed: {exc}"
+            _checkpoint(report_path, report, "normal_restore_failed")
+            raise
+
+    worktree_context = _mutation_worktree_with_report(
+        repo, commit, work_parent, persistent_path, report_path, report,
+        args.reuse_detached_checkout)
+    with _with_finalizer(worktree_context, restore_normal_target) as worktree:
         build_dir = (worktree / args.build_dir).resolve()
         if configure_argv:
             configure = run_command(_expand(configure_argv, root=worktree, build=build_dir),
@@ -1273,9 +1799,34 @@ def run_mutation(args: argparse.Namespace) -> int:
                 report["status"] = "configure_timeout" if configure.timed_out else "configure_error"
                 _checkpoint(report_path, report, "configure_failed")
                 return 2
-        build = _expand(build_argv, root=worktree, build=(worktree / args.build_dir).resolve())
-        baseline_build = run_command(build, cwd=worktree, timeout=args.timeout,
-                                     output_file=next_log("baseline-build"))
+        if target_mode:
+            assert target_spec is not None
+            try:
+                _configured_source(build_dir, worktree, target_spec["config"])
+                _file_api_query(build_dir)
+            except MutationError as exc:
+                report["target_preflight"] = {"status": "failed", "error": str(exc)}
+                _checkpoint(report_path, report, "target_preflight_failed")
+                raise
+            configure_result = execute(
+                [target_spec["cmake"], "-S", str(worktree), "-B", str(build_dir)],
+                cwd=worktree, phase="target-configure",
+                output_file=next_log("target-configure"))
+            report["target_configure"] = configure_result.json()
+            if configure_result.timed_out or configure_result.returncode != 0:
+                report["status"] = ("configure_timeout" if configure_result.timed_out
+                                    else "configure_error")
+                _checkpoint(report_path, report, "target_configure_failed")
+                return 2
+            _configured_source(build_dir, worktree, target_spec["config"])
+            build = [target_spec["cmake"], "--build", str(build_dir),
+                     "--config", target_spec["config"], "--target", target_spec["target"],
+                     "--parallel", str(target_spec["jobs"])]
+        else:
+            assert build_argv is not None
+            build = _expand(build_argv, root=worktree, build=build_dir)
+        baseline_build = execute(build, cwd=worktree, phase="baseline-build",
+                                 output_file=next_log("baseline-build"))
         report["baseline_build"] = baseline_build.json()
         if args.reuse_detached_checkout:
             _verify_reuse_checkout(repo, commit)
@@ -1284,6 +1835,54 @@ def run_mutation(args: argparse.Namespace) -> int:
             report["status"] = _classify_build(baseline_build)
             _checkpoint(report_path, report, "baseline_build_failed")
             return 2
+        if target_mode:
+            assert target_spec is not None and expected_control is not None
+            try:
+                _configured_source(build_dir, worktree, target_spec["config"])
+                tests, target_artifact = target_discovery(worktree, build_dir,
+                                                          "post-build-ctest-discovery")
+                target_selection = {test_filter: _selected_ctest_names(
+                    tests, control_regex=target_spec["control_regex"],
+                    exclude_label_regex=target_spec["exclude_label_regex"],
+                    test_filter=test_filter)
+                    for test_filter in sorted(set(mutant.test_filter for mutant in mutants))}
+                for names in target_selection.values():
+                    _verify_ctest_executables(tests, set(names), build_dir,
+                                              Path(target_artifact["artifact"]))
+                target_artifact["preserved_copy"] = _preserve_executable(
+                    out, "normal-baseline", target_spec["target"], target_artifact)
+                report["target_mode"] = {
+                    **target_spec,
+                    "build_dir": str(build_dir),
+                    "executable": target_artifact,
+                    "control_test_names": list(expected_control),
+                    "control_test_count": len(expected_control),
+                    "filter_test_names": target_selection,
+                    "ctest_discovery": target_discovery_outputs.get(
+                        "post-build-ctest-discovery"),
+                }
+                test_argv = [target_spec["ctest"], "--test-dir", str(build_dir),
+                             "-C", target_spec["config"], "-R", target_spec["control_regex"]]
+                if target_spec["exclude_label_regex"]:
+                    test_argv.extend(["-LE", target_spec["exclude_label_regex"]])
+                test_argv.extend(["--no-tests=error", "--output-on-failure", "--parallel",
+                                  str(target_spec["jobs"]), "--timeout", str(math.ceil(args.timeout)),
+                                  "--output-junit", "{junit}"])
+                report["commands"]["build_argv"] = build
+                report["commands"]["test_argv"] = test_argv
+                control = run_target_control(worktree, build_dir, phase="focused-control",
+                                             names=expected_control, artifact=target_artifact)
+                report["focused_control"] = control
+                _checkpoint(report_path, report, "focused_control")
+                if control["status"] != "passed":
+                    report["status"] = "focused_control_failed"
+                    _checkpoint(report_path, report, "focused_control_failed")
+                    return 2
+            except MutationError as exc:
+                report["status"] = "target_discovery_failed"
+                report["error"] = str(exc)
+                _checkpoint(report_path, report, "target_discovery_failed")
+                return 2
         # Validate each manifest filter against the unmutated build.  A
         # broad suite baseline can fail for unrelated reasons while still
         # hiding whether the selected test actually ran.
@@ -1295,12 +1894,12 @@ def run_mutation(args: argparse.Namespace) -> int:
             selected = _test_command(test_argv, baseline_mutant)
             baseline_log = next_log("baseline-test", test_filter)
             baseline_junit = junit_for_log(baseline_log)
-            baseline_test = run_command(_expand(selected, root=worktree,
-                                                 build=(worktree / args.build_dir).resolve(),
-                                                 test_filter=test_filter,
-                                                 junit=baseline_junit),
-                                        cwd=worktree, timeout=args.timeout,
-                                        output_file=baseline_log)
+            baseline_test = execute(_expand(selected, root=worktree,
+                                             build=(worktree / args.build_dir).resolve(),
+                                             test_filter=test_filter,
+                                             junit=baseline_junit),
+                                    cwd=worktree, phase="baseline-test", label=test_filter,
+                                    output_file=baseline_log)
             if args.reuse_detached_checkout:
                 _verify_reuse_checkout(repo, commit)
             log_evidence = _result_log_evidence(baseline_test)
@@ -1309,7 +1908,9 @@ def run_mutation(args: argparse.Namespace) -> int:
             if baseline_junit is not None:
                 _capture_junit_artifact(baseline_test, baseline_junit, log_root=log_root,
                                         console_test_count=evidence,
-                                        log_evidence=log_evidence)
+                                        log_evidence=log_evidence,
+                                        expected_names=(target_selection[test_filter]
+                                                        if target_mode else None))
             baseline_counts[test_filter] = evidence
             classification = _classify_test(baseline_test, evidence,
                                             log_evidence=log_evidence,
@@ -1354,29 +1955,44 @@ def run_mutation(args: argparse.Namespace) -> int:
             try:
                 path, original = _apply(mutant, worktree)
                 entry["source_match"] = "exactly_one"
-                mutant_build = run_command(build, cwd=worktree, timeout=args.timeout,
-                                           output_file=next_log("mutant-build", mutant.id))
+                mutant_build = execute(build, cwd=worktree, phase="mutant-build",
+                                       label=mutant.id,
+                                       output_file=next_log("mutant-build", mutant.id))
                 entry["build"] = mutant_build.json()
                 if mutant_build.timed_out or mutant_build.returncode != 0:
                     entry["status"] = _classify_build(mutant_build)
                     _checkpoint(report_path, report, f"mutant:{mutant.id}:build")
                     continue
+                if target_mode:
+                    assert target_spec is not None and target_artifact is not None
+                    mutant_artifact = _file_api_target(
+                        (worktree / args.build_dir).resolve(), target_spec["target"],
+                        target_spec["config"])
+                    if mutant_artifact["artifact"] != target_artifact["artifact"]:
+                        raise MutationError(
+                            "CMake target artifact path changed after the mutant build")
+                    mutant_artifact["preserved_copy"] = _preserve_executable(
+                        out, mutant.id, target_spec["target"], mutant_artifact)
+                    entry["executable"] = mutant_artifact
+                    _checkpoint(report_path, report, f"mutant:{mutant.id}:executable_preserved")
                 selected_test = _test_command(test_argv, mutant)
                 mutant_log = next_log("mutant-test", mutant.id)
                 mutant_junit = junit_for_log(mutant_log)
-                mutant_test = run_command(_expand(selected_test, root=worktree,
-                                                   build=(worktree / args.build_dir).resolve(),
-                                                   test_filter=mutant.test_filter,
-                                                   junit=mutant_junit),
-                                          cwd=worktree, timeout=args.timeout,
-                                          output_file=mutant_log)
+                mutant_test = execute(_expand(selected_test, root=worktree,
+                                               build=(worktree / args.build_dir).resolve(),
+                                               test_filter=mutant.test_filter,
+                                               junit=mutant_junit),
+                                      cwd=worktree, phase="mutant-test", label=mutant.id,
+                                      output_file=mutant_log)
                 log_evidence = _result_log_evidence(mutant_test)
                 mutant_evidence = (log_evidence.test_count if log_evidence is not None
                                    else test_evidence(mutant_test.stdout + mutant_test.stderr))
                 if mutant_junit is not None:
                     _capture_junit_artifact(mutant_test, mutant_junit, log_root=log_root,
                                             console_test_count=mutant_evidence,
-                                            log_evidence=log_evidence)
+                                            log_evidence=log_evidence,
+                                            expected_names=(target_selection[mutant.test_filter]
+                                                            if target_mode else None))
                 entry["test"] = mutant_test.json()
                 entry["test_evidence"] = mutant_evidence
                 if log_evidence is not None:
@@ -1440,16 +2056,26 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--root", default=".")
     run.add_argument("--build-dir", default="build")
     run.add_argument("--configure-command", help="optional CMake configure argv before the baseline build")
-    build_command = run.add_mutually_exclusive_group(required=True)
+    build_command = run.add_mutually_exclusive_group(required=False)
     build_command.add_argument("--build-command", help="build argv as a shell-like command string")
     build_command.add_argument("--build-argv-file",
                                help="JSON argv array file, relative to --root unless absolute")
-    test_command = run.add_mutually_exclusive_group(required=True)
+    test_command = run.add_mutually_exclusive_group(required=False)
     test_command.add_argument(
         "--test-command",
         help="test argv as a shell-like command string; optional {junit} retains and validates CTest JUnit output")
     test_command.add_argument("--test-argv-file",
                               help="JSON argv array file, relative to --root unless absolute; test argv may use {junit}")
+    run.add_argument("--target", help="configured CMake executable target; enables CMake/CTest target mode")
+    run.add_argument("--config", help="CMake build configuration for target mode")
+    run.add_argument("--jobs", type=int, help="bounded CMake and CTest parallelism for target mode")
+    run.add_argument("--cmake", help="CMake executable for target mode")
+    run.add_argument("--ctest", help="CTest executable for target mode")
+    run.add_argument("--control-regex", help="CTest test-name regex for the focused control inventory")
+    run.add_argument("--exclude-label-regex",
+                     help="CTest label regex excluded from focused control and mutation selections")
+    run.add_argument("--expected-control-inventory",
+                     help="JSON file containing the exact CTest test-name array (or an object with names)")
     run.add_argument("--mutants", action="append",
                      help="JSON mutant manifest; repeat to share one build across manifests (default: three Flow smoke mutants)")
     run.add_argument("--mutants-sha256", action="append",
