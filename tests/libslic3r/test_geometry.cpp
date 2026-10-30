@@ -15,6 +15,7 @@
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Geometry/Circle.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
+#include "libslic3r/Measure.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ShortestPath.hpp"
 
@@ -876,4 +877,27 @@ TEST_CASE("Skew is detected with and without a mirror", "[Geometry]")
     const bool mirrored = GENERATE(false, true);
     const Transform3d matrix = Transform3d(test_rotations()[2]) * skewed * Geometry::scale_transform(Vec3d(mirrored ? -1. : 1., 1., 1.));
     CHECK(Geometry::Transformation(matrix).has_skew());
+}
+
+TEST_CASE("Measuring from a point on a circle's axis includes the axial offset", "[Measure]")
+{
+    using namespace Slic3r::Measure;
+    // Circle of radius 3 in the XY plane, and a point 4 above its center.
+    const SurfaceFeature circle(SurfaceFeatureType::Circle, Vec3d::Zero(), Vec3d::UnitZ(), std::nullopt, 3.);
+    const SurfaceFeature point(Vec3d(0., 0., 4.));
+
+    SECTION("to the circle itself") {
+        const MeasurementResult result = get_measurement(point, circle);
+        REQUIRE(result.distance_strict.has_value());
+        CHECK_THAT(result.distance_strict->dist, Catch::Matchers::WithinAbs(5., 1e-9));
+        CHECK(result.distance_strict->from.isApprox(Vec3d(0., 0., 4.)));
+        CHECK_THAT(result.distance_strict->to.norm(), Catch::Matchers::WithinAbs(3., 1e-9));
+    }
+
+    SECTION("to the circle's center") {
+        const MeasurementResult result = get_measurement(point, circle, true);
+        REQUIRE(result.distance_strict.has_value());
+        CHECK_THAT(result.distance_strict->dist, Catch::Matchers::WithinAbs(4., 1e-9));
+        CHECK(result.distance_strict->to.norm() < 1e-9);
+    }
 }
