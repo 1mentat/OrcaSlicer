@@ -3,7 +3,7 @@
 #include <vector>
 #include <utility>
 #include <cstddef>
-#include "Point.hpp"
+#include "libslic3r/Point.hpp"
 
 namespace Slic3r { namespace tex2color {
 
