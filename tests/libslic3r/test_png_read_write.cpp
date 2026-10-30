@@ -8,6 +8,7 @@
 #include <boost/filesystem.hpp>
 
 #include "libslic3r/PNGReadWrite.hpp"
+#include "libslic3r/GCode/Thumbnails.hpp"
 
 using namespace Slic3r;
 
@@ -80,4 +81,27 @@ TEST_CASE("A PNG whose body is garbage is refused", "[PNG]") {
 
     png::ImageColorscale colour;
     CHECK_FALSE(png::decode_colored_png(buf_of(bytes, bytes.size()), colour));
+}
+
+TEST_CASE("A JPEG thumbnail larger than the raw pixel buffer is returned complete", "[Thumbnails]")
+{
+    // A 2x2 RGBA image is 16 bytes of pixels, but any JPEG stream (headers and tables
+    // alone) is several hundred bytes, so the encoder has to grow its output buffer.
+    Slic3r::ThumbnailData data;
+    data.set(2, 2);
+    for (size_t i = 0; i < data.pixels.size(); i += 4) {
+        data.pixels[i + 0] = 200;
+        data.pixels[i + 1] = 100;
+        data.pixels[i + 2] = 50;
+        data.pixels[i + 3] = 255;
+    }
+    const auto jpg = Slic3r::GCodeThumbnails::compress_thumbnail(data, Slic3r::GCodeThumbnailsFormat::JPG);
+    REQUIRE(jpg != nullptr);
+    REQUIRE(jpg->size > data.pixels.size());
+    const auto *bytes = static_cast<const unsigned char *>(jpg->data);
+    // Start-of-image and end-of-image markers.
+    CHECK(bytes[0] == 0xFF);
+    CHECK(bytes[1] == 0xD8);
+    CHECK(bytes[jpg->size - 2] == 0xFF);
+    CHECK(bytes[jpg->size - 1] == 0xD9);
 }
