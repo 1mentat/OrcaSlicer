@@ -240,8 +240,8 @@ It also registers `fff_print_tree_support_tests` and
 respective test source and shared setup for support and filament iteration.
 
 `fff_print_composite_focused_tests` combines existing G-code, motion-settings,
-fill, Arachne, pressure-equalizer, thumbnail, utility, and G-code-processor
-tests with Precise Seam and TreeSupport. It keeps one FFF main and one copy of
+Wipe, interlocking, fill, Arachne, pressure-equalizer, thumbnail, utility, and
+G-code-processor tests with Precise Seam and TreeSupport. It keeps one FFF main and one copy of
 the shared test helpers. The target is excluded from the default build; enabling
 `SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY` registers its source cases with the
 `FocusedComposite::` prefix. It is added to the parallel-test target list so
@@ -254,10 +254,17 @@ composite target, and run its full source inventory with:
 ```sh
 cmake -S . -B build -DBUILD_TESTS=ON \
   -DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=ON
-cmake --build build --config Release --target fff_print_composite_focused_tests --parallel 8
+cmake --build build --config Release --target fff_print_composite_focused_tests --parallel 2
 ctest --test-dir build/tests -C Release --output-on-failure \
-  -R '^FocusedComposite::' --no-tests=error
+  -R '^FocusedComposite::' -LE 'NotWorking|RequiresApp' \
+  --parallel 2 --timeout 180 --no-tests=error \
+  --output-junit build/composite-junit.xml
 ```
+
+Keep the configured source and build paths stable between edits. After a test-only
+edit, repeat the build and CTest commands to compile the changed test sources and
+relink the target. CTest runs each case in a separate process, matching the
+canonical suite's isolation of shared library state.
 
 `[RoleFilamentEndpoints]` checks default, available IDs 1–3, and the first
 unavailable ID in a three-filament configuration against the emitted tools,
