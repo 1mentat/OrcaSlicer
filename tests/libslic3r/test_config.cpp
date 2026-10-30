@@ -1169,6 +1169,24 @@ SCENARIO("ConfigOptionVector::set_to_index throws on incompatible type", "[Confi
     }
 }
 
+TEST_CASE("Adding one config to another takes the values of options both have", "[Config]") {
+    DynamicPrintConfig config;
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    config.set_key_value("nozzle_temperature", new ConfigOptionInts{200});
+
+    DynamicPrintConfig other;
+    other.set_key_value("layer_height", new ConfigOptionFloat(0.3));
+    other.set_key_value("nozzle_temperature", new ConfigOptionInts{230, 240});
+    other.set_key_value("wall_loops", new ConfigOptionInt(4));
+
+    config += other;
+    CHECK_THAT(config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.3, 1e-9));
+    CHECK(config.option<ConfigOptionInts>("nozzle_temperature")->values == std::vector<int>{230, 240});
+    CHECK(config.opt_int("wall_loops") == 4);
+    // The added config is left as it was.
+    CHECK_THAT(other.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.3, 1e-9));
+}
+
 TEST_CASE("read_cli applies valid values and collects non-option arguments", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
