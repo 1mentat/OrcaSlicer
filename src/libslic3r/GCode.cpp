@@ -634,10 +634,13 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                         line_out << ch;
                 }
 
+                // Strip the wipe tower's local X/Y even if the position is unchanged, as
+                // WipeTowerIntegration::post_process_wipe_tower_moves() does.
+                line = line_out.str();
+
                 transformed_pos = Eigen::Rotation2Df(angle) * pos + translation;
 
                 if (transformed_pos != old_pos || never_skip) {
-                    line = line_out.str();
                     std::ostringstream oss;
                     oss << std::fixed << std::setprecision(3) << "G1 ";
                     if (transformed_pos.x() != old_pos.x() || never_skip) oss << " X" << transformed_pos.x() - extruder_offset.x();

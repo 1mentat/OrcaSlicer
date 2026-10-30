@@ -6,6 +6,7 @@
 #include <boost/filesystem/operations.hpp>
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/GCode.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Model.hpp"
@@ -583,4 +584,30 @@ TEST_CASE("The temperature tower steps the temperature of the tool printing it",
         CHECK(temperatures == std::set<int>{190, 195, 200, 205, 210, 215, 220, 225, 230});
         CHECK(tools == std::set<std::string>{multi_tool ? "1" : "none"});
     }
+}
+
+TEST_CASE("Nozzle change G-code moves to the tower's print position even when a move repeats it", "[GCode][WipeTower]")
+{
+    // The second and third moves stay at X10 Y5 in tower coordinates, so the transform must not
+    // leave their local X10 Y5 in place.
+    const std::string gcode = "G1 X10 Y5 E1\nG1 X10 Y5 E-0.5\nG1 X10 F600\n";
+    const std::string out   = transform_gcode(gcode, Vec2f(0.f, 0.f), Vec2f(100.f, 50.f), 0.f);
+
+    std::istringstream lines(out);
+    std::string        line;
+    int                moves = 0;
+    while (std::getline(lines, line)) {
+        if (line.rfind("G1", 0) != 0)
+            continue;
+        ++moves;
+        INFO(line);
+        for (const char axis : {'X', 'Y'}) {
+            const size_t pos = line.find(axis);
+            if (pos != std::string::npos)
+                CHECK(std::stof(line.substr(pos + 1)) == (axis == 'X' ? 110.f : 55.f));
+        }
+    }
+    CHECK(moves == 3);
+    CHECK(out.find("X110.000") != std::string::npos);
+    CHECK(out.find("Y55.000") != std::string::npos);
 }
