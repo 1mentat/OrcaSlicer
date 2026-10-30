@@ -3536,3 +3536,21 @@ TEST_CASE("an unpainted part of the source carries no paint onto the rebuilt mes
             CHECK(state[t] == uint8_t(EnforcerBlockerType::NONE));
     }
 }
+
+TEST_CASE("The paint anchor is the area-weighted centroid of the painted patch", "[TextureDisplacement]")
+{
+    // A large and a tiny triangle, both painted. The tiny one must not pull the anchor halfway
+    // across to itself.
+    indexed_triangle_set mesh;
+    mesh.vertices = {{0.f, 0.f, 0.f}, {10.f, 0.f, 0.f}, {0.f, 10.f, 0.f},
+                     {20.f, 0.f, 0.f}, {21.f, 0.f, 0.f}, {20.f, 1.f, 0.f}};
+    mesh.indices  = {{0, 1, 2}, {3, 4, 5}};
+
+    Vec3f anchor_pos, anchor_normal;
+    REQUIRE(compute_layer_paint_anchor(mesh, paint_whole_mesh(mesh), anchor_pos, anchor_normal));
+    // Areas 50 and 0.5, centroids (10/3, 10/3) and (61/3, 1/3).
+    CHECK_THAT(anchor_pos.x(), WithinAbs((50.f * 10.f / 3.f + 0.5f * 61.f / 3.f) / 50.5f, 1e-3f));
+    CHECK_THAT(anchor_pos.y(), WithinAbs((50.f * 10.f / 3.f + 0.5f * 1.f / 3.f) / 50.5f, 1e-3f));
+    CHECK_THAT(anchor_pos.z(), WithinAbs(0.f, 1e-6f));
+    CHECK(anchor_normal.isApprox(Vec3f::UnitZ()));
+}
