@@ -1239,7 +1239,9 @@ void GCodeProcessor::run_post_process()
         return Slic3r::float_to_string_decimal_point(time, 2);
     };
 
-    auto format_line_M73_stop_float = [format_time_float](const std::string& mask, float time) {
+    auto format_line_M73_stop_float = [this, format_time_float](const std::string& mask, float time) {
+        if (this->m_disable_m73)
+            return std::string("");
         char line_M73[64];
         sprintf(line_M73, mask.c_str(), format_time_float(time).c_str());
         return std::string(line_M73);
