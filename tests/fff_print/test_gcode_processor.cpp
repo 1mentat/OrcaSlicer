@@ -2567,3 +2567,139 @@ TEST_CASE("Imported G-code ignores the obsolete silent_mode setting",
     // discards silent_mode even though the option remains registered.
     CHECK_THAT(public_processor_contracts::stealth_time(silent), WithinAbs(0.0f, 1e-6f));
 }
+
+TEST_CASE("Machine minimum feed rates set independent estimator floors",
+          "[GCodeProcessor][ProcessorMachineSettingsVariance]")
+{
+    const std::string travel_gcode = "G90\nG1 X0 Y0 Z0.2 F600\nG1 X100 Y0 Z0.2 F90\n";
+    const std::string extrusion_gcode = "G90\nM83\nG1 X0 Y0 Z0.2 F600\nG1 X100 Y0 Z0.2 E20 F90\n";
+
+    FullPrintConfig defaults;
+    defaults.gcode_flavor.value = gcfMarlinFirmware;
+    FullPrintConfig zero_limits = defaults;
+    zero_limits.machine_min_extruding_rate.values = {0., 0.};
+    zero_limits.machine_min_travel_rate.values = {0., 0.};
+
+    const auto default_travel = public_processor_contracts::process_buffer(travel_gcode, defaults);
+    const auto zero_travel = public_processor_contracts::process_buffer(travel_gcode, zero_limits);
+    const auto default_extrusion = public_processor_contracts::process_buffer(extrusion_gcode, defaults);
+    const auto zero_extrusion = public_processor_contracts::process_buffer(extrusion_gcode, zero_limits);
+
+    CHECK_THAT(public_processor_contracts::normal_time(zero_travel),
+               WithinAbs(public_processor_contracts::normal_time(default_travel), 1e-4f));
+    CHECK_THAT(public_processor_contracts::normal_time(zero_extrusion),
+               WithinAbs(public_processor_contracts::normal_time(default_extrusion), 1e-4f));
+
+    FullPrintConfig travel_floor_config = zero_limits;
+    travel_floor_config.machine_min_travel_rate.values = {30., 30.};
+    FullPrintConfig extrusion_floor_config = zero_limits;
+    extrusion_floor_config.machine_min_extruding_rate.values = {24., 24.};
+    const auto travel_floor = public_processor_contracts::process_buffer(travel_gcode, travel_floor_config);
+    const auto extrusion_floor = public_processor_contracts::process_buffer(extrusion_gcode, extrusion_floor_config);
+
+    const auto *default_travel_move = public_processor_contracts::last_of(default_travel, EMoveType::Travel);
+    const auto *floor_travel_move = public_processor_contracts::last_of(travel_floor, EMoveType::Travel);
+    const auto *default_extrusion_move = public_processor_contracts::last_of(default_extrusion, EMoveType::Extrude);
+    const auto *floor_extrusion_move = public_processor_contracts::last_of(extrusion_floor, EMoveType::Extrude);
+    REQUIRE(default_travel_move != nullptr);
+    REQUIRE(floor_travel_move != nullptr);
+    REQUIRE(default_extrusion_move != nullptr);
+    REQUIRE(floor_extrusion_move != nullptr);
+
+    // Zero is the no-floor fallback: F90 is 1.5 mm/s, so a 100 mm segment
+    // stays near 100 / 1.5 seconds before and after an explicit zero is set.
+    CHECK_THAT(default_travel_move->time[0], WithinAbs(100.f / 1.5f, 0.2f));
+    CHECK_THAT(default_extrusion_move->time[0], WithinAbs(100.f / 1.5f, 0.2f));
+    CHECK_THAT(floor_travel_move->position.x(), WithinAbs(100.f, 1e-4f));
+    CHECK_THAT(floor_travel_move->time[0], WithinAbs(100.f / 30.f, 0.2f));
+    CHECK(floor_travel_move->time[0] < default_travel_move->time[0] * 0.1f);
+    CHECK_THAT(floor_extrusion_move->position.x(), WithinAbs(100.f, 1e-4f));
+    CHECK_THAT(floor_extrusion_move->delta_extruder, WithinAbs(20.f, 1e-4f));
+    CHECK(floor_extrusion_move->time[0] < default_extrusion_move->time[0] * 0.1f);
+    CHECK_THAT(floor_extrusion_move->time[0], WithinAbs(100.f / 24.f, 0.2f));
+}
+
+TEST_CASE("Filament changes add configured load, unload, and tool delays",
+          "[GCodeProcessor][ProcessorMachineSettingsVariance]")
+{
+    const std::string gcode =
+        "M83\nG90\nT0\n"
+        "G1 X10 Y0 Z0.2 E1 F600\nG1 X20 Y0 E1 F600\n"
+        "T1\n"
+        "G1 X30 Y0 E1 F600\nG1 X40 Y0 E1 F600\n"
+        "M702 C\nM702 C\n";
+
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    config.filament_diameter.values = {1.75, 1.75};
+    config.filament_map.values = {1, 2};
+    FullPrintConfig zero_times = config;
+    zero_times.machine_load_filament_time.value = 0.;
+    zero_times.machine_unload_filament_time.value = 0.;
+    zero_times.machine_tool_change_time.value = 0.;
+
+    const auto defaults = public_processor_contracts::process_buffer(gcode, config);
+    const auto zero = public_processor_contracts::process_buffer(gcode, zero_times);
+    CHECK_THAT(public_processor_contracts::normal_time(zero),
+               WithinAbs(public_processor_contracts::normal_time(defaults), 1e-4f));
+
+    FullPrintConfig measured_times = zero_times;
+    measured_times.machine_load_filament_time.value = 11.25;
+    measured_times.machine_unload_filament_time.value = 13.5;
+    measured_times.machine_tool_change_time.value = 17.75;
+    const auto measured = public_processor_contracts::process_buffer(gcode, measured_times);
+    const auto &stats = measured.print_statistics;
+    CHECK_THAT(stats.total_filament_load_time, WithinAbs(22.5f, 1e-4f));
+    CHECK_THAT(stats.total_filament_unload_time, WithinAbs(13.5f, 1e-4f));
+    CHECK_THAT(stats.total_tool_change_time, WithinAbs(17.75f, 1e-4f));
+    CHECK_THAT(public_processor_contracts::normal_time(measured) - public_processor_contracts::normal_time(zero),
+               WithinAbs(53.75f, 0.1f));
+}
+
+TEST_CASE("Filament summaries use diameter, density, and price settings",
+          "[GCodeProcessor][ProcessorMachineSettingsVariance]")
+{
+    const std::string gcode =
+        "; filament used [mm] = 0\n"
+        "; filament used [g] = 0\n"
+        "; total filament used [g] = 0\n"
+        "; filament used [cm3] = 0\n"
+        "; filament cost = 0\n"
+        "; total filament cost = 0\n"
+        "M83\nG1 X20 Y0 Z0.2 E1000 F600\n";
+
+    FullPrintConfig config;
+    config.filament_diameter.values = {2.0};
+    config.filament_density.values = {1.25};
+    config.filament_cost.values = {80.0};
+    const auto two_mm = post_processor_contracts::process_post(gcode, config);
+    CHECK(two_mm.output.find("; filament used [mm] = 1000.00\n") != std::string::npos);
+    CHECK(two_mm.output.find("; filament used [g] = 3.93\n") != std::string::npos);
+    CHECK(two_mm.output.find("; filament used [cm3] = 3.14\n") != std::string::npos);
+    CHECK(two_mm.output.find("; filament cost = 0.31\n") != std::string::npos);
+
+    // The application validator's accepted minimum is 1 mm (the option schema declares 0).
+    FullPrintConfig minimum_diameter = config;
+    minimum_diameter.filament_diameter.values = {1.0};
+    CHECK(validate(minimum_diameter).count("filament_diameter") == 0);
+    FullPrintConfig below_minimum_diameter = minimum_diameter;
+    below_minimum_diameter.filament_diameter.values = {0.99};
+    CHECK(validate(below_minimum_diameter).count("filament_diameter") == 1);
+    const auto one_mm = post_processor_contracts::process_post(gcode, minimum_diameter);
+    CHECK(one_mm.output.find("; filament used [mm] = 1000.00\n") != std::string::npos);
+    CHECK(one_mm.output.find("; filament used [cm3] = 0.79\n") != std::string::npos);
+    CHECK(one_mm.output.find("; filament used [g] = 0.98\n") != std::string::npos);
+    CHECK(one_mm.output.find("; filament cost = 0.08\n") != std::string::npos);
+
+    FullPrintConfig zero_density = config;
+    zero_density.filament_density.values = {0.0};
+    const auto no_density = post_processor_contracts::process_post(gcode, zero_density);
+    CHECK(no_density.output.find("; filament used [g] = 0.00\n") != std::string::npos);
+    CHECK(no_density.output.find("; filament cost = 0.00\n") != std::string::npos);
+
+    FullPrintConfig zero_price = config;
+    zero_price.filament_cost.values = {0.0};
+    const auto no_price = post_processor_contracts::process_post(gcode, zero_price);
+    CHECK(no_price.output.find("; filament used [g] = 3.93\n") != std::string::npos);
+    CHECK(no_price.output.find("; filament cost = 0.00\n") != std::string::npos);
+}

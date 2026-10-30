@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "description": "GCodeProcessor mutations validate normal Marlin minimum feed rates, filament loading delay, and filament cost summaries.",
+  "selection": {
+    "label_filter": "^ProcessorMachineSettingsVariance$",
+    "expected_filtered_case_count": 3,
+    "case_names": [
+      "Machine minimum feed rates set independent estimator floors",
+      "Filament changes add configured load, unload, and tool delays",
+      "Filament summaries use diameter, density, and price settings"
+    ]
+  },
+  "mutants": [
+    {
+      "id": "gcp-zero-travel-minimum-imposes-positive-fallback",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "return std::max(feedrate, get_option_value(m_time_processor.machine_limits.machine_min_travel_rate, static_cast<size_t>(mode)));",
+      "new": "return std::max(feedrate, std::max(2.0f, get_option_value(m_time_processor.machine_limits.machine_min_travel_rate, static_cast<size_t>(mode))));",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "test_filter": "^ProcessorMachineSettingsVariance$",
+      "expected_test_count": 3,
+      "intended_failed_case": "Machine minimum feed rates set independent estimator floors",
+      "intended_failure_assertion": "CHECK_THAT(default_travel_move->time[0], WithinAbs(100.f / 1.5f, 0.2f));",
+      "intended_failure_line": 2611,
+      "ordinary_assertion_only": true,
+      "description": "Give a zero machine_min_travel_rate an unintended 2 mm/s floor instead of preserving the commanded F90 speed. The positive 30 mm/s row remains unaffected; the explicit zero fallback time oracle must fail."
+    },
+    {
+      "id": "gcp-extruding-minimum-feedrate-ignored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "return std::max(feedrate, get_option_value(m_time_processor.machine_limits.machine_min_extruding_rate, static_cast<size_t>(mode)));",
+      "new": "return std::max(feedrate, 0.0f);",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "test_filter": "^ProcessorMachineSettingsVariance$",
+      "expected_test_count": 3,
+      "intended_failed_case": "Machine minimum feed rates set independent estimator floors",
+      "intended_failure_assertion": "CHECK_THAT(floor_extrusion_move->time[0], WithinAbs(100.f / 24.f, 0.2f));",
+      "intended_failure_line": 2619,
+      "ordinary_assertion_only": true,
+      "description": "Ignore the configured positive minimum extrusion rate. The 100 mm row must no longer estimate a move time near 100/24 seconds."
+    },
+    {
+      "id": "gcp-configured-filament-load-delay-dropped",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "return m_time_processor.extruder_unloaded ? 0.0f : m_time_processor.filament_load_times;",
+      "new": "return m_time_processor.extruder_unloaded ? 0.0f : 0.0f;",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "test_filter": "^ProcessorMachineSettingsVariance$",
+      "expected_test_count": 3,
+      "intended_failed_case": "Filament changes add configured load, unload, and tool delays",
+      "intended_failure_assertion": "CHECK_THAT(stats.total_filament_load_time, WithinAbs(22.5f, 1e-4f));",
+      "intended_failure_line": 2652,
+      "ordinary_assertion_only": true,
+      "description": "Drop the configured load-time contribution for both the initial filament selection and the second-slot load; the aggregate load statistic and total estimated delay must fail."
+    },
+    {
+      "id": "gcp-filament-price-omitted-from-cost-summary",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "filament_cost[id] = filament_g[id] * double(m_result.filament_costs[id]) * 0.001;",
+      "new": "filament_cost[id] = filament_g[id] * 0.001;",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "test_filter": "^ProcessorMachineSettingsVariance$",
+      "expected_test_count": 3,
+      "intended_failed_case": "Filament summaries use diameter, density, and price settings",
+      "intended_failure_assertion": "CHECK(two_mm.output.find(\"; filament cost = 0.31\\n\") != std::string::npos);",
+      "intended_failure_line": 2679,
+      "ordinary_assertion_only": true,
+      "description": "Omit the configured price-per-kilogram factor when converting filament mass to cost. The positive-price summary must stop reporting 0.31 while the zero-price row remains zero."
+    }
+  ]
+}

@@ -770,13 +770,14 @@
       "reason": "Public SLA validation accepts the zero minimum and equal configured exposure limits and rejects exposures outside either limit. Six-layer prints at regular exposures 0, 2 and 2.5 seconds preserve six 100 mm2 slices and 300 mm3 of object material; their layer-time multisets and totals follow the independently calculated fade weights. The unbounded positive domain is represented, not exhausted."
     },
     "filament_density": {
-      "test": "tests/fff_print/test_gcodeprocessor.cpp",
-      "tag": "[GCodeProcessor]",
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[ProcessorMachineSettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Two extruder density values produce the measured mass ratio and center-of-mass shift; density boundaries are not claimed."
+      "reason": "Public processor post-processing of known E1000 compares the registered 0 density boundary with 1.25 g/cm3 while diameter, extrusion length, volume, and price are controlled. Zero density yields zero grams and cost; the positive row yields 3.93 g and 0.31 cost. This is bounded to one filament and these selected values."
     },
     "hollowing_enable": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
@@ -1652,12 +1653,14 @@
       "reason": "The 24 mm display establishes independent Y reflection bounds; other numeric boundary values remain untested."
     },
     "machine_unload_filament_time": {
-      "test": "tests/fff_print/test_gcodeprocessor.cpp",
-      "tag": "[GCodeProcessorUnloadRegression]",
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[ProcessorMachineSettingsVariance]",
       "dimensions": [
+        "boundary_values",
+        "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "A configured 12-second M702 C unload is charged exactly once to both elapsed time and unload statistics; the command without C is inert. The setting numeric boundary domain is not fully varied."
+      "reason": "A direct loaded-filament G-code buffer compares the registered 0-second endpoint with 13.5 seconds and runs M702 C twice. It includes two real extrusion blocks in each T0/T1 interval before each tool-change/unload flush, so the zero-delay and configured-delay runs account for the same motion history. The configured unload is counted once in unload statistics; separate load/tool statistics are exact and the total estimate increases by their 53.75-second sum. This does not claim other unload commands or machine layouts."
     },
     "wall_sequence": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -2469,21 +2472,23 @@
     },
     "filament_cost": {
       "test": "tests/fff_print/test_gcode_processor.cpp",
-      "tag": "[GcpPost]",
+      "tag": "[ProcessorMachineSettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "A 100 currency-units/kg filament cost with known extrusion length, diameter, and density produces 0.30 total and per-filament cost; numeric boundaries and multiple-tool costs are not claimed."
+      "reason": "Public processor post-processing of known E1000 at 1.25 g/cm3 compares the registered 0 price boundary with 80 currency units/kg. Cost changes from 0.00 to 0.31 while filament mass remains 3.93 g. This is bounded to one filament and these selected values."
     },
     "filament_diameter": {
       "test": "tests/fff_print/test_gcode_processor.cpp",
-      "tag": "[GcpPost]",
+      "tag": "[ProcessorMachineSettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The post-processing fixtures explicitly set 1.75 mm for independent volume/mass accounting and 2.0 mm for length preservation; numeric boundaries and mixed-tool interactions are not claimed."
+      "reason": "Public processor post-processing of known E1000 compares the application's validated 1 mm minimum with 2 mm: both report 1000 mm filament, while volume, mass, and price follow cross-sectional area (0.79 versus 3.14 cm3; 0.98 versus 3.93 g). The option schema declares a 0 minimum, but PrintConfig validation rejects diameters below 1 mm; this claim uses the accepted application boundary and excludes zero-diameter summary behavior."
     },
     "relative_correction_y": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
@@ -5761,6 +5766,46 @@
         "pipeline_oracle"
       ],
       "reason": "The emitted-volume-flow case compares an empty linear curve with representative anchors at normalized heights 0,0.5,1 and ratios 0.8,0.9,0.2. Parsed positive extrusions must match the smoothstep ratios over independent short and tall volume runs. This covers the selected curve and linear control, not arbitrary anchor strings or every curve x volume-mode combination."
+    },
+    "machine_min_extruding_rate": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[ProcessorMachineSettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Direct public GCodeProcessor processing compares the registered 0 mm/s endpoint with a 24 mm/s minimum on a 100 mm extrusion command at F90 (1.5 mm/s). The positive-row estimated move time is approximately 100/24 seconds (WithinAbs 0.2 s) while the zero row retains the commanded-feed estimate; X endpoint and 20 mm E are preserved. This claims the normal Marlin estimator and selected values only."
+    },
+    "machine_min_travel_rate": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[ProcessorMachineSettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Direct public GCodeProcessor processing compares the registered 0 mm/s endpoint with a 30 mm/s minimum on a 100 mm travel command at F90 (1.5 mm/s). The floor changes estimated duration to approximately 100/30 seconds while preserving the endpoint; the zero row retains the commanded-feed estimate. This claims the normal Marlin estimator and selected values only."
+    },
+    "machine_load_filament_time": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[ProcessorMachineSettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A direct two-filament T0-to-T1 G-code buffer compares the registered 0-second endpoint with 11.25 seconds. The initial load and second-slot load total 22.5 seconds in load statistics and in the normal estimate. This is one explicit two-slot Marlin fixture."
+    },
+    "machine_tool_change_time": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[ProcessorMachineSettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A direct two-filament T0-to-T1 G-code buffer compares the registered 0-second endpoint with 17.75 seconds. One physical slot change records that delay in tool-change statistics and the normal estimate. This claims only the selected two-slot Marlin case."
     }
   }
 }
