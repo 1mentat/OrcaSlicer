@@ -8,6 +8,7 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Line.hpp"
 #include "libslic3r/Polyline.hpp"
+#include "libslic3r/IntersectionPoints.hpp"
 
 using namespace Slic3r;
 
@@ -152,5 +153,33 @@ SCENARIO("Remove collinear points from Polygon", "[Polygon]") {
                 REQUIRE(p.points.size() == 7);
             }
         }
+    }
+}
+
+TEST_CASE("Intersections are found between lines that are next to each other in the list", "[IntersectionPoints]")
+{
+    SECTION("two crossing lines") {
+        const Lines lines{Line{Point::new_scale(0, 0), Point::new_scale(10, 10)}, Line{Point::new_scale(0, 10), Point::new_scale(10, 0)}};
+        const IntersectionsLines intersections = get_intersections(lines);
+        REQUIRE(intersections.size() == 1);
+        CHECK(intersections.front().line_index1 == 0);
+        CHECK(intersections.front().line_index2 == 1);
+    }
+
+    SECTION("the last edge of one polygon crossing the first edge of the next") {
+        // Square edge 3 runs from (0,10) to (0,0); the second polygon's edge 0 crosses it at (0,5),
+        // and its edge 1 crosses the square's edge 2 at (5,10).
+        const Polygons polygons{
+            Polygon{Point::new_scale(0, 0), Point::new_scale(10, 0), Point::new_scale(10, 10), Point::new_scale(0, 10)},
+            Polygon{Point::new_scale(-5, 5), Point::new_scale(5, 5), Point::new_scale(5, 20), Point::new_scale(-5, 20)}};
+        IntersectionsLines intersections = get_intersections(polygons);
+        std::sort(intersections.begin(), intersections.end(),
+                  [](const IntersectionLines &l, const IntersectionLines &r) { return l.line_index1 < r.line_index1; });
+        REQUIRE(intersections.size() == 2);
+        CHECK(intersections[0].line_index1 == 2);
+        CHECK(intersections[0].line_index2 == 5);
+        CHECK(intersections[1].line_index1 == 3);
+        CHECK(intersections[1].line_index2 == 4);
+        CHECK((intersections[1].intersection - Point::new_scale(0, 5).cast<double>()).norm() < 1.);
     }
 }
