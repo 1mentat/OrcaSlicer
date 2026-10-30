@@ -740,3 +740,45 @@ TEST_CASE("Z contouring follows the surface of each instance as it is turned", "
         CHECK(lifted > 0);
     }
 }
+
+TEST_CASE("Regenerating perimeters after a config change replaces the no-overlap fill areas", "[PrintObject]")
+{
+    // A wall_loops change re-runs perimeters on the existing slices. The result must match a
+    // fresh slice instead of keeping the no-overlap areas from the previous run.
+    auto no_overlap_area = [](const Print &print) {
+        std::vector<double> areas;
+        const PrintObject &object = *print.objects().front();
+        for (size_t i = 0; i < object.layer_count(); ++i) {
+            double area = 0.;
+            for (const LayerRegion *region : object.get_layer(i)->regions())
+                for (const ExPolygon &expoly : region->fill_no_overlap_expolygons)
+                    area += expoly.area();
+            areas.push_back(area);
+        }
+        return areas;
+    };
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"wall_loops", 2}, {"layer_height", 0.2}, {"initial_layer_print_height", 0.2}});
+
+    Print reused;
+    Model model;
+    init_print({cube(20)}, reused, model, config);
+    reused.process();
+    config.set_deserialize_strict({{"wall_loops", 3}});
+    reused.apply(model, config);
+    reused.process();
+
+    Print fresh;
+    Model fresh_model;
+    init_print({cube(20)}, fresh, fresh_model, config);
+    fresh.process();
+
+    const std::vector<double> expected = no_overlap_area(fresh);
+    const std::vector<double> actual = no_overlap_area(reused);
+    REQUIRE(actual.size() == expected.size());
+    REQUIRE(expected.front() > 0.);
+    for (size_t i = 0; i < expected.size(); ++i) {
+        CAPTURE(i);
+        CHECK_THAT(actual[i], Catch::Matchers::WithinRel(expected[i], 1e-9));
+    }
+}
