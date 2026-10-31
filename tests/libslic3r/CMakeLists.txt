@@ -21,7 +21,6 @@ add_executable(${_TEST_NAME}_tests
     test_clipper_utils.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
-    test_surface_collection.cpp
     test_locales_utils.cpp
     test_drc.cpp
     test_gcodereader.cpp
@@ -50,6 +49,7 @@ add_executable(${_TEST_NAME}_tests
     test_obj.cpp
     test_step.cpp
     test_stl.cpp
+    test_surface_collection.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp
     test_trianglemesh_slicer.cpp
