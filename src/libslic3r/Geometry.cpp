@@ -452,19 +452,15 @@ static std::pair<Transform3d, Transform3d> extract_rotation_scale(const Transfor
     return { Transform3d(rotation), Transform3d(scale) };
 }
 
-// Split the linear part into an orthogonal factor and a symmetric stretch (polar decomposition).
-// A reflection (det < 0) stays in the orthogonal factor, so it is kept together with the orientation
-// whatever the singular values are. Right-handed transforms use the rotation/scale split above;
-// so does a singular one (det == 0), which has no well-defined handedness to keep.
-static std::pair<Transform3d, Transform3d> extract_orthogonal_stretch(const Transform3d& trafo)
+// The orthogonal factor of the polar decomposition. It keeps a reflection (det < 0) whatever the
+// singular values are; right-handed (and singular) transforms use the rotation/scale split.
+static Transform3d extract_orthogonal(const Transform3d& trafo)
 {
     if (trafo.linear().determinant() >= 0.0)
-        return extract_rotation_scale(trafo);
+        return extract_rotation_matrix(trafo);
 
     const Eigen::JacobiSVD<Matrix3d> svd(trafo.linear(), Eigen::ComputeFullU | Eigen::ComputeFullV);
-    const Matrix3d orthogonal = svd.matrixU() * svd.matrixV().transpose();
-    const Matrix3d stretch    = svd.matrixV() * svd.singularValues().asDiagonal() * svd.matrixV().transpose();
-    return { Transform3d(orthogonal), Transform3d(stretch) };
+    return Transform3d(Matrix3d(svd.matrixU() * svd.matrixV().transpose()));
 }
 
 static bool contains_skew(const Transform3d& trafo)
@@ -538,10 +534,7 @@ void Transformation::set_rotation(Axis axis, double rotation)
 
 Vec3d Transformation::get_scaling_factor() const
 {
-    // For a mirrored transform, the diagonal of the polar stretch: the signed rotation/scale split
-    // misreports it when scales repeat. This matches set_scaling_factor(). Right-handed transforms
-    // read the same rotation/scale split as before.
-    const Transform3d scale = extract_orthogonal_stretch(m_matrix).second;
+    const Transform3d scale = extract_scale(m_matrix);
     return { std::abs(scale(0, 0)), std::abs(scale(1, 1)), std::abs(scale(2, 2)) };
 }
 
@@ -558,12 +551,9 @@ void Transformation::set_scaling_factor(const Vec3d& scaling_factor)
 {
     assert(scaling_factor.x() > 0.0 && scaling_factor.y() > 0.0 && scaling_factor.z() > 0.0);
 
-    // scaling_factor holds magnitudes; any mirror stays in the orthogonal factor.
-    // Unlike the axis setter, this replaces the whole stretch, dropping any skew.
-    const Transform3d orthogonal = extract_orthogonal_stretch(m_matrix).first;
-
+    // scaling_factor holds magnitudes; a mirror stays in the orthogonal factor.
     const Vec3d offset = get_offset();
-    m_matrix = orthogonal * scale_transform(scaling_factor);
+    m_matrix = extract_orthogonal(m_matrix) * scale_transform(scaling_factor);
     m_matrix.translation() = offset;
 }
 
@@ -571,38 +561,14 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
 {
     assert(scaling_factor > 0.0);
 
-    // scaling_factor is a magnitude; any mirror stays in the orthogonal factor.
-    auto [orthogonal, stretch] = extract_orthogonal_stretch(m_matrix);
-    Transform3d scaled = stretch;
-    scaled(axis, axis) = scaling_factor;
-
-    // Replacing the entry is exact for a right-handed transform whose axis is not coupled to the
-    // others. Otherwise scale the axis' row and column by the same factor (D * S * D): the stretch
-    // keeps its skew and stays positive definite, so the determinant keeps its sign, and the axis
-    // reads back the new value from get_scaling_factor(). If D * S * D is not possible (degenerate
-    // axis, invalid factor or overflow), keep the plain replacement; handedness is then not
-    // guaranteed. An extremely small factor can still make the result numerically singular, and
-    // rounding then decides the sign of its determinant.
-    const double current = stretch(axis, axis);
-    bool coupled = false;
-    for (int i = 0; i < 3; ++i)
-        if (i != axis && std::abs(stretch(axis, i)) > 1e-9 * std::sqrt(std::abs(current)) * std::sqrt(std::abs(stretch(i, i))))
-            coupled = true;
-    const bool valid = current > 0.0 && std::isfinite(current) && scaling_factor > 0.0 && std::isfinite(scaling_factor);
-    if ((coupled || is_left_handed()) && valid) {
-        const double k = std::sqrt(scaling_factor) / std::sqrt(current);
-        Transform3d congruent = scaled;
-        for (int i = 0; i < 3; ++i)
-            if (i != axis) {
-                congruent(axis, i) *= k;
-                congruent(i, axis) *= k;
-            }
-        if (std::isfinite(k) && congruent.matrix().allFinite())
-            scaled = congruent;
-    }
+    auto [rotation, scale] = extract_rotation_scale(m_matrix);
+    // scaling_factor is a magnitude; a mirrored transform keeps the sign of the entry. That keeps
+    // the mirror when the split carries it on a coordinate axis (unskewed, distinct scales), but
+    // not in general (see the known-bug test for a rotated uniformly scaled mirror).
+    scale(axis, axis) = is_left_handed() ? std::copysign(scaling_factor, scale(axis, axis)) : scaling_factor;
 
     const Vec3d offset = get_offset();
-    m_matrix = orthogonal * scaled;
+    m_matrix = rotation * scale;
     m_matrix.translation() = offset;
 }
 
