@@ -5568,9 +5568,10 @@
       "dimensions": [
         "boolean_values",
         "pipeline_oracle",
-        "interaction_matrix"
+        "interaction_matrix",
+        "nullable_behavior"
       ],
-      "reason": "The four public macro scenario rows emit explicit false/true per-filament extruder-change booleans on a mapped two-tool print. Nullable nil behavior is deliberately unclaimed. This observes exported macro settings, not physical cutting or retraction. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
+      "reason": "The public TYPE_FILAMENT parent-to-child variant merge resolves nil slots and explicit values before Print::apply on two logical filaments with reversed physical tool mapping. Nil flags inherit true; explicit true/false flags select the real H2D-profile M620.11 K/R firmware fields. T/I identify logical filaments and B follows the reversed physical mapping; both filaments retain positive perimeter and infill extrusion. This observes profile firmware intent, not built-in E-axis actuation or a full Cartesian matrix."
     },
     "retraction_distances_when_cut": {
       "test": "tests/fff_print/test_multifilament.cpp",
@@ -5588,9 +5589,10 @@
       "dimensions": [
         "boundary_values",
         "pipeline_oracle",
-        "interaction_matrix"
+        "interaction_matrix",
+        "nullable_behavior"
       ],
-      "reason": "The four public macro scenario rows emit explicit extruder-change distance values 0 and 10 on a mapped two-tool print. Nullable nil behavior is deliberately unclaimed, and the values are not a physical extruder-change measurement. The focused native baseline passes all 26 assertions; exported macro values do not prove a physical cut or retraction."
+      "reason": "The public TYPE_FILAMENT parent-to-child variant merge resolves nil slots and explicit values before Print::apply on two logical filaments with reversed physical tool mapping. Distinct inherited 6.5/2.25 mm values, an explicit 1.25 mm override, and explicit zero with an enabled flag are checked in emitted real-profile M620.11 R fields. The finite endpoint controls remain active and both filaments retain positive model extrusion. This observes profile firmware intent, not built-in E-axis actuation or a full Cartesian matrix."
     },
     "skirt_distance": {
       "test": "tests/fff_print/test_skirt_brim.cpp",

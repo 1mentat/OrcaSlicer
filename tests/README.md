@@ -885,10 +885,15 @@ scenarios cover all three named cut gates, machine and filament cut-distance
 endpoints, nil cut overrides, explicit Boolean overrides, and explicit
 extruder-change endpoints. Every scenario retains positive extrusion on both
 tools and conserves deposited material. The oracle observes values supplied to
-user G-code; it does not measure a physical cut or retract, and extruder-change
-nil behavior remains unclaimed. The two bounded mutations are in
-`filament_cut_ec_placeholders.json`. Its CTest label also selects the existing
-mapped cut-distance override case.
+user G-code; it does not measure a physical cut or retract. The two bounded
+mutations are in `filament_cut_ec_placeholders.json`.
+The nullable extruder-change case merges parent and child filament variants
+through the public API, then checks inherited and explicit flags/distances in
+the H2D-profile M620.11 K/R fields. It distinguishes logical filament IDs from
+reversed physical tool slots and retains positive model extrusion on both.
+Its two merge probes are in `filament_cut_ec_nullable.json`. The CTest label
+also selects the existing mapped cut-distance override case; build
+`fff_print_multifilament_tests` for focused feedback.
 
 `[SkirtDistance]` measures emitted skirt clearances at 0, 3, and 60 mm against
 an explicitly placed square, accounting for half the public skirt-flow spacing.

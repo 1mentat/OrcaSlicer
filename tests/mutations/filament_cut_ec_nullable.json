@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Nullable extruder-change child settings must inherit nil slots and preserve explicit values through the public variant merge.",
+  "mutants": [
+    {
+      "id": "ec-nil-child-materializes-false-zero",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                if (opt_vec_src->size() != variant_index.size() * size_t(stride)) {\n                    opt_src->set(opt_target);\n                }\n                else\n                    opt_vec_src->set_only_diff(opt_vec_dest, variant_index, stride);",
+      "new": "                if (opt_vec_src->size() != variant_index.size() * size_t(stride)) {\n                    opt_src->set(opt_target);\n                }\n                else if (opt == \"long_retractions_when_ec\" && opt_target->is_nil()) {\n                    if (auto *ec_src = dynamic_cast<ConfigOptionBoolsNullable*>(opt_vec_src))\n                        ec_src->values.assign(ec_src->size(), false);\n                    else\n                        opt_vec_src->set_only_diff(opt_vec_dest, variant_index, stride);\n                }\n                else if (opt == \"retraction_distances_when_ec\" && opt_target->is_nil()) {\n                    if (auto *ec_src = dynamic_cast<ConfigOptionFloatsNullable*>(opt_vec_src))\n                        ec_src->values.assign(ec_src->size(), 0.);\n                    else\n                        opt_vec_src->set_only_diff(opt_vec_dest, variant_index, stride);\n                }\n                else\n                    opt_vec_src->set_only_diff(opt_vec_dest, variant_index, stride);",
+      "description": "When and only when one of the two nullable EC child vectors is entirely nil, replace the inherited source vector with same-sized finite false/0 values. The candidate nil-child rows require the mapped parent fallbacks true/6.5 and true/2.25 to remain visible in emitted per-filament EC placeholders; all other keys and non-nil EC values still use the original set_only_diff call.",
+      "test_filter": "FilamentCutRetractionOverride"
+    },
+    {
+      "id": "ec-explicit-child-skips-diff-merge",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                if (opt_vec_src->size() != variant_index.size() * size_t(stride)) {\n                    opt_src->set(opt_target);\n                }\n                else\n                    opt_vec_src->set_only_diff(opt_vec_dest, variant_index, stride);",
+      "new": "                if (opt_vec_src->size() != variant_index.size() * size_t(stride)) {\n                    opt_src->set(opt_target);\n                }\n                else if (opt != \"long_retractions_when_ec\" &&\n                         opt != \"retraction_distances_when_ec\")\n                    opt_vec_src->set_only_diff(opt_vec_dest, variant_index, stride);",
+      "description": "Skip set_only_diff only for long_retractions_when_ec and retraction_distances_when_ec, leaving finite parent values in place even for non-nil children. The candidate explicit High Flow true/1.25 and Standard false/0 rows distinguish the child override from parent fallback through emitted EC placeholders.",
+      "test_filter": "FilamentCutRetractionOverride"
+    }
+  ]
+}

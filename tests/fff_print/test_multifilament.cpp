@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <map>
 #include "libslic3r/PrintConfig.hpp"
@@ -24,6 +25,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -32,6 +34,7 @@
 #include <regex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1456,6 +1459,293 @@ TEST_CASE("Cut and extruder-change placeholders follow mapped explicit settings"
                        Catch::Matchers::WithinAbs(reference_extrusion->at(0), 1e-4));
             CHECK_THAT(observation.positive_extrusion_by_tool.at(1),
                        Catch::Matchers::WithinAbs(reference_extrusion->at(1), 1e-4));
+        }
+    }
+}
+
+
+// Build the merged config exactly as PresetCollection does for a child filament preset: the
+// parent's selected variant values are the fallback, and non-nil child values replace them.
+static DynamicPrintConfig merge_filament_ec_variant_child(
+    const std::string &variant,
+    unsigned char parent_bool,
+    double parent_distance,
+    unsigned char child_bool,
+    double child_distance)
+{
+    DynamicPrintConfig parent = DynamicPrintConfig::full_print_config();
+    parent.set_key_value("filament_extruder_variant", new ConfigOptionStrings({ variant }));
+    parent.set_key_value("long_retractions_when_ec", new ConfigOptionBoolsNullable({ parent_bool }));
+    parent.set_key_value("retraction_distances_when_ec", new ConfigOptionFloatsNullable({ parent_distance }));
+
+    DynamicPrintConfig child = parent;
+    child.set_key_value("long_retractions_when_ec", new ConfigOptionBoolsNullable({ child_bool }));
+    child.set_key_value("retraction_distances_when_ec", new ConfigOptionFloatsNullable({ child_distance }));
+
+    std::string extruder_id_name;
+    std::string extruder_variant_name;
+    std::set<std::string> *key_set1 = nullptr;
+    std::set<std::string> *key_set2 = nullptr;
+    Preset::get_extruder_names_and_keysets(Preset::TYPE_FILAMENT, extruder_id_name, extruder_variant_name,
+                                           &key_set1, &key_set2);
+    parent.update_diff_values_to_child_config(child, extruder_id_name, extruder_variant_name, *key_set1, *key_set2);
+    return parent;
+}
+
+static DynamicPrintConfig two_extruder_ec_variant_print_config()
+{
+    DynamicPrintConfig config = single_variant_two_extruder_retraction_config();
+    config.set_key_value("printer_extruder_variant",
+                         new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive High Flow" }));
+    config.set_key_value("extruder_variant_list",
+                         new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive High Flow" }));
+    config.set_key_value("print_extruder_variant",
+                         new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive High Flow" }));
+    config.set_key_value("filament_extruder_variant",
+                         new ConfigOptionStrings({ "Direct Drive High Flow", "Direct Drive Standard" }));
+    config.set_key_value("filament_self_index", new ConfigOptionInts({ 1, 2 }));
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = { nvtStandard, nvtHighFlow };
+    config.set_deserialize_strict({
+        { "gcode_comments",             1 },
+        { "use_relative_e_distances",   1 },
+        { "wall_loops",                 1 },
+        { "top_shell_layers",           0 },
+        { "bottom_shell_layers",        0 },
+        { "sparse_infill_density",      "20%" },
+        { "outer_wall_filament_id",     1 },
+        { "inner_wall_filament_id",     1 },
+        { "sparse_infill_filament_id",  2 },
+        { "internal_solid_filament_id", 2 },
+        { "enable_prime_tower",         0 },
+    });
+    return config;
+}
+
+struct EcRetractionBlockObservation {
+    int filament_tool_command = -1;
+    bool enabled = false;
+    double distance = 0.0;
+    std::vector<std::string> profile_commands;
+};
+
+struct EcRetractionObservation {
+    std::map<int, std::vector<EcRetractionBlockObservation>> blocks_by_filament;
+    int malformed_begin_markers = 0;
+};
+
+static EcRetractionObservation observe_ec_retraction_blocks(const std::string &gcode,
+                                                            const DynamicPrintConfig &config)
+{
+    EcRetractionObservation observation;
+    int current_filament_tool_command = 0;
+    EcRetractionBlockObservation *active_block = nullptr;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&observation, &current_filament_tool_command, &active_block](GCodeReader &,
+                                                                            const GCodeReader::GCodeLine &line) {
+        const std::string command(line.cmd());
+        if (command.size() >= 2 && command[0] == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
+            current_filament_tool_command = std::stoi(command.substr(1));
+
+        std::string_view comment(line.comment());
+        while (!comment.empty() && (comment.front() == ' ' || comment.front() == '\t'))
+            comment.remove_prefix(1);
+        constexpr std::string_view begin_prefix = "EC_RETRACTION_BEGIN ";
+        if (comment.substr(0, begin_prefix.size()) == begin_prefix) {
+            std::istringstream fields{ std::string(comment) };
+            std::string label, filament_field, enabled_field, distance_field;
+            if (!(fields >> label >> filament_field >> enabled_field >> distance_field)) {
+                ++observation.malformed_begin_markers;
+                active_block = nullptr;
+                return;
+            }
+            try {
+                const auto value_after_equals = [](const std::string &field) {
+                    const size_t equals = field.find('=');
+                    if (equals == std::string::npos)
+                        throw std::invalid_argument("missing assignment separator");
+                    return field.substr(equals + 1);
+                };
+                if (label != "EC_RETRACTION_BEGIN" || filament_field.rfind("filament=", 0) != 0 ||
+                    enabled_field.rfind("enabled=", 0) != 0 || distance_field.rfind("distance=", 0) != 0)
+                    throw std::invalid_argument("unexpected EC marker fields");
+                const int filament = std::stoi(value_after_equals(filament_field));
+                EcRetractionBlockObservation block;
+                block.filament_tool_command = current_filament_tool_command;
+                block.enabled = std::stoi(value_after_equals(enabled_field)) != 0;
+                block.distance = std::stod(value_after_equals(distance_field));
+                auto &blocks = observation.blocks_by_filament[filament];
+                blocks.push_back(std::move(block));
+                active_block = &blocks.back();
+            } catch (const std::exception &) {
+                ++observation.malformed_begin_markers;
+                active_block = nullptr;
+            }
+            return;
+        }
+        if (comment == "EC_RETRACTION_END") {
+            active_block = nullptr;
+            return;
+        }
+        if (active_block != nullptr && command == "M620.11")
+            active_block->profile_commands.emplace_back(line.raw());
+    });
+    return observation;
+}
+
+// These EC keys are nullable filament-variant placeholders. The M620.11 K/R branch is reduced from
+// the Bambu Lab H2D change_filament_gcode profile template and is expanded through this family's
+// per-filament start hook so each selected filament config index is observable. It expresses firmware
+// retraction intent, not a built-in slicer E-axis retract.
+TEST_CASE("Nullable EC retraction settings inherit per filament variant",
+          "[MultiFilament][FilamentCutRetractionOverride][Pipeline][NullableBehavior]")
+{
+    struct Case {
+        const char *name;
+        unsigned char filament0_parent_bool;
+        double filament0_parent_distance;
+        unsigned char filament0_child_bool;
+        double filament0_child_distance;
+        unsigned char filament1_parent_bool;
+        double filament1_parent_distance;
+        unsigned char filament1_child_bool;
+        double filament1_child_distance;
+        std::map<int, std::pair<bool, double>> expected_by_filament;
+    };
+    const unsigned char nil_bool = ConfigOptionBoolsNullable::nil_value();
+    const double nil_distance = ConfigOptionFloatsNullable::nil_value();
+    const std::vector<Case> cases = {
+        {
+            "nil child overrides inherit distinct mapped nozzle-variant values",
+            true, 6.5, nil_bool, nil_distance,
+            true, 2.25, nil_bool, nil_distance,
+            { { 0, { true, 6.5 } }, { 1, { true, 2.25 } } },
+        },
+        {
+            "explicit High Flow enable and distance replace its disabled fallback",
+            false, 6.5, true, 1.25,
+            false, 2.25, nil_bool, nil_distance,
+            { { 0, { true, 1.25 } }, { 1, { false, 2.25 } } },
+        },
+        {
+            "explicit false and zero replace active Standard fallback",
+            false, 7.5, nil_bool, nil_distance,
+            true, 3.25, false, 0.0,
+            { { 0, { false, 7.5 } }, { 1, { false, 0.0 } } },
+        },
+        {
+            "explicit zero distance keeps the inherited true flag but emits no movement",
+            true, 7.5, nil_bool, 0.0,
+            true, 3.25, nil_bool, nil_distance,
+            { { 0, { true, 0.0 } }, { 1, { true, 3.25 } } },
+        },
+    };
+
+    const std::string filament_start_gcode =
+        "; EC_RETRACTION_BEGIN filament=[filament_extruder_id] enabled=[long_retraction_when_ec] "
+        "distance=[retraction_distance_when_ec]\n"
+        "{if long_retraction_when_ec}\n"
+        "M620.11 K1 I[current_filament_id] B[current_hotend] R{retraction_distance_when_ec} "
+        "F{max((flush_volumetric_speeds[current_filament_id]/2.4053*60), 200)}\n"
+        "{else}\n"
+        "M620.11 K0 I[current_filament_id] B[current_hotend] R0\n"
+        "{endif}\n"
+        "; EC_RETRACTION_END";
+
+    for (const Case &test_case : cases) {
+        CAPTURE(test_case.name);
+        const DynamicPrintConfig filament0 = merge_filament_ec_variant_child(
+            "Direct Drive High Flow", test_case.filament0_parent_bool, test_case.filament0_parent_distance,
+            test_case.filament0_child_bool, test_case.filament0_child_distance);
+        const DynamicPrintConfig filament1 = merge_filament_ec_variant_child(
+            "Direct Drive Standard", test_case.filament1_parent_bool, test_case.filament1_parent_distance,
+            test_case.filament1_child_bool, test_case.filament1_child_distance);
+
+        DynamicPrintConfig config = two_extruder_ec_variant_print_config();
+        const auto *filament0_bools = filament0.option<ConfigOptionBoolsNullable>("long_retractions_when_ec");
+        const auto *filament1_bools = filament1.option<ConfigOptionBoolsNullable>("long_retractions_when_ec");
+        const auto *filament0_distances = filament0.option<ConfigOptionFloatsNullable>("retraction_distances_when_ec");
+        const auto *filament1_distances = filament1.option<ConfigOptionFloatsNullable>("retraction_distances_when_ec");
+        REQUIRE(filament0_bools != nullptr);
+        REQUIRE(filament1_bools != nullptr);
+        REQUIRE(filament0_distances != nullptr);
+        REQUIRE(filament1_distances != nullptr);
+        REQUIRE(filament0_bools->values.size() == 1);
+        REQUIRE(filament1_bools->values.size() == 1);
+        REQUIRE(filament0_distances->values.size() == 1);
+        REQUIRE(filament1_distances->values.size() == 1);
+        const std::vector<unsigned char> merged_retraction_flags{
+            filament0_bools->values[0], filament1_bools->values[0] };
+        const std::vector<double> merged_retraction_distances{
+            filament0_distances->values[0], filament1_distances->values[0] };
+        config.set_key_value("long_retractions_when_ec", new ConfigOptionBoolsNullable(merged_retraction_flags));
+        config.set_key_value("retraction_distances_when_ec", new ConfigOptionFloatsNullable(merged_retraction_distances));
+        config.set_key_value("filament_start_gcode",
+                             new ConfigOptionStrings({ filament_start_gcode, filament_start_gcode }));
+
+        const std::string gcode = slice({ make_cube(10., 10., 0.8) }, config);
+        REQUIRE_FALSE(gcode.empty());
+        // T selects the logical filament in this path; current_hotend below witnesses the mapped
+        // physical extruder. The fixture deliberately keeps those identities different.
+        CHECK(tools_for_role(gcode, "perimeter") == std::set<int>{ 0 });
+        CHECK(tools_for_role(gcode, "infill") == std::set<int>{ 1 });
+
+        const EcRetractionObservation observation = observe_ec_retraction_blocks(gcode, config);
+        CHECK(observation.malformed_begin_markers == 0);
+        const auto command_distance = [](const std::string &command) -> std::optional<double> {
+            const size_t parameter = command.find(" R");
+            if (parameter == std::string::npos)
+                return std::nullopt;
+            const size_t begin = parameter + 2;
+            const size_t end = command.find_first_of(" \t", begin);
+            try {
+                return std::stod(command.substr(begin, end - begin));
+            } catch (const std::exception &) {
+                return std::nullopt;
+            }
+        };
+        const auto command_integer = [](const std::string &command, std::string_view parameter) -> std::optional<int> {
+            const size_t position = command.find(parameter);
+            if (position == std::string::npos)
+                return std::nullopt;
+            const size_t begin = position + parameter.size();
+            const size_t end = command.find_first_of(" \t", begin);
+            const std::string value = command.substr(begin, end == std::string::npos ? end : end - begin);
+            try {
+                size_t parsed = 0;
+                const int result = std::stoi(value, &parsed);
+                if (parsed != value.size())
+                    return std::nullopt;
+                return result;
+            } catch (const std::exception &) {
+                return std::nullopt;
+            }
+        };
+        const std::map<int, int> expected_physical_extruder_by_filament{ { 0, 1 }, { 1, 0 } };
+        for (const auto &[filament, expected] : test_case.expected_by_filament) {
+            CAPTURE(filament, expected.first, expected.second);
+            const auto blocks = observation.blocks_by_filament.find(filament);
+            REQUIRE(blocks != observation.blocks_by_filament.end());
+            REQUIRE_FALSE(blocks->second.empty());
+            const auto expected_physical_extruder = expected_physical_extruder_by_filament.find(filament);
+            REQUIRE(expected_physical_extruder != expected_physical_extruder_by_filament.end());
+            for (const EcRetractionBlockObservation &block : blocks->second) {
+                CHECK(block.filament_tool_command == filament);
+                CHECK(block.enabled == expected.first);
+                CHECK_THAT(block.distance, Catch::Matchers::WithinAbs(expected.second, 1e-5));
+                REQUIRE(block.profile_commands.size() == 1);
+                const std::string &profile_command = block.profile_commands.front();
+                CHECK(profile_command.find(expected.first ? " K1 " : " K0 ") != std::string::npos);
+                const std::optional<int> emitted_filament = command_integer(profile_command, " I");
+                REQUIRE(emitted_filament.has_value());
+                CHECK(*emitted_filament == filament);
+                const std::optional<int> emitted_physical_extruder = command_integer(profile_command, " B");
+                REQUIRE(emitted_physical_extruder.has_value());
+                CHECK(*emitted_physical_extruder == expected_physical_extruder->second);
+                const std::optional<double> emitted_distance = command_distance(profile_command);
+                REQUIRE(emitted_distance.has_value());
+                CHECK_THAT(*emitted_distance, Catch::Matchers::WithinAbs(expected.first ? expected.second : 0.0, 1e-5));
+            }
         }
     }
 }
