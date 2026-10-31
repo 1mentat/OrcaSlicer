@@ -122,11 +122,25 @@ double sampled_circle_distance(const SurfaceFeature &a, const SurfaceFeature &b)
     return std::sqrt(best);
 }
 
+// The 1e-6 tolerance of the solver checks is loose on purpose: measured errors are at most 2e-12 on
+// arm64, and roundoff differences between platforms (e.g. FMA contraction on x86) can move a double
+// root of the degree-8 polynomial by about sqrt(machine epsilon), 1e-8, which stays well inside it.
 void check_against_oracle(const SurfaceFeature &a, const SurfaceFeature &b)
 {
     const MeasurementResult result = get_measurement(a, b);
     check_witnessed_distance(result.distance_infinite, sampled_circle_distance(a, b), 1e-6);
     check_circle_pair_witness(result.distance_infinite, a, b, 1e-6);
+}
+
+// Checks a parallel-circle distance in both argument orders: swapping the circles swaps the witnesses.
+void check_parallel_pair(const SurfaceFeature &a, const SurfaceFeature &b, double expected)
+{
+    const MeasurementResult result = get_measurement(a, b);
+    check_witnessed_distance(result.distance_infinite, expected);
+    check_circle_pair_witness(result.distance_infinite, a, b);
+    const MeasurementResult reversed = get_measurement(b, a);
+    check_witnessed_distance(reversed.distance_infinite, expected);
+    check_circle_pair_witness(reversed.distance_infinite, b, a);
 }
 
 } // namespace
@@ -373,32 +387,35 @@ TEST_CASE("Measuring groups cube facets into planar features and honors world tr
     CHECK(measuring.get_feature(cube_mesh.indices.size(), Vec3d::Zero(), Transform3d::Identity(), false) == std::nullopt);
 }
 
-// Known bug: for parallel circles in different planes the distance ignores the axial gap, and when the
-// projected circles intersect the witnesses are the two centers; fixed by the follow-up fix PR
-TEST_CASE("Parallel circles return valid closest witnesses across geometric regimes", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Coplanar circles report disjoint, tangent and nested gaps", "[Measure][MeasureContracts]")
 {
-    const auto check_pair = [](const SurfaceFeature &a, const SurfaceFeature &b, double expected) {
-        const MeasurementResult result = get_measurement(a, b);
-        check_witnessed_distance(result.distance_infinite, expected);
-        check_circle_pair_witness(result.distance_infinite, a, b);
-        // Swapping the circles swaps the witnesses.
-        const MeasurementResult reversed = get_measurement(b, a);
-        check_witnessed_distance(reversed.distance_infinite, expected);
-        check_circle_pair_witness(reversed.distance_infinite, b, a);
-    };
-
     const SurfaceFeature radius2 = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
-    check_pair(radius2, circle(Vec3d(5.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0), 2.0);            // externally disjoint
-    check_pair(radius2, circle(Vec3d(5.0, 0.0, 3.0), Vec3d::UnitZ(), 1.0), std::sqrt(13.0)); // disjoint, above
-    check_pair(radius2, circle(Vec3d(5.0, 0.0, -3.0), Vec3d::UnitZ(), 1.0), std::sqrt(13.0)); // disjoint, below
-    check_pair(radius2, circle(Vec3d(3.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0), 0.0);              // external tangent
-    check_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0), circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0), 1.0); // nested
-    check_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.0), circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 3.0), 1.0); // reverse nested
-    check_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0), circle(Vec3d(0.0, 0.0, 2.0), Vec3d::UnitZ(), 1.0),
-               std::sqrt(8.0)); // concentric, axial gap
-    check_pair(radius2, circle(Vec3d(0.0, 0.0, -2.0), Vec3d::UnitZ(), 2.0), 2.0); // equal concentric, axial gap
-    check_pair(radius2, circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 2.0), 0.0);  // coplanar intersection
-    check_pair(radius2, circle(Vec3d(1.0, 0.0, 2.0), Vec3d::UnitZ(), 2.0), 2.0);  // projections intersect, axial gap
+    check_parallel_pair(radius2, circle(Vec3d(5.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0), 2.0); // externally disjoint
+    check_parallel_pair(radius2, circle(Vec3d(3.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0), 0.0); // external tangent
+    check_parallel_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0), circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0),
+                        1.0); // nested
+    check_parallel_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.0), circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 3.0),
+                        1.0); // reverse nested
+}
+
+// Known bug: when the projected circles intersect, the parallel branch returns the two centers as
+// witnesses and their distance; fixed by the follow-up fix PR
+TEST_CASE("Intersecting coplanar circles report zero distance at a common point", "[Measure][MeasureContracts][!shouldfail]")
+{
+    check_parallel_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0), circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 2.0), 0.0);
+}
+
+// Known bug: for parallel circles in different planes the distance ignores the axial gap; fixed by the
+// follow-up fix PR
+TEST_CASE("Parallel circles in different planes include the axial gap", "[Measure][MeasureContracts][!shouldfail]")
+{
+    const SurfaceFeature radius2 = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    check_parallel_pair(radius2, circle(Vec3d(5.0, 0.0, 3.0), Vec3d::UnitZ(), 1.0), std::sqrt(13.0));  // disjoint, above
+    check_parallel_pair(radius2, circle(Vec3d(5.0, 0.0, -3.0), Vec3d::UnitZ(), 1.0), std::sqrt(13.0)); // disjoint, below
+    check_parallel_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0), circle(Vec3d(0.0, 0.0, 2.0), Vec3d::UnitZ(), 1.0),
+                        std::sqrt(8.0)); // concentric
+    check_parallel_pair(radius2, circle(Vec3d(0.0, 0.0, -2.0), Vec3d::UnitZ(), 2.0), 2.0); // equal concentric
+    check_parallel_pair(radius2, circle(Vec3d(1.0, 0.0, 2.0), Vec3d::UnitZ(), 2.0), 2.0);  // projections intersect
 }
 
 // Known bug: as above, parallel circles in different planes lose the axial gap; fixed by the follow-up fix PR
@@ -502,10 +519,12 @@ TEST_CASE("Skew circle distances scale under a common rigid placement", "[Measur
     const Vec3d normal = Vec3d(1.0, 2.0, 3.0).normalized();
     const Eigen::Matrix3d rotation = Eigen::AngleAxisd(0.71, Vec3d(2.0, 3.0, 1.0).normalized()).toRotationMatrix();
     const Vec3d translation(17.0, -9.0, 4.0);
-    const MeasurementResult original = get_measurement(circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0),
-                                                       circle(Vec3d(3.0, 2.0, 1.0), normal, 1.0));
+    const SurfaceFeature a = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    const SurfaceFeature b = circle(Vec3d(3.0, 2.0, 1.0), normal, 1.0);
+    check_against_oracle(a, b);
+    const MeasurementResult original = get_measurement(a, b);
     REQUIRE(original.distance_infinite.has_value());
-    for (const double scale : {0.2, 1.0, 5.0}) {
+    for (const double scale : {0.2, 5.0}) {
         CAPTURE(scale);
         const SurfaceFeature moved_a = circle(translation, rotation * Vec3d::UnitZ(), 2.0 * scale);
         const SurfaceFeature moved_b = circle(translation + rotation * (Vec3d(3.0, 2.0, 1.0) * scale), rotation * normal, scale);
