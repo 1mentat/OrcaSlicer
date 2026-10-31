@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <nlohmann/json.hpp>
 #include <catch2/catch_all.hpp>
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Polygon.hpp"
@@ -9,6 +10,7 @@
 #include <limits>
 #include <cstddef>
 #include <cmath>
+#include <initializer_list>
 
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -427,3 +429,395 @@ TEST_CASE("Layered printing does not floor the object distance", "[Arrange]")
     update_selected_items_inflation(items, &cfg, p);
     CHECK(p.min_obj_distance == 0);
 }
+
+namespace arrange_surface_contracts {
+using Catch::Matchers::WithinAbs;
+
+ArrangePolygon rectangle(double width_mm, double height_mm, double x_mm = 0., double y_mm = 0.)
+{
+    const coord_t x = scaled(x_mm);
+    const coord_t y = scaled(y_mm);
+    ArrangePolygon result;
+    result.poly = ExPolygon(Polygon{{Point(x, y), Point(x + scaled(width_mm), y),
+                                     Point(x + scaled(width_mm), y + scaled(height_mm)),
+                                     Point(x, y + scaled(height_mm))}});
+    result.bed_idx = 0;
+    return result;
+}
+
+// Serial evaluation keeps the placement independent of thread scheduling.
+ArrangeParams serial_params(coord_t min_dist = 0)
+{
+    ArrangeParams params = quiet_params(min_dist);
+    params.parallel      = false;
+    return params;
+}
+
+bool inside_circle(const BoundingBox &box, const Point &center, double radius)
+{
+    for (const Point &corner : {box.min, Point(box.min.x(), box.max.y()),
+                                Point(box.max.x(), box.min.y()), box.max}) {
+        const double dx = double(corner.x() - center.x());
+        const double dy = double(corner.y() - center.y());
+        if (std::hypot(dx, dy) > radius)
+            return false;
+    }
+    return true;
+}
+
+TEST_CASE("ArrangePolygon transforms the retained contour without mutating its source", "[Arrange][ArrangeSurface]")
+{
+    ArrangePolygon item = rectangle(20., 10.);
+    const ExPolygon source = item.poly;
+    item.rotation = .35;
+    item.translation = Vec2crd(scaled(7.), scaled(9.));
+
+    const ExPolygon transformed = item.transformed_poly();
+    CHECK(item.poly == source);
+    const double c = std::cos(item.rotation);
+    const double s = std::sin(item.rotation);
+    REQUIRE(transformed.contour.points.size() == source.contour.points.size());
+    for (size_t i = 0; i < source.contour.points.size(); ++i) {
+        // Rotation about the origin first, then translation.
+        const Point &point = source.contour.points[i];
+        const Point expected(
+            coord_t(std::round(c * double(point.x()) - s * double(point.y()))) + item.translation.x(),
+            coord_t(std::round(c * double(point.y()) + s * double(point.x()))) + item.translation.y());
+        CHECK(transformed.contour.points[i] == expected);
+    }
+}
+
+TEST_CASE("ArrangePolygon applies its setter once and records that it was applied", "[Arrange][ArrangeSurface]")
+{
+    ArrangePolygon item = rectangle(10., 10.);
+    int calls = 0;
+    item.setter = [&](const ArrangePolygon &observed) {
+        ++calls;
+        CHECK(observed.bed_idx == 0);
+    };
+    item.apply();
+    item.apply();
+    CHECK(calls == 1);
+    CHECK(item.is_applied == 1);
+}
+
+TEST_CASE("Arrange dispatches an empty point bed as an infinite bed centred on the origin", "[Arrange][ArrangeSurface]")
+{
+    // A 1 m square fits no finite printer bed, so only the infinite bed places it.
+    ArrangePolygons items{rectangle(1000., 1000., 300., 400.)};
+    arrange(items, Points{}, serial_params());
+    REQUIRE(items.front().bed_idx == 0);
+    const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
+    CHECK_THAT(unscaled<double>(box.center().x()), WithinAbs(0., .01));
+    CHECK_THAT(unscaled<double>(box.center().y()), WithinAbs(0., .01));
+}
+
+TEST_CASE("Arrange dispatches a one-point bed as an infinite bed around that point", "[Arrange][ArrangeSurface]")
+{
+    ArrangePolygons items{rectangle(1000., 1000.)};
+    arrange(items, Points{Point(scaled(100.), scaled(75.))}, serial_params());
+    REQUIRE(items.front().bed_idx == 0);
+    const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
+    CHECK_THAT(unscaled<double>(box.center().x()), WithinAbs(100., .01));
+    CHECK_THAT(unscaled<double>(box.center().y()), WithinAbs(75., .01));
+}
+
+TEST_CASE("Arrange keeps every part inside a rectangular point bed", "[Arrange][ArrangeSurface]")
+{
+    // The parts start outside the bed, so staying inside requires placement.
+    ArrangePolygons items{rectangle(20., 10., -50.), rectangle(15., 15., -50.), rectangle(8., 22., -50.)};
+    const Points bed{Point(0, 0), Point(scaled(100.), 0), Point(scaled(100.), scaled(80.)), Point(0, scaled(80.))};
+    arrange(items, bed, serial_params(scaled(1.)));
+    for (const ArrangePolygon &item : items) {
+        REQUIRE(item.bed_idx == 0);
+        CHECK(BoundingBox(bed).contains(item.transformed_poly().contour.bounding_box()));
+    }
+    require_no_overlap(items);
+}
+
+TEST_CASE("Arrange treats equidistant bed points as a circular bed", "[Arrange][ArrangeSurface]")
+{
+    // The four cardinal points of a 100 mm circle. A 140x80 rectangle fits the
+    // circle (half-diagonal 80.6 mm) but not the diamond those points enclose
+    // (70 + 40 > 100), so it is placed only if the points become a CircleBed.
+    // Rotations are disabled so no fitter can hide the dispatch choice.
+    ArrangePolygons items{rectangle(140., 80.)};
+    const Point center(scaled(100.), scaled(100.));
+    const Points bed{Point(center.x() + scaled(100.), center.y()), Point(center.x(), center.y() + scaled(100.)),
+                     Point(center.x() - scaled(100.), center.y()), Point(center.x(), center.y() - scaled(100.))};
+    ArrangeParams params = serial_params();
+    params.allow_rotations = false;
+    arrange(items, bed, params);
+    REQUIRE(items.front().bed_idx == 0);
+    CHECK(inside_circle(items.front().transformed_poly().contour.bounding_box(), center, scaled(100.01)));
+}
+
+TEST_CASE("Arrange leaves an invalid contour unarranged while placing the valid contours before it", "[Arrange][ArrangeSurface]")
+{
+    ArrangePolygon invalid;
+    invalid.poly.contour.points = {Point(0, 0), Point(scaled(10.), 0)};
+    ArrangePolygons items{rectangle(10., 10., 500.), invalid};
+    arrange(items, bed(100., 100.), serial_params());
+    REQUIRE(items[0].bed_idx == 0);
+    CHECK(bed(100., 100.).contains(items[0].transformed_poly().contour.bounding_box()));
+    CHECK(items[1].bed_idx == UNARRANGED);
+}
+
+// Known bug: arrange() drops contours with fewer than 3 points before nesting but writes the results back by
+// position, so an invalid item takes the next item's result and the last items keep their input; fixed by the
+// follow-up fix PR.
+TEST_CASE("Arrange keeps results aligned with their items when an invalid contour comes first", "[Arrange][ArrangeSurface][!shouldfail]")
+{
+    // Callers seed bed_idx to 0 before arranging (see get_arrange_polys).
+    ArrangePolygon invalid;
+    invalid.poly.contour.points = {Point(0, 0), Point(scaled(10.), 0)};
+    invalid.bed_idx = 0;
+    ArrangePolygons items{invalid, rectangle(10., 10., 500.)};
+    arrange(items, bed(100., 100.), serial_params());
+    CHECK(items[0].bed_idx == UNARRANGED);
+    REQUIRE(items[1].bed_idx == 0);
+    CHECK(bed(100., 100.).contains(items[1].transformed_poly().contour.bounding_box()));
+}
+
+TEST_CASE("Arrange keeps footprints inside a CircleBed and disjoint", "[Arrange][ArrangeSurface]")
+{
+    // The origin lies outside this circle, so the parts must be moved onto it.
+    ArrangePolygons items{rectangle(20., 10.), rectangle(12., 18.), rectangle(9., 9.)};
+    const Point center(scaled(100.), scaled(100.));
+    arrange(items, CircleBed(center, scaled(100.)), serial_params(scaled(1.)));
+    for (const ArrangePolygon &item : items) {
+        REQUIRE(item.bed_idx == 0);
+        CHECK(inside_circle(item.transformed_poly().contour.bounding_box(), center, scaled(100.01)));
+    }
+    require_no_overlap(items);
+}
+
+TEST_CASE("Arrange keeps convex polygon-bed footprints inside and disjoint", "[Arrange][ArrangeSurface]")
+{
+    // A hexagon that excludes the origin, where the parts start.
+    const Polygon bed_poly{{Point(scaled(10.), scaled(10.)), Point(scaled(190.), scaled(10.)),
+                            Point(scaled(200.), scaled(100.)), Point(scaled(190.), scaled(190.)),
+                            Point(scaled(10.), scaled(190.)), Point(0, scaled(100.))}};
+    ArrangePolygons items{rectangle(20., 20.), rectangle(18., 12.)};
+    arrange(items, bed_poly, serial_params(scaled(1.)));
+    for (const ArrangePolygon &item : items) {
+        REQUIRE(item.bed_idx == 0);
+        CHECK(diff_ex(item.transformed_poly(), bed_poly).empty());
+    }
+    require_no_overlap(items);
+}
+
+TEST_CASE("Arrange keeps a fixed exclusion outside every arranged footprint", "[Arrange][ArrangeSurface]")
+{
+    // The fixed item covers the bed centre, where the pile would otherwise be aligned.
+    const ArrangePolygon fixed = rectangle(30., 30., 45., 45.);
+    ArrangePolygons items{rectangle(20., 20.), rectangle(18., 12.)};
+    const ExPolygon fixed_shape = fixed.transformed_poly();
+    arrange(items, {fixed}, bed(120., 120.), serial_params(scaled(1.)));
+    for (const ArrangePolygon &item : items) {
+        REQUIRE(item.bed_idx == 0);
+        CHECK(intersection_ex(item.transformed_poly(), fixed_shape).empty());
+    }
+    require_no_overlap(items);
+}
+
+TEST_CASE("Arrange rotates an oversized item to fit only when rotations are allowed", "[Arrange][ArrangeSurface]")
+{
+    // 120 mm wide does not fit a 50 mm wide bed, but 120 mm tall fits its 130 mm height.
+    ArrangePolygons disabled{rectangle(120., 30.)};
+    ArrangeParams no_rotations = serial_params();
+    no_rotations.allow_rotations = false;
+    arrange(disabled, bed(50., 130.), no_rotations);
+    CHECK(disabled.front().bed_idx == UNARRANGED);
+
+    ArrangePolygons enabled{rectangle(120., 30.)};
+    ArrangeParams rotations = serial_params();
+    rotations.allow_rotations = true;
+    arrange(enabled, bed(50., 130.), rotations);
+    REQUIRE(enabled.front().bed_idx == 0);
+    CHECK(std::abs(std::sin(enabled.front().rotation)) > .9);
+    CHECK(bed(50., 130.).contains(enabled.front().transformed_poly().contour.bounding_box()));
+}
+
+} // namespace arrange_surface_contracts
+
+namespace arrange_param_contracts {
+using Catch::Matchers::WithinAbs;
+using arrange_surface_contracts::rectangle;
+
+// Known bug: ArrangeParams::to_json() ends with a trailing comma and never closes the object, so the
+// logged string is not JSON; fixed by the follow-up fix PR.
+TEST_CASE("ArrangeParams serializes the distance and optimization controls as JSON", "[Arrange][ArrangeParams][!shouldfail]")
+{
+    ArrangeParams params = quiet_params(scaled(1.5));
+    params.accuracy = .25f;
+    params.parallel = false;
+    params.allow_rotations = true;
+    params.do_final_align = false;
+    params.is_seq_print = true;
+    params.bed_shrink_x = 2.f;
+    params.bed_shrink_y = 3.f;
+    params.brim_skirt_distance = 4.f;
+    params.clearance_height_to_rod = 5.f;
+    params.clearance_height_to_lid = 6.f;
+    params.clearance_radius = 7.f;
+    params.printable_height = 8.f;
+    const nlohmann::json json = nlohmann::json::parse(params.to_json(), nullptr, false);
+    REQUIRE_FALSE(json.is_discarded());
+    CHECK(json.at("min_obj_distance") == params.min_obj_distance);
+    CHECK_THAT(json.at("accuracy").get<double>(), WithinAbs(.25, 1e-12));
+    CHECK(json.at("parallel") == 0);
+    CHECK(json.at("allow_rotations") == 1);
+    CHECK(json.at("do_final_align") == 0);
+    CHECK(json.at("is_seq_print") == 1);
+    CHECK_THAT(json.at("bed_shrink_x").get<double>(), WithinAbs(2., 1e-12));
+    CHECK_THAT(json.at("bed_shrink_y").get<double>(), WithinAbs(3., 1e-12));
+    CHECK_THAT(json.at("brim_skirt_distance").get<double>(), WithinAbs(4., 1e-12));
+    CHECK_THAT(json.at("clearance_height_to_rod").get<double>(), WithinAbs(5., 1e-12));
+    CHECK_THAT(json.at("clearance_height_to_lid").get<double>(), WithinAbs(6., 1e-12));
+    CHECK_THAT(json.at("clearance_radius").get<double>(), WithinAbs(7., 1e-12));
+    CHECK_THAT(json.at("printable_height").get<double>(), WithinAbs(8., 1e-12));
+}
+
+TEST_CASE("Axis alignment turns the long axis of an asymmetric contour onto Y", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items{rectangle(20., 60.)};
+    items.front().rotation = .37;
+    ArrangeParams params = quiet_params();
+
+    // The alignment only runs when it is requested.
+    update_selected_items_axis_align(items, nullptr, params);
+    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
+
+    params.align_to_y_axis = true;
+    update_selected_items_axis_align(items, nullptr, params);
+    const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
+    CHECK_THAT(unscaled<double>(box.size().x()), WithinAbs(20., .01));
+    CHECK_THAT(unscaled<double>(box.size().y()), WithinAbs(60., .01));
+}
+
+TEST_CASE("Axis alignment leaves a contour without a dominant axis unrotated", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items{make_square(scaled(30.))};
+    items.front().rotation = .37;
+    ArrangeParams params = quiet_params();
+    params.align_to_y_axis = true;
+    update_selected_items_axis_align(items, nullptr, params);
+    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
+}
+
+TEST_CASE("Axis alignment ignores a degenerate contour", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygon item;
+    item.poly.contour.points = {Point(0, 0), Point(scaled(10.), 0)};
+    item.rotation = .37;
+    ArrangePolygons items{item};
+    ArrangeParams params = quiet_params();
+    params.align_to_y_axis = true;
+    update_selected_items_axis_align(items, nullptr, params);
+    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
+}
+
+TEST_CASE("Selected inflation uses half the widest tree-support brim for the whole plate", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(2, 20.);
+    items[0].brim_width = 1.;
+    items[1].brim_width = 4.;
+    DynamicPrintConfig config = bed_config();
+    ArrangeParams params = quiet_params();
+
+    // Without tree support each item keeps its own brim.
+    update_selected_items_inflation(items, &config, params);
+    CHECK(items[0].inflation == scaled(1.));
+    CHECK(items[1].inflation == scaled(4.));
+
+    items[1].has_tree_support = true;
+    update_selected_items_inflation(items, &config, params);
+    CHECK(items[0].inflation == scaled(2.));
+    CHECK(items[1].inflation == scaled(2.));
+}
+
+TEST_CASE("Selected inflation gives an explicit minimum distance precedence over brim", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(1, 20.);
+    items.front().brim_width = 8.;
+    DynamicPrintConfig config = bed_config();
+    ArrangeParams params = quiet_params(scaled(6.));
+    update_selected_items_inflation(items, &config, params);
+    CHECK(items.front().inflation == scaled(3.));
+}
+
+TEST_CASE("Unselected inflation distinguishes ordinary, virtual, and calibration regions", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(3, 10.);
+    items[0].brim_width = 3.;
+    items[1].is_virt_object = true;
+    items[2].is_virt_object = true;
+    items[2].is_extrusion_cali_object = true;
+    const ArrangeParams params = quiet_params();
+    update_unselected_items_inflation(items, nullptr, params);
+    CHECK(items[0].inflation == scaled(3.));
+    CHECK(items[1].inflation == scaled(1.));
+    CHECK(items[2].inflation == 0);
+}
+
+TEST_CASE("Sequential printing moves only virtual exclusion regions by the bed shrink", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(2, 10.);
+    items[0].is_virt_object = true;
+    const Point virt_before = items[0].poly.contour.points.front();
+    const Point real_before = items[1].poly.contour.points.front();
+    ArrangeParams params = quiet_params();
+    params.is_seq_print = true;
+    params.bed_shrink_x = 4.f;
+    params.bed_shrink_y = 6.f;
+    update_unselected_items_inflation(items, nullptr, params);
+    CHECK(items[0].poly.contour.points.front() == Point(virt_before.x() + scaled(4.), virt_before.y() + scaled(6.)));
+    CHECK(items[1].poly.contour.points.front() == real_before);
+}
+
+TEST_CASE("Arrange parameter update adds the real skirt clearance and sequential correction", "[Arrange][ArrangeParams]")
+{
+    // Skirt clearance is skirt_distance plus skirt_loops line widths: 3 + 2 * 0.4 = 3.8 mm.
+    DynamicPrintConfig config;
+    config.set_key_value("skirt_height", new ConfigOptionInt(1));
+    config.set_key_value("skirt_loops", new ConfigOptionInt(2));
+    config.set_key_value("skirt_distance", new ConfigOptionFloat(3.f));
+    config.set_key_value("line_width", new ConfigOptionFloat(.4f));
+    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(.4, false));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({.4}));
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = 10.f;
+    params.bed_shrink_y = 11.f;
+    params.clearance_radius = 4.f;
+
+    SECTION("by-layer printing adds the skirt clearance") {
+        update_arrange_params(params, &config, {});
+        CHECK_THAT(params.brim_skirt_distance, WithinAbs(3.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_x, WithinAbs(13.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_y, WithinAbs(14.8, 1e-5));
+    }
+    SECTION("sequential printing also gives back half the clearance radius") {
+        params.is_seq_print = true;
+        update_arrange_params(params, &config, {});
+        CHECK_THAT(params.bed_shrink_x, WithinAbs(11.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_y, WithinAbs(12.8, 1e-5));
+    }
+}
+
+TEST_CASE("Shrinking a rectangular bed moves every edge toward its center", "[Arrange][ArrangeParams]")
+{
+    DynamicPrintConfig config = bed_config();
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = 5.f;
+    params.bed_shrink_y = 7.f;
+    const Points points = get_shrink_bedpts(&config, params);
+    REQUIRE(points.size() == 4);
+    const BoundingBox box(points);
+    CHECK(box.min.x() == scaled(5.));
+    CHECK(box.max.x() == scaled(195.));
+    CHECK(box.min.y() == scaled(7.));
+    CHECK(box.max.y() == scaled(193.));
+}
+
+} // namespace arrange_param_contracts
