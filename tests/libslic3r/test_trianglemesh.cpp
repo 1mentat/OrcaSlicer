@@ -57,6 +57,15 @@ TEST_CASE("TriangleMesh affine and mirror operations preserve their stated orien
     CHECK_THAT(scaled.size().x(), WithinAbs(4., 1e-5));
     CHECK_THAT(scaled.size().y(), WithinAbs(9., 1e-5));
     CHECK_THAT(scaled.size().z(), WithinAbs(16., 1e-5));
+    // The vertices themselves are scaled, not just the cached statistics.
+    CHECK_THAT(its_volume(scaled.its), WithinAbs(576.f, 1e-3f));
+    const BoundingBoxf3 scaled_box = bounding_box(scaled.its);
+    REQUIRE(scaled_box.min.isApprox(Vec3d::Zero(), 1e-6));
+    REQUIRE(scaled_box.max.isApprox(Vec3d(4., 9., 16.), 1e-5));
+    TriangleMesh uniform = make_cube(2., 3., 4.);
+    uniform.scale(2.f);
+    REQUIRE(bounding_box(uniform.its).max.isApprox(Vec3d(4., 6., 8.), 1e-5));
+    CHECK_THAT(its_volume(uniform.its), WithinAbs(192.f, 1e-3f));
 
     TriangleMesh reflected = make_cube(2., 3., 4.);
     Transform3d reflection = Transform3d::Identity();
