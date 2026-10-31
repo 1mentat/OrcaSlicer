@@ -7,6 +7,8 @@
 #include <libslic3r/Point.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -187,20 +189,29 @@ TEST_CASE("CGAL merge joins disjoint closed components without changing total vo
     CHECK_THAT(merged.bounding_box().max.x(), WithinAbs(22., 1e-5));
 }
 
-TEST_CASE("CGAL repair closes a single missing cuboid face", "[MeshBoolean][MeshBooleanContracts]")
+TEST_CASE("CGAL repair closes a cube with one missing triangle", "[MeshBoolean][MeshBooleanContracts]")
 {
-    // Keep the cube away from the origin: a face lying in a plane through the origin adds nothing
-    // to the signed volume, so dropping it would leave the volume check blind to the hole.
-    TriangleMesh open = shifted_cube(20.f, 20.f, 20.f);
-    const size_t closed_faces = open.its.indices.size();
-    open.its.indices.pop_back();
+    // its_volume() measures heights from the first vertex, so drop a triangle on a face that does
+    // not contain that vertex; otherwise the hole would not change the volume. TriangleMesh::volume()
+    // is not used because it returns the cached volume of the closed cube.
+    TriangleMesh open = shifted_cube(0.f);
+    const Vec3f ref = open.its.vertices.front();
+    const auto dropped = std::find_if(open.its.indices.begin(), open.its.indices.end(), [&](const Vec3i32 &f) {
+        const Vec3f &a = open.its.vertices[f[0]];
+        const Vec3f n = (open.its.vertices[f[1]] - a).cross(open.its.vertices[f[2]] - a).normalized();
+        return std::abs(n.dot(a - ref)) > 1.f;
+    });
+    REQUIRE(dropped != open.its.indices.end());
+    open.its.indices.erase(dropped);
+    REQUIRE(its_volume(open.its) < 999.f);
+    REQUIRE(its_num_open_edges(open.its) > 0);
     REQUIRE_FALSE(MeshBoolean::cgal::does_bound_a_volume(*MeshBoolean::cgal::triangle_mesh_to_cgal(open)));
     RepairedMeshErrors errors;
     std::string error;
     REQUIRE(MeshBoolean::cgal::repair(open, &errors, &error));
     CHECK(error.empty());
-    CHECK(open.its.indices.size() == closed_faces);
-    CHECK_THAT(mesh_volume(open), WithinRel(1000.f, 1e-3f));
+    CHECK(its_num_open_edges(open.its) == 0);
+    CHECK_THAT(its_volume(open.its), WithinRel(1000.f, 1e-3f));
     CHECK_FALSE(MeshBoolean::cgal::does_self_intersect(open));
     const auto repaired_cgal = MeshBoolean::cgal::triangle_mesh_to_cgal(open);
     REQUIRE(repaired_cgal != nullptr);
