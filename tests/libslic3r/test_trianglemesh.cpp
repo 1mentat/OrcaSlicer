@@ -719,8 +719,7 @@ TEST_CASE("Legacy center rotation keeps mesh bounds and size synchronized",
     CHECK_THAT(mesh.size().y(), WithinAbs(actual.size().y(), 1e-4));
 }
 
-// Known bug: its_make_pyramid winds its two base facets inward; fixed by the follow-up fix PR
-TEST_CASE("Pyramid facets all face away from an interior point", "[TriangleMesh][PyramidWinding][!shouldfail]")
+TEST_CASE("Pyramid facets all face away from an interior point", "[TriangleMesh][PyramidWinding]")
 {
     const auto mesh = its_make_pyramid(6.f, 9.f);
     const Vec3f interior(0.f, 0.f, 2.25f);
@@ -736,8 +735,7 @@ TEST_CASE("Pyramid facets all face away from an interior point", "[TriangleMesh]
     }
 }
 
-// Known bug: its_make_pyramid winds its two base facets inward; fixed by the follow-up fix PR
-TEST_CASE("Pyramid topology pairs every directed edge with its reverse", "[TriangleMesh][PyramidWinding][!shouldfail]")
+TEST_CASE("Pyramid topology pairs every directed edge with its reverse", "[TriangleMesh][PyramidWinding]")
 {
     const auto mesh = its_make_pyramid(6.f, 9.f);
     CHECK(its_num_open_edges(mesh) == 0);
