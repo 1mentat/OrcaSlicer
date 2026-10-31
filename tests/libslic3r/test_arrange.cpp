@@ -574,9 +574,14 @@ TEST_CASE("Arrange keeps results aligned with their items when an invalid contou
     ArrangePolygon invalid;
     invalid.poly.contour.points = {Point(0, 0), Point(scaled(10.), 0)};
     invalid.bed_idx = 0;
+    invalid.translation = Vec2crd(scaled(5.), scaled(6.));
+    invalid.rotation = .25;
     ArrangePolygons items{invalid, rectangle(10., 10., 500.)};
     arrange(items, bed(100., 100.), serial_params());
     CHECK(items[0].bed_idx == UNARRANGED);
+    // The skipped item keeps its input transform.
+    CHECK(items[0].translation == invalid.translation);
+    CHECK_THAT(items[0].rotation, WithinAbs(.25, 1e-12));
     REQUIRE(items[1].bed_idx == 0);
     CHECK(bed(100., 100.).contains(items[1].transformed_poly().contour.bounding_box()));
 }
