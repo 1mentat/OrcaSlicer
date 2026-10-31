@@ -31,6 +31,7 @@
 #include <string>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/Semver.hpp"
 #include <utility>
 #include "libslic3r/Config.hpp"
 #include <map>
@@ -6644,6 +6645,21 @@ void write_process(const fs::path &file, const std::string &name, const std::str
     out << "}\n";
 }
 
+std::map<std::string, std::string> cloud_values(const std::string &type, const std::string &setting_id,
+                                                const std::string &user_id, const std::string &inherits = {})
+{
+    std::map<std::string, std::string> values{
+        { BBL_JSON_KEY_TYPE, type },
+        { BBL_JSON_KEY_VERSION, "1.0.0" },
+        { BBL_JSON_KEY_SETTING_ID, setting_id },
+        { BBL_JSON_KEY_USER_ID, user_id },
+        { ORCA_JSON_KEY_UPDATE_TIME, "10" },
+    };
+    if (!inherits.empty())
+        values.emplace(BBL_JSON_KEY_INHERITS, inherits);
+    return values;
+}
+
 } // namespace
 
 TEST_CASE("File preset loading resolves a three-level base chain", "[PresetFiles]")
@@ -6682,6 +6698,101 @@ TEST_CASE("File preset loading resolves a three-level base chain", "[PresetFiles
     CHECK_THAT(middle->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(30.0, 1e-9));
     CHECK_THAT(leaf->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
     CHECK_THAT(leaf->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(42.0, 1e-9));
+}
+
+TEST_CASE("Cloud preset loading performs two-pass inheritance and forward substitution", "[PresetFiles]")
+{
+    PresetBundle bundle;
+    AppConfig app_config;
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+
+    // Lexicographic order puts the child first. PresetBundle's two-pass load
+    // must still install the root before resolving the child.
+    auto root = cloud_values(PRESET_IOT_PRINT_TYPE, "cloud-root-id", "account-1");
+    root.emplace("layer_height", "0.24");
+    root.emplace("wall_generator", "future-generator");
+    cloud.emplace("A Child", cloud_values(PRESET_IOT_PRINT_TYPE, "cloud-child-id", "account-1", "Z Root"));
+    cloud.emplace("Z Root", std::move(root));
+    cloud.emplace("Ignored Type", cloud_values("future-profile", "ignored-id", "account-1"));
+    cloud.emplace("Missing Type", std::map<std::string, std::string>{{ BBL_JSON_KEY_VERSION, "1.0.0" }});
+
+    const PresetsConfigSubstitutions substitutions = bundle.load_user_presets(
+        app_config, cloud, ForwardCompatibilitySubstitutionRule::Enable);
+
+    const Preset *root_preset = bundle.prints.find_preset("Z Root");
+    const Preset *child_preset = bundle.prints.find_preset("A Child");
+    REQUIRE(root_preset != nullptr);
+    REQUIRE(child_preset != nullptr);
+    CHECK(bundle.prints.find_preset("Ignored Type") == nullptr);
+    CHECK(bundle.prints.find_preset("Missing Type") == nullptr);
+    CHECK(root_preset->inherits().empty());
+    CHECK(root_preset->setting_id == "cloud-root-id");
+    CHECK(root_preset->user_id == "account-1");
+    CHECK(root_preset->updated_time == 10);
+    CHECK(root_preset->version == *Semver::parse("1.0.0"));
+    CHECK_THAT(root_preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK(child_preset->setting_id == "cloud-child-id");
+    CHECK(child_preset->user_id == "account-1");
+    CHECK(child_preset->inherits() == "Z Root");
+    CHECK(child_preset->base_id == root_preset->setting_id);
+    CHECK_THAT(child_preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    REQUIRE(substitutions.size() == 1);
+    CHECK(substitutions.front().preset_name == "Z Root");
+    CHECK(substitutions.front().substitutions.size() == 1);
+    CHECK(substitutions.front().substitutions.front().old_value == "future-generator");
+}
+
+TEST_CASE("Cloud filament loading inherits null filament identity and rejects bad metadata", "[PresetFiles]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    PresetsConfigSubstitutions substitutions;
+
+    auto parent_values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "filament-setting-id", "account-1");
+    parent_values.emplace(BBL_JSON_KEY_FILAMENT_ID, "filament-family-id");
+    parent_values.emplace("filament_diameter", "1.75,2.85");
+    REQUIRE(collection.load_user_preset("Cloud Filament", std::move(parent_values), substitutions,
+                                        ForwardCompatibilitySubstitutionRule::EnableSilent));
+
+    auto child_values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "filament-child-id", "account-1", "Cloud Filament");
+    child_values.emplace(BBL_JSON_KEY_FILAMENT_ID, "null");
+    REQUIRE(collection.load_user_preset("Cloud Filament Child", std::move(child_values), substitutions,
+                                        ForwardCompatibilitySubstitutionRule::EnableSilent));
+    const Preset *child = collection.find_preset("Cloud Filament Child");
+    REQUIRE(child != nullptr);
+    CHECK(child->filament_id == "filament-family-id");
+    CHECK(child->base_id == "filament-setting-id");
+    REQUIRE(child->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
+    check_double_vector(child->config.option<ConfigOptionFloats>("filament_diameter")->values, { 1.75, 2.85 });
+    CHECK(child->setting_id == "filament-child-id");
+    CHECK(child->user_id == "account-1");
+    const Preset *parent = collection.find_preset("Cloud Filament");
+    REQUIRE(parent != nullptr);
+    CHECK(parent->filament_id == "filament-family-id");
+    CHECK(parent->setting_id == "filament-setting-id");
+
+    const size_t size_before_invalid = collection.size();
+    auto missing_parent = cloud_values(PRESET_IOT_FILAMENT_TYPE, "missing-parent-id", "account-1", "No Such Filament");
+    CHECK_FALSE(collection.load_user_preset("Orphan Filament", std::move(missing_parent), substitutions,
+                                            ForwardCompatibilitySubstitutionRule::EnableSilent));
+    CHECK(collection.find_preset("Orphan Filament") == nullptr);
+    CHECK(collection.size() == size_before_invalid);
+
+    auto missing_version = std::map<std::string, std::string>{
+        { BBL_JSON_KEY_SETTING_ID, "no-version-id" },
+        { BBL_JSON_KEY_USER_ID, "account-1" },
+    };
+    CHECK_FALSE(collection.load_user_preset("No Version", std::move(missing_version), substitutions,
+                                            ForwardCompatibilitySubstitutionRule::EnableSilent));
+    CHECK(collection.find_preset("No Version") == nullptr);
+
+    auto missing_user = std::map<std::string, std::string>{
+        { BBL_JSON_KEY_VERSION, "1.0.0" },
+        { BBL_JSON_KEY_SETTING_ID, "no-user-id" },
+    };
+    CHECK_FALSE(collection.load_user_preset("No User", std::move(missing_user), substitutions,
+                                            ForwardCompatibilitySubstitutionRule::EnableSilent));
+    CHECK(collection.find_preset("No User") == nullptr);
 }
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
