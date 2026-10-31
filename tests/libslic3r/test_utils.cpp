@@ -18,13 +18,16 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <set>
 #include <string>
 #include <thread>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <unistd.h>     // getuid
@@ -520,4 +523,111 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     // Non-letters 0x20 apart are not equal.
     CHECK_FALSE(ascii_iequals("[", "{"));
     CHECK_FALSE(ascii_iequals("@", "`"));
+}
+
+namespace {
+// Checks one-based layers 1..last against the layers a pattern must select.
+void check_layer_pattern(const std::string &pattern, const std::set<int> &one_based, int last = 20)
+{
+    for (int n = 1; n <= last; ++n) {
+        INFO("pattern=" << pattern << ", layer=" << n);
+        CHECK(check_layer_id_pattern(pattern, n - 1) == (one_based.count(n) != 0));
+    }
+}
+} // namespace
+
+TEST_CASE("Layer patterns use one-based interval starts and repeat bounded spans", "[utils]") {
+    check_layer_pattern("5", {5, 10, 15, 20});
+    check_layer_pattern("5#2", {5, 6, 10, 11, 15, 16, 20});
+    check_layer_pattern("5#", {5, 10, 15, 20});
+    check_layer_pattern("1", {1, 2, 3, 4, 5}, 5);
+    check_layer_pattern("3#5", {3, 4, 5, 6, 7, 8, 9, 10}, 10);
+}
+
+TEST_CASE("Layer patterns strip whitespace and surrounding quote forms", "[utils]") {
+    for (const std::string &p : {" 5 # 2 ", "\t\"5#2\"\r\n", "' 5 # 2 '"})
+        check_layer_pattern(p, {5, 6, 10, 11, 15, 16, 20});
+    check_layer_pattern("\"1, 7, 9\"", {1, 7, 9});
+}
+
+TEST_CASE("Layer lists keep independent ranges and do not repeat their entries", "[utils]") {
+    check_layer_pattern("1,7,9", {1, 7, 9});
+    check_layer_pattern("5,9#2,18", {5, 9, 10, 18});
+    check_layer_pattern(",,3#,7#3,,12,", {3, 7, 8, 9, 12});
+}
+
+TEST_CASE("Layer lists ignore malformed entries without losing subsequent valid ranges", "[utils]") {
+    check_layer_pattern("bad,3,0#2,-1#2,5#0,6#-1,8#2,9999999999999999999999", {3, 8, 9});
+    check_layer_pattern("bad,#2,5#bad", {});
+}
+
+TEST_CASE("Layer patterns reject empty, negative, nonnumeric and nonpositive intervals", "[utils]") {
+    for (const std::string &p : {"", " ", "\"\"", "''", "bad", "#2", "5#bad", "0", "-2", "2#0", "2#-1", "9999999999999999999999"})
+        check_layer_pattern(p, {});
+    CHECK_FALSE(check_layer_id_pattern("1", -1));
+}
+
+TEST_CASE("UTF8 stepping spans ASCII and complete modern multibyte characters", "[utils]") {
+    const std::string s = "A\xc3\xa9\xe6\xa8\xa1\xf0\x9f\x90\x8bZ";
+    const std::vector<std::pair<size_t, size_t>> rows{{0, 1}, {1, 2}, {3, 3}, {6, 4}, {10, 1}};
+    for (const auto &[pos, len] : rows) {
+        CHECK(get_utf8_sequence_length(s, pos) == len);
+        CHECK(get_utf8_sequence_length(s.data() + pos, s.size() - pos) == len);
+    }
+}
+
+TEST_CASE("UTF8 stepping clamps truncated sequences to available bytes", "[utils]") {
+    for (const auto &[lead, width] : std::vector<std::pair<unsigned char, size_t>>{{0xc3, 2}, {0xe6, 3}, {0xf0, 4}, {0xf8, 5}, {0xfc, 6}}) {
+        // This helper measures byte spans, including legacy five/six-byte headers; it is not a Unicode validator.
+        std::string s(width, char(0x80));
+        s[0] = char(lead);
+        for (size_t available = 1; available <= width; ++available) {
+            CAPTURE(lead, width, available);
+            CHECK(get_utf8_sequence_length(s.data(), available) == available);
+        }
+    }
+}
+
+TEST_CASE("UTF8 stepping from a continuation byte stops before a new character", "[utils]") {
+    const std::string ascii_end  = "\x80\xbf\x81Z";
+    const std::string header_end = "\x80\xbf\xc3\xa9";
+    CHECK(get_utf8_sequence_length(ascii_end, 0) == 3);
+    CHECK(get_utf8_sequence_length(ascii_end.data(), 2) == 2);
+    CHECK(get_utf8_sequence_length(header_end, 0) == 2);
+    CHECK(get_utf8_sequence_length("\xfe", 1) == 1);
+    CHECK(get_utf8_sequence_length("\xff", 1) == 1);
+}
+
+TEST_CASE("Power of two overloads preserve bounded integral boundaries", "[utils]") {
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(0)) == static_cast<uint16_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(3)) == static_cast<uint16_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(255)) == static_cast<uint16_t>(256));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(0)) == static_cast<uint32_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(3)) == static_cast<uint32_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(1025)) == static_cast<uint32_t>(2048));
+}
+
+TEST_CASE("Round up divide handles exact and partial bounded quotients", "[utils]") {
+    CHECK(round_up_divide<long long>(0, 3) == 0);
+    CHECK(round_up_divide<long long>(1, 3) == 1);
+    CHECK(round_up_divide<long long>(3, 3) == 1);
+    CHECK(round_up_divide<long long>(4, 3) == 2);
+}
+
+TEST_CASE("MD5 file fingerprints match standard vectors across the 64 KiB read boundary", "[utils]") {
+    ScopedTemporaryDir d;
+    std::string file = (d.path() / "data").string(), digest;
+    for (const auto &[data, expected] :
+         std::vector<std::pair<std::string, std::string>>{{"", "D41D8CD98F00B204E9800998ECF8427E"},
+                                                          {"abc", "900150983CD24FB0D6963F7D28E17F72"},
+                                                          {std::string(65537, 'a'), "B3C6FC238E908636E53AABD5AD830CF7"}}) {
+        std::ofstream(file, std::ios::binary) << data;
+        REQUIRE(bbl_calc_md5(file, digest));
+        CHECK(digest == expected);
+    }
+}
+
+TEST_CASE("Character filtering removes only requested characters", "[utils]") {
+    CHECK(filter_characters("a-b_c!", "-_") == "abc!");
+    CHECK(filter_characters("stable", "") == "stable");
 }
