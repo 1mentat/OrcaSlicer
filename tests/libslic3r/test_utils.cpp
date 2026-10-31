@@ -540,8 +540,21 @@ TEST_CASE("Published model links match the dots in their host names literally", 
     CHECK_FALSE(is_thingiverse_link("https://wwwXthingiverse.com"));
 }
 
-// Known bug: is_makerworld_link (Utils.hpp) uses regex_match, so only the bare site root matches and a model URL does not; the
-// MakerWorld branch in Downloader::start_download (Downloader.cpp), which passes a full orcaslicer://open URL, can never be taken; fixed by the follow-up fix PR
-TEST_CASE("A MakerWorld model URL is recognised as a MakerWorld link", "[utils][!shouldfail]") {
+// Known bug: is_makerworld_link (Utils.hpp) uses regex_match, so only the bare site root matches and a MakerWorld model URL
+// does not; fixed by the follow-up fix PR. Whichever side the fix lands on, the predicate must accept a model URL.
+TEST_CASE("is_makerworld_link accepts a MakerWorld model URL, not only the site root", "[utils][!shouldfail]") {
     CHECK(is_makerworld_link("https://makerworld.com/en/models/12345"));
+}
+
+// Known bug: Downloader::start_download (Downloader.cpp) tests is_orca_open(url) && is_makerworld_link(url) on the whole
+// orcaslicer://open?file=... link, which the anchored regex never matches, so MakerWorld links opened through Orca skip
+// request_model_download; fixed by the follow-up fix PR. This case pins that exact check on the link shape the browser
+// hands over. It passes only if is_makerworld_link learns to see the MakerWorld URL inside the link; if the fix instead
+// makes Downloader pass the decoded file URL, the fix PR should drop this case and rely on the one above.
+TEST_CASE("Downloader's MakerWorld check accepts an orcaslicer://open link to a MakerWorld model", "[utils][!shouldfail]") {
+    for (const std::string url : {"orcaslicer://open?file=https%3A%2F%2Fmakerworld.com%2Fen%2Fmodels%2F12345",
+                                  "orcaslicer://open?file=https://makerworld.com/en/models/12345"}) {
+        CAPTURE(url);
+        CHECK((is_orca_open(url) && is_makerworld_link(url)));
+    }
 }
