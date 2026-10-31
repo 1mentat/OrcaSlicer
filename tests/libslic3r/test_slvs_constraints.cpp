@@ -1,7 +1,13 @@
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/catch_all.hpp>   // mainline OrcaSlicer ships Catch2 v3 (v2 was catch2/catch.hpp)
 #include "libslic3r/Point.hpp"
+#include <cmath>
+#include <math.h>
 #include <vector>
 #include <cstddef>
 using Catch::Approx;   // v3 scopes Approx into the Catch namespace; v2 had it at global scope
@@ -403,4 +409,57 @@ TEST_CASE("slvs: reference-based constraint adds no degrees of freedom", "[slvs]
     auto res = sketch_solve(ents, cons);
     REQUIRE(res.ok);
     CHECK(res.dof == 1);
+}
+
+TEST_CASE("slvs: a solved EllipseArc end stays on the ellipse and keeps its sweep direction", "[slvs]")
+{
+    using Catch::Matchers::WithinAbs;
+    // Ellipse centre (2, -1), semi-axes 6 and 2.5, major axis rotated by 0.4 rad.
+    SketchEntity arc;
+    arc.type     = SketchEntity::Type::EllipseArc;
+    arc.center   = Vec2d(2.0, -1.0);
+    arc.radius   = 6.0;
+    arc.rminor   = 2.5;
+    arc.rotation = 0.4;
+    auto at = [&arc](double t) -> Vec2d {
+        const double x = arc.radius * std::cos(t), y = arc.rminor * std::sin(t);
+        return arc.center + Vec2d(x * std::cos(arc.rotation) - y * std::sin(arc.rotation),
+                                  x * std::sin(arc.rotation) + y * std::cos(arc.rotation));
+    };
+
+    // A short arc from t = 2.8 to 3.0 (or its mirror, -2.8 to -3.0) has its end dragged across
+    // the parameter seam at t = +-pi to t = -2.8 (or 2.8) by a coincident fixed point.
+    const int direction = GENERATE(1, -1);
+    CAPTURE(direction);
+    const double start  = 2.8 * direction;
+    const double target = -2.8 * direction;
+    arc.start_angle = start;
+    arc.end_angle   = 3.0 * direction;
+    arc.p0 = at(arc.start_angle);
+    arc.p1 = at(arc.end_angle);
+
+    SketchEntity point;
+    point.type = SketchEntity::Type::Point;
+    point.p0   = at(target);
+    std::vector<SketchEntity> ents{arc, point};
+    const std::vector<SketchEntityConstraintDef> cons{
+        con(CT::Fix, 0, R::Center, 0, R::Center),
+        con(CT::Fix, 0, R::P0, 0, R::P0),
+        con(CT::Fix, 1, R::P0, 1, R::P0),
+        con(CT::Coincident, 0, R::P1, 1, R::P0),
+    };
+    REQUIRE(sketch_solve(ents, cons).ok);
+
+    const SketchEntity &solved = ents[0];
+    CHECK(solved.type == SketchEntity::Type::EllipseArc);
+    CHECK_THAT((solved.center - arc.center).norm(), WithinAbs(0.0, 1e-8));
+    CHECK_THAT((solved.p0 - at(start)).norm(), WithinAbs(0.0, 1e-7));
+    CHECK_THAT((solved.p1 - at(target)).norm(), WithinAbs(0.0, 1e-7));
+    CHECK_THAT(solved.start_angle, WithinAbs(start, 1e-7));
+    // The sweep keeps its sign, so the end angle goes the long way past the seam rather than
+    // jumping back to the raw atan2 value.
+    CHECK_THAT(solved.end_angle, WithinAbs(target + 2.0 * M_PI * direction, 1e-7));
+    CHECK_THAT(solved.radius, WithinAbs(arc.radius, 1e-12));
+    CHECK_THAT(solved.rminor, WithinAbs(arc.rminor, 1e-12));
+    CHECK_THAT(solved.rotation, WithinAbs(arc.rotation, 1e-12));
 }
