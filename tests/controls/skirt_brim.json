@@ -34,6 +34,8 @@
     "FocusedSkirtBrim::Outer-only brim ears stay out of model holes",
     "FocusedSkirtBrim::Outer-only painted brim ears stay out of model holes",
     "FocusedSkirtBrim::Painted brim ear radius controls sliced size",
+    "FocusedSkirtBrim::Painted brim ears follow the compensated outline when enabled",
+    "FocusedSkirtBrim::Painted brim ears stay on the island containing their painted point",
     "FocusedSkirtBrim::Per-object skirt is generated per instance",
     "FocusedSkirtBrim::Per-object skirts group when objects are close",
     "FocusedSkirtBrim::Scenario: Brim has the configured number of loops",
@@ -46,6 +48,5 @@
     "FocusedSkirtBrim::Skirt height is honored",
     "FocusedSkirtBrim::Skirt is emitted once per layer it spans",
     "FocusedSkirtBrim::Uncombined neighboring brims precede their respective objects"
-  ],
-  "control_regex": "^FocusedSkirtBrim::"
+  ]
 }

@@ -413,6 +413,294 @@ TEST_CASE("Painted brim ear radius controls sliced size", "[SkirtBrim]")
     CHECK(max_path_radius < ear_radius);
 }
 
+// EFC tests below seed painted points from public first-layer contours, then
+// inspect the emitted brim geometry rather than relying on path counts.
+struct PaintedEfcBrimSample
+{
+    ExPolygons raw_outline;
+    ExPolygons compensated_outline;
+    BoundingBox brim_paths;
+    Point painted_point;
+};
+
+static ExPolygons painted_efc_outline(const PrintObject &object)
+{
+    ExPolygons outline;
+    for (LayerRegion *region : object.layers().front()->regions())
+        append(outline, closing_ex(region->slices.surfaces, float(SCALED_EPSILON)));
+    return outline;
+}
+
+static BoundingBox painted_efc_bounds(const ExPolygons &outline)
+{
+    BoundingBox bounds;
+    for (const ExPolygon &polygon : outline)
+        bounds.merge(get_extents(polygon.contour));
+    return bounds;
+}
+
+static double painted_efc_area_mm2(const ExPolygons &outline)
+{
+    double area = 0.0;
+    for (const ExPolygon &polygon : outline)
+        area += unscale<double>(unscale<double>(std::abs(polygon.area())));
+    return area;
+}
+
+// These EFC fixtures are made from axis-aligned cubes. Confirm their public
+// slice contours are rectangles before using rectangle bounds as the oracle;
+// this deliberately avoids duplicating Brim.cpp's nearest-edge search.
+static bool painted_efc_is_axis_aligned_rectangle(const ExPolygon &polygon)
+{
+    if (polygon.num_contours() != 1 || polygon.contour.points.size() < 4)
+        return false;
+
+    const BoundingBox bounds = get_extents(polygon.contour);
+    if (!bounds.defined)
+        return false;
+
+    for (const Point &point : polygon.contour.points) {
+        const bool on_vertical_edge = point.x() == bounds.min.x() || point.x() == bounds.max.x();
+        const bool on_horizontal_edge = point.y() == bounds.min.y() || point.y() == bounds.max.y();
+        if (!on_vertical_edge && !on_horizontal_edge)
+            return false;
+    }
+
+    const double rectangle_area = double(bounds.max.x() - bounds.min.x()) *
+                                  double(bounds.max.y() - bounds.min.y());
+    return std::abs(double(polygon.area())) == rectangle_area;
+}
+
+static Point painted_efc_rectangle_projection(const BoundingBox &rectangle, const Point &from)
+{
+    return Point(std::clamp(from.x(), rectangle.min.x(), rectangle.max.x()),
+                 std::clamp(from.y(), rectangle.min.y(), rectangle.max.y()));
+}
+
+static const ExPolygon &painted_efc_leftmost_island(const ExPolygons &outline)
+{
+    return *std::min_element(outline.begin(), outline.end(), [](const ExPolygon &a, const ExPolygon &b) {
+        return get_extents(a.contour).min.x() < get_extents(b.contour).min.x();
+    });
+}
+
+static const ExPolygon &painted_efc_rightmost_island(const ExPolygons &outline)
+{
+    return *std::max_element(outline.begin(), outline.end(), [](const ExPolygon &a, const ExPolygon &b) {
+        return get_extents(a.contour).min.x() < get_extents(b.contour).min.x();
+    });
+}
+
+static BrimPoint painted_efc_point_in_model(const Point &point, const PrintObject &object,
+                                             const Model &model, double radius)
+{
+    Transform3d model_transform = model.objects.front()->instances.front()->get_transformation().get_matrix_no_offset();
+    const Point &center_offset = object.center_offset();
+    model_transform = model_transform.pretranslate(
+        Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0));
+    Vec3d model_position = model_transform.inverse() *
+        Vec3d(unscale<double>(point.x()), unscale<double>(point.y()), 0);
+    model_position.z() = model.objects.front()->raw_mesh_bounding_box().min.z() - 0.0001;
+    return BrimPoint(model_position.cast<float>(), float(radius));
+}
+
+static BoundingBox painted_efc_local_brim_bounds(Print &print, const PrintObject &object)
+{
+    Polylines paths;
+    for (const auto &entry : print.get_brimMap())
+        entry.second.collect_polylines(paths);
+
+    Point print_shift = object.instances().front().shift_without_plate_offset();
+    const Vec3d plate_origin = print.get_plate_origin();
+    print_shift += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+
+    BoundingBox bounds;
+    for (const Polyline &path : paths)
+        for (const Point &point : path.points)
+            bounds.merge(point - print_shift);
+    return bounds;
+}
+
+static PaintedEfcBrimSample process_painted_efc_brim(bool use_efc_outline, bool two_islands,
+                                                      double compensation, double ear_radius)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_loops", 0 },
+        { "brim_type", "painted" },
+        { "brim_width", 15 },
+        { "brim_object_gap", 0.1 },
+        { "brim_ears_outer_only", true },
+        { "brim_use_efc_outline", use_efc_outline },
+        { "elefant_foot_compensation", compensation },
+        { "elefant_foot_compensation_layers", 1 },
+        { "raft_layers", 0 },
+        { "initial_layer_line_width", 0.5 },
+    });
+
+    TriangleMesh mesh = make_cube(20., 20., 20.);
+    if (two_islands) {
+        TriangleMesh adjacent = make_cube(20., 40., 20.);
+        adjacent.translate(20.1f, 0.f, 0.f);
+        mesh.merge(adjacent);
+    }
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(std::move(mesh));
+    init_print(std::move(meshes), print, model, config);
+    print.process();
+
+    const PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE_FALSE(object->layers().empty());
+    ExPolygons raw_outline = object->layers().front()->lslices;
+    REQUIRE_FALSE(raw_outline.empty());
+    const ExPolygon &raw_leftmost = painted_efc_leftmost_island(raw_outline);
+    const BoundingBox raw_bounds = get_extents(raw_leftmost.contour);
+    const Point painted_point(raw_bounds.max.x() - scaled(0.01), raw_bounds.max.y() - scaled(0.01));
+    REQUIRE(raw_leftmost.contains(painted_point, false));
+
+    model.objects.front()->brim_points = {
+        painted_efc_point_in_model(painted_point, *object, model, ear_radius),
+    };
+    print.apply(model, config);
+    print.process();
+
+    object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE_FALSE(object->layers().empty());
+    PaintedEfcBrimSample sample;
+    sample.raw_outline = object->layers().front()->lslices;
+    sample.compensated_outline = painted_efc_outline(*object);
+    sample.painted_point = painted_point;
+    sample.brim_paths = painted_efc_local_brim_bounds(print, *object);
+    REQUIRE(sample.raw_outline.size() == (two_islands ? 2 : 1));
+    REQUIRE(sample.compensated_outline.size() == (two_islands ? 2 : 1));
+    REQUIRE(sample.brim_paths.defined);
+    return sample;
+}
+
+TEST_CASE("Painted brim ears follow the compensated outline when enabled", "[SkirtBrim][PaintedBrimEfc]")
+{
+    constexpr double compensation = 1.2;
+    constexpr double ear_radius = 4.0;
+    const PaintedEfcBrimSample raw_brim = process_painted_efc_brim(false, false, compensation, ear_radius);
+    const PaintedEfcBrimSample compensated_brim = process_painted_efc_brim(true, false, compensation, ear_radius);
+
+    REQUIRE(compensated_brim.raw_outline.size() == 1);
+    REQUIRE(compensated_brim.compensated_outline.size() == 1);
+    const ExPolygon &raw_rectangle = compensated_brim.raw_outline.front();
+    const ExPolygon &efc_rectangle = compensated_brim.compensated_outline.front();
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(raw_rectangle));
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(efc_rectangle));
+    const BoundingBox raw_bounds = get_extents(raw_rectangle.contour);
+    const BoundingBox efc_bounds = get_extents(efc_rectangle.contour);
+    CHECK_THAT(unscale<double>(double(efc_bounds.min.x() - raw_bounds.min.x())),
+        Catch::Matchers::WithinAbs(compensation, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_bounds.max.x() - efc_bounds.max.x())),
+        Catch::Matchers::WithinAbs(compensation, 0.05));
+    CHECK_THAT(unscale<double>(double(efc_bounds.min.y() - raw_bounds.min.y())),
+        Catch::Matchers::WithinAbs(compensation, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_bounds.max.y() - efc_bounds.max.y())),
+        Catch::Matchers::WithinAbs(compensation, 0.05));
+    REQUIRE(compensated_brim.painted_point.x() > efc_bounds.max.x());
+    REQUIRE(compensated_brim.painted_point.y() > efc_bounds.max.y());
+    const Point projected_point = painted_efc_rectangle_projection(efc_bounds, compensated_brim.painted_point);
+    REQUIRE(projected_point == Point(efc_bounds.max.x(), efc_bounds.max.y()));
+    const double raw_ear_extent = unscale<double>(double(raw_brim.brim_paths.max.x() - raw_brim.painted_point.x()));
+    const double compensated_ear_extent = unscale<double>(
+        double(compensated_brim.brim_paths.max.x() - projected_point.x()));
+    INFO("painted radius=" << ear_radius << " mm, raw x extent=" << raw_ear_extent
+         << " mm, compensated x extent=" << compensated_ear_extent << " mm");
+
+    CHECK_THAT(raw_ear_extent, Catch::Matchers::WithinAbs(ear_radius, 0.75));
+    CHECK_THAT(compensated_ear_extent, Catch::Matchers::WithinAbs(ear_radius, 0.75));
+    CHECK(raw_brim.brim_paths.max.x() > compensated_brim.brim_paths.max.x() + scaled(0.5));
+
+    const BoundingBox model_outline_without_brim_follow_bounds = painted_efc_bounds(raw_brim.compensated_outline);
+    const BoundingBox model_outline_with_brim_follow_bounds = painted_efc_bounds(compensated_brim.compensated_outline);
+    CHECK_THAT(unscale<double>(double(model_outline_without_brim_follow_bounds.min.x() - model_outline_with_brim_follow_bounds.min.x())),
+        Catch::Matchers::WithinAbs(0.0, 0.01));
+    CHECK_THAT(unscale<double>(double(model_outline_without_brim_follow_bounds.max.x() - model_outline_with_brim_follow_bounds.max.x())),
+        Catch::Matchers::WithinAbs(0.0, 0.01));
+    CHECK_THAT(unscale<double>(double(model_outline_without_brim_follow_bounds.min.y() - model_outline_with_brim_follow_bounds.min.y())),
+        Catch::Matchers::WithinAbs(0.0, 0.01));
+    CHECK_THAT(unscale<double>(double(model_outline_without_brim_follow_bounds.max.y() - model_outline_with_brim_follow_bounds.max.y())),
+        Catch::Matchers::WithinAbs(0.0, 0.01));
+    CHECK_THAT(painted_efc_area_mm2(raw_brim.compensated_outline),
+        Catch::Matchers::WithinAbs(painted_efc_area_mm2(compensated_brim.compensated_outline), 0.01));
+}
+
+TEST_CASE("Painted brim ears stay on the island containing their painted point", "[SkirtBrim][PaintedBrimEfc]")
+{
+    constexpr double compensation = 2.0;
+    constexpr double ear_radius = 1.8;
+    const PaintedEfcBrimSample sample = process_painted_efc_brim(true, true, compensation, ear_radius);
+
+    REQUIRE(sample.raw_outline.size() == 2);
+    REQUIRE(sample.compensated_outline.size() == 2);
+    const ExPolygon &raw_left = painted_efc_leftmost_island(sample.raw_outline);
+    const ExPolygon &raw_right = painted_efc_rightmost_island(sample.raw_outline);
+    const ExPolygon &efc_left = painted_efc_leftmost_island(sample.compensated_outline);
+    const ExPolygon &efc_right = painted_efc_rightmost_island(sample.compensated_outline);
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(raw_left));
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(raw_right));
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(efc_left));
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(efc_right));
+    const BoundingBox raw_left_bounds = get_extents(raw_left.contour);
+    const BoundingBox raw_right_bounds = get_extents(raw_right.contour);
+    const BoundingBox efc_left_bounds = get_extents(efc_left.contour);
+    const BoundingBox efc_right_bounds = get_extents(efc_right.contour);
+    CHECK_THAT(unscale<double>(double(raw_left_bounds.max.x() - raw_left_bounds.min.x())),
+        Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_left_bounds.max.y() - raw_left_bounds.min.y())),
+        Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_right_bounds.max.x() - raw_right_bounds.min.x())),
+        Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_right_bounds.max.y() - raw_right_bounds.min.y())),
+        Catch::Matchers::WithinAbs(40.0, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_right_bounds.min.x() - raw_left_bounds.max.x())),
+        Catch::Matchers::WithinAbs(0.1, 0.05));
+    for (const auto &pair : { std::make_pair(&raw_left_bounds, &efc_left_bounds),
+                              std::make_pair(&raw_right_bounds, &efc_right_bounds) }) {
+        CHECK_THAT(unscale<double>(double(pair.second->min.x() - pair.first->min.x())),
+            Catch::Matchers::WithinAbs(compensation, 0.05));
+        CHECK_THAT(unscale<double>(double(pair.first->max.x() - pair.second->max.x())),
+            Catch::Matchers::WithinAbs(compensation, 0.05));
+        CHECK_THAT(unscale<double>(double(pair.second->min.y() - pair.first->min.y())),
+            Catch::Matchers::WithinAbs(compensation, 0.05));
+        CHECK_THAT(unscale<double>(double(pair.first->max.y() - pair.second->max.y())),
+            Catch::Matchers::WithinAbs(compensation, 0.05));
+    }
+    REQUIRE(sample.painted_point.x() > efc_left_bounds.max.x());
+    REQUIRE(sample.painted_point.y() > efc_left_bounds.max.y());
+    REQUIRE(sample.painted_point.x() < efc_right_bounds.min.x());
+    REQUIRE(sample.painted_point.y() >= efc_right_bounds.min.y());
+    REQUIRE(sample.painted_point.y() <= efc_right_bounds.max.y());
+    const Point expected_own_projection = painted_efc_rectangle_projection(efc_left_bounds, sample.painted_point);
+    const Point expected_global_projection(efc_right_bounds.min.x(), sample.painted_point.y());
+
+    const double own_distance = unscale<double>(
+        (expected_own_projection - sample.painted_point).cast<double>().norm());
+    const double global_distance = unscale<double>(
+        (expected_global_projection - sample.painted_point).cast<double>().norm());
+    const BoundingBox right_bounds = get_extents(efc_right.contour);
+    INFO("painted point local=" << sample.painted_point << ", own projection=" << expected_own_projection
+         << ", global projection=" << expected_global_projection << ", own distance=" << own_distance
+         << " mm, global distance=" << global_distance << " mm");
+
+    REQUIRE(raw_left.contains(sample.painted_point, false));
+    REQUIRE(global_distance + 0.25 < own_distance);
+    REQUIRE(expected_global_projection.x() > expected_own_projection.x() + scaled(2.0));
+    REQUIRE(right_bounds.inflated(scaled(0.1)).contains(expected_global_projection));
+
+    const double emitted_ear_extent = unscale<double>(
+        double(sample.brim_paths.max.x() - expected_own_projection.x()));
+    CHECK_THAT(emitted_ear_extent, Catch::Matchers::WithinAbs(ear_radius, 0.75));
+}
+
 TEST_CASE("Outer-only painted brim ears stay out of model holes", "[SkirtBrim]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
