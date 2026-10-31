@@ -898,6 +898,13 @@ checks the zero-speed fallback at an explicit 23 mm/s and a 37 mm/s override.
 The three bounded mutations are in `skirt_settings_geometry.json`. These are
 selected geometry and speed scenarios, not a full interaction matrix.
 
+`[BrimAutoMaterialBoundaries]` checks emitted outer-brim geometry for PLA and PC
+through the public material preparation API. It checks small-width omission,
+material-dependent reach on all four sides, and equal reach at 30 and 60 mm
+object heights. The fixture restores both process-wide material and speed maps.
+Its three production probes are in `brim_auto_material.json`; build
+`fff_print_skirt_brim_tests` for focused feedback.
+
 `[ExtrusionRoleGCode]` checks machine, filament, and process hook ordering,
 role transitions, and layer placeholders against emitted motion roles.
 `[CalibrationTowerOutput]` checks temperature, outer-wall speed, junction

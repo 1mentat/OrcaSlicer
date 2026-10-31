@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -47,6 +48,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
 #include "test_helpers.hpp"
 
 using namespace Slic3r::Test;
@@ -3202,7 +3204,8 @@ static HollowSample export_hollow_brim(const char *brim_type, const double width
                                        const double outer_size = 40.0,
                                        const double object_height = 20.0,
                                        const double origin_x = 80.0,
-                                       const double origin_y = 80.0)
+                                       const double origin_y = 80.0,
+                                       const char *filament_type = nullptr)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -3228,6 +3231,9 @@ static HollowSample export_hollow_brim(const char *brim_type, const double width
         { "printable_area",               "0x0,250x0,250x210,0x210" },
     });
 
+    if (filament_type != nullptr)
+        config.set_deserialize_strict({ { "filament_type", filament_type } });
+
     TriangleMesh shell = make_cube(float(outer_size), float(outer_size), float(object_height));
     shell.translate(float(origin_x), float(origin_y), 0.f);
     std::vector<TriangleMesh> meshes;
@@ -3245,6 +3251,12 @@ static HollowSample export_hollow_brim(const char *brim_type, const double width
                                    origin_y + (outer_size - 20.0) / 2.0, 0.0));
     print.apply(model, config);
     print.set_status_silent();
+    if (filament_type != nullptr) {
+        // Mirror the public Plater preparation before slicing. The test restores both
+        // process-wide tables with ScopeGuard so the material case is order-independent.
+        Model::setExtruderParams(config, 1);
+        Model::setPrintSpeedTable(config, print.config());
+    }
 
     const StringObjectException validation = print.validate();
     INFO("brim type=" << brim_type << " width=" << width << " validation=" << validation.string
@@ -3458,4 +3470,94 @@ TEST_CASE("Flat auto brim creates an outer ring when explicit width is zero",
     CHECK(automatic.brim.bounds.max_x > automatic.model_bounds.max_x + 1.0);
     CHECK(automatic.brim.bounds.min_y < automatic.model_bounds.min_y - 1.0);
     CHECK(automatic.brim.bounds.max_y > automatic.model_bounds.max_y + 1.0);
+}
+
+namespace brim_auto_material_boundaries {
+
+using brim_type_hollow_boundaries::HollowSample;
+using brim_type_hollow_boundaries::export_hollow_brim;
+using brim_type_hollow_boundaries::require_positive_model;
+using brim_type_hollow_boundaries::require_same_model_bounds;
+using brim_type_hollow_boundaries::require_same_model_motion;
+using brim_type_hollow_boundaries::require_valid_brim;
+
+static std::array<double, 4> outer_reach(const HollowSample &sample)
+{
+    return {
+        sample.model_bounds.min_x - sample.brim.bounds.min_x,
+        sample.brim.bounds.max_x - sample.model_bounds.max_x,
+        sample.model_bounds.min_y - sample.brim.bounds.min_y,
+        sample.brim.bounds.max_y - sample.model_bounds.max_y,
+    };
+}
+
+} // namespace brim_auto_material_boundaries
+
+TEST_CASE("Auto brim follows filament thermal length and caps its height input",
+          "[SkirtBrim][BrimAutoMaterialBoundaries]")
+{
+    using namespace brim_auto_material_boundaries;
+
+    const GlobalSpeedMap saved_speed_map = Model::printSpeedMap;
+    const std::map<size_t, ExtruderParams> saved_extruder_params = Model::extruderParamsMap;
+    ScopeGuard restore_model_static_state([&]() {
+        Model::printSpeedMap = saved_speed_map;
+        Model::extruderParamsMap = saved_extruder_params;
+    });
+
+    // One tool is configured through the same public preparation API used before
+    // Plater slicing; the helper calls it before Print::process(). The 120 mm square
+    // keeps the thermal-width term above the 5 mm omission threshold at 30 mm PLA height,
+    // while height 20 remains below it. The 250x210 bed leaves ample room for the capped
+    // PC brim in every direction.
+    const HollowSample pla_below_omission = export_hollow_brim(
+        "auto_brim", 0.0, 120.0, 20.0, 65.0, 45.0, "PLA");
+    const HollowSample pla_height_30 = export_hollow_brim(
+        "auto_brim", 0.0, 120.0, 30.0, 65.0, 45.0, "PLA");
+    const HollowSample pla_height_60 = export_hollow_brim(
+        "auto_brim", 0.0, 120.0, 60.0, 65.0, 45.0, "PLA");
+    const HollowSample pc_height_30 = export_hollow_brim(
+        "auto_brim", 0.0, 120.0, 30.0, 65.0, 45.0, "PC");
+
+    for (const HollowSample *sample : { &pla_below_omission, &pla_height_30,
+                                        &pla_height_60, &pc_height_30 })
+        require_positive_model(*sample, 120.0);
+    require_same_model_bounds(pla_below_omission.model_bounds, pla_height_30.model_bounds);
+    require_same_model_bounds(pla_height_30.model_bounds, pla_height_60.model_bounds);
+    require_same_model_bounds(pla_height_60.model_bounds, pc_height_30.model_bounds);
+    require_same_model_motion(pla_height_30.model_motion, pc_height_30.model_motion);
+
+    REQUIRE(pla_below_omission.emitted_regions.finite);
+    CHECK(pla_below_omission.brim.positive_xy_moves == 0);
+    CHECK(pla_below_omission.brim_loops == 0);
+    CHECK(pla_below_omission.emitted_regions.positive_xy_moves == 0);
+
+    for (const HollowSample *sample : { &pla_height_30, &pla_height_60, &pc_height_30 }) {
+        require_valid_brim(sample->brim);
+        REQUIRE(sample->emitted_regions.finite);
+        CHECK(sample->emitted_regions.arc_moves == 0);
+        CHECK(sample->emitted_regions.positive_xy_moves > 0);
+        CHECK(sample->emitted_regions.inside_hole_midpoints == 0);
+        CHECK(sample->emitted_regions.outside_model_midpoints > 0);
+        CHECK(sample->brim.bounds.min_x > 0.0);
+        CHECK(sample->brim.bounds.max_x < 250.0);
+        CHECK(sample->brim.bounds.min_y > 0.0);
+        CHECK(sample->brim.bounds.max_y < 210.0);
+    }
+
+    const std::array<double, 4> pla_30_reach = outer_reach(pla_height_30);
+    const std::array<double, 4> pla_60_reach = outer_reach(pla_height_60);
+    const std::array<double, 4> pc_30_reach = outer_reach(pc_height_30);
+    INFO("PLA 30 mm reaches L/R/Y0/Y1=" << pla_30_reach[0] << "/" << pla_30_reach[1]
+         << "/" << pla_30_reach[2] << "/" << pla_30_reach[3]
+         << "; PLA 60 mm=" << pla_60_reach[0] << "/" << pla_60_reach[1]
+         << "/" << pla_60_reach[2] << "/" << pla_60_reach[3]
+         << "; PC 30 mm=" << pc_30_reach[0] << "/" << pc_30_reach[1]
+         << "/" << pc_30_reach[2] << "/" << pc_30_reach[3]);
+    for (size_t direction = 0; direction < pla_30_reach.size(); ++direction) {
+        CHECK(pla_30_reach[direction] > 5.0);
+        CHECK_THAT(pla_60_reach[direction], Catch::Matchers::WithinAbs(
+            pla_30_reach[direction], 0.08));
+        CHECK(pc_30_reach[direction] > pla_30_reach[direction] + 8.0);
+    }
 }
