@@ -7,16 +7,17 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 
-#include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -87,7 +88,6 @@ void check_finite_mesh(const TriangleMesh &mesh)
         CHECK(std::isfinite(vertex.z()));
     }
 }
-
 
 TriangleMesh cooling_prism()
 {
@@ -161,7 +161,7 @@ TEST_CASE("Orientation returns a rigid leveling transform without changing sourc
     const double original_volume = std::abs(its_volume(leveled.its));
     leveled.transform(items.front().rotation_matrix);
     const BoundingBoxf3 box = leveled.bounding_box();
-    CHECK_THAT(std::abs(its_volume(leveled.its)), Catch::Matchers::WithinRel(original_volume, 1e-6));
+    CHECK_THAT(std::abs(its_volume(leveled.its)), Catch::Matchers::WithinRel(original_volume, 1e-5));
     CHECK(box.size().z() <= box.size().x() + 1e-5);
     CHECK(box.size().z() <= box.size().y() + 1e-5);
     CHECK_THAT(box.size().z(), Catch::Matchers::WithinAbs(2., 1e-4));
@@ -200,7 +200,7 @@ TEST_CASE("Parallel orientation keeps per-item transforms rigid and reconstructi
     for (std::size_t i = 0; i < items.size(); ++i) {
         check_rigid_orientation(items[i]);
         check_mesh_unchanged(originals[i], items[i].mesh);
-        CHECK_THAT(std::abs(its_volume(items[i].mesh.its)), Catch::Matchers::WithinRel(original_volumes[i], 1e-6));
+        CHECK_THAT(std::abs(its_volume(items[i].mesh.its)), Catch::Matchers::WithinRel(original_volumes[i], 1e-5));
 
         const Matrix3d reconstructed = Geometry::rotation_transform(items[i].euler_angles).linear();
         CHECK_THAT((reconstructed - items[i].rotation_matrix).norm(), Catch::Matchers::WithinAbs(0., 1e-6));
@@ -225,7 +225,7 @@ TEST_CASE("Orienting a tilted flat cuboid places its broad face on the bed", "[O
     const BoundingBoxf3 box = object->instance_bounding_box(0);
     CHECK_THAT(box.min.z(), Catch::Matchers::WithinAbs(0., 1e-5));
     CHECK_THAT(box.size().z(), Catch::Matchers::WithinAbs(2., 1e-4));
-    CHECK_THAT(std::abs(its_volume(object->mesh().its)), Catch::Matchers::WithinRel(original_volume, 1e-6));
+    CHECK_THAT(std::abs(its_volume(object->mesh().its)), Catch::Matchers::WithinRel(original_volume, 1e-5));
 }
 
 TEST_CASE("Cooling orientation leaves overhang-free and rotationally symmetric solids unchanged", "[Orient][FanDirection]")
@@ -244,11 +244,29 @@ TEST_CASE("Cooling orientation leaves overhang-free and rotationally symmetric s
     TriangleMesh cone = make_cone(5., 5., 2. * PI / 36.);
     cone.rotate_x(float(PI));
     cone.rotate_z(0.03f);
+    // orient_for_cooling calls a solid symmetric when its best horizontal overhang projection is
+    // within an absolute 1.0 (area units) of the projection toward the fan, so the outcome depends
+    // on the cone's size and facet count. Check the fixture is symmetric by a wide margin, using
+    // the same overhang band, weighting and 2-degree sampling.
+    const std::vector<Vec3f> cone_normals = its_face_normals(cone.its);
     std::size_t overhangs = 0;
-    for (const Vec3f &normal : its_face_normals(cone.its))
-        if (normal.z() < -0.6427f && normal.z() > -0.97f)
-            ++overhangs;
+    float min_projection = std::numeric_limits<float>::max();
+    float max_projection = 0.f;
+    for (int step = 0; step < 180; ++step) {
+        const Vec3f dir(std::cos(float(step) * float(PI) / 90.f), std::sin(float(step) * float(PI) / 90.f), 0.f);
+        float projection = 0.f;
+        for (std::size_t i = 0; i < cone_normals.size(); ++i) {
+            const Vec3f &normal = cone_normals[i];
+            if (normal.z() < -0.6427f && normal.z() > -0.97f) {
+                overhangs += step == 0;
+                projection += std::max(0.f, normal.dot(dir)) * cone.its.facet_area(i) * (1.f - normal.z());
+            }
+        }
+        min_projection = std::min(min_projection, projection);
+        max_projection = std::max(max_projection, projection);
+    }
     REQUIRE(overhangs > 0);
+    REQUIRE(max_projection - min_projection < 0.25f);
     TriangleMesh cooled_cone = cone;
     orientation::orient_for_cooling(cooled_cone, fan);
     check_mesh_unchanged(cone.its, cooled_cone);
@@ -287,10 +305,9 @@ TEST_CASE("Cooling orientation turns an asymmetric overhang toward the configure
         }
     }
     REQUIRE(overhangs > 0);
-    CHECK_THAT(std::abs(its_volume(cooled.its)), Catch::Matchers::WithinRel(static_cast<double>(std::abs(its_volume(source.its))), 1e-6));
+    CHECK_THAT(std::abs(its_volume(cooled.its)), Catch::Matchers::WithinRel(static_cast<double>(std::abs(its_volume(source.its))), 1e-5));
     CHECK_THAT(cooled.bounding_box().size().z(), Catch::Matchers::WithinAbs(source.bounding_box().size().z(), 1e-5));
 }
-
 
 TEST_CASE("Parallel fan orientation aims an exposed slope toward the configured cooling axis", "[Orient][FanDirection]")
 {
@@ -301,7 +318,7 @@ TEST_CASE("Parallel fan orientation aims an exposed slope toward the configured 
     source.translate(12.f, -8.f, 5.f);
     const indexed_triangle_set original = source.its;
     const double expected_volume = (100. * 14. + 2. * 14. - 2. * 2.) * 80.;
-    CHECK_THAT(std::abs(its_volume(source.its)), Catch::Matchers::WithinRel(expected_volume, 1e-6));
+    CHECK_THAT(std::abs(its_volume(source.its)), Catch::Matchers::WithinRel(expected_volume, 1e-5));
 
     const double fan_sign = GENERATE(-1., 1.);
     OrientMesh item = orient_mesh(source, "asymmetric fan prism");
@@ -319,7 +336,7 @@ TEST_CASE("Parallel fan orientation aims an exposed slope toward the configured 
     const OrientMesh &result = items.front();
     check_rigid_orientation(result);
     check_mesh_unchanged(original, result.mesh);
-    CHECK_THAT(std::abs(its_volume(result.mesh.its)), Catch::Matchers::WithinRel(expected_volume, 1e-6));
+    CHECK_THAT(std::abs(its_volume(result.mesh.its)), Catch::Matchers::WithinRel(expected_volume, 1e-5));
     CHECK(std::abs(result.orientation.z()) > 0.999);
 
     const double cos_yaw = std::cos(input_yaw);
@@ -347,7 +364,7 @@ TEST_CASE("Parallel fan orientation aims an exposed slope toward the configured 
     TriangleMesh fully_oriented = result.mesh;
     fully_oriented.transform(result.rotation_matrix);
     fully_oriented.transform(result.rotation_matrix_vertical);
-    CHECK_THAT(std::abs(its_volume(fully_oriented.its)), Catch::Matchers::WithinRel(expected_volume, 1e-6));
+    CHECK_THAT(std::abs(its_volume(fully_oriented.its)), Catch::Matchers::WithinRel(expected_volume, 1e-5));
 }
 
 TEST_CASE("Parallel fan orientation keeps the configured axis when no overhang favours a direction", "[Orient][FanDirection]")

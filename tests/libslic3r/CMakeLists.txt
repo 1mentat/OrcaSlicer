@@ -25,7 +25,6 @@ add_executable(${_TEST_NAME}_tests
     test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
-    test_orient.cpp
     test_locales_utils.cpp
     test_drc.cpp
     test_edge_grid.cpp
@@ -62,6 +61,7 @@ add_executable(${_TEST_NAME}_tests
     test_nozzle_volume_type.cpp
     test_obj.cpp
     test_obj_color_utils.cpp
+    test_orient.cpp
     test_sl1.cpp
     test_zipper_archive_import.cpp
     test_step.cpp
