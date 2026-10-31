@@ -759,8 +759,6 @@ TEST_CASE("Convex polygon intersection test prusa polygons", "[Geometry][Rotcali
     }
 }
 
-namespace math_gap_contracts {
-
 TEST_CASE("Point nearest-index query accepts mutable point pointers", "[Geometry][Point]")
 {
     Point first(0, 0);
@@ -794,5 +792,3 @@ TEST_CASE("Point3 nearest query leaves output unchanged when there are no candid
     CHECK(nearest.y() == 5);
     CHECK(nearest.z() == 6);
 }
-
-} // namespace math_gap_contracts
