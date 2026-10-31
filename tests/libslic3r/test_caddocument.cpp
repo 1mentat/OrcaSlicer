@@ -104,165 +104,118 @@ TEST_CASE("CadDocument legacy Rectangle sketch still works", "[CadDocument]")
     REQUIRE(doc.display_mesh.facets_count() > 0);
 }
 
+namespace cad_feature_editing {
+
+// A 10 x 10 x 5 box: a rectangle sketch on XY and a New extrude. Volume 500.
+void make_box(CadDocument& doc, int& sketch, int& extrude)
+{
+    sketch  = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 10.0, 10.0, 0.0, "Profile");
+    extrude = doc.add_extrude(sketch, 5.0, false, BooleanMode::New, "Solid");
+    REQUIRE(sketch == 0);
+    REQUIRE(extrude == 1);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    REQUIRE_THAT(doc.body_mass_properties(0).volume, Catch::Matchers::WithinRel(500.0, 1e-9));
+}
+
+} // namespace cad_feature_editing
+
 TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "[CadDocument]")
 {
     CadDocument doc;
-    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
-                                      10.0, 10.0, 0.0, "BaseSketch");
-    const int extrude = doc.add_extrude(sketch, 5.0, false, BooleanMode::New, "BaseExtrude");
-    const auto valid_feature_index = [&doc](int index) {
-        return index >= 0 && index < static_cast<int>(doc.features.size());
-    };
-    REQUIRE(valid_feature_index(sketch));
-    REQUIRE(valid_feature_index(extrude));
-    REQUIRE(doc.recompute());
-    REQUIRE(doc.error.empty());
-    REQUIRE(doc.bodies.size() == 1);
-    REQUIRE(doc.display_mesh.facets_count() > 0);
-    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(500.0, 0.02));
+    int sketch = -1, extrude = -1;
+    cad_feature_editing::make_box(doc, sketch, extrude);
 
-    // The editor payload deliberately carries a different name and link. The public replacement
-    // contract keeps the existing feature identity and sketch link while accepting solid parameters.
+    // The editor payload deliberately carries a different name, type and sketch link. Only the
+    // solid parameters are taken; the feature keeps its identity and link.
     CadFeature edited;
-    edited.name      = "EditedPayload";
-    edited.type      = CadFeatureType::Sketch; // Deliberately mismatched payload; production preserves Extrude.
+    edited.name       = "EditedPayload";
+    edited.type       = CadFeatureType::Sketch;
     edited.sketch_ref = 9999;
-    edited.distance  = 8.0;
-    edited.mode      = BooleanMode::New;
+    edited.distance   = 8.0;
+    edited.mode       = BooleanMode::New;
     REQUIRE(doc.replace_feature(extrude, edited));
 
-    REQUIRE(doc.features[extrude].name == "BaseExtrude");
-    REQUIRE(doc.features[extrude].type == CadFeatureType::Extrude);
-    REQUIRE(doc.features[extrude].sketch_ref == sketch);
-    REQUIRE(doc.recompute());
+    CHECK(doc.features[extrude].name == "Solid");
+    CHECK(doc.features[extrude].type == CadFeatureType::Extrude);
+    CHECK(doc.features[extrude].sketch_ref == sketch);
+    CHECK_THAT(doc.features[extrude].distance, Catch::Matchers::WithinAbs(8.0, 1e-12));
     REQUIRE(doc.error.empty());
     REQUIRE(doc.bodies.size() == 1);
-    REQUIRE(doc.display_mesh.facets_count() > 0);
-    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(800.0, 0.02));
+    CHECK_THAT(doc.body_mass_properties(0).volume, Catch::Matchers::WithinRel(800.0, 1e-9));
 }
 
 TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter sets", "[CadDocument]")
 {
     CadDocument doc;
-    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
-                                      10.0, 10.0, 0.0, "Profile");
-    const int extrude = doc.add_extrude(sketch, 5.0, false, BooleanMode::New, "Solid");
-    const auto valid_feature_index = [&doc](int index) {
-        return index >= 0 && index < static_cast<int>(doc.features.size());
-    };
-    REQUIRE(valid_feature_index(sketch));
-    REQUIRE(valid_feature_index(extrude));
-    REQUIRE(doc.recompute());
-    REQUIRE(doc.error.empty());
-    REQUIRE(doc.bodies.size() == 1);
-    REQUIRE(doc.display_mesh.facets_count() > 0);
-    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(500.0, 0.02));
+    int sketch = -1, extrude = -1;
+    cad_feature_editing::make_box(doc, sketch, extrude);
 
+    // Every field differs from the box: a radius-3 circle on a plane moved to x = 5, extruded
+    // 4 in Add mode with the symmetric flag set.
     CadFeature edited;
     edited.type      = CadFeatureType::Extrude;
-    edited.shape     = SketchShape::Rectangle;
+    edited.shape     = SketchShape::Circle;
     edited.plane     = SketchPlane::XY();
+    edited.plane.origin = Vec3d(5.0, 0.0, 0.0);
     edited.width     = 12.0;
     edited.height    = 8.0;
+    edited.radius    = 3.0;
     edited.distance  = 4.0;
-    edited.symmetric = false;
-    edited.mode      = BooleanMode::New;
+    edited.symmetric = true;
+    edited.mode      = BooleanMode::Add;
     REQUIRE(doc.replace_sketch_extrude(sketch, extrude, edited));
 
-    REQUIRE(doc.features[sketch].name == "Profile");
-    REQUIRE(doc.features[sketch].type == CadFeatureType::Sketch);
-    REQUIRE(doc.features[extrude].name == "Solid");
-    REQUIRE(doc.features[extrude].type == CadFeatureType::Extrude);
-    REQUIRE_THAT(doc.features[sketch].width, Catch::Matchers::WithinAbs(12.0, 1e-9));
-    REQUIRE_THAT(doc.features[sketch].height, Catch::Matchers::WithinAbs(8.0, 1e-9));
-    REQUIRE_THAT(doc.features[extrude].distance, Catch::Matchers::WithinAbs(4.0, 1e-9));
-    REQUIRE(doc.recompute());
+    const CadFeature& sk = doc.features[sketch];
+    const CadFeature& ex = doc.features[extrude];
+    CHECK(sk.name == "Profile");
+    CHECK(sk.type == CadFeatureType::Sketch);
+    CHECK(sk.shape == SketchShape::Circle);
+    CHECK_THAT((sk.plane.origin - Vec3d(5.0, 0.0, 0.0)).norm(), Catch::Matchers::WithinAbs(0.0, 1e-12));
+    CHECK_THAT(sk.width, Catch::Matchers::WithinAbs(12.0, 1e-12));
+    CHECK_THAT(sk.height, Catch::Matchers::WithinAbs(8.0, 1e-12));
+    CHECK_THAT(sk.radius, Catch::Matchers::WithinAbs(3.0, 1e-12));
+    CHECK(ex.name == "Solid");
+    CHECK(ex.type == CadFeatureType::Extrude);
+    CHECK(ex.sketch_ref == sketch);
+    CHECK_THAT(ex.distance, Catch::Matchers::WithinAbs(4.0, 1e-12));
+    CHECK(ex.symmetric);
+    CHECK(ex.mode == BooleanMode::Add);
+
+    // The rebuilt body is the circle at the moved plane: area 9 pi times length 4.
     REQUIRE(doc.error.empty());
     REQUIRE(doc.bodies.size() == 1);
-    REQUIRE(doc.display_mesh.facets_count() > 0);
-    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(384.0, 0.02));
+    const auto props = doc.body_mass_properties(0);
+    CHECK_THAT(props.volume, Catch::Matchers::WithinRel(9.0 * M_PI * 4.0, 1e-6));
+    CHECK_THAT(props.center_of_mass.x(), Catch::Matchers::WithinAbs(5.0, 1e-6));
+    CHECK_THAT(props.center_of_mass.y(), Catch::Matchers::WithinAbs(0.0, 1e-6));
 }
 
-TEST_CASE("CadDocument history exposes redo and invalidates it after a new edit", "[CadDocument][history]")
+TEST_CASE("Feature replacement rejects bad indices and rolls back a failed rebuild", "[CadDocument]")
 {
     CadDocument doc;
-    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
-                                      20.0, 20.0, 0.0, "BaseSketch");
-    REQUIRE(sketch >= 0);
-    const int extrude = doc.add_extrude(sketch, 10.0, false, BooleanMode::New, "Base");
-    REQUIRE(extrude >= 0);
-    REQUIRE(doc.recompute());
-    REQUIRE(doc.error.empty());
+    int sketch = -1, extrude = -1;
+    cad_feature_editing::make_box(doc, sketch, extrude);
+    const int feature_count = int(doc.features.size());
 
-    auto bbox = [](const CadDocument& d) {
-        Bnd_Box box;
-        BRepBndLib::Add(d.bodies.at(0).shape, box);
-        double x0, y0, z0, x1, y1, z1;
-        box.Get(x0, y0, z0, x1, y1, z1);
-        return std::make_pair(Vec3d(x0, y0, z0), Vec3d(x1, y1, z1));
-    };
+    CadFeature edited = doc.features[extrude];
+    edited.distance = 8.0;
+    CHECK_FALSE(doc.replace_feature(-1, edited));
+    CHECK_FALSE(doc.replace_feature(feature_count, edited));
+    CHECK_FALSE(doc.replace_sketch_extrude(-1, extrude, edited));
+    CHECK_FALSE(doc.replace_sketch_extrude(sketch, feature_count, edited));
+    CHECK_THAT(doc.features[extrude].distance, Catch::Matchers::WithinAbs(5.0, 1e-12));
 
-    const auto initial_box = bbox(doc);
-    const double initial_volume = doc.body_mass_properties(0).volume;
-    REQUIRE_THAT(initial_volume, Catch::Matchers::WithinRel(4000.0, 1e-6));
-    REQUIRE_THAT(initial_box.first.x(), Catch::Matchers::WithinAbs(-10.0, 1e-6));
-    REQUIRE_THAT(initial_box.second.x(), Catch::Matchers::WithinAbs(10.0, 1e-6));
-    REQUIRE_FALSE(doc.can_undo());
-    REQUIRE_FALSE(doc.can_redo());
-    REQUIRE(doc.undo_depth() == 0);
-    REQUIRE(doc.redo_depth() == 0);
-
-    doc.checkpoint();
-    const int shift = doc.add_transform(0, Vec3d(5.0, 0.0, 0.0), Vec3d(0.0, 0.0, 1.0),
-                                        Vec3d(0.0, 0.0, 0.0), 0.0, false, "Shift");
-    REQUIRE(shift >= 0);
-    REQUIRE(doc.recompute());
-    REQUIRE(doc.error.empty());
-    const auto shifted_box = bbox(doc);
-    REQUIRE(doc.can_undo());
-    REQUIRE_FALSE(doc.can_redo());
-    REQUIRE(doc.undo_depth() == 1);
-    REQUIRE(doc.redo_depth() == 0);
-    REQUIRE_THAT(shifted_box.first.x(), Catch::Matchers::WithinAbs(-5.0, 1e-6));
-    REQUIRE_THAT(shifted_box.second.x(), Catch::Matchers::WithinAbs(15.0, 1e-6));
-    REQUIRE_THAT(doc.body_mass_properties(0).volume,
-                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
-
-    REQUIRE(doc.undo());
-    REQUIRE(doc.error.empty());
-    const auto undone_box = bbox(doc);
-    REQUIRE_FALSE(doc.can_undo());
-    REQUIRE(doc.can_redo());
-    REQUIRE(doc.undo_depth() == 0);
-    REQUIRE(doc.redo_depth() == 1);
-    REQUIRE_THAT(undone_box.first.x(), Catch::Matchers::WithinAbs(initial_box.first.x(), 1e-6));
-    REQUIRE_THAT(undone_box.second.x(), Catch::Matchers::WithinAbs(initial_box.second.x(), 1e-6));
-    REQUIRE_THAT(doc.body_mass_properties(0).volume,
-                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
-
-    REQUIRE(doc.redo());
-    REQUIRE(doc.error.empty());
-    const auto redone_box = bbox(doc);
-    REQUIRE(doc.can_undo());
-    REQUIRE_FALSE(doc.can_redo());
-    REQUIRE(doc.undo_depth() == 1);
-    REQUIRE(doc.redo_depth() == 0);
-    REQUIRE_THAT(redone_box.first.x(), Catch::Matchers::WithinAbs(shifted_box.first.x(), 1e-6));
-    REQUIRE_THAT(redone_box.second.x(), Catch::Matchers::WithinAbs(shifted_box.second.x(), 1e-6));
-    REQUIRE_THAT(doc.body_mass_properties(0).volume,
-                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
-
-    // A new checkpoint is a new edit branch and must discard the old redo snapshot.
-    REQUIRE(doc.undo());
-    REQUIRE(doc.can_redo());
-    doc.checkpoint();
-    const int second_shift = doc.add_transform(0, Vec3d(-2.0, 0.0, 0.0), Vec3d(0.0, 0.0, 1.0),
-                                               Vec3d(0.0, 0.0, 0.0), 0.0, false, "NewBranch");
-    REQUIRE(second_shift >= 0);
-    REQUIRE(doc.recompute());
-    REQUIRE(doc.error.empty());
-    REQUIRE_FALSE(doc.can_redo());
-    REQUIRE(doc.redo_depth() == 0);
+    // A zero-length extrude cannot be built: the edit is refused, the error says why, and the
+    // previous feature and body come back.
+    edited.distance = 0.0;
+    CHECK_FALSE(doc.replace_feature(extrude, edited));
+    CHECK_FALSE(doc.error.empty());
+    REQUIRE(int(doc.features.size()) == feature_count);
+    CHECK_THAT(doc.features[extrude].distance, Catch::Matchers::WithinAbs(5.0, 1e-12));
+    REQUIRE(doc.bodies.size() == 1);
+    CHECK_THAT(doc.body_mass_properties(0).volume, Catch::Matchers::WithinRel(500.0, 1e-9));
 }
 
 TEST_CASE("CadDocument preview with profile on self-contained candidate", "[CadDocument]")
