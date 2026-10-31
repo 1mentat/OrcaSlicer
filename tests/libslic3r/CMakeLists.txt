@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
     test_arachne_walls.cpp
     test_arrange.cpp
     test_assemble_list.cpp
+    test_assimp_import.cpp
     test_bambu_networking.cpp
     test_belt_brim.cpp
     test_bridge_detector.cpp
@@ -51,6 +52,7 @@ add_executable(${_TEST_NAME}_tests
     test_png_read_write.cpp
     test_point.cpp
     test_polygon.cpp
+    test_polyline.cpp
     test_multipoint.cpp
     test_mutable_polygon.cpp
     test_mutable_priority_queue.cpp
@@ -59,6 +61,7 @@ add_executable(${_TEST_NAME}_tests
     test_obj.cpp
     test_obj_color_utils.cpp
     test_sl1.cpp
+    test_zipper_archive_import.cpp
     test_step.cpp
     test_stl.cpp
     test_surface_collection.cpp

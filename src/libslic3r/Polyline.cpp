@@ -164,44 +164,49 @@ void Polyline::simplify_by_fitting_arc(double tolerance)
     ArcFitter::do_arc_fitting_and_simplify(this->points, this->fitting_result, tolerance);
 }
 
+// Partition by arc length while retaining original bends. Distances must be finite and positive;
+// values below one integer coordinate unit use one unit. Split coordinates are rounded to the
+// integer grid relative to their segment start; empty pieces are omitted.
 Polylines Polyline::equally_spaced_lines(double distance) const
 {
+    if (!std::isfinite(distance) || distance <= 0.)
+        throw InvalidArgument("Polyline segment distance must be finite and positive");
+
+    // Splits finer than the integer coordinate grid cannot be represented.
+    distance = std::max(distance, 1.);
+
     Polylines lines;
+    if (this->points.size() < 2)
+        return lines;
+
     Polyline line;
     line.append(this->first_point());
-    double len = 0;
-
-    for (Points::const_iterator it = this->points.begin() + 1; it != this->points.end(); ++it) {
-        Vec2d  p1 = line.points.back().cast<double>();
-        Vec2d  v = it->cast<double>() - p1;
-        double segment_length = v.norm();
-        len += segment_length;
-        if (len < distance)
-            continue;
-        if (len == distance) {
-            line.append(*it);
-            lines.emplace_back(line);
-            
-            line.clear();
-            line.append(*it);
-            len = 0;
-            continue;
+    double remaining = distance;
+    for (size_t i = 1; i < this->points.size(); ++i) {
+        const Point &start_point = this->points[i - 1];
+        const Point &target_point = this->points[i];
+        const Vec2d delta = (target_point - start_point).cast<double>();
+        const double segment_length = delta.norm();
+        double position = 0.;
+        double length = segment_length;
+        while (length >= remaining) {
+            position += remaining;
+            const Point split = start_point + (delta * (position / segment_length)).cast<coord_t>();
+            line.append(split);
+            if (line.is_valid())
+                lines.emplace_back(std::move(line));
+            line = Polyline();
+            line.append(split);
+            length = segment_length - position;
+            remaining = distance;
         }
-        double take = distance;  // how much we take of this segment
-        line.append((p1 + v * (take / v.norm())).cast<coord_t>());
-        lines.emplace_back(line);
-
-        line.clear();
-        line.append(lines.back().last_point());
-        --it;
-        len = -take;
+        // Keep original vertices so a piece that crosses a bend follows the
+        // source path instead of replacing the bend with a chord.
+        line.append(target_point);
+        remaining -= length;
     }
-    // add the last reminder
-    if (line.size() == 1) {
-        line.append(this->last_point());
-        if(line.first_point()!=line.last_point())
-            lines.emplace_back(line);
-    }
+    if (line.is_valid())
+        lines.emplace_back(std::move(line));
     return lines;
 }
 
@@ -589,7 +594,7 @@ bool remove_degenerate(Polylines &polylines)
     for (size_t i = 0; i < polylines.size(); ++ i) {
         if (polylines[i].points.size() >= 2) {
             if (j < i) 
-                std::swap(polylines[i].points, polylines[j].points);
+                std::swap(polylines[i], polylines[j]);
             ++ j;
         } else
             modified = true;

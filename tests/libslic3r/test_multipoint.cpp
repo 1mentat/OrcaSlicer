@@ -118,8 +118,7 @@ Points transform(const Points &in, coord_t dx, coord_t dy, int scale)
 
 } // namespace
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
-TEST_CASE("Visvalingam keeps endpoints and handles two and three points", "[MultiPoint][Visvalingam][.]")
+TEST_CASE("Visvalingam keeps endpoints and handles two and three points", "[MultiPoint][Visvalingam]")
 {
     const Points two = { Point(11, -4), Point(30, 9) };
     check_exact(MultiPoint::visivalingam(two, 0.), two);
@@ -134,17 +133,14 @@ TEST_CASE("Visvalingam keeps endpoints and handles two and three points", "[Mult
     check_exact(MultiPoint::visivalingam(corner, 80.), Points{corner.front(), corner.back()});
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault), and its heap orders node
-// addresses instead of being a min-heap on effective area; fixed by the follow-up fix PR
-TEST_CASE("Visvalingam matches an independent elimination oracle", "[MultiPoint][Visvalingam][.]")
+TEST_CASE("Visvalingam matches an independent elimination oracle", "[MultiPoint][Visvalingam]")
 {
     const Points input = make_polyline();
     const double tolerance = GENERATE(0., 1., 20., 80., 100000.);
     check_exact(MultiPoint::visivalingam(input, tolerance), reference_visivalingam(input, tolerance));
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
-TEST_CASE("Visvalingam is translation invariant", "[MultiPoint][Visvalingam][.]")
+TEST_CASE("Visvalingam is translation invariant", "[MultiPoint][Visvalingam]")
 {
     const Points input = make_polyline();
     const Points translated = transform(input, 123456, -765432, 1);
@@ -152,8 +148,7 @@ TEST_CASE("Visvalingam is translation invariant", "[MultiPoint][Visvalingam][.]"
     check_exact(MultiPoint::visivalingam(translated, partial_tolerance), expected);
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
-TEST_CASE("Visvalingam scales tolerance with area", "[MultiPoint][Visvalingam][.]")
+TEST_CASE("Visvalingam scales tolerance with area", "[MultiPoint][Visvalingam]")
 {
     const Points input = make_polyline();
     const Points scaled = transform(input, 0, 0, 3);
@@ -161,8 +156,7 @@ TEST_CASE("Visvalingam scales tolerance with area", "[MultiPoint][Visvalingam][.
     check_exact(MultiPoint::visivalingam(scaled, partial_tolerance * 9.), expected);
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
-TEST_CASE("Visvalingam reverses the retained order", "[MultiPoint][Visvalingam][.]")
+TEST_CASE("Visvalingam reverses the retained order", "[MultiPoint][Visvalingam]")
 {
     const Points input = make_polyline();
     Points reversed = input;
@@ -172,9 +166,7 @@ TEST_CASE("Visvalingam reverses the retained order", "[MultiPoint][Visvalingam][
     check_exact(MultiPoint::visivalingam(reversed, partial_tolerance), expected);
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault), and its heap orders node
-// addresses instead of being a min-heap on effective area; fixed by the follow-up fix PR
-TEST_CASE("Visvalingam preserves a salient high-area turn", "[MultiPoint][Visvalingam][.]")
+TEST_CASE("Visvalingam preserves a salient high-area turn", "[MultiPoint][Visvalingam]")
 {
     const Points input = { Point(0, 0), Point(10, 1), Point(20, 2), Point(30, 40),
                            Point(40, 3), Point(50, 2), Point(60, 0) };
@@ -183,17 +175,14 @@ TEST_CASE("Visvalingam preserves a salient high-area turn", "[MultiPoint][Visval
     CHECK(std::find(result.begin(), result.end(), Point(30, 40)) != result.end());
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault), and its heap orders node
-// addresses instead of being a min-heap on effective area; fixed by the follow-up fix PR
-TEST_CASE("Visvalingam removes a shallow run before its neighbors", "[MultiPoint][Visvalingam][.]")
+TEST_CASE("Visvalingam removes a shallow run before its neighbors", "[MultiPoint][Visvalingam]")
 {
     const Points input = { Point(0, 0), Point(10, 2), Point(20, 4), Point(30, 5),
                            Point(40, 9), Point(50, 10), Point(60, 10) };
     check_exact(MultiPoint::visivalingam(input, 5.), reference_visivalingam(input, 5.));
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
-TEST_CASE("Visvalingam rejects only internal points at a large tolerance", "[MultiPoint][Visvalingam][.]")
+TEST_CASE("Visvalingam rejects only internal points at a large tolerance", "[MultiPoint][Visvalingam]")
 {
     const Points input = make_polyline();
     const Points result = MultiPoint::visivalingam(input, 1e12);
@@ -202,9 +191,7 @@ TEST_CASE("Visvalingam rejects only internal points at a large tolerance", "[Mul
     CHECK(result.back() == input.back());
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault), and its heap orders node
-// addresses instead of being a min-heap on effective area; fixed by the follow-up fix PR
-TEST_CASE("Visvalingam retains a high-area tail node", "[MultiPoint][Visvalingam][.]")
+TEST_CASE("Visvalingam retains a high-area tail node", "[MultiPoint][Visvalingam]")
 {
     const Points input = { Point(0, 0), Point(10, 1), Point(20, 2), Point(30, 3),
                            Point(40, 4), Point(50, 100), Point(60, 0) };

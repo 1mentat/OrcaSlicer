@@ -18,17 +18,20 @@
 #include <boost/filesystem.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
 #include <thread>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -925,4 +928,122 @@ TEST_CASE("Removing an installed vendor removes its profile, cache and presets b
     CHECK(fs::is_regular_file(system / "Other.opc"));
     CHECK(fs::is_regular_file(system / "Other" / "machine" / "printer.json"));
     CHECK(fs::is_regular_file(system / "AcmeLabs.json"));
+}
+
+// Sizes beyond a 32-bit size_t are skipped where size_t cannot hold them.
+TEST_CASE("Decimal memory formatting rounds MB and preserves comma groups", "[utils]") {
+    const std::vector<std::pair<std::uint64_t, std::string>>
+        rows{{0, "0MB"},       {499999, "0MB"},      {500000, "1MB"},        {1499999, "1MB"},
+             {1500000, "2MB"}, {999499999, "999MB"}, {999500000, "1,000MB"}, {1002003000000ULL, "1,002,003MB"}};
+    for (const auto &[n, s] : rows) {
+        if (n > std::numeric_limits<size_t>::max())
+            continue;
+        CAPTURE(n);
+        CHECK(format_memsize_MB(static_cast<size_t>(n)) == s);
+    }
+}
+
+TEST_CASE("Binary memory formatting switches units at powers of 1024", "[utils]") {
+    const std::vector<std::tuple<std::uint64_t, unsigned, std::string>> rows{
+        {0, 1, "0 bytes"},
+        {1023, 1, "1023 bytes"},
+        {1024, 1, "1024 bytes (1.0KB)"},
+        {1048576, 1, "1048576 bytes (1.0MB)"},
+        {1073741824ULL, 1, "1073741824 bytes (1.0GB)"},
+        {1099511627776ULL, 1, "1099511627776 bytes (1.0TB)"},
+        {1536, 2, "1536 bytes (1.50KB)"},
+        {1572864, 0, "1572864 bytes (2MB)"},
+        {1610612736ULL, 2, "1610612736 bytes (1.50GB)"},
+        {1649267441664ULL, 3, "1649267441664 bytes (1.500TB)"}};
+    for (const auto &[n, decimals, s] : rows) {
+        if (n > std::numeric_limits<size_t>::max())
+            continue;
+        CAPTURE(n, decimals);
+        CHECK(format_memsize(static_cast<size_t>(n), decimals) == s);
+    }
+}
+
+TEST_CASE("Short time formatting drops seconds and rounds to the minute once hours are shown", "[utils]") {
+    // Under an hour the seconds stay and nothing is rounded.
+    CHECK(short_time("0s") == "0s");
+    CHECK(short_time("0.5s") == "<1s");
+    CHECK(short_time("45s") == "45s");
+    CHECK(short_time("12m 30s") == "12m30s");
+    CHECK(short_time("59m 59s") == "59m59s");
+    // With hours or days the seconds are dropped, rounding half a minute up.
+    CHECK(short_time("1h 29m 29s") == "1h29m");
+    CHECK(short_time("1h 29m 30s") == "1h30m");
+    CHECK(short_time("1d 2h 3m 29s") == "1d2h3m");
+    CHECK(short_time("1d 2h 3m 30s") == "1d2h4m");
+    // The rounding carries into hours and days.
+    CHECK(short_time("1h 59m 30s") == "2h0m");
+    CHECK(short_time("23h 59m 30s") == "1d0h0m");
+}
+
+TEST_CASE("Second-resolution time formatters show day, hour, minute and second units", "[utils]") {
+    CHECK(get_time_dhms(61.f) == "1m 1s");
+    CHECK(get_time_dhms(3661.f) == "1h 1m 1s");
+    CHECK(get_time_dhms(86400.f) == "1d 0h 0m 0s");
+    CHECK(get_bbl_time_dhms(0.f) == "0s");
+    CHECK(get_bbl_time_dhms(61.f) == "1m1s");
+    CHECK(get_bbl_time_dhms(3661.f) == "1h1m1s");
+    CHECK(get_bbl_time_dhms(86400.f) == "1d0h0m0s");
+}
+
+TEST_CASE("Minute-resolution and clock formatters show the units the time needs", "[utils]") {
+    CHECK(get_time_dhm(0.f) == "0m");
+    CHECK(get_time_dhm(60.f) == "1m");
+    CHECK(get_time_dhm(3600.f) == "1h 0m");
+    CHECK(get_time_dhm(86400.f) == "1d 0h 0m");
+    CHECK(get_time_hms(0.f) == "00:00:00");
+    CHECK(get_time_hms(3661.f) == "01:01:01");
+}
+
+TEST_CASE("BBL monitor and remaining time formatters use compact units", "[utils]") {
+    CHECK(get_bbl_monitor_time_dhm(0.f) == "0m");
+    CHECK(get_bbl_monitor_time_dhm(60.f) == "1m");
+    CHECK(get_bbl_monitor_time_dhm(3600.f) == "1h0m");
+    CHECK(get_bbl_remain_time_dhms(61.f) == "1m1s");
+    CHECK(get_bbl_remain_time_dhms(3661.f) == "1h1m1s");
+    CHECK(get_bbl_remain_time_dhms(86400.f) == "1d0h0m0s");
+}
+
+TEST_CASE("Logging level names map the supported severities both ways", "[utils]") {
+    const std::array<std::string, 6> names{"fatal", "error", "warning", "info", "debug", "trace"};
+    for (unsigned i = 0; i < names.size(); ++i) {
+        CHECK(level_string_to_boost(names[i]) == i);
+        CHECK(get_string_logging_level(i) == names[i]);
+    }
+}
+
+TEST_CASE("Published model links accept the canonical site roots over http and https", "[utils]") {
+    CHECK(is_printables_link("https://printables.com"));
+    CHECK(is_printables_link("HTTP://PRINTABLES.COM"));
+    CHECK(is_makerworld_link("https://makerworld.com"));
+    CHECK(is_makerworld_link("http://makerworld.com"));
+    CHECK(is_thingiverse_link("https://www.thingiverse.com"));
+    CHECK_FALSE(is_printables_link("ftp://printables.com"));
+    CHECK_FALSE(is_makerworld_link("https://example.com"));
+    CHECK_FALSE(is_thingiverse_link("https://makerworld.com"));
+}
+
+// Known bug: unescaped '.' in the is_printables_link host pattern (Utils.hpp) matches any character; fixed by the follow-up fix PR
+TEST_CASE("is_printables_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_printables_link("https://printablesXcom"));
+}
+
+// Known bug: unescaped '.' in the is_makerworld_link host pattern (Utils.hpp); fixed by the follow-up fix PR
+TEST_CASE("is_makerworld_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_makerworld_link("https://makerworldXcom"));
+}
+
+// Known bug: unescaped '.' in the is_thingiverse_link host pattern (Utils.hpp); fixed by the follow-up fix PR
+TEST_CASE("is_thingiverse_link matches the dots in its host name literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_thingiverse_link("https://wwwXthingiverse.com"));
+}
+
+// Known bug: is_makerworld_link (Utils.hpp) uses regex_match, so only the bare site root matches and a MakerWorld model URL
+// does not; fixed by the follow-up fix PR
+TEST_CASE("is_makerworld_link accepts a MakerWorld model URL, not only the site root", "[utils][!shouldfail]") {
+    CHECK(is_makerworld_link("https://makerworld.com/en/models/12345"));
 }
