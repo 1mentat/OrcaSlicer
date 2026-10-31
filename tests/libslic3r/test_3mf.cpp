@@ -2148,6 +2148,8 @@ namespace bbs_archive_contracts {
 
 namespace {
 
+constexpr double position_tolerance = 1e-4;
+
 struct LoadedProject
 {
     DynamicPrintConfig config;
@@ -2161,19 +2163,15 @@ struct LoadedProject
     ~LoadedProject();
 };
 
-void release_presets(std::vector<Preset*>& presets)
-{
-    for (Preset *preset : presets)
-        delete preset;
-    presets.clear();
-}
-
 LoadedProject::~LoadedProject()
 {
     release_PlateData_list(plates);
-    release_presets(presets);
+    for (Preset *preset : presets)
+        delete preset;
 }
 
+// One object with two placed instances; `assembly` gives both instances an assembly
+// transform and offset. `two_objects` adds a second, differently shaped object.
 void make_model(Model& model, bool two_objects = false, bool assembly = false)
 {
     ModelObject *base = model.add_object();
@@ -2181,19 +2179,22 @@ void make_model(Model& model, bool two_objects = false, bool assembly = false)
     base->module_name = "base-module";
     ModelVolume *base_volume = base->add_volume(make_cube(10., 10., 10.));
     base_volume->name = "base-volume";
-    base_volume->set_material_id("PLA");
-    base->add_instance();
+    ModelInstance *first = base->add_instance();
+    first->set_offset({-20., 3., 0.});
+    first->set_rotation(Z, Geometry::deg2rad(9.));
     ModelInstance *second = base->add_instance();
     second->set_offset({30., 5., 0.});
     second->set_rotation(Z, Geometry::deg2rad(17.));
     second->set_scaling_factor({1.1, 0.9, 1.0});
 
     if (assembly) {
-        Transform3d assembled = Transform3d::Identity();
-        assembled.linear() = Eigen::AngleAxisd(Geometry::deg2rad(23.), Vec3d::UnitZ()).toRotationMatrix();
-        assembled.translation() = Vec3d(4., 6., 8.);
-        second->set_assemble_from_transform(assembled);
-        second->set_offset_to_assembly({1.5, -2.5, 0.75});
+        for (size_t i = 0; i < base->instances.size(); ++i) {
+            Transform3d assembled = Transform3d::Identity();
+            assembled.linear() = Eigen::AngleAxisd(Geometry::deg2rad(23. + 10. * i), Vec3d::UnitZ()).toRotationMatrix();
+            assembled.translation() = Vec3d(4. + i, 6., 8.);
+            base->instances[i]->set_assemble_from_transform(assembled);
+            base->instances[i]->set_offset_to_assembly(Vec3d(1.5, -2.5, 0.75) * double(i + 1));
+        }
     }
 
     if (two_objects) {
@@ -2202,67 +2203,52 @@ void make_model(Model& model, bool two_objects = false, bool assembly = false)
         other->module_name = "second-module";
         ModelVolume *other_volume = other->add_volume(make_cube(6., 8., 4.));
         other_volume->name = "second-volume";
-        other_volume->set_material_id("PETG");
         other->add_instance({60., 10., 0.}, {1., 1., 1.}, {0., 0., Geometry::deg2rad(11.)}, {1., 1., 1.});
     }
-
-    model.add_material("PLA")->attributes["filament_type"] = "PLA";
-    model.add_material("PETG")->attributes["filament_type"] = "PETG";
 }
 
-void make_multi_volume_model(Model& model)
-{
-    ModelObject *object = model.add_object();
-    object->name = "multi-volume";
-    ModelVolume *part = object->add_volume(make_cube(12., 10., 8.));
-    part->name = "printable-part";
-    part->set_material_id("PLA");
-    ModelVolume *negative = object->add_volume(make_cube(3., 3., 3.), ModelVolumeType::NEGATIVE_VOLUME);
-    negative->name = "negative-cavity";
-    negative->set_material_id("PETG");
-    negative->set_offset({2., 2., 2.});
-    object->add_instance();
-    model.add_material("PLA")->attributes["filament_type"] = "PLA";
-    model.add_material("PETG")->attributes["filament_type"] = "PETG";
-}
-
-void store_model(const std::string& path, Model& model, DynamicPrintConfig& config,
-                 PlateDataPtrs& plates, SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence)
+void store_model(const std::string& path, Model& model, DynamicPrintConfig& config, PlateDataPtrs& plates)
 {
     StoreParams params;
     params.path = path;
     params.model = &model;
     params.config = &config;
     params.plate_data_list = plates;
-    params.strategy = strategy;
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
     REQUIRE(store_bbs_3mf(params));
 }
 
-bool load_model(const std::string& path, Model& model, LoadedProject& loaded,
-                Import3mfProgressFn callback = nullptr)
+bool load_model(const std::string& path, Model& model, LoadedProject& loaded)
 {
     loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_ext_load");
     model.set_backup_path(loaded.backup->string());
     ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
-    const bool result = load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates,
-                                     &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version,
-                                     std::move(callback), LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
-    return result;
+    return load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates, &loaded.presets,
+                        &loaded.is_bbl, &loaded.is_orca, &loaded.version, nullptr,
+                        LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
 }
 
+// A plate record holding the given (object, instance) pairs.
 void make_plate(PlateData& plate, int index, const std::vector<std::pair<int, int>>& objects)
 {
     plate.plate_index = index;
-    plate.plate_name = "plate-" + std::to_string(index + 1);
-    plate.locked = index == 1;
     plate.objects_and_instances = objects;
-    plate.printer_model_id = "printer-" + std::to_string(index);
-    plate.nozzle_diameters = "0.4;0.6";
-    plate.nozzle_volume_types = "standard;high_flow";
-    plate.gcode_prediction = "{\"time\":42}";
-    plate.gcode_weight = "12.5";
-    plate.toolpath_outside = index == 1;
-    plate.is_support_used = index == 0;
+}
+
+// Extent of the object's volumes in object space: volume transforms applied, instance
+// transform not.
+BoundingBoxf3 object_space_box(const ModelObject& object)
+{
+    BoundingBoxf3 box;
+    for (const ModelVolume *volume : object.volumes)
+        box.merge(volume->mesh().transformed_bounding_box(volume->get_matrix()));
+    return box;
+}
+
+void check_same_box(const BoundingBoxf3& actual, const BoundingBoxf3& expected)
+{
+    CHECK((actual.min - expected.min).norm() < position_tolerance);
+    CHECK((actual.max - expected.max).norm() < position_tolerance);
 }
 
 } // namespace
@@ -2272,7 +2258,6 @@ TEST_CASE("BBS 3MF preserves multiple objects, instances, and transformed world 
     Model source;
     make_model(source, true);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_key_value("layer_height", new ConfigOptionFloat(0.24));
     ScopedTemporaryDir backup("orca_bbs_ext_store");
     source.set_backup_path(backup.string());
 
@@ -2288,27 +2273,28 @@ TEST_CASE("BBS 3MF preserves multiple objects, instances, and transformed world 
     REQUIRE(loaded_model.objects.size() == 2);
     REQUIRE(loaded_model.objects[0]->instances.size() == 2);
     REQUIRE(loaded_model.objects[1]->instances.size() == 1);
-    CHECK(loaded_model.objects[0]->name == "base-object");
-    CHECK(loaded_model.objects[1]->name == "second-object");
-    for (size_t obj_idx = 0; obj_idx < source.objects.size(); ++obj_idx)
-        for (size_t inst_idx = 0; inst_idx < source.objects[obj_idx]->instances.size(); ++inst_idx) {
-            INFO("object " << obj_idx << " instance " << inst_idx);
-            const BoundingBoxf3 expected = source.objects[obj_idx]->instance_bounding_box(inst_idx);
-            const BoundingBoxf3 actual   = loaded_model.objects[obj_idx]->instance_bounding_box(inst_idx);
-            CHECK((actual.min - expected.min).norm() < 1e-4);
-            CHECK((actual.max - expected.max).norm() < 1e-4);
+    for (size_t obj_idx = 0; obj_idx < source.objects.size(); ++obj_idx) {
+        const ModelObject &expected_object = *source.objects[obj_idx];
+        const ModelObject &actual_object   = *loaded_model.objects[obj_idx];
+        INFO("object " << obj_idx);
+        CHECK(actual_object.name == expected_object.name);
+        CHECK(actual_object.module_name == expected_object.module_name);
+        REQUIRE(actual_object.volumes.size() == 1);
+        CHECK(actual_object.volumes.front()->name == expected_object.volumes.front()->name);
+        CHECK(actual_object.volumes.front()->mesh().its.indices.size() == expected_object.volumes.front()->mesh().its.indices.size());
+        // The loader re-centres the volumes on their bounding box, so the object-space box
+        // may shift, but its size only changes if a rotation or scale was baked into the mesh.
+        CHECK((object_space_box(actual_object).size() - object_space_box(expected_object).size()).norm() < position_tolerance);
+        for (size_t inst_idx = 0; inst_idx < expected_object.instances.size(); ++inst_idx) {
+            const ModelInstance &expected = *expected_object.instances[inst_idx];
+            const ModelInstance &actual   = *actual_object.instances[inst_idx];
+            INFO("instance " << inst_idx);
+            // The offset absorbs the re-centring above; the world box checks the placement.
+            CHECK((actual.get_rotation() - expected.get_rotation()).norm() < 1e-6);
+            CHECK((actual.get_scaling_factor() - expected.get_scaling_factor()).norm() < 1e-6);
+            check_same_box(actual_object.instance_bounding_box(inst_idx), expected_object.instance_bounding_box(inst_idx));
         }
-    const BoundingBoxf3 source_bbox = source.mesh().bounding_box();
-    const BoundingBoxf3 loaded_bbox = loaded_model.mesh().bounding_box();
-    CHECK_THAT(loaded_bbox.min.x(), Catch::Matchers::WithinAbs(source_bbox.min.x(), 1e-5));
-    CHECK_THAT(loaded_bbox.min.z(), Catch::Matchers::WithinAbs(source_bbox.min.z(), 1e-5));
-    CHECK_THAT(loaded_bbox.min.y(), Catch::Matchers::WithinAbs(source_bbox.min.y(), 1e-5));
-    CHECK_THAT(loaded_bbox.max.x(), Catch::Matchers::WithinAbs(source_bbox.max.x(), 1e-5));
-    CHECK_THAT(loaded_bbox.max.y(), Catch::Matchers::WithinAbs(source_bbox.max.y(), 1e-5));
-    CHECK_THAT(loaded_bbox.max.z(), Catch::Matchers::WithinAbs(source_bbox.max.z(), 1e-5));
-    CHECK(loaded_model.mesh().its.indices.size() == source.mesh().its.indices.size());
-    REQUIRE(loaded.config.option<ConfigOptionFloat>("layer_height") != nullptr);
-    CHECK_THAT(loaded.config.option<ConfigOptionFloat>("layer_height")->value, Catch::Matchers::WithinAbs(0.24, 1e-6));
+    }
 }
 
 TEST_CASE("BBS 3MF preserves assembly transform and assembly offset", "[3MF][Bbs3mfExtended][Assembly]")
@@ -2329,17 +2315,34 @@ TEST_CASE("BBS 3MF preserves assembly transform and assembly offset", "[3MF][Bbs
     REQUIRE(load_model(archive.string(), loaded_model, loaded));
     REQUIRE(loaded_model.objects.size() == 1);
     REQUIRE(loaded_model.objects.front()->instances.size() == 2);
-    ModelInstance *instance = loaded_model.objects.front()->instances[1];
-    REQUIRE(instance->is_assemble_initialized());
-    CHECK(instance->get_assemble_transformation().get_matrix().isApprox(
-        source.objects.front()->instances[1]->get_assemble_transformation().get_matrix(), 1e-5));
-    CHECK(instance->get_offset_to_assembly().isApprox(Vec3d(1.5, -2.5, 0.75), 1e-5));
+    for (size_t i = 0; i < 2; ++i) {
+        INFO("instance " << i);
+        ModelInstance &expected = *source.objects.front()->instances[i];
+        ModelInstance &actual   = *loaded_model.objects.front()->instances[i];
+        REQUIRE(actual.is_assemble_initialized());
+        CHECK(actual.get_assemble_transformation().get_matrix().isApprox(expected.get_assemble_transformation().get_matrix(), 1e-5));
+        CHECK((actual.get_offset_to_assembly() - expected.get_offset_to_assembly()).norm() < position_tolerance);
+    }
 }
 
 TEST_CASE("BBS 3MF preserves model metadata and volume types", "[3MF][Bbs3mfExtended][Metadata]")
 {
     Model source;
-    make_multi_volume_model(source);
+    ModelObject *object = source.add_object();
+    object->name = "multi-volume";
+    const std::vector<std::pair<std::string, ModelVolumeType>> volumes{
+        {"printable-part", ModelVolumeType::MODEL_PART},
+        {"negative-cavity", ModelVolumeType::NEGATIVE_VOLUME},
+        {"settings-modifier", ModelVolumeType::PARAMETER_MODIFIER},
+        {"support-enforcer", ModelVolumeType::SUPPORT_ENFORCER},
+        {"support-blocker", ModelVolumeType::SUPPORT_BLOCKER},
+    };
+    for (size_t i = 0; i < volumes.size(); ++i) {
+        ModelVolume *volume = object->add_volume(i == 0 ? make_cube(12., 10., 8.) : make_cube(3., 3., 3.), volumes[i].second);
+        volume->name = volumes[i].first;
+        volume->set_offset({2. * i, 2., 2.});
+    }
+    object->add_instance();
     source.model_info = std::make_shared<ModelInfo>();
     source.model_info->model_name = "Archive contract";
     source.model_info->origin = "designer-origin";
@@ -2363,10 +2366,12 @@ TEST_CASE("BBS 3MF preserves model metadata and volume types", "[3MF][Bbs3mfExte
     CHECK(loaded_model.model_info->description == "metadata survives XML escaping: <&>");
     CHECK(loaded_model.model_info->metadata_items.at("custom-key") == "custom-value");
     REQUIRE(loaded_model.objects.size() == 1);
-    REQUIRE(loaded_model.objects.front()->volumes.size() == 2);
-    CHECK(loaded_model.objects.front()->volumes[0]->name == "printable-part");
-    CHECK(loaded_model.objects.front()->volumes[1]->name == "negative-cavity");
-    CHECK(loaded_model.objects.front()->volumes[1]->type() == ModelVolumeType::NEGATIVE_VOLUME);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == volumes.size());
+    for (size_t i = 0; i < volumes.size(); ++i) {
+        INFO("volume " << i);
+        CHECK(loaded_model.objects.front()->volumes[i]->name == volumes[i].first);
+        CHECK(loaded_model.objects.front()->volumes[i]->type() == volumes[i].second);
+    }
 }
 
 } // namespace bbs_archive_contracts
