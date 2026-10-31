@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
+#include <nlohmann/json.hpp>
 #include <cstddef>
 #include <fstream>
 
@@ -88,11 +90,12 @@ void write_preset_with_inherits(const DynamicPrintConfig &default_config, const 
 
 // A user preset file stating nothing but the preset it inherits, so every value it
 // ends up with came from resolving that parent.
-void write_minimal_child(const fs::path &file, const std::string &name, const std::string &inherits)
+void write_minimal_child(const fs::path &file, const std::string &name, const std::string &inherits,
+                         const std::string &type = "process")
 {
     fs::create_directories(file.parent_path());
     std::ofstream(file.string())
-        << R"({"type":"process","name":")" << name << R"(","from":"User","version":"1.0.0","inherits":")"
+        << R"({"type":")" << type << R"(","name":")" << name << R"(","from":"User","version":"1.0.0","inherits":")"
         << inherits << R"("})";
 }
 
@@ -1648,6 +1651,73 @@ TEST_CASE("Switching a printer reselects a compatible process and every filament
     CHECK(stored(bundle.filaments, "Filament B").is_compatible);
 }
 
+
+TEST_CASE("A user filament preset round-trips inherited multi-variant vectors", "[Preset][Bundle][RoundTrip]")
+{
+    using NullableFloats = ConfigOptionFloatsNullable;
+    ScopedTemporaryDir temp_dir;
+    auto load_filaments = [&temp_dir](PresetCollection &collection) {
+        PresetsConfigSubstitutions substitutions;
+        collection.load_presets(temp_dir.path().string(), PRESET_FILAMENT_NAME, substitutions,
+                                ForwardCompatibilitySubstitutionRule::Disable);
+    };
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    DynamicPrintConfig parent_config = collection.default_preset().config;
+    parent_config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"
+    };
+    // A nullable per-variant override (in filament_options_with_variant) and a plain vector.
+    parent_config.option<NullableFloats>("filament_retraction_length", true)->values = { 1.0, 2.0 };
+    parent_config.option<ConfigOptionStrings>("filament_type", true)->values = { "PLA" };
+    const fs::path filament_dir = temp_dir.path() / PRESET_FILAMENT_NAME;
+    const fs::path child_file = filament_dir / "Multi Child.json";
+    write_preset_with_inherits(parent_config, filament_dir / "base" / "Multi Base.json", "Multi Base", "");
+    write_minimal_child(child_file, "Multi Child", "Multi Base", "filament");
+
+    load_filaments(collection);
+    Preset *child = collection.find_preset("Multi Child");
+    const Preset *parent = collection.find_preset("Multi Base");
+    REQUIRE(child != nullptr);
+    REQUIRE(parent != nullptr);
+    CHECK(child->inherits() == "Multi Base");
+    CHECK(child->config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{ "Direct Drive Standard", "Direct Drive High Flow" });
+    check_double_vector(child->config.option<NullableFloats>("filament_retraction_length")->values, { 1.0, 2.0 });
+    CHECK(child->config.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{ "PLA" });
+
+    // Edit only the High Flow variant of the per-variant override, plus the plain vector, and
+    // save against the parent. The per-variant key is stored with the unchanged variant as nil.
+    child->config.option<NullableFloats>("filament_retraction_length")->values[1] = 3.0;
+    child->config.option<ConfigOptionStrings>("filament_type")->values = { "PETG" };
+    DynamicPrintConfig parent_values = parent->config;
+    REQUIRE(child->save(&parent_values));
+    nlohmann::json saved;
+    {
+        boost::nowide::ifstream in(child_file.string(), std::ios::binary);
+        REQUIRE(in.good());
+        in >> saved;
+    }
+    REQUIRE(saved.contains("filament_retraction_length"));
+    const nlohmann::json &saved_retraction = saved["filament_retraction_length"];
+    REQUIRE(saved_retraction.size() == 2);
+    CHECK(saved_retraction[0] == "nil");
+    CHECK_THAT(std::stod(saved_retraction[1].get<std::string>()), Catch::Matchers::WithinAbs(3.0, 1e-9));
+    CHECK(saved["filament_type"] == nlohmann::json::array({ "PETG" }));
+    CHECK_FALSE(saved.contains("filament_diameter"));
+
+    PresetCollection reloaded(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                              static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    load_filaments(reloaded);
+    const Preset *reloaded_child = reloaded.find_preset("Multi Child");
+    REQUIRE(reloaded_child != nullptr);
+    CHECK(reloaded_child->inherits() == "Multi Base");
+    CHECK(reloaded_child->config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{ "Direct Drive Standard", "Direct Drive High Flow" });
+    // The nil Standard slot is filled from the parent again; the edited High Flow slot stays.
+    check_double_vector(reloaded_child->config.option<NullableFloats>("filament_retraction_length")->values, { 1.0, 3.0 });
+    CHECK(reloaded_child->config.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{ "PETG" });
+}
 
 namespace {
 
@@ -6566,6 +6636,63 @@ TEST_CASE("A user filament whose derived compatible printer cannot be written ba
     CHECK(read_file(file) == before);
 }
 #endif
+
+namespace {
+
+void write_process(const fs::path &file, const std::string &name, const std::string &inherits,
+                   const std::string &layer_height = {}, const std::string &density = {})
+{
+    fs::create_directories(file.parent_path());
+    boost::nowide::ofstream out(file.string());
+    out << R"({"type":"process","name":")" << name
+        << R"(","from":"User","version":"1.0.0")";
+    if (!inherits.empty())
+        out << R"(,"inherits":")" << inherits << R"(")";
+    if (!layer_height.empty())
+        out << R"(,"layer_height":")" << layer_height << R"(")";
+    if (!density.empty())
+        out << R"(,"sparse_infill_density":")" << density << R"(")";
+    out << "}\n";
+}
+
+} // namespace
+
+TEST_CASE("File preset loading resolves a three-level base chain", "[PresetFiles]")
+{
+    ScopedTemporaryDir temp_dir;
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    const fs::path print_dir = temp_dir.path() / PRESET_PRINT_NAME;
+
+    // Each parent sits one base/ level deeper than its child, because load_presets() loads
+    // <dir>/base before <dir> and resolves files of one directory concurrently. Base sets both
+    // values (neither is the default); Middle overrides the density, Leaf overrides it again,
+    // so Leaf's layer height can only come from Base through Middle.
+    write_process(print_dir / "base" / "base" / "Base.json", "Base", {}, "0.24", "25%");
+    write_process(print_dir / "base" / "Middle.json", "Middle", "Base", {}, "30%");
+    write_process(print_dir / "Leaf.json", "Leaf", "Middle", {}, "42%");
+
+    PresetsConfigSubstitutions substitutions;
+    collection.load_presets(temp_dir.path().string(), PRESET_PRINT_NAME, substitutions,
+                            ForwardCompatibilitySubstitutionRule::Disable);
+
+    const Preset *base = collection.find_preset("Base");
+    const Preset *middle = collection.find_preset("Middle");
+    const Preset *leaf = collection.find_preset("Leaf");
+    REQUIRE(base != nullptr);
+    REQUIRE(middle != nullptr);
+    REQUIRE(leaf != nullptr);
+    CHECK(collection.error_count() == 0);
+    CHECK(base->inherits().empty());
+    CHECK_THAT(base->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK_THAT(base->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(25.0, 1e-9));
+    CHECK(middle->inherits() == "Base");
+    CHECK(leaf->inherits() == "Middle");
+    CHECK_THAT(middle->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK_THAT(middle->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(30.0, 1e-9));
+    CHECK_THAT(leaf->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK_THAT(leaf->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(42.0, 1e-9));
+}
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
 // "modified" marker; storing that label as the slot's preset name would point at no preset.
