@@ -16,6 +16,7 @@
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/ProjectTask.hpp"
 #include "libslic3r/PublishSettings.hpp"
+#include "libslic3r/CustomGCode.hpp"
 
 #include "test_utils.hpp"
 
@@ -1732,6 +1733,53 @@ SCENARIO("bbs_3mf_is_published detects only genuinely published 3MFs", "[3mf]") 
                 release_PlateData_list(dst_plates);
             }
         }
+    }
+}
+
+TEST_CASE("BBS 3MF round-trips per-plate custom G-code", "[3mf][3MFCustomGCode]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+
+    CustomGCode::Info &gcode = model.plates_custom_gcodes[0];
+    gcode.mode = CustomGCode::Mode::MultiExtruder;
+    gcode.gcodes = {
+        { 0.2, CustomGCode::ColorChange, 1, "#ff0000", "" },
+        { 0.4, CustomGCode::PausePrint, 2, "pause", "hold for inspection" },
+        { 0.6, CustomGCode::ToolChange, 3, "", "" },
+        { 0.8, CustomGCode::Custom, 1, "", "M117 custom marker" },
+    };
+
+    ScopedTemporaryDir backup_dir("orca_3mf_custom_gcode_src");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = temp.string().c_str();
+    store_params.model    = &model;
+    store_params.config   = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_3mf_custom_gcode_dst");
+    REQUIRE(load_project(temp.string(), loaded_model, loaded_backup_dir));
+
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    const auto loaded_it = loaded_model.plates_custom_gcodes.find(0);
+    REQUIRE(loaded_it != loaded_model.plates_custom_gcodes.end());
+    REQUIRE(loaded_it->second.mode == CustomGCode::Mode::MultiExtruder);
+    REQUIRE(loaded_it->second.gcodes.size() == gcode.gcodes.size());
+    for (size_t i = 0; i < gcode.gcodes.size(); ++i) {
+        const CustomGCode::Item &expected = gcode.gcodes[i];
+        const CustomGCode::Item &actual   = loaded_it->second.gcodes[i];
+        CHECK_THAT(actual.print_z, Catch::Matchers::WithinAbs(expected.print_z, 1e-6));
+        CHECK(actual.type == expected.type);
+        CHECK(actual.extruder == expected.extruder);
+        CHECK(actual.color == expected.color);
+        CHECK(actual.extra == expected.extra);
     }
 }
 
