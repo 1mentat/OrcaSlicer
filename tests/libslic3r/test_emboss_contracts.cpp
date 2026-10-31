@@ -47,7 +47,7 @@ double area_of(const ExPolygons &shape)
 
 } // namespace
 
-TEST_CASE("Healing removes self intersections while retaining filled area", "[Emboss][EmbossExtra]")
+TEST_CASE("Healing removes self intersections while retaining filled area", "[Emboss][EmbossHealing]")
 {
     // A bow tie: two 20 x 10 triangles meeting at its centre. Left self-crossing, its
     // signed area is 0, so the full 200 mm^2 shows the crossing was resolved.
@@ -76,7 +76,7 @@ static ExPolygons close_point_shape()
 
 // Known bug: divide_segments_for_close_point passes the radius to AABBTreeLines::all_lines_in_radius, which expects
 // it squared, so the search radius is sqrt(distance); fixed by the follow-up fix PR.
-TEST_CASE("Close-point division honors a Euclidean radius boundary", "[Emboss][EmbossExtra][!shouldfail]")
+TEST_CASE("Close-point division honors a Euclidean radius boundary", "[Emboss][EmbossHealing][!shouldfail]")
 {
     const double unit = 1. / SCALING_FACTOR;
     const size_t original_points = close_point_shape().front().contour.size();
@@ -103,7 +103,7 @@ TEST_CASE("Close-point division honors a Euclidean radius boundary", "[Emboss][E
     CHECK_FALSE(Emboss::divide_segments_for_close_point(empty, 2.0 * unit));
 }
 
-TEST_CASE("Union-with-delta merges overlapping glyph shapes and caches the healed result", "[Emboss][EmbossExtra]")
+TEST_CASE("Union-with-delta merges overlapping glyph shapes and caches the healed result", "[Emboss][EmbossHealing]")
 {
     EmbossShape shape;
     shape.shapes_with_ids = {
@@ -174,7 +174,7 @@ void check_positive_oriented_contours(const ExPolygons &shape)
 
 } // namespace
 
-TEST_CASE("Healing removes a sharp duplicate-point island and preserves the broad contour", "[Emboss][EmbossSpikeFollowup]")
+TEST_CASE("Healing removes a sharp duplicate-point island and preserves the broad contour", "[Emboss][EmbossHealing]")
 {
     const ExPolygon broad = broad_triangle();
     const double broad_area = broad.area();
@@ -186,7 +186,7 @@ TEST_CASE("Healing removes a sharp duplicate-point island and preserves the broa
     CHECK_THAT(shape.front().area(), WithinAbs(broad_area, 4.));
 }
 
-TEST_CASE("Healing retains a non-spike duplicate-point island as a separate contour", "[Emboss][EmbossSpikeFollowup]")
+TEST_CASE("Healing retains a non-spike duplicate-point island as a separate contour", "[Emboss][EmbossHealing]")
 {
     const ExPolygon broad = broad_triangle();
     const double broad_area = broad.area();
@@ -203,7 +203,7 @@ TEST_CASE("Healing retains a non-spike duplicate-point island as a separate cont
     CHECK_THAT(shape.front().area(), WithinAbs(blunt_area, 4.));
 }
 
-TEST_CASE("Healing leaves a shape without duplicate points unchanged", "[Emboss][EmbossSpikeFollowup]")
+TEST_CASE("Healing leaves a shape without duplicate points unchanged", "[Emboss][EmbossHealing]")
 {
     ExPolygons shape{broad_triangle()};
     const ExPolygons original = shape;
