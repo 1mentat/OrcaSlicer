@@ -568,10 +568,7 @@ TEST_CASE("Arrange leaves an invalid contour unarranged while placing the valid 
     CHECK(items[1].bed_idx == UNARRANGED);
 }
 
-// Known bug: arrange() drops contours with fewer than 3 points before nesting but writes the results back by
-// position, so an invalid item takes the next item's result and the last items keep their input; fixed by the
-// follow-up fix PR.
-TEST_CASE("Arrange keeps results aligned with their items when an invalid contour comes first", "[Arrange][ArrangeSurface][!shouldfail]")
+TEST_CASE("Arrange keeps results aligned with their items when an invalid contour comes first", "[Arrange][ArrangeSurface]")
 {
     // Callers seed bed_idx to 0 before arranging (see get_arrange_polys).
     ArrangePolygon invalid;
