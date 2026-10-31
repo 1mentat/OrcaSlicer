@@ -1518,7 +1518,7 @@ TEST_CASE("Transformation axis setters change only their own component", "[Geome
 
     // X is mirrored, but the decomposition carries the reflection on the smallest-scale axis
     // (Z) and compensates with a half turn. Changing the X or Y scale leaves that entry alone,
-    // so the reflection survives; changing Z is the known bug tagged below.
+    // so the reflection survives; changing Z is covered by the test below.
     Geometry::Transformation mirrored = scaled_quarter_turn(Vec3d(-1., 1., 1.));
     mirrored.set_scaling_factor(Y, 5.);
     check_linear_and_offset(mirrored.get_matrix(), quarter_turn_times(Vec3d(-4., 5., 2.)), offset);
