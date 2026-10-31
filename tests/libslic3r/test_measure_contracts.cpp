@@ -502,15 +502,19 @@ TEST_CASE("Edge and circle distances to a bounded plane use its boundary edges",
         edge(Vec3d(1.0, 1.0, 0.0), Vec3d(-1.0, 1.0, 0.0)), edge(Vec3d(-1.0, 1.0, 0.0), Vec3d(-1.0, -1.0, 0.0))});
     const SurfaceFeature floor = plane(7, Vec3d::UnitZ(), Vec3d::Zero(), boundary);
 
-    // The edge rises 2 over a run of 4 from (0, 0, 3), which is sqrt(1 + 9) from the nearest boundary points.
-    const MeasurementResult diagonal_floor = get_measurement(edge(Vec3d(0.0, 0.0, 3.0), Vec3d(4.0, 0.0, 5.0)), floor);
+    // An edge rising at 45 degrees beside the face: both ends project outside it, and the closest pair is
+    // its lower end (3, 0, 1) and the boundary point (1, 0, 0), sqrt(2^2 + 1^2) apart.
+    const MeasurementResult diagonal_floor = get_measurement(edge(Vec3d(3.0, 0.0, 1.0), Vec3d(5.0, 0.0, 3.0)), floor);
     REQUIRE(diagonal_floor.angle.has_value());
-    CHECK_THAT(diagonal_floor.angle->angle, WithinAbs(std::atan2(2.0, 4.0), 1e-8));
-    check_witnessed_distance(diagonal_floor.distance_infinite, std::sqrt(10.0));
-    check_vec(diagonal_floor.distance_infinite->from, Vec3d(0.0, 0.0, 3.0));
+    // The plane-side witness ray starts at the plane origin, which lies across the intersection (2, 0, 0)
+    // from this edge, so the branch reports the supplement here; either is the 45 degree line-plane angle.
+    CHECK_THAT(std::min(diagonal_floor.angle->angle, PI - diagonal_floor.angle->angle), WithinAbs(0.25 * PI, 1e-8));
+    check_witnessed_distance(diagonal_floor.distance_infinite, std::sqrt(5.0));
+    check_vec(diagonal_floor.distance_infinite->from, Vec3d(3.0, 0.0, 1.0));
+    check_vec(diagonal_floor.distance_infinite->to, Vec3d(1.0, 0.0, 0.0));
 
-    // A circle standing in the plane x = 4 beside the face: the closest face point is (1, 0, 0), 3 off the
-    // circle's plane and 5 - 2 radially from its center.
+    // A circle standing in the plane x = 4 beside the face, so every circle point projects outside it: the
+    // closest pair is (1, 0, 0) and the lowest circle point (4, 0, 3), sqrt(3^2 + 3^2) apart.
     const SurfaceFeature standing = circle(Vec3d(4.0, 0.0, 5.0), Vec3d::UnitX(), 2.0);
     const MeasurementResult standing_floor = get_measurement(standing, floor);
     check_witnessed_distance(standing_floor.distance_infinite, std::sqrt(18.0));
@@ -524,6 +528,24 @@ TEST_CASE("Edge and circle distances to a bounded plane use its boundary edges",
     const MeasurementResult ring_floor = get_measurement(circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0), unbounded);
     check_witnessed_distance(ring_floor.distance_infinite, 5.0);
     check_vec(ring_floor.distance_infinite->to, Vec3d::Zero());
+}
+
+// Known bug: the edge-plane and circle-plane branches measure only to the face's boundary edges, so a
+// feature above the face interior gets the distance to the boundary instead; needs a fix PR
+TEST_CASE("Edge and circle distances to a bounded plane reach the face interior", "[Measure][MeasureContracts][!shouldfail]")
+{
+    const auto boundary = std::make_shared<std::vector<SurfaceFeature>>(std::vector<SurfaceFeature>{
+        edge(Vec3d(-1.0, -1.0, 0.0), Vec3d(1.0, -1.0, 0.0)), edge(Vec3d(1.0, -1.0, 0.0), Vec3d(1.0, 1.0, 0.0)),
+        edge(Vec3d(1.0, 1.0, 0.0), Vec3d(-1.0, 1.0, 0.0)), edge(Vec3d(-1.0, 1.0, 0.0), Vec3d(-1.0, -1.0, 0.0))});
+    const SurfaceFeature floor = plane(7, Vec3d::UnitZ(), Vec3d::Zero(), boundary);
+
+    // The lower end (0, 0, 3) of a rising edge lies right above the face center, 3 away.
+    const MeasurementResult diagonal_floor = get_measurement(edge(Vec3d(0.0, 0.0, 3.0), Vec3d(4.0, 0.0, 5.0)), floor);
+    check_witnessed_distance(diagonal_floor.distance_infinite, 3.0);
+
+    // The lowest point (0, 0, 3) of a circle standing in x = 0 lies right above the face center, 3 away.
+    const MeasurementResult standing_floor = get_measurement(circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitX(), 2.0), floor);
+    check_witnessed_distance(standing_floor.distance_infinite, 3.0);
 }
 
 TEST_CASE("Cylinder extraction finds two circular caps and gives each facet one plane", "[Measure][MeasureContracts]")
