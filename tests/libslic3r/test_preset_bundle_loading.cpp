@@ -1600,6 +1600,54 @@ TEST_CASE("Filaments offered for a machine follow the app's compatibility rule",
     }
 }
 
+TEST_CASE("Switching a printer reselects a compatible process and every filament slot", "[Preset][Bundle][Compatibility][PresetSelection]")
+{
+    PresetBundle bundle;
+    // Add every preset before taking references: load_preset inserts into a std::deque.
+    for (const char *name : { "Printer A", "Printer B" })
+        add_inmemory_preset(bundle.printers, name);
+    for (const char *name : { "Process A", "Process B" })
+        add_inmemory_preset(bundle.prints, name);
+    for (const char *name : { "Filament A", "Filament B" })
+        add_inmemory_preset(bundle.filaments, name);
+    auto stored = [](PresetCollection &coll, const std::string &name) -> Preset & {
+        Preset *preset = coll.find_preset(name, /*first_visible_if_not_found=*/false, /*real=*/true);
+        REQUIRE(preset != nullptr);
+        return *preset;
+    };
+
+    for (const std::string suffix : { "A", "B" }) {
+        Preset &printer = stored(bundle.printers, "Printer " + suffix);
+        printer.is_system = true;
+        printer.config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = { 0.4, 0.4 };
+        printer.config.option<ConfigOptionString>("default_print_profile", true)->value = "Process " + suffix;
+        printer.config.option<ConfigOptionStrings>("default_filament_profile", true)->values = { "Filament " + suffix, "Filament " + suffix };
+        compatible_list(bundle.prints, "Process " + suffix, "compatible_printers") = { printer.name };
+        compatible_list(bundle.filaments, "Filament " + suffix, "compatible_printers") = { printer.name };
+        compatible_list(bundle.filaments, "Filament " + suffix, "compatible_prints") = { "Process " + suffix };
+    }
+    stored(bundle.prints, "Process A").config.option<ConfigOptionFloat>("layer_height", true)->value = 0.16;
+    stored(bundle.prints, "Process B").config.option<ConfigOptionFloat>("layer_height", true)->value = 0.24;
+
+    bundle.printers.select_preset_by_name("Printer A", true);
+    bundle.prints.select_preset_by_name("Process A", true);
+    bundle.filaments.select_preset_by_name("Filament A", true);
+    bundle.filament_presets = { "Filament A", "Filament A" };
+    bundle.update_compatible(PresetSelectCompatibleType::Always);
+    REQUIRE(bundle.prints.get_selected_preset_name() == "Process A");
+    REQUIRE(bundle.filament_presets == std::vector<std::string>{ "Filament A", "Filament A" });
+
+    bundle.printers.select_preset_by_name("Printer B", true);
+    bundle.update_compatible(PresetSelectCompatibleType::Always);
+
+    CHECK(bundle.prints.get_selected_preset_name() == "Process B");
+    CHECK_THAT(bundle.prints.get_selected_preset().config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK(bundle.filaments.get_selected_preset_name() == "Filament B");
+    CHECK(bundle.filament_presets == std::vector<std::string>{ "Filament B", "Filament B" });
+    CHECK_FALSE(stored(bundle.filaments, "Filament A").is_compatible);
+    CHECK(stored(bundle.filaments, "Filament B").is_compatible);
+}
+
 
 namespace {
 
