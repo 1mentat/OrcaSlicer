@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <ios>
 #include <iterator>
@@ -595,4 +596,20 @@ TEST_CASE("UTF8 stepping from a continuation byte stops before a new character",
     CHECK(get_utf8_sequence_length(header_end, 0) == 2);
     CHECK(get_utf8_sequence_length("\xfe", 1) == 1);
     CHECK(get_utf8_sequence_length("\xff", 1) == 1);
+}
+
+TEST_CASE("Power of two overloads preserve bounded integral boundaries", "[utils]") {
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(0)) == static_cast<uint16_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(3)) == static_cast<uint16_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(255)) == static_cast<uint16_t>(256));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(0)) == static_cast<uint32_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(3)) == static_cast<uint32_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(1025)) == static_cast<uint32_t>(2048));
+}
+
+TEST_CASE("Round up divide handles exact and partial bounded quotients", "[utils]") {
+    CHECK(round_up_divide<long long>(0, 3) == 0);
+    CHECK(round_up_divide<long long>(1, 3) == 1);
+    CHECK(round_up_divide<long long>(3, 3) == 1);
+    CHECK(round_up_divide<long long>(4, 3) == 2);
 }
