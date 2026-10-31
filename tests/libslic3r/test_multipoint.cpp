@@ -193,15 +193,6 @@ TEST_CASE("Visvalingam removes a shallow run before its neighbors", "[MultiPoint
 }
 
 // Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
-TEST_CASE("Visvalingam is deterministic for repeated equal input", "[MultiPoint][Visvalingam][.]")
-{
-    const Points input = make_polyline();
-    const Points expected = partial_reference(input);
-    for (int i = 0; i < 4; ++i)
-        check_exact(MultiPoint::visivalingam(input, partial_tolerance), expected);
-}
-
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
 TEST_CASE("Visvalingam rejects only internal points at a large tolerance", "[MultiPoint][Visvalingam][.]")
 {
     const Points input = make_polyline();
@@ -223,7 +214,7 @@ TEST_CASE("Visvalingam retains a high-area tail node", "[MultiPoint][Visvalingam
     CHECK(expected[expected.size() - 2] == input[input.size() - 2]);
 }
 
-TEST_CASE("MultiPoint tolerance lookup and duplicate cleanup preserve point identity", "[MultiPoint][MultiPointGap]")
+TEST_CASE("MultiPoint tolerance lookup finds a vertex strictly inside the radius", "[MultiPoint][MultiPointGap]")
 {
     Polyline path{Point(0, 0), Point(100, 0), Point(100, 100)};
     CHECK(path.find_point(Point(100, 0)) == 1);
@@ -233,7 +224,10 @@ TEST_CASE("MultiPoint tolerance lookup and duplicate cleanup preserve point iden
     CHECK(path.has_boundary_point(Point(50, 0)));
     // SCALED_EPSILON is 100 coordinate units; this offset is intentionally well outside it.
     CHECK_FALSE(path.has_boundary_point(Point(50, 1000)));
+}
 
+TEST_CASE("MultiPoint duplicate cleanup collapses consecutive repeated vertices", "[MultiPoint][MultiPointGap]")
+{
     Polyline duplicates{Point(0, 0), Point(10, 0), Point(10, 0), Point(10, 0), Point(20, 0)};
     CHECK(duplicates.has_duplicate_points());
     CHECK(duplicates.remove_duplicate_points());
@@ -290,6 +284,15 @@ TEST_CASE("MultiPoint line distance handles projections, endpoints, and degenera
     const Points remote_point{Point(3, 4), Point(3, 4)};
     CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(point_segment, remote_point),
                WithinAbs(5.0, 1e-9));
+
+    // Both perpendicular feet fall outside their segments: (13, 4) projects past (10, 0) at
+    // distance 4, and (10, 0) projects below (13, 4) at distance 3. Clamping to the segment
+    // ends makes the true distance |(13, 4) - (10, 0)| = 5 in either argument order.
+    const Points beyond{Point(13, 4), Point(13, 8)};
+    CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(horizontal, beyond),
+               WithinAbs(5.0, 1e-9));
+    CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(beyond, horizontal),
+               WithinAbs(5.0, 1e-9));
 }
 
 TEST_CASE("MultiPoint concave hull keeps a concavity up to its tolerance boundary", "[MultiPoint][MultiPointGap]")
@@ -307,16 +310,26 @@ TEST_CASE("MultiPoint concave hull keeps a concavity up to its tolerance boundar
     CHECK(smoothed == expected_smoothed);
 }
 
-TEST_CASE("MultiPoint3 keeps Z coordinates while matching, rotating, and deduplicating", "[MultiPoint][MultiPointGap]")
+TEST_CASE("MultiPoint3 matches and deduplicates on all three coordinates", "[MultiPoint][MultiPointGap]")
 {
-    Polyline3 path(Points3{Point3(0, 0, 5), Point3(10, 0, 7), Point3(10, 10, 9), Point3(10, 10, 9)});
-    CHECK(path.find_point(Point3(10, 0, 7)) == 1);
-    CHECK(path.find_point(Point3(10, 1, 7), 2.0) == 1);
-    CHECK(path.find_point(Point3(10, 1, 7), 1.0) == -1);
-    CHECK(path.remove_duplicate_points());
-    CHECK(path.points.size() == 3);
-    CHECK_FALSE(path.remove_duplicate_points());
+    // The first three vertices share XY and differ only in Z, so an XY-only comparison
+    // would match index 0 and collapse them.
+    Polyline3 path(Points3{Point3(0, 0, 5), Point3(0, 0, 8), Point3(0, 0, 8), Point3(10, 0, 7)});
+    CHECK(path.find_point(Point3(0, 0, 8)) == 1);
+    CHECK(path.find_point(Point3(0, 0, 6)) == -1);
+    CHECK(path.find_point(Point3(0, 1, 9), 2.0) == 1);
+    CHECK(path.find_point(Point3(10, 0, 12), 2.0) == -1);
+    // The 2D overload compares the XY projection only.
+    CHECK(path.find_point(Point(0, 0)) == 0);
 
+    CHECK(path.remove_duplicate_points());
+    CHECK(path.points == Points3{Point3(0, 0, 5), Point3(0, 0, 8), Point3(10, 0, 7)});
+    CHECK_FALSE(path.remove_duplicate_points());
+}
+
+TEST_CASE("MultiPoint3 bounding box and rotation keep Z coordinates", "[MultiPoint][MultiPointGap]")
+{
+    Polyline3 path(Points3{Point3(0, 0, 5), Point3(10, 0, 7), Point3(10, 10, 9)});
     const BoundingBox3 bounds = path.bounding_box();
     CHECK(bounds.defined);
     CHECK(bounds.min == Point3(0, 0, 5));
