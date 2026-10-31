@@ -1737,8 +1737,8 @@ SCENARIO("bbs_3mf_is_published detects only genuinely published 3MFs", "[3mf]") 
     }
 }
 
-// Every text configuration field set to a non-default value. Text, style name and
-// descriptor carry XML special characters; the font names are plain.
+// Every text configuration field set to a non-default value. The text and the font
+// descriptor carry XML special characters; the style name and font names are plain.
 static TextConfiguration make_text_configuration()
 {
     TextConfiguration tc;
@@ -1822,6 +1822,9 @@ TEST_CASE("BBS 3MF round-trips text configuration metadata with plain font names
 TEST_CASE("BBS 3MF round-trips text configuration metadata", "[3mf][EmbossMetadata][!shouldfail]")
 {
     TextConfiguration tc = make_text_configuration();
+    // Each escaped attribute (style name, font family, face name, style, weight) holds
+    // characters that make the model XML malformed unless they are escaped.
+    tc.style.name = "Round-trip <style> & \"quotes\" '>'";
     tc.style.prop.family = "Noto & Sans";
     tc.style.prop.face_name = "Display<>\"";
     tc.style.prop.style = "Italic & Oblique";
