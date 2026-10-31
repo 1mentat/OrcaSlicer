@@ -1620,15 +1620,24 @@ TEST_CASE("Transformation scale setters apply new magnitudes and keep orientatio
             }
 }
 
-TEST_CASE("Transformation scale setters keep the reflection and orientation of a skewed transform",
+TEST_CASE("Transformation scale setters keep the handedness and orientation of a skewed transform",
           "[Geometry][Transformation][Scale][Mirror][Skew]")
 {
+    const bool mirrored = GENERATE(true, false);
     Transform3d matrix = Transform3d::Identity();
-    matrix.linear() << -1., -0.5, 0.,
-                        0.5,  1., 0.,
-                        0.,   0., 3.;
+    if (mirrored)
+        matrix.linear() << -1., -0.5, 0.,
+                            0.5,  1., 0.,
+                            0.,   0., 3.;
+    else
+        matrix.linear() << 1.,   0.5, 0.,
+                           -0.25, 1., 0.,
+                            0.,   0., 3.;
     matrix.translation() = Vec3d(5., -6., 7.);
-    REQUIRE(matrix.linear().determinant() < 0.);
+    const bool left_handed = matrix.linear().determinant() < 0.;
+    REQUIRE(left_handed == mirrored);
+    // The columns are not orthogonal, so the stretch has off-diagonal terms.
+    REQUIRE(std::abs(matrix.linear().col(0).dot(matrix.linear().col(1))) > 0.1);
 
     // Independent polar decomposition: linear = orthogonal * stretch, stretch = sqrt(linearT * linear).
     const auto polar = [](const Matrix3d &linear) {
@@ -1638,20 +1647,69 @@ TEST_CASE("Transformation scale setters keep the reflection and orientation of a
     const Matrix3d orthogonal = polar(matrix.linear()).first;
 
     const double factor = GENERATE(0.1, 0.25, 4.);
-    CAPTURE(factor);
+    CAPTURE(mirrored, factor);
     Geometry::Transformation by_axis(matrix);
     by_axis.set_scaling_factor(X, factor);
     const Matrix3d axis_linear = by_axis.get_matrix().linear();
     REQUIRE(axis_linear.allFinite());
-    CHECK(axis_linear.determinant() < 0.);
+    CHECK((axis_linear.determinant() < 0.) == left_handed);
     const auto [axis_orthogonal, axis_stretch] = polar(axis_linear);
     CHECK(axis_orthogonal.isApprox(orthogonal, 1e-9));
     CHECK_THAT(axis_stretch(0, 0), WithinAbs(factor, 1e-9));
+    CHECK(Eigen::SelfAdjointEigenSolver<Matrix3d>(axis_stretch).eigenvalues().minCoeff() > 0.);
     CHECK(by_axis.get_offset().isApprox(matrix.translation(), 1e-12));
 
     Geometry::Transformation by_vector(matrix);
     by_vector.set_scaling_factor(Vec3d(factor, 2., 3.));
     check_linear_and_offset(by_vector.get_matrix(), orthogonal * Vec3d(factor, 2., 3.).asDiagonal(), matrix.translation(), 1e-9);
+}
+
+TEST_CASE("Transformation scale setters stay finite on singular and near-singular transforms",
+          "[Geometry][Transformation][Scale]")
+{
+    Transform3d flat = Transform3d::Identity();
+    flat.linear() = Vec3d(0., 2., 3.).asDiagonal();
+    Geometry::Transformation flat_axis(flat);
+    flat_axis.set_scaling_factor(X, 1.);
+    check_linear_and_offset(flat_axis.get_matrix(), Vec3d(1., 2., 3.).asDiagonal(), Vec3d::Zero());
+
+    const Matrix3d rotation = Eigen::AngleAxisd(0.7, Vec3d(1., -2., 0.5).normalized()).toRotationMatrix();
+    Transform3d rank_one = Transform3d::Identity();
+    rank_one.linear() = Vec3d(1., 2., 3.) * Vec3d(0.5, -1., 2.).transpose();
+    Transform3d near_singular_mirror = Transform3d::Identity();
+    near_singular_mirror.linear() = rotation * Vec3d(-1e-9, 2., 3.).asDiagonal();
+
+    for (const Transform3d &matrix : {flat, rank_one, near_singular_mirror}) {
+        CAPTURE(matrix.linear());
+        Geometry::Transformation by_vector(matrix);
+        by_vector.set_scaling_factor(Vec3d(1., 2., 3.));
+        CHECK(by_vector.get_matrix().matrix().allFinite());
+        for (Axis axis : {X, Y, Z}) {
+            Geometry::Transformation by_axis(matrix);
+            by_axis.set_scaling_factor(axis, 1.5);
+            CHECK(by_axis.get_matrix().matrix().allFinite());
+        }
+    }
+
+#ifdef NDEBUG
+    // Without asserts, invalid factors fall back to a plain assignment instead of producing NaN.
+    for (const double invalid : {0., -1.}) {
+        CAPTURE(invalid);
+        Transform3d skewed = Transform3d::Identity();
+        skewed.linear() << -1., -0.5, 0., 0.5, 1., 0., 0., 0., 3.;
+        Geometry::Transformation by_invalid_axis(skewed);
+        by_invalid_axis.set_scaling_factor(X, invalid);
+        CHECK_FALSE(by_invalid_axis.get_matrix().matrix().hasNaN());
+    }
+#endif
+
+    // The near-singular mirror keeps its reflection through both setters.
+    Geometry::Transformation by_vector(near_singular_mirror);
+    by_vector.set_scaling_factor(Vec3d(1., 2., 3.));
+    CHECK(by_vector.get_matrix().linear().determinant() < 0.);
+    Geometry::Transformation by_axis(near_singular_mirror);
+    by_axis.set_scaling_factor(X, 1.);
+    CHECK(by_axis.get_matrix().linear().determinant() < 0.);
 }
 
 TEST_CASE("Transformation rotation reset keeps scale and offset", "[Geometry][Transformation][Reset]")
