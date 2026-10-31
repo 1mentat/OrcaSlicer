@@ -24,6 +24,7 @@ add_executable(${_TEST_NAME}_tests
     test_config_variant_expansion.cpp
     test_locales_utils.cpp
     test_drc.cpp
+    test_edge_grid.cpp
     test_gcodereader.cpp
     test_toolordering_nozzle_group.cpp
     test_parallel_resolve.cpp
