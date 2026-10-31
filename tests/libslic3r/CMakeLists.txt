@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
     test_belt_brim.cpp
     test_buildvolume.cpp
     test_calib.cpp
+    test_circle.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
     test_config.cpp
@@ -37,6 +38,7 @@ add_executable(${_TEST_NAME}_tests
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
     test_geometry.cpp
+    test_point.cpp
     test_multimaterial_segmentation.cpp
     test_placeholder_parser.cpp
     test_png_read_write.cpp
