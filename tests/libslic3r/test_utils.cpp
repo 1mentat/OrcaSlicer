@@ -887,3 +887,12 @@ TEST_CASE("Configured resource directories resolve against the roots they were g
     CHECK_FALSE(is_shapes_dir((root / "unrelated").string()));
     CHECK_FALSE(is_shapes_dir((root / "data" / "nested").string()));
 }
+
+TEST_CASE("Perl-compatible path helpers split a path into parent, file name, stem and final extension", "[utils]") {
+    const auto p = boost::filesystem::path("models") / "nested" / "part.v2.3mf";
+    const auto s = p.string();
+    CHECK(PerlUtils::path_to_filename(s.c_str()) == "part.v2.3mf");
+    CHECK(PerlUtils::path_to_stem(s.c_str()) == "part.v2");
+    CHECK(PerlUtils::path_to_extension(s.c_str()) == ".3mf");
+    CHECK(PerlUtils::path_to_parent_path(s.c_str()) == (boost::filesystem::path("models") / "nested").string());
+}
