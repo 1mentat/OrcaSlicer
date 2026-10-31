@@ -16,6 +16,8 @@
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Geometry/Circle.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Geometry/MedialAxis.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ShortestPath.hpp"
 
@@ -813,6 +815,28 @@ TEST_CASE("Convex polygon chains classify boundaries and reject exterior points"
     CHECK(degenerate_chains.first.empty());
     CHECK(degenerate_chains.second.empty());
     CHECK_FALSE(Geometry::inside_convex_polygon(degenerate_chains, Vec2d(2., 1.)));
+}
+
+TEST_CASE("Medial axis of a rectangle is its central spine", "[Geometry][GeometryContract][MedialAxis]")
+{
+    const coord_t millimeter = scale_(1.0);
+    const Polygon contour{{Point(0, 0), Point(20 * millimeter, 0),
+                           Point(20 * millimeter, 4 * millimeter), Point(0, 4 * millimeter)}};
+    const ExPolygon region(contour);
+    Geometry::MedialAxis medial_axis(0.0, double(20 * millimeter), region);
+    Polylines centerlines;
+
+    medial_axis.build(&centerlines);
+    // The corner bisectors are pruned, leaving the spine at half the width that
+    // stops one half-width short of each short side.
+    REQUIRE(centerlines.size() == 1);
+    const Polyline &spine = centerlines.front();
+    REQUIRE(spine.points.size() >= 2);
+    for (const Point &point : spine.points)
+        CHECK(std::abs(point.y() - 2 * millimeter) <= SCALED_EPSILON);
+    const BoundingBox bounds = get_extents(spine);
+    CHECK(std::abs(bounds.min.x() - 2 * millimeter) <= SCALED_EPSILON);
+    CHECK(std::abs(bounds.max.x() - 18 * millimeter) <= SCALED_EPSILON);
 }
 
 } // namespace geometry_contract_family
