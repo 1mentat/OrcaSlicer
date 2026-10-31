@@ -18,13 +18,14 @@
 
 #include "test_utils.hpp"
 
+#include <boost/nowide/fstream.hpp>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <ios>
 #include <map>
 #include <stdexcept>
@@ -232,6 +233,8 @@ TEST_CASE("SL1 archive rasterizes and exports named layers", "[SL1]")
     ScopedTemporaryFile output(".sl1");
     archive.export_print(output.string(), print, "fixture");
     const auto entries = archive_entries(output.string());
+    // config.ini plus two layers. prusaslicer.ini is absent: the unconfigured SLAPrint has an
+    // empty full config, and Zipper drops entries with no data.
     REQUIRE(entries.size() == 3);
     CHECK(std::find_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "config.ini"; }) != entries.end());
     const auto layer0 = std::find_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "fixture00000.png"; });
@@ -348,9 +351,9 @@ TEST_CASE("SL1 import sorts case-insensitive image names and excludes thumbnails
     const sla::EncodedRaster large = make_layer_png(true);
     ScopedTemporaryFile unsorted(".sl1"), sorted(".sl1");
     const std::vector<RawEntry> unsorted_layers{
-        raw_entry("Z_LAYER.PNG", large), raw_entry("A_LAYER.PNG", small), raw_entry("thumbnail.PNG", large)};
+        raw_entry("Z_LAYER.PNG", large), raw_entry("a_layer.png", small), raw_entry("thumbnail.PNG", large)};
     const std::vector<RawEntry> sorted_layers{
-        raw_entry("A_LAYER.PNG", small), raw_entry("Z_LAYER.PNG", large)};
+        raw_entry("a_layer.png", small), raw_entry("Z_LAYER.PNG", large)};
     write_archive(unsorted.string(), config_ini(), profile_ini(), unsorted_layers);
     write_archive(sorted.string(), config_ini(), profile_ini(), sorted_layers);
 
@@ -370,9 +373,10 @@ TEST_CASE("SL1 import sorts case-insensitive image names and excludes thumbnails
     const float last_width = layers.back()[1] - layers.back()[0];
     const float first_height = layers.front()[3] - layers.front()[2];
     const float last_height = layers.back()[3] - layers.back()[2];
-    // The fixture deliberately names the small layer A and the large layer Z.  This
-    // semantic assertion makes the filename ordering observable instead of comparing
-    // two archives that could both be decoded in the same wrong order.
+    // The small layer is "a_layer.png" and the large one "Z_LAYER.PNG": a case-sensitive sort
+    // would put 'Z' (0x5A) before 'a' (0x61). This semantic assertion makes the filename
+    // ordering observable instead of comparing two archives that could both be decoded in
+    // the same wrong order.
     CHECK(first_width < last_width);
     CHECK(first_height < last_height);
 }
@@ -412,7 +416,7 @@ TEST_CASE("SL1 import rejects malformed INI and corrupt zip inputs", "[SL1]")
 
     ScopedTemporaryFile corrupt_zip(".sl1");
     {
-        std::ofstream out(corrupt_zip.string(), std::ios::binary);
+        boost::nowide::ofstream out(corrupt_zip.string(), std::ios::binary);
         out << "not a zip archive";
     }
     CHECK_THROWS(import_sla_archive(corrupt_zip.string(), profile));
