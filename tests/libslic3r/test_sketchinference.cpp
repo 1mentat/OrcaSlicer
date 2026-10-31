@@ -1,8 +1,12 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/catch_all.hpp>   // mainline OrcaSlicer ships Catch2 v3 (v2 was catch2/catch.hpp)
 #include "libslic3r/CAD/SketchEngine.hpp"
 #include "libslic3r/Point.hpp"
+#include <cmath>
+#include <math.h>
 #include <vector>
 using Catch::Approx;   // v3 scopes Approx into the Catch namespace; v2 had it at global scope
 
@@ -176,4 +180,117 @@ TEST_CASE("inference: at most one relation per rule per new entity", "[inference
     CHECK(rels.size() == 1);
     CHECK(rels[0].type == SketchConstraintType::EqualRadius);
     CHECK(rels[0].eb == 40);
+}
+
+static SketchEntity arc(Vec2d c, double r, double start, double end)
+{
+    SketchEntity e;
+    e.type = SketchEntity::Type::Arc;
+    e.center = c;
+    e.radius = r;
+    e.start_angle = start;
+    e.end_angle = end;
+    e.p0 = c + r * Vec2d(std::cos(start), std::sin(start));
+    e.p1 = c + r * Vec2d(std::cos(end), std::sin(end));
+    return e;
+}
+
+TEST_CASE("Snapping projects the cursor onto wrapped and clockwise arcs", "[inference]")
+{
+    using Catch::Matchers::WithinAbs;
+    const Vec2d center(8.0, -3.0);
+    constexpr double radius = 5.0;
+    auto rim = [&](double angle) -> Vec2d { return center + radius * Vec2d(std::cos(angle), std::sin(angle)); };
+    auto near_rim = [&](double angle) -> Vec2d { return center + 5.3 * Vec2d(std::cos(angle), std::sin(angle)); };
+
+    // atan2 reports 250 degrees as -110, below the stored 225..315 degree range; the projection
+    // has to wrap the angle to see that the cursor is over the arc.
+    const double wrapped_angle = 250.0 * M_PI / 180.0;
+    const SketchEntity wrapped = arc(center, radius, 225.0 * M_PI / 180.0, 315.0 * M_PI / 180.0);
+    const InferenceSnap wrapped_snap = infer_point_snap({wrapped}, near_rim(wrapped_angle), 0.5, false);
+    REQUIRE(wrapped_snap.kind == K::OnEdge);
+    CHECK(wrapped_snap.entity == 0);
+    CHECK_THAT((wrapped_snap.point - rim(wrapped_angle)).norm(), WithinAbs(0.0, 1e-9));
+
+    // The mid-arc snap of the same arc.
+    const double mid_angle = 0.5 * (wrapped.start_angle + wrapped.end_angle);
+    const InferenceSnap mid_snap = infer_point_snap({wrapped}, rim(mid_angle), 0.1, false);
+    REQUIRE(mid_snap.kind == K::Midpoint);
+    CHECK_THAT((mid_snap.point - rim(mid_angle)).norm(), WithinAbs(0.0, 1e-9));
+
+    // A clockwise half arc (negative sweep) from 135 to -45 degrees passes through 90 degrees.
+    const SketchEntity clockwise = arc(center, radius, 3.0 * M_PI / 4.0, -M_PI / 4.0);
+    const InferenceSnap clockwise_snap = infer_point_snap({clockwise}, near_rim(M_PI / 2.0), 0.5, false);
+    REQUIRE(clockwise_snap.kind == K::OnEdge);
+    CHECK(clockwise_snap.entity == 0);
+    CHECK_THAT((clockwise_snap.point - rim(M_PI / 2.0)).norm(), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("Snapping reaches point, ellipse and spline targets and ranks Center above OnEdge", "[inference]")
+{
+    using Catch::Matchers::WithinAbs;
+
+    SketchEntity point;
+    point.type = SketchEntity::Type::Point;
+    point.p0 = Vec2d(2.0, 4.0);
+    const InferenceSnap point_snap = infer_point_snap({point}, Vec2d(2.1, 4.1), 0.25, false);
+    REQUIRE(point_snap.kind == K::Endpoint);
+    CHECK(point_snap.entity == 0);
+    CHECK(point_snap.role == SketchPointRole::P0);
+    CHECK_THAT((point_snap.point - point.p0).norm(), WithinAbs(0.0, 1e-9));
+
+    SketchEntity ellipse_arc;
+    ellipse_arc.type = SketchEntity::Type::EllipseArc;
+    ellipse_arc.center = Vec2d(20.0, 20.0);
+    ellipse_arc.p0 = Vec2d(25.0, 21.0);
+    ellipse_arc.p1 = Vec2d(22.0, 23.0);
+    const InferenceSnap ellipse_arc_snap = infer_point_snap({ellipse_arc}, ellipse_arc.p1 + Vec2d(0.1, 0.0), 0.25, false);
+    REQUIRE(ellipse_arc_snap.kind == K::Endpoint);
+    CHECK(ellipse_arc_snap.entity == 0);
+    CHECK(ellipse_arc_snap.role == SketchPointRole::P1);
+    CHECK_THAT((ellipse_arc_snap.point - ellipse_arc.p1).norm(), WithinAbs(0.0, 1e-9));
+
+    SketchEntity ellipse;
+    ellipse.type = SketchEntity::Type::Ellipse;
+    ellipse.center = Vec2d(30.0, 10.0);
+    const InferenceSnap ellipse_snap = infer_point_snap({ellipse}, ellipse.center + Vec2d(0.1, 0.0), 0.25, false);
+    REQUIRE(ellipse_snap.kind == K::Center);
+    CHECK(ellipse_snap.entity == 0);
+    CHECK(ellipse_snap.role == SketchPointRole::Center);
+    CHECK_THAT((ellipse_snap.point - ellipse.center).norm(), WithinAbs(0.0, 1e-9));
+
+    SketchEntity spline;
+    spline.type = SketchEntity::Type::BSpline;
+    spline.ctrl = {Vec2d(40.0, 0.0), Vec2d(42.0, 3.0), Vec2d(45.0, 0.0)};
+    spline.p0 = spline.ctrl.front();
+    spline.p1 = spline.ctrl.back();
+    const InferenceSnap spline_snap = infer_point_snap({spline}, spline.p1 + Vec2d(-0.1, 0.0), 0.25, false);
+    REQUIRE(spline_snap.kind == K::Endpoint);
+    CHECK(spline_snap.entity == 0);
+    CHECK(spline_snap.role == SketchPointRole::P1);
+    CHECK_THAT((spline_snap.point - spline.p1).norm(), WithinAbs(0.0, 1e-9));
+
+    // Priority outranks distance: the ellipse centre is farther from the cursor than the
+    // circle-rim projection, but Center is preferred to OnEdge.
+    ellipse.center = Vec2d(5.15, 0.0);
+    const InferenceSnap priority_snap = infer_point_snap({circle(Vec2d(0.0, 0.0), 5.0), ellipse}, Vec2d(5.05, 0.0), 0.2, false);
+    REQUIRE(priority_snap.kind == K::Center);
+    CHECK(priority_snap.entity == 1);
+    CHECK_THAT((priority_snap.point - ellipse.center).norm(), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("Tangency to an arc is inferred only at a shared endpoint", "[inference]")
+{
+    const SketchEntity quarter = arc(Vec2d(2.0, 3.0), 5.0, 0.0, M_PI / 2.0);
+
+    // A horizontal line starting at the arc's top end continues it tangentially.
+    const SketchEntity tangent = line(quarter.p1, quarter.p1 + Vec2d(10.0, 0.0));
+    const auto inferred = infer_relations({quarter, tangent}, 1);
+    REQUIRE(inferred.size() == 1);
+    CHECK(inferred[0].type == SketchConstraintType::Tangent);
+    CHECK(inferred[0].ea == 0);
+    CHECK(inferred[0].eb == 1);
+
+    // The same direction away from the arc is not a tangent relation.
+    CHECK(infer_relations({quarter, line(Vec2d(12.0, 8.0), Vec2d(17.0, 8.0))}, 1).empty());
 }

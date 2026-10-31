@@ -841,9 +841,15 @@ static AngleAndEdges angle_plane_plane(const std::tuple<int, Vec3d, Vec3d>& p1, 
     const Vec3d origin1_proj = intersection_line.projection(origin1);
     const Vec3d origin2_proj = intersection_line.projection(origin2);
 
-    // Calculate edges on planes
-    const Vec3d edge_on_plane1_unit = (origin1 - origin1_proj).normalized();
-    const Vec3d edge_on_plane2_unit = (origin2 - origin2_proj).normalized();
+    // Calculate edges on planes, pointing from the intersection line towards each origin. An origin on
+    // the line gives no such direction, so use the in-plane perpendicular to the line instead; either
+    // side of it yields the dihedral angle or its supplement.
+    const auto edge_on_plane_unit = [&intersection_line_direction](const Vec3d& origin, const Vec3d& origin_proj, const Vec3d& normal) {
+        const Vec3d away = origin - origin_proj;
+        return away.norm() < EPSILON ? Vec3d(normal.cross(intersection_line_direction).normalized()) : Vec3d(away.normalized());
+    };
+    const Vec3d edge_on_plane1_unit = edge_on_plane_unit(origin1, origin1_proj, normal1);
+    const Vec3d edge_on_plane2_unit = edge_on_plane_unit(origin2, origin2_proj, normal2);
     const double radius = std::max(10.0, std::max((origin1 - origin1_proj).norm(), (origin2 - origin2_proj).norm()));
     const std::pair<Vec3d, Vec3d> edge_on_plane1 = { origin1_proj + radius * edge_on_plane1_unit, origin1_proj + 2.0 * radius * edge_on_plane1_unit };
     const std::pair<Vec3d, Vec3d> edge_on_plane2 = { origin2_proj + radius * edge_on_plane2_unit, origin2_proj + 2.0 * radius * edge_on_plane2_unit };

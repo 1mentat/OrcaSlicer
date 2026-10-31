@@ -246,9 +246,7 @@ TEST_CASE("Measure assembly and coordinate-distance contracts are explicit", "[M
     CHECK_THAT(perpendicular.angle_radian, WithinAbs(0.5 * PI, 1e-6));
 }
 
-// Known bug: when both plane origins lie on the intersection line, angle_plane_plane builds
-// zero-length witness edges and reports pi/2 whatever the dihedral angle; fixed by a follow-up fix PR
-TEST_CASE("Plane angle is the dihedral angle when both origins lie on the intersection line", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Plane angle is the dihedral angle when both origins lie on the intersection line", "[Measure][MeasureContracts]")
 {
     // The planes meet at 45 degrees along the Y axis, and both origins sit on that line, so
     // there is no offset witness point to orient the angle: either 45 or 135 degrees is valid.
