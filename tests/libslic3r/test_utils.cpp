@@ -9,6 +9,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
@@ -18,14 +19,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <ios>
 #include <iterator>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <unistd.h>     // getuid
@@ -305,7 +309,7 @@ namespace {
 void touch(const boost::filesystem::path &path) { std::ofstream(path.string()) << "existing"; }
 std::string file_contents(const boost::filesystem::path &path)
 {
-    std::ifstream file(path.string());
+    std::ifstream file(path.string(), std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 } // namespace
@@ -521,6 +525,243 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     // Non-letters 0x20 apart are not equal.
     CHECK_FALSE(ascii_iequals("[", "{"));
     CHECK_FALSE(ascii_iequals("@", "`"));
+}
+
+namespace {
+// Checks one-based layers 1..last against the layers a pattern must select.
+void check_layer_pattern(const std::string &pattern, const std::set<int> &one_based, int last = 20)
+{
+    for (int n = 1; n <= last; ++n) {
+        INFO("pattern=" << pattern << ", layer=" << n);
+        CHECK(check_layer_id_pattern(pattern, n - 1) == (one_based.count(n) != 0));
+    }
+}
+} // namespace
+
+TEST_CASE("Layer patterns use one-based interval starts and repeat bounded spans", "[utils]") {
+    check_layer_pattern("5", {5, 10, 15, 20});
+    check_layer_pattern("5#2", {5, 6, 10, 11, 15, 16, 20});
+    check_layer_pattern("5#", {5, 10, 15, 20});
+    check_layer_pattern("1", {1, 2, 3, 4, 5}, 5);
+    check_layer_pattern("3#5", {3, 4, 5, 6, 7, 8, 9, 10}, 10);
+}
+
+TEST_CASE("Layer patterns strip whitespace and surrounding quote forms", "[utils]") {
+    for (const std::string &p : {" 5 # 2 ", "\t\"5#2\"\r\n", "' 5 # 2 '"})
+        check_layer_pattern(p, {5, 6, 10, 11, 15, 16, 20});
+    check_layer_pattern("\"1, 7, 9\"", {1, 7, 9});
+}
+
+TEST_CASE("Layer lists keep independent ranges and do not repeat their entries", "[utils]") {
+    check_layer_pattern("1,7,9", {1, 7, 9});
+    check_layer_pattern("5,9#2,18", {5, 9, 10, 18});
+    check_layer_pattern(",,3#,7#3,,12,", {3, 7, 8, 9, 12});
+}
+
+TEST_CASE("Layer lists ignore malformed entries without losing subsequent valid ranges", "[utils]") {
+    check_layer_pattern("bad,3,0#2,-1#2,5#0,6#-1,8#2,9999999999999999999999", {3, 8, 9});
+    check_layer_pattern("bad,#2,5#bad", {});
+}
+
+TEST_CASE("Layer patterns reject empty, negative, nonnumeric and nonpositive intervals", "[utils]") {
+    for (const std::string &p : {"", " ", "\"\"", "''", "bad", "#2", "5#bad", "0", "-2", "2#0", "2#-1", "9999999999999999999999"})
+        check_layer_pattern(p, {});
+    CHECK_FALSE(check_layer_id_pattern("1", -1));
+}
+
+TEST_CASE("UTF8 stepping spans ASCII and complete modern multibyte characters", "[utils]") {
+    const std::string s = "A\xc3\xa9\xe6\xa8\xa1\xf0\x9f\x90\x8bZ";
+    const std::vector<std::pair<size_t, size_t>> rows{{0, 1}, {1, 2}, {3, 3}, {6, 4}, {10, 1}};
+    for (const auto &[pos, len] : rows) {
+        CHECK(get_utf8_sequence_length(s, pos) == len);
+        CHECK(get_utf8_sequence_length(s.data() + pos, s.size() - pos) == len);
+    }
+}
+
+TEST_CASE("UTF8 stepping clamps truncated sequences to available bytes", "[utils]") {
+    for (const auto &[lead, width] : std::vector<std::pair<unsigned char, size_t>>{{0xc3, 2}, {0xe6, 3}, {0xf0, 4}, {0xf8, 5}, {0xfc, 6}}) {
+        // This helper measures byte spans, including legacy five/six-byte headers; it is not a Unicode validator.
+        std::string s(width, char(0x80));
+        s[0] = char(lead);
+        for (size_t available = 1; available <= width; ++available) {
+            CAPTURE(lead, width, available);
+            CHECK(get_utf8_sequence_length(s.data(), available) == available);
+        }
+    }
+}
+
+TEST_CASE("UTF8 stepping from a continuation byte stops before a new character", "[utils]") {
+    const std::string ascii_end  = "\x80\xbf\x81Z";
+    const std::string header_end = "\x80\xbf\xc3\xa9";
+    CHECK(get_utf8_sequence_length(ascii_end, 0) == 3);
+    CHECK(get_utf8_sequence_length(ascii_end.data(), 2) == 2);
+    CHECK(get_utf8_sequence_length(header_end, 0) == 2);
+    CHECK(get_utf8_sequence_length("\xfe", 1) == 1);
+    CHECK(get_utf8_sequence_length("\xff", 1) == 1);
+}
+
+TEST_CASE("Power of two overloads preserve bounded integral boundaries", "[utils]") {
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(0)) == static_cast<uint16_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(3)) == static_cast<uint16_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(255)) == static_cast<uint16_t>(256));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(0)) == static_cast<uint32_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(3)) == static_cast<uint32_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(1025)) == static_cast<uint32_t>(2048));
+}
+
+TEST_CASE("Round up divide handles exact and partial bounded quotients", "[utils]") {
+    CHECK(round_up_divide<long long>(0, 3) == 0);
+    CHECK(round_up_divide<long long>(1, 3) == 1);
+    CHECK(round_up_divide<long long>(3, 3) == 1);
+    CHECK(round_up_divide<long long>(4, 3) == 2);
+}
+
+TEST_CASE("MD5 file fingerprints match standard vectors across the 64 KiB read boundary", "[utils]") {
+    ScopedTemporaryDir d;
+    std::string file = (d.path() / "data").string(), digest;
+    for (const auto &[data, expected] :
+         std::vector<std::pair<std::string, std::string>>{{"", "D41D8CD98F00B204E9800998ECF8427E"},
+                                                          {"abc", "900150983CD24FB0D6963F7D28E17F72"},
+                                                          {std::string(65537, 'a'), "B3C6FC238E908636E53AABD5AD830CF7"}}) {
+        std::ofstream(file, std::ios::binary) << data;
+        REQUIRE(bbl_calc_md5(file, digest));
+        CHECK(digest == expected);
+    }
+}
+
+TEST_CASE("Character filtering removes only requested characters", "[utils]") {
+    CHECK(filter_characters("a-b_c!", "-_") == "abc!");
+    CHECK(filter_characters("stable", "") == "stable");
+}
+
+namespace {
+void write_bytes(const boost::filesystem::path &path, const std::string &bytes)
+{
+    std::ofstream out(path.string(), std::ios::binary);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(out.good());
+}
+} // namespace
+
+TEST_CASE("File verification distinguishes absent inputs, length differences and changed bytes", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_ORIGIN_NOT_OPENED);
+    write_bytes(a, "abc");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_TARGET_NOT_OPENED);
+    write_bytes(b, "ab");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+    write_bytes(b, "abd");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+    write_bytes(b, "abc");
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+    write_bytes(a, "");
+    write_bytes(b, "");
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+}
+
+TEST_CASE("File verification detects changes after its first eight MiB chunk", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    std::string data(8 * 1024 * 1024 + 17, 'x');
+    data.front() = 'A';
+    data.back()  = 'Z';
+    write_bytes(a, data);
+    write_bytes(b, data);
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+    data.back() = 'Y';
+    write_bytes(b, data);
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+}
+
+TEST_CASE("Verified copies preserve binary bytes and replace an existing destination", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    const std::string data("x\0y\r\nz", 6);
+    write_bytes(a, data);
+    write_bytes(b, "obsolete");
+    std::string error;
+    CHECK(copy_file(a.string(), b.string(), error, true) == SUCCESS);
+    CHECK(file_contents(b) == data);
+#ifndef _WIN32
+    // Off Windows the copy goes through a temporary file beside the destination; none may remain.
+    CHECK_FALSE(boost::filesystem::exists(b.string() + ".tmp"));
+#endif
+}
+
+TEST_CASE("Framework copying recurses through directories and overwrites ordinary files", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src / "sub");
+    boost::filesystem::create_directories(dst);
+    write_bytes(src / "top", "top");
+    write_bytes(src / "sub" / "child", "nested");
+    write_bytes(dst / "top", "old");
+    REQUIRE(copy_framework(src.string(), dst.string()));
+    CHECK(file_contents(dst / "top") == "top");
+    CHECK(file_contents(dst / "sub" / "child") == "nested");
+    CHECK_FALSE(copy_framework((src / "top").string(), (d.path() / "bad").string()));
+    write_bytes(d.path() / "blocked", "file");
+    CHECK_FALSE(copy_framework(src.string(), (d.path() / "blocked").string()));
+}
+
+#ifndef _WIN32
+TEST_CASE("Framework copying preserves relative symlink targets", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    fs::create_directories(src / "Versions" / "A");
+    write_bytes(src / "Versions" / "A" / "binary", "payload");
+    fs::create_symlink("A", src / "Versions" / "Current");
+    REQUIRE(copy_framework(src.string(), dst.string()));
+    CHECK(fs::is_symlink(fs::symlink_status(dst / "Versions" / "Current")));
+    CHECK(fs::read_symlink(dst / "Versions" / "Current").string() == "A");
+    CHECK(file_contents(dst / "Versions" / "Current" / "binary") == "payload");
+}
+#endif
+
+// Known bug: copy_framework (utils.cpp) ignores the result of its recursive call for a nested directory and still returns true; fixed by the follow-up fix PR
+TEST_CASE("Framework copying propagates a failure from a nested directory", "[utils][!shouldfail]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src / "nested");
+    boost::filesystem::create_directories(dst);
+    write_bytes(src / "nested" / "payload", "source");
+    write_bytes(dst / "nested", "occupied by a file");
+    CHECK_FALSE(copy_framework(src.string(), dst.string()));
+    CHECK(file_contents(dst / "nested") == "occupied by a file");
+}
+
+TEST_CASE("Recursive directory copies exclude selected filenames and distinguish replacement from merge", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    fs::create_directories(src / "sub");
+    fs::create_directories(dst / "sub");
+    write_bytes(src / "keep.json", "new");
+    write_bytes(src / "ignore.png", "image");
+    write_bytes(src / "sub" / "child", "child");
+    write_bytes(dst / "stale", "stale");
+    write_bytes(dst / "sub" / "old", "old");
+    copy_directory_recursively(src, dst, [](const std::string &name) { return name == "ignore.png"; }, true);
+    CHECK(file_contents(dst / "keep.json") == "new");
+    CHECK(file_contents(dst / "sub" / "child") == "child");
+    CHECK(fs::exists(dst / "stale"));
+    CHECK(fs::exists(dst / "sub" / "old"));
+    CHECK_FALSE(fs::exists(dst / "ignore.png"));
+    copy_directory_recursively(src, dst, {}, false);
+    CHECK_FALSE(fs::exists(dst / "stale"));
+    CHECK_FALSE(fs::exists(dst / "sub" / "old"));
+    CHECK(file_contents(dst / "ignore.png") == "image");
+}
+
+TEST_CASE("Recursive directory copying throws when a directory occupies a file's destination", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src);
+    boost::filesystem::create_directories(dst / "file.txt" / "occupied");
+    write_bytes(src / "file.txt", "payload");
+    CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
 }
 
 // Known bug: ScopeGuard move leaves the moved-from std::function non-empty on libc++ (double fire); fixed by the follow-up fix PR.
