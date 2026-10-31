@@ -5,6 +5,8 @@
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/BrimEarsPoint.hpp"
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
@@ -1733,6 +1735,66 @@ SCENARIO("bbs_3mf_is_published detects only genuinely published 3MFs", "[3mf]") 
             }
         }
     }
+}
+
+TEST_CASE("BBS 3MF round-trips object layer and brim metadata", "[3mf][3MFModelMetadata]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+
+    const std::vector<coordf_t> expected_profile { 0., 0.12, 0.8, 0.2, 1.6, 0.28 };
+    object->layer_height_profile.set(expected_profile);
+
+    DynamicPrintConfig range_config;
+    range_config.set_key_value("layer_height", new ConfigOptionFloat(0.31));
+    object->layer_config_ranges[{ 0.4, 1.2 }].assign_config(std::move(range_config));
+
+    object->brim_points.emplace_back(1.f, 2.f, 0.3f, 0.45f);
+    object->brim_points.emplace_back(3.f, 4.f, 0.7f, 0.85f);
+
+    ScopedTemporaryDir backup_dir("orca_3mf_metadata_src");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = temp.string().c_str();
+    store_params.model    = &model;
+    store_params.config   = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_3mf_metadata_dst");
+    REQUIRE(load_project(temp.string(), loaded_model, loaded_backup_dir));
+
+    REQUIRE(loaded_model.objects.size() == 1);
+    const ModelObject *loaded_object = loaded_model.objects.front();
+    REQUIRE(loaded_object->volumes.size() == 1);
+    REQUIRE(loaded_object->volumes.front()->mesh().its.vertices.size() == object->volumes.front()->mesh().its.vertices.size());
+
+    const std::vector<coordf_t> loaded_profile = loaded_object->layer_height_profile.get();
+    REQUIRE(loaded_profile.size() == expected_profile.size());
+    for (size_t i = 0; i < expected_profile.size(); ++i)
+        CHECK_THAT(loaded_profile[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+
+    REQUIRE(loaded_object->layer_config_ranges.size() == 1);
+    const auto &loaded_range = loaded_object->layer_config_ranges.begin();
+    CHECK_THAT(loaded_range->first.first, Catch::Matchers::WithinAbs(0.4, 1e-6));
+    CHECK_THAT(loaded_range->first.second, Catch::Matchers::WithinAbs(1.2, 1e-6));
+    REQUIRE(loaded_range->second.has("layer_height"));
+    CHECK_THAT(loaded_range->second.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
+
+    REQUIRE(loaded_object->brim_points.size() == 2);
+    CHECK_THAT(loaded_object->brim_points[0].pos(0), Catch::Matchers::WithinAbs(1., 1e-5));
+    CHECK_THAT(loaded_object->brim_points[0].pos(1), Catch::Matchers::WithinAbs(2., 1e-5));
+    CHECK_THAT(loaded_object->brim_points[0].pos(2), Catch::Matchers::WithinAbs(0.3, 1e-5));
+    CHECK_THAT(loaded_object->brim_points[0].head_front_radius, Catch::Matchers::WithinAbs(0.45, 1e-5));
+    CHECK_THAT(loaded_object->brim_points[1].pos(0), Catch::Matchers::WithinAbs(3., 1e-5));
+    CHECK_THAT(loaded_object->brim_points[1].pos(1), Catch::Matchers::WithinAbs(4., 1e-5));
+    CHECK_THAT(loaded_object->brim_points[1].pos(2), Catch::Matchers::WithinAbs(0.7, 1e-5));
+    CHECK_THAT(loaded_object->brim_points[1].head_front_radius, Catch::Matchers::WithinAbs(0.85, 1e-5));
 }
 
 // Writes a single-entry zip whose central directory carries a zip64 record declaring an
