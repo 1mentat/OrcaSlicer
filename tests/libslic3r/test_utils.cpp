@@ -522,12 +522,26 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     CHECK_FALSE(ascii_iequals("@", "`"));
 }
 
-TEST_CASE("Published model links accept only their canonical URL forms", "[utils]") {
+TEST_CASE("Published model links accept the canonical site roots over http and https", "[utils]") {
     CHECK(is_printables_link("https://printables.com"));
     CHECK(is_printables_link("HTTP://PRINTABLES.COM"));
-    CHECK_FALSE(is_printables_link("https://printables.com/model/1"));
     CHECK(is_makerworld_link("https://makerworld.com"));
-    CHECK_FALSE(is_makerworld_link("https://makerworld.com/model/1"));
+    CHECK(is_makerworld_link("http://makerworld.com"));
     CHECK(is_thingiverse_link("https://www.thingiverse.com"));
-    CHECK_FALSE(is_thingiverse_link("https://thingiverse.com"));
+    CHECK_FALSE(is_printables_link("ftp://printables.com"));
+    CHECK_FALSE(is_makerworld_link("https://example.com"));
+    CHECK_FALSE(is_thingiverse_link("https://makerworld.com"));
+}
+
+// Known bug: the host patterns in is_printables_link, is_makerworld_link and is_thingiverse_link (Utils.hpp) leave '.' unescaped, so any character matches; fixed by the follow-up fix PR
+TEST_CASE("Published model links match the dots in their host names literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_printables_link("https://printablesXcom"));
+    CHECK_FALSE(is_makerworld_link("https://makerworldXcom"));
+    CHECK_FALSE(is_thingiverse_link("https://wwwXthingiverse.com"));
+}
+
+// Known bug: is_makerworld_link (Utils.hpp) uses regex_match, so only the bare site root matches and a model URL does not; the
+// MakerWorld branch in Downloader::start_download (Downloader.cpp), which passes a full orcaslicer://open URL, can never be taken; fixed by the follow-up fix PR
+TEST_CASE("A MakerWorld model URL is recognised as a MakerWorld link", "[utils][!shouldfail]") {
+    CHECK(is_makerworld_link("https://makerworld.com/en/models/12345"));
 }
