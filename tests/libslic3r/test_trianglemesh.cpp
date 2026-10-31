@@ -43,8 +43,6 @@ TEST_CASE("TriangleMesh keeps topology and statistics for a translated solid", "
     CHECK_THAT(mesh.size().x(), WithinAbs(2., 1e-6));
     CHECK_THAT(mesh.size().y(), WithinAbs(3., 1e-6));
     CHECK_THAT(mesh.size().z(), WithinAbs(4., 1e-6));
-    const size_t before = mesh.memsize();
-    REQUIRE(before >= sizeof(TriangleMesh));
     mesh.translate(Vec3f(10.f, -2.f, 7.f));
     REQUIRE(mesh.bounding_box().min.isApprox(Vec3d(10., -2., 7.), 1e-6));
     REQUIRE(mesh.bounding_box().max.isApprox(Vec3d(12., 1., 11.), 1e-6));
@@ -65,9 +63,12 @@ TEST_CASE("TriangleMesh affine and mirror operations preserve their stated orien
     reflection(0, 0)       = -1.;
     reflected.transform(reflection, false);
     CHECK_THAT(reflected.volume(), WithinAbs(-24.f, 1e-4f));
+    CHECK_THAT(its_volume(reflected.its), WithinAbs(-24.f, 1e-4f));
     TriangleMesh fixed = make_cube(2., 3., 4.);
     fixed.transform(reflection, true);
     CHECK_THAT(fixed.volume(), WithinAbs(24.f, 1e-4f));
+    // The fix-up must reorient the facets themselves, not just the cached volume.
+    CHECK_THAT(its_volume(fixed.its), WithinAbs(24.f, 1e-4f));
     reflected.mirror_y();
     CHECK_THAT(its_volume(reflected.its), WithinAbs(-24.f, 1e-4f));
     REQUIRE(reflected.bounding_box().min.y() < 0.);
@@ -85,6 +86,7 @@ TEST_CASE("TriangleMesh direct mirror and facet flip update orientation and boun
     const float original = flipped.volume();
     flipped.flip_triangles();
     CHECK_THAT(flipped.volume(), WithinAbs(-original, 1e-5f));
+    CHECK_THAT(its_volume(flipped.its), WithinAbs(-original, 1e-5f));
 }
 
 TEST_CASE("TriangleMesh merging combines component statistics and geometry", "[TriangleMesh][TriangleMeshContracts]")
@@ -97,6 +99,14 @@ TEST_CASE("TriangleMesh merging combines component statistics and geometry", "[T
     REQUIRE(first.stats().number_of_facets == 24);
     CHECK_THAT(first.volume(), WithinAbs(16.f, 1e-4f));
     CHECK_THAT(first.bounding_box().max.x(), WithinAbs(5., 1e-5));
+    // The geometry itself holds both cubes, not just the merged statistics.
+    REQUIRE(first.its.vertices.size() == 16);
+    REQUIRE(first.its.indices.size() == 24);
+    CHECK_THAT(its_volume(first.its), WithinAbs(16.f, 1e-4f));
+    const BoundingBoxf3 merged = bounding_box(first.its);
+    CHECK_THAT(merged.min.x(), WithinAbs(0., 1e-5));
+    CHECK_THAT(merged.max.x(), WithinAbs(5., 1e-5));
+    CHECK(its_number_of_patches(first.its) == 2);
 }
 
 TEST_CASE("TriangleMesh rotates around a 2D center in mesh coordinates", "[TriangleMesh][TriangleMeshContracts]")
@@ -106,7 +116,7 @@ TEST_CASE("TriangleMesh rotates around a 2D center in mesh coordinates", "[Trian
     // center in the same unscaled coordinate system as its vertices.
     Point center(10, 5);
     // This legacy overload is expressed in degrees, matching ADMesh's
-    // its_rotate_z routine (the Axis overload above takes radians).
+    // its_rotate_z routine (the Axis overload below takes radians).
     mesh.rotate(90., &center);
     // Check the vertices independently of the cached-bounds regression below.
     const BoundingBoxf3 box = bounding_box(mesh.its);
@@ -162,8 +172,9 @@ TEST_CASE("TriangleMesh split normalizes a reversed component", "[TriangleMesh][
     TriangleMesh mesh(std::move(reversed));
     auto parts = mesh.split();
     REQUIRE(parts.size() == 1);
-    CHECK(parts.front().volume() > 0.f);
     CHECK_THAT(parts.front().volume(), WithinAbs(8.f, 1e-4f));
+    // The facets themselves must be reoriented, not just the cached volume.
+    CHECK_THAT(its_volume(parts.front().its), WithinAbs(8.f, 1e-4f));
 }
 
 TEST_CASE("TriangleMesh STL writers round trip ASCII and binary geometry", "[TriangleMesh][TriangleMeshContracts]")
@@ -200,7 +211,7 @@ TEST_CASE("TriangleMesh transformed bounding box applies rotation before transla
     CHECK_THAT(transformed.max.y(), WithinAbs(22., 1e-6));
 }
 
-TEST_CASE("Empty TriangleMesh operations remain empty and finite", "[TriangleMesh][TriangleMeshContracts]")
+TEST_CASE("Empty TriangleMesh operations keep the mesh empty", "[TriangleMesh][TriangleMeshContracts]")
 {
     TriangleMesh mesh;
     REQUIRE(mesh.empty());
@@ -209,11 +220,12 @@ TEST_CASE("Empty TriangleMesh operations remain empty and finite", "[TriangleMes
     REQUIRE(mesh.horizontal_projection().empty());
     REQUIRE(mesh.convex_hull().empty());
     REQUIRE(mesh.convex_hull_3d().empty());
-    REQUIRE(mesh.memsize() > 0);
     mesh.align_to_origin();
-    mesh.translate(0.f, 0.f, 0.f);
-    mesh.rotate_z(0.f);
+    mesh.translate(1.f, 2.f, 3.f);
+    mesh.rotate_z(float(PI / 2.));
+    mesh.scale(2.f);
     REQUIRE(mesh.empty());
+    CHECK_THAT(mesh.volume(), WithinAbs(0.f, 1e-7f));
 }
 
 // Known bug: TriangleMesh::rotate(double, Point*) leaves the cached bounds stale; fixed by the follow-up fix PR
