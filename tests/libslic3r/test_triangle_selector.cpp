@@ -396,7 +396,9 @@ TEST_CASE("Swept brushes detect edges across the middle of the stroke", "[Triang
 {
     const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
     const auto brush = swept(kind);
-    CHECK(CursorInput::edge(*brush, {Vec3f(3, -4, 0), Vec3f(3, 4, 0), Vec3f(10, 4, 0)}));
+    // Only the x = 3 edge comes within the radius, and it stays more than a radius away from
+    // both centres (0,0,0) and (6,0,0), so only the cylinder/rectangle test can accept it.
+    CHECK(CursorInput::edge(*brush, {Vec3f(3, -4, 0), Vec3f(3, 4, 0), Vec3f(3.1f, 4, 0)}));
     CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(3, 4, 0), Vec3f(3, 8, 0), Vec3f(10, 8, 0)}));
 }
 
@@ -412,7 +414,9 @@ TEST_CASE("Transformed brush edge tests agree with their world-space radius", "[
 {
     const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
     const auto brush = swept(kind, stretch());
-    CHECK(CursorInput::edge(*brush, {Vec3f(3, -2, 0), Vec3f(3, 2, 0), Vec3f(7, 2, 0)}));
+    // In world space the stroke runs from (14,-6,20) to (26,-6,20). The positive triangle maps to
+    // x ~ 20, at least 4 from either centre, so it can only hit the middle of the stroke.
+    CHECK(CursorInput::edge(*brush, {Vec3f(3, -2, 0), Vec3f(3, 2, 0), Vec3f(3.1f, 2, 0)}));
     CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(3, 1, 0), Vec3f(3, 2, 0), Vec3f(7, 2, 0)}));
 }
 
@@ -443,12 +447,17 @@ TEST_CASE("Height brushes detect triangles spanning the band without an interior
     CHECK(CursorInput::edge(*brush, {Vec3f(0, 0, 0), Vec3f(1, 0, 8), Vec3f(0, 1, 8)}));
     CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, 0), Vec3f(1, 0, 1), Vec3f(0, 1, 1)}));
     CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, 6), Vec3f(1, 0, 8), Vec3f(0, 1, 8)}));
-    CHECK(CursorInput::edge(*brush, {Vec3f(0, 0, 5.00005f), Vec3f(1, 0, 5.00005f), Vec3f(0, 1, 5.00005f)}));
-    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, 5.0002f), Vec3f(1, 0, 5.0002f), Vec3f(0, 1, 5.0002f)}));
+    // The edge test widens the [2, 5] band by EPSILON on each side.
+    const float just_inside  = float(5. + EPSILON / 2.);
+    const float just_outside = float(5. + EPSILON * 2.);
+    CHECK(CursorInput::edge(*brush, {Vec3f(0, 0, just_inside), Vec3f(1, 0, just_inside), Vec3f(0, 1, just_inside)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, just_outside), Vec3f(1, 0, just_outside), Vec3f(0, 1, just_outside)}));
 }
 
 TEST_CASE("Cursor round ends exclude exact radius while capsule middle includes its boundary", "[TriangleSelector][TriangleCursor]")
 {
+    // Pins current behavior: the round ends compare with `<` and the capsule body with `<=`.
+    // Nothing relies on the difference; update this test if the comparisons are unified.
     const auto single_kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
     const auto single_brush = single(single_kind);
     CHECK(single_brush->is_mesh_point_inside(Vec3f(1.999f, 0, 0)));
