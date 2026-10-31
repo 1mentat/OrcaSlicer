@@ -638,9 +638,7 @@ void save_fixture(const ScopedTemporaryFile &file)
 
 } // namespace
 
-// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
-// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
-TEST_CASE("OBJ binary cache roundtrips geometry, names, groups, materials and smoothing", "[OBJBinary][OBJParser][.]")
+TEST_CASE("OBJ binary cache roundtrips geometry, names, groups, materials and smoothing", "[OBJBinary][OBJParser]")
 {
     ScopedTemporaryFile cache(".objbin");
     const ObjParser::ObjData original = fixture();
@@ -675,9 +673,7 @@ TEST_CASE("OBJ binary cache roundtrips geometry, names, groups, materials and sm
     CHECK(loaded.vertices == original.vertices);
 }
 
-// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
-// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
-TEST_CASE("OBJ binary cache supports an empty data set and clears prior records", "[OBJBinary][OBJParser][.]")
+TEST_CASE("OBJ binary cache supports an empty data set and clears prior records", "[OBJBinary][OBJParser]")
 {
     ScopedTemporaryFile full(".objbin");
     ScopedTemporaryFile empty(".objbin");
@@ -720,9 +716,7 @@ TEST_CASE("OBJ binary cache rejects short and unsupported headers", "[OBJBinary]
     CHECK_FALSE(ObjParser::objbinload(unsupported.string().c_str(), loaded));
 }
 
-// Known bug: objbinload allocates whatever count the file claims, so this throws std::length_error instead of
-// returning false; fixed by the follow-up OBJ binary cache fix PR
-TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary][OBJParser][!shouldfail]")
+TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary][OBJParser]")
 {
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
@@ -736,12 +730,10 @@ TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
-// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
-TEST_CASE("OBJ binary cache rejects a file cut off inside the coordinate vector", "[OBJBinary][OBJParser][.]")
+TEST_CASE("OBJ binary cache rejects a file cut off inside the coordinate vector", "[OBJBinary][OBJParser]")
 {
-    // The file ends mid-payload. A short read leaves the stream at EOF, so a loader without the payload
-    // check would still fail at the next count; this pins rejection of the cut file, not that specific check.
+    // The file ends before the declared payload, so the declared size exceeds the bytes left in the file and the
+    // loader's read budget rejects it.
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -754,12 +746,10 @@ TEST_CASE("OBJ binary cache rejects a file cut off inside the coordinate vector"
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
-// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
-TEST_CASE("OBJ binary cache rejects a file cut off inside a material name record", "[OBJBinary][OBJParser][.]")
+TEST_CASE("OBJ binary cache rejects a file cut off inside a material name record", "[OBJBinary][OBJParser]")
 {
-    // The file ends mid-payload. A short read leaves the stream at EOF, so a loader without the payload
-    // check would still fail at the next count; this pins rejection of the cut file, not that specific check.
+    // The file ends before the declared payload, so the declared size exceeds the bytes left in the file and the
+    // loader's read budget rejects it.
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -784,12 +774,10 @@ TEST_CASE("OBJ binary cache rejects a file cut off inside a material name record
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
-// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
-TEST_CASE("OBJ binary cache rejects a file cut off inside the smoothing group vector", "[OBJBinary][OBJParser][.]")
+TEST_CASE("OBJ binary cache rejects a file cut off inside the smoothing group vector", "[OBJBinary][OBJParser]")
 {
-    // The file ends mid-payload. A short read leaves the stream at EOF, so a loader without the payload
-    // check would still fail at the next count; this pins rejection of the cut file, not that specific check.
+    // The file ends before the declared payload, so the declared size exceeds the bytes left in the file and the
+    // loader's read budget rejects it.
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -806,11 +794,10 @@ TEST_CASE("OBJ binary cache rejects a file cut off inside the smoothing group ve
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
-// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
-TEST_CASE("OBJ binary cache rejects a truncated face vertex vector", "[OBJBinary][OBJParser][.]")
+TEST_CASE("OBJ binary cache rejects a truncated face vertex vector", "[OBJBinary][OBJParser]")
 {
-    // The face vertices are the last vector, so only the payload check can reject this file.
+    // The face vertices are the last vector, so no later read can reject this file; the declared count
+    // exceeds the bytes left in the file and the loader's read budget rejects it.
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -827,9 +814,7 @@ TEST_CASE("OBJ binary cache rejects a truncated face vertex vector", "[OBJBinary
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version into an int, so version 0x100000001 is accepted as version 1;
-// fixed by the follow-up OBJ binary cache fix PR
-TEST_CASE("OBJ binary cache rejects unsupported bits across its complete native version", "[OBJBinary][OBJBinaryWidthControl][OBJParser][!shouldfail]")
+TEST_CASE("OBJ binary cache rejects unsupported bits across its complete native version", "[OBJBinary][OBJBinaryWidthControl][OBJParser]")
 {
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
@@ -847,9 +832,7 @@ TEST_CASE("OBJ binary cache rejects unsupported bits across its complete native 
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
-// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
-TEST_CASE("OBJ binary cache rejects every proper prefix of a valid cache", "[OBJBinary][OBJParser][.]")
+TEST_CASE("OBJ binary cache rejects every proper prefix of a valid cache", "[OBJBinary][OBJParser]")
 {
     ScopedTemporaryFile full(".objbin");
     save_fixture(full);
