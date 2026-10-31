@@ -521,3 +521,68 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     CHECK_FALSE(ascii_iequals("[", "{"));
     CHECK_FALSE(ascii_iequals("@", "`"));
 }
+
+TEST_CASE("File classification checks case-insensitive extensions and regular-file type", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    for (const std::string &name : {"settings.INI", "cache.IdX", "shape.STL"})
+        touch(d.path() / name);
+    fs::create_directories(d.path() / "folder.ini");
+    CHECK(is_ini_file(fs::directory_entry(d.path() / "settings.INI")));
+    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "cache.IdX")));
+    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "folder.ini")));
+    CHECK(is_idx_file(fs::directory_entry(d.path() / "cache.IdX")));
+    CHECK_FALSE(is_idx_file(fs::directory_entry(d.path() / "settings.INI")));
+    CHECK(is_gallery_file(fs::directory_entry(d.path() / "shape.STL"), ".stl"));
+    CHECK_FALSE(is_gallery_file(fs::directory_entry(d.path() / "folder.ini"), ".ini"));
+    CHECK(is_gallery_file(std::string("nested/shape.STL"), ".stl"));
+    CHECK_FALSE(is_gallery_file(std::string("shape.stl.backup"), ".stl"));
+    CHECK(is_img_file("image.PNG"));
+    CHECK(is_img_file("image.SvG"));
+    CHECK_FALSE(is_img_file("image.svg.json"));
+}
+
+TEST_CASE("Configured resource paths resolve against their roots and distinguish all shape roots", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    ScopeGuard restore([var = var_dir(), resources = resources_dir(), temp = temporary_dir(), local = localization_dir(),
+                        shapes = sys_shapes_dir(), gcodes = custom_gcodes_dir(), data = data_dir()] {
+        set_var_dir(var);
+        set_resources_dir(resources);
+        set_temporary_dir(temp);
+        set_local_dir(local);
+        set_sys_shapes_dir(shapes);
+        set_custom_gcodes_dir(gcodes);
+        set_data_dir(data);
+    });
+    set_var_dir((d.path() / "var").string());
+    set_resources_dir((d.path() / "res").string());
+    set_data_dir((d.path() / "data" / "nested").string());
+    set_local_dir((d.path() / "locale").string());
+    set_sys_shapes_dir((d.path() / "shapes").string());
+    set_custom_gcodes_dir((d.path() / "gcodes").string());
+    set_temporary_dir((d.path() / "temp").string());
+    CHECK(fs::is_directory(data_dir()));
+    CHECK(localization_dir() == (d.path() / "locale").string());
+    CHECK(custom_gcodes_dir() == (d.path() / "gcodes").string());
+    CHECK(temporary_dir() == (d.path() / "temp").string());
+    CHECK(var("missing.png") == (d.path() / "var" / "missing.png").make_preferred().string());
+    const auto existing = d.path() / "existing.png";
+    touch(existing);
+    CHECK(var(existing.string()) == existing.string());
+    CHECK(custom_shapes_dir() == (fs::path(data_dir()) / "shapes").string());
+    CHECK(handy_models_dir() == (d.path() / "res" / "handy_models").string());
+    CHECK(is_shapes_dir(sys_shapes_dir()));
+    CHECK(is_shapes_dir(custom_shapes_dir()));
+    CHECK(is_shapes_dir(handy_models_dir()));
+    CHECK_FALSE(is_shapes_dir((d.path() / "unrelated").string()));
+}
+
+TEST_CASE("Perl-compatible path helpers preserve the parent and final extension", "[utils]") {
+    const auto p = boost::filesystem::path("models") / "nested" / "part.v2.3mf";
+    const auto s = p.string();
+    CHECK(PerlUtils::path_to_filename(s.c_str()) == "part.v2.3mf");
+    CHECK(PerlUtils::path_to_stem(s.c_str()) == "part.v2");
+    CHECK(PerlUtils::path_to_extension(s.c_str()) == ".3mf");
+    CHECK(PerlUtils::path_to_parent_path(s.c_str()) == p.parent_path().string());
+}
