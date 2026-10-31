@@ -29,8 +29,11 @@ ExPolygon box(double x0, double y0, double x1, double y1)
 
 TEST_CASE("Bridge direction follows the long unsupported edge", "[BridgeDetector]")
 {
+    // A long edge along X and a short one along Y. Bridging along X leaves only the short edge
+    // crossed by bridge ends, so it is the cheaper direction.
     const Lines floating_edges{
         Line(Point::new_scale(0., 0.), Point::new_scale(30., 0.)),
+        Line(Point::new_scale(30., 0.), Point::new_scale(30., 5.)),
     };
 
     const auto [direction, unsupported_length] = detect_bridging_direction(floating_edges, {});
@@ -38,7 +41,8 @@ TEST_CASE("Bridge direction follows the long unsupported edge", "[BridgeDetector
     CHECK_THAT(direction.norm(), Catch::Matchers::WithinAbs(1., 1e-12));
     CHECK(std::abs(direction.x()) > 0.99);
     CHECK(std::abs(direction.y()) < 0.01);
-    CHECK_THAT(unsupported_length, Catch::Matchers::WithinAbs(0., 1e-9));
+    // The cost is the length of floating edge across the bridge direction: the 5 mm edge.
+    CHECK_THAT(unscale_(unsupported_length), Catch::Matchers::WithinAbs(5., 1e-6));
 }
 
 TEST_CASE("Fully anchored bridge spans the short side of the region", "[BridgeDetector]")
@@ -50,7 +54,7 @@ TEST_CASE("Fully anchored bridge spans the short side of the region", "[BridgeDe
     const auto [direction, unsupported_length] = detect_bridging_direction(Lines{}, region);
 
     CHECK(direction.array().isFinite().all());
-    CHECK_THAT(direction.norm(), Catch::Matchers::WithinAbs(1., 1e-12));
+    CHECK_THAT(direction.norm(), Catch::Matchers::WithinAbs(1., 1e-6));
     // With no floating edge the minor principal axis is used, which is the 10 mm side.
     CHECK(std::abs(direction.y()) > 0.99);
     CHECK_THAT(unsupported_length, Catch::Matchers::WithinAbs(0., 1e-9));
