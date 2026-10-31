@@ -5848,6 +5848,42 @@
         "nullable_behavior"
       ],
       "reason": "With top-surface filament 1 selected, explicit 0 mm override matches nil inheritance from process 0.2 mm, showing the zero sentinel maps to half of a 0.4 mm nozzle. Nil inheritance from process 0.4 mm produces shorter paths. This is one selected slot and geometry fixture; vector bounds and other configurations are not claimed."
+    },
+    "cooling_tube_length": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerFilamentDistanceBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A full SEMM Print export compares the registered zero length with 40 mm. Zero suppresses cooling strokes; 40 mm produces two balanced cooling cycles with 160 mm total absolute E and rates 2/6 mm/s. The pre-cooling retract changes from 15 to 35 mm at a 15 mm center setting, and the park return preserves the configured 100 mm net parking retraction. Each export requires positive object-model deposition; the summed model-feature E length and XY path are conserved, and planned wipe toolchange spans retain matching layer/tool associations and Y span. No upper bound or cross-printer range is claimed."
+    },
+    "cooling_tube_retraction": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerFilamentDistanceBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A full SEMM Print export compares 0 and 30 mm center offsets with the tube length fixed at 40 mm. The emitted pre-cooling retraction is 20 versus 50 mm, and the cooling-park correction is 80 versus 50 mm, conserving the 100 mm net parking position in both cases. Balanced cooling moves persist. Each export requires positive object-model deposition; summed model-feature E length and XY path are conserved, and planned wipe toolchange spans retain matching layer/tool associations and Y span. No upper bound or full Cartesian interaction is claimed."
+    },
+    "parking_pos_retraction": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerFilamentDistanceBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A full SEMM Print export compares the registered zero parking distance with 40 mm while tube length, center offset, and extra loading remain fixed. The signed unload-plus-park E motion conserves the configured parking distance (0 versus 40 mm), and load extrusion phases total parking plus the fixed 8 mm extra (8 versus 48 mm) in the emitted 20/70/10 split. Each export requires positive object-model deposition; summed model-feature E length and XY path are conserved, and planned wipe toolchange spans retain matching layer/tool associations and Y span. No maximum is registered."
+    },
+    "extra_loading_move": {
+      "test": "tests/fff_print/test_wipe_tower.cpp",
+      "tag": "[WipeTowerFilamentDistanceBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The full SEMM Print export checks the tooltip-defined negative, zero, and positive sign partition at -5, 0, and +5 mm with parking fixed at 40 mm, keeping every effective loading distance positive. Parsed loading E phases total 35, 40, and 45 mm in the emitted 20/70/10 split; the unload-plus-park return remains 40 mm. Each export requires positive object-model deposition with conserved summed model-feature E length and XY path, and planned wipe toolchange spans retain matching layer/tool associations and Y span. Zero is a semantic sign boundary, not a registered minimum; no numeric extremes are claimed."
     }
   }
 }

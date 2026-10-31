@@ -7399,7 +7399,13 @@ struct ExportMotion {
     std::size_t tower_extrusion_moves = 0;
     std::size_t tower_travel_moves = 0;
     std::size_t model_extrusion_moves = 0;
+    std::size_t model_feature_extrusion_moves = 0;
     std::size_t support_extrusion_moves = 0;
+    std::size_t toolchange_block_starts = 0;
+    std::size_t toolchange_block_ends = 0;
+    std::size_t malformed_toolchange_blocks = 0;
+    double model_feature_e_length = 0.;
+    double model_feature_xy_path = 0.;
     double tower_e_length = 0.;
     std::set<int> support_tools;
     std::vector<std::pair<double, double>> tool_change_positions;
@@ -7513,7 +7519,9 @@ ExportMotion inspect_export(const std::string &gcode, const DynamicPrintConfig &
     const std::string &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start);
     const std::string &end_tag   = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End);
     bool in_tower = false;
+    bool in_toolchange_block = false;
     bool active_role_is_support = false;
+    bool active_role_is_model = false;
     std::string active_role;
     int current_tool = -1;
     double tower_min_x = std::numeric_limits<double>::infinity();
@@ -7529,12 +7537,22 @@ ExportMotion inspect_export(const std::string &gcode, const DynamicPrintConfig &
     };
     GCodeReader reader;
     reader.apply_config(config);
-    reader.parse_buffer(gcode, [&result, &in_tower, &active_role_is_support, &active_role, &current_tool,
+    reader.parse_buffer(gcode, [&result, &in_tower, &in_toolchange_block, &active_role_is_support,
+                                &active_role_is_model, &active_role, &current_tool,
                                 &tower_min_x, &tower_min_y, &tower_max_x, &tower_max_y,
                                 &region_moves, &finish_tower_region, &start_tag, &end_tag](GCodeReader &self, const GCodeReader::GCodeLine &line) {
         const std::string raw = line.raw();
         const std::string_view raw_view(raw);
         const std::string_view command = line.cmd();
+        if (raw_view.find("; CP TOOLCHANGE START") != std::string_view::npos) {
+            if (in_toolchange_block)
+                ++result.malformed_toolchange_blocks;
+            ++result.toolchange_block_starts;
+            in_toolchange_block = true;
+            active_role.clear();
+            active_role_is_support = false;
+            active_role_is_model = false;
+        }
         if (raw_view.find(start_tag) != std::string_view::npos) {
             finish_tower_region();
             in_tower = true;
@@ -7551,6 +7569,7 @@ ExportMotion inspect_export(const std::string &gcode, const DynamicPrintConfig &
             // Role comments can precede a tool change; never carry their role onto the new tool.
             active_role.clear();
             active_role_is_support = false;
+            active_role_is_model = false;
             current_tool = next_tool;
         }
         if (raw_view.rfind(";TYPE:", 0) == 0) {
@@ -7560,6 +7579,13 @@ ExportMotion inspect_export(const std::string &gcode, const DynamicPrintConfig &
                 return static_cast<char>(std::tolower(ch));
             });
             active_role_is_support = lowered_role.find("support") != std::string::npos;
+            active_role_is_model = !active_role.empty() && !active_role_is_support &&
+                lowered_role.find("prime tower") == std::string::npos &&
+                lowered_role.find("wipe tower") == std::string::npos &&
+                lowered_role.find("cooling") == std::string::npos &&
+                lowered_role.find("custom") == std::string::npos &&
+                lowered_role.find("skirt") == std::string::npos &&
+                lowered_role.find("brim") == std::string::npos;
         } else if (raw_view.rfind("; FEATURE:", 0) == 0) {
             active_role = raw.substr(10);
             std::string lowered_role = active_role;
@@ -7567,6 +7593,13 @@ ExportMotion inspect_export(const std::string &gcode, const DynamicPrintConfig &
                 return static_cast<char>(std::tolower(ch));
             });
             active_role_is_support = lowered_role.find("support") != std::string::npos;
+            active_role_is_model = !active_role.empty() && !active_role_is_support &&
+                lowered_role.find("prime tower") == std::string::npos &&
+                lowered_role.find("wipe tower") == std::string::npos &&
+                lowered_role.find("cooling") == std::string::npos &&
+                lowered_role.find("custom") == std::string::npos &&
+                lowered_role.find("skirt") == std::string::npos &&
+                lowered_role.find("brim") == std::string::npos;
         }
 
         const bool extruding = line.extruding(self);
@@ -7593,6 +7626,18 @@ ExportMotion inspect_export(const std::string &gcode, const DynamicPrintConfig &
             }
         } else if (line.cmd_is("G1") && (line.has_x() || line.has_y()) && extruding) {
             ++result.model_extrusion_moves;
+            const double x0 = self.x();
+            const double y0 = self.y();
+            const double x1 = line.new_X(self);
+            const double y1 = line.new_Y(self);
+            const double e_length = line.dist_E(self);
+            const double xy_path = std::hypot(x1 - x0, y1 - y0);
+            if (!in_toolchange_block && active_role_is_model &&
+                std::isfinite(e_length) && e_length > 0. && std::isfinite(xy_path) && xy_path > 0.) {
+                ++result.model_feature_extrusion_moves;
+                result.model_feature_e_length += e_length;
+                result.model_feature_xy_path += xy_path;
+            }
             const std::string_view comment = line.comment();
             std::string lowered_comment(comment);
             std::transform(lowered_comment.begin(), lowered_comment.end(), lowered_comment.begin(), [](unsigned char ch) {
@@ -7607,9 +7652,20 @@ ExportMotion inspect_export(const std::string &gcode, const DynamicPrintConfig &
             finish_tower_region();
             in_tower = false;
         }
+        if (raw_view.find("; CP TOOLCHANGE END") != std::string_view::npos) {
+            if (!in_toolchange_block)
+                ++result.malformed_toolchange_blocks;
+            ++result.toolchange_block_ends;
+            in_toolchange_block = false;
+            active_role.clear();
+            active_role_is_support = false;
+            active_role_is_model = false;
+        }
     });
     if (in_tower)
         finish_tower_region();
+    if (in_toolchange_block)
+        ++result.malformed_toolchange_blocks;
 
     // Count actual tool changes whose Tx position is in the emitted tower's XY envelope.
     // The margin includes a corner entry point while excluding the separated model objects.
@@ -8218,6 +8274,279 @@ TEST_CASE("Public SEMM export propagates filament speed boundaries into tower G-
     CHECK(count_rate(positive_stamp.xy_extrusions, 20.) == 2);
     CHECK(count_rate(positive_stamp.xy_extrusions, 2.) == 1);
     CHECK(count_rate(positive_stamp.xy_extrusions, 6.) == 1);
+}
+
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+using namespace multimaterial_wipe_variance_contracts;
+using namespace wipe_tower_prime_public_contracts;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+struct SemmDistanceExport {
+    DynamicPrintConfig config;
+    PublicPrintRun print;
+};
+
+SemmDistanceExport public_semm_distance_export(const double cooling_tube_length,
+                                               const double cooling_tube_retraction,
+                                               const double parking_pos_retraction,
+                                               const double extra_loading_move)
+{
+    DynamicPrintConfig config = prime_dynamic(2, true, false, false);
+    config.set_deserialize_strict({
+        {"wipe_tower_type", "type2"},
+        {"wipe_tower_x", 50},
+        {"wipe_tower_y", 50},
+        {"prime_tower_width", 35},
+        {"single_extruder_multi_material", true},
+        {"single_extruder_multi_material_priming", false},
+        {"enable_filament_ramming", true},
+        {"filament_cooling_moves", "2,2"},
+        {"filament_cooling_initial_speed", "2,2"},
+        {"filament_cooling_final_speed", "6,6"},
+        {"filament_stamping_distance", "0,0"},
+        {"filament_stamping_loading_speed", "20,20"},
+        {"filament_loading_speed", "12,12"},
+        {"filament_loading_speed_start", "12,12"},
+        {"filament_unloading_speed", "35,35"},
+        {"filament_unloading_speed_start", "55,55"},
+        {"filament_toolchange_delay", "1,1"},
+        {"cooling_tube_length", cooling_tube_length},
+        {"cooling_tube_retraction", cooling_tube_retraction},
+        {"parking_pos_retraction", parking_pos_retraction},
+        {"extra_loading_move", extra_loading_move},
+        {"change_filament_gcode", "T[next_extruder]\n"},
+        {"toolchange_ordering", "cyclic"},
+        {"toolchange_cyclic_order", "1,2"},
+        {"toolchange_cyclic_first_layer", true},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"gcode_comments", true},
+    });
+
+    TriangleMesh first = make_cube(10., 10., 2.);
+    TriangleMesh second = make_cube(10., 10., 2.);
+    second.translate(Vec3f(60.f, 0.f, 0.f));
+    PublicPrintRun print = run_public_print(
+        config, {std::move(first), std::move(second)},
+        {{{"extruder", 1}}, {{"extruder", 2}}}, false);
+    return {std::move(config), std::move(print)};
+}
+
+DirectRun direct_export(const SemmDistanceExport &exported)
+{
+    DirectRun run;
+    run.gcode = exported.print.gcode;
+    return run;
+}
+
+FilamentSpeedSection exported_motion(const SemmDistanceExport &exported,
+                                    const std::string_view begin,
+                                    const std::string_view end)
+{
+    return filament_speed_section(direct_export(exported), exported.config, begin, end);
+}
+
+CoolingMotionEvidence exported_cooling(const SemmDistanceExport &exported)
+{
+    return cooling_motion_evidence(direct_export(exported), exported.config);
+}
+
+double signed_e_distance(const FilamentSpeedSection &section)
+{
+    double total = 0.;
+    for (const FilamentSpeedMove &move : section.e_only)
+        total += move.e_mm;
+    for (const FilamentSpeedMove &move : section.xy_extrusions)
+        total += move.e_mm;
+    return total;
+}
+
+double pre_cooling_retraction_distance(const FilamentSpeedSection &section)
+{
+    double total = 0.;
+    for (const FilamentSpeedMove &move : section.e_only)
+        total -= move.e_mm;
+    return total;
+}
+
+double net_unload_retraction_distance(const FilamentSpeedSection &unload,
+                                      const FilamentSpeedSection &park)
+{
+    return -(signed_e_distance(unload) + signed_e_distance(park));
+}
+
+void require_public_model_and_wipe_geometry(const SemmDistanceExport &reference,
+                                            const SemmDistanceExport &observed)
+{
+    REQUIRE_FALSE(reference.print.gcode.empty());
+    REQUIRE_FALSE(observed.print.gcode.empty());
+    const ExportMotion reference_motion = inspect_export(reference.print.gcode, reference.config);
+    const ExportMotion observed_motion = inspect_export(observed.print.gcode, observed.config);
+    REQUIRE(reference_motion.tool_changes > 0);
+    REQUIRE(observed_motion.tool_changes > 0);
+    REQUIRE(reference_motion.model_extrusion_moves > 0);
+    REQUIRE(observed_motion.model_extrusion_moves > 0);
+    REQUIRE(reference_motion.model_feature_extrusion_moves > 0);
+    REQUIRE(observed_motion.model_feature_extrusion_moves > 0);
+    REQUIRE(reference_motion.model_feature_e_length > 0.);
+    REQUIRE(observed_motion.model_feature_e_length > 0.);
+    REQUIRE(reference_motion.model_feature_xy_path > 0.);
+    REQUIRE(observed_motion.model_feature_xy_path > 0.);
+    REQUIRE(reference_motion.toolchange_block_starts > 0);
+    REQUIRE(observed_motion.toolchange_block_starts > 0);
+    CHECK(reference_motion.toolchange_block_starts == reference_motion.toolchange_block_ends);
+    CHECK(observed_motion.toolchange_block_starts == observed_motion.toolchange_block_ends);
+    CHECK(reference_motion.malformed_toolchange_blocks == 0);
+    CHECK(observed_motion.malformed_toolchange_blocks == 0);
+    CHECK(reference_motion.toolchange_block_starts == observed_motion.toolchange_block_starts);
+    CHECK_THAT(reference_motion.model_feature_e_length, WithinAbs(observed_motion.model_feature_e_length, 0.02));
+    CHECK_THAT(reference_motion.model_feature_xy_path, WithinAbs(observed_motion.model_feature_xy_path, 0.02));
+    REQUIRE(reference_motion.tower_extrusion_moves > 0);
+    REQUIRE(observed_motion.tower_extrusion_moves > 0);
+
+    REQUIRE_FALSE(reference.print.tower_toolchange_spans.empty());
+    REQUIRE(reference.print.tower_toolchange_spans.size() == observed.print.tower_toolchange_spans.size());
+    for (std::size_t i = 0; i < reference.print.tower_toolchange_spans.size(); ++i) {
+        CAPTURE(i);
+        const TowerToolchangeSpan &before = reference.print.tower_toolchange_spans[i];
+        const TowerToolchangeSpan &after = observed.print.tower_toolchange_spans[i];
+        CHECK_THAT(before.print_z, WithinAbs(after.print_z, 1e-5f));
+        CHECK(before.initial_tool == after.initial_tool);
+        CHECK(before.new_tool == after.new_tool);
+        CHECK_THAT(before.y_span, WithinAbs(after.y_span, 1e-4f));
+    }
+}
+
+void require_load_distance_phases(const FilamentSpeedSection &section, const double total_distance)
+{
+    REQUIRE(total_distance > 0.);
+    REQUIRE(section.e_only.size() == 1);
+    REQUIRE(section.xy_extrusions.size() == 2);
+    const std::array<double, 3> phases{{section.e_only[0].e_mm,
+                                        section.xy_extrusions[0].e_mm,
+                                        section.xy_extrusions[1].e_mm}};
+    CHECK(phases[0] > 0.);
+    CHECK(phases[1] > 0.);
+    CHECK(phases[2] > 0.);
+    CHECK_THAT(phases[0], WithinAbs(0.2 * total_distance, 0.02));
+    CHECK_THAT(phases[1], WithinAbs(0.7 * total_distance, 0.02));
+    CHECK_THAT(phases[2], WithinAbs(0.1 * total_distance, 0.02));
+    CHECK_THAT(phases[0] + phases[1] + phases[2], WithinAbs(total_distance, 0.02));
+}
+
+} // namespace
+
+TEST_CASE("Public SEMM cooling tube length bounds cooling strokes and unload distance",
+          "[WipeTower][SettingsBoundary][WipeTowerFilamentDistanceBoundaries]")
+{
+    const SemmDistanceExport zero = public_semm_distance_export(0., 15., 100., 8.);
+    const SemmDistanceExport positive = public_semm_distance_export(40., 15., 100., 8.);
+    require_public_model_and_wipe_geometry(positive, zero);
+
+    const CoolingMotionEvidence zero_cooling = exported_cooling(zero);
+    const CoolingMotionEvidence positive_cooling = exported_cooling(positive);
+    require_balanced_cooling_path(zero_cooling, 0);
+    require_positive_effective_cooling_feeds(zero_cooling);
+    require_balanced_cooling_path(positive_cooling, 2);
+    require_positive_effective_cooling_feeds(positive_cooling);
+    CHECK(cooling_motion(direct_export(zero)).empty());
+    CHECK_FALSE(cooling_motion(direct_export(positive)).empty());
+    CHECK_THAT(positive_cooling.absolute_e, WithinAbs(160., 0.02));
+    require_endpoint_cooling_rates(positive_cooling, 2., 6.);
+
+    const FilamentSpeedSection zero_unload = exported_motion(zero, " Retract(unload)", " Cooling park");
+    const FilamentSpeedSection positive_unload = exported_motion(positive, " Retract(unload)", " Cooling park");
+    const FilamentSpeedSection zero_park = exported_motion(zero, " Cooling park", " Ramming end");
+    const FilamentSpeedSection positive_park = exported_motion(positive, " Cooling park", " Ramming end");
+    CHECK_THAT(pre_cooling_retraction_distance(zero_unload), WithinAbs(15., 0.02));
+    CHECK_THAT(pre_cooling_retraction_distance(positive_unload), WithinAbs(35., 0.02));
+    CHECK_THAT(net_unload_retraction_distance(zero_unload, zero_park), WithinAbs(100., 0.02));
+    CHECK_THAT(net_unload_retraction_distance(positive_unload, positive_park), WithinAbs(100., 0.02));
+}
+
+TEST_CASE("Public SEMM cooling tube retraction and park correction conserve the stop distance",
+          "[WipeTower][SettingsBoundary][WipeTowerFilamentDistanceBoundaries]")
+{
+    const SemmDistanceExport zero = public_semm_distance_export(40., 0., 100., 8.);
+    const SemmDistanceExport positive = public_semm_distance_export(40., 30., 100., 8.);
+    require_public_model_and_wipe_geometry(zero, positive);
+
+    const FilamentSpeedSection zero_unload = exported_motion(zero, " Retract(unload)", " Cooling park");
+    const FilamentSpeedSection positive_unload = exported_motion(positive, " Retract(unload)", " Cooling park");
+    const FilamentSpeedSection zero_park = exported_motion(zero, " Cooling park", " Ramming end");
+    const FilamentSpeedSection positive_park = exported_motion(positive, " Cooling park", " Ramming end");
+    CHECK_THAT(pre_cooling_retraction_distance(zero_unload), WithinAbs(20., 0.02));
+    CHECK_THAT(pre_cooling_retraction_distance(positive_unload), WithinAbs(50., 0.02));
+    CHECK_THAT(-signed_e_distance(zero_park), WithinAbs(80., 0.02));
+    CHECK_THAT(-signed_e_distance(positive_park), WithinAbs(50., 0.02));
+    CHECK_THAT(net_unload_retraction_distance(zero_unload, zero_park), WithinAbs(100., 0.02));
+    CHECK_THAT(net_unload_retraction_distance(positive_unload, positive_park), WithinAbs(100., 0.02));
+
+    const CoolingMotionEvidence zero_cooling = exported_cooling(zero);
+    const CoolingMotionEvidence positive_cooling = exported_cooling(positive);
+    require_balanced_cooling_path(zero_cooling, 2);
+    require_balanced_cooling_path(positive_cooling, 2);
+    CHECK_THAT(zero_cooling.absolute_e, WithinAbs(160., 0.02));
+    CHECK_THAT(positive_cooling.absolute_e, WithinAbs(160., 0.02));
+    CHECK_THAT(zero_cooling.xy_path, WithinAbs(positive_cooling.xy_path, 1e-3));
+    require_endpoint_cooling_rates(zero_cooling, 2., 6.);
+    require_endpoint_cooling_rates(positive_cooling, 2., 6.);
+}
+
+TEST_CASE("Public SEMM parking distance controls unloading stop and loading travel",
+          "[WipeTower][SettingsBoundary][WipeTowerFilamentDistanceBoundaries]")
+{
+    const SemmDistanceExport zero = public_semm_distance_export(40., 0., 0., 8.);
+    const SemmDistanceExport positive = public_semm_distance_export(40., 0., 40., 8.);
+    require_public_model_and_wipe_geometry(zero, positive);
+
+    const FilamentSpeedSection zero_unload = exported_motion(zero, " Retract(unload)", " Cooling park");
+    const FilamentSpeedSection positive_unload = exported_motion(positive, " Retract(unload)", " Cooling park");
+    const FilamentSpeedSection zero_park = exported_motion(zero, " Cooling park", " Ramming end");
+    const FilamentSpeedSection positive_park = exported_motion(positive, " Cooling park", " Ramming end");
+    CHECK_THAT(pre_cooling_retraction_distance(zero_unload), WithinAbs(20., 0.02));
+    CHECK_THAT(pre_cooling_retraction_distance(positive_unload), WithinAbs(20., 0.02));
+    CHECK_THAT(net_unload_retraction_distance(zero_unload, zero_park), WithinAbs(0., 0.02));
+    CHECK_THAT(net_unload_retraction_distance(positive_unload, positive_park), WithinAbs(40., 0.02));
+
+    const FilamentSpeedSection zero_load = exported_motion(zero, " CP TOOLCHANGE LOAD", " CP TOOLCHANGE WIPE");
+    const FilamentSpeedSection positive_load = exported_motion(positive, " CP TOOLCHANGE LOAD", " CP TOOLCHANGE WIPE");
+    require_load_distance_phases(zero_load, 8.);
+    require_load_distance_phases(positive_load, 48.);
+}
+
+TEST_CASE("Public SEMM extra loading distance preserves its signed 20/70/10 partition",
+          "[WipeTower][SettingsBoundary][WipeTowerFilamentDistanceBoundaries]")
+{
+    constexpr std::array<double, 3> extra_distances{{-5., 0., 5.}};
+    constexpr std::array<const char *, 3> names{{"negative", "zero", "positive"}};
+    std::vector<SemmDistanceExport> runs;
+    runs.reserve(extra_distances.size());
+    for (std::size_t i = 0; i < extra_distances.size(); ++i) {
+        CAPTURE(names[i], extra_distances[i]);
+        runs.push_back(public_semm_distance_export(40., 0., 40., extra_distances[i]));
+        REQUIRE_FALSE(runs.back().print.gcode.empty());
+        CHECK(runs.back().print.tower_toolchange_spans.size() > 0);
+    }
+    require_public_model_and_wipe_geometry(runs[1], runs[0]);
+    require_public_model_and_wipe_geometry(runs[1], runs[2]);
+
+    constexpr std::array<double, 3> expected_load_distances{{35., 40., 45.}};
+    for (std::size_t i = 0; i < runs.size(); ++i) {
+        CAPTURE(names[i], extra_distances[i], expected_load_distances[i]);
+        const FilamentSpeedSection load = exported_motion(
+            runs[i], " CP TOOLCHANGE LOAD", " CP TOOLCHANGE WIPE");
+        require_load_distance_phases(load, expected_load_distances[i]);
+        const FilamentSpeedSection unload = exported_motion(
+            runs[i], " Retract(unload)", " Cooling park");
+        const FilamentSpeedSection park = exported_motion(
+            runs[i], " Cooling park", " Ramming end");
+        CHECK_THAT(net_unload_retraction_distance(unload, park), WithinAbs(40., 0.02));
+    }
 }
 
 } // namespace prime_tower_boolean_family_contracts

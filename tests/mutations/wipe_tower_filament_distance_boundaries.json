@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Private, bounded target-mode mutation proposal for SEMM filament-distance consumer behavior. Both source-pinned mutants target actual WipeTower2 consumers and are selected only by the four new public Print cases.",
+  "base": {
+    "head": "8c1843cc0b9a39f645d8262a9122a382899c3122",
+    "test_source_sha256": "42c797aa9b02c248361695ddf87083b949c2f37f5dd8fde9b6195c399468d6c0",
+    "wipe_tower2_source_sha256": "ea1f1216ea367f01596e2315df20ce2e14bbfbe6a442258c1b3254f346fd59ac",
+    "print_config_source_sha256": "07c867df48a9de107435d63c9c1f312703630695c71e000100674acf1735b8cc"
+  },
+  "selection": {
+    "healthy_test_filter": "^WipeTowerFilamentDistanceBoundaries$",
+    "healthy_expected_test_count": 4,
+    "focused_control_regex": "^FocusedWipeTower::",
+    "focused_control_count": 147,
+    "base_control_count": 143,
+    "target_name": "fff_print_wipe_tower_tests"
+  },
+  "mutants": [
+    {
+      "id": "wipe-cooling-center-retraction-offset-omitted",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "float total_retraction_distance = m_cooling_tube_retraction + m_cooling_tube_length/2.f - 15.f;",
+      "new": "float total_retraction_distance = m_cooling_tube_length/2.f - 15.f;",
+      "description": "Omit cooling_tube_retraction from the pre-cooling unload distance while leaving the independent park correction unchanged.",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "expected_test_count": 4,
+      "test_filter": "^WipeTowerFilamentDistanceBoundaries$",
+      "intended_failed_case": "Public SEMM cooling tube retraction and park correction conserve the stop distance",
+      "ordinary_assertion_only": true,
+      "expected_failure_reason": "The full Print export must retract center + tube-length/2 before cooling and compensate the center offset on the return to parking."
+    },
+    {
+      "id": "wipe-negative-extra-loading-clamped-to-zero",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_extra_loading_move      = float(config.extra_loading_move);",
+      "new": "m_extra_loading_move      = std::max(0.f, float(config.extra_loading_move));",
+      "description": "Treat a negative extra_loading_move as zero instead of shortening the loading distance below the parking distance.",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "expected_test_count": 4,
+      "test_filter": "^WipeTowerFilamentDistanceBoundaries$",
+      "intended_failed_case": "Public SEMM extra loading distance preserves its signed 20/70/10 partition",
+      "ordinary_assertion_only": true,
+      "expected_failure_reason": "The public Print case uses parking 40 mm and extra loading -5 mm, then checks the emitted 20/70/10 phases total 35 mm."
+    }
+  ],
+  "claims": {
+    "ordinary_assertion_only": true,
+    "max_mutants": 2,
+    "one_mutant_build_per_invocation": true,
+    "no_known_baseline_defect_coverage_credit": true
+  }
+}
