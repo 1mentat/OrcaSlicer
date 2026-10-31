@@ -7,6 +7,7 @@
 #include <libslic3r/Point.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
+#include <algorithm>
 #include <cstddef>
 #include <utility>
 #include <vector>
@@ -186,7 +187,7 @@ TEST_CASE("CGAL merge joins disjoint closed components without changing total vo
     CHECK_THAT(merged.bounding_box().max.x(), WithinAbs(22., 1e-5));
 }
 
-TEST_CASE("CGAL segmentation splits a dumbbell into closed parts with conserved volume", "[MeshBoolean][MeshBooleanContracts]")
+TEST_CASE("CGAL segmentation splits a dumbbell into closed ball and rod parts", "[MeshBoolean][MeshBooleanContracts]")
 {
     // Two spheres joined by a thin rod, so the SDF segmentation has regions of clearly different
     // thickness to separate. Each part comes back hole-filled, so the parts' volumes add up.
@@ -196,17 +197,27 @@ TEST_CASE("CGAL segmentation splits a dumbbell into closed parts with conserved 
     MeshBoolean::cgal::plus(dumbbell, far_ball);
     MeshBoolean::cgal::plus(dumbbell, make_cylinder(1., 20.));
     const float dumbbell_volume = mesh_volume(dumbbell);
+    const float ball_volume = mesh_volume(make_sphere(5.));
 
     const std::vector<TriangleMesh> pieces = MeshBoolean::cgal::segment(dumbbell, 0.5, 3);
-    REQUIRE(pieces.size() >= 2);
-    float total_volume = 0.f;
+    REQUIRE(pieces.size() >= 3);
+    std::vector<float> volumes;
     for (const TriangleMesh &piece : pieces) {
         check_valid_indices(piece.its);
-        const float piece_volume = mesh_volume(piece);
-        CHECK(piece_volume > 0.f);
-        CHECK(piece_volume < dumbbell_volume);
-        total_volume += piece_volume;
+        CHECK(its_num_open_edges(piece.its) == 0);
+        volumes.push_back(mesh_volume(piece));
     }
+    std::sort(volumes.begin(), volumes.end(), [](float a, float b) { return a > b; });
+    // The two thick parts are the balls; the rod between them is a separate, much thinner part.
+    CHECK_THAT(volumes[0], WithinRel(ball_volume, 1e-2f));
+    CHECK_THAT(volumes[1], WithinRel(ball_volume, 1e-2f));
+    for (size_t i = 2; i < volumes.size(); ++i) {
+        CHECK(volumes[i] > 0.f);
+        CHECK(volumes[i] < 0.1f * ball_volume);
+    }
+    float total_volume = 0.f;
+    for (const float volume : volumes)
+        total_volume += volume;
     CHECK_THAT(total_volume, WithinRel(dumbbell_volume, 1e-2f));
 }
 
