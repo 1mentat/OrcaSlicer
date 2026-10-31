@@ -25,6 +25,7 @@
 #include <thread>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <unistd.h>     // getuid
@@ -520,4 +521,17 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     // Non-letters 0x20 apart are not equal.
     CHECK_FALSE(ascii_iequals("[", "{"));
     CHECK_FALSE(ascii_iequals("@", "`"));
+}
+
+TEST_CASE("MD5 file fingerprints match standard vectors across the 64 KiB read boundary", "[utils]") {
+    ScopedTemporaryDir d;
+    std::string file = (d.path() / "data").string(), digest;
+    for (const auto &[data, expected] :
+         std::vector<std::pair<std::string, std::string>>{{"", "D41D8CD98F00B204E9800998ECF8427E"},
+                                                          {"abc", "900150983CD24FB0D6963F7D28E17F72"},
+                                                          {std::string(65537, 'a'), "B3C6FC238E908636E53AABD5AD830CF7"}}) {
+        std::ofstream(file, std::ios::binary) << data;
+        REQUIRE(bbl_calc_md5(file, digest));
+        CHECK(digest == expected);
+    }
 }
