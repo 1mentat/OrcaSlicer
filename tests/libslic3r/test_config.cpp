@@ -712,7 +712,7 @@ TEST_CASE("save_to_json round-trips plugin capability references as strings", "[
     CHECK(reloaded.option<ConfigOptionStrings>("slicing_pipeline_plugin")->values == refs);
 }
 
-TEST_CASE("Config JSON loading honors grouped geometry and declared vector aliases", "[Config]") {
+TEST_CASE("Config JSON loading parses grouped geometry in flat and nested forms", "[Config]") {
     const std::string area_json = GENERATE(
         std::string(R"(["0x0,20x0,20x20,0x20","5x5,15x5,15x15,5x15"])"),
         std::string(R"([["0x0,20x0,20x20,0x20"],["5x5,15x5,15x15,5x15"]])"));
@@ -720,8 +720,7 @@ TEST_CASE("Config JSON loading honors grouped geometry and declared vector alias
     {
         boost::nowide::ofstream out(tmp.string());
         REQUIRE(out.is_open());
-        out << "{\"extruder_printable_area\":" << area_json
-            << R"(,"perimeter_feed_rate":["37","64"]})";
+        out << "{\"extruder_printable_area\":" << area_json << "}";
         out.close();
         REQUIRE(out.good());
     }
@@ -750,13 +749,42 @@ TEST_CASE("Config JSON loading honors grouped geometry and declared vector alias
             CHECK_THAT(areas->values[group][point].y(), Catch::Matchers::WithinAbs(expected_areas[group][point].y(), 1e-9));
         }
     }
+}
 
-    // perimeter_feed_rate is the declared alias of inner_wall_speed.
-    const ConfigOptionFloatsNullable *inner_wall_speeds = config.option<ConfigOptionFloatsNullable>("inner_wall_speed");
-    REQUIRE(inner_wall_speeds != nullptr);
-    REQUIRE(inner_wall_speeds->values.size() == 2);
-    CHECK_THAT(inner_wall_speeds->values[0], Catch::Matchers::WithinAbs(37., 1e-9));
-    CHECK_THAT(inner_wall_speeds->values[1], Catch::Matchers::WithinAbs(64., 1e-9));
+TEST_CASE("Config JSON loading joins an aliased array in its target option's format", "[Config]") {
+    // The only alias in print_config_def is a floats option, whose ',' separator
+    // is also the loader's fallback, so declare an aliased strings option here.
+    // Strings must be joined as quoted, escaped, ';'-separated items; only the
+    // loader's own alias lookup can tell that "legacy_labels" is a strings option.
+    struct AliasConfigDef : ConfigDef {
+        AliasConfigDef()
+        {
+            ConfigOptionDef *def = this->add("labels", coStrings);
+            def->aliases = { "legacy_labels" };
+            def->set_default_value(new ConfigOptionStrings());
+        }
+    };
+    static const AliasConfigDef alias_config_def;
+    struct AliasConfig : DynamicConfig {
+        const ConfigDef *def() const override { return &alias_config_def; }
+    };
+
+    ScopedTemporaryFile tmp(".json");
+    {
+        boost::nowide::ofstream out(tmp.string());
+        REQUIRE(out.is_open());
+        out << R"({"legacy_labels":["first, with comma","second; \"quoted\""]})";
+        out.close();
+        REQUIRE(out.good());
+    }
+
+    AliasConfig config;
+    const ConfigSubstitutions substitutions = config.load(tmp.string(), ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(substitutions.empty());
+    const ConfigOptionStrings *labels = config.option<ConfigOptionStrings>("labels");
+    REQUIRE(labels != nullptr);
+    CHECK(labels->values == std::vector<std::string>{"first, with comma", "second; \"quoted\""});
+    CHECK(config.option("legacy_labels") == nullptr);
 }
 
 TEST_CASE("load_from_json hands a preset's include list to the caller instead of the config", "[Config]") {
