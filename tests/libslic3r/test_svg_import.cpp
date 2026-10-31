@@ -189,8 +189,9 @@ TEST_CASE("SVG importer closes an open gradient-filled path along its implicit c
     check_prism(single_mesh(model), 6., 7., 6. * 7.);
 }
 
-// Known bug: a self-intersecting contour is extruded as one face from the crossing wire and comes
-// out with almost no volume (0.58 of 35 mm^3) instead of two filled lobes; fixed by the follow-up fix PR.
+// Known bug: the importer passes the self-crossing wire straight to BRepBuilderAPI_MakeFace
+// (is_profile_self_interaction only logs a warning), so the extruded solid has almost no volume
+// (0.58 of 35 mm^3) instead of two filled lobes; fixed by the follow-up fix PR.
 TEST_CASE("SVG importer fills both lobes of a self-intersecting contour", "[SVGImport][!shouldfail]")
 {
     ScopedTemporaryFile file(".svg");
@@ -214,7 +215,7 @@ TEST_CASE("SVG importer rejects an SVG with no drawable shapes", "[SVGImport]")
     CHECK(message.find("could not parse") != std::string::npos);
 }
 
-TEST_CASE("SVG importer accepts a path with a relative command mix", "[SVGImport]")
+TEST_CASE("SVG importer reads relative path commands", "[SVGImport]")
 {
     ScopedTemporaryFile file(".svg");
     write_svg(file,
