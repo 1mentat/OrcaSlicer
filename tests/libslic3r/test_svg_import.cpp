@@ -102,19 +102,34 @@ TEST_CASE("SVG importer preserves separate filled components", "[SVGImport]")
     check_prism(volumes[1]->mesh(), 6., 3., 6. * 3.);
 }
 
-TEST_CASE("SVG importer turns an open stroke into a solid", "[SVGImport]")
+namespace {
+// Imports a 10 px long, 2 px wide open stroke with the given extra path attributes.
+void check_open_stroke(const std::string &cap_attribute, double expected_length_px)
 {
     // Explicit width and height keep nanosvg's view scale at 1. Without them a zero-height
     // drawing gets a zero vertical scale, which halves the stroke width.
     ScopedTemporaryFile file(".svg");
     write_svg(file,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\">"
-        "<path fill=\"none\" stroke=\"#000000\" stroke-width=\"2\" d=\"M2 5 L12 5\"/></svg>");
+        "<path fill=\"none\" stroke=\"#000000\" stroke-width=\"2\" " + cap_attribute + " d=\"M2 5 L12 5\"/></svg>");
     Model model;
     std::string message;
     REQUIRE(load_svg(file.string().c_str(), &model, message));
-    // A 2 px wide band whose square caps extend 1 px past each end.
-    check_prism(single_mesh(model), 12., 2., 12. * 2.);
+    check_prism(single_mesh(model), expected_length_px, 2., expected_length_px * 2.);
+}
+} // namespace
+
+TEST_CASE("SVG importer turns an open square-capped stroke into a solid", "[SVGImport]")
+{
+    // Square caps extend half the stroke width, 1 px, past each end.
+    check_open_stroke("stroke-linecap=\"square\"", 12.);
+}
+
+// Known bug: the importer always offsets open strokes with square ends and ignores
+// stroke-linecap, whose default is butt; fixed by the follow-up fix PR.
+TEST_CASE("SVG importer ends an open stroke flush with its endpoints by default", "[SVGImport][!shouldfail]")
+{
+    check_open_stroke("", 10.);
 }
 
 TEST_CASE("SVG importer evaluates cubic path geometry", "[SVGImport]")
@@ -174,7 +189,9 @@ TEST_CASE("SVG importer closes an open gradient-filled path along its implicit c
     check_prism(single_mesh(model), 6., 7., 6. * 7.);
 }
 
-TEST_CASE("SVG importer handles a self-intersecting contour", "[SVGImport]")
+// Known bug: a self-intersecting contour is extruded as one face from the crossing wire and comes
+// out with almost no volume (0.58 of 35 mm^3) instead of two filled lobes; fixed by the follow-up fix PR.
+TEST_CASE("SVG importer fills both lobes of a self-intersecting contour", "[SVGImport][!shouldfail]")
 {
     ScopedTemporaryFile file(".svg");
     write_svg(file,
@@ -183,9 +200,8 @@ TEST_CASE("SVG importer handles a self-intersecting contour", "[SVGImport]")
     Model model;
     std::string message;
     REQUIRE(load_svg(file.string().c_str(), &model, message));
-    const TriangleMesh &mesh = single_mesh(model);
-    CHECK(mesh.facets_count() > 0);
-    CHECK(std::isfinite(TriangleMesh(mesh).volume()));
+    // The bow tie fills two triangles that meet at the crossing, 25 px^2 each.
+    check_prism(single_mesh(model), 10., 10., 2. * 25.);
 }
 
 TEST_CASE("SVG importer rejects an SVG with no drawable shapes", "[SVGImport]")
@@ -210,20 +226,22 @@ TEST_CASE("SVG importer accepts a path with a relative command mix", "[SVGImport
     check_prism(single_mesh(model), 8., 4., 8. * 4.);
 }
 
-TEST_CASE("SVG importer keeps distinct element names for styled paths", "[SVGImport]")
+TEST_CASE("SVG importer applies group transforms to the paths inside", "[SVGImport]")
 {
+    // The second group scales its 3 x 1 px rectangle by 2.
     ScopedTemporaryFile file(".svg");
     write_svg(file,
         "<svg xmlns=\"http://www.w3.org/2000/svg\">"
         "<g><path fill=\"red\" d=\"M0 0 L2 0 L2 2 L0 2 Z\"/></g>"
-        "<g><path fill=\"blue\" d=\"M4 0 L7 0 L7 1 L4 1 Z\"/></g></svg>");
+        "<g transform=\"scale(2)\"><path fill=\"blue\" d=\"M4 0 L7 0 L7 1 L4 1 Z\"/></g></svg>");
     Model model;
     std::string message;
     REQUIRE(load_svg(file.string().c_str(), &model, message));
     REQUIRE(model.objects.size() == 1);
     const ModelVolumePtrs &volumes = model.objects.front()->volumes;
     REQUIRE(volumes.size() == 2);
-    CHECK(volumes[0]->name != volumes[1]->name);
-    CHECK(volumes[0]->mesh().facets_count() > 0);
-    CHECK(volumes[1]->mesh().facets_count() > 0);
+    CHECK(volumes[0]->name == "part_1");
+    CHECK(volumes[1]->name == "part_2");
+    check_prism(volumes[0]->mesh(), 2., 2., 2. * 2.);
+    check_prism(volumes[1]->mesh(), 6., 2., 6. * 2.);
 }
