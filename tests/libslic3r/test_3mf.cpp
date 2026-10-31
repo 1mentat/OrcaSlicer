@@ -1996,8 +1996,7 @@ TEST_CASE("BBS 3MF round-trips text configuration metadata with plain font names
     check_text_configuration_round_trip(make_text_configuration());
 }
 
-// Known bug: font family/face/style/weight attributes are written without XML escaping, so the project fails to load; fixed by the follow-up fix PR
-TEST_CASE("BBS 3MF round-trips text configuration metadata", "[3mf][EmbossMetadata][!shouldfail]")
+TEST_CASE("BBS 3MF round-trips text configuration metadata", "[3mf][EmbossMetadata]")
 {
     TextConfiguration tc = make_text_configuration();
     // Each escaped attribute (style name, font family, face name, style, weight) holds
