@@ -49,13 +49,22 @@ TEST_CASE("Emboss normals bisect a right-angle corner", "[Emboss][EmbossLayout]"
     CHECK_THAT(std::sin(angle), WithinAbs(-std::sqrt(0.5), 1e-8));
 }
 
-TEST_CASE("Emboss normal calculation handles crossing into both adjacent edges", "[Emboss][EmbossLayout]")
+TEST_CASE("Emboss normal calculation handles crossing into either adjacent edge", "[Emboss][EmbossLayout]")
 {
-    // A 12 mm chord each way from the bottom midpoint reaches past both corners onto the side edges,
-    // symmetrically, so the normal still points straight down.
-    const double angle = Emboss::calculate_angle(int32_t(scaled(12.)), PolygonPoint{0, xy(0, -10)}, square());
-    CHECK_THAT(std::cos(angle), WithinAbs(0., 1e-8));
-    CHECK_THAT(std::sin(angle), WithinAbs(-1., 1e-8));
+    // An 8 mm chord from 5 mm off the bottom edge's midpoint: one sample crosses the near corner and meets
+    // the side edge where the 8 mm circle cuts it, sqrt(64 - 25) = sqrt(39) mm above the corner; the other
+    // stays on the bottom edge 8 mm away. The normal is perpendicular to the line between the two samples,
+    // so it tilts away from straight down (the bottom-edge normal and the clamp-to-corner result).
+    const double rise = std::sqrt(39.);
+    const double expected_tilt = std::atan2(-13., rise);  // -64.34 degrees
+    SECTION("the forward sample crosses the right corner") {
+        const double angle = Emboss::calculate_angle(int32_t(scaled(8.)), PolygonPoint{0, xy(5, -10)}, square());
+        CHECK_THAT(angle, WithinAbs(expected_tilt, 1e-6));
+    }
+    SECTION("the reverse sample crosses the left corner") {
+        const double angle = Emboss::calculate_angle(int32_t(scaled(8.)), PolygonPoint{0, xy(-5, -10)}, square());
+        CHECK_THAT(angle, WithinAbs(-PI - expected_tilt, 1e-6)); // -115.66 degrees, the mirror image
+    }
 }
 
 TEST_CASE("An empty list of emboss samples produces no normal angles", "[Emboss][EmbossLayout]")
@@ -106,12 +115,21 @@ TEST_CASE("Whitespace glyphs retain an existing baseline cursor", "[Emboss][Embo
 
 TEST_CASE("Emboss glyph sampling crosses a corner at the requested chord distance", "[Emboss][EmbossLayout]")
 {
-    const auto samples = Emboss::sample_slice(baseline(), BoundingBoxes{glyph_box(13)}, 1.);
-    REQUIRE(samples.size() == 1);
-    CHECK(samples[0].index == 1);
-    CHECK(samples[0].point.x() == scaled(10.));
-    // A 13 mm chord from (0,-10) reaches the x=10 edge at sqrt(69) above its base.
-    CHECK_THAT(unscale<double>(samples[0].point.y()), WithinAbs(-10. + std::sqrt(69.), 2e-6));
+    // A 13 mm chord from (0,-10) reaches a side edge sqrt(13^2 - 10^2) = sqrt(69) mm above its base.
+    SECTION("a glyph right of the origin lands on the right edge") {
+        const auto samples = Emboss::sample_slice(baseline(), BoundingBoxes{glyph_box(13)}, 1.);
+        REQUIRE(samples.size() == 1);
+        CHECK(samples[0].index == 1);
+        CHECK(samples[0].point.x() == scaled(10.));
+        CHECK_THAT(unscale<double>(samples[0].point.y()), WithinAbs(-10. + std::sqrt(69.), 2e-6));
+    }
+    SECTION("a glyph left of the origin lands on the left edge") {
+        const auto samples = Emboss::sample_slice(baseline(), BoundingBoxes{glyph_box(-13)}, 1.);
+        REQUIRE(samples.size() == 1);
+        CHECK(samples[0].index == 3);
+        CHECK(samples[0].point.x() == scaled(-10.));
+        CHECK_THAT(unscale<double>(samples[0].point.y()), WithinAbs(-10. + std::sqrt(69.), 2e-6));
+    }
 }
 
 } // namespace emboss_layout_contracts
