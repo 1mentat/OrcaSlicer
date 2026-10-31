@@ -5,6 +5,8 @@
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/BrimEarsPoint.hpp"
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/TextConfiguration.hpp"
@@ -12,12 +14,14 @@
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/Zipper.hpp"
+#include "libslic3r/ObjectID.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/ProjectTask.hpp"
 #include "libslic3r/PublishSettings.hpp"
+#include "libslic3r/CustomGCode.hpp"
 
 #include "test_utils.hpp"
 
@@ -1735,6 +1739,180 @@ SCENARIO("bbs_3mf_is_published detects only genuinely published 3MFs", "[3mf]") 
             }
         }
     }
+}
+
+TEST_CASE("BBS 3MF round-trips object layer and brim metadata", "[3mf][3MFModelMetadata]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+
+    const std::vector<coordf_t> expected_profile { 0., 0.12, 0.8, 0.2, 1.6, 0.28 };
+    object->layer_height_profile.set(expected_profile);
+
+    DynamicPrintConfig range_config;
+    range_config.set_key_value("layer_height", new ConfigOptionFloat(0.31));
+    object->layer_config_ranges[{ 0.4, 1.2 }].assign_config(std::move(range_config));
+
+    object->brim_points.emplace_back(1.f, 2.f, 0.3f, 0.45f);
+    object->brim_points.emplace_back(3.f, 4.f, 0.7f, 0.85f);
+
+    ScopedTemporaryDir backup_dir("orca_3mf_metadata_src");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = temp.string().c_str();
+    store_params.model    = &model;
+    store_params.config   = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_3mf_metadata_dst");
+    REQUIRE(load_project(temp.string(), loaded_model, loaded_backup_dir));
+
+    REQUIRE(loaded_model.objects.size() == 1);
+    const ModelObject *loaded_object = loaded_model.objects.front();
+    REQUIRE(loaded_object->volumes.size() == 1);
+    REQUIRE(loaded_object->volumes.front()->mesh().its.vertices.size() == object->volumes.front()->mesh().its.vertices.size());
+
+    const std::vector<coordf_t> loaded_profile = loaded_object->layer_height_profile.get();
+    REQUIRE(loaded_profile.size() == expected_profile.size());
+    for (size_t i = 0; i < expected_profile.size(); ++i)
+        CHECK_THAT(loaded_profile[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+
+    REQUIRE(loaded_object->layer_config_ranges.size() == 1);
+    const auto &loaded_range = loaded_object->layer_config_ranges.begin();
+    CHECK_THAT(loaded_range->first.first, Catch::Matchers::WithinAbs(0.4, 1e-6));
+    CHECK_THAT(loaded_range->first.second, Catch::Matchers::WithinAbs(1.2, 1e-6));
+    REQUIRE(loaded_range->second.has("layer_height"));
+    CHECK_THAT(loaded_range->second.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
+
+    REQUIRE(loaded_object->brim_points.size() == 2);
+    CHECK_THAT(loaded_object->brim_points[0].pos(0), Catch::Matchers::WithinAbs(1., 1e-5));
+    CHECK_THAT(loaded_object->brim_points[0].pos(1), Catch::Matchers::WithinAbs(2., 1e-5));
+    CHECK_THAT(loaded_object->brim_points[0].pos(2), Catch::Matchers::WithinAbs(0.3, 1e-5));
+    CHECK_THAT(loaded_object->brim_points[0].head_front_radius, Catch::Matchers::WithinAbs(0.45, 1e-5));
+    CHECK_THAT(loaded_object->brim_points[1].pos(0), Catch::Matchers::WithinAbs(3., 1e-5));
+    CHECK_THAT(loaded_object->brim_points[1].pos(1), Catch::Matchers::WithinAbs(4., 1e-5));
+    CHECK_THAT(loaded_object->brim_points[1].pos(2), Catch::Matchers::WithinAbs(0.7, 1e-5));
+    CHECK_THAT(loaded_object->brim_points[1].head_front_radius, Catch::Matchers::WithinAbs(0.85, 1e-5));
+}
+
+TEST_CASE("BBS 3MF round-trips per-plate custom G-code", "[3mf][3MFCustomGCode]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+
+    // Every plate gets its own mode and items, so a loader that dropped or remapped the
+    // serialized plate id would merge them or put them on the wrong plate.
+    CustomGCode::Info &first = model.plates_custom_gcodes[0];
+    first.mode = CustomGCode::Mode::MultiExtruder;
+    first.gcodes = {
+        { 0.2, CustomGCode::ColorChange, 1, "#ff0000", "" },
+        { 0.4, CustomGCode::PausePrint, 2, "pause", "hold for inspection" },
+        { 0.6, CustomGCode::ToolChange, 3, "", "" },
+        { 0.8, CustomGCode::Custom, 1, "", "M117 custom marker" },
+    };
+    // A plate with a mode but no items still keeps its own record.
+    model.plates_custom_gcodes[1].mode = CustomGCode::Mode::SingleExtruder;
+    CustomGCode::Info &third = model.plates_custom_gcodes[2];
+    third.mode = CustomGCode::Mode::MultiAsSingle;
+    third.gcodes = {
+        { 0.3, CustomGCode::Template, 2, "", "" },
+        { 0.5, CustomGCode::Unknown, 1, "", "unknown marker" },
+        { 1.0, CustomGCode::ColorChange, 2, "#00ff00", "" },
+    };
+
+    ScopedTemporaryDir backup_dir("orca_3mf_custom_gcode_src");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = temp.string().c_str();
+    store_params.model    = &model;
+    store_params.config   = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_3mf_custom_gcode_dst");
+    REQUIRE(load_project(temp.string(), loaded_model, loaded_backup_dir));
+
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == model.plates_custom_gcodes.size());
+    for (const auto &[plate, expected_info] : model.plates_custom_gcodes) {
+        INFO("plate " << plate);
+        const auto loaded_it = loaded_model.plates_custom_gcodes.find(plate);
+        REQUIRE(loaded_it != loaded_model.plates_custom_gcodes.end());
+        const CustomGCode::Info &loaded_info = loaded_it->second;
+        CHECK(loaded_info.mode == expected_info.mode);
+        REQUIRE(loaded_info.gcodes.size() == expected_info.gcodes.size());
+        for (size_t i = 0; i < expected_info.gcodes.size(); ++i) {
+            const CustomGCode::Item &expected = expected_info.gcodes[i];
+            const CustomGCode::Item &actual   = loaded_info.gcodes[i];
+            CHECK_THAT(actual.print_z, Catch::Matchers::WithinAbs(expected.print_z, 1e-6));
+            CHECK(actual.type == expected.type);
+            CHECK(actual.extruder == expected.extruder);
+            CHECK(actual.color == expected.color);
+            CHECK(actual.extra == expected.extra);
+        }
+    }
+}
+
+TEST_CASE("BBS 3MF round-trips cut object identity and connector metadata", "[3mf][3MFCutMetadata]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 2.));
+    ModelVolume *connector = object->add_volume(make_cube(2., 2., 1.), ModelVolumeType::NEGATIVE_VOLUME);
+    object->add_instance();
+
+    object->cut_id.init();
+    object->cut_id.set_check_sum(0x1234);
+    object->cut_id.increase_connectors_cnt(1);
+    connector->cut_info = ModelVolume::CutInfo(CutConnectorType::Dowel, 0.125f, 0.25f, true);
+    const ObjectID expected_cut_id = object->cut_id.id();
+
+    ScopedTemporaryDir backup_dir("orca_3mf_cut_src");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = temp.string().c_str();
+    store_params.model    = &model;
+    store_params.config   = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_3mf_cut_dst");
+    REQUIRE(load_project(temp.string(), loaded_model, loaded_backup_dir));
+
+    REQUIRE(loaded_model.objects.size() == 1);
+    const ModelObject *loaded_object = loaded_model.objects.front();
+    REQUIRE(loaded_object->is_cut());
+    CHECK(loaded_object->cut_id.id() == expected_cut_id);
+    CHECK(loaded_object->cut_id.check_sum() == 0x1234);
+    CHECK(loaded_object->cut_id.connectors_cnt() == 1);
+    REQUIRE(loaded_object->volumes.size() == 2);
+    const ModelVolume *loaded_connector = nullptr;
+    for (const ModelVolume *volume : loaded_object->volumes) {
+        if (volume->is_cut_connector()) {
+            loaded_connector = volume;
+            break;
+        }
+    }
+    REQUIRE(loaded_connector != nullptr);
+    REQUIRE(loaded_connector->is_cut_connector());
+    CHECK(loaded_connector->is_negative_volume());
+    CHECK(loaded_connector->cut_info.connector_type == CutConnectorType::Dowel);
+    CHECK_THAT(loaded_connector->cut_info.radius_tolerance, Catch::Matchers::WithinAbs(0.125, 1e-6));
+    CHECK_THAT(loaded_connector->cut_info.height_tolerance, Catch::Matchers::WithinAbs(0.25, 1e-6));
+    CHECK(loaded_connector->mesh().its.vertices.size() == connector->mesh().its.vertices.size());
 }
 
 // Every text configuration field set to a non-default value. The text and the font

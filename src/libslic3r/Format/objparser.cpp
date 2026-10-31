@@ -1,8 +1,12 @@
 #include <cassert>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <cstdio>
 #include <new>
 #include <istream>
+// fseeko/ftello are POSIX and declared by <stdio.h>, not <cstdio>.
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,6 +15,10 @@
 #include <string>
 #include <vector>
 #include <utility>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 
 #include "objparser.hpp"
 
@@ -821,35 +829,67 @@ bool savevectornameidx(FILE *pFile, const std::vector<T> &v)
 	return true;
 }
 
+// Size of an open file, measured once with 64-bit offsets so caches over 2 GiB are not misjudged on Windows.
+static bool file_size(FILE *pFile, size_t &size)
+{
+#ifdef _WIN32
+	if (::_fseeki64(pFile, 0, SEEK_END) != 0)
+		return false;
+	const int64_t end = ::_ftelli64(pFile);
+	const bool rewound = ::_fseeki64(pFile, 0, SEEK_SET) == 0;
+#else
+	static_assert(sizeof(off_t) >= 8, "fseeko/ftello need 64-bit offsets to measure caches over 2 GiB");
+	if (::fseeko(pFile, 0, SEEK_END) != 0)
+		return false;
+	const int64_t end = ::ftello(pFile);
+	const bool rewound = ::fseeko(pFile, 0, SEEK_SET) == 0;
+#endif
+	if (end < 0 || !rewound)
+		return false;
+	size = static_cast<uint64_t>(end) > std::numeric_limits<size_t>::max() ? std::numeric_limits<size_t>::max() : static_cast<size_t>(end);
+	return true;
+}
+
+// Reads exactly len bytes and charges them to the bytes left in the file, so every count can be bounded
+// by that budget before anything is allocated.
+static bool read_bytes(FILE *pFile, void *dst, size_t len, size_t &remaining)
+{
+	if (len > remaining || ::fread(dst, 1, len, pFile) != len)
+		return false;
+	remaining -= len;
+	return true;
+}
+
 template<typename T> 
-bool loadvector(FILE *pFile, std::vector<T> &v)
+bool loadvector(FILE *pFile, std::vector<T> &v, size_t &remaining)
 {
 	v.clear();
 	size_t cnt = 0;
-	if (::fread(&cnt, sizeof(cnt), 1, pFile) != 1)
+	if (!read_bytes(pFile, &cnt, sizeof(cnt), remaining) || cnt > remaining / sizeof(T))
 		return false;
 	//FIXME sizeof(T) works for data types leaving no gaps in the allocated vector because of alignment of the T type.
 	if (cnt != 0) {
 		v.assign(cnt, T());
-		if (::fread(&v.front(), sizeof(T), cnt, pFile) != cnt)
+		if (!read_bytes(pFile, v.data(), cnt * sizeof(T), remaining))
 			return false;
 	}
 	return true;
 }
 
-bool loadvector(FILE *pFile, std::vector<std::string> &v)
+bool loadvector(FILE *pFile, std::vector<std::string> &v, size_t &remaining)
 {
 	v.clear();
 	size_t cnt = 0;
-	if (::fread(&cnt, sizeof(cnt), 1, pFile) != 1)
+	// Each string takes at least its length field.
+	if (!read_bytes(pFile, &cnt, sizeof(cnt), remaining) || cnt > remaining / sizeof(size_t))
 		return false;
-	v.reserve(cnt);
+	// Records are appended as they are read, so memory grows only with data actually present.
 	for (size_t i = 0; i < cnt; ++ i) {
 		size_t len = 0;
-		if (::fread(&len, sizeof(len), 1, pFile) != 1)
+		if (!read_bytes(pFile, &len, sizeof(len), remaining) || len > remaining)
 			return false;
-		std::string s(" ", len);
-		if (::fread(s.data(), 1, len, pFile) != len)
+		std::string s(len, '\0');
+		if (!read_bytes(pFile, s.data(), len, remaining))
 			return false;
 		v.push_back(std::move(s));
 	}
@@ -857,22 +897,23 @@ bool loadvector(FILE *pFile, std::vector<std::string> &v)
 }
 
 template<typename T>
-bool loadvectornameidx(FILE *pFile, std::vector<T> &v)
+bool loadvectornameidx(FILE *pFile, std::vector<T> &v, size_t &remaining)
 {
 	v.clear();
 	size_t cnt = 0;
-	if (::fread(&cnt, sizeof(cnt), 1, pFile) != 1)
+	// Each record takes at least its vertex index and name length.
+	if (!read_bytes(pFile, &cnt, sizeof(cnt), remaining) || cnt > remaining / (sizeof(int) + sizeof(size_t)))
 		return false;
-	v.assign(cnt, T());
 	for (size_t i = 0; i < cnt; ++ i) {
-		if (::fread(&v[i].vertexIdxFirst, sizeof(int), 1, pFile) != 1)
-			return false;
+		T record{};
 		size_t len = 0;
-		if (::fread(&len, sizeof(len), 1, pFile) != 1)
+		if (!read_bytes(pFile, &record.vertexIdxFirst, sizeof(int), remaining) ||
+			!read_bytes(pFile, &len, sizeof(len), remaining) || len > remaining)
 			return false;
-		v[i].name.assign(" ", len);
-		if (::fread(v[i].name.data(), 1, len, pFile) != len)
+		record.name.assign(len, ' ');
+		if (!read_bytes(pFile, record.name.data(), len, remaining))
 			return false;
+		v.push_back(std::move(record));
 	}
 	return true;
 }
@@ -904,30 +945,30 @@ bool objbinsave(const char *path, const ObjData &data)
 
 bool objbinload(const char *path, ObjData &data)
 {
-	FILE *pFile = boost::nowide::fopen(path, "rb");
-	if (pFile == 0)
+	std::unique_ptr<FILE, decltype(&::fclose)> file(boost::nowide::fopen(path, "rb"), &::fclose);
+	FILE *pFile = file.get();
+	size_t remaining = 0;
+	if (pFile == 0 || !file_size(pFile, remaining))
 		return false;
 
+	// objbinsave writes the version as size_t, so read it back with the same width.
 	data.version = 0;
-	if (::fread(&data.version, sizeof(data.version), 1, pFile) != 1)
+	size_t serialized_version = 0;
+	if (!read_bytes(pFile, &serialized_version, sizeof(serialized_version), remaining) || serialized_version != 1)
 		return false;
-	if (data.version != 1)
-		return false;
+	data.version = 1;
 
-	bool result =
-		loadvector(pFile, data.coordinates)			&&
-		loadvector(pFile, data.textureCoordinates)	&&
-		loadvector(pFile, data.normals)				&&
-		loadvector(pFile, data.parameters)			&&
-		loadvector(pFile, data.mtllibs)				&&
-		loadvectornameidx(pFile, data.usemtls)		&&
-		loadvectornameidx(pFile, data.objects)		&&
-		loadvectornameidx(pFile, data.groups)		&&
-		loadvector(pFile, data.smoothingGroups)		&&
-		loadvector(pFile, data.vertices);
-
-	::fclose(pFile);
-	return result;
+	return
+		loadvector(pFile, data.coordinates, remaining)			&&
+		loadvector(pFile, data.textureCoordinates, remaining)	&&
+		loadvector(pFile, data.normals, remaining)				&&
+		loadvector(pFile, data.parameters, remaining)			&&
+		loadvector(pFile, data.mtllibs, remaining)				&&
+		loadvectornameidx(pFile, data.usemtls, remaining)		&&
+		loadvectornameidx(pFile, data.objects, remaining)		&&
+		loadvectornameidx(pFile, data.groups, remaining)		&&
+		loadvector(pFile, data.smoothingGroups, remaining)		&&
+		loadvector(pFile, data.vertices, remaining);
 }
 
 template<typename T>

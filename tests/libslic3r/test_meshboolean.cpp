@@ -7,8 +7,10 @@
 #include <libslic3r/Point.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -187,6 +189,42 @@ TEST_CASE("CGAL merge joins disjoint closed components without changing total vo
     CHECK_THAT(merged.bounding_box().max.x(), WithinAbs(22., 1e-5));
 }
 
+TEST_CASE("CGAL remeshing caps every edge at 4/3 of the target and keeps a constrained cuboid footprint", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // The prepass only splits the protected (sharp) cube edges; the 14.1 mm face diagonals are
+    // shortened only by the isotropic remeshing pass itself, which splits anything above 4/3 target.
+    const float target = 2.5f;
+    const indexed_triangle_set source = shifted_cube(2.f, -3.f, 4.f).its;
+    const indexed_triangle_set remeshed = MeshBoolean::cgal::remesh_isotropic(source, target, 1, 40., 1);
+    REQUIRE(remeshed.indices.size() > source.indices.size());
+    check_valid_indices(remeshed);
+    CHECK(its_num_open_edges(remeshed) == 0);
+    float max_edge = 0.f;
+    for (const Vec3i32 &face : remeshed.indices)
+        for (int i = 0; i < 3; ++i)
+            max_edge = std::max(max_edge, (remeshed.vertices[face[i]] - remeshed.vertices[face[(i + 1) % 3]]).norm());
+    CHECK(max_edge <= 4.f / 3.f * target);
+    const TriangleMesh result(remeshed);
+    CHECK_THAT(result.bounding_box().min.x(), WithinAbs(2., 1e-4));
+    CHECK_THAT(result.bounding_box().max.x(), WithinAbs(12., 1e-4));
+    CHECK_THAT(result.bounding_box().min.y(), WithinAbs(-3., 1e-4));
+    CHECK_THAT(result.bounding_box().max.y(), WithinAbs(7., 1e-4));
+    CHECK_THAT(result.bounding_box().min.z(), WithinAbs(4., 1e-4));
+    CHECK_THAT(result.bounding_box().max.z(), WithinAbs(14., 1e-4));
+    CHECK_THAT(mesh_volume(result), WithinRel(1000.f, 5e-2f));
+}
+
+TEST_CASE("CGAL remeshing returns invalid requests unchanged", "[MeshBoolean][MeshBooleanContracts]")
+{
+    const indexed_triangle_set source = shifted_cube(0.f).its;
+    const indexed_triangle_set zero_length = MeshBoolean::cgal::remesh_isotropic(source, 0., 2);
+    const indexed_triangle_set empty = MeshBoolean::cgal::remesh_isotropic(indexed_triangle_set{}, 2.);
+    CHECK(zero_length.vertices == source.vertices);
+    CHECK(zero_length.indices == source.indices);
+    CHECK(empty.vertices.empty());
+    CHECK(empty.indices.empty());
+}
+
 TEST_CASE("CGAL LSCM parameterization maps a disk and rejects disconnected patches", "[MeshBoolean][MeshBooleanContracts]")
 {
     const indexed_triangle_set square = open_square();
@@ -220,6 +258,75 @@ TEST_CASE("CGAL LSCM parameterization maps a disk and rejects disconnected patch
         disconnected.indices.push_back(face);
     }
     CHECK_FALSE(MeshBoolean::cgal::parameterize_lscm(disconnected).has_value());
+
+    // A patch plus a separate closed cube still has exactly one boundary loop, so only the
+    // connected-components check can reject it.
+    indexed_triangle_set with_closed_part = square;
+    its_merge(with_closed_part, shifted_cube(20.f).its);
+    CHECK_FALSE(MeshBoolean::cgal::parameterize_lscm(with_closed_part).has_value());
+}
+
+TEST_CASE("CGAL segmentation splits a dumbbell into closed ball and rod parts", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // Two spheres joined by a thin rod, so the SDF segmentation has regions of clearly different
+    // thickness to separate. Each part comes back hole-filled, so the parts' volumes add up.
+    TriangleMesh dumbbell = make_sphere(5.);
+    TriangleMesh far_ball = make_sphere(5.);
+    far_ball.translate(Vec3f(0.f, 0.f, 20.f));
+    MeshBoolean::cgal::plus(dumbbell, far_ball);
+    MeshBoolean::cgal::plus(dumbbell, make_cylinder(1., 20.));
+    const float dumbbell_volume = mesh_volume(dumbbell);
+    const float ball_volume = mesh_volume(make_sphere(5.));
+
+    const std::vector<TriangleMesh> pieces = MeshBoolean::cgal::segment(dumbbell, 0.5, 3);
+    REQUIRE(pieces.size() >= 3);
+    std::vector<float> volumes;
+    for (const TriangleMesh &piece : pieces) {
+        check_valid_indices(piece.its);
+        CHECK(its_num_open_edges(piece.its) == 0);
+        volumes.push_back(mesh_volume(piece));
+    }
+    std::sort(volumes.begin(), volumes.end(), [](float a, float b) { return a > b; });
+    // The two thick parts are the balls; the rod between them is a separate, much thinner part.
+    CHECK_THAT(volumes[0], WithinRel(ball_volume, 1e-2f));
+    CHECK_THAT(volumes[1], WithinRel(ball_volume, 1e-2f));
+    for (size_t i = 2; i < volumes.size(); ++i) {
+        CHECK(volumes[i] > 0.f);
+        CHECK(volumes[i] < 0.1f * ball_volume);
+    }
+    float total_volume = 0.f;
+    for (const float volume : volumes)
+        total_volume += volume;
+    CHECK_THAT(total_volume, WithinRel(dumbbell_volume, 1e-2f));
+}
+
+TEST_CASE("CGAL repair closes a cube with one missing triangle", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // its_volume() measures heights from the first vertex, so drop a triangle on a face that does
+    // not contain that vertex; otherwise the hole would not change the volume. TriangleMesh::volume()
+    // is not used because it returns the cached volume of the closed cube.
+    TriangleMesh open = shifted_cube(0.f);
+    const Vec3f ref = open.its.vertices.front();
+    const auto dropped = std::find_if(open.its.indices.begin(), open.its.indices.end(), [&](const Vec3i32 &f) {
+        const Vec3f &a = open.its.vertices[f[0]];
+        const Vec3f n = (open.its.vertices[f[1]] - a).cross(open.its.vertices[f[2]] - a).normalized();
+        return std::abs(n.dot(a - ref)) > 1.f;
+    });
+    REQUIRE(dropped != open.its.indices.end());
+    open.its.indices.erase(dropped);
+    REQUIRE(its_volume(open.its) < 999.f);
+    REQUIRE(its_num_open_edges(open.its) > 0);
+    REQUIRE_FALSE(MeshBoolean::cgal::does_bound_a_volume(*MeshBoolean::cgal::triangle_mesh_to_cgal(open)));
+    RepairedMeshErrors errors;
+    std::string error;
+    REQUIRE(MeshBoolean::cgal::repair(open, &errors, &error));
+    CHECK(error.empty());
+    CHECK(its_num_open_edges(open.its) == 0);
+    CHECK_THAT(its_volume(open.its), WithinRel(1000.f, 1e-3f));
+    CHECK_FALSE(MeshBoolean::cgal::does_self_intersect(open));
+    const auto repaired_cgal = MeshBoolean::cgal::triangle_mesh_to_cgal(open);
+    REQUIRE(repaired_cgal != nullptr);
+    CHECK(MeshBoolean::cgal::does_bound_a_volume(*repaired_cgal));
 }
 
 TEST_CASE("MCUT conversion round trips cuboid topology and empty state", "[MeshBoolean][MeshBooleanContracts]")
