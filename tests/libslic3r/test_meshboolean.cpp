@@ -7,6 +7,7 @@
 #include <libslic3r/Point.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <utility>
@@ -185,6 +186,42 @@ TEST_CASE("CGAL merge joins disjoint closed components without changing total vo
     CHECK_THAT(mesh_volume(merged), WithinRel(2000.f, 1e-3f));
     CHECK_THAT(merged.bounding_box().min.x(), WithinAbs(0., 1e-5));
     CHECK_THAT(merged.bounding_box().max.x(), WithinAbs(22., 1e-5));
+}
+
+TEST_CASE("CGAL remeshing caps every edge at 4/3 of the target and keeps a constrained cuboid footprint", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // The prepass only splits the protected (sharp) cube edges; the 14.1 mm face diagonals are
+    // shortened only by the isotropic remeshing pass itself, which splits anything above 4/3 target.
+    const float target = 2.5f;
+    const indexed_triangle_set source = shifted_cube(2.f, -3.f, 4.f).its;
+    const indexed_triangle_set remeshed = MeshBoolean::cgal::remesh_isotropic(source, target, 1, 40., 1);
+    REQUIRE(remeshed.indices.size() > source.indices.size());
+    check_valid_indices(remeshed);
+    CHECK(its_num_open_edges(remeshed) == 0);
+    float max_edge = 0.f;
+    for (const Vec3i32 &face : remeshed.indices)
+        for (int i = 0; i < 3; ++i)
+            max_edge = std::max(max_edge, (remeshed.vertices[face[i]] - remeshed.vertices[face[(i + 1) % 3]]).norm());
+    CHECK(max_edge <= 4.f / 3.f * target);
+    const TriangleMesh result(remeshed);
+    CHECK_THAT(result.bounding_box().min.x(), WithinAbs(2., 1e-4));
+    CHECK_THAT(result.bounding_box().max.x(), WithinAbs(12., 1e-4));
+    CHECK_THAT(result.bounding_box().min.y(), WithinAbs(-3., 1e-4));
+    CHECK_THAT(result.bounding_box().max.y(), WithinAbs(7., 1e-4));
+    CHECK_THAT(result.bounding_box().min.z(), WithinAbs(4., 1e-4));
+    CHECK_THAT(result.bounding_box().max.z(), WithinAbs(14., 1e-4));
+    CHECK_THAT(mesh_volume(result), WithinRel(1000.f, 5e-2f));
+}
+
+TEST_CASE("CGAL remeshing returns invalid requests unchanged", "[MeshBoolean][MeshBooleanContracts]")
+{
+    const indexed_triangle_set source = shifted_cube(0.f).its;
+    const indexed_triangle_set zero_length = MeshBoolean::cgal::remesh_isotropic(source, 0., 2);
+    const indexed_triangle_set empty = MeshBoolean::cgal::remesh_isotropic(indexed_triangle_set{}, 2.);
+    CHECK(zero_length.vertices == source.vertices);
+    CHECK(zero_length.indices == source.indices);
+    CHECK(empty.vertices.empty());
+    CHECK(empty.indices.empty());
 }
 
 TEST_CASE("CGAL LSCM parameterization maps a disk and rejects disconnected patches", "[MeshBoolean][MeshBooleanContracts]")
