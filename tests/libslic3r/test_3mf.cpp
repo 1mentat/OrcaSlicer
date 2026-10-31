@@ -37,6 +37,7 @@
 #include <memory>
 #include <cstdint>
 #include <ios>
+#include <iterator>
 #include <nlohmann/json.hpp>
 
 #include <boost/filesystem/operations.hpp>
@@ -2218,13 +2219,13 @@ void store_model(const std::string& path, Model& model, DynamicPrintConfig& conf
     REQUIRE(store_bbs_3mf(params));
 }
 
-bool load_model(const std::string& path, Model& model, LoadedProject& loaded)
+bool load_model(const std::string& path, Model& model, LoadedProject& loaded, Import3mfProgressFn callback = nullptr)
 {
     loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_ext_load");
     model.set_backup_path(loaded.backup->string());
     ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
     return load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates, &loaded.presets,
-                        &loaded.is_bbl, &loaded.is_orca, &loaded.version, nullptr,
+                        &loaded.is_bbl, &loaded.is_orca, &loaded.version, std::move(callback),
                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
 }
 
@@ -2471,6 +2472,147 @@ TEST_CASE("BBS 3MF gates slice metadata while retaining every plate instance map
     CHECK(loaded_unsliced.obj_inst_map.begin()->first == loaded_sliced.obj_inst_map.begin()->first);
     CHECK(loaded_unsliced.obj_inst_map.begin()->second.first == 0);
     CHECK(loaded_sliced.obj_inst_map.begin()->second.first == 1);
+}
+
+TEST_CASE("BBS 3MF import cancellation returns false at the public progress seam", "[3MF][Bbs3mfExtended][Cancellation]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_cancel_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    bool called = false;
+    Model loaded_model;
+    LoadedProject loaded;
+    const bool result = load_model(archive.string(), loaded_model, loaded,
+        [&called](int stage, int, int, bool& cancel) {
+            called = true;
+            cancel = stage == IMPORT_STAGE_OPEN;
+        });
+    CHECK(called);
+    CHECK_FALSE(result);
+}
+
+TEST_CASE("BBS 3MF export cancellation stops before writing a project", "[3MF][Bbs3mfExtended][Cancellation]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_export_cancel");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    bool called = false;
+    StoreParams params;
+    params.path = archive.string();
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    params.proFn = [&called](int, int, int, bool& cancel) {
+        called = true;
+        cancel = true;
+    };
+    CHECK_FALSE(store_bbs_3mf(params));
+    CHECK(called);
+    CHECK_FALSE(boost::filesystem::exists(archive.path()));
+    CHECK_FALSE(boost::filesystem::exists(archive.string() + ".tmp"));
+}
+
+TEST_CASE("BBS 3MF import cancellation leaves plate output untouched at loading",
+          "[3MF][Bbs3mfLateCancellation][Import]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_late_import_cancel_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    std::vector<int> stages;
+    Model loaded_model;
+    LoadedProject loaded;
+    const bool result = load_model(archive.string(), loaded_model, loaded,
+        [&stages](int stage, int, int, bool& cancel) {
+            stages.push_back(stage);
+            cancel = stage == IMPORT_STAGE_LOADING_PLATES;
+        });
+
+    CHECK_FALSE(result);
+    REQUIRE(std::find(stages.begin(), stages.end(), IMPORT_STAGE_LOADING_PLATES) != stages.end());
+    CHECK(loaded.plates.empty());
+}
+
+TEST_CASE("BBS 3MF export cancellation removes unfinished archives at late stages",
+          "[3MF][Bbs3mfLateCancellation][Export]")
+{
+    const int target_stage = GENERATE(EXPORT_STAGE_ADD_MODELS, EXPORT_STAGE_FINISH);
+    const bool preserve_existing = GENERATE(false, true);
+    INFO("target export stage " << target_stage);
+    INFO("pre-existing destination " << preserve_existing);
+
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_late_export_cancel_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+
+    ScopedTemporaryDir output_dir("orca_bbs_late_export_cancel_output");
+    const boost::filesystem::path output = output_dir.path() / ("cancelled-" + std::to_string(target_stage) + ".3mf");
+    std::vector<int> stages;
+    StoreParams params;
+    params.path = output.string();
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+
+    const auto read_file = [&output]() {
+        boost::nowide::ifstream input(output.string(), std::ios::binary);
+        REQUIRE(input.good());
+        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    };
+    std::string existing_archive;
+    if (preserve_existing) {
+        REQUIRE(store_bbs_3mf(params));
+        existing_archive = read_file();
+        REQUIRE_FALSE(existing_archive.empty());
+    }
+
+    bool cancellation_requested = false;
+    bool progress_after_cancellation = false;
+    params.proFn = [&stages, target_stage, &cancellation_requested, &progress_after_cancellation]
+                   (int stage, int, int, bool& cancel) {
+        progress_after_cancellation |= cancellation_requested;
+        stages.push_back(stage);
+        cancel = stage == target_stage;
+        cancellation_requested |= cancel;
+    };
+
+    CHECK_FALSE(store_bbs_3mf(params));
+    REQUIRE(std::find(stages.begin(), stages.end(), target_stage) != stages.end());
+    CHECK_FALSE(progress_after_cancellation);
+    CHECK_FALSE(boost::filesystem::exists(output.string() + ".tmp"));
+
+    if (preserve_existing)
+        CHECK(read_file() == existing_archive);
+    else
+        CHECK_FALSE(boost::filesystem::exists(output));
 }
 
 } // namespace bbs_archive_contracts
