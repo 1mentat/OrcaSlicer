@@ -820,3 +820,23 @@ TEST_CASE("ScopeGuard reset suppresses the callback", "[utils]") {
     }
     CHECK(calls == 0);
 }
+
+TEST_CASE("File classification checks case-insensitive extensions and regular-file type", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    for (const std::string &name : {"settings.INI", "cache.IdX", "shape.STL"})
+        touch(d.path() / name);
+    fs::create_directories(d.path() / "folder.ini");
+    CHECK(is_ini_file(fs::directory_entry(d.path() / "settings.INI")));
+    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "cache.IdX")));
+    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "folder.ini")));
+    CHECK(is_idx_file(fs::directory_entry(d.path() / "cache.IdX")));
+    CHECK_FALSE(is_idx_file(fs::directory_entry(d.path() / "settings.INI")));
+    CHECK(is_gallery_file(fs::directory_entry(d.path() / "shape.STL"), ".stl"));
+    CHECK_FALSE(is_gallery_file(fs::directory_entry(d.path() / "folder.ini"), ".ini"));
+    CHECK(is_gallery_file(std::string("nested/shape.STL"), ".stl"));
+    CHECK_FALSE(is_gallery_file(std::string("shape.stl.backup"), ".stl"));
+    CHECK(is_img_file("image.PNG"));
+    CHECK(is_img_file("image.SvG"));
+    CHECK_FALSE(is_img_file("image.svg.json"));
+}
