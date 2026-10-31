@@ -8,6 +8,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
 #include "libslic3r/LocalesUtils.hpp"
+#include "libslic3r/Point.hpp"
 
 #include "test_utils.hpp"
 
@@ -709,6 +710,81 @@ TEST_CASE("save_to_json round-trips plugin capability references as strings", "[
     REQUIRE(reloaded.load_from_json(tmp.string(), substitutions, true, key_values, reason) == 0);
     CHECK(reason.empty());
     CHECK(reloaded.option<ConfigOptionStrings>("slicing_pipeline_plugin")->values == refs);
+}
+
+TEST_CASE("Config JSON loading parses grouped geometry in flat and nested forms", "[Config]") {
+    const std::string area_json = GENERATE(
+        std::string(R"(["0x0,20x0,20x20,0x20","5x5,15x5,15x15,5x15"])"),
+        std::string(R"([["0x0,20x0,20x20,0x20"],["5x5,15x5,15x15,5x15"]])"));
+    ScopedTemporaryFile tmp(".json");
+    {
+        boost::nowide::ofstream out(tmp.string());
+        REQUIRE(out.is_open());
+        out << "{\"extruder_printable_area\":" << area_json << "}";
+        out.close();
+        REQUIRE(out.good());
+    }
+
+    // Exercise ConfigBase's schema-driven JSON loader without DynamicPrintConfig's
+    // print-specific legacy filtering, while retaining the registered print option types.
+    struct PrintSchemaConfig : DynamicConfig {
+        const ConfigDef *def() const override { return &print_config_def; }
+    };
+    PrintSchemaConfig config;
+    const ConfigSubstitutions substitutions = config.load(
+        tmp.string(), ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(substitutions.empty());
+
+    const ConfigOptionPointsGroups *areas = config.option<ConfigOptionPointsGroups>("extruder_printable_area");
+    REQUIRE(areas != nullptr);
+    REQUIRE(areas->values.size() == 2);
+    const Vec2ds expected_areas[] = {
+        { Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.) },
+        { Vec2d(5., 5.), Vec2d(15., 5.), Vec2d(15., 15.), Vec2d(5., 15.) },
+    };
+    for (size_t group = 0; group < areas->values.size(); ++group) {
+        REQUIRE(areas->values[group].size() == expected_areas[group].size());
+        for (size_t point = 0; point < expected_areas[group].size(); ++point) {
+            CHECK_THAT(areas->values[group][point].x(), Catch::Matchers::WithinAbs(expected_areas[group][point].x(), 1e-9));
+            CHECK_THAT(areas->values[group][point].y(), Catch::Matchers::WithinAbs(expected_areas[group][point].y(), 1e-9));
+        }
+    }
+}
+
+TEST_CASE("Config JSON loading joins an aliased array in its target option's format", "[Config]") {
+    // The only alias in print_config_def is a floats option, whose ',' separator
+    // is also the loader's fallback, so declare an aliased strings option here.
+    // Strings must be joined as quoted, escaped, ';'-separated items; only the
+    // loader's own alias lookup can tell that "legacy_labels" is a strings option.
+    struct AliasConfigDef : ConfigDef {
+        AliasConfigDef()
+        {
+            ConfigOptionDef *def = this->add("labels", coStrings);
+            def->aliases = { "legacy_labels" };
+            def->set_default_value(new ConfigOptionStrings());
+        }
+    };
+    static const AliasConfigDef alias_config_def;
+    struct AliasConfig : DynamicConfig {
+        const ConfigDef *def() const override { return &alias_config_def; }
+    };
+
+    ScopedTemporaryFile tmp(".json");
+    {
+        boost::nowide::ofstream out(tmp.string());
+        REQUIRE(out.is_open());
+        out << R"({"legacy_labels":["first, with comma","second; \"quoted\""]})";
+        out.close();
+        REQUIRE(out.good());
+    }
+
+    AliasConfig config;
+    const ConfigSubstitutions substitutions = config.load(tmp.string(), ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(substitutions.empty());
+    const ConfigOptionStrings *labels = config.option<ConfigOptionStrings>("labels");
+    REQUIRE(labels != nullptr);
+    CHECK(labels->values == std::vector<std::string>{"first, with comma", "second; \"quoted\""});
+    CHECK(config.option("legacy_labels") == nullptr);
 }
 
 TEST_CASE("load_from_json hands a preset's include list to the caller instead of the config", "[Config]") {
@@ -1597,4 +1673,70 @@ TEST_CASE("Default options of enum lists get their definition's keys map", "[Con
         ++enum_lists;
     }
     CHECK(enum_lists > 0);
+}
+
+TEST_CASE("Project JSON migration records support and wall-order differences", "[Config][ConfigJsonMigration]")
+{
+    const auto [seed_existing, keep_wall_order] = GENERATE(
+        table<bool, bool>({
+            {false, false},
+            {false, true},
+            {true, false},
+            {true, true},
+        }));
+    CAPTURE(seed_existing, keep_wall_order);
+
+    nlohmann::json document;
+    document["name"] = "project_settings";
+    document["support_type"] = "hybrid(auto)";
+    document["filament_settings_id"] = {"filament-a", "filament-b"};
+    if (seed_existing) {
+        document["different_settings_to_system"] = {"wall_sequence;outer_wall_filament_id"};
+    } else {
+        document["different_settings_to_system"] = nlohmann::json::array();
+    }
+    if (keep_wall_order)
+        document["wall_infill_order"] = "infill/outer wall/inner wall";
+
+    ScopedTemporaryFile tmp(".json");
+    {
+        boost::nowide::ofstream out(tmp.string());
+        REQUIRE(out.is_open());
+        out << document.dump();
+        out.close();
+        REQUIRE(out.good());
+    }
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("is_infill_first", "0");
+    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+    std::map<std::string, std::string> key_values;
+    std::string reason;
+    REQUIRE(config.load_from_json(tmp.string(), substitutions, true, key_values, reason) == 0);
+    CHECK(reason.empty());
+    CHECK(key_values["name"] == "project_settings");
+    CHECK(substitutions.unrecogized_keys.empty());
+    CHECK(config.opt_serialize("support_type") == "tree(auto)");
+    CHECK(config.opt_serialize("support_style") == "tree_hybrid");
+    CHECK(config.opt_bool("is_infill_first") == keep_wall_order);
+
+    const ConfigOptionStrings *different = config.option<ConfigOptionStrings>("different_settings_to_system");
+    REQUIRE(different != nullptr);
+
+    std::vector<std::string> expected;
+    if (seed_existing) {
+        expected.push_back(keep_wall_order
+            ? "wall_sequence;outer_wall_filament_id;support_type;support_style;is_infill_first"
+            : "outer_wall_filament_id;support_type;support_style");
+    } else {
+        expected = {
+            keep_wall_order ? "support_type;support_style;is_infill_first" : "support_type;support_style",
+            "",
+            "",
+            "",
+        };
+    }
+    REQUIRE(different->values.size() == expected.size());
+    for (size_t index = 0; index < expected.size(); ++index)
+        CHECK(different->values[index] == expected[index]);
 }

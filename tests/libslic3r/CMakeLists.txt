@@ -25,6 +25,7 @@ add_executable(${_TEST_NAME}_tests
     test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
+    test_parameter_utils.cpp
     test_locales_utils.cpp
     test_drc.cpp
     test_edge_grid.cpp
@@ -61,6 +62,7 @@ add_executable(${_TEST_NAME}_tests
     test_nozzle_volume_type.cpp
     test_obj.cpp
     test_obj_color_utils.cpp
+    test_orient.cpp
     test_sl1.cpp
     test_zipper_archive_import.cpp
     test_step.cpp
@@ -78,6 +80,7 @@ add_executable(${_TEST_NAME}_tests
     test_lay_on_face.cpp
     test_model.cpp
     test_project_task.cpp
+    test_rotfinder.cpp
     test_utils.cpp
     test_miniz_extension.cpp
     test_timeutils.cpp
@@ -99,6 +102,7 @@ add_executable(${_TEST_NAME}_tests
 if (SLIC3R_CAD)
     target_sources(${_TEST_NAME}_tests PRIVATE
         test_caddocument.cpp
+        test_sketchengine.cpp
         test_sketchconstraints.cpp
         test_sketchedit.cpp
         test_sketchprofile.cpp
