@@ -29,10 +29,22 @@ using Catch::Matchers::WithinAbs;
 
 namespace {
 
-// resources/fonts sits beside resources/profiles (PROFILES_DIR).
+// These tests need the bundled resources/fonts/Sarabun-Medium.ttf at runtime. resources/fonts sits beside
+// resources/profiles (PROFILES_DIR), so every CI test job has to ship resources/fonts as well as profiles.
 std::string font_path()
 {
     return (std::filesystem::path(std::string(PROFILES_DIR)).parent_path() / "fonts" / "Sarabun-Medium.ttf").string();
+}
+
+// Simple independent metrics: 1000 units per em, 800 ascent and a 1200-unit line advance.
+Emboss::FontFile::Info simple_metrics()
+{
+    Emboss::FontFile::Info info{};
+    info.ascent      = 800;
+    info.descent     = -200;
+    info.linegap     = 200;
+    info.unit_per_em = 1000;
+    return info;
 }
 
 std::unique_ptr<Emboss::FontFile> load_font()
@@ -62,17 +74,27 @@ ExPolygon square(double x, double y, double side)
 
 TEST_CASE("Emboss loads a font from a file or raw data and extracts glyphs", "[Emboss][EmbossFont]")
 {
+    const auto from_file = load_font();
     std::ifstream input(font_path(), std::ios::binary);
     REQUIRE(input.good());
     std::vector<unsigned char> data((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     auto font = Emboss::create_font_file(std::make_unique<std::vector<unsigned char>>(data));
     REQUIRE(font != nullptr);
-    REQUIRE_FALSE(font->infos.empty());
+
+    // Both overloads read the same face metrics.
+    REQUIRE(font->infos.size() == from_file->infos.size());
+    CHECK(font->infos.front().ascent == from_file->infos.front().ascent);
+    CHECK(font->infos.front().descent == from_file->infos.front().descent);
+    CHECK(font->infos.front().linegap == from_file->infos.front().linegap);
+    CHECK(font->infos.front().unit_per_em == from_file->infos.front().unit_per_em);
 
     const auto glyph = Emboss::letter2glyph(*font, 0, 'A', 0.1f);
     REQUIRE(glyph.has_value());
     CHECK_FALSE(glyph->shape.empty());
     CHECK(glyph->advance_width > 0);
+    const auto file_glyph = Emboss::letter2glyph(*from_file, 0, 'A', 0.1f);
+    REQUIRE(file_glyph.has_value());
+    CHECK(file_glyph->advance_width == glyph->advance_width);
 
     // A collection index past the end is rejected instead of read.
     const auto missing = static_cast<unsigned>(font->infos.size());
@@ -211,9 +233,8 @@ TEST_CASE("Emboss vertical alignment offsets respond independently to text heigh
 TEST_CASE("Emboss vertical offsets convert supplied font metrics into exact millimeters", "[Emboss][EmbossFont]")
 {
     const auto face = load_font();
-    // Layout consumes cached metrics. Keep a real owned font buffer and supply
-    // simple independent metrics: 1000 units/em, 800 ascent, 1200 line advance.
-    face->infos = {{800, -200, 200, 1000}};
+    // Layout consumes cached metrics. Keep a real owned font buffer and supply simple ones.
+    face->infos = {simple_metrics()};
     const FontProp prop(10.f);
     CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::top, 3, *face, prop), WithinAbs(-8., 1e-5));
     CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::bottom, 3, *face, prop), WithinAbs(24., 1e-5));
@@ -223,7 +244,7 @@ TEST_CASE("Emboss vertical offsets convert supplied font metrics into exact mill
 TEST_CASE("Extra emboss line gap changes only multi-line baseline spacing", "[Emboss][EmbossFont]")
 {
     const auto face = load_font();
-    face->infos = {{800, -200, 200, 1000}};
+    face->infos = {simple_metrics()};
     FontProp prop(10.f);
     prop.line_gap = 300;
     CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::bottom, 1, *face, prop), WithinAbs(0., 1e-5));
@@ -234,7 +255,12 @@ TEST_CASE("Extra emboss line gap changes only multi-line baseline spacing", "[Em
 TEST_CASE("Emboss layout selects metrics from the requested font collection entry", "[Emboss][EmbossFont]")
 {
     const auto face = load_font();
-    face->infos = {{800, -200, 200, 1000}, {1200, -400, 100, 2000}};
+    Emboss::FontFile::Info second{};
+    second.ascent      = 1200;
+    second.descent     = -400;
+    second.linegap     = 100;
+    second.unit_per_em = 2000;
+    face->infos = {simple_metrics(), second};
     FontProp prop(20.f);
     prop.collection_number = 1;
     CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::top, 1, *face, prop), WithinAbs(-12., 1e-5));
