@@ -64,6 +64,16 @@ float processed_belt_tilt(const std::string &gcode)
 }
 
 constexpr const char *body = "G1 X10 Y10 Z0.2 F3000\nG1 X20 Y10 E1 F1200\n";
+constexpr const char *continuous_rising_outer_wall_gcode =
+    "M83\nG90\n"
+    "G1 X0 Y0 Z0.2 F600\n"
+    ";TYPE:Outer wall\n"
+    "G1 X10 Y0 E1 F600\n"
+    "G1 X10 Y10 Z0.4 E1\n"
+    "G1 X0 Y10 E1\n"
+    "G1 X10.05 Y10 E1\n"
+    ";TYPE:Inner wall\n"
+    "G1 X10.10 Y10 E1\n";
 
 } // namespace
 
@@ -659,17 +669,6 @@ TestResult process_continuous_rising_outer_wall(bool detect_layer_from_tags)
     // Keep the seam detector active through the rising external extrusion. The
     // following inner-wall move ends the continuous outer path, allowing the
     // two tracking modes to select different seam origins.
-    const std::string gcode =
-        "M83\nG90\n"
-        "G1 X0 Y0 Z0.2 F600\n"
-        ";TYPE:Outer wall\n"
-        "G1 X10 Y0 E1 F600\n"
-        "G1 X10 Y10 Z0.4 E1\n"
-        "G1 X0 Y10 E1\n"
-        "G1 X10.05 Y10 E1\n"
-        ";TYPE:Inner wall\n"
-        "G1 X10.10 Y10 E1\n";
-
     GCodeProcessor processor;
     FullPrintConfig config;
     config.gcode_flavor.value = gcfMarlinFirmware;
@@ -677,12 +676,32 @@ TestResult process_continuous_rising_outer_wall(bool detect_layer_from_tags)
     processor.initialize("gcode_processor_layer_tag_contract.gcode");
     processor.initialize_result_moves();
     processor.detect_layer_based_on_tag(detect_layer_from_tags);
-    processor.process_buffer(gcode);
+    processor.process_buffer(continuous_rising_outer_wall_gcode);
     processor.finalize(false);
 
     TestResult result;
     result = std::move(processor.extract_result());
     return result;
+}
+
+TestResult process_continuous_rising_outer_wall_with_config(const FullPrintConfig &config)
+{
+    // TYPE: is the compatible/Marlin role dialect. Keep the process-global parser
+    // setting local to this fixture and restore it even when a Catch assertion throws.
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+    return process_buffer(continuous_rising_outer_wall_gcode, config);
+}
+
+TestResult import_continuous_rising_outer_wall_with_config(const FullPrintConfig &config)
+{
+    // The public G-code import path reads this real CONFIG_BLOCK into a
+    // DynamicPrintConfig before applying processor settings.
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+    return process_file(orca_header(config) + continuous_rising_outer_wall_gcode);
 }
 
 } // namespace
@@ -713,6 +732,77 @@ TEST_CASE("Tag-based seam tracking follows a rising continuous outer path", "[GC
     CHECK_THAT(tag_based_seams.front()->position.x(), WithinAbs(10.025f, 1e-4f));
     CHECK_THAT(tag_based_seams.front()->position.y(), WithinAbs(10.f, 1e-4f));
     CHECK_THAT(tag_based_seams.front()->position.z(), WithinAbs(0.4f, 1e-4f));
+}
+
+TEST_CASE("Registered scarf seam config selects layer-tag seam tracking", "[GCodeProcessor][GCodeProcessorScarfSeam]")
+{
+    struct Scenario {
+        bool scarf_seam;
+        bool spiral_mode;
+        bool expect_tag_based_seam;
+    };
+    constexpr std::array<Scenario, 4> scenarios{{
+        { false, false, false },
+        { true,  false, true  },
+        { false, true,  true  },
+        { true,  true,  true  },
+    }};
+    struct ExpectedPosition {
+        float x;
+        float y;
+        float z;
+    };
+    constexpr std::array<ExpectedPosition, 5> expected_extrusions{{
+        { 10.f,    0.f, 0.2f },
+        { 10.f,   10.f, 0.4f },
+        {  0.f,   10.f, 0.4f },
+        { 10.05f, 10.f, 0.4f },
+        { 10.10f, 10.f, 0.4f },
+    }};
+
+    const auto check_result = [&](const GCodeProcessorResult &result, const Scenario &scenario) {
+        const auto extrusions = moves_of(result, EMoveType::Extrude);
+        REQUIRE(extrusions.size() == expected_extrusions.size());
+        for (size_t i = 0; i < expected_extrusions.size(); ++i) {
+            CAPTURE(i);
+            CHECK_THAT(extrusions[i]->position.x(), WithinAbs(expected_extrusions[i].x, 1e-4f));
+            CHECK_THAT(extrusions[i]->position.y(), WithinAbs(expected_extrusions[i].y, 1e-4f));
+            CHECK_THAT(extrusions[i]->position.z(), WithinAbs(expected_extrusions[i].z, 1e-4f));
+            CHECK(std::isfinite(extrusions[i]->delta_extruder));
+            CHECK(extrusions[i]->delta_extruder > 0.f);
+        }
+
+        const auto seams = moves_of(result, EMoveType::Seam);
+        if (!scenario.expect_tag_based_seam) {
+            CHECK(seams.empty());
+            return;
+        }
+
+        REQUIRE(seams.size() == 1);
+        CHECK_THAT(seams.front()->position.x(), WithinAbs(10.025f, 1e-4f));
+        CHECK_THAT(seams.front()->position.y(), WithinAbs(10.f, 1e-4f));
+        CHECK_THAT(seams.front()->position.z(), WithinAbs(0.4f, 1e-4f));
+    };
+
+    for (const Scenario &scenario : scenarios) {
+        CAPTURE(scenario.scarf_seam, scenario.spiral_mode);
+        FullPrintConfig config;
+        config.gcode_flavor.value = gcfMarlinFirmware;
+        config.has_scarf_joint_seam.value = scenario.scarf_seam;
+        config.spiral_mode.value = scenario.spiral_mode;
+        const auto result = process_continuous_rising_outer_wall_with_config(config);
+        check_result(result, scenario);
+    }
+
+    for (const Scenario &scenario : scenarios) {
+        CAPTURE(scenario.scarf_seam, scenario.spiral_mode);
+        FullPrintConfig config;
+        config.gcode_flavor.value = gcfMarlinFirmware;
+        config.has_scarf_joint_seam.value = scenario.scarf_seam;
+        config.spiral_mode.value = scenario.spiral_mode;
+        const auto result = import_continuous_rising_outer_wall_with_config(config);
+        check_result(result, scenario);
+    }
 }
 
 

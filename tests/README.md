@@ -895,6 +895,13 @@ Its two merge probes are in `filament_cut_ec_nullable.json`. The CTest label
 also selects the existing mapped cut-distance override case; build
 `fff_print_multifilament_tests` for focused feedback.
 
+`[GCodeProcessorScarfSeam]` checks all four scarf/spiral Boolean pairs through
+public buffer processing and config-bearing G-code import. The fixed rising
+outer-wall stream has a known seam midpoint and five preserved positive
+extrusion endpoints. Its four probes are in `gcode_processor_scarf_seam.json`;
+build `fff_print_gcodeprocessor_tests` for focused feedback. These checks cover
+processor seam tracking, not scarf mesh generation.
+
 `[SkirtDistance]` measures emitted skirt clearances at 0, 3, and 60 mm against
 an explicitly placed square, accounting for half the public skirt-flow spacing.
 `[SkirtAngle]` checks -180, -90, 0, 90, and 180 degree start bearings while

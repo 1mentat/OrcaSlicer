@@ -5929,6 +5929,16 @@
         "pipeline_oracle"
       ],
       "reason": "Writer-emitted G1 XYZ/E endpoints cover omitted and explicit 45-degree defaults, zero, -30/+30, and the registered -180/+180 limits on X/Y belt axes. Coupled frame tilt deliberately ignores an extreme decoupled-angle value. Independently rotated input and physical height/feed projections test real writer output; +/-180 degrees undo preslicing while the near-zero-sine frame gate stays inactive. Constant/default and 45-degree-clamped inverse rotations each fail ordinary assertions. This writer-level contract does not claim full mesh slicing or Print export for every angle."
+    },
+    "has_scarf_joint_seam": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GCodeProcessorScarfSeam]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "All four scarf-seam/spiral-mode Boolean pairs are applied through the public static processor configuration and through public G-code file import, whose CONFIG_BLOCK loader creates the dynamic configuration. False/false emits no seam; each other pair emits the seam at the expected rising outer-wall midpoint. Each row retains five finite positive-extrusion endpoints. Four source-local mutations challenge both scarf consumers and preservation of the spiral flag. This covers processor seam tracking, not scarf mesh generation or full Print export geometry."
     }
   }
 }
