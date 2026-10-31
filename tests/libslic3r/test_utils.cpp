@@ -23,6 +23,7 @@
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -761,4 +762,61 @@ TEST_CASE("Recursive directory copying throws when a directory occupies a file's
     boost::filesystem::create_directories(dst / "file.txt" / "occupied");
     write_bytes(src / "file.txt", "payload");
     CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
+}
+
+// Known bug: ScopeGuard move leaves the moved-from std::function non-empty on libc++ (double fire); fixed by the follow-up fix PR.
+// ScopeGuard relies on a moved-from std::function being empty. libstdc++ and MSVC empty it; libc++ keeps a
+// small closure in the source, so the moved-from guard fires too. The move tests can only fail where that happens.
+#ifdef _LIBCPP_VERSION
+#define SCOPE_GUARD_MOVE_TAGS "[utils][!shouldfail]"
+#else
+#define SCOPE_GUARD_MOVE_TAGS "[utils]"
+#endif
+
+TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", SCOPE_GUARD_MOVE_TAGS) {
+    size_t calls = 0;
+    {
+        std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
+        ScopeGuard moved(std::move(*source));
+        source.reset();
+        // The moved-from guard gave its callback away, so destroying it runs nothing.
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", SCOPE_GUARD_MOVE_TAGS) {
+    size_t calls = 0;
+    {
+        ScopeGuard guard;
+        std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
+        guard = std::move(*source);
+        source.reset();
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", SCOPE_GUARD_MOVE_TAGS) {
+    size_t calls = 0;
+    {
+        ScopeGuard destination([&calls] { calls += 10; });
+        std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
+        destination = std::move(*source);
+        CHECK(calls == 0);
+        source.reset();
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+#undef SCOPE_GUARD_MOVE_TAGS
+
+TEST_CASE("ScopeGuard reset suppresses the callback", "[utils]") {
+    size_t calls = 0;
+    {
+        ScopeGuard guard([&calls] { ++calls; });
+        guard.reset();
+    }
+    CHECK(calls == 0);
 }
