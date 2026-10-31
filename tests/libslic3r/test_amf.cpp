@@ -304,12 +304,13 @@ TEST_CASE("AMF missing constellation targets do not duplicate known geometry", "
     CHECK(m.objects[0]->instances.empty());
 }
 
-TEST_CASE("AMF empty constellation instances preserve uninstanced geometry", "[AMF]")
+TEST_CASE("AMF empty constellation instances still load the object geometry", "[AMF]")
 {
     ScopedTemporaryFile f(".amf");
     write_file(f.string(), document(instance("")));
     Model m;
     REQUIRE(load(f.string(), m));
+    // Whether an empty <instance> creates a ModelInstance is intentionally not asserted.
     geometry(m, f.string());
 }
 
