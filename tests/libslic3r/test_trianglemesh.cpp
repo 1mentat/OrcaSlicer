@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <map>
 #include <utility>
@@ -54,7 +55,15 @@ TEST_CASE("Primitive generators preserve analytic bounds and positive solids", "
     const indexed_triangle_set frustum = its_make_frustum(6., 8., PI / 12.);
     const BoundingBoxf3 frustum_box    = bounding_box(frustum);
     CHECK_THAT(frustum_box.size().z(), WithinAbs(8., 1e-5));
-    CHECK_THAT(its_volume(frustum), WithinAbs(float((7. / 12.) * PI * 36. * 8.), 15.f));
+    // The frustum is a stack of two regular n-gons (bottom radius 6, top radius 3) with two
+    // center vertices; its exact volume is h / 3 * (A1 + A2 + sqrt(A1 * A2)).
+    const double sides = double(frustum.vertices.size() - 2) / 2.;
+    REQUIRE(sides >= 24.);
+    const auto polygon_area = [sides](double radius) { return sides / 2. * radius * radius * std::sin(2. * PI / sides); };
+    const double bottom_area = polygon_area(6.);
+    const double top_area    = polygon_area(3.);
+    const double expected_frustum_volume = 8. / 3. * (bottom_area + top_area + std::sqrt(bottom_area * top_area));
+    CHECK_THAT(its_volume(frustum), WithinAbs(float(expected_frustum_volume), 1e-2f));
     const indexed_triangle_set torus = its_make_torus(8., 2., PI / 8.);
     const BoundingBoxf3 torus_box    = bounding_box(torus);
     CHECK_THAT(torus_box.size().x(), WithinAbs(20., 0.2));
@@ -102,10 +111,6 @@ TEST_CASE("Specialized primitive generators produce closed positive solids with 
     CHECK_THAT(snap_box.min.y(), WithinAbs(-snap_box.max.y(), 1e-4));
 }
 
-namespace pyramid_winding_contracts {
-using namespace Slic3r;
-using Catch::Matchers::WithinAbs;
-
 // Known bug: its_make_pyramid winds its two base facets inward; fixed by the follow-up fix PR
 TEST_CASE("Pyramid facets all face away from an interior point", "[TriangleMesh][PyramidWinding][!shouldfail]")
 {
@@ -135,7 +140,8 @@ TEST_CASE("Pyramid topology pairs every directed edge with its reverse", "[Trian
             CHECK(face >= 0);
 }
 
-TEST_CASE("Pyramid signed volume is invariant under translation", "[TriangleMesh][PyramidWinding]")
+// its_volume() measures from the first vertex, so this holds regardless of the base winding.
+TEST_CASE("Pyramid signed volume is invariant under translation", "[TriangleMesh][TriangleMeshContracts]")
 {
     const Vec3f displacement = GENERATE(Vec3f(0.f, 0.f, 7.f), Vec3f(0.f, 0.f, -7.f), Vec3f(11.f, -13.f, 5.f));
     auto mesh                = its_make_pyramid(6.f, 9.f);
@@ -146,4 +152,3 @@ TEST_CASE("Pyramid signed volume is invariant under translation", "[TriangleMesh
     CHECK_THAT(its_volume(mesh), WithinAbs(108., 1e-3));
 }
 
-} // namespace pyramid_winding_contracts
