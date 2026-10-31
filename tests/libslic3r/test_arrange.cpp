@@ -860,10 +860,7 @@ DynamicPrintConfig arrange_config(const char *support_type, bool enable_support)
     return config;
 }
 
-// Known bug: get_arrange_poly(const Model &) rotates and translates the hull accumulated so far instead of
-// each instance's own footprint, so the other instances lose their own offset and Z rotation; fixed by the follow-up
-// fix PR.
-TEST_CASE("Model arrange polygon is the convex hull of every instance at its position and rotation", "[Arrange][ModelArrange][!shouldfail]")
+TEST_CASE("Model arrange polygon is the convex hull of every instance at its position and rotation", "[Arrange][ModelArrange]")
 {
     // The first cube turned a quarter about Z covers x 30..50 at its offset (70 if left unrotated),
     // the second covers 0..20, so the hull is the 50x20 rectangle spanning both. Their inner corners
