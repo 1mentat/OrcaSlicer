@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <nlohmann/json.hpp>
 #include <catch2/catch_all.hpp>
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Polygon.hpp"
@@ -639,3 +640,184 @@ TEST_CASE("Arrange rotates an oversized item to fit only when rotations are allo
 }
 
 } // namespace arrange_surface_contracts
+
+namespace arrange_param_contracts {
+using Catch::Matchers::WithinAbs;
+using arrange_surface_contracts::rectangle;
+
+// Known bug: ArrangeParams::to_json() ends with a trailing comma and never closes the object, so the
+// logged string is not JSON; fixed by the follow-up fix PR.
+TEST_CASE("ArrangeParams serializes the distance and optimization controls as JSON", "[Arrange][ArrangeParams][!shouldfail]")
+{
+    ArrangeParams params = quiet_params(scaled(1.5));
+    params.accuracy = .25f;
+    params.parallel = false;
+    params.allow_rotations = true;
+    params.do_final_align = false;
+    params.is_seq_print = true;
+    params.bed_shrink_x = 2.f;
+    params.bed_shrink_y = 3.f;
+    params.brim_skirt_distance = 4.f;
+    params.clearance_height_to_rod = 5.f;
+    params.clearance_height_to_lid = 6.f;
+    params.clearance_radius = 7.f;
+    params.printable_height = 8.f;
+    const nlohmann::json json = nlohmann::json::parse(params.to_json(), nullptr, false);
+    REQUIRE_FALSE(json.is_discarded());
+    CHECK(json.at("min_obj_distance") == params.min_obj_distance);
+    CHECK_THAT(json.at("accuracy").get<double>(), WithinAbs(.25, 1e-12));
+    CHECK(json.at("parallel") == 0);
+    CHECK(json.at("allow_rotations") == 1);
+    CHECK(json.at("do_final_align") == 0);
+    CHECK(json.at("is_seq_print") == 1);
+    CHECK_THAT(json.at("bed_shrink_x").get<double>(), WithinAbs(2., 1e-12));
+    CHECK_THAT(json.at("bed_shrink_y").get<double>(), WithinAbs(3., 1e-12));
+    CHECK_THAT(json.at("brim_skirt_distance").get<double>(), WithinAbs(4., 1e-12));
+    CHECK_THAT(json.at("clearance_height_to_rod").get<double>(), WithinAbs(5., 1e-12));
+    CHECK_THAT(json.at("clearance_height_to_lid").get<double>(), WithinAbs(6., 1e-12));
+    CHECK_THAT(json.at("clearance_radius").get<double>(), WithinAbs(7., 1e-12));
+    CHECK_THAT(json.at("printable_height").get<double>(), WithinAbs(8., 1e-12));
+}
+
+TEST_CASE("Axis alignment turns the long axis of an asymmetric contour onto Y", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items{rectangle(20., 60.)};
+    items.front().rotation = .37;
+    ArrangeParams params = quiet_params();
+
+    // The alignment only runs when it is requested.
+    update_selected_items_axis_align(items, nullptr, params);
+    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
+
+    params.align_to_y_axis = true;
+    update_selected_items_axis_align(items, nullptr, params);
+    const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
+    CHECK_THAT(unscaled<double>(box.size().x()), WithinAbs(20., .01));
+    CHECK_THAT(unscaled<double>(box.size().y()), WithinAbs(60., .01));
+}
+
+TEST_CASE("Axis alignment leaves a contour without a dominant axis unrotated", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items{make_square(scaled(30.))};
+    items.front().rotation = .37;
+    ArrangeParams params = quiet_params();
+    params.align_to_y_axis = true;
+    update_selected_items_axis_align(items, nullptr, params);
+    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
+}
+
+TEST_CASE("Axis alignment ignores a degenerate contour", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygon item;
+    item.poly.contour.points = {Point(0, 0), Point(scaled(10.), 0)};
+    item.rotation = .37;
+    ArrangePolygons items{item};
+    ArrangeParams params = quiet_params();
+    params.align_to_y_axis = true;
+    update_selected_items_axis_align(items, nullptr, params);
+    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
+}
+
+TEST_CASE("Selected inflation uses half the widest tree-support brim for the whole plate", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(2, 20.);
+    items[0].brim_width = 1.;
+    items[1].brim_width = 4.;
+    DynamicPrintConfig config = bed_config();
+    ArrangeParams params = quiet_params();
+
+    // Without tree support each item keeps its own brim.
+    update_selected_items_inflation(items, &config, params);
+    CHECK(items[0].inflation == scaled(1.));
+    CHECK(items[1].inflation == scaled(4.));
+
+    items[1].has_tree_support = true;
+    update_selected_items_inflation(items, &config, params);
+    CHECK(items[0].inflation == scaled(2.));
+    CHECK(items[1].inflation == scaled(2.));
+}
+
+TEST_CASE("Selected inflation gives an explicit minimum distance precedence over brim", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(1, 20.);
+    items.front().brim_width = 8.;
+    DynamicPrintConfig config = bed_config();
+    ArrangeParams params = quiet_params(scaled(6.));
+    update_selected_items_inflation(items, &config, params);
+    CHECK(items.front().inflation == scaled(3.));
+}
+
+TEST_CASE("Unselected inflation distinguishes ordinary, virtual, and calibration regions", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(3, 10.);
+    items[0].brim_width = 3.;
+    items[1].is_virt_object = true;
+    items[2].is_virt_object = true;
+    items[2].is_extrusion_cali_object = true;
+    const ArrangeParams params = quiet_params();
+    update_unselected_items_inflation(items, nullptr, params);
+    CHECK(items[0].inflation == scaled(3.));
+    CHECK(items[1].inflation == scaled(1.));
+    CHECK(items[2].inflation == 0);
+}
+
+TEST_CASE("Sequential printing moves only virtual exclusion regions by the bed shrink", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(2, 10.);
+    items[0].is_virt_object = true;
+    const Point virt_before = items[0].poly.contour.points.front();
+    const Point real_before = items[1].poly.contour.points.front();
+    ArrangeParams params = quiet_params();
+    params.is_seq_print = true;
+    params.bed_shrink_x = 4.f;
+    params.bed_shrink_y = 6.f;
+    update_unselected_items_inflation(items, nullptr, params);
+    CHECK(items[0].poly.contour.points.front() == Point(virt_before.x() + scaled(4.), virt_before.y() + scaled(6.)));
+    CHECK(items[1].poly.contour.points.front() == real_before);
+}
+
+TEST_CASE("Arrange parameter update adds the real skirt clearance and sequential correction", "[Arrange][ArrangeParams]")
+{
+    // Skirt clearance is skirt_distance plus skirt_loops line widths: 3 + 2 * 0.4 = 3.8 mm.
+    DynamicPrintConfig config;
+    config.set_key_value("skirt_height", new ConfigOptionInt(1));
+    config.set_key_value("skirt_loops", new ConfigOptionInt(2));
+    config.set_key_value("skirt_distance", new ConfigOptionFloat(3.f));
+    config.set_key_value("line_width", new ConfigOptionFloat(.4f));
+    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(.4, false));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({.4}));
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = 10.f;
+    params.bed_shrink_y = 11.f;
+    params.clearance_radius = 4.f;
+
+    SECTION("by-layer printing adds the skirt clearance") {
+        update_arrange_params(params, &config, {});
+        CHECK_THAT(params.brim_skirt_distance, WithinAbs(3.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_x, WithinAbs(13.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_y, WithinAbs(14.8, 1e-5));
+    }
+    SECTION("sequential printing also gives back half the clearance radius") {
+        params.is_seq_print = true;
+        update_arrange_params(params, &config, {});
+        CHECK_THAT(params.bed_shrink_x, WithinAbs(11.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_y, WithinAbs(12.8, 1e-5));
+    }
+}
+
+TEST_CASE("Shrinking a rectangular bed moves every edge toward its center", "[Arrange][ArrangeParams]")
+{
+    DynamicPrintConfig config = bed_config();
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = 5.f;
+    params.bed_shrink_y = 7.f;
+    const Points points = get_shrink_bedpts(&config, params);
+    REQUIRE(points.size() == 4);
+    const BoundingBox box(points);
+    CHECK(box.min.x() == scaled(5.));
+    CHECK(box.max.x() == scaled(195.));
+    CHECK(box.min.y() == scaled(7.));
+    CHECK(box.max.y() == scaled(193.));
+}
+
+} // namespace arrange_param_contracts
