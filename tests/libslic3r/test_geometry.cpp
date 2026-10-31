@@ -20,6 +20,7 @@
 #include "libslic3r/Geometry/MedialAxis.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ShortestPath.hpp"
+#include "libslic3r/Algorithm/LineSplit.hpp"
 
 //#include <random>
 //#include "libnest2d/tools/benchmark.h"
@@ -35,6 +36,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <utility>
 #include "libnest2d/backends/libslic3r/geometries.hpp"
 
 using namespace Slic3r;
@@ -840,6 +842,253 @@ TEST_CASE("Medial axis of a rectangle is its central spine", "[Geometry][Geometr
 }
 
 } // namespace geometry_contract_family
+
+TEST_CASE("Line splitting clips the path around expolygon holes", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{
+        {{0, 0}, {20 * mm, 0}, {20 * mm, 20 * mm}, {0, 20 * mm}},
+        {{8 * mm, 8 * mm}, {8 * mm, 12 * mm}, {12 * mm, 12 * mm}, {12 * mm, 8 * mm}}
+    };
+    const Polyline path{Point(-5 * mm, -5 * mm), Point(25 * mm, 25 * mm)};
+
+    const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, false);
+    REQUIRE(split.size() >= 4);
+    CHECK(split.front().p == path.points.front());
+    CHECK(split.front().is_src());
+    CHECK(split.front().get_src_index() == 0);
+    CHECK(split.back().p == path.points.back());
+    CHECK(split.back().is_src());
+    CHECK(split.back().get_src_index() == 1);
+
+    std::vector<Point> clipped_endpoints;
+    for (size_t i = 0; i + 1 < split.size(); ++i) {
+        if (!split[i].clipped)
+            continue;
+        CHECK(split[i].p.x() == split[i].p.y());
+        CHECK(split[i + 1].p.x() == split[i + 1].p.y());
+        CHECK_FALSE(split[i].is_src());
+        CHECK_FALSE(split[i + 1].is_src());
+        CHECK(split[i].get_src_index() == 0);
+        CHECK(split[i + 1].get_src_index() == 0);
+        clipped_endpoints.emplace_back(split[i].p);
+        clipped_endpoints.emplace_back(split[i + 1].p);
+    }
+    const std::vector<Point> expected_endpoints{
+        Point(0, 0), Point(8 * mm, 8 * mm), Point(12 * mm, 12 * mm), Point(20 * mm, 20 * mm)
+    };
+    CHECK(clipped_endpoints == expected_endpoints);
+}
+
+TEST_CASE("Closed line splitting clips the closing edge and omits the duplicate endpoint", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    // The closing edge (-5,2) -> (15,2) crosses the clip, so only closed handling
+    // produces its clipped run; the open path is clipped on edge 1 alone.
+    const Polyline path{
+        Point(15 * mm, 2 * mm), Point(15 * mm, 8 * mm),
+        Point(-5 * mm, 8 * mm), Point(-5 * mm, 2 * mm)
+    };
+
+    const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, true);
+    REQUIRE(split.size() >= path.points.size());
+    CHECK(split.front().p != split.back().p);
+
+    bool saw_closing_edge_run = false;
+    coord_t clipped_length = 0;
+    for (size_t i = 0; i + 1 < split.size(); ++i) {
+        if (!split[i].clipped)
+            continue;
+        CHECK(split[i].p.y() == split[i + 1].p.y());
+        size_t source_edge = 1;
+        if (split[i].p.y() == 2 * mm) {
+            CHECK(split[i + 1].p.y() == 2 * mm);
+            source_edge = 3;
+            saw_closing_edge_run = true;
+        } else {
+            CHECK(split[i].p.y() == 8 * mm);
+            CHECK(split[i + 1].p.y() == 8 * mm);
+        }
+        CHECK_FALSE(split[i].is_src());
+        CHECK_FALSE(split[i + 1].is_src());
+        CHECK(split[i].get_src_index() == source_edge);
+        CHECK(split[i + 1].get_src_index() == source_edge);
+        CHECK(split[i].p.x() >= 0);
+        CHECK(split[i].p.x() <= 10 * mm);
+        CHECK(split[i + 1].p.x() >= 0);
+        CHECK(split[i + 1].p.x() <= 10 * mm);
+        const coord_t dx = split[i + 1].p.x() - split[i].p.x();
+        clipped_length += dx < 0 ? -dx : dx;
+    }
+    CHECK(saw_closing_edge_run);
+    CHECK(clipped_length == 20 * mm);
+}
+
+TEST_CASE("Line splitting returns no junctions for an empty path", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    const Polyline empty_path;
+
+    CHECK(Algorithm::split_line(empty_path, ExPolygons{clip}, false).empty());
+    CHECK(Algorithm::split_line(empty_path, ExPolygons{clip}, true).empty());
+}
+
+TEST_CASE("Line splitting returns no junctions when the path misses the clip", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    const Polyline outside{Point(-5 * mm, -5 * mm), Point(15 * mm, -5 * mm), Point(15 * mm, -2 * mm)};
+
+    CHECK(Algorithm::split_line(outside, ExPolygons{clip}, false).empty());
+    CHECK(Algorithm::split_line(outside, ExPolygons{clip}, true).empty());
+}
+
+TEST_CASE("Line splitting keeps source indices for boundary-overlap runs", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const bool vertical = GENERATE(false, true);
+    const auto point_on_axis = [vertical](coord_t along, coord_t offset) {
+        return vertical ? Point(offset, along) : Point(along, offset);
+    };
+    Polygon clip_polygon{
+        point_on_axis(0, 0), point_on_axis(5 * mm, 0), point_on_axis(10 * mm, 0),
+        point_on_axis(10 * mm, 10 * mm), point_on_axis(0, 10 * mm)
+    };
+    clip_polygon.make_counter_clockwise();
+    const ExPolygon clip{std::move(clip_polygon)};
+    const Polyline path{
+        point_on_axis(-5 * mm, 5 * mm), point_on_axis(2 * mm, 5 * mm),
+        point_on_axis(2 * mm, 0), point_on_axis(8 * mm, 0),
+        point_on_axis(8 * mm, 5 * mm), point_on_axis(15 * mm, 5 * mm)
+    };
+
+    const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, false);
+    REQUIRE(split.size() >= 3);
+
+    const Point left_cut = point_on_axis(0, 5 * mm);
+    const Point right_cut = point_on_axis(10 * mm, 5 * mm);
+    const Point collinear_clip_vertex = point_on_axis(5 * mm, 0);
+    bool saw_left_cut = false;
+    bool saw_source_1 = false;
+    bool saw_source_2 = false;
+    bool saw_source_3 = false;
+    bool saw_source_4 = false;
+    bool saw_right_cut = false;
+    for (const Algorithm::SplitLineJunction &junction : split) {
+        if (junction.p == left_cut) {
+            saw_left_cut = true;
+            CHECK_FALSE(junction.is_src());
+            CHECK(junction.get_src_index() == 0);
+        }
+        if (junction.p == path[1]) {
+            saw_source_1 = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 1);
+        }
+        if (junction.p == path[2]) {
+            saw_source_2 = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 2);
+        }
+        if (junction.p == path[3]) {
+            saw_source_3 = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 3);
+        }
+        if (junction.p == path[4]) {
+            saw_source_4 = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 4);
+        }
+        // The clip contour's collinear vertex inside the overlap run adds no
+        // junction: the run is reported by its source vertices alone.
+        CHECK(junction.p != collinear_clip_vertex);
+        if (junction.p == right_cut) {
+            saw_right_cut = true;
+            CHECK_FALSE(junction.is_src());
+            CHECK(junction.get_src_index() == 4);
+        }
+    }
+    REQUIRE(saw_left_cut);
+    REQUIRE(saw_source_1);
+    REQUIRE(saw_source_2);
+    REQUIRE(saw_source_3);
+    REQUIRE(saw_source_4);
+    REQUIRE(saw_right_cut);
+
+    coord_t clipped_length = 0;
+    for (size_t i = 0; i + 1 < split.size(); ++i) {
+        if (!split[i].clipped)
+            continue;
+        const Point &a = split[i].p;
+        const Point &b = split[i + 1].p;
+        const coord_t offset_a = vertical ? a.x() : a.y();
+        const coord_t offset_b = vertical ? b.x() : b.y();
+        const coord_t along_a = vertical ? a.y() : a.x();
+        const coord_t along_b = vertical ? b.y() : b.x();
+        CHECK(offset_a >= 0);
+        CHECK(offset_a <= 10 * mm);
+        CHECK(offset_b >= 0);
+        CHECK(offset_b <= 10 * mm);
+        CHECK(along_a >= 0);
+        CHECK(along_a <= 10 * mm);
+        CHECK(along_b >= 0);
+        CHECK(along_b <= 10 * mm);
+        if (offset_a != offset_b)
+            CHECK(along_a == along_b);
+        const coord_t along_delta = along_b >= along_a ? along_b - along_a : along_a - along_b;
+        const coord_t offset_delta = offset_b >= offset_a ? offset_b - offset_a : offset_a - offset_b;
+        clipped_length += along_delta + offset_delta;
+    }
+    CHECK(clipped_length == 20 * mm);
+}
+
+TEST_CASE("Line splitting preserves source vertices coincident with clip corners", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    const Polyline path{
+        Point(-5 * mm, -5 * mm), Point(0, 0), Point(5 * mm, 5 * mm),
+        Point(10 * mm, 10 * mm), Point(15 * mm, 15 * mm)
+    };
+
+    const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, false);
+    REQUIRE(split.size() >= 3);
+
+    bool saw_entry_vertex = false;
+    bool saw_exit_vertex = false;
+    coord_t clipped_diagonal_length = 0;
+    for (const Algorithm::SplitLineJunction &junction : split) {
+        if (junction.p == Point(0, 0)) {
+            saw_entry_vertex = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 1);
+        }
+        if (junction.p == Point(10 * mm, 10 * mm)) {
+            saw_exit_vertex = true;
+            CHECK(junction.is_src());
+            CHECK(junction.get_src_index() == 3);
+        }
+    }
+    for (size_t i = 0; i + 1 < split.size(); ++i) {
+        if (!split[i].clipped)
+            continue;
+        CHECK(split[i].p.x() == split[i].p.y());
+        CHECK(split[i + 1].p.x() == split[i + 1].p.y());
+        CHECK(split[i].p.x() >= 0);
+        CHECK(split[i].p.x() <= 10 * mm);
+        CHECK(split[i + 1].p.x() >= 0);
+        CHECK(split[i + 1].p.x() <= 10 * mm);
+        const coord_t delta = split[i + 1].p.x() - split[i].p.x();
+        CHECK(delta >= 0);
+        clipped_diagonal_length += delta;
+    }
+    REQUIRE(saw_entry_vertex);
+    REQUIRE(saw_exit_vertex);
+    CHECK(clipped_diagonal_length == 10 * mm);
+}
 
 namespace {
 
