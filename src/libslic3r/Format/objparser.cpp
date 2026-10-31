@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <new>
 #include <istream>
+// fseeko/ftello are POSIX and declared by <stdio.h>, not <cstdio>.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,10 @@
 #include <string>
 #include <vector>
 #include <utility>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 
 #include "objparser.hpp"
 
@@ -833,6 +838,7 @@ static bool file_size(FILE *pFile, size_t &size)
 	const int64_t end = ::_ftelli64(pFile);
 	const bool rewound = ::_fseeki64(pFile, 0, SEEK_SET) == 0;
 #else
+	static_assert(sizeof(off_t) >= 8, "fseeko/ftello need 64-bit offsets to measure caches over 2 GiB");
 	if (::fseeko(pFile, 0, SEEK_END) != 0)
 		return false;
 	const int64_t end = ::ftello(pFile);

@@ -732,8 +732,8 @@ TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary
 
 TEST_CASE("OBJ binary cache rejects a file cut off inside the coordinate vector", "[OBJBinary][OBJParser]")
 {
-    // The file ends mid-payload. A short read leaves the stream at EOF, so a loader without the payload
-    // check would still fail at the next count; this pins rejection of the cut file, not that specific check.
+    // The file ends before the declared payload, so the declared size exceeds the bytes left in the file and the
+    // loader's read budget rejects it.
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -748,8 +748,8 @@ TEST_CASE("OBJ binary cache rejects a file cut off inside the coordinate vector"
 
 TEST_CASE("OBJ binary cache rejects a file cut off inside a material name record", "[OBJBinary][OBJParser]")
 {
-    // The file ends mid-payload. A short read leaves the stream at EOF, so a loader without the payload
-    // check would still fail at the next count; this pins rejection of the cut file, not that specific check.
+    // The file ends before the declared payload, so the declared size exceeds the bytes left in the file and the
+    // loader's read budget rejects it.
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -776,8 +776,8 @@ TEST_CASE("OBJ binary cache rejects a file cut off inside a material name record
 
 TEST_CASE("OBJ binary cache rejects a file cut off inside the smoothing group vector", "[OBJBinary][OBJParser]")
 {
-    // The file ends mid-payload. A short read leaves the stream at EOF, so a loader without the payload
-    // check would still fail at the next count; this pins rejection of the cut file, not that specific check.
+    // The file ends before the declared payload, so the declared size exceeds the bytes left in the file and the
+    // loader's read budget rejects it.
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -796,7 +796,8 @@ TEST_CASE("OBJ binary cache rejects a file cut off inside the smoothing group ve
 
 TEST_CASE("OBJ binary cache rejects a truncated face vertex vector", "[OBJBinary][OBJParser]")
 {
-    // The face vertices are the last vector, so only the payload check can reject this file.
+    // The face vertices are the last vector, so no later read can reject this file; the declared count
+    // exceeds the bytes left in the file and the loader's read budget rejects it.
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
