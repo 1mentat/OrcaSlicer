@@ -11,10 +11,10 @@
 
 #include "test_utils.hpp"
 
+#include <boost/nowide/fstream.hpp>
 #include <boost/property_tree/ptree.hpp>
 
 #include <cstdint>
-#include <fstream>
 #include <initializer_list>
 #include <string>
 #include <utility>
@@ -95,7 +95,7 @@ TEST_CASE("Zipper archive import rejects a missing archive", "[ZipperArchiveImpo
 TEST_CASE("Zipper archive import rejects malformed archive bytes", "[ZipperArchiveImport]")
 {
     ScopedTemporaryFile malformed(".zip");
-    std::ofstream out(malformed.string(), std::ios::binary);
+    boost::nowide::ofstream out(malformed.string(), std::ios::binary);
     REQUIRE(out.good());
     out << "not a ZIP archive";
     out.close();
