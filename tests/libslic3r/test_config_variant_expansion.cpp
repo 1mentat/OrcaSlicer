@@ -1114,9 +1114,7 @@ TEST_CASE("Registered print options round-trip through binary option archives", 
     round_trip_registered_option_archives(print_config_def);
 }
 
-// Known bug: load_slicedata is registered as coStrings with a ConfigOptionString default, so
-// def-type dispatch builds the wrong class; fixed by the follow-up fix PR
-TEST_CASE("Registered CLI options round-trip through binary option archives", "[Config][ConfigArchive][!shouldfail]")
+TEST_CASE("Registered CLI options round-trip through binary option archives", "[Config][ConfigArchive]")
 {
     round_trip_registered_option_archives(cli_actions_config_def);
     round_trip_registered_option_archives(cli_transform_config_def);
