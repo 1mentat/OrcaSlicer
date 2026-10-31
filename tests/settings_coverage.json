@@ -718,13 +718,14 @@
       "reason": "The named direct-writer contract checks registered endpoints 1 and 100 plus 50. A four-layer Klipper Print export adds factors 1, 37, and 100 and verifies ACCEL_TO_DECEL as the configured percentage of each emitted ACCEL command with enablement on; deposited motion and material stay invariant. Disabled-mode factor independence, firmware execution, and other motion-setting interactions are not claimed."
     },
     "brim_type": {
-      "test": "tests/fff_print/test_gcodeprocessor.cpp",
-      "tag": "[GCodeProcessor]",
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[SkirtBrim]",
       "dimensions": [
+        "enum_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "No-brim and outer-brim configurations are distinguished by printed mass and center-of-mass output; the complete brim enum domain is not claimed."
+      "reason": "All eight registered modes have behavioral witnesses. Hollow-model exports distinguish outer-only, inner-only, combined rings and the flat leading-edge fallback by emitted segment locations and bounds. Automatic mode at configured width zero emits an outer ring on a valid large fixture while explicit outer-only zero emits none. Existing no-brim, automatic-ear and painted-ear controls cover the remaining modes; collapsed belt fallbacks are not the finite-domain evidence. The 52-case control passes before and after all three ordinary-assertion selection/derived-width mutation probes."
     },
     "brim_width": {
       "test": "tests/fff_print/test_skirt_brim.cpp",

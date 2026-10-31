@@ -28,6 +28,8 @@
     "FocusedSkirtBrim::Combine brims merges touching brims",
     "FocusedSkirtBrim::Every brim type slices on a belt printer",
     "FocusedSkirtBrim::Extra belt brim endpoints extend symmetrically across the belt",
+    "FocusedSkirtBrim::Flat auto brim creates an outer ring when explicit width is zero",
+    "FocusedSkirtBrim::Flat brim types follow both boundaries of a hollow model",
     "FocusedSkirtBrim::Leading belt brim endpoints extend only the downhill reach",
     "FocusedSkirtBrim::Leading brim length alone produces a belt brim",
     "FocusedSkirtBrim::Leading brim length reaches further ahead of the object",

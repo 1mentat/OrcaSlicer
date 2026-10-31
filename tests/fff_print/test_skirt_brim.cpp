@@ -3106,3 +3106,356 @@ TEST_CASE("Extra belt brim endpoints extend symmetrically across the belt",
     CHECK_THAT(representative.brim_bounds.max_y,
                Catch::Matchers::WithinAbs(maximum_width.brim_bounds.max_y, 0.5));
 }
+
+namespace brim_type_hollow_boundaries {
+
+using brim_range_settings::BrimEvidence;
+using brim_range_settings::Bounds;
+using brim_range_settings::RoleMotionEvidence;
+using brim_range_settings::inspect_brim;
+using brim_range_settings::inspect_role_motion;
+using brim_range_settings::require_same_model_bounds;
+using brim_range_settings::require_valid_brim;
+using brim_range_settings::first_layer_model_bounds;
+
+struct HollowSample {
+    BrimEvidence brim;
+    struct EmittedRegions {
+        size_t positive_xy_moves = 0;
+        size_t arc_moves = 0;
+        size_t inside_hole_midpoints = 0;
+        size_t outside_model_midpoints = 0;
+        bool finite = true;
+    } emitted_regions;
+    Bounds model_bounds;
+    RoleMotionEvidence model_motion;
+    size_t brim_loops = 0;
+    size_t hole_count = 0;
+    bool brim_enters_hole = false;
+};
+
+static Bounds polygon_bounds(const Polygon &polygon)
+{
+    Bounds bounds;
+    for (const Point &point : polygon.points) {
+        const double x = unscale<double>(point.x());
+        const double y = unscale<double>(point.y());
+        bounds.min_x = std::min(bounds.min_x, x);
+        bounds.max_x = std::max(bounds.max_x, x);
+        bounds.min_y = std::min(bounds.min_y, y);
+        bounds.max_y = std::max(bounds.max_y, y);
+    }
+    return bounds;
+}
+
+static HollowSample::EmittedRegions inspect_emitted_regions(const std::string &output,
+                                                             const DynamicPrintConfig &config,
+                                                             const Bounds &model_bounds,
+                                                             const Polygon &world_hole)
+{
+    HollowSample::EmittedRegions evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&evidence, &model_bounds, &world_hole](GCodeReader &self,
+                                                                        const GCodeReader::GCodeLine &line) {
+        if (line.comment().find("brim") == std::string_view::npos)
+            return;
+        if (line.cmd_is("G2") || line.cmd_is("G3")) {
+            if (line.extruding(self))
+                ++evidence.arc_moves;
+            return;
+        }
+        if (!line.cmd_is("G1") || !line.extruding(self))
+            return;
+
+        const double xy = line.dist_XY(self);
+        const double e = std::abs(line.dist_E(self));
+        const double start_x = self.x();
+        const double start_y = self.y();
+        const double end_x = line.new_X(self);
+        const double end_y = line.new_Y(self);
+        if (!std::isfinite(xy) || !std::isfinite(e) || !std::isfinite(start_x) ||
+            !std::isfinite(start_y) || !std::isfinite(end_x) || !std::isfinite(end_y)) {
+            evidence.finite = false;
+            return;
+        }
+        if (xy <= EPSILON || e <= 0.0)
+            return;
+
+        const double midpoint_x = (start_x + end_x) / 2.0;
+        const double midpoint_y = (start_y + end_y) / 2.0;
+        if (!std::isfinite(midpoint_x) || !std::isfinite(midpoint_y)) {
+            evidence.finite = false;
+            return;
+        }
+        ++evidence.positive_xy_moves;
+        if (Slic3r::contains(world_hole, Point::new_scale(midpoint_x, midpoint_y), false))
+            ++evidence.inside_hole_midpoints;
+        if (midpoint_x < model_bounds.min_x || midpoint_x > model_bounds.max_x ||
+            midpoint_y < model_bounds.min_y || midpoint_y > model_bounds.max_y)
+            ++evidence.outside_model_midpoints;
+    });
+    return evidence;
+}
+
+static HollowSample export_hollow_brim(const char *brim_type, const double width,
+                                       const double outer_size = 40.0,
+                                       const double object_height = 20.0,
+                                       const double origin_x = 80.0,
+                                       const double origin_y = 80.0)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",                 0.2 },
+        { "initial_layer_print_height",   0.2 },
+        { "initial_layer_line_width",     0.5 },
+        { "elefant_foot_compensation",    0.0 },
+        { "xy_contour_compensation",      0.0 },
+        { "xy_hole_compensation",         0.0 },
+        { "skirt_loops",                  0 },
+        { "raft_layers",                  0 },
+        { "enable_support",               false },
+        { "enable_prime_tower",           false },
+        { "enable_arc_fitting",           false },
+        { "brim_type",                    brim_type },
+        { "brim_width",                   width },
+        { "brim_flow_ratio",              1.0 },
+        { "brim_object_gap",              0.0 },
+        { "gcode_comments",               true },
+        { "gcode_flavor",                 "marlin" },
+        { "use_relative_e_distances",     true },
+        { "layer_change_gcode",           "G92 E0\n" },
+        { "printable_area",               "0x0,250x0,250x210,0x210" },
+    });
+
+    TriangleMesh shell = make_cube(float(outer_size), float(outer_size), float(object_height));
+    shell.translate(float(origin_x), float(origin_y), 0.f);
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(std::move(shell));
+
+    Print print;
+    Model model;
+    Slic3r::Test::init_print(std::move(meshes), print, model, config, nullptr, false);
+    REQUIRE(model.objects.size() == 1);
+    ModelObject *model_object = model.objects.front();
+    ModelVolume *through_hole = model_object->add_volume(
+        make_cube(20.0, 20.0, float(object_height)), ModelVolumeType::NEGATIVE_VOLUME, false);
+    REQUIRE(through_hole != nullptr);
+    through_hole->set_offset(Vec3d(origin_x + (outer_size - 20.0) / 2.0,
+                                   origin_y + (outer_size - 20.0) / 2.0, 0.0));
+    print.apply(model, config);
+    print.set_status_silent();
+
+    const StringObjectException validation = print.validate();
+    INFO("brim type=" << brim_type << " width=" << width << " validation=" << validation.string
+         << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    const PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE_FALSE(object->layers().empty());
+    REQUIRE_FALSE(object->layers().front()->lslices.empty());
+    REQUIRE(object->layers().front()->lslices.size() == 1);
+    REQUIRE(object->layers().front()->lslices.front().holes.size() == 1);
+    REQUIRE(object->instances().size() == 1);
+
+    HollowSample sample;
+    sample.model_bounds = first_layer_model_bounds(print);
+    sample.hole_count = object->layers().front()->lslices.front().holes.size();
+    sample.brim_loops = brim_loop_count(print);
+    sample.brim_enters_hole = brim_enters_first_layer_hole(print);
+
+    Polygon hole = object->layers().front()->lslices.front().holes.front();
+    REQUIRE(hole.points.size() == 4);
+    coord_t min_hole_x = hole.points.front().x();
+    coord_t max_hole_x = hole.points.front().x();
+    coord_t min_hole_y = hole.points.front().y();
+    coord_t max_hole_y = hole.points.front().y();
+    std::set<std::pair<coord_t, coord_t>> corners;
+    for (const Point &point : hole.points) {
+        min_hole_x = std::min(min_hole_x, point.x());
+        max_hole_x = std::max(max_hole_x, point.x());
+        min_hole_y = std::min(min_hole_y, point.y());
+        max_hole_y = std::max(max_hole_y, point.y());
+        corners.emplace(point.x(), point.y());
+    }
+    REQUIRE(corners.size() == 4);
+    for (const Point &point : hole.points) {
+        const bool x_is_rectangle_boundary =
+            point.x() == min_hole_x || point.x() == max_hole_x;
+        const bool y_is_rectangle_boundary =
+            point.y() == min_hole_y || point.y() == max_hole_y;
+        REQUIRE(x_is_rectangle_boundary);
+        REQUIRE(y_is_rectangle_boundary);
+    }
+    Point world_shift = object->instances().front().shift_without_plate_offset();
+    const Vec3d plate_origin = print.get_plate_origin();
+    world_shift += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    hole.translate(world_shift);
+    const Bounds hole_bounds = polygon_bounds(hole);
+    REQUIRE_THAT(hole_bounds.max_x - hole_bounds.min_x,
+                 Catch::Matchers::WithinAbs(20.0, 0.05));
+    REQUIRE_THAT(hole_bounds.max_y - hole_bounds.min_y,
+                 Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT((hole_bounds.min_x + hole_bounds.max_x) / 2.0,
+               Catch::Matchers::WithinAbs((sample.model_bounds.min_x + sample.model_bounds.max_x) / 2.0, 0.05));
+    CHECK_THAT((hole_bounds.min_y + hole_bounds.max_y) / 2.0,
+               Catch::Matchers::WithinAbs((sample.model_bounds.min_y + sample.model_bounds.max_y) / 2.0, 0.05));
+    CHECK(hole_bounds.min_x > sample.model_bounds.min_x);
+    CHECK(hole_bounds.max_x < sample.model_bounds.max_x);
+    CHECK(hole_bounds.min_y > sample.model_bounds.min_y);
+    CHECK(hole_bounds.max_y < sample.model_bounds.max_y);
+
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    sample.brim = inspect_brim(output, config, &sample.model_bounds);
+    sample.emitted_regions = inspect_emitted_regions(output, config, sample.model_bounds, hole);
+    sample.model_motion = inspect_role_motion(output, config, "perimeter");
+    return sample;
+}
+
+static void require_positive_model(const HollowSample &sample, const double expected_size = 40.0)
+{
+    REQUIRE(sample.model_motion.finite);
+    REQUIRE(sample.model_motion.extruding_moves > 0);
+    REQUIRE(sample.model_motion.xy_length > 0.0);
+    REQUIRE(sample.model_motion.filament > 0.0);
+    REQUIRE(sample.hole_count == 1);
+    CHECK_THAT(sample.model_bounds.max_x - sample.model_bounds.min_x,
+               Catch::Matchers::WithinAbs(expected_size, 0.05));
+    CHECK_THAT(sample.model_bounds.max_y - sample.model_bounds.min_y,
+               Catch::Matchers::WithinAbs(expected_size, 0.05));
+}
+
+static void require_same_model_motion(const RoleMotionEvidence &reference,
+                                      const RoleMotionEvidence &changed)
+{
+    REQUIRE(reference.finite);
+    REQUIRE(changed.finite);
+    REQUIRE(reference.extruding_moves > 0);
+    REQUIRE(changed.extruding_moves > 0);
+    CHECK_THAT(changed.xy_length,
+               Catch::Matchers::WithinAbs(reference.xy_length, 0.02));
+    CHECK_THAT(changed.filament,
+               Catch::Matchers::WithinAbs(reference.filament, 0.01));
+}
+
+} // namespace brim_type_hollow_boundaries
+
+TEST_CASE("Flat brim types follow both boundaries of a hollow model",
+          "[SkirtBrim][BrimTypeHollowBoundaries]")
+{
+    using namespace brim_type_hollow_boundaries;
+
+    const HollowSample outer = export_hollow_brim("outer_only", 5.0);
+    const HollowSample inner = export_hollow_brim("inner_only", 5.0);
+    const HollowSample both  = export_hollow_brim("outer_and_inner", 5.0);
+    const HollowSample flat_leading_edge = export_hollow_brim("leading_edge_only", 5.0);
+
+    require_positive_model(outer);
+    require_positive_model(inner);
+    require_positive_model(both);
+    require_positive_model(flat_leading_edge);
+    require_valid_brim(outer.brim);
+    require_valid_brim(inner.brim);
+    require_valid_brim(both.brim);
+    require_valid_brim(flat_leading_edge.brim);
+    REQUIRE(outer.brim_loops > 0);
+    REQUIRE(inner.brim_loops > 0);
+    REQUIRE(both.brim_loops > outer.brim_loops);
+    REQUIRE(both.brim_loops > inner.brim_loops);
+
+    require_same_model_bounds(outer.model_bounds, inner.model_bounds);
+    require_same_model_bounds(inner.model_bounds, both.model_bounds);
+    require_same_model_motion(outer.model_motion, inner.model_motion);
+    require_same_model_motion(inner.model_motion, both.model_motion);
+    require_same_model_bounds(outer.model_bounds, flat_leading_edge.model_bounds);
+    require_same_model_motion(outer.model_motion, flat_leading_edge.model_motion);
+
+    for (const HollowSample *sample : { &outer, &inner, &both, &flat_leading_edge }) {
+        REQUIRE(sample->emitted_regions.finite);
+        CHECK(sample->emitted_regions.arc_moves == 0);
+        CHECK(sample->emitted_regions.positive_xy_moves > 0);
+    }
+
+    CHECK_FALSE(outer.brim_enters_hole);
+    CHECK(inner.brim_enters_hole);
+    CHECK(both.brim_enters_hole);
+    CHECK(outer.emitted_regions.inside_hole_midpoints == 0);
+    CHECK(outer.emitted_regions.outside_model_midpoints > 0);
+    CHECK(inner.emitted_regions.inside_hole_midpoints > 0);
+    CHECK(inner.emitted_regions.outside_model_midpoints == 0);
+    CHECK(both.emitted_regions.inside_hole_midpoints > 0);
+    CHECK(both.emitted_regions.outside_model_midpoints > 0);
+    CHECK(flat_leading_edge.emitted_regions.inside_hole_midpoints == 0);
+    CHECK(flat_leading_edge.emitted_regions.outside_model_midpoints > 0);
+    CHECK_THAT(flat_leading_edge.brim.xy_length,
+               Catch::Matchers::WithinAbs(outer.brim.xy_length, 0.02));
+    CHECK_THAT(flat_leading_edge.brim.filament,
+               Catch::Matchers::WithinAbs(outer.brim.filament, 0.01));
+    CHECK(flat_leading_edge.brim.positive_xy_moves == outer.brim.positive_xy_moves);
+    CHECK_THAT(flat_leading_edge.brim.bounds.min_x,
+               Catch::Matchers::WithinAbs(outer.brim.bounds.min_x, 0.02));
+    CHECK_THAT(flat_leading_edge.brim.bounds.max_x,
+               Catch::Matchers::WithinAbs(outer.brim.bounds.max_x, 0.02));
+    CHECK_THAT(flat_leading_edge.brim.bounds.min_y,
+               Catch::Matchers::WithinAbs(outer.brim.bounds.min_y, 0.02));
+    CHECK_THAT(flat_leading_edge.brim.bounds.max_y,
+               Catch::Matchers::WithinAbs(outer.brim.bounds.max_y, 0.02));
+    CHECK(flat_leading_edge.emitted_regions.inside_hole_midpoints ==
+          outer.emitted_regions.inside_hole_midpoints);
+    CHECK(flat_leading_edge.emitted_regions.outside_model_midpoints ==
+          outer.emitted_regions.outside_model_midpoints);
+    CHECK(inner.brim.bounds.min_x > inner.model_bounds.min_x);
+    CHECK(inner.brim.bounds.max_x < inner.model_bounds.max_x);
+    CHECK(inner.brim.bounds.min_y > inner.model_bounds.min_y);
+    CHECK(inner.brim.bounds.max_y < inner.model_bounds.max_y);
+
+    CHECK(outer.brim.bounds.min_x < outer.model_bounds.min_x - 1.0);
+    CHECK(outer.brim.bounds.max_x > outer.model_bounds.max_x + 1.0);
+    CHECK(outer.brim.bounds.min_y < outer.model_bounds.min_y - 1.0);
+    CHECK(outer.brim.bounds.max_y > outer.model_bounds.max_y + 1.0);
+    CHECK_THAT(both.brim.bounds.min_x, Catch::Matchers::WithinAbs(outer.brim.bounds.min_x, 0.1));
+    CHECK_THAT(both.brim.bounds.max_x, Catch::Matchers::WithinAbs(outer.brim.bounds.max_x, 0.1));
+    CHECK_THAT(both.brim.bounds.min_y, Catch::Matchers::WithinAbs(outer.brim.bounds.min_y, 0.1));
+    CHECK_THAT(both.brim.bounds.max_y, Catch::Matchers::WithinAbs(outer.brim.bounds.max_y, 0.1));
+    CHECK(both.brim.xy_length > outer.brim.xy_length + 1.0);
+    CHECK(both.brim.xy_length > inner.brim.xy_length + 1.0);
+}
+
+TEST_CASE("Flat auto brim creates an outer ring when explicit width is zero",
+          "[SkirtBrim][BrimTypeHollowBoundaries]")
+{
+    using namespace brim_type_hollow_boundaries;
+
+    // A separate, wider 120x120x30 hollow part activates Auto even when the FFF test
+    // helper has not populated Model::extruderParamsMap and Model falls back to its
+    // conservative 200 mm thermal-length reference. The independent enum fixture above
+    // remains 40x40x20.
+    const HollowSample explicit_zero = export_hollow_brim("outer_only", 0.0,
+                                                          120.0, 30.0, 65.0, 45.0);
+    const HollowSample automatic     = export_hollow_brim("auto_brim", 0.0,
+                                                          120.0, 30.0, 65.0, 45.0);
+
+    require_positive_model(explicit_zero, 120.0);
+    require_positive_model(automatic, 120.0);
+    require_same_model_bounds(explicit_zero.model_bounds, automatic.model_bounds);
+    require_same_model_motion(explicit_zero.model_motion, automatic.model_motion);
+
+    CHECK(explicit_zero.brim.positive_xy_moves == 0);
+    CHECK(explicit_zero.brim_loops == 0);
+    CHECK(explicit_zero.emitted_regions.positive_xy_moves == 0);
+    require_valid_brim(automatic.brim);
+    REQUIRE(automatic.emitted_regions.finite);
+    CHECK(automatic.emitted_regions.arc_moves == 0);
+    CHECK(automatic.emitted_regions.positive_xy_moves > 0);
+    CHECK(automatic.emitted_regions.inside_hole_midpoints == 0);
+    CHECK(automatic.emitted_regions.outside_model_midpoints > 0);
+    REQUIRE(automatic.brim_loops > 0);
+    CHECK_FALSE(automatic.brim_enters_hole);
+    CHECK(automatic.brim.bounds.min_x < automatic.model_bounds.min_x - 1.0);
+    CHECK(automatic.brim.bounds.max_x > automatic.model_bounds.max_x + 1.0);
+    CHECK(automatic.brim.bounds.min_y < automatic.model_bounds.min_y - 1.0);
+    CHECK(automatic.brim.bounds.max_y > automatic.model_bounds.max_y + 1.0);
+}
