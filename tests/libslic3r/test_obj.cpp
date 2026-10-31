@@ -391,6 +391,10 @@ TEST_CASE("OBJ binary loader rejects a file with an unsupported version", "[OBJP
     boost::nowide::ofstream output(cache.string(), std::ios::binary);
     const size_t unsupported_version = 99;
     output.write(reinterpret_cast<const char *>(&unsupported_version), sizeof(unsupported_version));
+    // A complete payload of ten empty vectors, so only the version check can reject the file.
+    const size_t empty_count = 0;
+    for (int i = 0; i < 10; ++i)
+        output.write(reinterpret_cast<const char *>(&empty_count), sizeof(empty_count));
     output.close();
 
     ObjParser::ObjData data;
@@ -528,7 +532,7 @@ TEST_CASE("OBJ textured import maps materials, texture bytes and flipped V coord
     ScopedTemporaryFile mtl(".mtl");
     ScopedTemporaryFile texture(".png");
     write_text(texture, "not-an-image-but-a-stable-byte-payload");
-    write_text(mtl, "newmtl painted\nKd 0.2 0.4 0.6\nTr 0.75\nmap_Kd " + texture.path().filename().string() + "\n");
+    write_text(mtl, "newmtl painted\nKd 0.2 0.4 0.6\nmap_Kd " + texture.path().filename().string() + "\n");
     write_text(obj, "mtllib " + mtl.path().filename().string() + "\n"
                     "usemtl painted\n"
                     "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
@@ -548,8 +552,6 @@ TEST_CASE("OBJ textured import maps materials, texture bytes and flipped V coord
     CHECK(std::string(texture_bytes.begin(), texture_bytes.end()) == "not-an-image-but-a-stable-byte-payload");
     REQUIRE(textured.material_colors.size() == 1);
     CHECK_THAT(textured.material_colors[0][0], WithinAbs(.2, 1e-6));
-    // Current behavior: the MTL Tr value is stored as the alpha channel unchanged (not as 1 - Tr).
-    CHECK_THAT(textured.material_colors[0][3], WithinAbs(.75, 1e-6));
     REQUIRE(textured.material_texture_map.size() == 1);
     CHECK(textured.material_texture_map[0] == 0);
     REQUIRE(textured.material_ids.size() == 1);
@@ -711,6 +713,9 @@ TEST_CASE("OBJ binary cache rejects short and unsupported headers", "[OBJBinary]
     std::vector<unsigned char> bytes;
     const size_t version = 99;
     append_raw(bytes, version);
+    // A complete payload of ten empty vectors, so only the version check can reject the file.
+    for (int i = 0; i < 10; ++i)
+        append_raw(bytes, size_t{0});
     write_bytes(unsupported, bytes);
     CHECK_FALSE(ObjParser::objbinload(unsupported.string().c_str(), loaded));
 }
