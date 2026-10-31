@@ -11,6 +11,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
+#include <Eigen/SVD>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -1580,9 +1581,10 @@ TEST_CASE("Transformation scale setters leave a uniformly scaled reflection unch
     by_vector.set_scaling_factor(Vec3d::Constant(factor));
     check_linear_and_offset(by_vector.get_matrix(), linear, matrix.translation(), 1e-9);
 
-    // The axis setter works relative to get_scaling_factor(), which does not report the true scale
-    // here; its round trip is covered by "Transformation axis scale setter round-trips with the
-    // scale getter".
+    Geometry::Transformation by_axis(matrix);
+    CHECK(by_axis.get_scaling_factor().isApprox(Vec3d::Constant(factor), 1e-12));
+    by_axis.set_scaling_factor(Y, factor);
+    check_linear_and_offset(by_axis.get_matrix(), linear, matrix.translation(), 1e-9);
 }
 
 TEST_CASE("Transformation scale setters keep the reflection of a mirrored larger axis",
@@ -1631,11 +1633,8 @@ TEST_CASE("Transformation scale setters apply new magnitudes and keep orientatio
                 Geometry::Transformation by_axis(matrix);
                 by_axis.set_scaling_factor(Z, 5.);
                 CHECK((by_axis.get_matrix().linear().determinant() < 0.) == (mirror_axis >= 0));
-                // With repeated scales, get_scaling_factor() misreports a mirrored transform and
-                // the axis setter (relative to it) cannot hit the true scale.
-                const bool distinct = scale.x() != scale.y() && scale.y() != scale.z() && scale.x() != scale.z();
-                if (mirror_axis < 0 || distinct)
-                    CHECK(by_axis.get_matrix().linear().isApprox(orthogonal * Vec3d(scale.x(), scale.y(), 5.).asDiagonal(), 1e-9));
+                CHECK(by_axis.get_matrix().linear().isApprox(orthogonal * Vec3d(scale.x(), scale.y(), 5.).asDiagonal(), 1e-9));
+                CHECK(Geometry::Transformation(matrix).get_scaling_factor().isApprox(scale, 1e-9));
             }
 }
 
@@ -1675,8 +1674,9 @@ TEST_CASE("Transformation scale setters keep the handedness and orientation of a
     CHECK((axis_linear.determinant() < 0.) == left_handed);
     const auto [axis_orthogonal, axis_stretch] = polar(axis_linear);
     CHECK(axis_orthogonal.isApprox(orthogonal, 1e-9));
-    // The stretch along X changes by the ratio of the new factor to the reported one.
-    CHECK_THAT(axis_stretch(0, 0), WithinAbs(polar(matrix.linear()).second(0, 0) * factor / reported, 1e-9));
+    CHECK_THAT(reported, WithinAbs(polar(matrix.linear()).second(0, 0), 1e-9));
+    CHECK_THAT(axis_stretch(0, 0), WithinAbs(factor, 1e-9));
+    CHECK_THAT(by_axis.get_scaling_factor(X), WithinAbs(factor, 1e-9));
     CHECK(Eigen::SelfAdjointEigenSolver<Matrix3d>(axis_stretch).eigenvalues().minCoeff() > 0.);
     CHECK(by_axis.get_offset().isApprox(matrix.translation(), 1e-12));
 
@@ -1803,11 +1803,17 @@ TEST_CASE("Transformation scale setters stay finite on singular and near-singula
 
     // Tiny and huge factors on a skewed transform stay finite and keep the handedness.
     for (const double factor : {1e-6, 1e6})
-        for (const double sign : {1., -1.}) {
-            CAPTURE(factor, sign);
+        for (const bool mirrored : {false, true}) {
+            CAPTURE(factor, mirrored);
             Transform3d skewed = Transform3d::Identity();
-            skewed.linear() << sign, -0.5, 0., 0.5 * sign, 1., 0., 0., 0., 3.;
+            if (mirrored)
+                skewed.linear() << -1., -0.5, 0., 0.5, 1., 0., 0., 0., 3.;
+            else
+                skewed.linear() << 1., 0.5, 0., -0.25, 1., 0., 0., 0., 3.;
+            // Non-orthogonal columns, so the stretch couples X and Y.
+            REQUIRE(std::abs(skewed.linear().col(X).dot(skewed.linear().col(Y))) > 0.1);
             const bool left_handed = skewed.linear().determinant() < 0.;
+            REQUIRE(left_handed == mirrored);
             Geometry::Transformation extreme(skewed);
             extreme.set_scaling_factor(Y, factor);
             REQUIRE(extreme.get_matrix().matrix().allFinite());
@@ -1851,6 +1857,7 @@ TEST_CASE("Transformation scale setters match the plain rotation and scale split
             by_vector.set_scaling_factor(new_scale);
             // Not compared with ==: fused multiply-add contraction may differ between translation units.
             CHECK(by_vector.get_matrix().matrix().isApprox(expected_vector.matrix(), 1e-12));
+            CHECK(Geometry::Transformation(matrix).get_scaling_factor().isApprox(split_scale.diagonal().cwiseAbs(), 1e-12));
 
             for (Axis a : {X, Y, Z}) {
                 Geometry::Transformation by_axis(matrix);
@@ -1889,8 +1896,8 @@ TEST_CASE("Transformation axis scale setter round-trips with the scale getter",
         }
     }
 
-    // Where the decomposition reads the stretch directly, the new value reads back.
-    for (const Matrix3d &linear : {skewed_right, unskewed_mirror})
+    // A new value reads back and keeps the handedness.
+    for (const Matrix3d &linear : {skewed_mirror, skewed_right, uniform_mirror, unskewed_mirror})
         for (Axis axis : {X, Y, Z}) {
             CAPTURE(linear, axis);
             Geometry::Transformation changed(make(linear));
@@ -1898,6 +1905,14 @@ TEST_CASE("Transformation axis scale setter round-trips with the scale getter",
             CHECK_THAT(changed.get_scaling_factor(axis), WithinAbs(1.7, 1e-9));
             CHECK((changed.get_matrix().linear().determinant() < 0.) == (linear.determinant() < 0.));
         }
+
+    // The rotated uniform mirror reports its true scale, and a new value stays bounded: the
+    // singular values become exactly the requested scales.
+    Geometry::Transformation uniform(make(uniform_mirror));
+    CHECK(uniform.get_scaling_factor().isApprox(Vec3d(2., 2., 2.), 1e-12));
+    uniform.set_scaling_factor(Z, 3.);
+    const Vec3d singular_values = Eigen::JacobiSVD<Matrix3d>(uniform.get_matrix().linear()).singularValues();
+    CHECK(singular_values.isApprox(Vec3d(3., 2., 2.), 1e-9));
 }
 
 TEST_CASE("Transformation rotation reset keeps scale and offset", "[Geometry][Transformation][Reset]")
