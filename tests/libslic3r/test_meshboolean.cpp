@@ -8,6 +8,7 @@
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
 #include <cstddef>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -184,6 +185,26 @@ TEST_CASE("CGAL merge joins disjoint closed components without changing total vo
     CHECK_THAT(mesh_volume(merged), WithinRel(2000.f, 1e-3f));
     CHECK_THAT(merged.bounding_box().min.x(), WithinAbs(0., 1e-5));
     CHECK_THAT(merged.bounding_box().max.x(), WithinAbs(22., 1e-5));
+}
+
+TEST_CASE("CGAL repair closes a single missing cuboid face", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // Keep the cube away from the origin: a face lying in a plane through the origin adds nothing
+    // to the signed volume, so dropping it would leave the volume check blind to the hole.
+    TriangleMesh open = shifted_cube(20.f, 20.f, 20.f);
+    const size_t closed_faces = open.its.indices.size();
+    open.its.indices.pop_back();
+    REQUIRE_FALSE(MeshBoolean::cgal::does_bound_a_volume(*MeshBoolean::cgal::triangle_mesh_to_cgal(open)));
+    RepairedMeshErrors errors;
+    std::string error;
+    REQUIRE(MeshBoolean::cgal::repair(open, &errors, &error));
+    CHECK(error.empty());
+    CHECK(open.its.indices.size() == closed_faces);
+    CHECK_THAT(mesh_volume(open), WithinRel(1000.f, 1e-3f));
+    CHECK_FALSE(MeshBoolean::cgal::does_self_intersect(open));
+    const auto repaired_cgal = MeshBoolean::cgal::triangle_mesh_to_cgal(open);
+    REQUIRE(repaired_cgal != nullptr);
+    CHECK(MeshBoolean::cgal::does_bound_a_volume(*repaired_cgal));
 }
 
 TEST_CASE("MCUT conversion round trips cuboid topology and empty state", "[MeshBoolean][MeshBooleanContracts]")
