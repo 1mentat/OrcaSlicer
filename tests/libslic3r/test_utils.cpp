@@ -18,6 +18,7 @@
 #include <boost/filesystem.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -1005,4 +1006,12 @@ TEST_CASE("BBL monitor and remaining time formatters use compact units", "[utils
     CHECK(get_bbl_remain_time_dhms(61.f) == "1m1s");
     CHECK(get_bbl_remain_time_dhms(3661.f) == "1h1m1s");
     CHECK(get_bbl_remain_time_dhms(86400.f) == "1d0h0m0s");
+}
+
+TEST_CASE("Logging level names map the supported severities both ways", "[utils]") {
+    const std::array<std::string, 6> names{"fatal", "error", "warning", "info", "debug", "trace"};
+    for (unsigned i = 0; i < names.size(); ++i) {
+        CHECK(level_string_to_boost(names[i]) == i);
+        CHECK(get_string_logging_level(i) == names[i]);
+    }
 }
