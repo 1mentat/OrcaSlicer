@@ -86,6 +86,30 @@ Reuse this path with catalogs and arguments instead of copying private Python
 controllers or guessing archive/generated-header paths. Update inventories
 only for intentional case changes; retain every existing control.
 
+For work across several workers, keep each lane's platform facts and accepted
+launch environment with its owner in the current task state. Name the platform,
+configuration, source file, and scope of each inventory count; a multi-config
+production-row count is not a single-config total or coverage-row count. Reuse
+the accepted environment, including explicit empty cache overrides. Read hashes
+and argv from their manifest files instead of transcribing abbreviated values.
+
+Before the first native attempt, review the actual consumer, the registered
+value domain, the expected boundary relation, and which output events the
+observer includes. Confirm the fixture activates the intended behavior, including
+angle and geometry prerequisites. Retain validated output-selection predicates
+when making bounded corrections. Distinguish object deposition from cooling,
+purge, skirt, and brim; use the consumer's angular domain when comparing directions.
+Route every instrumented invocation, including Catch discovery, to private
+profile paths so listing tests cannot update earlier coverage files.
+
+A completed validation handoff includes the final source/catalog/ledger delta,
+host-captured raw reports, JUnit and receipts, exact before/after inventories,
+intended mutation failures, normal restoration, tidy, and remaining limitations.
+A remote pass with retrieval pending is not a completed handoff. Record candidate
+ready, native start/end, and host capture ready UTC times in the existing batch
+summary; root records acceptance/publication. Reconcile an explanatory metadata
+error once without rerunning unchanged valid source or resending the packet.
+
 ## Catch2 rules that cause real breakage
 
 - Never reuse a `SECTION` name inside a loop. Use `DYNAMIC_SECTION` so each iteration is unique.

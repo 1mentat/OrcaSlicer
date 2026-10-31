@@ -385,6 +385,108 @@ class StatusTests(unittest.TestCase):
         report = {"baseline": {"status": "no_tests"}, "heads": [{"status": "pass"}]}
         self.assertEqual(slicer_pr_validation._overall_status(report), ("no_tests", 2))
 
+    def test_qualified_failed_baseline_keeps_overall_status_nonzero(self):
+        report = {
+            "configuration": {"reference_baseline": False},
+            "baseline": {"status": "test_failed"},
+            "baseline_expectation": {"enabled": True, "status": "qualified"},
+            "heads": [{"status": "pass"}],
+        }
+        self.assertEqual(slicer_pr_validation._overall_status(report), ("test_failed", 2))
+
+    def test_rejected_baseline_expectation_blocks_even_a_passing_raw_baseline(self):
+        report = {
+            "baseline": {"status": "pass"},
+            "baseline_expectation": {"enabled": True, "status": "rejected"},
+            "heads": [{"status": "pass"}],
+        }
+        self.assertEqual(
+            slicer_pr_validation._overall_status(report),
+            ("baseline_expectation_invalid", 2),
+        )
+
+    def test_policy_identity_presence_requires_previously_failed_case_to_execute(self):
+        entry = {
+            "status": "pass",
+            "junit_evidence": {"counts": {"tests": 1}},
+            "junit_case_statuses": {"suite::previous pass": "passed"},
+        }
+        slicer_pr_validation._apply_minimum_test_gate(
+            entry, minimum_tests=1,
+            required_identity_cases={
+                "suite::previous pass": "passed",
+                "suite::previous failure": "failed",
+            })
+        self.assertEqual(entry["missing_baseline_expectation_testcases"],
+                         ["suite::previous failure"])
+        self.assertEqual(entry["status"], "test_evidence_incomplete")
+        self.assertFalse(entry["junit_reference_usable"])
+
+    def test_baseline_failure_comparison_distinguishes_inherited_resolved_and_new(self):
+        known = [f"suite::known {index}" for index in range(3)]
+        reference_statuses = {name: "failed" for name in known}
+        reference_statuses["suite::stable"] = "passed"
+        head_statuses = {
+            known[0]: "failed", known[1]: "passed", known[2]: "passed",
+            "suite::stable": "failed",
+        }
+        reference = {
+            "status": "test_failed", "junit_reference_usable": True,
+            "junit_case_statuses": reference_statuses,
+            "failed_test_names": known,
+        }
+        head = {
+            "number": 17, "reference_base_sha": "base",
+            "status": "test_failed", "junit_reference_usable": True,
+            "missing_baseline_expectation_testcases": [],
+            "junit_case_statuses": head_statuses,
+            "failed_test_names": [known[0], "suite::stable"],
+        }
+        head["failure_classification"] = slicer_pr_validation.classify_failure_names(
+            reference, head)
+        self.assertEqual(head["failure_classification"]["inherited"], [known[0]])
+        self.assertEqual(head["failure_classification"]["resolved"], known[1:])
+        self.assertEqual(head["failure_classification"]["new"], ["suite::stable"])
+        report = {
+            "configuration": {"reference_baseline": True},
+            "baseline_expectation": {"status": "qualified"},
+            "references": {"base": reference},
+            "heads": [head],
+        }
+        comparison = slicer_pr_validation._baseline_expectation_comparison(report)
+        self.assertEqual(comparison["status"], "new_failing_testcases")
+        self.assertEqual(comparison["new_failing_testcases_by_head"],
+                         {"17": ["suite::stable"]})
+
+        head["junit_case_statuses"].pop(known[2])
+        head["missing_baseline_expectation_testcases"] = [known[2]]
+        comparison = slicer_pr_validation._baseline_expectation_comparison(report)
+        self.assertEqual(comparison["status"], "incomplete")
+
+    def test_no_new_failure_comparison_can_still_retain_raw_failures(self):
+        reference = {
+            "status": "test_failed", "junit_reference_usable": True,
+            "junit_case_statuses": {"suite::old": "failed"},
+            "failed_test_names": ["suite::old"],
+        }
+        head = {
+            "number": 2, "reference_base_sha": "base", "status": "test_failed",
+            "junit_reference_usable": True, "missing_baseline_expectation_testcases": [],
+            "junit_case_statuses": {"suite::old": "failed"},
+            "failed_test_names": ["suite::old"],
+        }
+        head["failure_classification"] = slicer_pr_validation.classify_failure_names(
+            reference, head)
+        report = {
+            "configuration": {"reference_baseline": True},
+            "baseline_expectation": {"status": "qualified"},
+            "references": {"base": reference}, "heads": [head],
+        }
+        self.assertEqual(
+            slicer_pr_validation._baseline_expectation_comparison(report)["status"],
+            "no_new_failing_testcases",
+        )
+
     def test_a_failed_head_is_not_a_fully_passing_run(self):
         report = {"baseline": {"status": "pass"}, "heads": [
             {"status": "pass"}, {"status": "build_failed"},
@@ -993,6 +1095,174 @@ class IdentityManifestTests(unittest.TestCase):
             evidence = slicer_pr_validation.read_junit_evidence(junit)
         self.assertFalse(evidence["usable"])
         self.assertEqual(evidence["duplicate_testcase_identities"], ["suite::same"])
+
+
+class BaselineExpectationManifestTests(unittest.TestCase):
+    @staticmethod
+    def _manifest(statuses=None):
+        return {
+            "schema_version": 1,
+            "harness_ref_sha": "a" * 40,
+            "harness_ref_tree_sha": "b" * 40,
+            "tracked_source_index_sha256": hashlib.sha256(b"tracked src").hexdigest(),
+            "testcase_statuses": statuses or {
+                "suite::ordinary pass": "passed",
+                "suite::ordinary failure": "failed",
+            },
+        }
+
+    def test_manifest_binds_exact_source_and_accepts_generic_status_counts(self):
+        manifest = self._manifest()
+        raw = json.dumps(manifest)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "baseline.json"
+            path.write_text(raw, encoding="utf-8")
+            loaded, digest = slicer_pr_validation._load_baseline_expectation_manifest(path)
+        policy = slicer_pr_validation._validate_baseline_expectation_manifest(
+            loaded, harness_ref="a" * 40, harness_ref_tree_sha="b" * 40)
+        self.assertEqual(digest, hashlib.sha256(raw.encode("utf-8")).hexdigest())
+        self.assertEqual(policy["testcase_count"], 2)
+        self.assertEqual(policy["status_counts"], {"failed": 1, "passed": 1})
+
+    def test_manifest_rejects_duplicate_keys_unknown_status_and_extra_fields(self):
+        duplicate = (
+            '{"schema_version":1,"harness_ref_sha":"' + "a" * 40 +
+            '","harness_ref_tree_sha":"' + "b" * 40 +
+            '","tracked_source_index_sha256":"' + hashlib.sha256(b"tracked src").hexdigest() +
+            '","testcase_statuses":{"suite::one":"passed","suite::one":"failed"}}'
+        )
+        invalid_documents = [
+            duplicate,
+            json.dumps(self._manifest({"suite::one": "skipped"})),
+            json.dumps(dict(self._manifest(), unrecognized=True)),
+            json.dumps(self._manifest({"suite::one": "passed"})),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "baseline.json"
+            for index, document in enumerate(invalid_documents):
+                with self.subTest(document=index):
+                    path.write_text(document, encoding="utf-8")
+                    with self.assertRaises(slicer_pr_validation.ValidationError):
+                        slicer_pr_validation._load_baseline_expectation_manifest(path)
+
+    def test_manifest_rejects_stale_commit_or_tree(self):
+        manifest = self._manifest()
+        for ref, tree in (("c" * 40, "b" * 40), ("a" * 40, "d" * 40)):
+            with self.subTest(ref=ref, tree=tree):
+                with self.assertRaisesRegex(slicer_pr_validation.ValidationError, "stale"):
+                    slicer_pr_validation._validate_baseline_expectation_manifest(
+                        manifest, harness_ref=ref, harness_ref_tree_sha=tree)
+
+    @staticmethod
+    def _observed_baseline(statuses):
+        counts = {
+            "tests": len(statuses),
+            "failures": sum(status == "failed" for status in statuses.values()),
+            "errors": 0, "skipped": 0, "timeouts": 0,
+        }
+        return {
+            "status": "test_failed",
+            "commands": {
+                "configure": {"returncode": 0, "timed_out": False},
+                "build": {"returncode": 0, "timed_out": False},
+                "test": {"returncode": 8, "timed_out": False},
+            },
+            "test_timeout_source": None,
+            "junit_exists": True,
+            "junit_evidence": {
+                "usable": True, "errors": [], "duplicate_testcase_identities": [],
+                "counts": counts,
+            },
+            "junit_reference_usable": True,
+            "test_log_evidence_available": True,
+            "test_log_evidence_error": None,
+            "no_test_evidence": False,
+            "junit_timeout_evidence": 0,
+            "skipped_test_evidence": 0,
+            "test_evidence": len(statuses),
+            "ctest_summary": {
+                "tests_failed": counts["failures"], "tests_total": counts["tests"],
+            },
+            "junit_case_statuses": dict(statuses),
+        }
+
+    def test_only_exact_ordinary_test_failed_baseline_qualifies(self):
+        manifest = self._manifest()
+        expectation = slicer_pr_validation._validate_baseline_expectation_manifest(
+            manifest, harness_ref="a" * 40, harness_ref_tree_sha="b" * 40)
+        baseline = self._observed_baseline(expectation["testcase_statuses"])
+        source_hash = expectation["tracked_source_index_sha256"]
+        result = slicer_pr_validation._qualify_baseline_expectation(
+            baseline, expectation=expectation,
+            source_hash_before=source_hash, source_hash_after=source_hash)
+        self.assertEqual(result["status"], "qualified")
+        self.assertEqual(baseline["status"], "test_failed")
+        self.assertEqual(result["expected_testcase_count"], len(expectation["testcase_statuses"]))
+
+    def test_changed_map_or_nonordinary_evidence_never_qualifies(self):
+        manifest = self._manifest()
+        expectation = slicer_pr_validation._validate_baseline_expectation_manifest(
+            manifest, harness_ref="a" * 40, harness_ref_tree_sha="b" * 40)
+        source_hash = expectation["tracked_source_index_sha256"]
+        changed = self._observed_baseline({
+            "suite::ordinary pass": "failed",
+            "suite::ordinary failure": "passed",
+        })
+        result = slicer_pr_validation._qualify_baseline_expectation(
+            changed, expectation=expectation,
+            source_hash_before=source_hash, source_hash_after=source_hash)
+        self.assertEqual(result["status"], "rejected")
+        self.assertTrue(result["status_mismatches"])
+
+        baseline = self._observed_baseline(expectation["testcase_statuses"])
+        baseline["junit_evidence"]["counts"]["errors"] = 1
+        result = slicer_pr_validation._qualify_baseline_expectation(
+            baseline, expectation=expectation,
+            source_hash_before=source_hash, source_hash_after=source_hash)
+        self.assertEqual(result["status"], "rejected")
+
+        baseline = self._observed_baseline(expectation["testcase_statuses"])
+        result = slicer_pr_validation._qualify_baseline_expectation(
+            baseline, expectation=expectation,
+            source_hash_before=source_hash, source_hash_after="0" * 64)
+        self.assertEqual(result["status"], "rejected")
+
+        rejected_baselines = []
+        missing = self._observed_baseline({"suite::ordinary pass": "passed"})
+        rejected_baselines.append(missing)
+        extra = self._observed_baseline({
+            **expectation["testcase_statuses"], "suite::unexpected": "passed",
+        })
+        rejected_baselines.append(extra)
+        duplicate = self._observed_baseline(expectation["testcase_statuses"])
+        duplicate["junit_evidence"]["usable"] = False
+        duplicate["junit_evidence"]["duplicate_testcase_identities"] = ["suite::ordinary pass"]
+        rejected_baselines.append(duplicate)
+        missing_log = self._observed_baseline(expectation["testcase_statuses"])
+        missing_log["test_log_evidence_available"] = False
+        missing_log["test_log_evidence_error"] = "missing test log"
+        rejected_baselines.append(missing_log)
+        skipped = self._observed_baseline(expectation["testcase_statuses"])
+        skipped["junit_evidence"]["counts"]["skipped"] = 1
+        skipped["skipped_test_evidence"] = 1
+        rejected_baselines.append(skipped)
+        timed_out = self._observed_baseline(expectation["testcase_statuses"])
+        timed_out["junit_evidence"]["counts"]["timeouts"] = 1
+        timed_out["junit_timeout_evidence"] = 1
+        timed_out["test_timeout_source"] = "junit_case_timeout"
+        rejected_baselines.append(timed_out)
+        contradictory = self._observed_baseline(expectation["testcase_statuses"])
+        contradictory["ctest_summary"]["tests_failed"] = 0
+        rejected_baselines.append(contradictory)
+        failed_build = self._observed_baseline(expectation["testcase_statuses"])
+        failed_build["commands"]["build"]["returncode"] = 1
+        rejected_baselines.append(failed_build)
+        for rejected in rejected_baselines:
+            with self.subTest(baseline=rejected):
+                result = slicer_pr_validation._qualify_baseline_expectation(
+                    rejected, expectation=expectation,
+                    source_hash_before=source_hash, source_hash_after=source_hash)
+                self.assertEqual(result["status"], "rejected")
 
 
 class IdentityManifestIntegrationTests(unittest.TestCase):
@@ -2241,6 +2511,20 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         }]), encoding="utf-8")
         return snapshot
 
+    def _write_baseline_expectation_manifest(self, root, repo, harness_ref, statuses):
+        tree = self._git(repo, "rev-parse", f"{harness_ref}^{{tree}}").stdout.strip()
+        source_hash, source_result = slicer_pr_validation._tracked_source_index_hash(repo)
+        self.assertEqual(source_result.returncode, 0)
+        path = root / "baseline-expectation.json"
+        path.write_text(json.dumps({
+            "schema_version": 1,
+            "harness_ref_sha": harness_ref,
+            "harness_ref_tree_sha": tree,
+            "tracked_source_index_sha256": source_hash,
+            "testcase_statuses": statuses,
+        }), encoding="utf-8")
+        return path
+
     def _make_seed_worktree(self, root, repo, ref, *, build_dir="build"):
         worktree = root / "seed" / "repo"
         worktree.parent.mkdir()
@@ -2926,6 +3210,137 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             "junit_case_statuses": {"suite::base regression": "passed"},
             "failed_test_names": [],
         }
+
+    @staticmethod
+    def _baseline_policy_run(name, statuses, *, status=None):
+        counts = {
+            "tests": len(statuses),
+            "failures": sum(value == "failed" for value in statuses.values()),
+            "errors": 0, "skipped": 0, "timeouts": 0,
+        }
+        actual_status = status or ("test_failed" if counts["failures"] else "pass")
+        return {
+            "name": name,
+            "status": actual_status,
+            "junit_exists": True,
+            "junit_evidence": {
+                "usable": True, "errors": [], "duplicate_testcase_identities": [],
+                "counts": counts,
+            },
+            "junit_reference_usable": actual_status in {"pass", "test_failed"},
+            "junit_case_statuses": dict(statuses),
+            "failed_test_names": sorted(
+                identity for identity, value in statuses.items() if value == "failed"),
+            "test_log_evidence_available": True,
+            "test_log_evidence_error": None,
+            "test_evidence": len(statuses),
+            "ctest_summary": {
+                "tests_failed": counts["failures"], "tests_total": counts["tests"],
+            },
+            "no_test_evidence": False,
+            "junit_timeout_evidence": 0,
+            "skipped_test_evidence": 0,
+            "test_timeout_source": None,
+            "commands": {
+                "configure": {"returncode": 0, "timed_out": False},
+                "build": {"returncode": 0, "timed_out": False},
+                "test": {"returncode": 8 if counts["failures"] else 0,
+                          "timed_out": False},
+            },
+            "minimum_tests_observed": len(statuses),
+            "minimum_tests_ok": True,
+            "missing_baseline_testcases": [],
+        }
+
+    def test_qualified_failed_baseline_runs_exact_comparisons_without_hiding_failures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            expected = {
+                "suite::baseline pass": "passed",
+                "suite::previous failure": "failed",
+                "suite::previous failure now resolved": "failed",
+            }
+            manifest = self._write_baseline_expectation_manifest(
+                root, repo, harness_ref, expected)
+            args = self._args(repo, snapshot, root / "evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.baseline_expectation_manifest = str(manifest)
+            names = []
+
+            def run_tree(worktree, output, name, _args, _configure, _build, **_kwargs):
+                names.append(name)
+                if name == "baseline":
+                    return self._baseline_policy_run(name, expected)
+                if name == "reference":
+                    reference_statuses = dict(expected)
+                    reference_statuses["suite::new failure"] = "passed"
+                    return self._baseline_policy_run(name, reference_statuses)
+                head_statuses = {
+                    "suite::baseline pass": "passed",
+                    "suite::previous failure": "failed",
+                    "suite::previous failure now resolved": "passed",
+                    "suite::new failure": "failed",
+                }
+                return self._baseline_policy_run(name, head_statuses)
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree", side_effect=run_tree):
+                result = slicer_pr_validation.run_validation(args)
+            report = json.loads((Path(args.output_dir) / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(result, 2)
+            self.assertEqual(names, ["baseline", "reference", "pr-1"])
+            self.assertEqual(report["baseline"]["status"], "test_failed")
+            self.assertEqual(report["baseline"]["failed_test_names"],
+                             ["suite::previous failure",
+                              "suite::previous failure now resolved"])
+            self.assertEqual(report["baseline_expectation"]["status"], "qualified")
+            self.assertEqual(report["status"], "test_failed")
+            self.assertEqual(report["baseline_failure_comparison"]["status"],
+                             "new_failing_testcases")
+            self.assertEqual(report["baseline_failure_comparison"]["new_failing_testcases_by_head"],
+                             {"1": ["suite::new failure"]})
+            self.assertEqual(report["heads"][0]["failure_classification"]["inherited"],
+                             ["suite::previous failure"])
+            self.assertEqual(report["heads"][0]["failure_classification"]["resolved"],
+                             ["suite::previous failure now resolved"])
+
+    def test_policy_status_map_change_blocks_comparison_and_preserves_raw_baseline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            expected = {
+                "suite::baseline pass": "passed",
+                "suite::previous failure": "failed",
+            }
+            manifest = self._write_baseline_expectation_manifest(
+                root, repo, harness_ref, expected)
+            args = self._args(repo, snapshot, root / "evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.baseline_expectation_manifest = str(manifest)
+            names = []
+
+            def changed_baseline(_worktree, _output, name, _args, _configure, _build, **_kwargs):
+                names.append(name)
+                return self._baseline_policy_run(name, {
+                    "suite::baseline pass": "failed",
+                    "suite::previous failure": "passed",
+                }, status="test_failed")
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=changed_baseline):
+                result = slicer_pr_validation.run_validation(args)
+            report = json.loads((Path(args.output_dir) / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(result, 2)
+            self.assertEqual(names, ["baseline"])
+            self.assertEqual(report["baseline"]["status"], "test_failed")
+            self.assertEqual(report["baseline_expectation"]["status"], "rejected")
+            self.assertTrue(report["baseline_expectation"]["status_mismatches"])
+            self.assertEqual(report["references"], {})
+            self.assertEqual(report["status"], "baseline_expectation_invalid")
 
     def test_no_reference_mode_does_not_run_or_require_reference_entries(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -69,6 +69,7 @@ DEFAULT_TIMEOUT = 3600.0
 DEFAULT_TEST_TIMEOUT = 180.0
 DEFAULT_MINIMUM_TESTS = 1
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TEST_ONLY_PATHS = ("tests/", "scripts/", "cmake/", ":(top)CMakeLists.txt", ":(top).gitignore")
 INTEGRATION_PATHS = TEST_ONLY_PATHS + ("src/CMakeLists.txt", "src/libslic3r/CMakeLists.txt")
 
@@ -252,6 +253,201 @@ def _load_identity_manifest(path: Path) -> tuple[dict[str, Any], str]:
     if not isinstance(manifest, dict) or manifest.get("schema_version") != _IDENTITY_MANIFEST_VERSION:
         raise ValidationError("identity manifest has an unsupported schema_version")
     return manifest, hashlib.sha256(raw).hexdigest()
+
+
+_BASELINE_EXPECTATION_MANIFEST_VERSION = 1
+_BASELINE_EXPECTATION_MANIFEST_KEYS = {
+    "schema_version", "harness_ref_sha", "harness_ref_tree_sha",
+    "tracked_source_index_sha256", "testcase_statuses",
+}
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object while rejecting duplicate keys instead of overwriting."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def _load_baseline_expectation_manifest(path: Path) -> tuple[dict[str, Any], str]:
+    """Load a bounded, duplicate-free baseline failure expectation manifest."""
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(16 * 1024 * 1024 + 1)
+        if len(raw) > 16 * 1024 * 1024:
+            raise ValidationError("baseline expectation manifest exceeds the 16 MiB limit")
+        manifest = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except ValidationError:
+        raise
+    except OSError as exc:
+        raise ValidationError(f"cannot read baseline expectation manifest {path}: {exc}") from exc
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise ValidationError(
+            f"baseline expectation manifest is not valid duplicate-free JSON: {path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValidationError("baseline expectation manifest must be an object")
+    if set(manifest) != _BASELINE_EXPECTATION_MANIFEST_KEYS:
+        missing = sorted(_BASELINE_EXPECTATION_MANIFEST_KEYS - set(manifest))
+        extra = sorted(set(manifest) - _BASELINE_EXPECTATION_MANIFEST_KEYS)
+        raise ValidationError(
+            f"baseline expectation manifest fields mismatch; missing={missing}, extra={extra}")
+    if (type(manifest.get("schema_version")) is not int or
+            manifest["schema_version"] != _BASELINE_EXPECTATION_MANIFEST_VERSION):
+        raise ValidationError("baseline expectation manifest has an unsupported schema_version")
+    for field in ("harness_ref_sha", "harness_ref_tree_sha"):
+        value = manifest.get(field)
+        if not isinstance(value, str) or not _HEX40.fullmatch(value):
+            raise ValidationError(f"baseline expectation manifest {field} must be a full commit/tree SHA")
+    source_hash = manifest.get("tracked_source_index_sha256")
+    if not isinstance(source_hash, str) or not _HEX64.fullmatch(source_hash):
+        raise ValidationError(
+            "baseline expectation manifest tracked_source_index_sha256 must be a SHA-256 digest")
+    statuses = manifest.get("testcase_statuses")
+    if not isinstance(statuses, dict) or not statuses:
+        raise ValidationError("baseline expectation manifest testcase_statuses must be a non-empty object")
+    for identity, status in statuses.items():
+        if not isinstance(identity, str) or not identity.strip() or identity != identity.strip():
+            raise ValidationError("baseline expectation manifest has an empty or padded testcase identity")
+        if not isinstance(status, str) or status not in {"passed", "failed"}:
+            raise ValidationError(
+                f"baseline expectation testcase {identity!r} has an unknown status: {status!r}")
+    if not any(status == "failed" for status in statuses.values()):
+        raise ValidationError("baseline expectation manifest must pin at least one ordinary failure")
+    return manifest, hashlib.sha256(raw).hexdigest()
+
+
+def _validate_baseline_expectation_manifest(manifest: dict[str, Any], *,
+                                            harness_ref: str,
+                                            harness_ref_tree_sha: str) -> dict[str, Any]:
+    """Validate source revision pins and summarize an already parsed manifest."""
+    if manifest["harness_ref_sha"] != harness_ref:
+        raise ValidationError("baseline expectation manifest harness_ref_sha is stale")
+    if manifest["harness_ref_tree_sha"] != harness_ref_tree_sha:
+        raise ValidationError("baseline expectation manifest harness_ref_tree_sha is stale")
+    statuses = dict(manifest["testcase_statuses"])
+    return {
+        "harness_ref_sha": harness_ref,
+        "harness_ref_tree_sha": harness_ref_tree_sha,
+        "tracked_source_index_sha256": manifest["tracked_source_index_sha256"],
+        "testcase_statuses": statuses,
+        "testcase_count": len(statuses),
+        "status_counts": dict(sorted(Counter(statuses.values()).items())),
+    }
+
+
+def _baseline_expectation_mismatches(expected: dict[str, str],
+                                     actual: dict[str, str]) -> dict[str, Any]:
+    expected_ids = set(expected)
+    actual_ids = set(actual)
+    common_ids = expected_ids.intersection(actual_ids)
+    changed = {
+        identity: {"expected": expected[identity], "actual": actual[identity]}
+        for identity in sorted(common_ids) if expected[identity] != actual[identity]
+    }
+    return {
+        "missing_testcase_ids": sorted(expected_ids - actual_ids),
+        "extra_testcase_ids": sorted(actual_ids - expected_ids),
+        "status_mismatches": changed,
+        "expected_status_counts": dict(sorted(Counter(expected.values()).items())),
+        "actual_status_counts": dict(sorted(Counter(actual.values()).items())),
+    }
+
+
+def _qualify_baseline_expectation(baseline: dict[str, Any], *,
+                                  expectation: dict[str, Any],
+                                  source_hash_before: str | None,
+                                  source_hash_after: str | None) -> dict[str, Any]:
+    """Qualify only an exact ordinary assertion-failure baseline with complete evidence."""
+    actual = baseline.get("junit_case_statuses") or {}
+    result = {
+        "status": "rejected",
+        "raw_baseline_status": baseline.get("status"),
+        "expected_testcase_count": expectation["testcase_count"],
+        "expected_status_counts": expectation["status_counts"],
+        "actual_testcase_count": len(actual) if isinstance(actual, dict) else 0,
+        **_baseline_expectation_mismatches(
+            expectation["testcase_statuses"], actual if isinstance(actual, dict) else {}),
+        "source_hash_before": source_hash_before,
+        "source_hash_after": source_hash_after,
+    }
+    if baseline.get("status") != "test_failed":
+        result["reason"] = "baseline status is not an ordinary test_failed result"
+        return result
+    if (source_hash_before != expectation["tracked_source_index_sha256"] or
+            source_hash_after != expectation["tracked_source_index_sha256"] or
+            source_hash_before != source_hash_after):
+        result["reason"] = "tracked source index hash differs from the pinned baseline"
+        return result
+    commands = baseline.get("commands") or {}
+    if not isinstance(commands, dict):
+        result["reason"] = "baseline command evidence is malformed"
+        return result
+    configure = commands.get("configure") or {}
+    build = commands.get("build") or {}
+    test = commands.get("test") or {}
+    if not all(isinstance(item, dict) for item in (configure, build, test)):
+        result["reason"] = "baseline command evidence is malformed"
+        return result
+    if (type(configure.get("returncode")) is not int or configure["returncode"] != 0 or
+            configure.get("timed_out") is not False or
+            type(build.get("returncode")) is not int or build["returncode"] != 0 or
+            build.get("timed_out") is not False):
+        result["reason"] = "baseline configure or build did not complete successfully"
+        return result
+    if (type(test.get("returncode")) is not int or test["returncode"] <= 0 or
+            test.get("timed_out") is not False or
+            baseline.get("test_timeout_source") is not None):
+        result["reason"] = "baseline test command is not an ordinary nonzero assertion result"
+        return result
+    evidence = baseline.get("junit_evidence") or {}
+    if not isinstance(evidence, dict):
+        result["reason"] = "baseline JUnit evidence is malformed"
+        return result
+    counts = evidence.get("counts") or {}
+    count_fields = ("tests", "failures", "errors", "skipped", "timeouts")
+    if (not isinstance(counts, dict) or
+            any(type(counts.get(field)) is not int or counts[field] < 0
+                for field in count_fields)):
+        result["reason"] = "baseline JUnit counts are missing or malformed"
+        return result
+    if (baseline.get("junit_exists") is not True or evidence.get("usable") is not True or
+            evidence.get("errors") != [] or evidence.get("duplicate_testcase_identities") != [] or
+            baseline.get("junit_reference_usable") is not True or
+            baseline.get("test_log_evidence_available") is not True or
+            baseline.get("test_log_evidence_error") is not None or
+            baseline.get("no_test_evidence") is not False or
+            type(baseline.get("junit_timeout_evidence")) is not int or
+            baseline["junit_timeout_evidence"] != 0 or
+            type(baseline.get("skipped_test_evidence")) is not int or
+            baseline["skipped_test_evidence"] != 0 or
+            counts["errors"] or counts["skipped"] or counts["timeouts"]):
+        result["reason"] = "baseline JUnit or console evidence is unusable or non-ordinary"
+        return result
+    expected_counts = result["expected_status_counts"]
+    if (counts.get("tests") != len(actual) or
+            counts["failures"] != expected_counts.get("failed", 0) or
+            baseline.get("test_evidence") != len(actual)):
+        result["reason"] = "baseline JUnit, console, and expected status counts contradict"
+        return result
+    ctest_summary = baseline.get("ctest_summary")
+    if (not isinstance(ctest_summary, dict) or
+            type(ctest_summary.get("tests_total")) is not int or
+            type(ctest_summary.get("tests_failed")) is not int or
+            ctest_summary.get("tests_total") != len(actual) or
+            ctest_summary.get("tests_failed") != expected_counts.get("failed", 0)):
+        result["reason"] = "baseline CTest summary is missing or contradicts JUnit"
+        return result
+    if (result["missing_testcase_ids"] or result["extra_testcase_ids"] or
+            result["status_mismatches"] or
+            result["expected_status_counts"] != result["actual_status_counts"]):
+        result["reason"] = "baseline JUnit identities or statuses differ from the manifest"
+        return result
+    result["status"] = "qualified"
+    result["reason"] = "exact source-pinned ordinary baseline failures matched"
+    return result
 
 
 def _declaration_names(
@@ -496,6 +692,10 @@ _CTEST_COUNT_RE = re.compile(
     r"\b\d+(?:\.\d+)?% tests passed,\s*\d+ tests failed out of\s+(\d+)\b",
     re.IGNORECASE,
 )
+_CTEST_SUMMARY_RE = re.compile(
+    r"\b\d+(?:\.\d+)?% tests passed,\s*(\d+) tests failed out of\s+(\d+)\b",
+    re.IGNORECASE,
+)
 _FALLBACK_TEST_COUNT_RES = (
     re.compile(r"test cases?:\s*(\d+)\b", re.IGNORECASE),
     re.compile(r"all tests passed\s*\(\d+\s+assertions?\s+in\s+(\d+)\s+test cases?\)",
@@ -524,6 +724,7 @@ def _read_test_log_evidence(log_path: Path) -> dict[str, Any]:
     bounded stdout tail in CommandResult.
     """
     last_ctest_count: int | None = None
+    last_ctest_summary: dict[str, int] | None = None
     fallback_count = 0
     no_tests = False
     overlap = ""
@@ -537,6 +738,12 @@ def _read_test_log_evidence(log_path: Path) -> dict[str, Any]:
                 ctest_counts = _CTEST_COUNT_RE.findall(window)
                 if ctest_counts:
                     last_ctest_count = int(ctest_counts[-1])
+                ctest_summaries = _CTEST_SUMMARY_RE.findall(window)
+                if ctest_summaries:
+                    failures, total = ctest_summaries[-1]
+                    last_ctest_summary = {
+                        "tests_failed": int(failures), "tests_total": int(total),
+                    }
                 for pattern in _FALLBACK_TEST_COUNT_RES:
                     matches = pattern.findall(window)
                     if matches:
@@ -548,12 +755,14 @@ def _read_test_log_evidence(log_path: Path) -> dict[str, Any]:
         return {
             "available": False,
             "count": 0,
+            "ctest_summary": None,
             "no_tests": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
     return {
         "available": True,
         "count": last_ctest_count if last_ctest_count is not None else fallback_count,
+        "ctest_summary": last_ctest_summary,
         "no_tests": no_tests,
         "error": None,
     }
@@ -831,7 +1040,8 @@ def _missing_baseline_testcases(baseline_cases: dict[str, str],
 
 def _apply_minimum_test_gate(entry: dict[str, Any], *, minimum_tests: int,
                              baseline_cases: dict[str, str] | None = None,
-                             required_cases: dict[str, str] | None = None) -> dict[str, Any]:
+                             required_cases: dict[str, str] | None = None,
+                             required_identity_cases: dict[str, str] | None = None) -> dict[str, Any]:
     """Apply count plus optional baseline/head identity gates to a run."""
     counts = (entry.get("junit_evidence") or {}).get("counts") or {}
     observed = counts.get("tests")
@@ -844,6 +1054,9 @@ def _apply_minimum_test_gate(entry: dict[str, Any], *, minimum_tests: int,
     missing_required = (sorted(name for name, status in required_cases.items()
                                if status == "passed" and current_cases.get(name) != "passed")
                         if required_cases is not None else [])
+    missing_expected = (sorted(name for name in required_identity_cases
+                               if name not in current_cases)
+                        if required_identity_cases is not None else [])
     entry["minimum_tests_required"] = minimum_tests
     entry["minimum_tests_observed"] = observed
     entry["minimum_tests_ok"] = isinstance(observed, int) and observed >= minimum_tests
@@ -851,11 +1064,13 @@ def _apply_minimum_test_gate(entry: dict[str, Any], *, minimum_tests: int,
     entry["skipped_baseline_testcases"] = skipped
     if required_cases is not None:
         entry["missing_required_head_testcases"] = missing_required
+    if required_identity_cases is not None:
+        entry["missing_baseline_expectation_testcases"] = missing_expected
     # Preserve stronger configure/build/timeout/error statuses.  The gate only
     # changes an otherwise comparable test result, so it cannot hide an
     # existing infrastructure failure.
     if (entry.get("status") in {"pass", "test_failed"}
-            and (not entry["minimum_tests_ok"] or missing or missing_required)):
+            and (not entry["minimum_tests_ok"] or missing or missing_required or missing_expected)):
         entry["status"] = "test_evidence_incomplete"
     entry["junit_reference_usable"] = entry.get("status") in {"pass", "test_failed"}
     # A complete JUnit run containing isolated execution-error cases remains
@@ -868,6 +1083,7 @@ def _apply_minimum_test_gate(entry: dict[str, Any], *, minimum_tests: int,
         and bool(entry.get("minimum_tests_ok"))
         and not entry.get("missing_baseline_testcases")
         and not entry.get("missing_required_head_testcases")
+        and not entry.get("missing_baseline_expectation_testcases")
         and int(junit_counts.get("errors", 0)) > 0
         and int(junit_counts.get("timeouts", 0)) == 0
         and int(junit_counts.get("skipped", 0)) == 0
@@ -1103,9 +1319,6 @@ def _git_pathspec(path: str) -> str:
 
 
 _OVERLAY_RESOLUTION_MANIFEST_VERSION = 1
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
-
-
 def _load_overlay_resolution_manifest(path: Path, *, patch_sha256: str,
                                        scope: str, includes: Sequence[str]) -> tuple[dict[str, Any], str]:
     """Load exact-head/base conflict resolutions for one harness overlay.
@@ -2334,6 +2547,7 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
     if test_log_evidence["error"] is not None:
         entry["test_log_evidence_error"] = test_log_evidence["error"]
     entry["test_evidence"] = test_log_evidence["count"]
+    entry["ctest_summary"] = test_log_evidence["ctest_summary"]
     entry["no_test_evidence"] = test_log_evidence["no_tests"]
     entry["junit_exists"] = junit.is_file()
     junit_evidence = read_junit_evidence(junit)
@@ -2360,6 +2574,92 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
 
 def _selected_statuses(report: dict[str, Any]) -> list[str]:
     return [str(item.get("status", "infrastructure_error")) for item in report.get("heads", [])]
+
+
+def _baseline_expectation_comparison(report: dict[str, Any]) -> dict[str, Any]:
+    """Summarize PR regression evidence without changing any raw run status."""
+    expectation = report.get("baseline_expectation") or {}
+    result: dict[str, Any] = {
+        "status": "incomplete",
+        "new_failing_testcases_by_head": {},
+        "incomplete_heads": {},
+    }
+    result["scope"] = (
+        "JUnit testcase status comparison only; matching names do not establish the same "
+        "assertion or failure cause. Raw baseline, reference, and head logs remain authoritative."
+    )
+    if expectation.get("status") != "qualified":
+        result["reason"] = "baseline failure expectation was not qualified"
+        return result
+    if (report.get("configuration") or {}).get("reference_baseline") is not True:
+        result["reason"] = "per-base reference execution is disabled"
+        return result
+    references = report.get("references")
+    if not isinstance(references, dict) or not references:
+        result["reason"] = "no exact per-base reference evidence is available"
+        return result
+    heads = report.get("heads")
+    if not isinstance(heads, list) or not heads:
+        result["reason"] = "no PR heads were selected"
+        return result
+
+    any_new = False
+    incomplete: dict[str, list[str]] = {}
+    new_by_head: dict[str, list[str]] = {}
+    for head in heads:
+        number = str(head.get("number", "unknown"))
+        reference = references.get(str(head.get("reference_base_sha", "")))
+        if (head.get("status") not in {"pass", "test_failed"} or
+                not head.get("junit_reference_usable") or
+                head.get("missing_baseline_expectation_testcases")):
+            incomplete.setdefault(number, []).append("head execution or testcase evidence is incomplete")
+            continue
+        if (not isinstance(reference, dict) or
+                reference.get("status") not in {"pass", "test_failed"} or
+                not reference.get("junit_reference_usable") or
+                reference.get("missing_baseline_expectation_testcases")):
+            incomplete.setdefault(number, []).append("exact base reference evidence is incomplete")
+            continue
+        classification = head.get("failure_classification") or {}
+        if classification.get("reference_available") is not True:
+            incomplete.setdefault(number, []).append("failure classification lacks a comparable reference")
+            continue
+        raw_new = sorted(classification.get("new", []))
+        raw_uncompared = sorted(classification.get("uncompared_head_failures", []))
+        raw_not_executed = sorted(classification.get("not_executed_reference_failures", []))
+        error_or_timeout = any(classification.get(key) for key in (
+            "raw_observed_head_errors", "raw_observed_head_timeouts",
+            "uncompared_head_errors", "not_executed_reference_errors",
+            "reference_timeout_names", "reference_error_names", "head_error_names",
+        ))
+        if raw_new:
+            new_by_head[number] = raw_new
+            any_new = True
+        if raw_uncompared or raw_not_executed or error_or_timeout:
+            reasons: list[str] = []
+            if raw_uncompared:
+                reasons.append("head failures do not have a passed/failed reference identity")
+            if raw_not_executed:
+                reasons.append("reference failures were not executed by the head")
+            if error_or_timeout:
+                reasons.append("execution errors or timeouts are not assertion failures")
+            incomplete[number] = reasons
+
+    result["new_failing_testcases_by_head"] = new_by_head
+    result["incomplete_heads"] = incomplete
+    if incomplete:
+        result["status"] = "incomplete"
+        result["reason"] = "one or more head/reference comparisons are incomplete"
+    elif any_new:
+        result["status"] = "new_failing_testcases"
+        result["reason"] = "one or more heads contain failures absent from their exact base"
+    else:
+        result["status"] = "no_new_failing_testcases"
+        result["reason"] = (
+            "all selected heads have complete testcase-status comparisons with no newly "
+            "failing testcase names"
+        )
+    return result
 
 
 def classify_failure_names(reference: dict[str, Any] | None,
@@ -2454,7 +2754,15 @@ def classify_failure_names(reference: dict[str, Any] | None,
 def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
     baseline = report.get("baseline", {})
     baseline_status = baseline.get("status")
-    if baseline_status != "pass":
+    expectation = report.get("baseline_expectation") or {}
+    expectation_enabled = expectation.get("enabled") is True
+    if expectation_enabled and expectation.get("status") != "qualified":
+        return "baseline_expectation_invalid", 2
+    policy_qualified = (
+        expectation_enabled and expectation.get("status") == "qualified" and
+        baseline_status == "test_failed"
+    )
+    if baseline_status != "pass" and not policy_qualified:
         return str(baseline_status or "baseline_failed"), 2
     # A requested reference is part of the comparison contract.  Accept only
     # the two statuses that contain usable testcase evidence; a denylist would
@@ -2478,6 +2786,20 @@ def _overall_status(report: dict[str, Any]) -> tuple[str, int]:
     statuses = _selected_statuses(report)
     if not statuses:
         return "no_heads", 2
+    if policy_qualified:
+        if any(status in {"patch_conflict", "invalid_ref", "reset_failed",
+                          "tree_resolution_failed", "infrastructure_error", "cleanup_failed",
+                          "test_error", "test_evidence_incomplete", "test_timeout",
+                          "test_skipped", "no_tests", "identity_manifest_invalid",
+                          "configure_failed", "build_failed", "configure_timeout", "build_timeout",
+                          "tracked_source_index_changed", "tracked_source_index_resolution_failed",
+                          "overlay_resolution_missing", "overlay_resolution_invalid",
+                          "overlay_state_inspection_failed", "overlay_unmerged_after_apply"}
+               for status in statuses):
+            return "infrastructure_error", 2
+        # Keep the known raw baseline failures visible and nonzero even when
+        # the separate comparison reports no new PR-head failures.
+        return "test_failed", 2
     if all(status == "pass" for status in statuses):
         return "pass", 0
     if any(status in {"patch_conflict", "invalid_ref", "reset_failed",
@@ -2501,6 +2823,7 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
                         patch_path: Path, patch: bytes, patch_sha256: str,
                         resolution_manifest: dict[str, Any] | None,
                         baseline_passed_cases: dict[str, str], *,
+                        baseline_expectation_cases: dict[str, str] | None = None,
                         preserve_build_dir: str | None = None,
                         allowed_staged_paths: Sequence[str] | None = None,
                         reuse_lock: _PrValidationReuseLock | None = None,
@@ -2619,7 +2942,8 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
             "overlay_identity": reference_overlay_identity,
         }
     _apply_minimum_test_gate(reference, minimum_tests=gate_minimum_tests,
-                              baseline_cases=gate_baseline_cases)
+                              baseline_cases=gate_baseline_cases,
+                              required_identity_cases=baseline_expectation_cases)
     reference["harness_patch_applied"] = bool(patch)
     return reference
 
@@ -2653,6 +2977,28 @@ def run_validation(args: argparse.Namespace) -> int:
         raise ValidationError(f"invalid --harness-base {args.harness_base}: {harness_base_result.stderr.strip()}")
     if harness_ref is None:
         raise ValidationError(f"invalid --harness-ref {args.harness_ref}: {harness_ref_result.stderr.strip()}")
+
+    baseline_expectation_manifest = None
+    baseline_expectation_manifest_sha = None
+    baseline_expectation_policy = None
+    baseline_expectation_manifest_path = None
+    baseline_expectation_tree_result = None
+    if args.baseline_expectation_manifest:
+        if not args.reference_baseline:
+            raise ValidationError(
+                "--baseline-expectation-manifest requires per-base reference execution")
+        baseline_expectation_manifest_path = Path(
+            args.baseline_expectation_manifest).expanduser().resolve()
+        baseline_expectation_manifest, baseline_expectation_manifest_sha = (
+            _load_baseline_expectation_manifest(baseline_expectation_manifest_path))
+        baseline_tree_result = _git(repo, "rev-parse", "--verify", f"{harness_ref}^{{tree}}")
+        baseline_ref_tree = baseline_tree_result.stdout.strip()
+        if baseline_tree_result.returncode != 0 or not _HEX40.fullmatch(baseline_ref_tree):
+            raise ValidationError("cannot resolve the exact harness-ref tree for baseline expectation")
+        baseline_expectation_tree_result = baseline_tree_result.json()
+        baseline_expectation_policy = _validate_baseline_expectation_manifest(
+            baseline_expectation_manifest, harness_ref=harness_ref,
+            harness_ref_tree_sha=baseline_ref_tree)
 
     identity_manifest = None
     identity_manifest_sha = None
@@ -2738,8 +3084,27 @@ def run_validation(args: argparse.Namespace) -> int:
             "identity_manifest": (str(Path(args.identity_manifest).expanduser().resolve())
                                    if args.identity_manifest else None),
             "identity_manifest_sha256": identity_manifest_sha,
+            "baseline_expectation_manifest": (str(baseline_expectation_manifest_path)
+                                               if baseline_expectation_manifest_path else None),
+            "baseline_expectation_manifest_sha256": baseline_expectation_manifest_sha,
             "overlay_resolution_manifest": (resolution_manifest.get("path") if resolution_manifest else None),
             "overlay_resolution_manifest_sha256": resolution_manifest_sha,
+        },
+        "baseline_expectation": {
+            "enabled": baseline_expectation_policy is not None,
+            "status": "pending" if baseline_expectation_policy is not None else "not_requested",
+            "manifest_path": (str(baseline_expectation_manifest_path)
+                              if baseline_expectation_manifest_path else None),
+            "manifest_sha256": baseline_expectation_manifest_sha,
+            "harness_ref_tree_resolution": baseline_expectation_tree_result,
+            **({
+                "harness_ref_sha": baseline_expectation_policy["harness_ref_sha"],
+                "harness_ref_tree_sha": baseline_expectation_policy["harness_ref_tree_sha"],
+                "tracked_source_index_sha256": baseline_expectation_policy[
+                    "tracked_source_index_sha256"],
+                "expected_testcase_count": baseline_expectation_policy["testcase_count"],
+                "expected_status_counts": baseline_expectation_policy["status_counts"],
+            } if baseline_expectation_policy is not None else {}),
         },
         "baseline": {},
         "references": {},
@@ -2866,18 +3231,73 @@ def run_validation(args: argparse.Namespace) -> int:
         report["commands"] = {"configure": configure_args, "build": build_args}
 
         baseline_tree, baseline_tree_result = _tree_sha(worktree)
-        report["baseline"] = {"status": "in_progress", "name": "baseline"}
-        _write_json(output / "report.json", report)
-        baseline = _run_tree(worktree, output, "baseline", args, configure_args, build_args,
-                             commit_sha=harness_ref, tree_sha=baseline_tree)
-        baseline["tree_resolution"] = baseline_tree_result.json()
+        baseline_source_hash_before = None
+        baseline_source_result_before = None
+        baseline_expectation_preflight_error = None
+        if baseline_expectation_policy is not None:
+            baseline_source_hash_before, baseline_source_result_before = (
+                _tracked_source_index_hash(worktree))
+            if baseline_tree != baseline_expectation_policy["harness_ref_tree_sha"]:
+                baseline_expectation_preflight_error = "harness-ref index tree differs from manifest"
+            elif baseline_source_hash_before is None:
+                baseline_expectation_preflight_error = "cannot resolve tracked source index before baseline"
+            elif (baseline_source_hash_before !=
+                  baseline_expectation_policy["tracked_source_index_sha256"]):
+                baseline_expectation_preflight_error = "tracked source index hash differs from manifest"
+        if baseline_expectation_preflight_error is not None:
+            baseline = {
+                "name": "baseline", "commit_sha": harness_ref,
+                "tree_sha": baseline_tree, "tested_tree_sha": baseline_tree,
+                "status": "baseline_expectation_invalid",
+                "baseline_expectation_preflight_error": baseline_expectation_preflight_error,
+                "tree_resolution": baseline_tree_result.json(),
+            }
+            report["baseline_expectation"].update({
+                "status": "rejected", "reason": baseline_expectation_preflight_error,
+                "source_hash_before": baseline_source_hash_before,
+                "source_hash_resolution_before": (
+                    baseline_source_result_before.json()
+                    if baseline_source_result_before is not None else None),
+            })
+            baseline_prod_hash = baseline_source_hash_before
+            baseline_prod_result = baseline_source_result_before
+        else:
+            report["baseline"] = {"status": "in_progress", "name": "baseline"}
+            _write_json(output / "report.json", report)
+            baseline = _run_tree(worktree, output, "baseline", args, configure_args, build_args,
+                                 commit_sha=harness_ref, tree_sha=baseline_tree)
+            baseline["tree_resolution"] = baseline_tree_result.json()
+            baseline_prod_hash, baseline_prod_result = _tracked_source_index_hash(worktree)
+            baseline["tracked_source_index_hash_before_overlay"] = (
+                baseline_source_hash_before if baseline_expectation_policy is not None
+                else baseline_prod_hash)
+            baseline["tracked_source_index_hash_after_overlay"] = baseline_prod_hash
+            baseline["tracked_source_index_unchanged"] = (
+                baseline_source_hash_before == baseline_prod_hash
+                if baseline_expectation_policy is not None else True)
+            baseline["tracked_source_index_resolution"] = baseline_prod_result.json()
+            if baseline_expectation_policy is not None:
+                qualification = _qualify_baseline_expectation(
+                    baseline, expectation=baseline_expectation_policy,
+                    source_hash_before=baseline_source_hash_before,
+                    source_hash_after=baseline_prod_hash)
+                report["baseline_expectation"].update(qualification)
+                report["baseline_expectation"]["source_hash_resolution_before"] = (
+                    baseline_source_result_before.json()
+                    if baseline_source_result_before is not None else None)
+                report["baseline_expectation"]["source_hash_resolution_after"] = (
+                    baseline_prod_result.json())
         baseline_passed_cases = {
             name: status for name, status in baseline.get("junit_case_statuses", {}).items()
             if status == "passed"
         }
         baseline["baseline_passed_testcase_count"] = len(baseline_passed_cases)
         baseline["baseline_passed_testcase_ids"] = sorted(baseline_passed_cases)
-        if identity_policy is not None and baseline["status"] == "pass":
+        expectation_qualified = (
+            baseline_expectation_policy is not None and
+            report["baseline_expectation"].get("status") == "qualified")
+        if (identity_policy is not None and
+                (baseline["status"] == "pass" or expectation_qualified)):
             required_ids = identity_policy["required_harness_runtime_ids"]
             missing_required = [name for name in required_ids if name not in baseline_passed_cases]
             exception_ids = sorted({
@@ -2899,21 +3319,29 @@ def run_validation(args: argparse.Namespace) -> int:
                 "selected_head_count": identity_policy["selected_head_count"],
                 "all_snapshot_heads_validated": identity_policy["all_snapshot_heads_validated"],
             }
-        baseline_prod_hash, baseline_prod_result = _tracked_source_index_hash(worktree)
-        baseline["tracked_source_index_hash_before_overlay"] = baseline_prod_hash
-        baseline["tracked_source_index_hash_after_overlay"] = baseline_prod_hash
-        baseline["tracked_source_index_unchanged"] = True
-        baseline["tracked_source_index_resolution"] = baseline_prod_result.json()
+        if baseline_expectation_policy is None:
+            baseline["tracked_source_index_hash_before_overlay"] = baseline_prod_hash
+            baseline["tracked_source_index_hash_after_overlay"] = baseline_prod_hash
+            baseline["tracked_source_index_unchanged"] = True
+            baseline["tracked_source_index_resolution"] = baseline_prod_result.json()
         baseline["harness_patch_applied"] = False
         report["baseline"] = baseline
         last_tree_run: dict[str, Any] | None = baseline
         _write_json(output / "report.json", report)
 
-        if baseline["status"] != "pass":
+        baseline_expectation_cases = (
+            baseline_expectation_policy["testcase_statuses"]
+            if expectation_qualified else None)
+        baseline_can_continue = (
+            baseline["status"] == "pass" and baseline_expectation_policy is None
+        ) or expectation_qualified
+        if not baseline_can_continue:
             report["references"] = {}
             report["reference"] = {
                 "status": "not_run",
-                "reason": "harness_ref baseline guard did not pass",
+                "reason": ("baseline expectation did not qualify" if
+                           baseline_expectation_policy is not None else
+                           "harness_ref baseline guard did not pass"),
             }
             for record in records:
                 report["heads"].append({
@@ -2921,7 +3349,8 @@ def run_validation(args: argparse.Namespace) -> int:
                     "head_ref_name": record.get("headRefName", ""),
                     "head_ref_oid": str(record["headRefOid"]),
                     "status": "baseline_failed",
-                    "reason": baseline["status"],
+                    "reason": report["baseline_expectation"].get("reason")
+                    if baseline_expectation_policy is not None else baseline["status"],
                 })
             return_code = 2
         else:
@@ -2980,6 +3409,7 @@ def run_validation(args: argparse.Namespace) -> int:
                                 worktree, output, reference_name, requested_base_oid, args,
                                 configure_args, build_args, patch_path, patch, patch_sha,
                                 resolution_manifest, baseline_passed_cases,
+                                baseline_expectation_cases=baseline_expectation_cases,
                                 preserve_build_dir=args.build_dir if preserve_build_mode else None,
                                 allowed_staged_paths=applied_paths if preserve_build_mode else None,
                                 reuse_lock=reuse_lock if preserve_build_mode else None,
@@ -3176,7 +3606,8 @@ def run_validation(args: argparse.Namespace) -> int:
                 _apply_minimum_test_gate(
                     entry, minimum_tests=gate_minimum_tests,
                     baseline_cases=gate_baseline_cases,
-                    required_cases=required_head_case_statuses)
+                    required_cases=required_head_case_statuses,
+                    required_identity_cases=baseline_expectation_cases)
                 entry["harness_patch_applied"] = bool(patch)
                 if (identity_policy is None and resolved and
                         entry.get("status") in {"pass", "test_failed"} and
@@ -3301,6 +3732,8 @@ def run_validation(args: argparse.Namespace) -> int:
             report["status"] = "infrastructure_error"
             return_code = 2
         elif validation_completed:
+            if (report.get("baseline_expectation") or {}).get("enabled") is True:
+                report["baseline_failure_comparison"] = _baseline_expectation_comparison(report)
             report["status"], return_code = _overall_status(report)
         _write_json(output / "report.json", report)
     return return_code
@@ -3355,6 +3788,10 @@ def _parser() -> argparse.ArgumentParser:
                         help="run harness-base plus the selected overlay as a failure reference (default: enabled)")
     parser.add_argument("--identity-manifest",
                         help="optional exact-head testcase identity manifest; disabled by default")
+    parser.add_argument("--baseline-expectation-manifest",
+                        help=("optional source-pinned manifest permitting comparison after an exact "
+                              "ordinary assertion-failing harness baseline; raw baseline failures "
+                              "remain visible and the overall status stays nonzero"))
     parser.add_argument("--overlay-resolution-manifest",
                         help=("optional exact base/head conflict-resolution manifest; each row must pin "
                               "the overlay patch SHA, conflict stages, and resolved test-file payload"))

@@ -1656,6 +1656,48 @@ and each head. Equal totals cannot hide a missing test replaced by another name.
 A requested reference with incomplete execution evidence makes the overall
 matrix incomplete, even if individual heads pass.
 
+An exact harness-ref run that has ordinary assertion failures can be used as
+an explicitly pinned comparison baseline with
+`--baseline-expectation-manifest <path>`. The option is disabled by default;
+without it, the existing harness-ref pass guard is unchanged. The version 1
+JSON manifest has exactly these fields:
+
+```json
+{
+  "schema_version": 1,
+  "harness_ref_sha": "<full commit SHA>",
+  "harness_ref_tree_sha": "<full tree SHA>",
+  "tracked_source_index_sha256": "<SHA-256 from the baseline report>",
+  "testcase_statuses": {
+    "<exact JUnit runtime identity>": "passed",
+    "<another exact JUnit runtime identity>": "failed"
+  }
+}
+```
+
+`testcase_statuses` must list every testcase identity with only its exact
+`passed` or ordinary assertion `failed` status. The runner requires the
+manifest commit, full tree, and tracked `src/` index hash to match. It then
+qualifies only a `test_failed` run with usable, duplicate-free JUnit, matching
+CTest/JUnit counts and failure totals, and no errors, skips, timeouts, or
+missing evidence. A changed status map, identity set, or source pin rejects the
+policy and prevents reference/head runs. The report stores the manifest path
+and SHA-256 separately under `configuration` and `baseline_expectation`; the
+baseline's raw status, failed names, logs, and JUnit remain unchanged.
+
+When qualified, every manifest identity must also execute in every exact
+snapshot-base reference and head. Its status may be `passed` or `failed`; a
+missing identity makes the comparison incomplete, while errors, skips, and
+timeouts remain execution failures and are never classified as inherited
+assertion failures. `baseline_failure_comparison` separately reports
+`no_new_failing_testcases`, `new_failing_testcases`, or `incomplete`, comparing
+JUnit testcase names against each head's exact base. This narrow result does
+not prove that same-named failures have the same assertion or root cause; use
+the raw logs and JUnit failure messages for that analysis. The overall report
+and process exit remain `test_failed` and nonzero while the pinned harness-ref
+baseline itself still has ordinary failures, even when the testcase comparison
+finds no newly failing names.
+
 The report's `references` map binds reference evidence to exact base OIDs.
 Shared bases run once. Within the same invocation, an exact commit already
 tested as a head or reference may supply the other role under the identical
