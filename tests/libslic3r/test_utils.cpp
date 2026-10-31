@@ -626,3 +626,8 @@ TEST_CASE("MD5 file fingerprints match standard vectors across the 64 KiB read b
         CHECK(digest == expected);
     }
 }
+
+TEST_CASE("Character filtering removes only requested characters", "[utils]") {
+    CHECK(filter_characters("a-b_c!", "-_") == "abc!");
+    CHECK(filter_characters("stable", "") == "stable");
+}
