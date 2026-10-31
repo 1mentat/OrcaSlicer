@@ -111,19 +111,20 @@ TEST_CASE("ObjColorUtils image application replaces every pixel with its cluster
     RngRestore restore;
     cv::theRNG().state = 12345;
     QuantKMeans quant;
+    // Four shades in two clusters: each pixel must become its cluster mean, which no input pixel equals.
     cv::Mat input(2, 2, CV_8UC3), output(2, 2, CV_8UC3, cv::Scalar(0, 0, 0));
-    input.at<Bgr>(0, 0) = Bgr(0, 0, 255);
-    input.at<Bgr>(0, 1) = Bgr(0, 0, 255);
-    input.at<Bgr>(1, 0) = Bgr(255, 0, 0);
-    input.at<Bgr>(1, 1) = Bgr(255, 0, 0);
+    input.at<Bgr>(0, 0) = Bgr(0, 0, 250);
+    input.at<Bgr>(0, 1) = Bgr(0, 0, 254);
+    input.at<Bgr>(1, 0) = Bgr(250, 0, 0);
+    input.at<Bgr>(1, 1) = Bgr(254, 0, 0);
     quant.apply(input, output, 2, 0);
     REQUIRE(output.rows == input.rows);
     REQUIRE(output.cols == input.cols);
     REQUIRE(output.type() == CV_8UC3);
-    require_vec(output.at<Bgr>(0, 0), Bgr(0, 0, 255));
-    require_vec(output.at<Bgr>(0, 1), Bgr(0, 0, 255));
-    require_vec(output.at<Bgr>(1, 0), Bgr(255, 0, 0));
-    require_vec(output.at<Bgr>(1, 1), Bgr(255, 0, 0));
+    require_vec(output.at<Bgr>(0, 0), Bgr(0, 0, 252));
+    require_vec(output.at<Bgr>(0, 1), Bgr(0, 0, 252));
+    require_vec(output.at<Bgr>(1, 0), Bgr(252, 0, 0));
+    require_vec(output.at<Bgr>(1, 1), Bgr(252, 0, 0));
 }
 
 TEST_CASE("ObjColorUtils alpha application preserves transparent pixels and alpha bytes", "[ObjColorUtils][ObjColorUtilsExtended]")
@@ -131,19 +132,22 @@ TEST_CASE("ObjColorUtils alpha application preserves transparent pixels and alph
     RngRestore restore;
     cv::theRNG().state = 54321;
     QuantKMeans quant(10);
-    cv::Mat input(1, 3, CV_8UC4), output(1, 3, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    // One transparent pixel and four opaque shades in two clusters.
+    cv::Mat input(1, 5, CV_8UC4), output(1, 5, CV_8UC4, cv::Scalar(0, 0, 0, 0));
     input.at<Rgba>(0, 0) = Rgba(5, 6, 7, 0);
-    input.at<Rgba>(0, 1) = Rgba(0, 0, 255, 255);
-    input.at<Rgba>(0, 2) = Rgba(255, 0, 0, 128);
+    input.at<Rgba>(0, 1) = Rgba(0, 0, 250, 255);
+    input.at<Rgba>(0, 2) = Rgba(0, 0, 254, 200);
+    input.at<Rgba>(0, 3) = Rgba(250, 0, 0, 128);
+    input.at<Rgba>(0, 4) = Rgba(254, 0, 0, 64);
     quant.apply_aplha(input, output, 2, 0);
     REQUIRE(output.rows == input.rows);
     REQUIRE(output.cols == input.cols);
     REQUIRE(output.type() == CV_8UC4);
     CHECK(output.at<Rgba>(0, 0) == input.at<Rgba>(0, 0));
-    CHECK(output.at<Rgba>(0, 1)[3] == 255);
-    CHECK(output.at<Rgba>(0, 2)[3] == 128);
-    CHECK(output.at<Rgba>(0, 1)[2] == 255);
-    CHECK(output.at<Rgba>(0, 2)[0] == 255);
+    CHECK(output.at<Rgba>(0, 1) == Rgba(0, 0, 252, 255));
+    CHECK(output.at<Rgba>(0, 2) == Rgba(0, 0, 252, 200));
+    CHECK(output.at<Rgba>(0, 3) == Rgba(252, 0, 0, 128));
+    CHECK(output.at<Rgba>(0, 4) == Rgba(252, 0, 0, 64));
 }
 
 TEST_CASE("ObjColorUtils vector clustering retains two exact palette regions", "[ObjColorUtils][ObjColorUtilsExtended]")
@@ -194,6 +198,31 @@ TEST_CASE("ObjColorUtils requested clusters collapse to the number of distinct s
         CHECK_THAT(centers[static_cast<std::size_t>(labels[i])][0], WithinAbs(colors[i][0], 1e-6));
         CHECK_THAT(centers[static_cast<std::size_t>(labels[i])][1], WithinAbs(colors[i][1], 1e-6));
         CHECK_THAT(centers[static_cast<std::size_t>(labels[i])][2], WithinAbs(colors[i][2], 1e-6));
+    }
+}
+
+TEST_CASE("ObjColorUtils automatic cluster count finds every distinct color", "[ObjColorUtils][ObjColorUtilsExtended]")
+{
+    RngRestore restore;
+    cv::theRNG().state = 11235;
+    QuantKMeans quant;
+    // num_cluster < 1 selects the cluster count by k-means score; three exact colors need three clusters.
+    const std::vector<RGBA> colors{{1.f, 0.f, 0.f, 1.f}, {1.f, 0.f, 0.f, 1.f}, {0.f, 1.f, 0.f, 1.f},
+                                   {0.f, 1.f, 0.f, 1.f}, {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f}};
+    std::vector<RGBA> centers;
+    std::vector<int> labels;
+    quant.apply(colors, centers, labels, -1, 4, 0);
+    REQUIRE(centers.size() == 3);
+    REQUIRE(labels.size() == colors.size());
+    CHECK(labels[0] == labels[1]);
+    CHECK(labels[2] == labels[3]);
+    CHECK(labels[4] == labels[5]);
+    CHECK(std::set<int>{labels[0], labels[2], labels[4]}.size() == 3);
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+        REQUIRE(labels[i] >= 0);
+        REQUIRE(static_cast<std::size_t>(labels[i]) < centers.size());
+        for (int channel = 0; channel < 3; ++channel)
+            CHECK_THAT(centers[static_cast<std::size_t>(labels[i])][channel], WithinAbs(colors[i][channel], 1e-6));
     }
 }
 
