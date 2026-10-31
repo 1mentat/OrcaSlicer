@@ -4,6 +4,10 @@
 #include "test_utils.hpp"
 
 #include "libslic3r/Geometry/Voronoi.hpp"
+#include "libslic3r/Arachne/utils/PolygonsSegmentIndex.hpp"
+#include "libslic3r/Arachne/utils/PolygonsPointIndex.hpp"
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/Geometry/VoronoiUtils.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Line.hpp"
 #include <cmath>
@@ -2167,4 +2171,75 @@ TEST_CASE("Intersecting Voronoi edges", "[Voronoi]")
     };
 
 //    REQUIRE(!has_intersecting_edges(poly, vd));
+}
+
+TEST_CASE("Voronoi source lookups preserve polygon endpoints and reject mismatched cells", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygon outline{{Point(0, 0), Point(100, 0), Point(100, 60), Point(0, 60)}};
+    const Polygons polygons{outline};
+    std::vector<Arachne::PolygonsSegmentIndex> segments;
+    for (size_t index = 0; index < outline.size(); ++index)
+        segments.emplace_back(&polygons, 0, static_cast<unsigned int>(index));
+
+    VD diagram;
+    diagram.construct_voronoi(segments.cbegin(), segments.cend(), false);
+    REQUIRE(diagram.num_cells() > 0);
+
+    const VD::cell_type *point_cell = nullptr;
+    const VD::cell_type *segment_cell = nullptr;
+    for (const VD::cell_type &cell : diagram.cells()) {
+        if (cell.contains_point() && point_cell == nullptr)
+            point_cell = &cell;
+        if (cell.contains_segment() && segment_cell == nullptr)
+            segment_cell = &cell;
+    }
+    REQUIRE(point_cell != nullptr);
+    REQUIRE(segment_cell != nullptr);
+
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_segment(*point_cell, segments.cbegin(), segments.cend()), InvalidArgument);
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_segment(*segment_cell, segments.cbegin(), segments.cbegin()), OutOfRange);
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_point(*segment_cell, segments.cbegin(), segments.cend()), InvalidArgument);
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_point_index(*segment_cell, segments.cbegin(), segments.cend()), InvalidArgument);
+
+    // Boost merges the shared endpoints of adjacent segments, so a closed rectangle yields
+    // exactly one point cell per corner. A Voronoi vertex on the boundary of a point cell
+    // is at least as close to that cell's site as to any other corner.
+    Points source_points;
+    for (const VD::cell_type &cell : diagram.cells()) {
+        if (!cell.contains_point())
+            continue;
+        const Point source_point = Geometry::VoronoiUtils::get_source_point(cell, segments.cbegin(), segments.cend());
+        const Arachne::PolygonsPointIndex source_point_index =
+            Geometry::VoronoiUtils::get_source_point_index(cell, segments.cbegin(), segments.cend());
+        CHECK(source_point_index.p() == source_point);
+        source_points.push_back(source_point);
+
+        const VD::edge_type *edge = cell.incident_edge();
+        do {
+            if (const VD::vertex_type *vertex = edge->vertex0(); vertex != nullptr) {
+                const Vec2d v(vertex->x(), vertex->y());
+                const double site_distance = (v - source_point.cast<double>()).norm();
+                for (const Point &corner : outline.points)
+                    CHECK(site_distance <= (v - corner.cast<double>()).norm() + 1e-6);
+            }
+            edge = edge->next();
+        } while (edge != cell.incident_edge());
+    }
+    std::sort(source_points.begin(), source_points.end());
+    Points corners = outline.points;
+    std::sort(corners.begin(), corners.end());
+    CHECK(source_points == corners);
+}
+
+TEST_CASE("Parabola discretization returns its endpoints when the focus lies on the directrix", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygons polygons{Polygon{{Point(0, 0), Point(100, 0), Point(100, 100), Point(0, 100)}}};
+    const Arachne::PolygonsSegmentIndex directrix(&polygons, 0, 0);
+    const Point start(25, 0);
+    const Point end(75, 0);
+
+    const Points samples = Geometry::VoronoiUtils::discretize_parabola(Point(50, 0), directrix, start, end, 10, 0.5f);
+    REQUIRE(samples.size() == 2);
+    CHECK(samples.front() == start);
+    CHECK(samples.back() == end);
 }
