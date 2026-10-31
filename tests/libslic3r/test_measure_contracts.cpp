@@ -1,3 +1,4 @@
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -7,11 +8,13 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 
+#include <Eigen/Core>
 #include <Eigen/Geometry>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -52,6 +55,92 @@ void check_distance(const std::optional<DistAndPoints> &distance, double expecte
 {
     REQUIRE(distance.has_value());
     CHECK_THAT(distance->dist, WithinAbs(expected, 1e-8));
+}
+
+// A distance whose witness points are as far apart as the reported distance.
+void check_witnessed_distance(const std::optional<DistAndPoints> &distance, double expected, double tolerance = 1e-7)
+{
+    REQUIRE(distance.has_value());
+    CHECK_THAT(distance->dist, WithinAbs(expected, tolerance));
+    CHECK_THAT((distance->to - distance->from).norm(), WithinAbs(distance->dist, tolerance));
+}
+
+// A witness point that lies on the circle.
+void check_on_circle(const Vec3d &point, const SurfaceFeature &circle_feature, double tolerance = 1e-7)
+{
+    const auto [center, radius, normal] = circle_feature.get_circle();
+    CHECK_THAT((point - center).dot(normal.normalized()), WithinAbs(0.0, tolerance));
+    CHECK_THAT((point - center).norm(), WithinAbs(radius, tolerance));
+}
+
+// A witness pair of a circle-circle distance: one point on each circle.
+void check_circle_pair_witness(const std::optional<DistAndPoints> &distance, const SurfaceFeature &from_circle,
+                               const SurfaceFeature &to_circle, double tolerance = 1e-7)
+{
+    REQUIRE(distance.has_value());
+    check_on_circle(distance->from, from_circle, tolerance);
+    check_on_circle(distance->to, to_circle, tolerance);
+}
+
+// Independent oracle for the circle-circle distance: minimize the exact point-to-circle distance from
+// b's points to a over b's angle. It uses neither the production polynomial nor its root finder.
+double sampled_circle_distance(const SurfaceFeature &a, const SurfaceFeature &b)
+{
+    const auto [a_center, a_radius, a_normal_raw] = a.get_circle();
+    const auto [b_center, b_radius, b_normal_raw] = b.get_circle();
+    const Vec3d a_normal = a_normal_raw.normalized();
+    const Vec3d u = b_normal_raw.unitOrthogonal();
+    const Vec3d v = b_normal_raw.normalized().cross(u);
+    const auto square_distance = [&](double angle) {
+        const Vec3d delta = b_center + b_radius * (u * std::cos(angle) + v * std::sin(angle)) - a_center;
+        const double height = delta.dot(a_normal);
+        const double radial = (delta - height * a_normal).norm() - a_radius;
+        return height * height + radial * radial;
+    };
+    constexpr int samples = 512;
+    constexpr double step = 2.0 * PI / samples;
+    double best = std::numeric_limits<double>::infinity();
+    for (int i = 0; i < samples; ++i) {
+        const double angle = i * step;
+        const double current = square_distance(angle);
+        best = std::min(best, current);
+        if (current > square_distance(angle - step) || current > square_distance(angle + step))
+            continue;
+        // Refine every sampled local minimum by ternary search.
+        double lo = angle - step;
+        double hi = angle + step;
+        for (int iteration = 0; iteration < 80; ++iteration) {
+            const double left = lo + (hi - lo) / 3.0;
+            const double right = hi - (hi - lo) / 3.0;
+            if (square_distance(left) < square_distance(right))
+                hi = right;
+            else
+                lo = left;
+        }
+        best = std::min(best, square_distance(0.5 * (lo + hi)));
+    }
+    return std::sqrt(best);
+}
+
+// The 1e-6 tolerance of the solver checks is loose on purpose: measured errors are at most 2e-12 on
+// arm64, and roundoff differences between platforms (e.g. FMA contraction on x86) can move a double
+// root of the degree-8 polynomial by about sqrt(machine epsilon), 1e-8, which stays well inside it.
+void check_against_oracle(const SurfaceFeature &a, const SurfaceFeature &b)
+{
+    const MeasurementResult result = get_measurement(a, b);
+    check_witnessed_distance(result.distance_infinite, sampled_circle_distance(a, b), 1e-6);
+    check_circle_pair_witness(result.distance_infinite, a, b, 1e-6);
+}
+
+// Checks a parallel-circle distance in both argument orders: swapping the circles swaps the witnesses.
+void check_parallel_pair(const SurfaceFeature &a, const SurfaceFeature &b, double expected)
+{
+    const MeasurementResult result = get_measurement(a, b);
+    check_witnessed_distance(result.distance_infinite, expected);
+    check_circle_pair_witness(result.distance_infinite, a, b);
+    const MeasurementResult reversed = get_measurement(b, a);
+    check_witnessed_distance(reversed.distance_infinite, expected);
+    check_circle_pair_witness(reversed.distance_infinite, b, a);
 }
 
 } // namespace
@@ -294,4 +383,152 @@ TEST_CASE("Measuring groups cube facets into planar features and honors world tr
     REQUIRE(edge_pick.has_value());
     CHECK(edge_pick->get_type() == SurfaceFeatureType::Edge);
     CHECK(measuring.get_feature(cube_mesh.indices.size(), Vec3d::Zero(), Transform3d::Identity(), false) == std::nullopt);
+}
+
+TEST_CASE("Coplanar circles report disjoint, tangent and nested gaps", "[Measure][MeasureContracts]")
+{
+    const SurfaceFeature radius2 = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    check_parallel_pair(radius2, circle(Vec3d(5.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0), 2.0); // externally disjoint
+    check_parallel_pair(radius2, circle(Vec3d(3.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0), 0.0); // external tangent
+    check_parallel_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0), circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0),
+                        1.0); // nested
+    check_parallel_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.0), circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 3.0),
+                        1.0); // reverse nested
+}
+
+// Known bug: when the projected circles intersect, the parallel branch returns the two centers as
+// witnesses and their distance; fixed by the follow-up fix PR
+TEST_CASE("Intersecting coplanar circles report zero distance at a common point", "[Measure][MeasureContracts][!shouldfail]")
+{
+    check_parallel_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0), circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 2.0), 0.0);
+}
+
+// Known bug: for parallel circles in different planes the distance ignores the axial gap; fixed by the
+// follow-up fix PR
+TEST_CASE("Parallel circles in different planes include the axial gap", "[Measure][MeasureContracts][!shouldfail]")
+{
+    const SurfaceFeature radius2 = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    check_parallel_pair(radius2, circle(Vec3d(5.0, 0.0, 3.0), Vec3d::UnitZ(), 1.0), std::sqrt(13.0));  // disjoint, above
+    check_parallel_pair(radius2, circle(Vec3d(5.0, 0.0, -3.0), Vec3d::UnitZ(), 1.0), std::sqrt(13.0)); // disjoint, below
+    check_parallel_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0), circle(Vec3d(0.0, 0.0, 2.0), Vec3d::UnitZ(), 1.0),
+                        std::sqrt(8.0)); // concentric
+    check_parallel_pair(radius2, circle(Vec3d(0.0, 0.0, -2.0), Vec3d::UnitZ(), 2.0), 2.0); // equal concentric
+    check_parallel_pair(radius2, circle(Vec3d(1.0, 0.0, 2.0), Vec3d::UnitZ(), 2.0), 2.0);  // projections intersect
+}
+
+// Known bug: as above, parallel circles in different planes lose the axial gap; fixed by the follow-up fix PR
+TEST_CASE("Parallel circle analytic sweep preserves axial and radial gaps", "[Measure][MeasureContracts][!shouldfail]")
+{
+    struct Case {
+        double radius0;
+        double radius1;
+        double projected_separation;
+        double axial_separation;
+        bool opposed_normal;
+    };
+    const Case cases[] = {
+        {0.5, 1.0, 0.0, 1.25, false},   // concentric nested
+        {3.0, 1.0, 0.25, -2.0, false},  // nested
+        {3.0, 1.0, 2.0, 0.0, false},    // internal tangent
+        {3.0, 1.0, 2.5, 0.75, false},   // projected intersection
+        {3.0, 1.0, 4.0, -1.5, false},   // external tangent
+        {3.0, 1.0, 5.0, 2.0, false},    // disjoint
+        {0.5, 3.0, 1.5, -0.5, false},   // reverse nested
+        {0.5, 0.5, 0.0, -1.0, false},   // equal concentric
+        {0.5, 1.0, 1.2, 0.3, true},     // opposed normals
+        {0.5, 0.5, 1e-8, 0.0, false},   // near-concentric equal radii
+        {0.5, 1.0, 1e-6, 1.25, false},  // near-concentric nested with axial offset
+        {1.0, 0.5, 1e-4, -0.3, true},   // near-concentric opposed normals
+    };
+    // A generic rigid placement, so that no coordinate axis lines up with the circle axes.
+    const Transform3d rigid = Eigen::Translation3d(11.0, -7.0, 4.0) * Eigen::AngleAxisd(0.37, Vec3d(1.0, 2.0, 3.0).normalized());
+    for (const Case &test : cases) {
+        CAPTURE(test.radius0, test.radius1, test.projected_separation, test.axial_separation, test.opposed_normal);
+        SurfaceFeature first = circle(Vec3d::Zero(), Vec3d::UnitZ(), test.radius0);
+        SurfaceFeature second = circle(Vec3d(test.projected_separation, 0.0, test.axial_separation),
+                                       test.opposed_normal ? Vec3d(0.0, 0.0, -1.0) : Vec3d::UnitZ(), test.radius1);
+        first.translate(rigid);
+        second.translate(rigid);
+        // In-plane gap between the projected circles, combined with the axial gap.
+        const double radial_gap = std::max({test.projected_separation - test.radius0 - test.radius1,
+                                            std::abs(test.radius0 - test.radius1) - test.projected_separation, 0.0});
+        const double expected = std::hypot(radial_gap, test.axial_separation);
+        const MeasurementResult result = get_measurement(first, second);
+        check_witnessed_distance(result.distance_infinite, expected, 1e-6);
+        check_circle_pair_witness(result.distance_infinite, first, second, 1e-6);
+    }
+}
+
+TEST_CASE("Perpendicular circles have analytic separation and intersection witnesses", "[Measure][MeasureContracts]")
+{
+    // Two unit circles about the same center in perpendicular planes meet at (+-1, 0, 0).
+    const SurfaceFeature horizontal = circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.0);
+    const SurfaceFeature vertical = circle(Vec3d::Zero(), Vec3d::UnitY(), 1.0);
+    const MeasurementResult intersecting = get_measurement(horizontal, vertical);
+    check_witnessed_distance(intersecting.distance_infinite, 0.0, 1e-6);
+    check_circle_pair_witness(intersecting.distance_infinite, horizontal, vertical, 1e-6);
+    CHECK_THAT(std::abs(intersecting.distance_infinite->from.x()), WithinAbs(1.0, 1e-6));
+
+    // Lifted by 3, the closest pair is (+-1, 0, 0) and the lifted-circle point towards it,
+    // (0, 0, 3) + (+-1, 0, -3) / sqrt(10): sqrt(10) - 1 = sqrt(11 - 2 sqrt(10)) apart.
+    const SurfaceFeature lifted = circle(Vec3d(0.0, 0.0, 3.0), Vec3d::UnitY(), 1.0);
+    const MeasurementResult separated = get_measurement(horizontal, lifted);
+    check_witnessed_distance(separated.distance_infinite, std::sqrt(11.0 - 2.0 * std::sqrt(10.0)), 1e-6);
+    check_circle_pair_witness(separated.distance_infinite, horizontal, lifted, 1e-6);
+}
+
+TEST_CASE("Skew circle distances agree with angular minimization", "[Measure][MeasureContracts]")
+{
+    // Three fixed skew placements, each measured in both orders.
+    const SurfaceFeature fixed[] = {
+        circle(Vec3d(0.2, -0.4, 0.6), Vec3d::UnitZ(), 1.3),
+        circle(Vec3d(2.4, 0.7, 0.3), Vec3d(std::sin(0.56), 0.0, std::cos(0.56)), 1.01),
+        circle(Vec3d(0.82, 1.27, 1.37), Vec3d(std::sin(1.08), 0.0, std::cos(1.08)), 1.51),
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        CAPTURE(i);
+        check_against_oracle(fixed[i], fixed[(i + 1) % 3]);
+        check_against_oracle(fixed[(i + 1) % 3], fixed[i]);
+    }
+
+    // A sweep of tilts, offsets and radii.
+    for (int index = 0; index < 8; ++index) {
+        CAPTURE(index);
+        const double angle = 0.17 + 0.13 * index;
+        const SurfaceFeature a = circle(Vec3d(0.2, -0.4, 0.6), Vec3d::UnitZ(), 1.3 + 0.1 * index);
+        const SurfaceFeature b = circle(Vec3d(2.4 - 0.23 * index, 0.7 + 0.19 * index, 0.3 + 0.11 * index),
+                                        Vec3d(std::sin(angle), 0.0, std::cos(angle)), 0.8 + 0.07 * index);
+        check_against_oracle(a, b);
+        check_against_oracle(b, a);
+    }
+
+    // Perpendicular circles pulled apart along X.
+    for (const double separation : {1.0, 4.0}) {
+        CAPTURE(separation);
+        const SurfaceFeature a = circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.0);
+        const SurfaceFeature b = circle(Vec3d(separation, 0.0, 0.0), Vec3d::UnitY(), 1.0);
+        check_against_oracle(a, b);
+        check_against_oracle(b, a);
+    }
+}
+
+TEST_CASE("Skew circle distances scale under a common rigid placement", "[Measure][MeasureContracts]")
+{
+    const Vec3d normal = Vec3d(1.0, 2.0, 3.0).normalized();
+    const Eigen::Matrix3d rotation = Eigen::AngleAxisd(0.71, Vec3d(2.0, 3.0, 1.0).normalized()).toRotationMatrix();
+    const Vec3d translation(17.0, -9.0, 4.0);
+    const SurfaceFeature a = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    const SurfaceFeature b = circle(Vec3d(3.0, 2.0, 1.0), normal, 1.0);
+    check_against_oracle(a, b);
+    const MeasurementResult original = get_measurement(a, b);
+    REQUIRE(original.distance_infinite.has_value());
+    for (const double scale : {0.2, 5.0}) {
+        CAPTURE(scale);
+        const SurfaceFeature moved_a = circle(translation, rotation * Vec3d::UnitZ(), 2.0 * scale);
+        const SurfaceFeature moved_b = circle(translation + rotation * (Vec3d(3.0, 2.0, 1.0) * scale), rotation * normal, scale);
+        check_against_oracle(moved_a, moved_b);
+        const MeasurementResult moved = get_measurement(moved_a, moved_b);
+        REQUIRE(moved.distance_infinite.has_value());
+        CHECK_THAT(moved.distance_infinite->dist, WithinAbs(scale * original.distance_infinite->dist, 1e-6));
+    }
 }
