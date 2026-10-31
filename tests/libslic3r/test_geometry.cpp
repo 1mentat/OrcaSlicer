@@ -1,8 +1,11 @@
 #include <algorithm>
+#include <cmath>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -11,8 +14,10 @@
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Geometry/Circle.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ShortestPath.hpp"
+#include "libslic3r/Algorithm/RegionExpansion.hpp"
 
 //#include <random>
 //#include "libnest2d/tools/benchmark.h"
@@ -28,6 +33,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <utility>
 #include "libnest2d/backends/libslic3r/geometries.hpp"
 
 using namespace Slic3r;
@@ -758,3 +764,192 @@ TEST_CASE("Convex polygon intersection test prusa polygons", "[Geometry][Rotcali
         REQUIRE(res == ref);
     }
 }
+
+TEST_CASE("Wave expansion grows a closed seed and clips it to its boundary", "[Geometry][GeometryContract][RegionExpansion]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygons source{
+        ExPolygon{{{20 * mm, 20 * mm}, {40 * mm, 20 * mm},
+                   {40 * mm, 40 * mm}, {20 * mm, 40 * mm}}}
+    };
+    const ExPolygons boundary{
+        ExPolygon{{{0, 0}, {45 * mm, 0}, {45 * mm, 60 * mm}, {0, 60 * mm}}}
+    };
+    const float full_expansion = static_cast<float>(10 * mm);
+    const float expansion_step = static_cast<float>(4 * mm);
+
+    const std::vector<Polygons> by_source =
+        Algorithm::expand_expolygons(source, boundary, full_expansion, expansion_step, 4);
+    REQUIRE(by_source.size() == 1);
+    REQUIRE_FALSE(by_source.front().empty());
+    const BoundingBox grouped_bounds = get_extents(by_source.front());
+    constexpr double coord_rounding_tolerance = 10.;
+    CHECK_THAT(double(grouped_bounds.min.x()),
+               Catch::Matchers::WithinAbs(double(10 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(grouped_bounds.min.y()),
+               Catch::Matchers::WithinAbs(double(10 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(grouped_bounds.max.x()),
+               Catch::Matchers::WithinAbs(double(45 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(grouped_bounds.max.y()),
+               Catch::Matchers::WithinAbs(double(50 * mm), coord_rounding_tolerance));
+
+    const std::vector<Algorithm::RegionExpansionEx> detailed =
+        Algorithm::propagate_waves_ex(source, boundary, full_expansion, expansion_step, 4);
+    REQUIRE_FALSE(detailed.empty());
+    BoundingBox detailed_bounds;
+    for (const Algorithm::RegionExpansionEx &region : detailed) {
+        CHECK(region.src_id == 0);
+        CHECK(region.boundary_id == 0);
+        detailed_bounds.merge(get_extents(region.expolygon));
+    }
+    CHECK_THAT(double(detailed_bounds.min.x()),
+               Catch::Matchers::WithinAbs(double(10 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(detailed_bounds.min.y()),
+               Catch::Matchers::WithinAbs(double(10 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(detailed_bounds.max.x()),
+               Catch::Matchers::WithinAbs(double(45 * mm), coord_rounding_tolerance));
+    CHECK_THAT(double(detailed_bounds.max.y()),
+               Catch::Matchers::WithinAbs(double(50 * mm), coord_rounding_tolerance));
+}
+
+TEST_CASE("Wave seeds retain source IDs across shared boundary vertices", "[Geometry][GeometryContract][RegionExpansion]")
+{
+    const coord_t mm = scale_(1.0);
+    const coord_t crossing_y = scale_(9.05);
+    const float tiny_expansion = static_cast<float>(scale_(0.05));
+    const auto rectangle = [mm](int x0, int y0, int x1, int y1) {
+        return ExPolygon{{{x0 * mm, y0 * mm}, {x1 * mm, y0 * mm},
+                          {x1 * mm, y1 * mm}, {x0 * mm, y1 * mm}}};
+    };
+
+    // The first source and boundary are disjoint decoys. The target square is
+    // contained by the second boundary except for a notch crossing its expanded
+    // top edge at two existing, non-collinear boundary vertices.
+    const ExPolygons sources{
+        rectangle(-80, -80, -70, -70),
+        rectangle(1, 1, 9, 9)
+    };
+    Polygon boundary_contour{
+        Point(-10 * mm, -10 * mm), Point(20 * mm, -10 * mm),
+        Point(20 * mm, 20 * mm), Point(7 * mm, 20 * mm),
+        Point(7 * mm, crossing_y), Point(6 * mm, 8 * mm),
+        Point(4 * mm, 8 * mm), Point(3 * mm, crossing_y),
+        Point(3 * mm, 20 * mm), Point(-10 * mm, 20 * mm)
+    };
+    boundary_contour.make_counter_clockwise();
+    const ExPolygons boundaries{
+        rectangle(-100, -100, -90, -90),
+        ExPolygon{std::move(boundary_contour)}
+    };
+
+    const std::vector<Algorithm::WaveSeed> seeds =
+        Algorithm::wave_seeds(sources, boundaries, tiny_expansion, true);
+    REQUIRE(seeds.size() == 1);
+
+    const Algorithm::WaveSeed &seed = seeds.front();
+    CHECK(seed.src == 1);
+    CHECK(seed.boundary == 1);
+    REQUIRE(seed.path.size() >= 2);
+    const Point left_crossing(3 * mm, crossing_y);
+    const Point right_crossing(7 * mm, crossing_y);
+    const Point &front = seed.path.front();
+    const Point &back = seed.path.back();
+    CAPTURE(front.x(), front.y(), back.x(), back.y(),
+            left_crossing.x(), left_crossing.y(), right_crossing.x(), right_crossing.y());
+    const bool endpoints_match =
+        (front == left_crossing && back == right_crossing) ||
+        (front == right_crossing && back == left_crossing);
+    REQUIRE(endpoints_match);
+
+    // The retained source arc has the square-join perimeter, less the four-mm
+    // notch. Its bounds and perimeter are derived from the specified rectangle.
+    const BoundingBox actual_bounds = get_extents(seed.path);
+    CHECK_THAT(double(actual_bounds.min.x()), Catch::Matchers::WithinAbs(double(scale_(0.95)), 20.));
+    CHECK_THAT(double(actual_bounds.min.y()), Catch::Matchers::WithinAbs(double(scale_(0.95)), 20.));
+    CHECK_THAT(double(actual_bounds.max.x()), Catch::Matchers::WithinAbs(double(scale_(9.05)), 20.));
+    CHECK_THAT(double(actual_bounds.max.y()), Catch::Matchers::WithinAbs(double(scale_(9.05)), 20.));
+    const double delta = double(scale_(0.05));
+    const double expanded_square_perimeter = 4. * (8. * double(mm)) +
+        16. * delta * (std::sqrt(2.) - 1.);
+    const double expected_length = expanded_square_perimeter - 4. * double(mm);
+    CHECK_THAT(Polyline(seed.path).length(),
+               Catch::Matchers::WithinAbs(expected_length, 20.));
+}
+
+TEST_CASE("Region merge preserves leading and trailing sources around one expansion", "[Geometry][GeometryContract][RegionExpansion]")
+{
+    const coord_t mm = scale_(1.0);
+    const auto rectangle = [mm](int x0, int y0, int x1, int y1) {
+        return ExPolygon{{{x0 * mm, y0 * mm}, {x1 * mm, y0 * mm},
+                          {x1 * mm, y1 * mm}, {x0 * mm, y1 * mm}}};
+    };
+    ExPolygons source{
+        rectangle(0, 0, 10, 10), rectangle(30, 0, 40, 10), rectangle(60, 0, 70, 10)
+    };
+    const ExPolygons boundary{rectangle(40, 0, 55, 10)};
+    const Algorithm::RegionExpansionParameters params =
+        Algorithm::RegionExpansionParameters::build(float(10 * mm), float(4 * mm), 4);
+
+    const std::vector<ExPolygon> merged =
+        Algorithm::expand_merge_expolygons(std::move(source), boundary, params);
+    REQUIRE(merged.size() == 3);
+
+    const BoundingBox first = get_extents(merged[0]);
+    CHECK(first.min.x() == 0);
+    CHECK(first.min.y() == 0);
+    CHECK(first.max.x() == 10 * mm);
+    CHECK(first.max.y() == 10 * mm);
+    const BoundingBox middle = get_extents(merged[1]);
+    // Allow 0.000025 mm for the union safety expansion and coordinate rounding.
+    CHECK_THAT(double(middle.min.x()), Catch::Matchers::WithinAbs(double(30 * mm), 25.));
+    CHECK_THAT(double(middle.min.y()), Catch::Matchers::WithinAbs(0., 25.));
+    CHECK_THAT(double(middle.max.x()), Catch::Matchers::WithinAbs(double(50 * mm), 25.));
+    CHECK_THAT(double(middle.max.y()), Catch::Matchers::WithinAbs(double(10 * mm), 25.));
+    const BoundingBox last = get_extents(merged[2]);
+    CHECK(last.min.x() == 60 * mm);
+    CHECK(last.min.y() == 0);
+    CHECK(last.max.x() == 70 * mm);
+    CHECK(last.max.y() == 10 * mm);
+
+    const double square_millimeters = double(mm) * double(mm);
+    CHECK_THAT(merged[0].area() / square_millimeters, Catch::Matchers::WithinAbs(100., 0.01));
+    CHECK_THAT(merged[1].area() / square_millimeters, Catch::Matchers::WithinAbs(200., 0.01));
+    CHECK_THAT(merged[2].area() / square_millimeters, Catch::Matchers::WithinAbs(100., 0.01));
+}
+
+TEST_CASE("Region merge selects the source-bearing component among detached expansion fragments", "[Geometry][GeometryContract][RegionExpansion]")
+{
+    const coord_t mm = scale_(1.0);
+    const auto rectangle = [mm](int x0, int y0, int x1, int y1) {
+        return ExPolygon{{{x0 * mm, y0 * mm}, {x1 * mm, y0 * mm},
+                          {x1 * mm, y1 * mm}, {x0 * mm, y1 * mm}}};
+    };
+    ExPolygon attached = rectangle(40, 0, 45, 10);
+    ExPolygon detached = rectangle(15, 0, 20, 10);
+    ExPolygons source{
+        rectangle(0, 0, 10, 10), rectangle(30, 0, 40, 10), rectangle(60, 0, 70, 10)
+    };
+    std::vector<Algorithm::RegionExpansion> fragments{
+        {attached.contour, 1, 0}, {detached.contour, 1, 0}
+    };
+
+    const std::vector<ExPolygon> merged =
+        Algorithm::merge_expansions_into_expolygons(std::move(source), std::move(fragments));
+    REQUIRE(merged.size() == 3);
+    const BoundingBox first = get_extents(merged[0]);
+    CHECK(first.min.x() == 0);
+    CHECK(first.max.x() == 10 * mm);
+    const BoundingBox selected = get_extents(merged[1]);
+    // Allow 0.000025 mm for the union safety expansion and coordinate rounding.
+    CHECK_THAT(double(selected.min.x()), Catch::Matchers::WithinAbs(double(30 * mm), 25.));
+    CHECK_THAT(double(selected.max.x()), Catch::Matchers::WithinAbs(double(45 * mm), 25.));
+    const BoundingBox last = get_extents(merged[2]);
+    CHECK(last.min.x() == 60 * mm);
+    CHECK(last.max.x() == 70 * mm);
+
+    const double square_millimeters = double(mm) * double(mm);
+    CHECK_THAT(merged[0].area() / square_millimeters, Catch::Matchers::WithinAbs(100., 0.01));
+    CHECK_THAT(merged[1].area() / square_millimeters, Catch::Matchers::WithinAbs(150., 0.01));
+    CHECK_THAT(merged[2].area() / square_millimeters, Catch::Matchers::WithinAbs(100., 0.01));
+}
+
