@@ -1,4 +1,5 @@
 #include <catch2/catch_all.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Config.hpp"
 #include <string>
 #include <vector>
@@ -788,6 +789,25 @@ TEST_CASE("get_index_for_extruder scales the variant column by the requested str
     REQUIRE(col1_stride2 == 2);
 }
 
+TEST_CASE("Incomplete extruder ID maps resolve variant slots with the configured stride", "[Config][PrintConfigVariants]")
+{
+    DynamicPrintConfig config;
+    config.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {
+        "Direct Drive Standard,Direct Drive High Flow",
+        " Bowden Standard , Bowden High Flow "
+    };
+    // A transient preset may have the variant columns before its full ID map is synthesized.
+    config.option<ConfigOptionInts>("print_extruder_id", true)->values = {1};
+    config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard", "Bowden High Flow"
+    };
+
+    CHECK(config.get_index_for_extruder(2, "print_extruder_id", etBowden, nvtStandard,
+                                        "print_extruder_variant", 2) == 4);
+    CHECK(config.get_index_for_extruder(2, "print_extruder_id", etBowden, nvtHighFlow,
+                                        "print_extruder_variant", 2) == 6);
+}
+
 // A per-variant filament option read with a single value gives it to every filament variant. A project
 // exported by an older CLI holds a single value for an option no loaded preset defined, such as
 // filament_ironing_flow.
@@ -882,4 +902,83 @@ TEST_CASE("The mixed filament metadata is sized to the filament count", "[Config
     resize_mixed_filament_metadata(config, 2, 4);
     REQUIRE(config.option<ConfigOptionBools>("filament_is_mixed")->values == std::vector<unsigned char>({false, false, false, false}));
     REQUIRE(config.option<ConfigOptionStrings>("filament_mixed_components")->values == std::vector<std::string>({"", "", "", ""}));
+}
+
+TEST_CASE("Variant migration keeps percent units and the smallest matching override",
+          "[Config][VariantExpansion][ConfigGapContracts]")
+{
+    using Catch::Matchers::WithinAbs;
+    DynamicPrintConfig overrides, destination;
+    auto *source = overrides.option<ConfigOptionFloatsOrPercentsNullable>("overhang_1_4_speed", true);
+    source->values = {{70., true}, ConfigOptionFloatsOrPercentsNullable::nil_value(),
+                      {35., true}, {12., false}};
+    destination.option<ConfigOptionFloatsOrPercentsNullable>("overhang_1_4_speed", true)->values =
+        {{90., true}, {80., true}, {60., false}};
+    // Equal variants can arise on separate extruders. An absent override must not
+    // replace the destination; a newly introduced variant must remain inherited.
+    const std::vector<std::string> from{"A", "A", "A", "B", "C"};
+    const std::vector<std::string> to{"B", "A", "C", "D"};
+    REQUIRE(overrides.update_values_from_multi_to_multi_2(
+        from, to, destination, {"overhang_1_4_speed"}) == 0);
+    const auto *result = overrides.option<ConfigOptionFloatsOrPercentsNullable>("overhang_1_4_speed");
+    REQUIRE(result->values.size() == 4);
+    CHECK_THAT(result->values[0].value, WithinAbs(12., 1e-9));
+    CHECK_FALSE(result->values[0].percent);
+    CHECK_THAT(result->values[1].value, WithinAbs(35., 1e-9));
+    CHECK(result->values[1].percent);
+    CHECK_THAT(result->values[2].value, WithinAbs(60., 1e-9));
+    CHECK_FALSE(result->values[2].percent);
+    CHECK(result->is_nil(3));
+    const auto *original = destination.option<ConfigOptionFloatsOrPercentsNullable>("overhang_1_4_speed");
+    REQUIRE(original->values.size() == 3);
+    CHECK_THAT(original->values[0].value, WithinAbs(90., 1e-9));
+    CHECK(original->values[0].percent);
+}
+
+TEST_CASE("Variant migration preserves the first explicit boolean and inherited columns",
+          "[Config][VariantExpansion][ConfigGapContracts]")
+{
+    const ConfigOptionDef *definition = print_config_def.get("enable_overhang_speed");
+    REQUIRE(definition != nullptr);
+    CHECK(definition->type == coBools);
+    CHECK(definition->nullable);
+
+    DynamicPrintConfig overrides, destination;
+    overrides.option<ConfigOptionBoolsNullable>("enable_overhang_speed", true)->values =
+        {ConfigOptionBoolsNullable::nil_value(), false, true, true};
+    destination.option<ConfigOptionBoolsNullable>("enable_overhang_speed", true)->values = {false, true, true};
+    REQUIRE(overrides.update_values_from_multi_to_multi_2(
+        {"A", "A", "A", "B", "C"}, {"B", "A", "C", "D"}, destination,
+        {"enable_overhang_speed"}) == 0);
+    const auto *result = overrides.option<ConfigOptionBoolsNullable>("enable_overhang_speed");
+    REQUIRE(result->values.size() == 4);
+    CHECK(result->values[0] == true);
+    CHECK(result->values[1] == false);
+    CHECK(result->values[2] == true);
+    CHECK(result->is_nil(3));
+    const std::vector<unsigned char> expected_destination{false, true, true};
+    CHECK(destination.option<ConfigOptionBoolsNullable>("enable_overhang_speed")->values ==
+          expected_destination);
+}
+
+TEST_CASE("Extruder compatibility detects drive and flow differences beyond the first pair",
+          "[Config][ConfigGapContracts]")
+{
+    DynamicPrintConfig config;
+    CHECK_FALSE(config.is_using_different_extruders());
+    config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.4, 0.4};
+    CHECK_FALSE(config.is_using_different_extruders());
+    config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values =
+        {etDirectDrive, etDirectDrive, etDirectDrive};
+    CHECK_FALSE(config.is_using_different_extruders());
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values =
+        {nvtStandard, nvtStandard, nvtStandard};
+    CHECK_FALSE(config.is_using_different_extruders());
+    config.option<ConfigOptionEnumsGeneric>("extruder_type")->values[2] = etBowden;
+    CHECK(config.is_using_different_extruders());
+    config.option<ConfigOptionEnumsGeneric>("extruder_type")->values[2] = etDirectDrive;
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type")->values[2] = nvtHighFlow;
+    CHECK(config.is_using_different_extruders());
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type")->values[2] = nvtStandard;
+    CHECK_FALSE(config.is_using_different_extruders());
 }
