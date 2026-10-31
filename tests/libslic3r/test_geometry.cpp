@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -287,6 +288,29 @@ SCENARIO("Circle Fit, TaubinFit with Newton's method", "[Geometry]") {
             }
         }
     }
+}
+
+TEST_CASE("Circle fit APIs reject underdetermined samples and recover an exact circle", "[Geometry][CircleFit]")
+{
+    const Vec2ds underdetermined{Vec2d(9., -3.), Vec2d(4., 2.)};
+    CHECK(Geometry::circle_taubin_newton(underdetermined).invalid());
+    CHECK(Geometry::circle_ransac(underdetermined).invalid());
+
+    // Four axis points provide an exact, non-vacuous fit oracle for center and radius.
+    const Vec2ds exact_circle{Vec2d(9., -3.), Vec2d(4., 2.), Vec2d(-1., -3.), Vec2d(4., -8.)};
+    const Geometry::Circled taubin = Geometry::circle_taubin_newton(exact_circle);
+    REQUIRE(taubin.valid());
+    CHECK_THAT(taubin.center.x(), Catch::Matchers::WithinAbs(4., 1e-8));
+    CHECK_THAT(taubin.center.y(), Catch::Matchers::WithinAbs(-3., 1e-8));
+    CHECK_THAT(taubin.radius, Catch::Matchers::WithinAbs(5., 1e-8));
+
+    double ransac_error = -1.;
+    const Geometry::Circled ransac = Geometry::circle_ransac(exact_circle, 16, &ransac_error);
+    REQUIRE(ransac.valid());
+    CHECK_THAT(ransac.center.x(), Catch::Matchers::WithinAbs(4., 1e-8));
+    CHECK_THAT(ransac.center.y(), Catch::Matchers::WithinAbs(-3., 1e-8));
+    CHECK_THAT(ransac.radius, Catch::Matchers::WithinAbs(5., 1e-8));
+    CHECK_THAT(ransac_error, Catch::Matchers::WithinAbs(0., 1e-8));
 }
 
 TEST_CASE("smallest_enclosing_circle_welzl", "[Geometry]") {
@@ -1516,8 +1540,9 @@ TEST_CASE("Transformation axis setters change only their own component", "[Geome
     positive.set_scaling_factor(Y, 5.);
     check_linear_and_offset(positive.get_matrix(), quarter_turn_times(Vec3d(4., 5., 2.)), offset);
 
-    // The reflection of X survives a scale change of another axis, whichever axis the
-    // decomposition attributes it to.
+    // X is mirrored, but the decomposition carries the reflection on the smallest-scale axis
+    // (Z) and compensates with a half turn. Changing the X or Y scale leaves that entry alone,
+    // so the reflection survives; changing Z is covered by the test below.
     Geometry::Transformation mirrored = scaled_quarter_turn(Vec3d(-1., 1., 1.));
     mirrored.set_scaling_factor(Y, 5.);
     check_linear_and_offset(mirrored.get_matrix(), quarter_turn_times(Vec3d(-4., 5., 2.)), offset);
@@ -1583,6 +1608,141 @@ TEST_CASE("Transformation skew reset removes shear while keeping offset and volu
     CHECK(transform.get_offset().isApprox(offset, 1e-12));
     // The shear is upper triangular, so the volume scale is the product of the diagonal.
     CHECK_THAT(transform.get_matrix().linear().determinant(), WithinAbs(24., 1e-9));
+}
+
+TEST_CASE("Transforming a 3D line applies rotation and translation to both endpoints",
+          "[Geometry][Line]")
+{
+    Transform3d transform = Transform3d::Identity();
+    transform.linear() = Eigen::AngleAxisd(std::acos(-1.0) / 2.0, Vec3d::UnitZ()).toRotationMatrix();
+    transform.translation() = Vec3d(10.0, -3.0, 2.0);
+
+    const Linef3 input(Vec3d(1.0, 2.0, 3.0), Vec3d(4.0, 5.0, 6.0));
+    const Linef3 actual = Slic3r::transform(input, transform);
+    CHECK_THAT(actual.a.x(), Catch::Matchers::WithinAbs(8.0, 1e-12));
+    CHECK_THAT(actual.a.y(), Catch::Matchers::WithinAbs(-2.0, 1e-12));
+    CHECK_THAT(actual.a.z(), Catch::Matchers::WithinAbs(5.0, 1e-12));
+    CHECK_THAT(actual.b.x(), Catch::Matchers::WithinAbs(5.0, 1e-12));
+    CHECK_THAT(actual.b.y(), Catch::Matchers::WithinAbs(1.0, 1e-12));
+    CHECK_THAT(actual.b.z(), Catch::Matchers::WithinAbs(8.0, 1e-12));
+}
+
+TEST_CASE("Infinite and segment intersections distinguish crossing parallel and coincident lines",
+          "[Geometry][Line]")
+{
+    const Line horizontal(Point(0, 0), Point(10, 0));
+    Point intersection(17, 19);
+    const Point unchanged(17, 19);
+
+    CHECK(horizontal.intersection_infinite(Line(Point(20, -5), Point(20, 5)), &intersection));
+    CHECK(intersection == Point(20, 0)); // The crossing is outside the finite horizontal segment.
+
+    intersection = unchanged;
+    CHECK_FALSE(horizontal.intersection_infinite(Line(Point(0, 2), Point(10, 2)), &intersection));
+    CHECK(intersection == unchanged);
+    CHECK_FALSE(horizontal.intersection_infinite(Line(Point(2, 0), Point(8, 0)), &intersection));
+    CHECK(intersection == unchanged);
+    CHECK_FALSE(horizontal.intersection(Line(Point(0, 2), Point(10, 2)), &intersection));
+    // Collinear overlapping segments report no intersection. Line.hpp keeps a disabled
+    // (#if 0) alternative that would report them as intersecting; this pins the active one.
+    CHECK_FALSE(horizontal.intersection(Line(Point(2, 0), Point(8, 0)), &intersection));
+    CHECK(intersection == unchanged);
+
+    // Segment intersection requires the crossing to lie within both segments.
+    CHECK_FALSE(horizontal.intersection(Line(Point(20, -5), Point(20, 5)), &intersection)); // beyond this segment
+    CHECK_FALSE(horizontal.intersection(Line(Point(4, 1), Point(4, 5)), &intersection));    // beyond the other one
+    CHECK(intersection == unchanged);
+    REQUIRE(horizontal.intersection(Line(Point(4, -5), Point(4, 5)), &intersection));
+    CHECK(intersection == Point(4, 0));
+    intersection = unchanged;
+
+    const coord_t half_max = std::numeric_limits<coord_t>::max() / 2;
+    const Line wide_horizontal(Point(-half_max, 0), Point(half_max, 0));
+    const Line nearly_parallel(Point(-half_max, 1), Point(half_max, 2));
+    CHECK_FALSE(wide_horizontal.intersection_infinite(nearly_parallel, &intersection));
+    CHECK(intersection == unchanged);
+}
+
+TEST_CASE("Line perpendicular distance covers degenerate segments and angle predicates classify directions",
+          "[Geometry][Line]")
+{
+    const Line horizontal(Point(0, 0), Point(4, 0));
+    CHECK_THAT(horizontal.perp_distance_to(Point(2, 3)), Catch::Matchers::WithinAbs(3.0, 1e-12));
+    CHECK(horizontal.perpendicular_to(std::acos(-1.0) / 2.0));
+    CHECK_FALSE(horizontal.perpendicular_to(0.0));
+    const Line vertical(Point(1, 0), Point(1, 6));
+    CHECK(vertical.perpendicular_to(0.0));
+    CHECK_FALSE(vertical.perpendicular_to(std::acos(-1.0) / 2.0));
+
+    const Line point_segment(Point(5, 5), Point(5, 5));
+    CHECK_THAT(point_segment.perp_distance_to(Point(8, 9)), Catch::Matchers::WithinAbs(5.0, 1e-12));
+}
+
+TEST_CASE("Line clipping and 3D plane intersection return analytic endpoints",
+          "[Geometry][Line]")
+{
+    const BoundingBox bounds(Point(0, 0), Point(10, 10));
+    Line crossing(Point(-5, 5), Point(15, 5));
+    REQUIRE(crossing.clip_with_bbox(bounds));
+    CHECK(crossing.a == Point(0, 5));
+    CHECK(crossing.b == Point(10, 5));
+
+    Line outside(Point(-5, -5), Point(-1, -1));
+    const Line outside_before = outside;
+    CHECK_FALSE(outside.clip_with_bbox(bounds));
+    CHECK(outside == outside_before);
+
+    const Linef3 sloped(Vec3d(1.0, 2.0, 3.0), Vec3d(5.0, 10.0, 7.0));
+    const Vec3d hit = sloped.intersect_plane(5.0);
+    CHECK_THAT(hit.x(), Catch::Matchers::WithinAbs(3.0, 1e-12));
+    CHECK_THAT(hit.y(), Catch::Matchers::WithinAbs(6.0, 1e-12));
+    CHECK_THAT(hit.z(), Catch::Matchers::WithinAbs(5.0, 1e-12));
+}
+
+TEST_CASE("Bounding boxes rotate around an explicit center", "[Geometry][BoundingBox]")
+{
+    const BoundingBox source(Point(10, 20), Point(14, 22));
+    const BoundingBox rotated = source.rotated(PI / 2., Point(7, 17));
+
+    REQUIRE(rotated.defined);
+    CHECK(rotated.min == Point(2, 20));
+    CHECK(rotated.max == Point(4, 24));
+}
+
+TEST_CASE("3D bounding boxes merge point clouds and expose xy footprints in both units",
+          "[Geometry][BoundingBox]")
+{
+    const Pointf3s points{
+        Vec3d(4., -7., 2.),
+        Vec3d(10., 3., 15.),
+        Vec3d(-2., 8., 9.)
+    };
+    BoundingBoxf3 bounds;
+    bounds.merge(points);
+
+    REQUIRE(bounds.defined);
+    CHECK(bounds.min.isApprox(Vec3d(-2., -7., 2.), 1e-12));
+    CHECK(bounds.max.isApprox(Vec3d(10., 8., 15.), 1e-12));
+    CHECK(bounds.size().isApprox(Vec3d(12., 15., 13.), 1e-12));
+    CHECK_THAT(bounds.max_size(), Catch::Matchers::WithinAbs(15., 1e-12));
+
+    const Vec3d before_empty_merge_min = bounds.min;
+    const Vec3d before_empty_merge_max = bounds.max;
+    bounds.merge(BoundingBoxf3{});
+    CHECK(bounds.defined);
+    CHECK(bounds.min.isApprox(before_empty_merge_min, 1e-12));
+    CHECK(bounds.max.isApprox(before_empty_merge_max, 1e-12));
+
+    const Points raw_expected{
+        Point(-2, -7), Point(10, -7), Point(10, 8), Point(-2, 8)
+    };
+    CHECK(bounds.polygon(false).points == raw_expected);
+
+    const Points scaled_expected{
+        Point::new_scale(-2., -7.), Point::new_scale(10., -7.),
+        Point::new_scale(10., 8.), Point::new_scale(-2., 8.)
+    };
+    CHECK(bounds.polygon(true).points == scaled_expected);
 }
 
 TEST_CASE("Point nearest-index query accepts mutable point pointers", "[Geometry][Point]")
