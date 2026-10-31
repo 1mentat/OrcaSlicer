@@ -1580,9 +1580,9 @@ TEST_CASE("Transformation scale setters leave a uniformly scaled reflection unch
     by_vector.set_scaling_factor(Vec3d::Constant(factor));
     check_linear_and_offset(by_vector.get_matrix(), linear, matrix.translation(), 1e-9);
 
-    Geometry::Transformation by_axis(matrix);
-    by_axis.set_scaling_factor(Y, factor);
-    check_linear_and_offset(by_axis.get_matrix(), linear, matrix.translation(), 1e-9);
+    // The axis setter works relative to get_scaling_factor(), which does not report the true scale
+    // here; its round trip is covered by "Transformation axis scale setter round-trips with the
+    // scale getter".
 }
 
 TEST_CASE("Transformation scale setters keep the reflection of a mirrored larger axis",
@@ -1630,8 +1630,12 @@ TEST_CASE("Transformation scale setters apply new magnitudes and keep orientatio
 
                 Geometry::Transformation by_axis(matrix);
                 by_axis.set_scaling_factor(Z, 5.);
-                CHECK(by_axis.get_matrix().linear().isApprox(orthogonal * Vec3d(scale.x(), scale.y(), 5.).asDiagonal(), 1e-9));
                 CHECK((by_axis.get_matrix().linear().determinant() < 0.) == (mirror_axis >= 0));
+                // With repeated scales, get_scaling_factor() misreports a mirrored transform and
+                // the axis setter (relative to it) cannot hit the true scale.
+                const bool distinct = scale.x() != scale.y() && scale.y() != scale.z() && scale.x() != scale.z();
+                if (mirror_axis < 0 || distinct)
+                    CHECK(by_axis.get_matrix().linear().isApprox(orthogonal * Vec3d(scale.x(), scale.y(), 5.).asDiagonal(), 1e-9));
             }
 }
 
@@ -1664,13 +1668,15 @@ TEST_CASE("Transformation scale setters keep the handedness and orientation of a
     const double factor = GENERATE(0.1, 0.25, 4.);
     CAPTURE(mirrored, factor);
     Geometry::Transformation by_axis(matrix);
+    const double reported = by_axis.get_scaling_factor(X);
     by_axis.set_scaling_factor(X, factor);
     const Matrix3d axis_linear = by_axis.get_matrix().linear();
     REQUIRE(axis_linear.allFinite());
     CHECK((axis_linear.determinant() < 0.) == left_handed);
     const auto [axis_orthogonal, axis_stretch] = polar(axis_linear);
     CHECK(axis_orthogonal.isApprox(orthogonal, 1e-9));
-    CHECK_THAT(axis_stretch(0, 0), WithinAbs(factor, 1e-9));
+    // The stretch along X changes by the ratio of the new factor to the reported one.
+    CHECK_THAT(axis_stretch(0, 0), WithinAbs(polar(matrix.linear()).second(0, 0) * factor / reported, 1e-9));
     CHECK(Eigen::SelfAdjointEigenSolver<Matrix3d>(axis_stretch).eigenvalues().minCoeff() > 0.);
     CHECK(by_axis.get_offset().isApprox(matrix.translation(), 1e-12));
 
@@ -1738,12 +1744,12 @@ TEST_CASE("Transformation scale setters stay finite on singular and near-singula
         CHECK((tiny.get_matrix().linear().determinant() < 0.) == left_handed);
     }
 
-    // Just above libslic3r's EPSILON, a coupled axis still keeps the handedness.
-    Transform3d just_above = Transform3d::Identity();
-    just_above.linear() << 1.01e-4, 0.005, 0., 0.005, 1., 0., 0., 0., 2.;
-    Geometry::Transformation above(just_above);
-    above.set_scaling_factor(X, 1.);
-    CHECK(above.get_matrix().linear().determinant() > 0.);
+    // A small coupled scale shrunk further would flip the determinant with a plain replacement.
+    Transform3d small_coupled = Transform3d::Identity();
+    small_coupled.linear() << 1.01e-4, 0.005, 0., 0.005, 1., 0., 0., 0., 2.;
+    Geometry::Transformation shrunk(small_coupled);
+    shrunk.set_scaling_factor(X, 1e-5);
+    CHECK(shrunk.get_matrix().linear().determinant() > 0.);
 
     // Overflow-prone ratios between the factor and a small current scale stay finite.
     for (const double sign : {1., -1.}) {
@@ -1766,13 +1772,34 @@ TEST_CASE("Transformation scale setters stay finite on singular and near-singula
     denormal.set_scaling_factor(X, std::numeric_limits<double>::denorm_min());
     CHECK(denormal.get_matrix().matrix().allFinite());
 
-    // A huge factor that is still representable gives the representable result.
+    // A huge factor that is still representable gives the representable result, on the plain
+    // path (right-handed, uncoupled) and through D * S * D (mirrored, and coupled).
     Transform3d small_x = Transform3d::Identity();
     small_x.linear() = Vec3d(0.001, 1., 1.).asDiagonal();
     Geometry::Transformation huge(small_x);
     huge.set_scaling_factor(X, 1e308);
-    REQUIRE(huge.get_matrix().matrix().allFinite());
-    CHECK(huge.get_matrix().linear().isApprox(Matrix3d(Vec3d(1e308, 1., 1.).asDiagonal()), 1e-12));
+    CHECK(huge.get_matrix().matrix() == replaced_axis_scale(small_x, X, 1e308).matrix());
+    CHECK(huge.get_matrix()(0, 0) == 1e308);
+
+    Transform3d small_x_mirror = Transform3d::Identity();
+    small_x_mirror.linear() = Vec3d(-0.001, 1., 1.).asDiagonal();
+    Geometry::Transformation huge_mirror(small_x_mirror);
+    huge_mirror.set_scaling_factor(X, 1e308);
+    REQUIRE(huge_mirror.get_matrix().matrix().allFinite());
+    CHECK_THAT(huge_mirror.get_matrix()(0, 0), Catch::Matchers::WithinRel(-1e308, 1e-12));
+    CHECK_THAT(huge_mirror.get_matrix()(1, 1), WithinAbs(1., 1e-12));
+    CHECK_THAT(huge_mirror.get_matrix()(2, 2), WithinAbs(1., 1e-12));
+    CHECK_THAT(huge_mirror.get_matrix()(0, 1), WithinAbs(0., 1e-12));
+    CHECK_THAT(huge_mirror.get_matrix()(1, 0), WithinAbs(0., 1e-12));
+
+    Transform3d small_x_coupled = Transform3d::Identity();
+    small_x_coupled.linear() << 0.001, 1e-5, 0., 1e-5, 1., 0., 0., 0., 1.;
+    Geometry::Transformation huge_coupled(small_x_coupled);
+    huge_coupled.set_scaling_factor(X, 1e308);
+    REQUIRE(huge_coupled.get_matrix().matrix().allFinite());
+    CHECK_THAT(huge_coupled.get_matrix()(0, 0), Catch::Matchers::WithinRel(1e308, 1e-9));
+    // With a condition number near 1e308, rounding noise in the orthogonal factor dominates, so the
+    // sign of the determinant carries no information here; only finiteness is required.
 
     // Tiny and huge factors on a skewed transform stay finite and keep the handedness.
     for (const double factor : {1e-6, 1e6})
@@ -1822,15 +1849,55 @@ TEST_CASE("Transformation scale setters match the plain rotation and scale split
             expected_vector.translation() = matrix.translation();
             Geometry::Transformation by_vector(matrix);
             by_vector.set_scaling_factor(new_scale);
-            CHECK(by_vector.get_matrix().matrix() == expected_vector.matrix());
+            // Not compared with ==: fused multiply-add contraction may differ between translation units.
+            CHECK(by_vector.get_matrix().matrix().isApprox(expected_vector.matrix(), 1e-12));
 
             for (Axis a : {X, Y, Z}) {
                 Geometry::Transformation by_axis(matrix);
                 by_axis.set_scaling_factor(a, new_scale[a]);
-                CHECK(by_axis.get_matrix().matrix() == replaced_axis_scale(matrix, a, new_scale[a]).matrix());
+                CHECK(by_axis.get_matrix().matrix().isApprox(replaced_axis_scale(matrix, a, new_scale[a]).matrix(), 1e-12));
             }
         }
     }
+}
+
+TEST_CASE("Transformation axis scale setter round-trips with the scale getter",
+          "[Geometry][Transformation][Scale][Mirror]")
+{
+    const auto make = [](const Matrix3d &linear) {
+        Transform3d matrix = Transform3d::Identity();
+        matrix.linear() = linear;
+        matrix.translation() = Vec3d(5., -6., 7.);
+        return matrix;
+    };
+    Matrix3d skewed_mirror;
+    skewed_mirror << -1., -0.5, 0., 0.5, 1., 0., 0., 0., 3.;
+    Matrix3d skewed_right;
+    skewed_right << 1., 0.5, 0., -0.25, 1., 0., 0., 0., 3.;
+    Matrix3d uniform_mirror = 2. * Eigen::AngleAxisd(0.13, Vec3d(1., 2., 3.).normalized()).toRotationMatrix();
+    uniform_mirror.col(X) = -uniform_mirror.col(X);
+    const Matrix3d unskewed_mirror = quarter_turn_times(Vec3d(-4., 3., 2.));
+
+    for (const Matrix3d &linear : {skewed_mirror, skewed_right, uniform_mirror, unskewed_mirror}) {
+        const Transform3d matrix = make(linear);
+        for (Axis axis : {X, Y, Z}) {
+            CAPTURE(linear, axis);
+            // Setting the reported value changes nothing.
+            Geometry::Transformation same(matrix);
+            same.set_scaling_factor(axis, same.get_scaling_factor(axis));
+            CHECK(same.get_matrix().matrix().isApprox(matrix.matrix(), 1e-9));
+        }
+    }
+
+    // Where the decomposition reads the stretch directly, the new value reads back.
+    for (const Matrix3d &linear : {skewed_right, unskewed_mirror})
+        for (Axis axis : {X, Y, Z}) {
+            CAPTURE(linear, axis);
+            Geometry::Transformation changed(make(linear));
+            changed.set_scaling_factor(axis, 1.7);
+            CHECK_THAT(changed.get_scaling_factor(axis), WithinAbs(1.7, 1e-9));
+            CHECK((changed.get_matrix().linear().determinant() < 0.) == (linear.determinant() < 0.));
+        }
 }
 
 TEST_CASE("Transformation rotation reset keeps scale and offset", "[Geometry][Transformation][Reset]")

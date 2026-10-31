@@ -454,7 +454,8 @@ static std::pair<Transform3d, Transform3d> extract_rotation_scale(const Transfor
 
 // Split the linear part into an orthogonal factor and a symmetric stretch (polar decomposition).
 // A reflection (det < 0) stays in the orthogonal factor, so it is kept together with the orientation
-// whatever the singular values are. Right-handed transforms use the rotation/scale split above.
+// whatever the singular values are. Right-handed transforms use the rotation/scale split above;
+// so does a singular one (det == 0), which has no well-defined handedness to keep.
 static std::pair<Transform3d, Transform3d> extract_orthogonal_stretch(const Transform3d& trafo)
 {
     if (trafo.linear().determinant() >= 0.0)
@@ -574,24 +575,29 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
 
     // Replacing the entry is exact for a right-handed transform whose axis is not coupled to the
     // others. Otherwise scale the axis' row and column by the same factor (D * S * D): the stretch
-    // keeps its skew and stays positive definite, so the determinant keeps its sign. If that is not
-    // possible (degenerate axis, invalid factor or overflow), keep the plain replacement; handedness
-    // is then not guaranteed. An extremely small factor can still make the result numerically
-    // singular, and rounding then decides the sign of its determinant.
-    const double current = stretch(axis, axis);
+    // keeps its skew and stays positive definite, so the determinant keeps its sign. The factor is
+    // the ratio to what get_scaling_factor() reports, so setting the reported value is a no-op even
+    // where that differs from the stretch (mirrored and skewed). If D * S * D is not possible
+    // (degenerate axis, invalid factor or overflow), keep the plain replacement; handedness is then
+    // not guaranteed. An extremely small factor can still make the result numerically singular, and
+    // rounding then decides the sign of its determinant.
+    const double current  = stretch(axis, axis);
+    const double reported = get_scaling_factor()[axis];
     bool coupled = false;
     for (int i = 0; i < 3; ++i)
-        if (i != axis && std::abs(stretch(axis, i)) > 1e-9 * std::sqrt(std::abs(current * stretch(i, i))))
+        if (i != axis && std::abs(stretch(axis, i)) > 1e-9 * std::sqrt(std::abs(current)) * std::sqrt(std::abs(stretch(i, i))))
             coupled = true;
-    if ((is_left_handed() || coupled) && current > 0.0 && std::isfinite(current) && scaling_factor > 0.0 &&
-        std::isfinite(scaling_factor)) {
-        const double k = std::sqrt(scaling_factor) / std::sqrt(current);
-        Transform3d congruent = scaled;
+    if ((is_left_handed() || coupled) && current > 0.0 && std::isfinite(current) && reported > 0.0 &&
+        std::isfinite(reported) && scaling_factor > 0.0 && std::isfinite(scaling_factor)) {
+        const double k = std::sqrt(scaling_factor) / std::sqrt(reported);
+        Transform3d congruent = stretch;
         for (int i = 0; i < 3; ++i)
             if (i != axis) {
                 congruent(axis, i) *= k;
                 congruent(i, axis) *= k;
             }
+        // k * k * current, ordered to avoid overflow; exactly scaling_factor when right-handed.
+        congruent(axis, axis) = is_left_handed() ? (current / reported) * scaling_factor : scaling_factor;
         if (std::isfinite(k) && congruent.matrix().allFinite())
             scaled = congruent;
     }
