@@ -10,6 +10,7 @@
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/Zipper.hpp"
+#include "libslic3r/ObjectID.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/Preset.hpp"
@@ -1733,6 +1734,58 @@ SCENARIO("bbs_3mf_is_published detects only genuinely published 3MFs", "[3mf]") 
             }
         }
     }
+}
+
+TEST_CASE("BBS 3MF round-trips cut object identity and connector metadata", "[3mf][3MFCutMetadata]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 2.));
+    ModelVolume *connector = object->add_volume(make_cube(2., 2., 1.), ModelVolumeType::NEGATIVE_VOLUME);
+    object->add_instance();
+
+    object->cut_id.init();
+    object->cut_id.set_check_sum(0x1234);
+    object->cut_id.increase_connectors_cnt(1);
+    connector->cut_info = ModelVolume::CutInfo(CutConnectorType::Dowel, 0.125f, 0.25f, true);
+    const ObjectID expected_cut_id = object->cut_id.id();
+
+    ScopedTemporaryDir backup_dir("orca_3mf_cut_src");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = temp.string().c_str();
+    store_params.model    = &model;
+    store_params.config   = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_3mf_cut_dst");
+    REQUIRE(load_project(temp.string(), loaded_model, loaded_backup_dir));
+
+    REQUIRE(loaded_model.objects.size() == 1);
+    const ModelObject *loaded_object = loaded_model.objects.front();
+    REQUIRE(loaded_object->is_cut());
+    CHECK(loaded_object->cut_id.id() == expected_cut_id);
+    CHECK(loaded_object->cut_id.check_sum() == 0x1234);
+    CHECK(loaded_object->cut_id.connectors_cnt() == 1);
+    REQUIRE(loaded_object->volumes.size() == 2);
+    const ModelVolume *loaded_connector = nullptr;
+    for (const ModelVolume *volume : loaded_object->volumes) {
+        if (volume->is_cut_connector()) {
+            loaded_connector = volume;
+            break;
+        }
+    }
+    REQUIRE(loaded_connector != nullptr);
+    REQUIRE(loaded_connector->is_cut_connector());
+    CHECK(loaded_connector->is_negative_volume());
+    CHECK(loaded_connector->cut_info.connector_type == CutConnectorType::Dowel);
+    CHECK_THAT(loaded_connector->cut_info.radius_tolerance, Catch::Matchers::WithinAbs(0.125, 1e-6));
+    CHECK_THAT(loaded_connector->cut_info.height_tolerance, Catch::Matchers::WithinAbs(0.25, 1e-6));
+    CHECK(loaded_connector->mesh().its.vertices.size() == connector->mesh().its.vertices.size());
 }
 
 // Writes a single-entry zip whose central directory carries a zip64 record declaring an
