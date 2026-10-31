@@ -521,3 +521,50 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     CHECK_FALSE(ascii_iequals("[", "{"));
     CHECK_FALSE(ascii_iequals("@", "`"));
 }
+
+TEST_CASE("Configured resource directories resolve against the roots they were given", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    ScopeGuard restore([var = var_dir(), resources = resources_dir(), temp = temporary_dir(), local = localization_dir(),
+                        shapes = sys_shapes_dir(), gcodes = custom_gcodes_dir(), data = data_dir()] {
+        set_var_dir(var);
+        set_resources_dir(resources);
+        set_temporary_dir(temp);
+        set_local_dir(local);
+        set_sys_shapes_dir(shapes);
+        set_custom_gcodes_dir(gcodes);
+        set_data_dir(data);
+    });
+    const fs::path root = d.path();
+    set_var_dir((root / "var").string());
+    set_resources_dir((root / "res").string());
+    set_data_dir((root / "data" / "nested").string());
+    set_local_dir((root / "locale").string());
+    set_sys_shapes_dir((root / "shapes").string());
+    set_custom_gcodes_dir((root / "gcodes").string());
+    set_temporary_dir((root / "temp").string());
+
+    CHECK(var_dir() == (root / "var").string());
+    CHECK(resources_dir() == (root / "res").string());
+    CHECK(data_dir() == (root / "data" / "nested").string());
+    CHECK(localization_dir() == (root / "locale").string());
+    CHECK(sys_shapes_dir() == (root / "shapes").string());
+    CHECK(custom_gcodes_dir() == (root / "gcodes").string());
+    CHECK(temporary_dir() == (root / "temp").string());
+    // set_data_dir creates a missing data directory, including its parents.
+    CHECK(fs::is_directory(root / "data" / "nested"));
+
+    // var() resolves a missing file against the var directory and passes an existing path through.
+    CHECK(var("missing.png") == (root / "var" / "missing.png").make_preferred().string());
+    const fs::path existing = root / "existing.png";
+    touch(existing);
+    CHECK(var(existing.string()) == existing.string());
+
+    CHECK(custom_shapes_dir() == (root / "data" / "nested" / "shapes").string());
+    CHECK(handy_models_dir() == (root / "res" / "handy_models").string());
+    CHECK(is_shapes_dir((root / "shapes").string()));
+    CHECK(is_shapes_dir((root / "data" / "nested" / "shapes").string()));
+    CHECK(is_shapes_dir((root / "res" / "handy_models").string()));
+    CHECK_FALSE(is_shapes_dir((root / "unrelated").string()));
+    CHECK_FALSE(is_shapes_dir((root / "data" / "nested").string()));
+}
