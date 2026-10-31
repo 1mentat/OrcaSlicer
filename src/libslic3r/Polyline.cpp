@@ -594,7 +594,7 @@ bool remove_degenerate(Polylines &polylines)
     for (size_t i = 0; i < polylines.size(); ++ i) {
         if (polylines[i].points.size() >= 2) {
             if (j < i) 
-                std::swap(polylines[i].points, polylines[j].points);
+                std::swap(polylines[i], polylines[j]);
             ++ j;
         } else
             modified = true;
