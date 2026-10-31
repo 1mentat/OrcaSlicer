@@ -1013,6 +1013,12 @@ TEST_CASE("Linear sketch arrays translate every entity type and preserve the sou
     };
     source[1].type = SketchEntity::Type::Point;
     source[1].p0 = Vec2d(1., -2.);
+    SketchEntity circle;
+    circle.type = SketchEntity::Type::Circle;
+    circle.center = Vec2d(-4., -1.5);
+    circle.p0 = circle.center;
+    circle.radius = 1.75;
+    source.push_back(circle);
     const std::vector<SketchEntity> original = source;
     const Vec2d step(4., -2.);
 
