@@ -3,8 +3,12 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <libslic3r/Point.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
+#include <cmath>
+#include <cstddef>
+#include <string>
 #include <vector>
 
 using namespace Slic3r;
@@ -62,3 +66,156 @@ TEST_CASE("mcut difference handles source splits between cuts", "[MeshBoolean]")
         Catch::Matchers::WithinRel(2480., 1e-3)
     );
 }
+
+namespace meshboolean_contracts {
+
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
+
+namespace {
+
+TriangleMesh shifted_cube(float x, float y = 0.f, float z = 0.f, float side = 10.f)
+{
+    TriangleMesh mesh = make_cube(side, side, side);
+    mesh.translate(Vec3f(x, y, z));
+    return mesh;
+}
+
+indexed_triangle_set open_square()
+{
+    indexed_triangle_set mesh;
+    mesh.vertices = {Vec3f(0.f, 0.f, 0.f), Vec3f(10.f, 0.f, 0.f), Vec3f(10.f, 10.f, 0.f), Vec3f(0.f, 10.f, 0.f)};
+    mesh.indices = {Vec3i32(0, 1, 2), Vec3i32(0, 2, 3)};
+    return mesh;
+}
+
+float mesh_volume(const TriangleMesh &mesh)
+{
+    TriangleMesh copy = mesh;
+    return copy.volume();
+}
+
+void check_valid_indices(const indexed_triangle_set &mesh)
+{
+    REQUIRE_FALSE(mesh.vertices.empty());
+    REQUIRE_FALSE(mesh.indices.empty());
+    for (const Vec3i32 &face : mesh.indices) {
+        REQUIRE(face[0] >= 0);
+        REQUIRE(face[1] >= 0);
+        REQUIRE(face[2] >= 0);
+        REQUIRE(static_cast<size_t>(face[0]) < mesh.vertices.size());
+        REQUIRE(static_cast<size_t>(face[1]) < mesh.vertices.size());
+        REQUIRE(static_cast<size_t>(face[2]) < mesh.vertices.size());
+    }
+}
+
+} // namespace
+
+TEST_CASE("CGAL remeshing keeps a constrained cuboid footprint and valid faces", "[MeshBoolean][MeshBooleanContracts]")
+{
+    const indexed_triangle_set source = shifted_cube(2.f, -3.f, 4.f).its;
+    const indexed_triangle_set remeshed = MeshBoolean::cgal::remesh_isotropic(source, 2.5, 1, 40., 1);
+    REQUIRE(remeshed.indices.size() > source.indices.size());
+    check_valid_indices(remeshed);
+    const TriangleMesh result(remeshed);
+    CHECK_THAT(result.bounding_box().min.x(), WithinAbs(2., 1e-4));
+    CHECK_THAT(result.bounding_box().max.x(), WithinAbs(12., 1e-4));
+    CHECK_THAT(result.bounding_box().min.y(), WithinAbs(-3., 1e-4));
+    CHECK_THAT(result.bounding_box().max.y(), WithinAbs(7., 1e-4));
+    CHECK_THAT(result.bounding_box().min.z(), WithinAbs(4., 1e-4));
+    CHECK_THAT(result.bounding_box().max.z(), WithinAbs(14., 1e-4));
+    CHECK_THAT(mesh_volume(result), WithinRel(1000.f, 5e-2f));
+}
+
+TEST_CASE("CGAL remeshing returns invalid requests unchanged", "[MeshBoolean][MeshBooleanContracts]")
+{
+    const indexed_triangle_set source = shifted_cube(0.f).its;
+    const indexed_triangle_set zero_length = MeshBoolean::cgal::remesh_isotropic(source, 0., 2);
+    const indexed_triangle_set empty = MeshBoolean::cgal::remesh_isotropic(indexed_triangle_set{}, 2.);
+    CHECK(zero_length.vertices == source.vertices);
+    CHECK(zero_length.indices == source.indices);
+    CHECK(empty.vertices.empty());
+    CHECK(empty.indices.empty());
+}
+
+TEST_CASE("CGAL LSCM parameterization maps a disk and rejects disconnected patches", "[MeshBoolean][MeshBooleanContracts]")
+{
+    const indexed_triangle_set square = open_square();
+    const auto uv = MeshBoolean::cgal::parameterize_lscm(square);
+    REQUIRE(uv.has_value());
+    REQUIRE(uv->size() == square.vertices.size());
+    for (const Vec2f &point : *uv) {
+        CHECK(std::isfinite(point.x()));
+        CHECK(std::isfinite(point.y()));
+    }
+    const Vec2f e0 = (*uv)[1] - (*uv)[0];
+    const Vec2f e1 = (*uv)[2] - (*uv)[1];
+    const Vec2f e2 = (*uv)[3] - (*uv)[2];
+    const Vec2f e3 = (*uv)[0] - (*uv)[3];
+    const Vec2f d0 = (*uv)[2] - (*uv)[0];
+    const Vec2f d1 = (*uv)[3] - (*uv)[1];
+    const float uv_area = std::abs(e0.x() * e1.y() - e0.y() * e1.x()) * 0.5f +
+                          std::abs(e2.x() * e3.y() - e2.y() * e3.x()) * 0.5f;
+    CHECK(uv_area > 1e-6f);
+    CHECK_THAT(e0.norm(), WithinRel(e1.norm(), 1e-3f));
+    CHECK_THAT(e0.dot(e1), WithinAbs(0.f, 1e-5f));
+    CHECK_THAT(e0.norm(), WithinRel(e2.norm(), 1e-3f));
+    CHECK_THAT(e1.norm(), WithinRel(e3.norm(), 1e-3f));
+    CHECK_THAT(d0.norm(), WithinRel(d1.norm(), 1e-3f));
+
+    indexed_triangle_set disconnected = square;
+    const int offset = static_cast<int>(disconnected.vertices.size());
+    disconnected.vertices.insert(disconnected.vertices.end(), square.vertices.begin(), square.vertices.end());
+    for (Vec3i32 face : square.indices) {
+        face.array() += offset;
+        disconnected.indices.push_back(face);
+    }
+    CHECK_FALSE(MeshBoolean::cgal::parameterize_lscm(disconnected).has_value());
+}
+
+TEST_CASE("CGAL segmentation splits a dumbbell into closed parts with conserved volume", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // Two spheres joined by a thin rod, so the SDF segmentation has regions of clearly different
+    // thickness to separate. Each part comes back hole-filled, so the parts' volumes add up.
+    TriangleMesh dumbbell = make_sphere(5.);
+    TriangleMesh far_ball = make_sphere(5.);
+    far_ball.translate(Vec3f(0.f, 0.f, 20.f));
+    MeshBoolean::cgal::plus(dumbbell, far_ball);
+    MeshBoolean::cgal::plus(dumbbell, make_cylinder(1., 20.));
+    const float dumbbell_volume = mesh_volume(dumbbell);
+
+    const std::vector<TriangleMesh> pieces = MeshBoolean::cgal::segment(dumbbell, 0.5, 3);
+    REQUIRE(pieces.size() >= 2);
+    float total_volume = 0.f;
+    for (const TriangleMesh &piece : pieces) {
+        check_valid_indices(piece.its);
+        const float piece_volume = mesh_volume(piece);
+        CHECK(piece_volume > 0.f);
+        CHECK(piece_volume < dumbbell_volume);
+        total_volume += piece_volume;
+    }
+    CHECK_THAT(total_volume, WithinRel(dumbbell_volume, 1e-2f));
+}
+
+TEST_CASE("CGAL repair closes a single missing cuboid face", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // Keep the cube away from the origin: a face lying in a plane through the origin adds nothing
+    // to the signed volume, so dropping it would leave the volume check blind to the hole.
+    TriangleMesh open = shifted_cube(20.f, 20.f, 20.f);
+    const size_t closed_faces = open.its.indices.size();
+    open.its.indices.pop_back();
+    REQUIRE_FALSE(MeshBoolean::cgal::does_bound_a_volume(*MeshBoolean::cgal::triangle_mesh_to_cgal(open)));
+    RepairedMeshErrors errors;
+    std::string error;
+    REQUIRE(MeshBoolean::cgal::repair(open, &errors, &error));
+    CHECK(error.empty());
+    CHECK(open.its.indices.size() == closed_faces);
+    CHECK_THAT(mesh_volume(open), WithinRel(1000.f, 1e-3f));
+    CHECK_FALSE(MeshBoolean::cgal::does_self_intersect(open));
+    const auto repaired_cgal = MeshBoolean::cgal::triangle_mesh_to_cgal(open);
+    REQUIRE(repaired_cgal != nullptr);
+    CHECK(MeshBoolean::cgal::does_bound_a_volume(*repaired_cgal));
+}
+
+} // namespace meshboolean_contracts
