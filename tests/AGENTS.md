@@ -34,6 +34,11 @@ command's output afterward, so its raw outcome survives an assessment error.
 Validate imported helper exports and reused receipt schemas before starting
 expensive commands. Preserve each successful command's output identities with its
 receipt so a later assessment can reuse those outputs.
+Set each command's working directory explicitly and use absolute helper paths.
+Use `git -C <source-root>` for private validation snapshots. Preserve leading
+columns when reading porcelain status; `.strip()` changes their meaning.
+For changed-line analysis, require evidence that the intended file was checked;
+an exit-zero run that skipped the file does not establish a tidy pass.
 Require the native control's exit status and exact JUnit inventory to pass before
 compiling or running a mutant. Preserve raw assertion text when classifying a
 mutation; reporter punctuation alone must not turn an ordinary assertion failure
