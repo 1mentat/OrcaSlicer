@@ -246,8 +246,7 @@ TEST_CASE("BuildVolume per-extruder rectangle limits are returned as a complete 
     CHECK_FALSE(inside_bbox[2]);
 }
 
-// Known bug: the per-extruder mask is resize()d, so a false entry from a previous call survives into the next; fixed by the follow-up fix PR.
-TEST_CASE("BuildVolume per-extruder limits replace every entry of a reused mask", "[BuildVolume][BuildVolumeVariance][!shouldfail]")
+TEST_CASE("BuildVolume per-extruder limits replace every entry of a reused mask", "[BuildVolume][BuildVolumeVariance]")
 {
     const auto bed = rectangle(0., 0., 20., 20.);
     const BuildVolume volume(bed, 100., {bed, rectangle(0., 0., 10., 20.), rectangle(10., 0., 20., 20.)}, {100., 100., 100.});
