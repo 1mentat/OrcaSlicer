@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
+#include <nlohmann/json.hpp>
 #include <cstddef>
 #include <fstream>
 
@@ -30,6 +32,7 @@
 #include <string>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/Semver.hpp"
 #include <utility>
 #include "libslic3r/Config.hpp"
 #include <map>
@@ -88,11 +91,12 @@ void write_preset_with_inherits(const DynamicPrintConfig &default_config, const 
 
 // A user preset file stating nothing but the preset it inherits, so every value it
 // ends up with came from resolving that parent.
-void write_minimal_child(const fs::path &file, const std::string &name, const std::string &inherits)
+void write_minimal_child(const fs::path &file, const std::string &name, const std::string &inherits,
+                         const std::string &type = "process")
 {
     fs::create_directories(file.parent_path());
     std::ofstream(file.string())
-        << R"({"type":"process","name":")" << name << R"(","from":"User","version":"1.0.0","inherits":")"
+        << R"({"type":")" << type << R"(","name":")" << name << R"(","from":"User","version":"1.0.0","inherits":")"
         << inherits << R"("})";
 }
 
@@ -1648,6 +1652,73 @@ TEST_CASE("Switching a printer reselects a compatible process and every filament
     CHECK(stored(bundle.filaments, "Filament B").is_compatible);
 }
 
+
+TEST_CASE("A user filament preset round-trips inherited multi-variant vectors", "[Preset][Bundle][RoundTrip]")
+{
+    using NullableFloats = ConfigOptionFloatsNullable;
+    ScopedTemporaryDir temp_dir;
+    auto load_filaments = [&temp_dir](PresetCollection &collection) {
+        PresetsConfigSubstitutions substitutions;
+        collection.load_presets(temp_dir.path().string(), PRESET_FILAMENT_NAME, substitutions,
+                                ForwardCompatibilitySubstitutionRule::Disable);
+    };
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    DynamicPrintConfig parent_config = collection.default_preset().config;
+    parent_config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"
+    };
+    // A nullable per-variant override (in filament_options_with_variant) and a plain vector.
+    parent_config.option<NullableFloats>("filament_retraction_length", true)->values = { 1.0, 2.0 };
+    parent_config.option<ConfigOptionStrings>("filament_type", true)->values = { "PLA" };
+    const fs::path filament_dir = temp_dir.path() / PRESET_FILAMENT_NAME;
+    const fs::path child_file = filament_dir / "Multi Child.json";
+    write_preset_with_inherits(parent_config, filament_dir / "base" / "Multi Base.json", "Multi Base", "");
+    write_minimal_child(child_file, "Multi Child", "Multi Base", "filament");
+
+    load_filaments(collection);
+    Preset *child = collection.find_preset("Multi Child");
+    const Preset *parent = collection.find_preset("Multi Base");
+    REQUIRE(child != nullptr);
+    REQUIRE(parent != nullptr);
+    CHECK(child->inherits() == "Multi Base");
+    CHECK(child->config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{ "Direct Drive Standard", "Direct Drive High Flow" });
+    check_double_vector(child->config.option<NullableFloats>("filament_retraction_length")->values, { 1.0, 2.0 });
+    CHECK(child->config.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{ "PLA" });
+
+    // Edit only the High Flow variant of the per-variant override, plus the plain vector, and
+    // save against the parent. The per-variant key is stored with the unchanged variant as nil.
+    child->config.option<NullableFloats>("filament_retraction_length")->values[1] = 3.0;
+    child->config.option<ConfigOptionStrings>("filament_type")->values = { "PETG" };
+    DynamicPrintConfig parent_values = parent->config;
+    REQUIRE(child->save(&parent_values));
+    nlohmann::json saved;
+    {
+        boost::nowide::ifstream in(child_file.string(), std::ios::binary);
+        REQUIRE(in.good());
+        in >> saved;
+    }
+    REQUIRE(saved.contains("filament_retraction_length"));
+    const nlohmann::json &saved_retraction = saved["filament_retraction_length"];
+    REQUIRE(saved_retraction.size() == 2);
+    CHECK(saved_retraction[0] == "nil");
+    CHECK_THAT(std::stod(saved_retraction[1].get<std::string>()), Catch::Matchers::WithinAbs(3.0, 1e-9));
+    CHECK(saved["filament_type"] == nlohmann::json::array({ "PETG" }));
+    CHECK_FALSE(saved.contains("filament_diameter"));
+
+    PresetCollection reloaded(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                              static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    load_filaments(reloaded);
+    const Preset *reloaded_child = reloaded.find_preset("Multi Child");
+    REQUIRE(reloaded_child != nullptr);
+    CHECK(reloaded_child->inherits() == "Multi Base");
+    CHECK(reloaded_child->config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{ "Direct Drive Standard", "Direct Drive High Flow" });
+    // The nil Standard slot is filled from the parent again; the edited High Flow slot stays.
+    check_double_vector(reloaded_child->config.option<NullableFloats>("filament_retraction_length")->values, { 1.0, 3.0 });
+    CHECK(reloaded_child->config.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{ "PETG" });
+}
 
 namespace {
 
@@ -6567,6 +6638,222 @@ TEST_CASE("A user filament whose derived compatible printer cannot be written ba
 }
 #endif
 
+namespace {
+
+void write_process(const fs::path &file, const std::string &name, const std::string &inherits,
+                   const std::string &layer_height = {}, const std::string &density = {})
+{
+    fs::create_directories(file.parent_path());
+    boost::nowide::ofstream out(file.string());
+    out << R"({"type":"process","name":")" << name
+        << R"(","from":"User","version":"1.0.0")";
+    if (!inherits.empty())
+        out << R"(,"inherits":")" << inherits << R"(")";
+    if (!layer_height.empty())
+        out << R"(,"layer_height":")" << layer_height << R"(")";
+    if (!density.empty())
+        out << R"(,"sparse_infill_density":")" << density << R"(")";
+    out << "}\n";
+}
+
+std::map<std::string, std::string> cloud_values(const std::string &type, const std::string &setting_id,
+                                                const std::string &user_id, const std::string &inherits = {})
+{
+    std::map<std::string, std::string> values{
+        { BBL_JSON_KEY_TYPE, type },
+        { BBL_JSON_KEY_VERSION, "1.0.0" },
+        { BBL_JSON_KEY_SETTING_ID, setting_id },
+        { BBL_JSON_KEY_USER_ID, user_id },
+        { ORCA_JSON_KEY_UPDATE_TIME, "10" },
+    };
+    if (!inherits.empty())
+        values.emplace(BBL_JSON_KEY_INHERITS, inherits);
+    return values;
+}
+
+} // namespace
+
+TEST_CASE("File preset loading resolves a three-level base chain", "[PresetFiles]")
+{
+    ScopedTemporaryDir temp_dir;
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    const fs::path print_dir = temp_dir.path() / PRESET_PRINT_NAME;
+
+    // Each parent sits one base/ level deeper than its child, because load_presets() loads
+    // <dir>/base before <dir> and resolves files of one directory concurrently. Base sets both
+    // values (neither is the default); Middle overrides the density, Leaf overrides it again,
+    // so Leaf's layer height can only come from Base through Middle.
+    write_process(print_dir / "base" / "base" / "Base.json", "Base", {}, "0.24", "25%");
+    write_process(print_dir / "base" / "Middle.json", "Middle", "Base", {}, "30%");
+    write_process(print_dir / "Leaf.json", "Leaf", "Middle", {}, "42%");
+
+    PresetsConfigSubstitutions substitutions;
+    collection.load_presets(temp_dir.path().string(), PRESET_PRINT_NAME, substitutions,
+                            ForwardCompatibilitySubstitutionRule::Disable);
+
+    const Preset *base = collection.find_preset("Base");
+    const Preset *middle = collection.find_preset("Middle");
+    const Preset *leaf = collection.find_preset("Leaf");
+    REQUIRE(base != nullptr);
+    REQUIRE(middle != nullptr);
+    REQUIRE(leaf != nullptr);
+    CHECK(collection.error_count() == 0);
+    CHECK(base->inherits().empty());
+    CHECK_THAT(base->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK_THAT(base->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(25.0, 1e-9));
+    CHECK(middle->inherits() == "Base");
+    CHECK(leaf->inherits() == "Middle");
+    CHECK_THAT(middle->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK_THAT(middle->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(30.0, 1e-9));
+    CHECK_THAT(leaf->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK_THAT(leaf->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(42.0, 1e-9));
+}
+
+TEST_CASE("Cloud preset loading performs two-pass inheritance and forward substitution", "[PresetFiles]")
+{
+    PresetBundle bundle;
+    AppConfig app_config;
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+
+    // Lexicographic order puts the child first. PresetBundle's two-pass load
+    // must still install the root before resolving the child.
+    auto root = cloud_values(PRESET_IOT_PRINT_TYPE, "cloud-root-id", "account-1");
+    root.emplace("layer_height", "0.24");
+    root.emplace("wall_generator", "future-generator");
+    cloud.emplace("A Child", cloud_values(PRESET_IOT_PRINT_TYPE, "cloud-child-id", "account-1", "Z Root"));
+    cloud.emplace("Z Root", std::move(root));
+    cloud.emplace("Ignored Type", cloud_values("future-profile", "ignored-id", "account-1"));
+    cloud.emplace("Missing Type", std::map<std::string, std::string>{{ BBL_JSON_KEY_VERSION, "1.0.0" }});
+
+    const PresetsConfigSubstitutions substitutions = bundle.load_user_presets(
+        app_config, cloud, ForwardCompatibilitySubstitutionRule::Enable);
+
+    const Preset *root_preset = bundle.prints.find_preset("Z Root");
+    const Preset *child_preset = bundle.prints.find_preset("A Child");
+    REQUIRE(root_preset != nullptr);
+    REQUIRE(child_preset != nullptr);
+    // Smoke check only: an entry with an unknown or missing type has no collection to load
+    // into, so nothing could install it even without the type checks.
+    CHECK(bundle.prints.find_preset("Ignored Type") == nullptr);
+    CHECK(bundle.prints.find_preset("Missing Type") == nullptr);
+    CHECK(root_preset->inherits().empty());
+    CHECK(root_preset->base_id.empty());
+    CHECK(root_preset->setting_id == "cloud-root-id");
+    CHECK(root_preset->user_id == "account-1");
+    CHECK(root_preset->updated_time == 10);
+    CHECK(root_preset->version == *Semver::parse("1.0.0"));
+    CHECK_THAT(root_preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK(child_preset->setting_id == "cloud-child-id");
+    CHECK(child_preset->user_id == "account-1");
+    CHECK(child_preset->updated_time == 10);
+    CHECK(child_preset->version == *Semver::parse("1.0.0"));
+    CHECK(child_preset->inherits() == "Z Root");
+    CHECK(child_preset->base_id == root_preset->setting_id);
+    CHECK_THAT(child_preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    REQUIRE(substitutions.size() == 1);
+    CHECK(substitutions.front().preset_name == "Z Root");
+    CHECK(substitutions.front().substitutions.size() == 1);
+    CHECK(substitutions.front().substitutions.front().old_value == "future-generator");
+}
+
+TEST_CASE("Cloud filament loading inherits null filament identity and rejects unresolvable or malformed entries", "[PresetFiles]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    PresetsConfigSubstitutions substitutions;
+    auto load = [&](const std::string &name, std::map<std::string, std::string> values) {
+        return collection.load_user_preset(name, std::move(values), substitutions,
+                                           ForwardCompatibilitySubstitutionRule::EnableSilent);
+    };
+
+    auto parent_values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "filament-setting-id", "account-1");
+    parent_values.emplace(BBL_JSON_KEY_FILAMENT_ID, "filament-family-id");
+    parent_values.emplace("filament_diameter", "1.75,2.85");
+    REQUIRE(load("Cloud Filament", std::move(parent_values)));
+    const size_t size_with_parent = collection.size();
+
+    SECTION("a child with a null filament id takes the parent's identity") {
+        auto child_values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "filament-child-id", "account-1", "Cloud Filament");
+        child_values.emplace(BBL_JSON_KEY_FILAMENT_ID, "null");
+        REQUIRE(load("Cloud Filament Child", std::move(child_values)));
+        const Preset *child = collection.find_preset("Cloud Filament Child");
+        REQUIRE(child != nullptr);
+        CHECK(child->filament_id == "filament-family-id");
+        CHECK(child->base_id == "filament-setting-id");
+        REQUIRE(child->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
+        check_double_vector(child->config.option<ConfigOptionFloats>("filament_diameter")->values, { 1.75, 2.85 });
+        CHECK(child->setting_id == "filament-child-id");
+        CHECK(child->user_id == "account-1");
+        CHECK(child->updated_time == 10);
+        CHECK(child->version == *Semver::parse("1.0.0"));
+        const Preset *parent = collection.find_preset("Cloud Filament");
+        REQUIRE(parent != nullptr);
+        CHECK(parent->filament_id == "filament-family-id");
+        CHECK(parent->setting_id == "filament-setting-id");
+        CHECK(parent->base_id.empty());
+    }
+
+    SECTION("a child whose parent cannot be resolved is rejected") {
+        CHECK_FALSE(load("Orphan Filament",
+                         cloud_values(PRESET_IOT_FILAMENT_TYPE, "missing-parent-id", "account-1", "No Such Filament")));
+        CHECK(collection.find_preset("Orphan Filament") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
+
+    SECTION("an unparsable version is rejected") {
+        auto values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "bad-version-id", "account-1");
+        values[BBL_JSON_KEY_VERSION] = "not-a-version";
+        CHECK_FALSE(load("Bad Version", std::move(values)));
+        CHECK(collection.find_preset("Bad Version") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
+
+    SECTION("a missing version is rejected") {
+        // Rejected by the missing-version check, or, without it, by the unparsable-version
+        // check on the empty string it would read; this pins the outcome only.
+        auto values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "no-version-id", "account-1");
+        values.erase(BBL_JSON_KEY_VERSION);
+        CHECK_FALSE(load("No Version", std::move(values)));
+        CHECK(collection.find_preset("No Version") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
+
+    SECTION("a missing setting id is rejected") {
+        auto values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "unused", "account-1");
+        values.erase(BBL_JSON_KEY_SETTING_ID);
+        CHECK_FALSE(load("No Setting", std::move(values)));
+        CHECK(collection.find_preset("No Setting") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
+
+    SECTION("a missing user id is rejected") {
+        auto values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "no-user-id", "unused");
+        values.erase(BBL_JSON_KEY_USER_ID);
+        CHECK_FALSE(load("No User", std::move(values)));
+        CHECK(collection.find_preset("No User") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
+}
+
+// The filament combo box shows a dirty preset as Preset::label(), which carries the
+// "modified" marker; storing that label as the slot's preset name would point at no preset.
+TEST_CASE("filament selection canonicalizes the actual dirty preset label", "[Preset][Bundle][PresetSelection]")
+{
+    PresetBundle bundle;
+    bundle.set_num_filaments(1, "#FF0000");
+    Preset dirty(Preset::TYPE_FILAMENT, "Selected PLA");
+    dirty.set_dirty();
+    const std::string displayed = dirty.label(true);
+    REQUIRE(displayed != "Selected PLA");
+    bundle.set_filament_preset(0, displayed);
+    CHECK(bundle.filament_presets.front() == "Selected PLA");
+
+    const std::vector<std::string> before = bundle.filament_presets;
+    bundle.set_filament_preset(bundle.filament_presets.size(), "ignored");
+    CHECK(bundle.filament_presets == before);
+}
+
 TEST_CASE("Preset bundle filament sizing keeps maps and mixed metadata aligned", "[Preset][Bundle][Filament]")
 {
     PresetBundle bundle;
@@ -6622,4 +6909,194 @@ TEST_CASE("Preset bundle physical filament indices exclude only live mixed slots
         CHECK(bundle.num_mixed_filaments() == 1);
         CHECK(bundle.num_physical_filaments() == 3);
     }
+}
+
+TEST_CASE("Preset bundle full config applies current project values over the edited print preset", "[Preset][Bundle][FullConfig]")
+{
+    PresetBundle bundle;
+    bundle.prints.get_edited_preset().config.option<ConfigOptionFloat>("layer_height", true)->value = 0.3;
+    bundle.project_config = DynamicPrintConfig::full_print_config();
+    bundle.project_config.option<ConfigOptionFloat>("layer_height")->value = 0.22;
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#00FF00"};
+    bundle.filament_presets = {bundle.filaments.default_preset().name};
+
+    const DynamicPrintConfig config = bundle.full_config(false);
+    // The project is applied after the edited print preset, so its value wins.
+    CHECK_THAT(config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.22, 1e-6));
+    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#00FF00"});
+    CHECK(config.opt_enum<PrinterTechnology>("printer_technology") == ptFFF);
+    CHECK_FALSE(config.has("inherits"));
+}
+
+namespace {
+
+Preset &add_bundle_filament(PresetBundle &bundle, const std::string &name, const std::string &id, const std::string &type,
+                            bool system = false)
+{
+    DynamicPrintConfig config = bundle.filaments.default_preset().config;
+    config.option<ConfigOptionStrings>("filament_type", true)->values = {type};
+    Preset &preset       = bundle.filaments.load_preset({}, name, std::move(config), false);
+    preset.is_system     = system;
+    preset.is_visible    = true;
+    preset.is_compatible = true;
+    preset.filament_id   = id;
+    return preset;
+}
+
+// Two logical extruders, each a hybrid with one Standard and one High Flow physical nozzle.
+void set_hybrid_two_extruder_printer(PresetBundle &bundle)
+{
+    DynamicPrintConfig &printer = bundle.printers.get_edited_preset().config;
+    printer.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.4};
+    printer.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values = {int(etDirectDrive), int(etDirectDrive)};
+    printer.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {int(nvtHybrid), int(nvtHybrid)};
+    printer.option<ConfigOptionStrings>("extruder_nozzle_stats", true)->values = {
+        "Standard#1|High Flow#1", "Standard#1|High Flow#1"};
+    printer.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {
+        "Direct Drive Standard,Direct Drive High Flow", "Direct Drive Standard,Direct Drive High Flow"};
+    printer.option<ConfigOptionInts>("printer_extruder_id", true)->values = {1, 1, 2, 2};
+    printer.option<ConfigOptionStrings>("printer_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow", "Direct Drive Standard", "Direct Drive High Flow"};
+
+    // full_fff_config applies the project after the printer preset, so the project-side nozzle
+    // type has to be hybrid too or it collapses both extruders back to Standard.
+    bundle.project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {
+        int(nvtHybrid), int(nvtHybrid)};
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#AA0000", "#00AA00"};
+    bundle.project_config.option<ConfigOptionInts>("filament_map", true)->values = {1, 2};
+}
+
+void set_variant_aware_filament(Preset &preset, double standard_speed, double high_flow_speed)
+{
+    preset.config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+        "Direct Drive Standard", "Direct Drive High Flow"};
+    preset.config.option<ConfigOptionFloats>("filament_max_volumetric_speed", true)->values = {
+        standard_speed, high_flow_speed};
+}
+
+} // namespace
+
+TEST_CASE("full SLA config merges selected profiles and marks SLA technology", "[Preset][Bundle][FullConfig]")
+{
+    PresetBundle bundle;
+    DynamicPrintConfig printer_config = bundle.printers.default_preset().config;
+    printer_config.option<ConfigOptionEnumGeneric>("printer_technology", true)->value = ptSLA;
+    printer_config.option<ConfigOptionString>("printer_notes", true)->value = "resin printer";
+    bundle.printers.load_preset({}, "SLA Printer", printer_config, true);
+    DynamicPrintConfig sla_print_config = bundle.sla_prints.default_preset().config;
+    sla_print_config.option<ConfigOptionFloat>("layer_height", true)->value = 0.035;
+    sla_print_config.option<ConfigOptionString>("compatible_printers_condition", true)->value = "printer_technology == 'SLA'";
+    bundle.sla_prints.load_preset({}, "SLA Print", sla_print_config, true);
+    DynamicPrintConfig sla_material_config = bundle.sla_materials.default_preset().config;
+    sla_material_config.option<ConfigOptionFloat>("exposure_time", true)->value = 7.5;
+    bundle.sla_materials.load_preset({}, "SLA Material", sla_material_config, true);
+
+    const DynamicPrintConfig config = bundle.full_config();
+    CHECK(config.opt_enum<PrinterTechnology>("printer_technology") == ptSLA);
+    CHECK(config.opt_string("printer_notes") == "resin printer");
+    CHECK_THAT(config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.035, 1e-9));
+    CHECK_THAT(config.opt_float("exposure_time"), Catch::Matchers::WithinAbs(7.5, 1e-9));
+    CHECK(config.opt_string("printer_settings_id") == "SLA Printer");
+    CHECK(config.opt_string("sla_print_settings_id") == "SLA Print");
+    CHECK(config.opt_string("sla_material_settings_id") == "SLA Material");
+    // The per-preset bookkeeping is collected into the group keys, not left as plain keys.
+    CHECK(config.option<ConfigOptionStrings>("compatible_machine_expression_group")->values ==
+          std::vector<std::string>{"printer_technology == 'SLA'", ""});
+    CHECK_FALSE(config.has("compatible_printers"));
+    CHECK_FALSE(config.has("compatible_printers_condition"));
+    CHECK_FALSE(config.has("inherits"));
+}
+
+TEST_CASE("Full FFF configuration applies explicit filament volume maps", "[Preset][Bundle][FullConfig]")
+{
+    const auto [first_volume, second_volume, first_speed, second_speed] = GENERATE(
+        table<NozzleVolumeType, NozzleVolumeType, double, double>({
+            {nvtStandard, nvtStandard, 12., 13.},
+            {nvtStandard, nvtHighFlow, 12., 23.},
+            {nvtHighFlow, nvtStandard, 22., 13.},
+            {nvtHighFlow, nvtHighFlow, 22., 23.},
+        }));
+    CAPTURE(first_volume, second_volume);
+
+    PresetBundle bundle;
+    set_hybrid_two_extruder_printer(bundle);
+    add_bundle_filament(bundle, "PLA", "PLA-ID", "PLA");
+    add_bundle_filament(bundle, "PETG", "PETG-ID", "PETG");
+    Preset *pla  = bundle.filaments.find_preset("PLA", false, true);
+    Preset *petg = bundle.filaments.find_preset("PETG", false, true);
+    REQUIRE(pla != nullptr);
+    REQUIRE(petg != nullptr);
+    set_variant_aware_filament(*pla, 12., 22.);
+    set_variant_aware_filament(*petg, 13., 23.);
+    REQUIRE(bundle.filaments.select_preset_by_name("PLA", true));
+    bundle.filament_presets = {"PLA", "PETG"};
+    // A project map of the right size that matches no row, so the explicit argument has to
+    // override it. Both extruders are identical hybrids, so the volume map alone picks each
+    // filament's variant; the filament map only routes the filaments.
+    bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values = {int(nvtHybrid), int(nvtHybrid)};
+
+    const DynamicPrintConfig out = bundle.full_config(true, std::vector<int>{1, 2},
+                                                      std::vector<int>{int(first_volume), int(second_volume)});
+    CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{int(first_volume), int(second_volume)});
+    CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{first_volume == nvtStandard ? "Direct Drive Standard" : "Direct Drive High Flow",
+                                   second_volume == nvtStandard ? "Direct Drive Standard" : "Direct Drive High Flow"});
+    check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {first_speed, second_speed});
+    CHECK(out.option<ConfigOptionStrings>("filament_settings_id")->values == std::vector<std::string>{"PLA", "PETG"});
+    CHECK(out.option<ConfigOptionStrings>("filament_ids")->values == std::vector<std::string>{"PLA-ID", "PETG-ID"});
+    CHECK(out.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{"PLA", "PETG"});
+}
+
+TEST_CASE("Full FFF configuration falls back to the project filament volume map", "[Preset][Bundle][FullConfig]")
+{
+    PresetBundle bundle;
+    set_hybrid_two_extruder_printer(bundle);
+    add_bundle_filament(bundle, "PLA", "PLA-ID", "PLA");
+    add_bundle_filament(bundle, "PETG", "PETG-ID", "PETG");
+    set_variant_aware_filament(*bundle.filaments.find_preset("PLA", false, true), 12., 22.);
+    set_variant_aware_filament(*bundle.filaments.find_preset("PETG", false, true), 13., 23.);
+    REQUIRE(bundle.filaments.select_preset_by_name("PLA", true));
+    bundle.filament_presets = {"PLA", "PETG"};
+    bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values = {int(nvtHighFlow), int(nvtStandard)};
+
+    // No volume map argument: the project's map, one entry per filament, is used.
+    const DynamicPrintConfig out = bundle.full_config(true, std::vector<int>{1, 2});
+    CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{int(nvtHighFlow), int(nvtStandard)});
+    CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{"Direct Drive High Flow", "Direct Drive Standard"});
+    check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {22., 13.});
+}
+
+TEST_CASE("Full FFF configuration records selected system filament changes", "[Preset][Bundle][FullConfig]")
+{
+    PresetBundle bundle;
+    add_bundle_filament(bundle, "System PLA", "SYSTEM-PLA", "PLA", true);
+    Preset &user = add_bundle_filament(bundle, "User PETG", "USER-PETG", "PETG");
+    user.config.option<ConfigOptionFloats>("filament_max_volumetric_speed", true)->values = {9.0};
+    bundle.filament_presets = {"System PLA", "User PETG"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#AA0000", "#00AA00"};
+    REQUIRE(bundle.filaments.select_preset_by_name("System PLA", true));
+    REQUIRE(bundle.filaments.get_edited_preset().is_system);
+
+    // The selected system preset is copied into the edited preset. Change that copy after
+    // selection, so full_fff_config has to compare it with the stored system profile.
+    Preset &edited = bundle.filaments.get_edited_preset();
+    edited.config.option<ConfigOptionFloats>("filament_max_volumetric_speed", true)->values = {31.5};
+    edited.inherits() = "ignored-parent-metadata";
+
+    const DynamicPrintConfig out = bundle.full_config(false);
+    CHECK(out.option<ConfigOptionStrings>("filament_settings_id")->values == std::vector<std::string>{"System PLA", "User PETG"});
+    CHECK(out.option<ConfigOptionStrings>("filament_ids")->values == std::vector<std::string>{"SYSTEM-PLA", "USER-PETG"});
+    CHECK(out.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{"PLA", "PETG"});
+    check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {31.5, 9.0});
+    // One entry per preset: print, each filament, printer. Only the edited system filament differs.
+    const auto *different = out.option<ConfigOptionStrings>("different_settings_to_system");
+    REQUIRE(different != nullptr);
+    REQUIRE(different->values.size() == 4);
+    CHECK(different->values[0].empty());
+    CHECK(different->values[2].empty());
+    CHECK(different->values[3].empty());
+    std::vector<std::string> changed_keys;
+    REQUIRE(unescape_strings_cstyle(different->values[1], changed_keys));
+    CHECK(changed_keys == std::vector<std::string>{"filament_max_volumetric_speed"});
 }
