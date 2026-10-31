@@ -288,3 +288,24 @@ TEST_CASE("Truncated archive path fields retain the stored ASCII filename", "[Mi
         extra[2] = 4;
     CHECK(decoded_entry_from_extra(stored_name, extra, false) == stored_name);
 }
+
+TEST_CASE("Recognized archive error codes retain diagnostics instead of an unknown-error fallback", "[MinizExtension][ArchiveDiagnostics]")
+{
+    const mz_zip_error code = GENERATE(
+        MZ_ZIP_NO_ERROR, MZ_ZIP_UNDEFINED_ERROR, MZ_ZIP_TOO_MANY_FILES, MZ_ZIP_FILE_TOO_LARGE,
+        MZ_ZIP_UNSUPPORTED_METHOD, MZ_ZIP_UNSUPPORTED_ENCRYPTION, MZ_ZIP_UNSUPPORTED_FEATURE,
+        MZ_ZIP_FAILED_FINDING_CENTRAL_DIR, MZ_ZIP_NOT_AN_ARCHIVE, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED,
+        MZ_ZIP_UNSUPPORTED_MULTIDISK, MZ_ZIP_DECOMPRESSION_FAILED, MZ_ZIP_COMPRESSION_FAILED,
+        MZ_ZIP_UNEXPECTED_DECOMPRESSED_SIZE, MZ_ZIP_CRC_CHECK_FAILED, MZ_ZIP_UNSUPPORTED_CDIR_SIZE,
+        MZ_ZIP_ALLOC_FAILED, MZ_ZIP_FILE_OPEN_FAILED, MZ_ZIP_FILE_CREATE_FAILED, MZ_ZIP_FILE_WRITE_FAILED,
+        MZ_ZIP_FILE_READ_FAILED, MZ_ZIP_FILE_CLOSE_FAILED, MZ_ZIP_FILE_SEEK_FAILED, MZ_ZIP_FILE_STAT_FAILED,
+        MZ_ZIP_INVALID_PARAMETER, MZ_ZIP_INVALID_FILENAME, MZ_ZIP_BUF_TOO_SMALL, MZ_ZIP_INTERNAL_ERROR,
+        MZ_ZIP_FILE_NOT_FOUND, MZ_ZIP_ARCHIVE_TOO_LARGE, MZ_ZIP_VALIDATION_FAILED, MZ_ZIP_WRITE_CALLBACK_FAILED);
+    CAPTURE(code);
+    const std::string diagnostic = MZ_Archive::get_errorstr(code);
+    REQUIRE_FALSE(diagnostic.empty());
+    CHECK(diagnostic != "unknown error");
+    MZ_Archive archive;
+    archive.arch.m_last_error = code;
+    CHECK(archive.get_errorstr() == diagnostic + "!");
+}
