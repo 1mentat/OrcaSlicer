@@ -5,6 +5,7 @@
 #include "libslic3r/libslic3r.h"
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <Eigen/Geometry>
 #include <admesh/stl.h>
 #include <array>
 #include <cmath>
@@ -14,7 +15,6 @@
 #include <utility>
 
 #include "catch2/catch_test_macros.hpp"
-#include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/Emboss.hpp"
 
 using namespace Slic3r;
@@ -86,9 +86,18 @@ void same_vector(const Vec3d &actual, const Vec3d &expected)
         CHECK_THAT(actual[axis], Catch::Matchers::WithinAbs(expected[axis], 1e-6));
 }
 
+// A frame at (3, 4, 5) turned 90 degrees about world Y: local X is world -Z, local Y world Y, local Z world X.
+Transform3d tilted_frame()
+{
+    Transform3d transform = Transform3d::Identity();
+    transform.translate(Vec3d(3, 4, 5));
+    transform.rotate(Eigen::AngleAxisd(PI / 2, Vec3d::UnitY()));
+    return transform;
+}
+
 } // namespace
 
-TEST_CASE("Emboss polygons2model preserves hole area and closes the projected shell", "[Emboss]")
+TEST_CASE("Emboss polygons2model preserves hole area and closes the projected shell", "[Emboss][EmbossProjection]")
 {
     const ExPolygons shape{rectangle_with_hole()};
     constexpr double depth = 7.;
@@ -103,7 +112,7 @@ TEST_CASE("Emboss polygons2model preserves hole area and closes the projected sh
     CHECK(summary.side_faces == 16); // Two triangles per wall, four walls each for the contour and its hole.
 }
 
-TEST_CASE("Emboss polygons2model handles shared polygon points without duplicate vertices", "[Emboss]")
+TEST_CASE("Emboss polygons2model handles shared polygon points without duplicate vertices", "[Emboss][EmbossProjection]")
 {
     // The two components touch at one corner.  That shared point intentionally
     // selects polygons2model_duplicit without relying on triangle ordering.
@@ -121,23 +130,28 @@ TEST_CASE("Emboss polygons2model handles shared polygon points without duplicate
     CHECK(summary.side_faces == 16);
 }
 
-TEST_CASE("Emboss places text onto a surface point facing along its normal", "[Emboss]")
+TEST_CASE("Emboss places text onto a surface point facing along its normal", "[Emboss][EmbossProjection]")
 {
-    // The text's Z axis follows the surface normal and its Y axis the suggested up direction.
-    struct Case { Vec3d normal; Vec3d up; };
-    const std::array<Case, 3> cases{{{Vec3d::UnitZ(), Vec3d::UnitY()},
-                                     {-Vec3d::UnitZ(), Vec3d::UnitY()},
-                                     {Vec3d::UnitX(), Vec3d::UnitZ()}}};
+    // The text's Z axis follows the surface normal, its Y axis the suggested up direction, and its X axis
+    // completes a right-handed frame.
+    struct Case { Vec3d normal; Vec3d x; Vec3d up; };
+    // Mirrored normals (+X and -X, tilted toward +X and -X) need opposite turns about the normal.
+    const std::array<Case, 5> cases{{{-Vec3d::UnitZ(), -Vec3d::UnitX(), Vec3d::UnitY()},
+                                     {Vec3d::UnitX(), Vec3d::UnitY(), Vec3d::UnitZ()},
+                                     {-Vec3d::UnitX(), -Vec3d::UnitY(), Vec3d::UnitZ()},
+                                     {Vec3d(0.6, 0., 0.8), Vec3d::UnitY(), Vec3d(-0.8, 0., 0.6)},
+                                     {Vec3d(-0.6, 0., 0.8), -Vec3d::UnitY(), Vec3d(0.8, 0., 0.6)}}};
     const Vec3d position(12., -4., 9.);
     for (const Case &c : cases) {
         const Transform3d transform = Emboss::create_transformation_onto_surface(position, c.normal);
         same_vector(transform.translation(), position);
-        same_vector((transform.linear() * Vec3d::UnitZ()).normalized(), c.normal);
-        same_vector((transform.linear() * Vec3d::UnitY()).normalized(), c.up);
+        same_vector(transform.linear() * Vec3d::UnitX(), c.x);
+        same_vector(transform.linear() * Vec3d::UnitY(), c.up);
+        same_vector(transform.linear() * Vec3d::UnitZ(), c.normal);
     }
 }
 
-TEST_CASE("Emboss Z and orthogonal projections round-trip a 2d point", "[Emboss]")
+TEST_CASE("Emboss Z and orthogonal projections round-trip a 2d point", "[Emboss][EmbossProjection]")
 {
     const Point point{30, 40};
     Emboss::ProjectZ project_z(11.);
@@ -159,9 +173,23 @@ TEST_CASE("Emboss Z and orthogonal projections round-trip a 2d point", "[Emboss]
     REQUIRE(from_back.has_value());
     CHECK_THAT((*from_back - point.cast<double>()).norm(), Catch::Matchers::WithinAbs(0., 1e-9));
     CHECK_THAT(depth, Catch::Matchers::WithinAbs(3., 1e-9));
+
+    // With a rotated matrix the direction is given in world space and unprojection undoes the rotation.
+    Transform3d rotated = Transform3d::Identity();
+    rotated.translate(Vec3d(5., 6., 7.));
+    rotated.rotate(Eigen::AngleAxisd(PI / 2., Vec3d::UnitX()));
+    Emboss::OrthoProject rotated_ortho(rotated, rotated.linear() * Vec3d(0., 0., 3.));
+    const auto rotated_front_back = rotated_ortho.create_front_back(point);
+    same_vector(rotated_front_back.first, Vec3d(35., 6., 47.));
+    same_vector(rotated_front_back.second, Vec3d(35., 3., 47.));
+    depth = -1.;
+    const std::optional<Vec2d> rotated_back = rotated_ortho.unproject(rotated_front_back.second, &depth);
+    REQUIRE(rotated_back.has_value());
+    CHECK_THAT((*rotated_back - point.cast<double>()).norm(), Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(depth, Catch::Matchers::WithinAbs(3., 1e-9));
 }
 
-TEST_CASE("Projection wrappers preserve round-trip coordinates and scale the depth", "[Emboss]")
+TEST_CASE("Projection wrappers preserve round-trip coordinates and scale the depth", "[Emboss][EmbossProjection]")
 {
     const Point p = Point::new_scale(3., 5.);
 
@@ -177,13 +205,18 @@ TEST_CASE("Projection wrappers preserve round-trip coordinates and scale the dep
         CHECK_THAT(depth, Catch::Matchers::WithinAbs(8., 1e-9));
     }
     SECTION("ProjectTransform moves the projected points and scales the depth by its Z scale") {
+        // Tilted 30 degrees about X, so the Z scale is the length of the transformed Z axis (3), not its
+        // Z component (3 cos 30).
         Transform3d transform = Transform3d::Identity();
         transform.translate(Vec3d(10., -4., 3.));
+        transform.rotate(Eigen::AngleAxisd(PI / 6., Vec3d::UnitX()));
         transform.scale(Vec3d(1., 1., 3.));
         auto core = std::make_unique<Emboss::OrthoProject>(Transform3d::Identity(), Vec3d(0., 0., 2.));
         Emboss::ProjectTransform transformed(std::move(core), transform);
         const auto front_back = transformed.create_front_back(p);
-        same_vector(front_back.second, Vec3d(p.x() + 10., p.y() - 4., 3. + 3. * 2.));
+        same_vector(front_back.second, Vec3d(p.x() + 10.,
+                                             p.y() * std::cos(PI / 6.) - 6. * std::sin(PI / 6.) - 4.,
+                                             p.y() * std::sin(PI / 6.) + 6. * std::cos(PI / 6.) + 3.));
         double depth = 0.;
         const auto back = transformed.unproject(front_back.second, &depth);
         REQUIRE(back.has_value());
@@ -192,13 +225,13 @@ TEST_CASE("Projection wrappers preserve round-trip coordinates and scale the dep
     }
 }
 
-TEST_CASE("Orthogonal 3d projection moves a point by its direction", "[Emboss]")
+TEST_CASE("Orthogonal 3d projection moves a point by its direction", "[Emboss][EmbossProjection]")
 {
     const Emboss::OrthoProject3d projection(Vec3d(1., 2., 3.));
     same_vector(projection.project(Vec3d(4., -1., 8.)), Vec3d(5., 1., 11.));
 }
 
-TEST_CASE("Suggested-up and calculated-up distinguish identity and rotated frames", "[Emboss]")
+TEST_CASE("Suggested-up and calculated-up distinguish identity and rotated frames", "[Emboss][EmbossProjection]")
 {
     // A normal tilted 37 degrees from Z: the suggested up lies in the surface and points upward.
     const Vec3d normal = Vec3d(0.6, 0.0, 0.8);
@@ -210,10 +243,11 @@ TEST_CASE("Suggested-up and calculated-up distinguish identity and rotated frame
     rotated.rotate(Eigen::AngleAxisd(PI / 2., Vec3d::UnitZ()));
     const auto calculated = Emboss::calc_up(rotated);
     REQUIRE(calculated.has_value());
-    CHECK_THAT(std::abs(*calculated), Catch::Matchers::WithinAbs(PI / 2., 1e-6));
+    // A frame turned +90 degrees about Z (its Y axis now points along -X) reports +pi/2.
+    CHECK_THAT(*calculated, Catch::Matchers::WithinAbs(PI / 2., 1e-6));
 }
 
-TEST_CASE("An absent emboss transform preserves the existing placement", "[Emboss]")
+TEST_CASE("An absent emboss transform preserves the existing placement", "[Emboss][EmbossProjection]")
 {
     Transform3d transform = Transform3d::Identity();
     transform.translate(Vec3d(3, 4, 5));
@@ -223,30 +257,33 @@ TEST_CASE("An absent emboss transform preserves the existing placement", "[Embos
     CHECK_THAT((transform.matrix() - before.matrix()).norm(), Catch::Matchers::WithinAbs(0., 1e-12));
 }
 
-TEST_CASE("Emboss rotation acts around the local text normal", "[Emboss]")
+TEST_CASE("Emboss rotation acts around the local text normal", "[Emboss][EmbossProjection]")
 {
-    Transform3d transform = Transform3d::Identity();
-    transform.translate(Vec3d(3, 4, 5));
+    // In the tilted frame the text normal (local Z) is world +X, so a rotation about world Z would differ.
+    Transform3d transform = tilted_frame();
     Emboss::apply_transformation(float(PI / 2), std::nullopt, transform);
-    same_vector(transform * Vec3d::UnitX(), Vec3d(3, 5, 5));
-    same_vector(transform * Vec3d::UnitY(), Vec3d(2, 4, 5));
-    same_vector(transform * Vec3d::Zero(), Vec3d(3, 4, 5));
+    same_vector(transform.translation(), Vec3d(3, 4, 5));
+    same_vector(transform.linear() * Vec3d::UnitX(), Vec3d::UnitY());
+    same_vector(transform.linear() * Vec3d::UnitY(), Vec3d::UnitZ());
+    same_vector(transform.linear() * Vec3d::UnitZ(), Vec3d::UnitX());
 }
 
-TEST_CASE("Emboss distance follows the transformed normal", "[Emboss]")
+TEST_CASE("Emboss distance follows the transformed normal", "[Emboss][EmbossProjection]")
 {
-    Transform3d transform = Transform3d::Identity();
-    transform.translate(Vec3d(3, 4, 5));
-    transform.rotate(Eigen::AngleAxisd(PI / 2, Vec3d::UnitY()));
+    Transform3d transform = tilted_frame();
     Emboss::apply_transformation(std::nullopt, -2.f, transform);
     same_vector(transform * Vec3d::Zero(), Vec3d(1, 4, 5));
     same_vector(transform.linear() * Vec3d::UnitZ(), Vec3d::UnitX());
 }
 
-TEST_CASE("Combined emboss rotation and distance retain both placement effects", "[Emboss]")
+TEST_CASE("Combined emboss rotation and distance retain both placement effects", "[Emboss][EmbossProjection]")
 {
-    Transform3d transform = Transform3d::Identity();
+    // A rotation about the normal and a move along it commute, so only the frame (local, not world) is
+    // observable: the text turns about world +X and moves 3 mm along it.
+    Transform3d transform = tilted_frame();
     Emboss::apply_transformation(float(PI / 2), 3.f, transform);
-    same_vector(transform * Vec3d::UnitX(), Vec3d(0, 1, 3));
-    same_vector(transform * Vec3d::UnitY(), Vec3d(-1, 0, 3));
+    same_vector(transform.translation(), Vec3d(6, 4, 5));
+    same_vector(transform.linear() * Vec3d::UnitX(), Vec3d::UnitY());
+    same_vector(transform.linear() * Vec3d::UnitY(), Vec3d::UnitZ());
+    same_vector(transform.linear() * Vec3d::UnitZ(), Vec3d::UnitX());
 }
