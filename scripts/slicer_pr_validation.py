@@ -2537,6 +2537,9 @@ def _run_tree(worktree: Path, root_output: Path, name: str, args: argparse.Names
     if test_regex is not None:
         # Keep regex syntax literal: _format_args treats braces in command arguments as templates.
         test_args.extend(["-R", test_regex])
+    exclude_test_regex = getattr(args, "exclude_test_regex", None)
+    if exclude_test_regex is not None:
+        test_args.extend(["-E", exclude_test_regex])
     entry["commands"]["test"] = {"argv": test_args, "junit": str(junit),
                                   "log": str(run_dir / "test.log")}
     test = _run_phase(test_args, cwd=worktree, timeout=args.timeout,
@@ -3063,6 +3066,7 @@ def run_validation(args: argparse.Namespace) -> int:
             "test_jobs": args.test_jobs if args.test_jobs is not None else args.jobs,
             "build_dir": args.build_dir, "exclude_labels": args.exclude_labels,
             "test_regex": getattr(args, "test_regex", None),
+            "exclude_test_regex": getattr(args, "exclude_test_regex", None),
             "targets": list(args.targets), "timeout_seconds": args.timeout,
             "test_timeout_seconds": getattr(args, "test_timeout", DEFAULT_TEST_TIMEOUT),
             "keep_worktree": bool(getattr(args, "keep_worktree", False)),
@@ -3778,6 +3782,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--exclude-labels", default=DEFAULT_EXCLUDED_LABELS)
     parser.add_argument("--test-regex",
                         help="optional regular expression passed to CTest -R to select test names")
+    parser.add_argument("--exclude-test-regex",
+                        help="optional regular expression passed to CTest -E to exclude test names")
     parser.add_argument("--patch-scope", choices=("test-only", "integration", "full"),
                         default="test-only",
                         help="overlay scope; test-only protects src/, integration allows build CMake, full applies the legacy complete diff")
@@ -3860,6 +3866,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if args.test_regex is not None and not args.test_regex.strip():
         print("slicer_pr_validation: error: --test-regex must not be empty", file=sys.stderr)
+        return 2
+    if args.exclude_test_regex is not None and not args.exclude_test_regex.strip():
+        print("slicer_pr_validation: error: --exclude-test-regex must not be empty",
+              file=sys.stderr)
         return 2
     args.targets = tuple(args.targets or DEFAULT_TARGETS)
     try:

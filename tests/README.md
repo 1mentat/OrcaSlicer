@@ -1619,6 +1619,13 @@ automatically. The runner does not write the original checkout; if its observed
 state changes during a run, the report records that fact without attributing
 who changed it and exits nonzero.
 
+Use repeated `--target` options to choose build targets. `--test-regex` selects
+CTest names and `--exclude-test-regex` excludes names; both filters are recorded
+in the report. When building only some suites, exclude only the exact unbuilt
+placeholders for unrequested suites. A placeholder for a requested target must
+remain an error. Keep a testcase floor and inspect the runtime inventory so
+exclusions cannot silently reduce the intended validation scope.
+
 Use `--keep-worktree` to preserve the validation checkout and its native build
 after the run. The retained location is recorded in `report.json` under
 `cleanup.path`.

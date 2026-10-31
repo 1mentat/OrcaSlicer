@@ -227,6 +227,16 @@ class ParsingTests(unittest.TestCase):
         parsed = slicer_pr_validation._parser().parse_args([*base, "--test-regex", regex])
         self.assertEqual(parsed.test_regex, regex)
 
+    def test_exclude_test_regex_is_optional_and_preserved_by_parser(self):
+        base = ["--harness-base", "base", "--harness-ref", "ref",
+                "--deps-prefix", "/unused"]
+        self.assertIsNone(
+            slicer_pr_validation._parser().parse_args(base).exclude_test_regex)
+        regex = r"^(first_NOT_BUILT|second_NOT_BUILT)$"
+        parsed = slicer_pr_validation._parser().parse_args(
+            [*base, "--exclude-test-regex", regex])
+        self.assertEqual(parsed.exclude_test_regex, regex)
+
     def test_keep_and_reuse_worktree_options_are_mutually_exclusive(self):
         conflicting_options = (
             ("--keep-worktree", "--reuse-worktree-from-report", "prior-report.json"),
@@ -250,6 +260,18 @@ class ParsingTests(unittest.TestCase):
                 result = slicer_pr_validation.main([
                     "--harness-base", "base", "--harness-ref", "ref",
                     "--deps-prefix", "/unused", "--test-regex", regex,
+                ])
+            self.assertEqual(result, 2)
+            run.assert_not_called()
+
+    def test_empty_exclude_test_regex_fails_before_validation(self):
+        for regex in ("", "   "):
+            with self.subTest(regex=regex), \
+                 mock.patch.object(slicer_pr_validation, "run_validation") as run, \
+                 mock.patch("sys.stderr"):
+                result = slicer_pr_validation.main([
+                    "--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused", "--exclude-test-regex", regex,
                 ])
             self.assertEqual(result, 2)
             run.assert_not_called()
@@ -292,6 +314,7 @@ class ParsingTests(unittest.TestCase):
             "NotWorking|RequiresApp")
         self.assertEqual(command[command.index("-LE") + 1], "NotWorking|RequiresApp")
         self.assertNotIn("-R", command)
+        self.assertNotIn("-E", command)
 
     def test_nonfinite_phase_timeout_fails_before_validation(self):
         for timeout in ("nan", "inf"):
@@ -811,7 +834,7 @@ class MinimumTestIntegrationTests(unittest.TestCase):
     """Exercise the count and identity gates through the real _run_tree path."""
 
     @staticmethod
-    def _args(minimum_tests=1, test_regex=None):
+    def _args(minimum_tests=1, test_regex=None, exclude_test_regex=None):
         return Namespace(
             test_timeout=180.0,
             timeout=30.0,
@@ -821,11 +844,13 @@ class MinimumTestIntegrationTests(unittest.TestCase):
             test_jobs=1,
             exclude_labels="",
             test_regex=test_regex,
+            exclude_test_regex=exclude_test_regex,
             deps_prefix="deps",
             uv="uv",
         )
 
-    def _run_tree(self, *, minimum_tests, names, build_result=None, test_regex=None):
+    def _run_tree(self, *, minimum_tests, names, build_result=None, test_regex=None,
+                  exclude_test_regex=None):
         with tempfile.TemporaryDirectory() as temp:
             root_output = Path(temp) / "output"
             worktree = Path(temp) / "worktree"
@@ -862,7 +887,7 @@ class MinimumTestIntegrationTests(unittest.TestCase):
                                    side_effect=fake_phase):
                 return slicer_pr_validation._run_tree(
                     worktree, root_output, "baseline",
-                    self._args(minimum_tests, test_regex),
+                    self._args(minimum_tests, test_regex, exclude_test_regex),
                     ["cmake", "configure"], ["cmake", "build"],
                     commit_sha="a" * 40, tree_sha="b" * 40,
                 )
@@ -874,6 +899,14 @@ class MinimumTestIntegrationTests(unittest.TestCase):
         self.assertEqual(entry["minimum_tests_observed"], 1)
         argv = entry["commands"]["test"]["argv"]
         self.assertEqual(argv[argv.index("-R") + 1], regex)
+
+    def test_exclude_test_regex_reaches_ctest_literally(self):
+        regex = r"^(unused[0-9]{2}_NOT_BUILT|literal\{name\})$"
+        entry = self._run_tree(
+            minimum_tests=1, names=["Alpha"], exclude_test_regex=regex)
+        argv = entry["commands"]["test"]["argv"]
+        self.assertEqual(argv[argv.index("-E") + 1], regex)
+        self.assertNotIn("-R", argv)
 
     def test_count_floor_is_applied_after_junit_parsing(self):
         entry = self._run_tree(minimum_tests=4, names=["one", "two", "three"])
@@ -4175,6 +4208,25 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                     self._git(repo, "worktree", "remove", "--force", str(worktree))
                     worktree.parent.rmdir()
 
+    def test_report_records_exclude_test_regex(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            regex = r"^(libnest2d_tests_NOT_BUILT-b12d07c|slic3rutils_tests_NOT_BUILT-b12d07c)$"
+            args.exclude_test_regex = regex
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree):
+                result = slicer_pr_validation.run_validation(args)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(result, 0)
+            self.assertEqual(report["configuration"]["exclude_test_regex"], regex)
+
     def test_default_cleanup_still_removes_worktree_and_build(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4198,6 +4250,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             worktree = Path(report["worktree"]["path"])
             self.assertEqual(result, 0)
             self.assertEqual(report["configuration"]["keep_worktree"], False)
+            self.assertIsNone(report["configuration"]["exclude_test_regex"])
             self.assertTrue(report["cleanup"]["removed"])
             self.assertTrue(report["cleanup"]["parent_removed"])
             self.assertFalse(worktree.exists())
