@@ -15,11 +15,13 @@ add_executable(${_TEST_NAME}_tests
     test_assemble_list.cpp
     test_bambu_networking.cpp
     test_belt_brim.cpp
+    test_bridge_detector.cpp
     test_buildvolume.cpp
     test_calib.cpp
     test_circle.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
+    test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
     test_locales_utils.cpp
@@ -34,6 +36,7 @@ add_executable(${_TEST_NAME}_tests
     test_vendor_cache.cpp
     test_preset_options.cpp
     test_elephant_foot_compensation.cpp
+    test_expolygon_contracts.cpp
     test_expolygons_index_contracts.cpp
     test_extrusion_simulator.cpp
     test_intersection_points_contracts.cpp
@@ -55,6 +58,7 @@ add_executable(${_TEST_NAME}_tests
     test_obj.cpp
     test_step.cpp
     test_stl.cpp
+    test_surface_collection.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp
     test_trianglemesh_slicer.cpp

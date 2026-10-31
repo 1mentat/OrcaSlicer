@@ -1,13 +1,21 @@
 #include <algorithm>
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "test_utils.hpp"
 
 #include "libslic3r/Geometry/Voronoi.hpp"
+#include "libslic3r/Arachne/utils/PolygonsSegmentIndex.hpp"
+#include "libslic3r/Arachne/utils/PolygonsPointIndex.hpp"
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/Geometry/VoronoiUtils.hpp"
+#include "libslic3r/Geometry/VoronoiUtilsCgal.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Line.hpp"
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include "libslic3r/BoundingBox.hpp"
 #include <libslic3r/Polygon.hpp>
 #include <libslic3r/Polyline.hpp>
@@ -33,6 +41,7 @@ using namespace Slic3r;
 
 using VD = Geometry::VoronoiDiagram;
 using BoostVD = boost::polygon::voronoi_diagram<double>;
+using Catch::Matchers::WithinAbs;
 
 // https://svn.boost.org/trac10/ticket/12067
 // This bug seems to be confirmed.
@@ -1934,6 +1943,72 @@ TEST_CASE("Voronoi skeleton", "[VoronoiSkeleton]")
     REQUIRE(! skeleton_edges.empty());
 }
 
+TEST_CASE("Voronoi skeleton clips an inside point-point edge at its corner threshold", "[Voronoi][VoronoiSkeleton]")
+{
+    const coord_t unit = scale_(1.);
+    Polygon outline {
+        { -4 * unit, -4 * unit }, {  4 * unit, -4 * unit },
+        {  4 * unit, -1 * unit }, {  1 * unit, -1 * unit },
+        {  1 * unit,  1 * unit }, {  4 * unit,  1 * unit },
+        {  4 * unit,  4 * unit }, { -4 * unit,  4 * unit },
+        { -4 * unit,  1 * unit }, { -1 * unit,  1 * unit },
+        { -1 * unit, -1 * unit }, { -4 * unit, -1 * unit }
+    };
+    REQUIRE(outline.area() > 0.);
+
+    Lines lines = to_lines(outline);
+    VD vd;
+    vd.construct_voronoi(lines.begin(), lines.end());
+    REQUIRE(vd.edges().size() > 0);
+    Slic3r::Voronoi::annotate_inside_outside(vd, lines);
+
+    const double threshold_alpha = M_PI / 6.;
+    const std::vector<Vec2d> skeleton = Slic3r::Voronoi::skeleton_edges_rough(vd, lines, threshold_alpha);
+    REQUIRE(skeleton.size() == vd.edges().size());
+    const VD::edge_type *first_edge = &vd.edges().front();
+    const Point left_notch(-unit, -unit);
+    const Point right_notch(unit, -unit);
+    const double expected_threshold_y = -double(unit) * (1. + std::tan(0.5 * threshold_alpha));
+    bool found_inside_point_point_edge = false;
+
+    for (const VD::edge_type &edge : vd.edges()) {
+        if (&edge > edge.twin() || edge.is_secondary() || edge.is_infinite())
+            continue;
+        const VD::cell_type *cell = edge.cell();
+        const VD::cell_type *cell2 = edge.twin()->cell();
+        if (! cell->contains_point() || ! cell2->contains_point())
+            continue;
+
+        const Point &site0 = Slic3r::Voronoi::contour_point(*cell, lines);
+        const Point &site1 = Slic3r::Voronoi::contour_point(*cell2, lines);
+        if (! ((site0 == left_notch && site1 == right_notch) ||
+               (site0 == right_notch && site1 == left_notch)))
+            continue;
+
+        const bool inside = Slic3r::Voronoi::edge_category(edge) == Slic3r::Voronoi::EdgeCategory::PointsInside ||
+                            Slic3r::Voronoi::edge_category(edge.twin()) == Slic3r::Voronoi::EdgeCategory::PointsInside;
+        REQUIRE(inside);
+        const size_t edge_index = &edge - first_edge;
+        const Vec2d &p0 = skeleton[edge_index];
+        const Vec2d &p1 = skeleton[edge.twin() - first_edge];
+        REQUIRE(std::isfinite(p0.x()));
+        REQUIRE(std::isfinite(p1.x()));
+        CHECK_THAT(p0.x(), WithinAbs(0., double(unit) * 1e-6));
+        CHECK_THAT(p1.x(), WithinAbs(0., double(unit) * 1e-6));
+        CHECK_THAT(std::min(p0.y(), p1.y()), WithinAbs(expected_threshold_y, double(unit) * 1e-5));
+        CHECK_THAT(std::max(p0.y(), p1.y()), WithinAbs(-double(unit), double(unit) * 1e-6));
+        const double d0 = (p0 - left_notch.cast<double>()).norm();
+        const double d1 = (p0 - right_notch.cast<double>()).norm();
+        CHECK_THAT(d0, WithinAbs(d1, double(unit) * 1e-6));
+        const double d2 = (p1 - left_notch.cast<double>()).norm();
+        const double d3 = (p1 - right_notch.cast<double>()).norm();
+        CHECK_THAT(d2, WithinAbs(d3, double(unit) * 1e-6));
+        found_inside_point_point_edge = true;
+    }
+
+    REQUIRE(found_inside_point_point_edge);
+}
+
 // Simple detection with complexity N^2 if there is any point in the input polygons that doesn't have Voronoi vertex.
 [[maybe_unused]] static bool has_missing_voronoi_vertices(const Polygons &polygons, const VD &vd)
 {
@@ -2167,4 +2242,154 @@ TEST_CASE("Intersecting Voronoi edges", "[Voronoi]")
     };
 
 //    REQUIRE(!has_intersecting_edges(poly, vd));
+}
+
+TEST_CASE("Voronoi construction states distinguish validation and clearing", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygon outline{{Point(0, 0), Point(100, 0), Point(100, 60), Point(0, 60)}};
+    Lines lines = to_lines(outline);
+
+    VD validated;
+    validated.construct_voronoi(lines.begin(), lines.end());
+    REQUIRE(validated.num_edges() > 0);
+    CHECK(validated.get_state() == VD::State::REPAIR_NOT_NEEDED);
+    CHECK(validated.get_issue_type() == VD::IssueType::NO_ISSUE_DETECTED);
+
+    validated.clear();
+    REQUIRE(validated.num_edges() == 0);
+    CHECK(validated.num_vertices() == 0);
+    CHECK(validated.num_cells() == 0);
+    CHECK(validated.get_state() == VD::State::UNKNOWN);
+    CHECK(validated.get_issue_type() == VD::IssueType::UNKNOWN);
+
+    VD unchecked;
+    unchecked.construct_voronoi(lines.begin(), lines.end(), false);
+    REQUIRE(unchecked.num_edges() > 0);
+    CHECK(unchecked.get_state() == VD::State::UNKNOWN);
+    CHECK(unchecked.get_issue_type() == VD::IssueType::UNKNOWN);
+}
+
+TEST_CASE("Voronoi repair restores a vertex at a split polygon edge", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Point split_point(-12412500, -25000000);
+    const Polygon outline{
+        {25000000, 25000000}, {-25000000, 25000000}, {-25000000, -25000000},
+        {split_point.x(), split_point.y()}, {25000000, -25000000}
+    };
+    Lines lines = to_lines(outline);
+
+    VD diagram;
+    diagram.construct_voronoi(lines.begin(), lines.end());
+    REQUIRE(diagram.get_state() == VD::State::REPAIR_SUCCESSFUL);
+    CHECK(diagram.is_valid());
+    REQUIRE(diagram.num_vertices() > 0);
+
+    bool has_split_vertex = false;
+    for (const VD::vertex_type &vertex : diagram.vertices()) {
+        if (Geometry::VoronoiUtils::is_finite(vertex) &&
+            Geometry::VoronoiUtils::to_point(vertex) == split_point.cast<int64_t>()) {
+            has_split_vertex = true;
+            break;
+        }
+    }
+    CHECK(has_split_vertex);
+
+    diagram.clear();
+    CHECK(diagram.num_vertices() == 0);
+    CHECK(diagram.num_edges() == 0);
+    CHECK(diagram.num_cells() == 0);
+    CHECK(diagram.get_state() == VD::State::UNKNOWN);
+    CHECK(diagram.get_issue_type() == VD::IssueType::UNKNOWN);
+}
+
+TEST_CASE("Voronoi planar intersection validation preserves edge annotations", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygon outline{{Point(0, 0), Point(100, 0), Point(100, 60), Point(0, 60)}};
+    Lines lines = to_lines(outline);
+    VD diagram;
+    diagram.construct_voronoi(lines.begin(), lines.end(), false);
+    REQUIRE(diagram.num_edges() > 0);
+
+    CHECK(Geometry::VoronoiUtilsCgal::is_voronoi_diagram_planar_intersection(diagram));
+    for (const VD::edge_type &edge : diagram.edges())
+        REQUIRE(edge.color() == 0);
+    CHECK(Geometry::VoronoiUtilsCgal::is_voronoi_diagram_planar_intersection(diagram));
+    for (const VD::edge_type &edge : diagram.edges())
+        REQUIRE(edge.color() == 0);
+
+    const Points sites{Point(0, 0), Point(100, 0), Point(0, 100)};
+    VD point_diagram;
+    point_diagram.construct_voronoi(sites.begin(), sites.end());
+    CHECK(Geometry::VoronoiUtilsCgal::is_voronoi_diagram_planar_intersection(point_diagram));
+}
+
+TEST_CASE("Voronoi source lookups preserve polygon endpoints and reject mismatched cells", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygon outline{{Point(0, 0), Point(100, 0), Point(100, 60), Point(0, 60)}};
+    const Polygons polygons{outline};
+    std::vector<Arachne::PolygonsSegmentIndex> segments;
+    for (size_t index = 0; index < outline.size(); ++index)
+        segments.emplace_back(&polygons, 0, static_cast<unsigned int>(index));
+
+    VD diagram;
+    diagram.construct_voronoi(segments.cbegin(), segments.cend(), false);
+    REQUIRE(diagram.num_cells() > 0);
+
+    const VD::cell_type *point_cell = nullptr;
+    const VD::cell_type *segment_cell = nullptr;
+    for (const VD::cell_type &cell : diagram.cells()) {
+        if (cell.contains_point() && point_cell == nullptr)
+            point_cell = &cell;
+        if (cell.contains_segment() && segment_cell == nullptr)
+            segment_cell = &cell;
+    }
+    REQUIRE(point_cell != nullptr);
+    REQUIRE(segment_cell != nullptr);
+
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_segment(*point_cell, segments.cbegin(), segments.cend()), InvalidArgument);
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_segment(*segment_cell, segments.cbegin(), segments.cbegin()), OutOfRange);
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_point(*segment_cell, segments.cbegin(), segments.cend()), InvalidArgument);
+    CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_point_index(*segment_cell, segments.cbegin(), segments.cend()), InvalidArgument);
+
+    // Boost merges the shared endpoints of adjacent segments, so a closed rectangle yields
+    // exactly one point cell per corner. A Voronoi vertex on the boundary of a point cell
+    // is at least as close to that cell's site as to any other corner.
+    Points source_points;
+    for (const VD::cell_type &cell : diagram.cells()) {
+        if (!cell.contains_point())
+            continue;
+        const Point source_point = Geometry::VoronoiUtils::get_source_point(cell, segments.cbegin(), segments.cend());
+        const Arachne::PolygonsPointIndex source_point_index =
+            Geometry::VoronoiUtils::get_source_point_index(cell, segments.cbegin(), segments.cend());
+        CHECK(source_point_index.p() == source_point);
+        source_points.push_back(source_point);
+
+        const VD::edge_type *edge = cell.incident_edge();
+        do {
+            if (const VD::vertex_type *vertex = edge->vertex0(); vertex != nullptr) {
+                const Vec2d v(vertex->x(), vertex->y());
+                const double site_distance = (v - source_point.cast<double>()).norm();
+                for (const Point &corner : outline.points)
+                    CHECK(site_distance <= (v - corner.cast<double>()).norm() + 1e-6);
+            }
+            edge = edge->next();
+        } while (edge != cell.incident_edge());
+    }
+    std::sort(source_points.begin(), source_points.end());
+    Points corners = outline.points;
+    std::sort(corners.begin(), corners.end());
+    CHECK(source_points == corners);
+}
+
+TEST_CASE("Parabola discretization returns its endpoints when the focus lies on the directrix", "[Voronoi][VoronoiGeometryContracts]")
+{
+    const Polygons polygons{Polygon{{Point(0, 0), Point(100, 0), Point(100, 100), Point(0, 100)}}};
+    const Arachne::PolygonsSegmentIndex directrix(&polygons, 0, 0);
+    const Point start(25, 0);
+    const Point end(75, 0);
+
+    const Points samples = Geometry::VoronoiUtils::discretize_parabola(Point(50, 0), directrix, start, end, 10, 0.5f);
+    REQUIRE(samples.size() == 2);
+    CHECK(samples.front() == start);
+    CHECK(samples.back() == end);
 }
