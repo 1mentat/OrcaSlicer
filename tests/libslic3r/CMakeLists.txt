@@ -20,6 +20,7 @@ add_executable(${_TEST_NAME}_tests
     test_circle.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
+    test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
     test_locales_utils.cpp
