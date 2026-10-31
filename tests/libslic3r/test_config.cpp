@@ -1598,3 +1598,69 @@ TEST_CASE("Default options of enum lists get their definition's keys map", "[Con
     }
     CHECK(enum_lists > 0);
 }
+
+TEST_CASE("Project JSON migration records support and wall-order differences", "[Config][ConfigJsonMigration]")
+{
+    const auto [seed_existing, keep_wall_order] = GENERATE(
+        table<bool, bool>({
+            {false, false},
+            {false, true},
+            {true, false},
+            {true, true},
+        }));
+    CAPTURE(seed_existing, keep_wall_order);
+
+    nlohmann::json document;
+    document["name"] = "project_settings";
+    document["support_type"] = "hybrid(auto)";
+    document["filament_settings_id"] = {"filament-a", "filament-b"};
+    if (seed_existing) {
+        document["different_settings_to_system"] = {"wall_sequence;outer_wall_filament_id"};
+    } else {
+        document["different_settings_to_system"] = nlohmann::json::array();
+    }
+    if (keep_wall_order)
+        document["wall_infill_order"] = "infill/outer wall/inner wall";
+
+    ScopedTemporaryFile tmp(".json");
+    {
+        boost::nowide::ofstream out(tmp.string());
+        REQUIRE(out.is_open());
+        out << document.dump();
+        out.close();
+        REQUIRE(out.good());
+    }
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("is_infill_first", "0");
+    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+    std::map<std::string, std::string> key_values;
+    std::string reason;
+    REQUIRE(config.load_from_json(tmp.string(), substitutions, true, key_values, reason) == 0);
+    CHECK(reason.empty());
+    CHECK(key_values["name"] == "project_settings");
+    CHECK(substitutions.unrecogized_keys.empty());
+    CHECK(config.opt_serialize("support_type") == "tree(auto)");
+    CHECK(config.opt_serialize("support_style") == "tree_hybrid");
+    CHECK(config.opt_bool("is_infill_first") == keep_wall_order);
+
+    const ConfigOptionStrings *different = config.option<ConfigOptionStrings>("different_settings_to_system");
+    REQUIRE(different != nullptr);
+
+    std::vector<std::string> expected;
+    if (seed_existing) {
+        expected.push_back(keep_wall_order
+            ? "wall_sequence;outer_wall_filament_id;support_type;support_style;is_infill_first"
+            : "outer_wall_filament_id;support_type;support_style");
+    } else {
+        expected = {
+            keep_wall_order ? "support_type;support_style;is_infill_first" : "support_type;support_style",
+            "",
+            "",
+            "",
+        };
+    }
+    REQUIRE(different->values.size() == expected.size());
+    for (size_t index = 0; index < expected.size(); ++index)
+        CHECK(different->values[index] == expected[index]);
+}

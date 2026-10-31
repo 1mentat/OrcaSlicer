@@ -62,6 +62,7 @@ add_executable(${_TEST_NAME}_tests
     test_nozzle_volume_type.cpp
     test_obj.cpp
     test_obj_color_utils.cpp
+    test_orient.cpp
     test_sl1.cpp
     test_zipper_archive_import.cpp
     test_step.cpp
@@ -79,6 +80,7 @@ add_executable(${_TEST_NAME}_tests
     test_lay_on_face.cpp
     test_model.cpp
     test_project_task.cpp
+    test_rotfinder.cpp
     test_utils.cpp
     test_miniz_extension.cpp
     test_timeutils.cpp
