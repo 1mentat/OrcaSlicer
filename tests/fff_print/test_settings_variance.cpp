@@ -4438,6 +4438,45 @@ TEST_CASE("Locked-zag skin controls change distinct public fill properties",
         CHECK_THAT(row.perimeter_length, Catch::Matchers::WithinAbs(base.perimeter_length, 0.01));
 }
 
+TEST_CASE("Locked-zag skin density and depth exercise safe boundary points",
+          "[SettingsVariance][SolidSkinInfill][SkinInfillBoundary]")
+{
+    const auto density_low = infill_settings_contracts::run_locked_zag(1.0, 2.0, 0.0);
+    const auto density_default_depth = infill_settings_contracts::run_locked_zag(25.0, 2.0, 0.0);
+    const auto density_representative = infill_settings_contracts::run_locked_zag(70.0, 2.0, 0.0);
+    const auto density_max = infill_settings_contracts::run_locked_zag(100.0, 2.0, 0.0);
+    const auto depth_zero = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0);
+    const auto depth_max = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0);
+
+    for (const auto &row : {density_low, density_default_depth, density_representative,
+                            density_max, depth_zero, depth_max}) {
+        REQUIRE(row.finite);
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.length > 0.0);
+        REQUIRE(row.flow_length > 0.0);
+        REQUIRE(row.perimeter_length > 0.0);
+    }
+
+    // The low positive sentinel keeps the generator away from its zero-density
+    // divide while exercising a skin density close to the registered minimum.
+    // Depth stays fixed so the density comparisons isolate the skin fill spacing.
+    REQUIRE(density_default_depth.length > density_low.length + 0.05);
+    REQUIRE(density_max.length > density_representative.length + 0.05);
+    REQUIRE(density_default_depth.flow_length > density_low.flow_length + 0.01);
+    REQUIRE(density_max.flow_length > density_representative.flow_length + 0.01);
+
+    // At depth zero the entire infill footprint stays in the lower-density
+    // skeleton; the maximum depth makes the same footprint skin fill.
+    REQUIRE(density_default_depth.length > depth_zero.length + 0.05);
+    REQUIRE(depth_max.length > density_default_depth.length + 0.05);
+    REQUIRE(density_default_depth.flow_length > depth_zero.flow_length + 0.01);
+    REQUIRE(depth_max.flow_length > density_default_depth.flow_length + 0.01);
+
+    for (const auto &row : {density_low, density_representative, density_max, depth_zero, depth_max})
+        CHECK_THAT(row.perimeter_length,
+                   Catch::Matchers::WithinAbs(density_default_depth.perimeter_length, 0.01));
+}
+
 TEST_CASE("Minimum sparse area promotes only the analytically small component",
           "[SettingsVariance][MinimumSparseArea]")
 {

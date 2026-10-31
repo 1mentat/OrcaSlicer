@@ -243,6 +243,19 @@ if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
     orcaslicer_discover_tests(fff_print_wipe_tower_tests TEST_PREFIX "FocusedWipeTower::")
 endif()
 
+# Focused skirt and brim contracts, without duplicate CTest registration.
+add_executable(fff_print_skirt_brim_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_skirt_brim.cpp)
+target_link_libraries(fff_print_skirt_brim_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_skirt_brim_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_skirt_brim_tests)
+slicer_enable_llvm_source_coverage(fff_print_skirt_brim_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_skirt_brim_tests TEST_PREFIX "FocusedSkirtBrim::")
+endif()
+
 # Focused perimeter contracts, without duplicate CTest registration.
 add_executable(fff_print_perimeters_tests EXCLUDE_FROM_ALL
     fff_print_tests.cpp

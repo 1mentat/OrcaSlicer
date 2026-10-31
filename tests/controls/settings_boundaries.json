@@ -9,7 +9,8 @@
     "FocusedSettingsVariance::Internal bridge density changes deposited bridge volume",
     "FocusedSettingsVariance::Internal bridge flow scales extrusion at fixed path length",
     "FocusedSettingsVariance::Locked-zag skin controls change distinct public fill properties",
-    "FocusedSettingsVariance::Relative internal bridge angle adds to automatic direction"
+    "FocusedSettingsVariance::Relative internal bridge angle adds to automatic direction",
+    "FocusedSettingsVariance::Locked-zag skin density and depth exercise safe boundary points"
   ],
-  "control_regex": "^FocusedSettingsVariance::(Infill combination height cap bounds and changes sparse path heights|Internal bridge angle overrides automatic direction|Relative internal bridge angle adds to automatic direction|Bridge density changes external bridge deposition|Bridge flow changes external bridge deposition|Internal bridge density changes deposited bridge volume|Bridge line width changes external bridge deposition|Internal bridge flow scales extrusion at fixed path length|Locked-zag skin controls change distinct public fill properties)$"
+  "control_regex": "^FocusedSettingsVariance::(Bridge density changes external bridge deposition|Bridge flow changes external bridge deposition|Bridge line width changes external bridge deposition|Infill combination height cap bounds and changes sparse path heights|Internal bridge angle overrides automatic direction|Internal bridge density changes deposited bridge volume|Internal bridge flow scales extrusion at fixed path length|Locked-zag skin controls change distinct public fill properties|Relative internal bridge angle adds to automatic direction|Locked-zag skin density and depth exercise safe boundary points)$"
 }

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Consumer probes for emitted brim clearance and zero-disabled ear decimation. Run with fff_print_skirt_brim_tests and tests/controls/skirt_brim.json.",
+  "mutants": [
+    {
+      "id": "brim-object-gap-ignored",
+      "path": "src/libslic3r/Brim.cpp",
+      "old": "float              brim_offset = scale_(object->config().brim_object_gap.value);",
+      "new": "float              brim_offset = 0.f;",
+      "description": "Ignore configured brim-object gap for ordinary outer brims. The emitted-path-to-model clearance must fail to increase across the 0, 1, and 2 mm rows.",
+      "test_filter": "^BrimEarsGapBoundaries$"
+    },
+    {
+      "id": "brim-ear-zero-disable-becomes-default-one",
+      "path": "src/libslic3r/Brim.cpp",
+      "old": "coord_t            ear_detection_length = scale_(object->config().brim_ears_detection_length.value);",
+      "new": "coord_t            ear_detection_length = scale_(std::max(1.0, object->config().brim_ears_detection_length.value));",
+      "description": "Treat only the registered zero sentinel as the default 1 mm decimation distance while preserving positive 1 and 2 mm controls. Under the fixture angle that includes the 126.87-degree triangle tip, the zero-row G1 segment witness must disappear.",
+      "test_filter": "^BrimEarsGapBoundaries$"
+    }
+  ]
+}

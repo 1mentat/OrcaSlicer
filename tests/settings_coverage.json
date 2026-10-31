@@ -4433,21 +4433,22 @@
     },
     "skin_infill_density": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance][SolidSkinInfill]",
+      "tag": "[SettingsVariance][SolidSkinInfill][SkinInfillBoundary]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The public locked-zag fixture independently varies skin_infill_density from 35% to 70% while pinning skeleton density, line widths, pattern, walls, and shell settings. The 70% row increases internal-fill length and flow length while retaining positive finite paths and unchanged perimeter length within 0.01 mm. Numeric boundaries, full percent range, and interactions remain unclaimed."
+      "reason": "The existing 35%/70% public locked-zag comparison is retained. The new fixed-depth rows add a finite positive 1% low sentinel, the registered default 25%, the existing 70% representative, and the registered maximum 100%; the max row must exceed the 70% row in actual generated internal-fill path length and path-length-times-mm3-per-mm, with unchanged perimeter. The registered 0% minimum is deliberately not executed: Fill.cpp appends the zero-valued skin density into the consumer map, and FillRectilinear.cpp asserts density > 0.0001 then divides line spacing by density. Therefore boundary_values remains uncredited and this setting remains partial until the consumer handles zero safely."
     },
     "skin_infill_depth": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance][SolidSkinInfill]",
+      "tag": "[SettingsVariance][SolidSkinInfill][SkinInfillBoundary]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "The public locked-zag fixture independently varies skin_infill_depth from 1.0 to 2.0 mm with skin density and lock depth held at their control values. The deeper row increases internal-fill length and flow length while retaining positive finite paths and unchanged perimeter length within 0.01 mm. Numeric boundaries and interactions remain unclaimed."
+      "reason": "The public locked-zag Print fixture compares the registered skin_infill_depth minimum 0 mm, default 2 mm, and maximum 100 mm with skin density held at its default 25% and infill_lock_depth at 0. The zero row leaves the footprint in the lower-density skeleton region; the 100 mm row makes the footprint skin fill. Actual generated internal-infill path length and path-length-times-mm3-per-mm establish positive finite geometry and deposition, while perimeter length stays within 0.01 mm of the shared default. This adds the registered bounds for the configured fixture only; interactions remain unclaimed."
     },
     "infill_lock_depth": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -5884,6 +5885,24 @@
         "pipeline_oracle"
       ],
       "reason": "The full SEMM Print export checks the tooltip-defined negative, zero, and positive sign partition at -5, 0, and +5 mm with parking fixed at 40 mm, keeping every effective loading distance positive. Parsed loading E phases total 35, 40, and 45 mm in the emitted 20/70/10 split; the unload-plus-park return remains 40 mm. Each export requires positive object-model deposition with conserved summed model-feature E length and XY path, and planned wipe toolchange spans retain matching layer/tool associations and Y span. Zero is a semantic sign boundary, not a registered minimum; no numeric extremes are claimed."
+    },
+    "brim_object_gap": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[BrimEarsGapBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public outer-only brim fixture compares omitted/default and explicit 0 mm with 1 and the registered 2 mm maximum. It parses emitted brim-comment positive-E G1 XY moves and measures their closest physical clearance from the independently sliced first-layer model bounds. Default matches explicit minimum; each positive step increases that separation while the model bounds remain unchanged. This validates only the fixed outer-only 5 mm brim fixture and these values, not other brim types or interactions."
+    },
+    "brim_ears_detection_length": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[BrimEarsGapBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public Print fixture uses a triangular prism whose sliced rightmost tip has a 126.87 degree interior angle (about a 53.13 degree turn). A test-local 130 degree brim_ears_max_angle makes that corner eligible: Brim.cpp passes 50 degrees to Polygon::convex_points, while 91 degrees had passed an 89 degree threshold and excluded this tip. The 0.5 mm outward tip is below the positive 1 mm Douglas-Peucker tolerance. The requested 5 mm brim width is quantized by Brim.cpp to floor(5/(2\u00d70.45708))\u00d72\u00d70.45708\u22484.57080 mm. Brim.cpp then sets the ear radius to quantized width minus object gap minus flow spacing, about 4.11372 mm. The 4.9 mm point-to-segment window is about 0.78628 mm beyond that construction radius. With the nib removed, adjacent cube-corner ear circles are at least sqrt(10\u00b2+0.5\u00b2)-4.11372\u22485.8988 mm from the nib tip, beyond the 4.9 mm window. Public slice bounds must show the expected 20.5 mm X by 20.0 mm Y footprint. Zero/default-1/positive-2 outputs must keep model bounds unchanged and finite positive brim deposition. No maximum or broader angle/shape interaction is claimed."
     }
   }
 }

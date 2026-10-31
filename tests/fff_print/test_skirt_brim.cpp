@@ -2088,3 +2088,300 @@ TEST_CASE("Skirt angle selects the registered start and zero speed uses layer fa
     CHECK_THAT(fallback.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(23.0, 0.05));
     CHECK_THAT(base.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(37.0, 0.05));
 }
+
+namespace brim_ears_gap_boundaries {
+
+using skirt_settings_variance::Bounds;
+using skirt_settings_variance::first_layer_model_bounds;
+
+struct BrimEvidence {
+    size_t positive_xy_moves = 0;
+    size_t arc_moves = 0;
+    size_t segments_near_nib_tip = 0;
+    double xy_length = 0.0;
+    double filament = 0.0;
+    double minimum_model_clearance = std::numeric_limits<double>::infinity();
+    double closest_segment_to_nib_tip = std::numeric_limits<double>::infinity();
+    double closest_endpoint_to_nib_tip = std::numeric_limits<double>::infinity();
+    Bounds bounds;
+    bool finite = true;
+};
+
+struct BrimSample {
+    BrimEvidence brim;
+    Bounds model_bounds;
+};
+
+BrimEvidence inspect_brim(const std::string &output, const DynamicPrintConfig &config,
+                          const Bounds *model_bounds = nullptr,
+                          double nib_tip_x = std::numeric_limits<double>::quiet_NaN(),
+                          double nib_tip_y = std::numeric_limits<double>::quiet_NaN())
+{
+    BrimEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&evidence, model_bounds, nib_tip_x, nib_tip_y](GCodeReader &self,
+                                                                                const GCodeReader::GCodeLine &line) {
+        // Keep the established emitted-description contract: generated brim
+        // moves are marked by lowercase "brim" comments. TYPE/FEATURE state
+        // does not identify this output consistently across the fixtures.
+        if (line.comment().find("brim") == std::string_view::npos)
+            return;
+        if (line.cmd_is("G2") || line.cmd_is("G3")) {
+            if (line.extruding(self))
+                ++evidence.arc_moves;
+            return;
+        }
+        if (!line.cmd_is("G1") || !line.extruding(self))
+            return;
+
+        const double xy = line.dist_XY(self);
+        const double e = std::abs(line.dist_E(self));
+        const double start_x = self.x();
+        const double start_y = self.y();
+        const double end_x = line.new_X(self);
+        const double end_y = line.new_Y(self);
+        if (!std::isfinite(xy) || !std::isfinite(e) || !std::isfinite(start_x) ||
+            !std::isfinite(start_y) || !std::isfinite(end_x) || !std::isfinite(end_y)) {
+            evidence.finite = false;
+            return;
+        }
+        if (xy <= EPSILON || e <= 0.0)
+            return;
+
+        for (const auto &[x, y] : { std::pair<double, double>{start_x, start_y},
+                                    std::pair<double, double>{end_x, end_y} }) {
+            evidence.bounds.min_x = std::min(evidence.bounds.min_x, x);
+            evidence.bounds.max_x = std::max(evidence.bounds.max_x, x);
+            evidence.bounds.min_y = std::min(evidence.bounds.min_y, y);
+            evidence.bounds.max_y = std::max(evidence.bounds.max_y, y);
+            if (model_bounds != nullptr) {
+                const double dx = std::max({ model_bounds->min_x - x, 0.0, x - model_bounds->max_x });
+                const double dy = std::max({ model_bounds->min_y - y, 0.0, y - model_bounds->max_y });
+                evidence.minimum_model_clearance = std::min(
+                    evidence.minimum_model_clearance, std::hypot(dx, dy));
+            }
+            if (std::isfinite(nib_tip_x) && std::isfinite(nib_tip_y)) {
+                const double endpoint_distance = std::hypot(x - nib_tip_x, y - nib_tip_y);
+                evidence.closest_endpoint_to_nib_tip = std::min(
+                    evidence.closest_endpoint_to_nib_tip, endpoint_distance);
+            }
+        }
+        if (std::isfinite(nib_tip_x) && std::isfinite(nib_tip_y)) {
+            // A segment can pass near the nib tip while both emitted endpoints are
+            // farther away. Measure distance to the physical XY deposition segment.
+            const double dx = end_x - start_x;
+            const double dy = end_y - start_y;
+            const double length_squared = dx * dx + dy * dy;
+            if (!std::isfinite(length_squared) || length_squared <= 0.0) {
+                evidence.finite = false;
+                return;
+            }
+            const double raw_projection =
+                ((nib_tip_x - start_x) * dx + (nib_tip_y - start_y) * dy) / length_squared;
+            if (!std::isfinite(raw_projection)) {
+                evidence.finite = false;
+                return;
+            }
+            const double projection = std::clamp(raw_projection, 0.0, 1.0);
+            const double closest_x = start_x + projection * dx;
+            const double closest_y = start_y + projection * dy;
+            const double segment_distance = std::hypot(closest_x - nib_tip_x, closest_y - nib_tip_y);
+            if (!std::isfinite(segment_distance)) {
+                evidence.finite = false;
+                return;
+            }
+            evidence.closest_segment_to_nib_tip = std::min(
+                evidence.closest_segment_to_nib_tip, segment_distance);
+            if (segment_distance < 4.9)
+                ++evidence.segments_near_nib_tip;
+        }
+        ++evidence.positive_xy_moves;
+        evidence.xy_length += xy;
+        evidence.filament += e;
+    });
+    return evidence;
+}
+
+DynamicPrintConfig outer_brim_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "skirt_loops",                0 },
+        { "raft_layers",                0 },
+        { "enable_support",              false },
+        { "enable_prime_tower",          false },
+        { "enable_arc_fitting",          false },
+        { "brim_type",                  "outer_only" },
+        { "brim_width",                  5.0 },
+        { "brim_flow_ratio",             1.0 },
+        { "gcode_comments",              true },
+    });
+    return config;
+}
+
+BrimSample export_outer_brim(bool set_gap, double gap)
+{
+    DynamicPrintConfig config = outer_brim_config();
+    if (set_gap)
+        config.set_deserialize_strict({ { "brim_object_gap", gap } });
+
+    Print print;
+    init_and_process_print({ make_cube(20.0, 20.0, 2.0) }, print, config);
+    BrimSample sample;
+    sample.model_bounds = first_layer_model_bounds(print);
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    sample.brim = inspect_brim(output, config, &sample.model_bounds);
+    return sample;
+}
+
+TriangleMesh shallow_nib_prism(const Vec3d &part_offset)
+{
+    // its_make_prism() defines a triangle with a 0.5 mm +Z apex and a 2 mm
+    // base width. Rx(+90) then Rz(+90) maps that apex to +X; translation places
+    // its base on the cube's right face at X=20, so the first-layer slice spans
+    // 20.5 mm in X. The 0.5 mm tip is below the positive 1 mm DP tolerance.
+    TriangleMesh nib = make_prism(2.0f, 2.0f, 0.5f);
+    nib.rotate_x(float(PI / 2.0));
+    nib.rotate_z(float(PI / 2.0));
+    nib.translate(float(20.0 - part_offset.x()), float(10.0 - part_offset.y()),
+                  float(1.0 - part_offset.z()));
+    return nib;
+}
+
+BrimSample export_auto_ears(double detection_length)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "initial_layer_line_width",   0.5 },
+        { "elefant_foot_compensation",   0.0 },
+        { "xy_contour_compensation",    0.0 },
+        { "xy_hole_compensation",       0.0 },
+        { "skirt_loops",                0 },
+        { "raft_layers",                0 },
+        { "enable_support",              false },
+        { "enable_prime_tower",          false },
+        { "enable_arc_fitting",          false },
+        { "brim_type",                  "brim_ears" },
+        { "brim_width",                  5.0 },
+        { "brim_flow_ratio",             1.0 },
+        { "brim_object_gap",             0.0 },
+        // At this triangle tip the internal angle is 126.87 degrees. Brim.cpp
+        // passes (180 - max_angle) to Polygon::convex_points(), so 130 degrees
+        // admits its ~53-degree turn while preserving the square-corner ears.
+        { "brim_ears_max_angle",         130.0 },
+        { "brim_ears_outer_only",        true },
+        { "brim_ears_detection_length",  detection_length },
+        { "gcode_comments",              true },
+    });
+
+    Print print;
+    Model model;
+    init_print({ make_cube(20.0, 20.0, 2.0) }, print, model, config, nullptr, false);
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    const Vec3d part_offset = model.objects.front()->volumes.front()->get_offset();
+    ModelVolume *nib = model.objects.front()->add_volume(
+        shallow_nib_prism(part_offset), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(nib != nullptr);
+    nib->set_offset(part_offset);
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+
+    BrimSample sample;
+    sample.model_bounds = first_layer_model_bounds(print);
+    const double nib_tip_x = sample.model_bounds.max_x;
+    const double nib_tip_y = (sample.model_bounds.min_y + sample.model_bounds.max_y) / 2.0;
+    const double model_x_span = sample.model_bounds.max_x - sample.model_bounds.min_x;
+    const double model_y_span = sample.model_bounds.max_y - sample.model_bounds.min_y;
+    INFO("first-layer model bounds x=[" << sample.model_bounds.min_x << ", "
+         << sample.model_bounds.max_x << "] span=" << model_x_span << " mm; y=["
+         << sample.model_bounds.min_y << ", " << sample.model_bounds.max_y
+         << "] span=" << model_y_span << " mm; nib tip=(" << nib_tip_x << ", " << nib_tip_y << ")");
+    REQUIRE_THAT(model_x_span, Catch::Matchers::WithinAbs(20.5, 0.02));
+    REQUIRE_THAT(model_y_span, Catch::Matchers::WithinAbs(20.0, 0.02));
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    sample.brim = inspect_brim(output, config, &sample.model_bounds, nib_tip_x, nib_tip_y);
+    return sample;
+}
+
+void require_same_model_bounds(const Bounds &a, const Bounds &b)
+{
+    CHECK_THAT(a.min_x, Catch::Matchers::WithinAbs(b.min_x, 0.01));
+    CHECK_THAT(a.max_x, Catch::Matchers::WithinAbs(b.max_x, 0.01));
+    CHECK_THAT(a.min_y, Catch::Matchers::WithinAbs(b.min_y, 0.01));
+    CHECK_THAT(a.max_y, Catch::Matchers::WithinAbs(b.max_y, 0.01));
+}
+
+void require_valid_brim(const BrimEvidence &brim)
+{
+    REQUIRE(brim.finite);
+    REQUIRE(brim.arc_moves == 0);
+    REQUIRE(brim.positive_xy_moves > 0);
+    REQUIRE(brim.xy_length > 0.0);
+    REQUIRE(brim.filament > 0.0);
+    REQUIRE(std::isfinite(brim.minimum_model_clearance));
+    REQUIRE(std::isfinite(brim.bounds.min_x));
+    REQUIRE(std::isfinite(brim.bounds.max_x));
+    REQUIRE(std::isfinite(brim.bounds.min_y));
+    REQUIRE(std::isfinite(brim.bounds.max_y));
+}
+
+} // namespace brim_ears_gap_boundaries
+
+TEST_CASE("Brim object gap changes emitted clearance without changing the model",
+          "[SkirtBrim][BrimEarsGapBoundaries]")
+{
+    using namespace brim_ears_gap_boundaries;
+    const BrimSample default_gap = export_outer_brim(false, 0.0);
+    const BrimSample minimum_gap = export_outer_brim(true, 0.0);
+    const BrimSample middle_gap = export_outer_brim(true, 1.0);
+    const BrimSample maximum_gap = export_outer_brim(true, 2.0);
+
+    require_valid_brim(default_gap.brim);
+    require_valid_brim(minimum_gap.brim);
+    require_valid_brim(middle_gap.brim);
+    require_valid_brim(maximum_gap.brim);
+    require_same_model_bounds(default_gap.model_bounds, minimum_gap.model_bounds);
+    require_same_model_bounds(minimum_gap.model_bounds, middle_gap.model_bounds);
+    require_same_model_bounds(middle_gap.model_bounds, maximum_gap.model_bounds);
+
+    CHECK_THAT(default_gap.brim.minimum_model_clearance,
+               Catch::Matchers::WithinAbs(minimum_gap.brim.minimum_model_clearance, 0.03));
+    CHECK(middle_gap.brim.minimum_model_clearance > minimum_gap.brim.minimum_model_clearance + 0.8);
+    CHECK(maximum_gap.brim.minimum_model_clearance > middle_gap.brim.minimum_model_clearance + 0.8);
+}
+
+TEST_CASE("Brim ear detection length zero keeps a small corner in the emitted geometry",
+          "[SkirtBrim][BrimEarsGapBoundaries]")
+{
+    using namespace brim_ears_gap_boundaries;
+    const BrimSample disabled = export_auto_ears(0.0);
+    const BrimSample default_length = export_auto_ears(1.0);
+    const BrimSample positive_length = export_auto_ears(2.0);
+
+    require_valid_brim(disabled.brim);
+    require_valid_brim(default_length.brim);
+    require_valid_brim(positive_length.brim);
+    require_same_model_bounds(disabled.model_bounds, default_length.model_bounds);
+    require_same_model_bounds(default_length.model_bounds, positive_length.model_bounds);
+    INFO("disabled ear: nearest segment=" << disabled.brim.closest_segment_to_nib_tip
+         << " mm, nearest endpoint=" << disabled.brim.closest_endpoint_to_nib_tip << " mm");
+    INFO("1 mm ear: nearest segment=" << default_length.brim.closest_segment_to_nib_tip
+         << " mm, nearest endpoint=" << default_length.brim.closest_endpoint_to_nib_tip << " mm");
+    INFO("2 mm ear: nearest segment=" << positive_length.brim.closest_segment_to_nib_tip
+         << " mm, nearest endpoint=" << positive_length.brim.closest_endpoint_to_nib_tip << " mm");
+    CHECK(disabled.brim.segments_near_nib_tip > 0);
+    CHECK(default_length.brim.segments_near_nib_tip == 0);
+    CHECK(positive_length.brim.segments_near_nib_tip == 0);
+    CHECK(disabled.brim.closest_segment_to_nib_tip < 4.9);
+    CHECK(default_length.brim.closest_segment_to_nib_tip >= 4.9);
+    CHECK(positive_length.brim.closest_segment_to_nib_tip >= 4.9);
+}
