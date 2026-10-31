@@ -1,8 +1,13 @@
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <Eigen/Geometry>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -757,4 +762,80 @@ TEST_CASE("Convex polygon intersection test prusa polygons", "[Geometry][Rotcali
 
         REQUIRE(res == ref);
     }
+}
+
+TEST_CASE("Transforming a 3D line applies rotation and translation to both endpoints",
+          "[Geometry][Line]")
+{
+    Transform3d transform = Transform3d::Identity();
+    transform.linear() = Eigen::AngleAxisd(std::acos(-1.0) / 2.0, Vec3d::UnitZ()).toRotationMatrix();
+    transform.translation() = Vec3d(10.0, -3.0, 2.0);
+
+    const Linef3 input(Vec3d(1.0, 2.0, 3.0), Vec3d(4.0, 5.0, 6.0));
+    const Linef3 actual = Slic3r::transform(input, transform);
+    CHECK_THAT(actual.a.x(), Catch::Matchers::WithinAbs(8.0, 1e-12));
+    CHECK_THAT(actual.a.y(), Catch::Matchers::WithinAbs(-2.0, 1e-12));
+    CHECK_THAT(actual.a.z(), Catch::Matchers::WithinAbs(5.0, 1e-12));
+    CHECK_THAT(actual.b.x(), Catch::Matchers::WithinAbs(5.0, 1e-12));
+    CHECK_THAT(actual.b.y(), Catch::Matchers::WithinAbs(1.0, 1e-12));
+    CHECK_THAT(actual.b.z(), Catch::Matchers::WithinAbs(8.0, 1e-12));
+}
+
+TEST_CASE("Infinite and segment intersections distinguish crossing parallel and coincident lines",
+          "[Geometry][Line]")
+{
+    const Line horizontal(Point(0, 0), Point(10, 0));
+    Point intersection(17, 19);
+    const Point unchanged(17, 19);
+
+    CHECK(horizontal.intersection_infinite(Line(Point(20, -5), Point(20, 5)), &intersection));
+    CHECK(intersection == Point(20, 0)); // The crossing is outside the finite horizontal segment.
+
+    intersection = unchanged;
+    CHECK_FALSE(horizontal.intersection_infinite(Line(Point(0, 2), Point(10, 2)), &intersection));
+    CHECK(intersection == unchanged);
+    CHECK_FALSE(horizontal.intersection_infinite(Line(Point(2, 0), Point(8, 0)), &intersection));
+    CHECK(intersection == unchanged);
+    CHECK_FALSE(horizontal.intersection(Line(Point(0, 2), Point(10, 2)), &intersection));
+    CHECK_FALSE(horizontal.intersection(Line(Point(2, 0), Point(8, 0)), &intersection));
+    CHECK(intersection == unchanged);
+
+    const coord_t half_max = std::numeric_limits<coord_t>::max() / 2;
+    const Line wide_horizontal(Point(-half_max, 0), Point(half_max, 0));
+    const Line nearly_parallel(Point(-half_max, 1), Point(half_max, 2));
+    CHECK_FALSE(wide_horizontal.intersection_infinite(nearly_parallel, &intersection));
+    CHECK(intersection == unchanged);
+}
+
+TEST_CASE("Line perpendicular distances and angle predicates cover degenerate segments",
+          "[Geometry][Line]")
+{
+    const Line horizontal(Point(0, 0), Point(4, 0));
+    CHECK_THAT(horizontal.perp_distance_to(Point(2, 3)), Catch::Matchers::WithinAbs(3.0, 1e-12));
+    CHECK(horizontal.perpendicular_to(std::acos(-1.0) / 2.0));
+    CHECK_FALSE(horizontal.perpendicular_to(0.0));
+
+    const Line point_segment(Point(5, 5), Point(5, 5));
+    CHECK_THAT(point_segment.perp_distance_to(Point(8, 9)), Catch::Matchers::WithinAbs(5.0, 1e-12));
+}
+
+TEST_CASE("Line clipping and 3D plane intersection return analytic endpoints",
+          "[Geometry][Line]")
+{
+    const BoundingBox bounds(Point(0, 0), Point(10, 10));
+    Line crossing(Point(-5, 5), Point(15, 5));
+    REQUIRE(crossing.clip_with_bbox(bounds));
+    CHECK(crossing.a == Point(0, 5));
+    CHECK(crossing.b == Point(10, 5));
+
+    Line outside(Point(-5, -5), Point(-1, -1));
+    const Line outside_before = outside;
+    CHECK_FALSE(outside.clip_with_bbox(bounds));
+    CHECK(outside == outside_before);
+
+    const Linef3 sloped(Vec3d(1.0, 2.0, 3.0), Vec3d(5.0, 10.0, 7.0));
+    const Vec3d hit = sloped.intersect_plane(5.0);
+    CHECK_THAT(hit.x(), Catch::Matchers::WithinAbs(3.0, 1e-12));
+    CHECK_THAT(hit.y(), Catch::Matchers::WithinAbs(6.0, 1e-12));
+    CHECK_THAT(hit.z(), Catch::Matchers::WithinAbs(5.0, 1e-12));
 }
