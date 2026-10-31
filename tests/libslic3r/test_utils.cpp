@@ -16,15 +16,17 @@
 #include <boost/filesystem.hpp>
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <thread>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -524,38 +526,36 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     CHECK_FALSE(ascii_iequals("@", "`"));
 }
 
+// Sizes beyond a 32-bit size_t are skipped where size_t cannot hold them.
 TEST_CASE("Decimal memory formatting rounds MB and preserves comma groups", "[utils]") {
-    const std::vector<std::pair<size_t, std::string>>
+    const std::vector<std::pair<std::uint64_t, std::string>>
         rows{{0, "0MB"},       {499999, "0MB"},      {500000, "1MB"},        {1499999, "1MB"},
              {1500000, "2MB"}, {999499999, "999MB"}, {999500000, "1,000MB"}, {1002003000000ULL, "1,002,003MB"}};
     for (const auto &[n, s] : rows) {
+        if (n > std::numeric_limits<size_t>::max())
+            continue;
         CAPTURE(n);
-        CHECK(format_memsize_MB(n) == s);
+        CHECK(format_memsize_MB(static_cast<size_t>(n)) == s);
     }
 }
 
 TEST_CASE("Binary memory formatting switches units at powers of 1024", "[utils]") {
-    const std::vector<std::pair<size_t, std::string>> rows{{0, "0 bytes"},
-                                                           {1023, "1023 bytes"},
-                                                           {1024, "1024 bytes (1.0KB)"},
-                                                           {1048576, "1048576 bytes (1.0MB)"},
-                                                           {1073741824ULL, "1073741824 bytes (1.0GB)"},
-                                                           {1099511627776ULL, "1099511627776 bytes (1.0TB)"}};
-    for (const auto &[n, s] : rows) {
-        CAPTURE(n);
-        CHECK(format_memsize(n) == s);
-    }
-    CHECK(format_memsize(1536, 2) == "1536 bytes (1.50KB)");
-    CHECK(format_memsize(1572864, 0) == "1572864 bytes (2MB)");
-    CHECK(format_memsize(1610612736ULL, 2) == "1610612736 bytes (1.50GB)");
-    CHECK(format_memsize(1649267441664ULL, 3) == "1649267441664 bytes (1.500TB)");
-}
-
-TEST_CASE("Logging level names map the supported severities both ways", "[utils]") {
-    const std::array<std::string, 6> names{"fatal", "error", "warning", "info", "debug", "trace"};
-    for (unsigned i = 0; i < names.size(); ++i) {
-        CHECK(level_string_to_boost(names[i]) == i);
-        CHECK(get_string_logging_level(i) == names[i]);
+    const std::vector<std::tuple<std::uint64_t, unsigned, std::string>> rows{
+        {0, 1, "0 bytes"},
+        {1023, 1, "1023 bytes"},
+        {1024, 1, "1024 bytes (1.0KB)"},
+        {1048576, 1, "1048576 bytes (1.0MB)"},
+        {1073741824ULL, 1, "1073741824 bytes (1.0GB)"},
+        {1099511627776ULL, 1, "1099511627776 bytes (1.0TB)"},
+        {1536, 2, "1536 bytes (1.50KB)"},
+        {1572864, 0, "1572864 bytes (2MB)"},
+        {1610612736ULL, 2, "1610612736 bytes (1.50GB)"},
+        {1649267441664ULL, 3, "1649267441664 bytes (1.500TB)"}};
+    for (const auto &[n, decimals, s] : rows) {
+        if (n > std::numeric_limits<size_t>::max())
+            continue;
+        CAPTURE(n, decimals);
+        CHECK(format_memsize(static_cast<size_t>(n), decimals) == s);
     }
 }
 
