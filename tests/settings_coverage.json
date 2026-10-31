@@ -727,13 +727,14 @@
       "reason": "No-brim and outer-brim configurations are distinguished by printed mass and center-of-mass output; the complete brim enum domain is not claimed."
     },
     "brim_width": {
-      "test": "tests/fff_print/test_gcodeprocessor.cpp",
-      "tag": "[GCodeProcessor]",
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[BrimRangeBoundaries]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "A 5 mm outer-brim width reaches a mass and center-of-mass oracle; numeric boundaries are not claimed."
+      "reason": "The public Print export holds the first-layer model fixed and checks default/explicit-zero disablement, 5 mm clearance, and both endpoints of the registered 0\u2013100 mm range. The endpoint oracle parses actual Brim-role G-code and measures all four emitted path extents from independently sliced first-layer model bounds; 100 mm must fit a 600 mm bed with the 20 mm cube centered at 300 mm. Each row requires finite G-code, positive perimeter output, identical model bounds, and equal perimeter segment counts, finite positive perimeter motion, and equal model XY path length/filament totals. The 50-case native control and all three ordinary-assertion mutation probes pass."
     },
     "enable_overhang_bridge_fan": {
       "test": "tests/fff_print/test_cooling.cpp",
@@ -2684,22 +2685,24 @@
       "reason": "Direct GCode mass-limit consumer uses an explicit bed mass 10 plus print mass 100 to check the force-derived cap; numeric boundaries and independent bed-mass variation remain unclaimed."
     },
     "leading_brim_length": {
-      "test": "tests/fff_print/test_gcode.cpp",
-      "tag": "[GCodeBroad]",
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[BrimRangeBoundaries]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Separate zero-to-five variations on a belt step fixture increase parsed extrusion-path length. Broader dimensions and printer interactions remain unclaimed. Additional [GCodeBeltApron] cases compare 30 and 50 mm leading lengths and require extrusion in every prologue band."
+      "reason": "A public belt Print export preserves the default/explicit-zero all-zero rows, which must emit no Brim-role moves. The 5 and 100 mm rows keep extra_brim_width=5 mm, and an otherwise identical leading=0/lateral=5 mm positive-brim anchor provides the contact-footprint reference. The differential emitted-path min-Y is converted from slice Y to true 45-degree belt distance by dividing by cos(45\u00b0), avoiding use of the whole rotated model bounds as a proxy for the belt contact footprint. Cross-belt X bounds stay fixed; model slices, perimeter segment counts, finite positive perimeter motion, model XY path length and filament totals stay invariant. The centered 20 mm cube uses a 600 mm square build area/1200 mm height, Print::validate must pass, and generated brim bounds remain within the configured area. The 50-case native control and all three ordinary-assertion mutation probes pass."
     },
     "extra_brim_width": {
-      "test": "tests/fff_print/test_gcode.cpp",
-      "tag": "[GCodeBroad]",
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[BrimRangeBoundaries]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Separate zero-to-five variations on a belt step fixture increase parsed extrusion-path length. Broader dimensions and printer interactions remain unclaimed. Additional [GCodeBeltApron] cases isolate 0 versus 6 mm lateral extension and require increased emitted brim path."
+      "reason": "A public belt Print export isolates lateral width with brim and leading width fixed at zero; default/explicit zero must emit no Brim-role moves, while 5 and 100 mm must emit positive Brim and model paths. The independent belt-plane oracle checks left and right cross-belt X reach separately at both positive values, then requires Y/feed-axis extent unchanged. It requires unchanged public model slice bounds/perimeter segment counts and bounds the 100 mm paths within the same valid centered 600 mm build area. The 50-case native control and all three ordinary-assertion mutation probes pass."
     },
     "belt_printer": {
       "test": "tests/fff_print/test_gcode.cpp",
