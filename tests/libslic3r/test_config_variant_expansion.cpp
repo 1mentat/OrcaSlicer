@@ -5,6 +5,12 @@
 #include <vector>
 #include <set>
 #include <cmath>
+#include <memory>
+#include <sstream>
+
+#include <cereal/archives/binary.hpp>
+#include <cereal/types/string.hpp>
+#include <cereal/types/vector.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -38,6 +44,50 @@ void add_print_variant_columns(DynamicPrintConfig &config)
     config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = {"Direct Drive Standard", "Direct Drive High Flow",
                                                                                   "Direct Drive Standard", "Direct Drive High Flow"};
     config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {30., 200., 50., 500.};
+}
+
+// Undo/redo snapshots archive options through ConfigOptionDef::save/load_option_to/from_archive,
+// which pick the concrete option class from def->type and def->nullable. Round-trip every
+// registered default through that dispatch. A def whose type or nullable flag disagrees with its
+// default would be cast to the wrong class, so it is reported and not archived.
+void round_trip_registered_option_archives(const ConfigDef &definition)
+{
+    size_t round_trips = 0;
+    for (const auto &entry : definition.options) {
+        const ConfigOptionDef &option_def = entry.second;
+        if (option_def.default_value.get() == nullptr)
+            continue;
+        INFO("registered option: " << option_def.opt_key);
+        CHECK(option_def.default_value->type() == option_def.type);
+        CHECK(option_def.default_value->nullable() == option_def.nullable);
+        if (option_def.default_value->type() != option_def.type ||
+            option_def.default_value->nullable() != option_def.nullable)
+            continue;
+
+        std::unique_ptr<ConfigOption> materialized(option_def.create_default_option());
+        REQUIRE(materialized != nullptr);
+        REQUIRE(materialized->type() == option_def.type);
+        REQUIRE(materialized->nullable() == option_def.nullable);
+        CHECK(*materialized == *option_def.default_value);
+
+        std::stringstream bytes;
+        {
+            cereal::BinaryOutputArchive archive(bytes);
+            option_def.save_option_to_archive(archive, materialized.get());
+        }
+
+        bytes.seekg(0);
+        {
+            cereal::BinaryInputArchive archive(bytes);
+            std::unique_ptr<ConfigOption> restored(option_def.load_option_from_archive(archive));
+            REQUIRE(restored != nullptr);
+            REQUIRE(restored->type() == option_def.type);
+            REQUIRE(restored->nullable() == option_def.nullable);
+            CHECK(*restored == *materialized);
+        }
+        ++round_trips;
+    }
+    REQUIRE(round_trips > 0);
 }
 
 } // namespace
@@ -955,4 +1005,20 @@ TEST_CASE("Support filament identity follows vendor identifiers and generic mate
         CHECK(config.get_filament_type(displayed, 0) == "PLA");
         CHECK(displayed == "PLA");
     }
+}
+
+// Known bug: options registered with nullable=false keep a Nullable default, so archive load
+// rebuilds them as non-nullable options; fixed by the follow-up fix PR
+TEST_CASE("Registered print options round-trip through binary option archives", "[Config][ConfigArchive][!shouldfail]")
+{
+    round_trip_registered_option_archives(print_config_def);
+}
+
+// Known bug: load_slicedata is registered as coStrings with a ConfigOptionString default, so
+// def-type dispatch builds the wrong class; fixed by the follow-up fix PR
+TEST_CASE("Registered CLI options round-trip through binary option archives", "[Config][ConfigArchive][!shouldfail]")
+{
+    round_trip_registered_option_archives(cli_actions_config_def);
+    round_trip_registered_option_archives(cli_transform_config_def);
+    round_trip_registered_option_archives(cli_misc_config_def);
 }
