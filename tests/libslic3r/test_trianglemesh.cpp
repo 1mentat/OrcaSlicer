@@ -141,6 +141,15 @@ TEST_CASE("TriangleMesh affine and mirror operations preserve their stated orien
     CHECK_THAT(scaled.size().x(), WithinAbs(4., 1e-5));
     CHECK_THAT(scaled.size().y(), WithinAbs(9., 1e-5));
     CHECK_THAT(scaled.size().z(), WithinAbs(16., 1e-5));
+    // The vertices themselves are scaled, not just the cached statistics.
+    CHECK_THAT(its_volume(scaled.its), WithinAbs(576.f, 1e-3f));
+    const BoundingBoxf3 scaled_box = bounding_box(scaled.its);
+    REQUIRE(scaled_box.min.isApprox(Vec3d::Zero(), 1e-6));
+    REQUIRE(scaled_box.max.isApprox(Vec3d(4., 9., 16.), 1e-5));
+    TriangleMesh uniform = make_cube(2., 3., 4.);
+    uniform.scale(2.f);
+    REQUIRE(bounding_box(uniform.its).max.isApprox(Vec3d(4., 6., 8.), 1e-5));
+    CHECK_THAT(its_volume(uniform.its), WithinAbs(192.f, 1e-3f));
 
     TriangleMesh reflected = make_cube(2., 3., 4.);
     Transform3d reflection = Transform3d::Identity();
@@ -521,6 +530,12 @@ TEST_CASE("Convex hull construction encloses a translated tetrahedron", "[Triang
     REQUIRE(hull.vertices.size() == 4);
     REQUIRE(hull.indices.size() == 4);
     CHECK_THAT(its_volume(hull), WithinAbs(1000.f / 6.f, 1e-3f));
+    // The hull vertices are exactly the four translated corners; the interior points are dropped.
+    for (size_t corner = 0; corner < 4; ++corner) {
+        const Vec3f& expected = points[corner];
+        CHECK(std::count_if(hull.vertices.begin(), hull.vertices.end(),
+                            [&expected](const Vec3f& vertex) { return (vertex - expected).norm() < 1e-5f; }) == 1);
+    }
     const TriangleMesh hull_mesh(hull);
     CHECK(hull_mesh.stats().open_edges == 0);
 }
