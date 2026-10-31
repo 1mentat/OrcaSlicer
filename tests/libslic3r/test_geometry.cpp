@@ -772,13 +772,15 @@ TEST_CASE("Point nearest-index query accepts mutable point pointers", "[Geometry
 
 TEST_CASE("Point3 nearest query uses XY distance and preserves query Z", "[Geometry][Point]")
 {
-    const Point3 query(12, 1, 77);
-    const Points candidates{Point(0, 0), Point(10, 0)};
+    const Point3 query(10, 10, 77);
+    // Ignoring Y would pick the first candidate (same X), ignoring X the last (same Y);
+    // only the full XY distance picks the middle one.
+    const Points candidates{Point(10, -20), Point(13, 8), Point(40, 10)};
     Point3 nearest(0, 0, -1);
 
     REQUIRE(query.nearest_point(candidates, &nearest));
-    CHECK(nearest.x() == 10);
-    CHECK(nearest.y() == 0);
+    CHECK(nearest.x() == 13);
+    CHECK(nearest.y() == 8);
     CHECK(nearest.z() == 77);
 }
 
