@@ -389,6 +389,7 @@ void TriangleMesh::rotate(double angle, Point* center)
         this->translate(-c(0), -c(1), 0);
         its_rotate_z(this->its, (float)angle);
         this->translate(c(0), c(1), 0);
+        update_bounding_box(this->its, this->m_stats);
     }
 }
 
