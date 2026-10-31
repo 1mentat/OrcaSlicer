@@ -6733,9 +6733,12 @@ TEST_CASE("Cloud preset loading performs two-pass inheritance and forward substi
     const Preset *child_preset = bundle.prints.find_preset("A Child");
     REQUIRE(root_preset != nullptr);
     REQUIRE(child_preset != nullptr);
+    // Smoke check only: an entry with an unknown or missing type has no collection to load
+    // into, so nothing could install it even without the type checks.
     CHECK(bundle.prints.find_preset("Ignored Type") == nullptr);
     CHECK(bundle.prints.find_preset("Missing Type") == nullptr);
     CHECK(root_preset->inherits().empty());
+    CHECK(root_preset->base_id.empty());
     CHECK(root_preset->setting_id == "cloud-root-id");
     CHECK(root_preset->user_id == "account-1");
     CHECK(root_preset->updated_time == 10);
@@ -6743,6 +6746,8 @@ TEST_CASE("Cloud preset loading performs two-pass inheritance and forward substi
     CHECK_THAT(root_preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
     CHECK(child_preset->setting_id == "cloud-child-id");
     CHECK(child_preset->user_id == "account-1");
+    CHECK(child_preset->updated_time == 10);
+    CHECK(child_preset->version == *Semver::parse("1.0.0"));
     CHECK(child_preset->inherits() == "Z Root");
     CHECK(child_preset->base_id == root_preset->setting_id);
     CHECK_THAT(child_preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
@@ -6752,57 +6757,83 @@ TEST_CASE("Cloud preset loading performs two-pass inheritance and forward substi
     CHECK(substitutions.front().substitutions.front().old_value == "future-generator");
 }
 
-TEST_CASE("Cloud filament loading inherits null filament identity and rejects bad metadata", "[PresetFiles]")
+TEST_CASE("Cloud filament loading inherits null filament identity and rejects unresolvable or malformed entries", "[PresetFiles]")
 {
     PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
                                 static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
     PresetsConfigSubstitutions substitutions;
+    auto load = [&](const std::string &name, std::map<std::string, std::string> values) {
+        return collection.load_user_preset(name, std::move(values), substitutions,
+                                           ForwardCompatibilitySubstitutionRule::EnableSilent);
+    };
 
     auto parent_values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "filament-setting-id", "account-1");
     parent_values.emplace(BBL_JSON_KEY_FILAMENT_ID, "filament-family-id");
     parent_values.emplace("filament_diameter", "1.75,2.85");
-    REQUIRE(collection.load_user_preset("Cloud Filament", std::move(parent_values), substitutions,
-                                        ForwardCompatibilitySubstitutionRule::EnableSilent));
+    REQUIRE(load("Cloud Filament", std::move(parent_values)));
+    const size_t size_with_parent = collection.size();
 
-    auto child_values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "filament-child-id", "account-1", "Cloud Filament");
-    child_values.emplace(BBL_JSON_KEY_FILAMENT_ID, "null");
-    REQUIRE(collection.load_user_preset("Cloud Filament Child", std::move(child_values), substitutions,
-                                        ForwardCompatibilitySubstitutionRule::EnableSilent));
-    const Preset *child = collection.find_preset("Cloud Filament Child");
-    REQUIRE(child != nullptr);
-    CHECK(child->filament_id == "filament-family-id");
-    CHECK(child->base_id == "filament-setting-id");
-    REQUIRE(child->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
-    check_double_vector(child->config.option<ConfigOptionFloats>("filament_diameter")->values, { 1.75, 2.85 });
-    CHECK(child->setting_id == "filament-child-id");
-    CHECK(child->user_id == "account-1");
-    const Preset *parent = collection.find_preset("Cloud Filament");
-    REQUIRE(parent != nullptr);
-    CHECK(parent->filament_id == "filament-family-id");
-    CHECK(parent->setting_id == "filament-setting-id");
+    SECTION("a child with a null filament id takes the parent's identity") {
+        auto child_values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "filament-child-id", "account-1", "Cloud Filament");
+        child_values.emplace(BBL_JSON_KEY_FILAMENT_ID, "null");
+        REQUIRE(load("Cloud Filament Child", std::move(child_values)));
+        const Preset *child = collection.find_preset("Cloud Filament Child");
+        REQUIRE(child != nullptr);
+        CHECK(child->filament_id == "filament-family-id");
+        CHECK(child->base_id == "filament-setting-id");
+        REQUIRE(child->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
+        check_double_vector(child->config.option<ConfigOptionFloats>("filament_diameter")->values, { 1.75, 2.85 });
+        CHECK(child->setting_id == "filament-child-id");
+        CHECK(child->user_id == "account-1");
+        CHECK(child->updated_time == 10);
+        CHECK(child->version == *Semver::parse("1.0.0"));
+        const Preset *parent = collection.find_preset("Cloud Filament");
+        REQUIRE(parent != nullptr);
+        CHECK(parent->filament_id == "filament-family-id");
+        CHECK(parent->setting_id == "filament-setting-id");
+        CHECK(parent->base_id.empty());
+    }
 
-    const size_t size_before_invalid = collection.size();
-    auto missing_parent = cloud_values(PRESET_IOT_FILAMENT_TYPE, "missing-parent-id", "account-1", "No Such Filament");
-    CHECK_FALSE(collection.load_user_preset("Orphan Filament", std::move(missing_parent), substitutions,
-                                            ForwardCompatibilitySubstitutionRule::EnableSilent));
-    CHECK(collection.find_preset("Orphan Filament") == nullptr);
-    CHECK(collection.size() == size_before_invalid);
+    SECTION("a child whose parent cannot be resolved is rejected") {
+        CHECK_FALSE(load("Orphan Filament",
+                         cloud_values(PRESET_IOT_FILAMENT_TYPE, "missing-parent-id", "account-1", "No Such Filament")));
+        CHECK(collection.find_preset("Orphan Filament") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
 
-    auto missing_version = std::map<std::string, std::string>{
-        { BBL_JSON_KEY_SETTING_ID, "no-version-id" },
-        { BBL_JSON_KEY_USER_ID, "account-1" },
-    };
-    CHECK_FALSE(collection.load_user_preset("No Version", std::move(missing_version), substitutions,
-                                            ForwardCompatibilitySubstitutionRule::EnableSilent));
-    CHECK(collection.find_preset("No Version") == nullptr);
+    SECTION("an unparsable version is rejected") {
+        auto values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "bad-version-id", "account-1");
+        values[BBL_JSON_KEY_VERSION] = "not-a-version";
+        CHECK_FALSE(load("Bad Version", std::move(values)));
+        CHECK(collection.find_preset("Bad Version") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
 
-    auto missing_user = std::map<std::string, std::string>{
-        { BBL_JSON_KEY_VERSION, "1.0.0" },
-        { BBL_JSON_KEY_SETTING_ID, "no-user-id" },
-    };
-    CHECK_FALSE(collection.load_user_preset("No User", std::move(missing_user), substitutions,
-                                            ForwardCompatibilitySubstitutionRule::EnableSilent));
-    CHECK(collection.find_preset("No User") == nullptr);
+    SECTION("a missing version is rejected") {
+        // Rejected by the missing-version check, or, without it, by the unparsable-version
+        // check on the empty string it would read; this pins the outcome only.
+        auto values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "no-version-id", "account-1");
+        values.erase(BBL_JSON_KEY_VERSION);
+        CHECK_FALSE(load("No Version", std::move(values)));
+        CHECK(collection.find_preset("No Version") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
+
+    SECTION("a missing setting id is rejected") {
+        auto values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "unused", "account-1");
+        values.erase(BBL_JSON_KEY_SETTING_ID);
+        CHECK_FALSE(load("No Setting", std::move(values)));
+        CHECK(collection.find_preset("No Setting") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
+
+    SECTION("a missing user id is rejected") {
+        auto values = cloud_values(PRESET_IOT_FILAMENT_TYPE, "no-user-id", "unused");
+        values.erase(BBL_JSON_KEY_USER_ID);
+        CHECK_FALSE(load("No User", std::move(values)));
+        CHECK(collection.find_preset("No User") == nullptr);
+        CHECK(collection.size() == size_with_parent);
+    }
 }
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
