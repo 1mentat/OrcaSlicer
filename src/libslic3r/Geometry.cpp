@@ -568,22 +568,36 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
     assert(scaling_factor > 0.0);
 
     // scaling_factor is a magnitude; any mirror stays in the orthogonal factor.
-    // The stretch keeps its skew (off-diagonal terms). Scaling its row and column by the same
-    // factor (D * S * D) keeps it positive definite, so the determinant keeps its sign.
-    // A degenerate (near zero) axis or an invalid factor falls back to just replacing the entry.
     auto [orthogonal, stretch] = extract_orthogonal_stretch(m_matrix);
-    if (stretch(axis, axis) > EPSILON && scaling_factor > 0.0 && std::isfinite(scaling_factor)) {
-        const double k = std::sqrt(scaling_factor / stretch(axis, axis));
+    Transform3d scaled = stretch;
+    scaled(axis, axis) = scaling_factor;
+
+    // Replacing the entry is exact for a right-handed transform whose axis is not coupled to the
+    // others. Otherwise scale the axis' row and column by the same factor (D * S * D): the stretch
+    // keeps its skew and stays positive definite, so the determinant keeps its sign. If that is not
+    // possible (degenerate axis, invalid factor or overflow), keep the plain replacement; handedness
+    // is then not guaranteed. An extremely small factor can still make the result numerically
+    // singular, and rounding then decides the sign of its determinant.
+    const double current = stretch(axis, axis);
+    bool coupled = false;
+    for (int i = 0; i < 3; ++i)
+        if (i != axis && std::abs(stretch(axis, i)) > 1e-9 * std::sqrt(std::abs(current * stretch(i, i))))
+            coupled = true;
+    if ((is_left_handed() || coupled) && current > 0.0 && std::isfinite(current) && scaling_factor > 0.0 &&
+        std::isfinite(scaling_factor)) {
+        const double k = std::sqrt(scaling_factor) / std::sqrt(current);
+        Transform3d congruent = scaled;
         for (int i = 0; i < 3; ++i)
             if (i != axis) {
-                stretch(axis, i) *= k;
-                stretch(i, axis) *= k;
+                congruent(axis, i) *= k;
+                congruent(i, axis) *= k;
             }
+        if (std::isfinite(k) && congruent.matrix().allFinite())
+            scaled = congruent;
     }
-    stretch(axis, axis) = scaling_factor;
 
     const Vec3d offset = get_offset();
-    m_matrix = orthogonal * stretch;
+    m_matrix = orthogonal * scaled;
     m_matrix.translation() = offset;
 }
 
