@@ -33,6 +33,7 @@ add_executable(${_TEST_NAME}_tests
     test_preset_options.cpp
     test_elephant_foot_compensation.cpp
     test_extrusion_simulator.cpp
+    test_intersection_points_contracts.cpp
     test_fill_corner_smoothing.cpp
     test_filament_mixer.cpp
     test_fill_plane_path.cpp
