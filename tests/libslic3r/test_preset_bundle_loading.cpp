@@ -6518,3 +6518,60 @@ TEST_CASE("A user filament whose derived compatible printer cannot be written ba
     CHECK(read_file(file) == before);
 }
 #endif
+
+TEST_CASE("Preset bundle filament sizing keeps maps and mixed metadata aligned", "[Preset][Bundle][Filament]")
+{
+    PresetBundle bundle;
+    bundle.filament_presets = {"A", "B"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#000000", "#111111"};
+    bundle.set_num_filaments(3, "#ABCDEF");
+    CHECK(bundle.filament_presets == std::vector<std::string>{"A", "B", "B"});
+    // Only the appended slot takes the new colour.
+    CHECK(bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#000000", "#111111", "#ABCDEF"});
+    CHECK(bundle.project_config.option<ConfigOptionInts>("filament_map")->values.size() == 3);
+    CHECK(bundle.num_physical_filaments() == 3);
+    CHECK(bundle.num_mixed_filaments() == 0);
+
+    bundle.project_config.option<ConfigOptionBools>("filament_is_mixed")->values = {false, false, true};
+    bundle.project_config.option<ConfigOptionStrings>("filament_mixed_components")->values = {"", "", "1,2"};
+    CHECK(bundle.is_mixed_filament(2));
+    CHECK(bundle.num_mixed_filaments() == 1);
+    CHECK(bundle.num_physical_filaments() == 2);
+
+    // Deleting physical slot 0 shifts every per-slot array, and the mix's reference to the
+    // deleted filament becomes the 0 sentinel while its reference to slot 2 becomes slot 1.
+    bundle.update_num_filaments(0);
+    CHECK(bundle.filament_presets.size() == 2);
+    CHECK(bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#111111", "#ABCDEF"});
+    CHECK(bundle.project_config.option<ConfigOptionInts>("filament_map")->values.size() == 2);
+    CHECK(bundle.project_config.option<ConfigOptionBools>("filament_is_mixed")->values ==
+          std::vector<unsigned char>{false, true});
+    CHECK(bundle.project_config.option<ConfigOptionStrings>("filament_mixed_components")->values ==
+          std::vector<std::string>{"", "0,1"});
+    CHECK(bundle.is_mixed_filament(1));
+}
+
+TEST_CASE("Preset bundle physical filament indices exclude only live mixed slots", "[Preset][Bundle][Filament]")
+{
+    PresetBundle bundle;
+    bundle.filament_presets = {"A", "B", "C", "D"};
+    bundle.project_config = DynamicPrintConfig::full_print_config();
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"a", "b", "c", "d"};
+    auto &is_mixed = bundle.project_config.option<ConfigOptionBools>("filament_is_mixed")->values;
+
+    SECTION("a stale flag past the last slot is not counted") {
+        is_mixed = {false, true, false, true, true};
+        CHECK(bundle.physical_filament_config_indices() == std::vector<size_t>{0, 2});
+        CHECK(bundle.num_mixed_filaments() == 2);
+        CHECK(bundle.num_physical_filaments() == 2);
+    }
+
+    SECTION("slots without a flag are physical") {
+        is_mixed = {false, true};
+        CHECK(bundle.physical_filament_config_indices() == std::vector<size_t>{0, 2, 3});
+        CHECK(bundle.num_mixed_filaments() == 1);
+        CHECK(bundle.num_physical_filaments() == 3);
+    }
+}
