@@ -1,3 +1,7 @@
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/ModelArrange.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 #include <algorithm>
 #include <nlohmann/json.hpp>
 #include <catch2/catch_all.hpp>
@@ -15,6 +19,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/Arrange.hpp"
@@ -821,3 +826,248 @@ TEST_CASE("Shrinking a rectangular bed moves every edge toward its center", "[Ar
 }
 
 } // namespace arrange_param_contracts
+
+namespace model_arrange_contracts {
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
+
+// One 20 mm cube object with an instance at each given XY offset.
+Model arrange_model(std::initializer_list<Vec2d> offsets = {Vec2d::Zero()})
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "model-arrange-contract.stl";
+    object->add_volume(TriangleMesh(its_make_cube(20., 20., 20.)));
+    for (const Vec2d &offset : offsets)
+        object->add_instance()->set_offset(to_3d(offset, 0.));
+    return model;
+}
+
+// Supplies only the fields ModelArrange reads, with a distinct value per filament
+// so the tests can tell which filament's value was picked.
+DynamicPrintConfig arrange_config(const char *support_type, bool enable_support)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", enable_support},
+        {"support_type", support_type},
+        {"curr_bed_type", "Cool Plate"},
+        {"cool_plate_temp", "65,66"},
+        {"cool_plate_temp_initial_layer", "70,71"},
+        {"nozzle_temperature", "205,206"},
+        {"nozzle_temperature_initial_layer", "215,216"},
+        {"temperature_vitrification", "90,91"}
+    });
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PLA", "PC"}));
+    return config;
+}
+
+// Known bug: get_arrange_poly(const Model &) rotates and translates the hull accumulated so far instead of
+// each instance's own footprint, so the other instances lose their own offset and Z rotation; fixed by the follow-up
+// fix PR.
+TEST_CASE("Model arrange polygon is the convex hull of every instance at its position and rotation", "[Arrange][ModelArrange][!shouldfail]")
+{
+    // The first cube turned a quarter about Z covers x 30..50 at its offset (70 if left unrotated),
+    // the second covers 0..20, so the hull is the 50x20 rectangle spanning both. Their inner corners
+    // (x = 20 and x = 30) lie on its edges and must not be hull vertices.
+    Model model = arrange_model({Vec2d(50., 0.), Vec2d(0., 0.)});
+    model.objects.front()->instances.front()->set_rotation(Z, PI / 2.);
+
+    const ArrangePolygon polygon = get_arrange_poly(model);
+    const Polygon       &hull    = polygon.poly.contour;
+    CHECK(hull.is_counter_clockwise());
+    CHECK_THAT(hull.area() * SCALING_FACTOR * SCALING_FACTOR, WithinRel(50. * 20., 1e-6));
+    REQUIRE(hull.points.size() == 4);
+    for (const Vec2d &corner : {Vec2d(0., 0.), Vec2d(50., 0.), Vec2d(50., 20.), Vec2d(0., 20.)})
+        CHECK(std::any_of(hull.points.begin(), hull.points.end(), [&corner](const Point &p) {
+            return (unscaled(p) - corner).norm() < .01;
+        }));
+}
+
+TEST_CASE("Model object duplication copies only the original instances", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model({Vec2d(1., 2.), Vec2d(11., 12.)});
+    const ModelObject *object = model.objects.front();
+
+    duplicate_objects(model, 3);
+
+    REQUIRE(object->instances.size() == 6);
+    int first = 0, second = 0;
+    for (const ModelInstance *instance : object->instances) {
+        const Vec3d offset = instance->get_offset();
+        first += offset.isApprox(Vec3d(1., 2., 0.));
+        second += offset.isApprox(Vec3d(11., 12., 0.));
+    }
+    CHECK(first == 3);
+    CHECK(second == 3);
+}
+
+TEST_CASE("Model instance arrange polygon setter writes an arranged result back to the instance", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model();
+    ModelInstance *instance = model.objects.front()->instances.front();
+
+    ArrangePolygon polygon = get_arrange_poly(instance, arrange_config("normal(auto)", false));
+    CHECK(polygon.bed_idx == 0);
+    REQUIRE(polygon.setter);
+
+    SECTION("an arranged result moves the instance") {
+        polygon.translation = Vec2crd{scaled(3.), scaled(4.)};
+        polygon.rotation = .5;
+        polygon.itemid = 17;
+        polygon.apply();
+
+        CHECK(polygon.is_applied == 1);
+        CHECK_THAT(instance->get_offset(X), WithinAbs(3., 1e-9));
+        CHECK_THAT(instance->get_offset(Y), WithinAbs(4., 1e-9));
+        CHECK_THAT(instance->get_rotation(Z), WithinAbs(.5, 1e-9));
+        CHECK(instance->arrange_order == 17);
+    }
+    SECTION("an unarranged result leaves the instance where it was") {
+        polygon.translation = Vec2crd{scaled(3.), scaled(4.)};
+        polygon.bed_idx = arrangement::UNARRANGED;
+        polygon.apply();
+
+        CHECK(polygon.is_applied == 1);
+        CHECK_THAT(instance->get_offset(X), WithinAbs(0., 1e-9));
+        CHECK_THAT(instance->get_offset(Y), WithinAbs(0., 1e-9));
+    }
+}
+
+TEST_CASE("Model instance arrangement reads plate and filament metadata for the instance's filament", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model();
+    ModelObject *object = model.objects.front();
+    object->volumes.front()->config.set("extruder", 2);
+    ModelInstance *instance = object->instances.front();
+
+    const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("normal(auto)", false));
+
+    REQUIRE(polygon.extrude_ids == std::vector<int>{2});
+    CHECK(polygon.bed_temp == 66);
+    CHECK(polygon.first_bed_temp == 71);
+    CHECK(polygon.print_temp == 206);
+    CHECK(polygon.first_print_temp == 216);
+    CHECK(polygon.vitrify_temp == 91);
+    CHECK(polygon.filament_temp_type == FilamentTempType::HighTemp); // PC
+    CHECK(polygon.name == object->name);
+    CHECK_THAT(polygon.height, WithinAbs(20., 1e-6));
+}
+
+TEST_CASE("Model instance arrangement sizes the brim margin by the support type", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model();
+    ModelInstance *instance = model.objects.front()->instances.front();
+
+    SECTION("disabled support keeps the 1 mm default even for tree support") {
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("tree(manual)", false));
+        CHECK_THAT(polygon.brim_width, WithinAbs(1., 1e-9));
+        CHECK_FALSE(polygon.has_tree_support);
+    }
+    SECTION("normal support adds 6 mm") {
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("normal(manual)", true));
+        CHECK_THAT(polygon.brim_width, WithinAbs(6., 1e-9));
+        CHECK_FALSE(polygon.has_tree_support);
+    }
+    SECTION("tree support adds 24 mm and marks the plate") {
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("tree(manual)", true));
+        CHECK_THAT(polygon.brim_width, WithinAbs(24., 1e-9));
+        CHECK(polygon.has_tree_support);
+    }
+}
+
+TEST_CASE("Model arrange default out-of-bed callback throws with the bed index", "[Arrange][ModelArrange]")
+{
+    ArrangePolygon polygon;
+    polygon.bed_idx = 1;
+
+    REQUIRE_THROWS_AS(throw_if_out_of_bed(polygon), RuntimeError);
+    REQUIRE_THROWS_WITH(throw_if_out_of_bed(polygon), Catch::Matchers::ContainsSubstring("bed_idx==1"));
+}
+
+TEST_CASE("Model arrange collects instances and applies reachable bed results", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model({Vec2d::Zero(), Vec2d::Zero(), Vec2d::Zero()});
+    ModelInstancePtrs instances;
+    ArrangePolygons polygons = get_arrange_polys(model, instances);
+
+    REQUIRE(polygons.size() == 3);
+    REQUIRE(instances.size() == 3);
+    for (size_t i = 0; i < instances.size(); ++i) {
+        REQUIRE(instances[i] == model.objects.front()->instances[i]);
+        CHECK(polygons[i].bed_idx == 0);
+    }
+
+    polygons[0].translation = Vec2crd{scaled(4.), scaled(5.)};
+    polygons[1].translation = Vec2crd{scaled(8.), scaled(9.)};
+    polygons[1].bed_idx = 2;
+    polygons[2].translation = Vec2crd{scaled(12.), scaled(13.)};
+    polygons[2].bed_idx = arrangement::UNARRANGED;
+
+    std::vector<int> callback_beds;
+    const bool all_on_physical_bed = apply_arrange_polys(
+        polygons, instances, [&callback_beds](ArrangePolygon &polygon) {
+            callback_beds.push_back(polygon.bed_idx);
+        });
+
+    // Virtual and unarranged results both reach the callback, but only a
+    // result on some bed moves its instance.
+    CHECK_FALSE(all_on_physical_bed);
+    CHECK(callback_beds == std::vector<int>{2, arrangement::UNARRANGED});
+    CHECK_THAT(instances[0]->get_offset(X), WithinAbs(4., 1e-9));
+    CHECK_THAT(instances[0]->get_offset(Y), WithinAbs(5., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(X), WithinAbs(8., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(Y), WithinAbs(9., 1e-9));
+    CHECK_THAT(instances[2]->get_offset(X), WithinAbs(0., 1e-9));
+    CHECK_THAT(instances[2]->get_offset(Y), WithinAbs(0., 1e-9));
+}
+
+TEST_CASE("Model arrange reports success when every result is on the physical bed", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model({Vec2d::Zero(), Vec2d::Zero()});
+    ModelInstancePtrs instances;
+    ArrangePolygons polygons = get_arrange_polys(model, instances);
+    REQUIRE(polygons.size() == 2);
+    polygons[0].translation = Vec2crd{scaled(1.), scaled(2.)};
+    polygons[1].translation = Vec2crd{scaled(3.), scaled(4.)};
+
+    int callbacks = 0;
+    CHECK(apply_arrange_polys(polygons, instances, [&callbacks](ArrangePolygon &) { ++callbacks; }));
+    CHECK(callbacks == 0);
+    CHECK_THAT(instances[0]->get_offset(X), WithinAbs(1., 1e-9));
+    CHECK_THAT(instances[0]->get_offset(Y), WithinAbs(2., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(X), WithinAbs(3., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(Y), WithinAbs(4., 1e-9));
+}
+
+TEST_CASE("Model arrange duplicates each source instance for every requested placement", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model({Vec2d(1., 2.), Vec2d(11., 12.)});
+    const ModelObject *object = model.objects.front();
+
+    // Each copy's translation is added to every source instance's offset.
+    ArrangePolygon first = make_square(scaled(8.));
+    first.translation = Vec2crd{scaled(4.), scaled(5.)};
+    ArrangePolygon virtual_bed = make_square(scaled(8.));
+    virtual_bed.translation = Vec2crd{scaled(-6.), scaled(7.)};
+    virtual_bed.bed_idx = 2;
+    ArrangePolygons copies{first, virtual_bed};
+
+    std::vector<int> callback_beds;
+    duplicate(model, copies, [&callback_beds](ArrangePolygon &polygon) {
+        callback_beds.push_back(polygon.bed_idx);
+    });
+
+    REQUIRE(object->instances.size() == 4);
+    CHECK(callback_beds == std::vector<int>{2, 2});
+    CHECK_THAT(object->instances[0]->get_offset(X), WithinAbs(5., 1e-9));
+    CHECK_THAT(object->instances[0]->get_offset(Y), WithinAbs(7., 1e-9));
+    CHECK_THAT(object->instances[1]->get_offset(X), WithinAbs(-5., 1e-9));
+    CHECK_THAT(object->instances[1]->get_offset(Y), WithinAbs(9., 1e-9));
+    CHECK_THAT(object->instances[2]->get_offset(X), WithinAbs(15., 1e-9));
+    CHECK_THAT(object->instances[2]->get_offset(Y), WithinAbs(17., 1e-9));
+    CHECK_THAT(object->instances[3]->get_offset(X), WithinAbs(5., 1e-9));
+    CHECK_THAT(object->instances[3]->get_offset(Y), WithinAbs(19., 1e-9));
+}
+
+} // namespace model_arrange_contracts
