@@ -282,6 +282,103 @@ TEST_CASE("CadDocument solve_sketch_feature snaps a rough quad to a rectangle", 
     REQUIRE(doc.display_mesh.facets_count() > 0);
 }
 
+TEST_CASE("CadDocument history exposes redo and invalidates it after a new edit", "[CadDocument][history]")
+{
+    CadDocument doc;
+    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                      20.0, 20.0, 0.0, "BaseSketch");
+    REQUIRE(sketch >= 0);
+    const int extrude = doc.add_extrude(sketch, 10.0, false, BooleanMode::New, "Base");
+    REQUIRE(extrude >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+
+    auto bbox = [](const CadDocument& d) {
+        Bnd_Box box;
+        BRepBndLib::Add(d.bodies.at(0).shape, box);
+        double x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        return std::make_pair(Vec3d(x0, y0, z0), Vec3d(x1, y1, z1));
+    };
+
+    const auto initial_box = bbox(doc);
+    const double initial_volume = doc.body_mass_properties(0).volume;
+    REQUIRE_THAT(initial_volume, Catch::Matchers::WithinRel(4000.0, 1e-6));
+    REQUIRE_THAT(initial_box.first.x(), Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(initial_box.second.x(), Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_FALSE(doc.can_undo());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 0);
+    REQUIRE(doc.redo_depth() == 0);
+
+    doc.checkpoint();
+    const int shift = doc.add_transform(0, Vec3d(5.0, 0.0, 0.0), Vec3d(0.0, 0.0, 1.0),
+                                        Vec3d(0.0, 0.0, 0.0), 0.0, false, "Shift");
+    REQUIRE(shift >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    const auto shifted_box = bbox(doc);
+    REQUIRE(doc.can_undo());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 1);
+    REQUIRE(doc.redo_depth() == 0);
+    REQUIRE_THAT(shifted_box.first.x(), Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(shifted_box.second.x(), Catch::Matchers::WithinAbs(15.0, 1e-6));
+    REQUIRE_THAT(doc.body_mass_properties(0).volume,
+                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
+
+    REQUIRE(doc.features.size() == 3);
+    REQUIRE(doc.undo());
+    REQUIRE(doc.error.empty());
+    const auto undone_box = bbox(doc);
+    REQUIRE(doc.features.size() == 2);   // the Shift feature is gone again
+    REQUIRE_FALSE(doc.can_undo());
+    REQUIRE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 0);
+    REQUIRE(doc.redo_depth() == 1);
+    REQUIRE_THAT(undone_box.first.x(), Catch::Matchers::WithinAbs(initial_box.first.x(), 1e-6));
+    REQUIRE_THAT(undone_box.second.x(), Catch::Matchers::WithinAbs(initial_box.second.x(), 1e-6));
+    REQUIRE_THAT(doc.body_mass_properties(0).volume,
+                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
+
+    REQUIRE(doc.redo());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.features.size() == 3);
+    const auto redone_box = bbox(doc);
+    REQUIRE(doc.can_undo());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 1);
+    REQUIRE(doc.redo_depth() == 0);
+    REQUIRE_THAT(redone_box.first.x(), Catch::Matchers::WithinAbs(shifted_box.first.x(), 1e-6));
+    REQUIRE_THAT(redone_box.second.x(), Catch::Matchers::WithinAbs(shifted_box.second.x(), 1e-6));
+    REQUIRE_THAT(doc.body_mass_properties(0).volume,
+                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
+
+    // A new checkpoint is a new edit branch and must discard the old redo snapshot.
+    REQUIRE(doc.undo());
+    REQUIRE(doc.can_redo());
+    doc.checkpoint();
+    const int second_shift = doc.add_transform(0, Vec3d(-2.0, 0.0, 0.0), Vec3d(0.0, 0.0, 1.0),
+                                               Vec3d(0.0, 0.0, 0.0), 0.0, false, "NewBranch");
+    REQUIRE(second_shift >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.redo_depth() == 0);
+    REQUIRE(doc.undo_depth() == 1);
+    const auto branch_box = bbox(doc);
+    REQUIRE_THAT(branch_box.first.x(), Catch::Matchers::WithinAbs(-12.0, 1e-6));
+    REQUIRE_THAT(branch_box.second.x(), Catch::Matchers::WithinAbs(8.0, 1e-6));
+
+    // Undoing the new branch goes back to the original box, not to the discarded shift.
+    REQUIRE(doc.undo());
+    REQUIRE(doc.features.size() == 2);
+    const auto restored_box = bbox(doc);
+    REQUIRE_THAT(restored_box.first.x(), Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(restored_box.second.x(), Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_FALSE(doc.can_undo());
+}
+
 TEST_CASE("sketch entities -> wire -> extrude", "[CadDocument]")
 {
     SECTION("square from 4 lines") {
