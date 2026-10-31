@@ -70,6 +70,14 @@ TEST_CASE("MeasureUtils polynomial arithmetic matches convolution and pointwise 
 
     const Polynomial1 scaled = 2.5 * p;
     check_poly(scaled, {2.5, 5.0, 7.5});
+
+    // With the lower-degree operand first, the higher terms come from the second operand.
+    check_poly(p + q, {5.0, 1.0, 3.0, 2.0});
+    check_poly(p - q, {-3.0, 3.0, 3.0, -2.0});
+
+    // Cancelled leading terms lower the degree of the result.
+    check_poly(Polynomial1{1.0, 1.0, 1.0} + Polynomial1{1.0, 2.0, -1.0}, {2.0, 3.0});
+    check_poly(Polynomial1{1.0, 2.0, 3.0} - Polynomial1{0.0, 0.0, 3.0}, {1.0, 2.0});
 }
 
 TEST_CASE("MeasureUtils mutable polynomial degree and coefficient reset are explicit", "[MeasureUtils]")
@@ -121,10 +129,11 @@ TEST_CASE("MeasureUtils root finder handles repeated and leading-zero equations"
     const double repeated[] = {-4.0, 4.0, -1.0};
     double roots[4] = {};
     const int repeated_count = RootsPolynomial::Find(2, repeated, 128, roots);
-    REQUIRE(repeated_count >= 1);
-    REQUIRE(repeated_count <= 2);
-    for (int i = 0; i < repeated_count; ++i)
-        CHECK_THAT(roots[i], WithinAbs(2.0, 1e-7));
+    // A double root comes back from the brackets on both sides of the derivative root, so it is listed
+    // twice; the circle-circle solver collects roots into a set.
+    REQUIRE(repeated_count == 2);
+    CHECK_THAT(roots[0], WithinAbs(2.0, 1e-7));
+    CHECK_THAT(roots[1], WithinAbs(2.0, 1e-7));
 
     const double leading_zero[] = {-2.0, 1.0, 0.0};
     const int count = RootsPolynomial::Find(2, leading_zero, 128, roots);
@@ -139,6 +148,10 @@ TEST_CASE("MeasureUtils interval root finder honors endpoint and bracket contrac
     // A root at an endpoint is returned as that endpoint.
     CHECK(RootsPolynomial::Find(1, coefficients, 2.0, 4.0, 64, root));
     CHECK_THAT(root, WithinAbs(2.0, 1e-12));
+    // A root at tmax is returned before bisecting: one iteration would otherwise stop at 3.
+    const double root_at_tmax[] = {-4.0, 1.0};
+    CHECK(RootsPolynomial::Find(1, root_at_tmax, 2.0, 4.0, 1, root));
+    CHECK_THAT(root, WithinAbs(4.0, 1e-12));
     // No sign change: the interval is not known to bracket a root.
     CHECK_FALSE(RootsPolynomial::Find(1, coefficients, 3.0, 4.0, 64, root));
     // A sign change with tmin > tmax is rejected as an invalid interval.
