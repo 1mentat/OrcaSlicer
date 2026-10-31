@@ -1,4 +1,5 @@
 #include <catch2/catch_all.hpp>
+#include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Config.hpp"
 #include <string>
@@ -789,6 +790,22 @@ TEST_CASE("get_index_for_extruder scales the variant column by the requested str
     REQUIRE(col1_stride2 == 2);
 }
 
+TEST_CASE("ASA-Aero legacy filament spelling is normalized on deserialization", "[Config][PrintConfigCompatibility]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("filament_type", "\"ASA-Aero\";\"PLA\"");
+
+    const auto *types = config.option<ConfigOptionStrings>("filament_type");
+    REQUIRE(types != nullptr);
+    REQUIRE(types->values.size() == 2);
+    CHECK(types->values[0] == "ASA-AERO");
+    CHECK(types->values[1] == "PLA");
+
+    config.set_deserialize_strict("filament_type", "\"ASA-AERO\";\"PETG\"");
+    const std::vector<std::string> expected_canonical_types{"ASA-AERO", "PETG"};
+    CHECK(config.option<ConfigOptionStrings>("filament_type")->values == expected_canonical_types);
+}
+
 TEST_CASE("Incomplete extruder ID maps resolve variant slots with the configured stride", "[Config][PrintConfigVariants]")
 {
     DynamicPrintConfig config;
@@ -806,6 +823,23 @@ TEST_CASE("Incomplete extruder ID maps resolve variant slots with the configured
                                         "print_extruder_variant", 2) == 4);
     CHECK(config.get_index_for_extruder(2, "print_extruder_id", etBowden, nvtHighFlow,
                                         "print_extruder_variant", 2) == 6);
+}
+
+TEST_CASE("Filament metadata getters return the first stored value", "[Config][Filament]")
+{
+    DynamicPrintConfig config;
+    CHECK(config.get_filament_vendor().empty());
+    CHECK(config.get_filament_type().empty());
+
+    config.set_key_value("filament_vendor", new ConfigOptionStrings());
+    config.set_key_value("filament_type", new ConfigOptionStrings());
+    CHECK(config.get_filament_vendor().empty());
+    CHECK(config.get_filament_type().empty());
+
+    config.set_key_value("filament_vendor", new ConfigOptionStrings({"Acme Materials", "Second Vendor"}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PETG-CF", "PLA"}));
+    CHECK(config.get_filament_vendor() == "Acme Materials");
+    CHECK(config.get_filament_type() == "PETG-CF");
 }
 
 // A per-variant filament option read with a single value gives it to every filament variant. A project
@@ -981,4 +1015,43 @@ TEST_CASE("Extruder compatibility detects drive and flow differences beyond the 
     CHECK(config.is_using_different_extruders());
     config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type")->values[2] = nvtStandard;
     CHECK_FALSE(config.is_using_different_extruders());
+}
+
+TEST_CASE("Support filament identity follows vendor identifiers and generic material fallbacks",
+          "[Config][Filament][ConfigGapContracts]")
+{
+    struct Row {
+        std::string id;
+        std::string material;
+        bool support;
+        std::string type;
+        std::string display;
+    };
+    const std::vector<Row> rows{
+        {"GFS00", "PETG", true, "PLA-S", "Sup.PLA"},
+        {"GFS01", "PETG", true, "PA-S", "Sup.PA"},
+        {"generic", "PLA", true, "PLA-S", "Sup.PLA"},
+        {"generic", "PA", true, "PA-S", "Sup.PA"},
+        {"generic", "PVA", true, "PVA", "PVA"},
+        {"", "PLA", true, "PLA-S", "Sup.PLA"},
+        {"", "PA", true, "PA-S", "Sup.PA"},
+        {"", "PVA", true, "PVA", "PVA"},
+        {"GFS01", "PETG", false, "PETG", "PETG"},
+    };
+    for (const Row &row : rows) {
+        CAPTURE(row.id, row.material, row.support);
+        DynamicPrintConfig config;
+        // Use the second filament so the requested index matters independently of
+        // the PLA first-slot control. Missing identifiers exercise generic types.
+        config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA", row.material};
+        config.option<ConfigOptionBools>("filament_is_support", true)->values = {false, row.support};
+        // Filament identifiers are dynamic preset metadata, not registered print options.
+        if (!row.id.empty())
+            config.set_key_value("filament_id", new ConfigOptionStrings({"base", row.id}));
+        std::string displayed = "unresolved";
+        CHECK(config.get_filament_type(displayed, 1) == row.type);
+        CHECK(displayed == row.display);
+        CHECK(config.get_filament_type(displayed, 0) == "PLA");
+        CHECK(displayed == "PLA");
+    }
 }
