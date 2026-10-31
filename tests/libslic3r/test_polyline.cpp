@@ -418,8 +418,7 @@ TEST_CASE("Foot projection past a repeated vertex selects the nearest real segme
     CHECK(result.second == Point(6, 0));
 }
 
-// Known bug: remove_degenerate() moves survivors' points but leaves their fitting_result behind; fixed by the follow-up fix PR
-TEST_CASE("Compacting polylines preserves each surviving path's arc metadata", "[Polyline][PolylineOperations][!shouldfail]")
+TEST_CASE("Compacting polylines preserves each surviving path's arc metadata", "[Polyline][PolylineOperations]")
 {
     const Polyline expected = arc();
     Polylines paths{Polyline{Points{p(0, 0)}}, expected, Polyline{}, elbow()};
