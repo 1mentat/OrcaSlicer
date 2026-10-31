@@ -9,6 +9,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
@@ -307,7 +308,7 @@ namespace {
 void touch(const boost::filesystem::path &path) { std::ofstream(path.string()) << "existing"; }
 std::string file_contents(const boost::filesystem::path &path)
 {
-    std::ifstream file(path.string());
+    std::ifstream file(path.string(), std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 } // namespace
@@ -630,4 +631,134 @@ TEST_CASE("MD5 file fingerprints match standard vectors across the 64 KiB read b
 TEST_CASE("Character filtering removes only requested characters", "[utils]") {
     CHECK(filter_characters("a-b_c!", "-_") == "abc!");
     CHECK(filter_characters("stable", "") == "stable");
+}
+
+namespace {
+void write_bytes(const boost::filesystem::path &path, const std::string &bytes)
+{
+    std::ofstream out(path.string(), std::ios::binary);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(out.good());
+}
+} // namespace
+
+TEST_CASE("File verification distinguishes absent inputs, length differences and changed bytes", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_ORIGIN_NOT_OPENED);
+    write_bytes(a, "abc");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_TARGET_NOT_OPENED);
+    write_bytes(b, "ab");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+    write_bytes(b, "abd");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+    write_bytes(b, "abc");
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+    write_bytes(a, "");
+    write_bytes(b, "");
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+}
+
+TEST_CASE("File verification detects changes after its first eight MiB chunk", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    std::string data(8 * 1024 * 1024 + 17, 'x');
+    data.front() = 'A';
+    data.back()  = 'Z';
+    write_bytes(a, data);
+    write_bytes(b, data);
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+    data.back() = 'Y';
+    write_bytes(b, data);
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+}
+
+TEST_CASE("Verified copies preserve binary bytes and replace an existing destination", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    const std::string data("x\0y\r\nz", 6);
+    write_bytes(a, data);
+    write_bytes(b, "obsolete");
+    std::string error;
+    CHECK(copy_file(a.string(), b.string(), error, true) == SUCCESS);
+    CHECK(file_contents(b) == data);
+#ifndef _WIN32
+    // Off Windows the copy goes through a temporary file beside the destination; none may remain.
+    CHECK_FALSE(boost::filesystem::exists(b.string() + ".tmp"));
+#endif
+}
+
+TEST_CASE("Framework copying recurses through directories and overwrites ordinary files", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src / "sub");
+    boost::filesystem::create_directories(dst);
+    write_bytes(src / "top", "top");
+    write_bytes(src / "sub" / "child", "nested");
+    write_bytes(dst / "top", "old");
+    REQUIRE(copy_framework(src.string(), dst.string()));
+    CHECK(file_contents(dst / "top") == "top");
+    CHECK(file_contents(dst / "sub" / "child") == "nested");
+    CHECK_FALSE(copy_framework((src / "top").string(), (d.path() / "bad").string()));
+    write_bytes(d.path() / "blocked", "file");
+    CHECK_FALSE(copy_framework(src.string(), (d.path() / "blocked").string()));
+}
+
+#ifndef _WIN32
+TEST_CASE("Framework copying preserves relative symlink targets", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    fs::create_directories(src / "Versions" / "A");
+    write_bytes(src / "Versions" / "A" / "binary", "payload");
+    fs::create_symlink("A", src / "Versions" / "Current");
+    REQUIRE(copy_framework(src.string(), dst.string()));
+    CHECK(fs::is_symlink(fs::symlink_status(dst / "Versions" / "Current")));
+    CHECK(fs::read_symlink(dst / "Versions" / "Current").string() == "A");
+    CHECK(file_contents(dst / "Versions" / "Current" / "binary") == "payload");
+}
+#endif
+
+// Known bug: copy_framework (utils.cpp) ignores the result of its recursive call for a nested directory and still returns true; fixed by the follow-up fix PR
+TEST_CASE("Framework copying propagates a failure from a nested directory", "[utils][!shouldfail]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src / "nested");
+    boost::filesystem::create_directories(dst);
+    write_bytes(src / "nested" / "payload", "source");
+    write_bytes(dst / "nested", "occupied by a file");
+    CHECK_FALSE(copy_framework(src.string(), dst.string()));
+    CHECK(file_contents(dst / "nested") == "occupied by a file");
+}
+
+TEST_CASE("Recursive directory copies exclude selected filenames and distinguish replacement from merge", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    fs::create_directories(src / "sub");
+    fs::create_directories(dst / "sub");
+    write_bytes(src / "keep.json", "new");
+    write_bytes(src / "ignore.png", "image");
+    write_bytes(src / "sub" / "child", "child");
+    write_bytes(dst / "stale", "stale");
+    write_bytes(dst / "sub" / "old", "old");
+    copy_directory_recursively(src, dst, [](const std::string &name) { return name == "ignore.png"; }, true);
+    CHECK(file_contents(dst / "keep.json") == "new");
+    CHECK(file_contents(dst / "sub" / "child") == "child");
+    CHECK(fs::exists(dst / "stale"));
+    CHECK(fs::exists(dst / "sub" / "old"));
+    CHECK_FALSE(fs::exists(dst / "ignore.png"));
+    copy_directory_recursively(src, dst, {}, false);
+    CHECK_FALSE(fs::exists(dst / "stale"));
+    CHECK_FALSE(fs::exists(dst / "sub" / "old"));
+    CHECK(file_contents(dst / "ignore.png") == "image");
+}
+
+TEST_CASE("Recursive directory copying throws when a directory occupies a file's destination", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src);
+    boost::filesystem::create_directories(dst / "file.txt" / "occupied");
+    write_bytes(src / "file.txt", "payload");
+    CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
 }
