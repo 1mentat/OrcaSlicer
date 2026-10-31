@@ -19,6 +19,7 @@
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/ProjectTask.hpp"
 #include "libslic3r/PublishSettings.hpp"
+#include "libslic3r/CustomGCode.hpp"
 
 #include "test_utils.hpp"
 
@@ -1796,6 +1797,68 @@ TEST_CASE("BBS 3MF round-trips object layer and brim metadata", "[3mf][3MFModelM
     CHECK_THAT(loaded_object->brim_points[1].pos(1), Catch::Matchers::WithinAbs(4., 1e-5));
     CHECK_THAT(loaded_object->brim_points[1].pos(2), Catch::Matchers::WithinAbs(0.7, 1e-5));
     CHECK_THAT(loaded_object->brim_points[1].head_front_radius, Catch::Matchers::WithinAbs(0.85, 1e-5));
+}
+
+TEST_CASE("BBS 3MF round-trips per-plate custom G-code", "[3mf][3MFCustomGCode]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+
+    // Every plate gets its own mode and items, so a loader that dropped or remapped the
+    // serialized plate id would merge them or put them on the wrong plate.
+    CustomGCode::Info &first = model.plates_custom_gcodes[0];
+    first.mode = CustomGCode::Mode::MultiExtruder;
+    first.gcodes = {
+        { 0.2, CustomGCode::ColorChange, 1, "#ff0000", "" },
+        { 0.4, CustomGCode::PausePrint, 2, "pause", "hold for inspection" },
+        { 0.6, CustomGCode::ToolChange, 3, "", "" },
+        { 0.8, CustomGCode::Custom, 1, "", "M117 custom marker" },
+    };
+    // A plate with a mode but no items still keeps its own record.
+    model.plates_custom_gcodes[1].mode = CustomGCode::Mode::SingleExtruder;
+    CustomGCode::Info &third = model.plates_custom_gcodes[2];
+    third.mode = CustomGCode::Mode::MultiAsSingle;
+    third.gcodes = {
+        { 0.3, CustomGCode::Template, 2, "", "" },
+        { 0.5, CustomGCode::Unknown, 1, "", "unknown marker" },
+        { 1.0, CustomGCode::ColorChange, 2, "#00ff00", "" },
+    };
+
+    ScopedTemporaryDir backup_dir("orca_3mf_custom_gcode_src");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = temp.string().c_str();
+    store_params.model    = &model;
+    store_params.config   = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_3mf_custom_gcode_dst");
+    REQUIRE(load_project(temp.string(), loaded_model, loaded_backup_dir));
+
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == model.plates_custom_gcodes.size());
+    for (const auto &[plate, expected_info] : model.plates_custom_gcodes) {
+        INFO("plate " << plate);
+        const auto loaded_it = loaded_model.plates_custom_gcodes.find(plate);
+        REQUIRE(loaded_it != loaded_model.plates_custom_gcodes.end());
+        const CustomGCode::Info &loaded_info = loaded_it->second;
+        CHECK(loaded_info.mode == expected_info.mode);
+        REQUIRE(loaded_info.gcodes.size() == expected_info.gcodes.size());
+        for (size_t i = 0; i < expected_info.gcodes.size(); ++i) {
+            const CustomGCode::Item &expected = expected_info.gcodes[i];
+            const CustomGCode::Item &actual   = loaded_info.gcodes[i];
+            CHECK_THAT(actual.print_z, Catch::Matchers::WithinAbs(expected.print_z, 1e-6));
+            CHECK(actual.type == expected.type);
+            CHECK(actual.extruder == expected.extruder);
+            CHECK(actual.color == expected.color);
+            CHECK(actual.extra == expected.extra);
+        }
+    }
 }
 
 TEST_CASE("BBS 3MF round-trips cut object identity and connector metadata", "[3mf][3MFCutMetadata]")
