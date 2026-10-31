@@ -1,16 +1,17 @@
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/TriangleMesh.hpp"
-#include <cstddef>
-#include <cmath>
-#include <catch2/catch_all.hpp>
-#include <vector>
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/libslic3r.h"
 
+#include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include "libslic3r/BuildVolume.hpp"
-#include "libslic3r/BoundingBox.hpp"
+
+#include <cmath>
+#include <cstddef>
+#include <vector>
 
 using namespace Slic3r;
 
@@ -77,9 +78,10 @@ Transform3f translation(float x, float y, float z)
 TEST_CASE("BuildVolume treats an extruder area as the bed only when both its shape and height match", "[BuildVolume][BuildVolumeVariance]")
 {
     const auto bed = rectangle(0., 0., 20., 20.);
-    // Area 0 has the bed's shape but its own height. Area 2 has the bed's shape and no height
-    // entry, so it falls back to the bed height and becomes identical to the bed.
-    const BuildVolume volume(bed, 100., {bed, rectangle(0., 0., 10., 20.), bed}, {40., 50.});
+    // Area 0 has the bed's shape but its own height. Area 1 has the bed's height but its own shape.
+    // Area 2 has the bed's shape and no height entry, so it falls back to the bed height and becomes
+    // identical to the bed.
+    const BuildVolume volume(bed, 100., {bed, rectangle(0., 0., 10., 20.), bed}, {40., 100.});
     REQUIRE(volume.get_extruder_area_count() == 3);
     CHECK_FALSE(volume.get_extruder_area_volume(0).same_with_bed);
     CHECK_FALSE(volume.get_extruder_area_volume(1).same_with_bed);
@@ -155,18 +157,20 @@ TEST_CASE("BuildVolume per-extruder circle limits distinguish radial collision",
 TEST_CASE("BuildVolume shared volume is the intersection of the extruder areas and heights", "[BuildVolume][BuildVolumeVariance]")
 {
     const auto bed = rectangle(0., 0., 20., 30.);
-    const BuildVolume volume(bed, 75., {rectangle(0., 0., 10., 30.)}, {40.});
+    // Each bound of the intersection comes from a different area: min X and max Y from area 0,
+    // min Y and the height from area 1, max X from area 2.
+    const BuildVolume volume(bed, 75., {rectangle(2., 0., 20., 25.), rectangle(0., 4., 15., 30.), rectangle(0., 0., 12., 28.)}, {60., 40., 50.});
     const auto &shared = volume.get_shared_volume();
     CHECK(shared.type == static_cast<int>(BuildVolume_Type::Rectangle));
-    CHECK_THAT(shared.data[0], Catch::Matchers::WithinAbs(0., 1e-6));
-    CHECK_THAT(shared.data[1], Catch::Matchers::WithinAbs(0., 1e-6));
-    CHECK_THAT(shared.data[2], Catch::Matchers::WithinAbs(10., 1e-6));
-    CHECK_THAT(shared.data[3], Catch::Matchers::WithinAbs(30., 1e-6));
+    CHECK_THAT(shared.data[0], Catch::Matchers::WithinAbs(2., 1e-6));
+    CHECK_THAT(shared.data[1], Catch::Matchers::WithinAbs(4., 1e-6));
+    CHECK_THAT(shared.data[2], Catch::Matchers::WithinAbs(12., 1e-6));
+    CHECK_THAT(shared.data[3], Catch::Matchers::WithinAbs(25., 1e-6));
     CHECK_THAT(shared.zs[0], Catch::Matchers::WithinAbs(0., 1e-6));
     CHECK_THAT(shared.zs[1], Catch::Matchers::WithinAbs(40., 1e-6));
 }
 
-TEST_CASE("Unlimited circular extruder areas preserve the independent nozzle mask",
+TEST_CASE("BuildVolume circular extruder areas have no upper Z limit when the printable height is zero",
           "[BuildVolume][BuildVolumeUnlimited][BuildVolumeVariance]")
 {
     const auto bed = rectangle(0., 0., 40., 30.);
