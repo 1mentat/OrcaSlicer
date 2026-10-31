@@ -13,13 +13,16 @@ add_executable(${_TEST_NAME}_tests
     test_arachne_walls.cpp
     test_arrange.cpp
     test_assemble_list.cpp
+    test_assimp_import.cpp
     test_bambu_networking.cpp
     test_belt_brim.cpp
+    test_bridge_detector.cpp
     test_buildvolume.cpp
     test_calib.cpp
     test_circle.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
+    test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
     test_locales_utils.cpp
@@ -34,6 +37,7 @@ add_executable(${_TEST_NAME}_tests
     test_vendor_cache.cpp
     test_preset_options.cpp
     test_elephant_foot_compensation.cpp
+    test_expolygon_contracts.cpp
     test_expolygons_index_contracts.cpp
     test_extrusion_simulator.cpp
     test_intersection_points_contracts.cpp
@@ -48,15 +52,22 @@ add_executable(${_TEST_NAME}_tests
     test_png_read_write.cpp
     test_point.cpp
     test_polygon.cpp
+    test_polyline.cpp
+    test_multipoint.cpp
     test_mutable_polygon.cpp
     test_mutable_priority_queue.cpp
     test_minimum_spanning_tree.cpp
     test_nozzle_volume_type.cpp
     test_obj.cpp
+    test_obj_color_utils.cpp
+    test_zipper_archive_import.cpp
     test_step.cpp
     test_stl.cpp
+    test_surface_collection.cpp
+    test_short_edge_collapse.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp
+    test_trianglemesh.cpp
     test_trianglemesh_slicer.cpp
     test_marchingsquares.cpp
     test_lay_on_face.cpp

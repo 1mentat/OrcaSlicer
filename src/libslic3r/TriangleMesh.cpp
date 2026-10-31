@@ -389,6 +389,7 @@ void TriangleMesh::rotate(double angle, Point* center)
         this->translate(-c(0), -c(1), 0);
         its_rotate_z(this->its, (float)angle);
         this->translate(c(0), c(1), 0);
+        update_bounding_box(this->its, this->m_stats);
     }
 }
 
@@ -1104,8 +1105,8 @@ indexed_triangle_set its_make_pyramid(float base, float height)
     float a = base / 2.f;
     return {
         {
-            {0, 1, 2},
-            {0, 2, 3},
+            {0, 2, 1},
+            {0, 3, 2},
             {0, 1, 4},
             {1, 2, 4},
             {2, 3, 4},
