@@ -540,8 +540,15 @@ void Transformation::set_scaling_factor(const Vec3d& scaling_factor)
 {
     assert(scaling_factor.x() > 0.0 && scaling_factor.y() > 0.0 && scaling_factor.z() > 0.0);
 
+    // Keep the mirror carried by the signed scale; scaling_factor holds magnitudes only.
+    auto [rotation, scale] = extract_rotation_scale(m_matrix);
+    Vec3d signed_scale = scaling_factor;
+    for (int i = 0; i < 3; ++i)
+        if (scale(i, i) < 0.0)
+            signed_scale[i] = -signed_scale[i];
+
     const Vec3d offset = get_offset();
-    m_matrix = extract_rotation_matrix(m_matrix) * scale_transform(scaling_factor);
+    m_matrix = rotation * scale_transform(signed_scale);
     m_matrix.translation() = offset;
 }
 
@@ -550,7 +557,8 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
     assert(scaling_factor > 0.0);
 
     auto [rotation, scale] = extract_rotation_scale(m_matrix);
-    scale(axis, axis) = scaling_factor;
+    // Keep the mirror carried by the signed scale; scaling_factor is a magnitude.
+    scale(axis, axis) = std::copysign(scaling_factor, scale(axis, axis));
 
     const Vec3d offset = get_offset();
     m_matrix = rotation * scale;

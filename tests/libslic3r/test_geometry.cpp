@@ -1531,18 +1531,16 @@ TEST_CASE("Transformation axis setters change only their own component", "[Geome
     check_linear_and_offset(no_full_turn.get_matrix(), Matrix3d::Identity(), offset);
 }
 
-// Known bug: set_scaling_factor(Axis) overwrites the signed scale entry that carries the reflection with a positive value, un-mirroring the transform; fixed by the follow-up fix PR
 TEST_CASE("Transformation axis scale setter keeps the reflection of the axis it changes",
-          "[Geometry][Transformation][Scale][Mirror][!shouldfail]")
+          "[Geometry][Transformation][Scale][Mirror]")
 {
     Geometry::Transformation mirrored = scaled_quarter_turn(Vec3d(1., 1., -1.));
     mirrored.set_scaling_factor(Z, 5.);
     check_linear_and_offset(mirrored.get_matrix(), quarter_turn_times(Vec3d(4., 3., -5.)), Vec3d(5., -6., 7.));
 }
 
-// Known bug: set_scaling_factor(Vec3d) rebuilds the matrix from the rotation and the new positive scale, dropping any reflection; fixed by the follow-up fix PR
 TEST_CASE("Transformation vector scale setter keeps an existing reflection",
-          "[Geometry][Transformation][Scale][Mirror][!shouldfail]")
+          "[Geometry][Transformation][Scale][Mirror]")
 {
     Geometry::Transformation mirrored = scaled_quarter_turn(Vec3d(1., 1., -1.));
     mirrored.set_scaling_factor(Vec3d(4., 3., 5.));
