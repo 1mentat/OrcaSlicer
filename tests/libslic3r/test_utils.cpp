@@ -26,6 +26,7 @@
 #include <thread>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <unistd.h>     // getuid
@@ -563,4 +564,35 @@ TEST_CASE("Layer patterns reject empty, negative, nonnumeric and nonpositive int
     for (const std::string &p : {"", " ", "\"\"", "''", "bad", "#2", "5#bad", "0", "-2", "2#0", "2#-1", "9999999999999999999999"})
         check_layer_pattern(p, {});
     CHECK_FALSE(check_layer_id_pattern("1", -1));
+}
+
+TEST_CASE("UTF8 stepping spans ASCII and complete modern multibyte characters", "[utils]") {
+    const std::string s = "A\xc3\xa9\xe6\xa8\xa1\xf0\x9f\x90\x8bZ";
+    const std::vector<std::pair<size_t, size_t>> rows{{0, 1}, {1, 2}, {3, 3}, {6, 4}, {10, 1}};
+    for (const auto &[pos, len] : rows) {
+        CHECK(get_utf8_sequence_length(s, pos) == len);
+        CHECK(get_utf8_sequence_length(s.data() + pos, s.size() - pos) == len);
+    }
+}
+
+TEST_CASE("UTF8 stepping clamps truncated sequences to available bytes", "[utils]") {
+    for (const auto &[lead, width] : std::vector<std::pair<unsigned char, size_t>>{{0xc3, 2}, {0xe6, 3}, {0xf0, 4}, {0xf8, 5}, {0xfc, 6}}) {
+        // This helper measures byte spans, including legacy five/six-byte headers; it is not a Unicode validator.
+        std::string s(width, char(0x80));
+        s[0] = char(lead);
+        for (size_t available = 1; available <= width; ++available) {
+            CAPTURE(lead, width, available);
+            CHECK(get_utf8_sequence_length(s.data(), available) == available);
+        }
+    }
+}
+
+TEST_CASE("UTF8 stepping from a continuation byte stops before a new character", "[utils]") {
+    const std::string ascii_end  = "\x80\xbf\x81Z";
+    const std::string header_end = "\x80\xbf\xc3\xa9";
+    CHECK(get_utf8_sequence_length(ascii_end, 0) == 3);
+    CHECK(get_utf8_sequence_length(ascii_end.data(), 2) == 2);
+    CHECK(get_utf8_sequence_length(header_end, 0) == 2);
+    CHECK(get_utf8_sequence_length("\xfe", 1) == 1);
+    CHECK(get_utf8_sequence_length("\xff", 1) == 1);
 }
