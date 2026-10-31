@@ -800,28 +800,32 @@ TEST_CASE("Line splitting clips the path around expolygon holes", "[Geometry][Ge
     CHECK(clipped_endpoints == expected_endpoints);
 }
 
-TEST_CASE("Closed line splitting omits the duplicate endpoint", "[Geometry][GeometryContract][LineSplit]")
+TEST_CASE("Closed line splitting clips the closing edge and omits the duplicate endpoint", "[Geometry][GeometryContract][LineSplit]")
 {
     const coord_t mm = scale_(1.0);
     const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    // The closing edge (-5,2) -> (15,2) crosses the clip, so only closed handling
+    // produces its clipped run; the open path is clipped on edge 1 alone.
     const Polyline path{
-        Point(-5 * mm, 2 * mm), Point(15 * mm, 2 * mm),
-        Point(15 * mm, 8 * mm), Point(-5 * mm, 8 * mm)
+        Point(15 * mm, 2 * mm), Point(15 * mm, 8 * mm),
+        Point(-5 * mm, 8 * mm), Point(-5 * mm, 2 * mm)
     };
 
     const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, true);
     REQUIRE(split.size() >= path.points.size());
     CHECK(split.front().p != split.back().p);
 
+    bool saw_closing_edge_run = false;
     coord_t clipped_length = 0;
     for (size_t i = 0; i + 1 < split.size(); ++i) {
         if (!split[i].clipped)
             continue;
         CHECK(split[i].p.y() == split[i + 1].p.y());
-        size_t source_edge = 2;
+        size_t source_edge = 1;
         if (split[i].p.y() == 2 * mm) {
             CHECK(split[i + 1].p.y() == 2 * mm);
-            source_edge = 0;
+            source_edge = 3;
+            saw_closing_edge_run = true;
         } else {
             CHECK(split[i].p.y() == 8 * mm);
             CHECK(split[i + 1].p.y() == 8 * mm);
@@ -837,9 +841,9 @@ TEST_CASE("Closed line splitting omits the duplicate endpoint", "[Geometry][Geom
         const coord_t dx = split[i + 1].p.x() - split[i].p.x();
         clipped_length += dx < 0 ? -dx : dx;
     }
+    CHECK(saw_closing_edge_run);
     CHECK(clipped_length == 20 * mm);
 }
-
 
 TEST_CASE("Line splitting returns no junctions for an empty path", "[Geometry][GeometryContract][LineSplit]")
 {
@@ -849,6 +853,16 @@ TEST_CASE("Line splitting returns no junctions for an empty path", "[Geometry][G
 
     CHECK(Algorithm::split_line(empty_path, ExPolygons{clip}, false).empty());
     CHECK(Algorithm::split_line(empty_path, ExPolygons{clip}, true).empty());
+}
+
+TEST_CASE("Line splitting returns no junctions when the path misses the clip", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    const Polyline outside{Point(-5 * mm, -5 * mm), Point(15 * mm, -5 * mm), Point(15 * mm, -2 * mm)};
+
+    CHECK(Algorithm::split_line(outside, ExPolygons{clip}, false).empty());
+    CHECK(Algorithm::split_line(outside, ExPolygons{clip}, true).empty());
 }
 
 TEST_CASE("Line splitting keeps source indices for boundary-overlap runs", "[Geometry][GeometryContract][LineSplit]")
@@ -875,6 +889,7 @@ TEST_CASE("Line splitting keeps source indices for boundary-overlap runs", "[Geo
 
     const Point left_cut = point_on_axis(0, 5 * mm);
     const Point right_cut = point_on_axis(10 * mm, 5 * mm);
+    const Point collinear_clip_vertex = point_on_axis(5 * mm, 0);
     bool saw_left_cut = false;
     bool saw_source_1 = false;
     bool saw_source_2 = false;
@@ -907,6 +922,9 @@ TEST_CASE("Line splitting keeps source indices for boundary-overlap runs", "[Geo
             CHECK(junction.is_src());
             CHECK(junction.get_src_index() == 4);
         }
+        // The clip contour's collinear vertex inside the overlap run adds no
+        // junction: the run is reported by its source vertices alone.
+        CHECK(junction.p != collinear_clip_vertex);
         if (junction.p == right_cut) {
             saw_right_cut = true;
             CHECK_FALSE(junction.is_src());
