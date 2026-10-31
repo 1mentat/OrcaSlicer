@@ -8,6 +8,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/miniz_extension.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
 
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <ios>
 #include <iterator>
@@ -202,3 +204,87 @@ TEST_CASE("Confined extraction replaces a symlink at the destination instead of 
     }
 }
 #endif
+
+namespace {
+
+std::string make_unicode_path_field(const std::string &stored_name, const std::string &unicode_name,
+                                    unsigned char version, bool matching_crc)
+{
+    REQUIRE(unicode_name.size() <= 65530);
+    const auto length = static_cast<std::uint16_t>(unicode_name.size() + 5);
+    std::string extra;
+    extra.push_back(char(0x75));
+    extra.push_back(char(0x70));
+    extra.push_back(static_cast<char>(length & 0xff));
+    extra.push_back(static_cast<char>(length >> 8));
+    extra.push_back(static_cast<char>(version));
+    const mz_ulong crc = mz_crc32(0, reinterpret_cast<const unsigned char *>(stored_name.data()), stored_name.size())
+                       ^ (matching_crc ? 0u : 1u);
+    for (unsigned int byte = 0; byte < 4; ++byte)
+        extra.push_back(static_cast<char>((crc >> (8 * byte)) & 0xff));
+    return extra + unicode_name;
+}
+
+std::string decoded_entry_from_extra(const std::string &stored_name, const std::string &extra, bool utf8)
+{
+    ScopedTemporaryDir tmp;
+    const fs::path path = tmp.path() / "path-metadata.zip";
+    const std::string payload = "archive-path-contract";
+    {
+        mz_zip_archive writer{};
+        REQUIRE(open_zip_writer(&writer, path.string()));
+        ScopeGuard close_writer([&writer] { close_zip_writer(&writer); });
+        const mz_uint flags = MZ_DEFAULT_LEVEL | (utf8 ? 0 : MZ_ZIP_FLAG_ASCII_FILENAME);
+        REQUIRE(mz_zip_writer_add_mem_ex_v2(&writer, stored_name.c_str(), payload.data(), payload.size(),
+            nullptr, 0, flags, 0, 0, nullptr, extra.data(), static_cast<mz_uint>(extra.size()),
+            extra.data(), static_cast<mz_uint>(extra.size())));
+        REQUIRE(mz_zip_writer_finalize_archive(&writer));
+    }
+    mz_zip_archive reader{};
+    REQUIRE(open_zip_reader(&reader, path.string()));
+    ScopeGuard close_reader([&reader] { close_zip_reader(&reader); });
+    mz_zip_archive_file_stat stat{};
+    REQUIRE(mz_zip_reader_file_stat(&reader, 0, &stat));
+    REQUIRE(bool(stat.m_is_utf8) == utf8);
+    return decode_archive_entry_path(&reader, stat);
+}
+
+} // namespace
+
+TEST_CASE("Archive Unicode path metadata requires its declared version and filename checksum", "[MinizExtension][ArchivePathMetadata]")
+{
+    const bool matching_crc = GENERATE(false, true);
+    const unsigned char version = GENERATE(1, 2);
+    const bool preceding_field = GENERATE(false, true);
+    const std::string stored_name = "models/original.stl";
+    const std::string unicode_name = "models/pi\xc3\xa8\x63" "e.stl";
+    std::string extra;
+    if (preceding_field)
+        extra = std::string("\xfe\xca\x02\x00xy", 6);
+    extra += make_unicode_path_field(stored_name, unicode_name, version, matching_crc);
+
+    const std::string actual = decoded_entry_from_extra(stored_name, extra, false);
+    const std::string expected = matching_crc && version == 1 ? unicode_name : stored_name;
+    CHECK(actual == expected);
+}
+
+TEST_CASE("Archive UTF8 filenames take precedence over Unicode path extra fields", "[MinizExtension][ArchivePathMetadata]")
+{
+    const std::string stored_name = "models/original-\xc3\xa9.stl";
+    const std::string extra = make_unicode_path_field(stored_name, "models/other.stl", 1, true);
+    CHECK(decoded_entry_from_extra(stored_name, extra, true) == stored_name);
+}
+
+TEST_CASE("Truncated archive path fields retain the stored ASCII filename", "[MinizExtension][ArchivePathMetadata]")
+{
+    const bool incomplete_payload = GENERATE(false, true);
+    const std::string stored_name = "models/original.stl";
+    std::string extra = make_unicode_path_field(stored_name, "models/other.stl", 1, true);
+    if (incomplete_payload)
+        extra[2] = 127; // Declared payload extends beyond the central extra-field bytes.
+    else
+        // Too short for version plus four CRC bytes. The bytes after it still hold a matching CRC,
+        // so only the length check keeps them out of the field.
+        extra[2] = 4;
+    CHECK(decoded_entry_from_extra(stored_name, extra, false) == stored_name);
+}
