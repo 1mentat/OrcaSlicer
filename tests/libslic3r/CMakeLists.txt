@@ -64,6 +64,7 @@ add_executable(${_TEST_NAME}_tests
     test_step.cpp
     test_stl.cpp
     test_surface_collection.cpp
+    test_svg_import.cpp
     test_short_edge_collapse.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp
