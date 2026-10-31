@@ -12465,7 +12465,7 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->cli_params = "slicing_data_directory";
     def->set_default_value(new ConfigOptionString("cached_data"));
 
-    def = this->add("load_slicedata", coStrings);
+    def = this->add("load_slicedata", coString);
     def->label = L("Load slicing data");
     def->tooltip = L("Load cached slicing data from directory.");
     def->cli_params = "slicing_data_directory";
