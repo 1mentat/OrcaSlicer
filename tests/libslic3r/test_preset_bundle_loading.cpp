@@ -7027,6 +7027,8 @@ TEST_CASE("The complete preset configuration resolves multiple filaments while r
     CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
           std::vector<std::string>{"Direct Drive High Flow", "Direct Drive Standard"});
     check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {22., 13.});
+    CHECK(out.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 2});
+    CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{nvtHighFlow, nvtStandard});
 }
 
 TEST_CASE("The complete preset configuration removes preset-only bookkeeping from the merged config", "[Preset][Bundle][ConstructFullConfig]")
@@ -7036,21 +7038,55 @@ TEST_CASE("The complete preset configuration removes preset-only bookkeeping fro
     in.filaments[0].inherits() = "Base Filament";
     in.print.compatible_printers_condition() = "machine";
     in.filaments[0].compatible_printers_condition() = "machine";
+    in.filaments[0].compatible_prints_condition() = "process";
     in.print.config.option<ConfigOptionStrings>("compatible_printers", true)->values = {"Test Printer"};
+    in.filaments[0].config.option<ConfigOptionStrings>("compatible_prints", true)->values = {"Test Process"};
+    in.bundle.project_config.option<ConfigOptionStrings>("different_settings_to_system", true)->values = {"layer_height"};
+
+    const std::vector<std::string> stripped{"compatible_prints", "compatible_printers", "compatible_printers_condition",
+                                            "compatible_prints_condition", "inherits", "different_settings_to_system"};
+    // Every key is fed in by one of the merged configs, so its absence below is the stripping.
+    for (const std::string &key : stripped) {
+        CAPTURE(key);
+        REQUIRE((in.print.config.has(key) || in.filaments[0].config.has(key) || in.bundle.project_config.has(key)));
+    }
 
     DynamicPrintConfig out = in.construct();
 
-    CHECK_FALSE(out.has("compatible_prints"));
-    CHECK_FALSE(out.has("compatible_printers"));
-    CHECK_FALSE(out.has("compatible_printers_condition"));
-    CHECK_FALSE(out.has("compatible_prints_condition"));
-    CHECK_FALSE(out.has("inherits"));
-    CHECK_FALSE(out.has("different_settings_to_system"));
+    for (const std::string &key : stripped) {
+        CAPTURE(key);
+        CHECK_FALSE(out.has(key));
+    }
     // The print's printer list survives under its own key, and the rest in the group keys.
     CHECK(out.option<ConfigOptionStrings>("print_compatible_printers")->values == std::vector<std::string>{"Test Printer"});
     CHECK(out.option<ConfigOptionStrings>("compatible_machine_expression_group")->values ==
           std::vector<std::string>{"machine", "machine"});
+    CHECK(out.option<ConfigOptionStrings>("compatible_process_expression_group")->values == std::vector<std::string>{"process"});
     CHECK(out.option<ConfigOptionStrings>("inherits_group")->values == std::vector<std::string>{"Base Process", "Base Filament"});
+}
+
+TEST_CASE("The complete preset configuration groups the metadata of every filament", "[Preset][Bundle][ConstructFullConfig][!shouldfail]")
+{
+    // Known bug: with several filaments construct_full_config collects only the print's conditions and inherits into the group keys (full_fff_config collects every filament's); fixed by the follow-up fix PR
+    ConstructInputs in;
+    in.add_filament("Test PETG", "test-petg-id");
+    in.print.inherits() = "Base Process";
+    in.print.compatible_printers_condition() = "print machine";
+    for (size_t i = 0; i < in.filaments.size(); ++i) {
+        in.filaments[i].inherits() = "Base Filament " + std::to_string(i);
+        in.filaments[i].compatible_printers_condition() = "filament machine " + std::to_string(i);
+        in.filaments[i].compatible_prints_condition() = "filament process " + std::to_string(i);
+    }
+
+    DynamicPrintConfig out = in.construct();
+
+    CHECK(out.option<ConfigOptionStrings>("inherits_group")->values ==
+          std::vector<std::string>{"Base Process", "Base Filament 0", "Base Filament 1"});
+    CHECK(out.option<ConfigOptionStrings>("compatible_machine_expression_group")->values ==
+          std::vector<std::string>{"print machine", "filament machine 0", "filament machine 1"});
+    const auto *process_group = out.option<ConfigOptionStrings>("compatible_process_expression_group");
+    REQUIRE(process_group != nullptr);
+    CHECK(process_group->values == std::vector<std::string>{"filament process 0", "filament process 1"});
 }
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
