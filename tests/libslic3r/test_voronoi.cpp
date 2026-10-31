@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "test_utils.hpp"
 
 #include "libslic3r/Geometry/Voronoi.hpp"
@@ -36,6 +38,7 @@ using namespace Slic3r;
 
 using VD = Geometry::VoronoiDiagram;
 using BoostVD = boost::polygon::voronoi_diagram<double>;
+using Catch::Matchers::WithinAbs;
 
 // https://svn.boost.org/trac10/ticket/12067
 // This bug seems to be confirmed.
@@ -1935,6 +1938,72 @@ TEST_CASE("Voronoi skeleton", "[VoronoiSkeleton]")
     std::vector<Vec2d> skeleton_edges = Slic3r::Voronoi::skeleton_edges_rough(vd, lines, threshold_alpha);
 
     REQUIRE(! skeleton_edges.empty());
+}
+
+TEST_CASE("Voronoi skeleton clips an inside point-point edge at its corner threshold", "[Voronoi][VoronoiSkeleton]")
+{
+    const coord_t unit = scale_(1.);
+    Polygon outline {
+        { -4 * unit, -4 * unit }, {  4 * unit, -4 * unit },
+        {  4 * unit, -1 * unit }, {  1 * unit, -1 * unit },
+        {  1 * unit,  1 * unit }, {  4 * unit,  1 * unit },
+        {  4 * unit,  4 * unit }, { -4 * unit,  4 * unit },
+        { -4 * unit,  1 * unit }, { -1 * unit,  1 * unit },
+        { -1 * unit, -1 * unit }, { -4 * unit, -1 * unit }
+    };
+    REQUIRE(outline.area() > 0.);
+
+    Lines lines = to_lines(outline);
+    VD vd;
+    vd.construct_voronoi(lines.begin(), lines.end());
+    REQUIRE(vd.edges().size() > 0);
+    Slic3r::Voronoi::annotate_inside_outside(vd, lines);
+
+    const double threshold_alpha = M_PI / 6.;
+    const std::vector<Vec2d> skeleton = Slic3r::Voronoi::skeleton_edges_rough(vd, lines, threshold_alpha);
+    REQUIRE(skeleton.size() == vd.edges().size());
+    const VD::edge_type *first_edge = &vd.edges().front();
+    const Point left_notch(-unit, -unit);
+    const Point right_notch(unit, -unit);
+    const double expected_threshold_y = -double(unit) * (1. + std::tan(0.5 * threshold_alpha));
+    bool found_inside_point_point_edge = false;
+
+    for (const VD::edge_type &edge : vd.edges()) {
+        if (&edge > edge.twin() || edge.is_secondary() || edge.is_infinite())
+            continue;
+        const VD::cell_type *cell = edge.cell();
+        const VD::cell_type *cell2 = edge.twin()->cell();
+        if (! cell->contains_point() || ! cell2->contains_point())
+            continue;
+
+        const Point &site0 = Slic3r::Voronoi::contour_point(*cell, lines);
+        const Point &site1 = Slic3r::Voronoi::contour_point(*cell2, lines);
+        if (! ((site0 == left_notch && site1 == right_notch) ||
+               (site0 == right_notch && site1 == left_notch)))
+            continue;
+
+        const bool inside = Slic3r::Voronoi::edge_category(edge) == Slic3r::Voronoi::EdgeCategory::PointsInside ||
+                            Slic3r::Voronoi::edge_category(edge.twin()) == Slic3r::Voronoi::EdgeCategory::PointsInside;
+        REQUIRE(inside);
+        const size_t edge_index = &edge - first_edge;
+        const Vec2d &p0 = skeleton[edge_index];
+        const Vec2d &p1 = skeleton[edge.twin() - first_edge];
+        REQUIRE(std::isfinite(p0.x()));
+        REQUIRE(std::isfinite(p1.x()));
+        CHECK_THAT(p0.x(), WithinAbs(0., double(unit) * 1e-6));
+        CHECK_THAT(p1.x(), WithinAbs(0., double(unit) * 1e-6));
+        CHECK_THAT(std::min(p0.y(), p1.y()), WithinAbs(expected_threshold_y, double(unit) * 1e-5));
+        CHECK_THAT(std::max(p0.y(), p1.y()), WithinAbs(-double(unit), double(unit) * 1e-6));
+        const double d0 = (p0 - left_notch.cast<double>()).norm();
+        const double d1 = (p0 - right_notch.cast<double>()).norm();
+        CHECK_THAT(d0, WithinAbs(d1, double(unit) * 1e-6));
+        const double d2 = (p1 - left_notch.cast<double>()).norm();
+        const double d3 = (p1 - right_notch.cast<double>()).norm();
+        CHECK_THAT(d2, WithinAbs(d3, double(unit) * 1e-6));
+        found_inside_point_point_edge = true;
+    }
+
+    REQUIRE(found_inside_point_point_edge);
 }
 
 // Simple detection with complexity N^2 if there is any point in the input polygons that doesn't have Voronoi vertex.
