@@ -186,6 +186,30 @@ TEST_CASE("CGAL merge joins disjoint closed components without changing total vo
     CHECK_THAT(merged.bounding_box().max.x(), WithinAbs(22., 1e-5));
 }
 
+TEST_CASE("CGAL segmentation splits a dumbbell into closed parts with conserved volume", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // Two spheres joined by a thin rod, so the SDF segmentation has regions of clearly different
+    // thickness to separate. Each part comes back hole-filled, so the parts' volumes add up.
+    TriangleMesh dumbbell = make_sphere(5.);
+    TriangleMesh far_ball = make_sphere(5.);
+    far_ball.translate(Vec3f(0.f, 0.f, 20.f));
+    MeshBoolean::cgal::plus(dumbbell, far_ball);
+    MeshBoolean::cgal::plus(dumbbell, make_cylinder(1., 20.));
+    const float dumbbell_volume = mesh_volume(dumbbell);
+
+    const std::vector<TriangleMesh> pieces = MeshBoolean::cgal::segment(dumbbell, 0.5, 3);
+    REQUIRE(pieces.size() >= 2);
+    float total_volume = 0.f;
+    for (const TriangleMesh &piece : pieces) {
+        check_valid_indices(piece.its);
+        const float piece_volume = mesh_volume(piece);
+        CHECK(piece_volume > 0.f);
+        CHECK(piece_volume < dumbbell_volume);
+        total_volume += piece_volume;
+    }
+    CHECK_THAT(total_volume, WithinRel(dumbbell_volume, 1e-2f));
+}
+
 TEST_CASE("MCUT conversion round trips cuboid topology and empty state", "[MeshBoolean][MeshBooleanContracts]")
 {
     const TriangleMesh cube = shifted_cube(7.f, 1.f, -2.f);
