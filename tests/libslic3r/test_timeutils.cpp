@@ -48,3 +48,38 @@ TEST_CASE("Slic3r_UTC_Time_Format", "[Timeutils]") {
     
     REQUIRE(date == mydate);
 }
+
+TEST_CASE("ISO 8601 millisecond parsing honors the UTC epoch and leap-day boundary", "[Timeutils]") {
+    using Slic3r::Utils::iso8601_to_millis;
+
+    // These constants are Unix milliseconds computed from the Gregorian UTC dates,
+    // independently of the production parser.
+    CHECK(iso8601_to_millis("1970-01-01T00:00:00Z") == 0LL);
+    CHECK(iso8601_to_millis("2000-02-29T00:00:00.000Z") == 951782400000LL);
+    CHECK(iso8601_to_millis("2000-03-01T00:00:00.000Z") == 951868800000LL);
+}
+
+TEST_CASE("ISO 8601 millisecond fractions normalize to three digits", "[Timeutils]") {
+    using Slic3r::Utils::iso8601_to_millis;
+    constexpr long long leap_day_midnight = 1709164800000LL;
+
+    CHECK(iso8601_to_millis("2024-02-29T00:00:00Z") == leap_day_midnight);
+    CHECK(iso8601_to_millis("2024-02-29T00:00:00.1Z") == leap_day_midnight + 100LL);
+    CHECK(iso8601_to_millis("2024-02-29T00:00:00.12Z") == leap_day_midnight + 120LL);
+    CHECK(iso8601_to_millis("2024-02-29T00:00:00.123Z") == leap_day_midnight + 123LL);
+    CHECK(iso8601_to_millis("2024-02-29T00:00:00.1234Z") == leap_day_midnight + 123LL);
+    CHECK(iso8601_to_millis("2024-02-29T00:00:00.123456Z") == leap_day_midnight + 123LL);
+}
+
+TEST_CASE("ISO 8601 millisecond formatting round-trips and parse errors use the documented sentinel", "[Timeutils]") {
+    using Slic3r::Utils::iso8601_to_millis;
+    using Slic3r::Utils::millis_to_iso8601;
+
+    constexpr long long leap_day_instant = 1709164800123LL;
+    CHECK(millis_to_iso8601(0LL) == "1970-01-01T00:00:00.000Z");
+    CHECK(millis_to_iso8601(leap_day_instant) == "2024-02-29T00:00:00.123Z");
+    CHECK(iso8601_to_millis(millis_to_iso8601(leap_day_instant)) == leap_day_instant);
+    CHECK(iso8601_to_millis("") == -1LL);
+    CHECK(iso8601_to_millis("not an ISO 8601 timestamp") == -1LL);
+    CHECK(iso8601_to_millis("2024-02-29") == -1LL);
+}
