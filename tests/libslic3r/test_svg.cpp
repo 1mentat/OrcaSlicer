@@ -235,62 +235,61 @@ TEST_CASE("SVG emits grid lines only when the requested step fits", "[SVG]")
     CHECK(elements(read_svg(too_small), "line").empty());
 }
 
-TEST_CASE("SVG handles polygon winding and primitive annotations", "[SVG]")
+TEST_CASE("SVG paints counter-clockwise polygons with their fill and clockwise ones white", "[SVG]")
 {
-    const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
     Polygon ccw = square(1., 1., 8., 8.).contour;
     if (!ccw.is_counter_clockwise())
         ccw.reverse();
-    Polygon cw = ccw;
-    cw.reverse();
+    Polygon cw = square(10., 10., 18., 18.).contour;
+    if (!cw.is_clockwise())
+        cw.reverse();
 
-    ScopedTemporaryFile ccw_output(".svg");
+    ScopedTemporaryFile output(".svg");
     {
-        SVG svg(ccw_output.string(), box, scaled(1.), false);
+        SVG svg(output.string(), BoundingBox(Point(0, 0), Point(scaled(20.), scaled(20.))), scaled(1.), false);
+        svg.draw(Polygons{ccw, cw}, "red");
+        svg.Close();
+    }
+    // A clockwise polygon is painted white, as a hole, instead of the requested fill.
+    const std::vector<pt::ptree> paths = elements(read_svg(output), "path");
+    REQUIRE(paths.size() == 2);
+    CHECK(style(paths[0]).at("fill") == "red");
+    CHECK(style(paths[1]).at("fill") == "white");
+}
+
+TEST_CASE("SVG writes line arrows, text, legends and comments", "[SVG]")
+{
+    ScopedTemporaryFile output(".svg");
+    {
+        SVG svg(output.string(), BoundingBox(Point(0, 0), Point(scaled(20.), scaled(20.))), scaled(1.), false);
         svg.arrows = true;
-        svg.draw(Polygons{ccw}, "red");
         svg.draw(Line(Point(scaled(2.), scaled(2.)), Point(scaled(6.), scaled(2.))), "orange", scaled(.1));
         svg.draw_text(Point(scaled(2.), scaled(4.)), "text", "purple", 3);
         svg.draw_legend(Point(scaled(2.), scaled(6.)), "legend", "teal");
         svg.add_comment("metadata");
         svg.Close();
     }
+    const pt::ptree svg = read_svg(output);
 
-    const pt::ptree ccw_svg = read_svg(ccw_output);
-    const std::vector<pt::ptree> ccw_paths = elements(ccw_svg, "path");
-    REQUIRE(ccw_paths.size() == 1);
-    CHECK(style(ccw_paths.front()).at("fill") == "red");
-
-    const std::vector<pt::ptree> lines = elements(ccw_svg, "line");
+    const std::vector<pt::ptree> lines = elements(svg, "line");
     REQUIRE(lines.size() == 1);
     CHECK(style(lines.front()).at("stroke") == "orange");
     CHECK(attr(lines.front(), "marker-end") == "url(#endArrow)");
 
     // draw_text scales the font size by 10; the legend is a swatch plus a black label.
-    const std::vector<pt::ptree> texts = elements(ccw_svg, "text");
+    const std::vector<pt::ptree> texts = elements(svg, "text");
     REQUIRE(texts.size() == 2);
     CHECK(text(texts[0]) == "text");
     CHECK(attr(texts[0], "fill") == "purple");
     CHECK(attr(texts[0], "font-size") == "30px");
     CHECK(text(texts[1]) == "legend");
-    const std::vector<pt::ptree> circles = elements(ccw_svg, "circle");
+    const std::vector<pt::ptree> circles = elements(svg, "circle");
     REQUIRE(circles.size() == 1);
     CHECK(attr(circles.front(), "fill") == "teal");
 
-    const std::vector<pt::ptree> comments = elements(ccw_svg, "<xmlcomment>");
+    const std::vector<pt::ptree> comments = elements(svg, "<xmlcomment>");
     REQUIRE(comments.size() == 1);
     CHECK(text(comments.front()) == "metadata");
-
-    // A clockwise polygon is painted white, as a hole, instead of the requested fill.
-    ScopedTemporaryFile cw_output(".svg");
-    {
-        SVG svg(cw_output.string(), box, scaled(1.), false);
-        svg.draw(Polygons{cw}, "red");
-        svg.Close();
-    }
-    const std::vector<pt::ptree> cw_paths = elements(read_svg(cw_output), "path");
-    REQUIRE(cw_paths.size() == 1);
-    CHECK(style(cw_paths.front()).at("fill") == "white");
 }
 
 TEST_CASE("SVG creates nested output paths and reports an unopenable destination", "[SVG]")
