@@ -4,9 +4,10 @@
 #include <cstddef>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <string>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -57,6 +58,29 @@ void parse_obj(const std::string& text, std::vector<Vec3f>& vertices, std::vecto
     }
 }
 
+// A face index paired with the index of one of its edges; edge e runs from corner e to corner e + 1.
+using FaceEdge = std::pair<size_t, int>;
+
+std::map<int, std::vector<FaceEdge>> edge_id_occurrences(const std::vector<Vec3i32>& ids)
+{
+    std::map<int, std::vector<FaceEdge>> occurrences;
+    for (size_t face = 0; face < ids.size(); ++face)
+        for (int edge = 0; edge < 3; ++edge)
+            if (ids[face][edge] >= 0)
+                occurrences[ids[face][edge]].emplace_back(face, edge);
+    return occurrences;
+}
+
+// True when the two face edges belong to different faces and traverse the same two vertices in opposite directions.
+bool is_reverse_edge_pair(const indexed_triangle_set& its, const FaceEdge& a, const FaceEdge& b)
+{
+    if (a.first == b.first)
+        return false;
+    const Vec3i32& fa = its.indices[a.first];
+    const Vec3i32& fb = its.indices[b.first];
+    return fa[a.second] == fb[(b.second + 1) % 3] && fa[(a.second + 1) % 3] == fb[b.second];
+}
+
 } // namespace
 
 TEST_CASE("Indexed mesh edge identifiers pair every cube edge", "[TriangleMesh][TriangleMeshContracts]")
@@ -64,18 +88,16 @@ TEST_CASE("Indexed mesh edge identifiers pair every cube edge", "[TriangleMesh][
     const indexed_triangle_set cube = its_make_cube(2., 3., 4.);
     const auto ids                  = its_face_edge_ids(cube);
     REQUIRE(ids.size() == cube.indices.size());
-    std::unordered_map<int, int> occurrences;
     for (const Vec3i32& face : ids)
-        for (int id : face) {
+        for (int id : face)
             REQUIRE(id >= 0);
-            ++occurrences[id];
-        }
+    const auto occurrences = edge_id_occurrences(ids);
     REQUIRE(occurrences.size() == 18);
-    for (int id = 0; id < 18; ++id)
-        REQUIRE(occurrences.count(id) == 1);
-    for (const auto& [id, count] : occurrences) {
-        (void) id;
-        CHECK(count == 2);
+    int expected_id = 0;
+    for (const auto& [id, uses] : occurrences) {
+        CHECK(id == expected_id++);
+        REQUIRE(uses.size() == 2);
+        CHECK(is_reverse_edge_pair(cube, uses[0], uses[1]));
     }
     bool callback_called    = false;
     const auto callback_ids = its_face_edge_ids(cube, [&callback_called] { callback_called = true; });
@@ -91,39 +113,60 @@ TEST_CASE("Masked and supplied-neighbor edge identifiers preserve unbound edges"
     mask[1]           = true;
     const auto masked = its_face_edge_ids(cube, mask);
     REQUIRE(masked.size() == cube.indices.size());
-    int selected_zero_edges = 0;
-    int selected_one_edges  = 0;
     for (int edge = 0; edge < 3; ++edge) {
-        if (masked[0][edge] >= 0)
-            ++selected_zero_edges;
-        if (masked[1][edge] >= 0)
-            ++selected_one_edges;
         CHECK(masked[0][edge] >= 0);
         CHECK(masked[1][edge] >= 0);
     }
-    CHECK(selected_zero_edges == 3);
-    CHECK(selected_one_edges == 3);
     for (size_t face = 2; face < masked.size(); ++face)
         for (int edge = 0; edge < 3; ++edge)
             CHECK(masked[face][edge] == -1);
-    int shared_id      = -1;
-    int shared_matches = 0;
-    for (int edge0 = 0; edge0 < 3; ++edge0)
-        for (int edge1 = 0; edge1 < 3; ++edge1)
-            if (masked[0][edge0] == masked[1][edge1]) {
-                shared_id = masked[0][edge0];
-                ++shared_matches;
+    // The two masked faces share exactly one edge, and it gets one ID on both sides.
+    const auto masked_occurrences = edge_id_occurrences(masked);
+    REQUIRE(masked_occurrences.size() == 5);
+    int shared_ids = 0;
+    for (const auto& [id, uses] : masked_occurrences) {
+        (void) id;
+        if (uses.size() == 2) {
+            ++shared_ids;
+            CHECK(is_reverse_edge_pair(cube, uses[0], uses[1]));
+        }
+    }
+    CHECK(shared_ids == 1);
+
+    // Removing one face opens three boundary edges whose supplied neighbor is -1.
+    indexed_triangle_set open = its_make_cube(2., 2., 2.);
+    open.indices.pop_back();
+    auto neighbors = its_face_neighbors(open);
+    int num_edges  = 0;
+    const auto bound_only = its_face_edge_ids(open, neighbors, false, &num_edges);
+    REQUIRE(bound_only.size() == open.indices.size());
+    CHECK(num_edges == 15);
+    std::vector<FaceEdge> unbound;
+    for (size_t face = 0; face < bound_only.size(); ++face)
+        for (int edge = 0; edge < 3; ++edge)
+            if (bound_only[face][edge] == -1) {
+                CHECK(neighbors[face][edge] == -1);
+                unbound.emplace_back(face, edge);
             }
-    CHECK(shared_matches == 1);
-    REQUIRE(shared_id >= 0);
-    auto neighbors      = its_face_neighbors(cube);
-    int num_edges       = 0;
-    const auto supplied = its_face_edge_ids(cube, neighbors, true, &num_edges);
-    REQUIRE(supplied.size() == cube.indices.size());
-    REQUIRE(num_edges == 18);
-    for (const Vec3i32& face : supplied)
-        for (int id : face)
-            REQUIRE(id >= 0);
+    REQUIRE(unbound.size() == 3);
+    for (const auto& [id, uses] : edge_id_occurrences(bound_only)) {
+        (void) id;
+        REQUIRE(uses.size() == 2);
+        CHECK(is_reverse_edge_pair(open, uses[0], uses[1]));
+    }
+
+    const auto assigned = its_face_edge_ids(open, neighbors, true, &num_edges);
+    CHECK(num_edges == 18);
+    std::vector<FaceEdge> single_use;
+    for (const auto& [id, uses] : edge_id_occurrences(assigned)) {
+        CHECK(id < num_edges);
+        if (uses.size() == 1)
+            single_use.push_back(uses.front());
+        else
+            CHECK(is_reverse_edge_pair(open, uses[0], uses[1]));
+    }
+    std::sort(single_use.begin(), single_use.end());
+    CHECK(single_use == unbound);
 }
 
 TEST_CASE("Disconnected indexed meshes report patches and preserve additive volume", "[TriangleMesh][TriangleMeshContracts]")
@@ -147,7 +190,7 @@ TEST_CASE("Open and closed indexed meshes expose their boundary edges", "[Triang
     auto closed = its_make_cube(2., 2., 2.);
     REQUIRE(its_num_open_edges(closed) == 0);
     closed.indices.pop_back();
-    REQUIRE(its_num_open_edges(closed) > 0);
+    REQUIRE(its_num_open_edges(closed) == 3);
     REQUIRE(its_number_of_patches(closed) == 1);
     const auto neighbors = its_face_neighbors_par(closed);
     REQUIRE(neighbors.size() == closed.indices.size());
@@ -156,19 +199,39 @@ TEST_CASE("Open and closed indexed meshes expose their boundary edges", "[Triang
 
 TEST_CASE("Indexed mesh cleanup removes duplicate and unused vertices without invalidating faces", "[TriangleMesh][TriangleMeshContracts]")
 {
-    indexed_triangle_set mesh = its_make_cube(1., 1., 1.);
-    mesh.vertices.push_back(mesh.vertices.front());
-    const size_t with_unused = mesh.vertices.size();
-    mesh.indices.emplace_back(0, 0, 0);
-    const int removed_faces = its_remove_degenerate_faces(mesh);
-    REQUIRE(removed_faces == 1);
-    const int removed_vertices = its_merge_vertices(mesh);
-    REQUIRE(removed_vertices >= 1);
+    indexed_triangle_set mesh  = its_make_cube(1., 1., 1.);
+    const size_t cube_vertices = mesh.vertices.size();
+    // Re-point one corner of one face at a copy of vertex 0, which opens the surface along that corner.
+    const int duplicate = int(mesh.vertices.size());
+    mesh.vertices.push_back(mesh.vertices[0]);
+    size_t remapped_face   = 0;
+    int    remapped_corner = -1;
+    for (size_t face = 0; face < mesh.indices.size() && remapped_corner < 0; ++face)
+        for (int corner = 0; corner < 3; ++corner)
+            if (mesh.indices[face][corner] == 0) {
+                mesh.indices[face][corner] = duplicate;
+                remapped_face              = face;
+                remapped_corner            = corner;
+                break;
+            }
+    REQUIRE(remapped_corner >= 0);
+    REQUIRE(its_num_open_edges(mesh) > 0);
+    // A distinct vertex that no face references.
+    mesh.vertices.emplace_back(5.f, 5.f, 5.f);
+    mesh.indices.emplace_back(0, 0, 1);
+
+    REQUIRE(its_remove_degenerate_faces(mesh) == 1);
+    REQUIRE(its_merge_vertices(mesh) == 1);
+    CHECK(mesh.indices[remapped_face][remapped_corner] == 0);
     REQUIRE(all_indices_valid(mesh));
-    its_shrink_to_fit(mesh);
-    REQUIRE(its_compactify_vertices(mesh) == 0);
-    REQUIRE(mesh.vertices.size() < with_unused);
     CHECK(its_num_open_edges(mesh) == 0);
+    REQUIRE(mesh.vertices.size() == cube_vertices + 1);
+
+    REQUIRE(its_compactify_vertices(mesh) == 1);
+    REQUIRE(mesh.vertices.size() == cube_vertices);
+    REQUIRE(all_indices_valid(mesh));
+    CHECK(its_num_open_edges(mesh) == 0);
+    CHECK_THAT(its_volume(mesh), WithinAbs(1.f, 1e-5f));
 }
 
 TEST_CASE("Vertex face incidence counts every cube corner consistently", "[TriangleMesh][TriangleMeshContracts]")
