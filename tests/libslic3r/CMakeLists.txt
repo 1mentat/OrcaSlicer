@@ -64,6 +64,7 @@ add_executable(${_TEST_NAME}_tests
     test_zipper_archive_import.cpp
     test_step.cpp
     test_stl.cpp
+    test_nsvg_utils.cpp
     test_surface_collection.cpp
     test_svg.cpp
     test_short_edge_collapse.cpp
