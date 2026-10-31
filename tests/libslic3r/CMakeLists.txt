@@ -22,7 +22,6 @@ add_executable(${_TEST_NAME}_tests
     test_circle.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
-    test_rotfinder.cpp
     test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
@@ -79,6 +78,7 @@ add_executable(${_TEST_NAME}_tests
     test_lay_on_face.cpp
     test_model.cpp
     test_project_task.cpp
+    test_rotfinder.cpp
     test_utils.cpp
     test_miniz_extension.cpp
     test_timeutils.cpp

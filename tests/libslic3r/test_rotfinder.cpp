@@ -43,6 +43,34 @@ RotObject asymmetric_prism()
     return RotObject(make_cube(3., 7., 11.));
 }
 
+// The X-Z profile below, extruded 20 mm along Y: a 20 mm wide top bar on two legs splaying out
+// to a 40 mm footprint, with the notch between the legs open to the bed.
+TriangleMesh splayed_frame()
+{
+    const std::vector<Vec2f> profile{{0.f, 0.f},   {2.f, 0.f},   {11.f, 18.f}, {29.f, 18.f},
+                                     {38.f, 0.f},  {40.f, 0.f},  {30.f, 20.f}, {10.f, 20.f}};
+    // The profile is not convex, so its caps are the left leg, the top bar and the right leg.
+    const std::vector<Vec3i32> cap{{0, 1, 2}, {0, 2, 7}, {7, 2, 3}, {7, 3, 6}, {3, 4, 5}, {3, 5, 6}};
+    constexpr float depth = 20.f;
+    const int n = int(profile.size());
+
+    std::vector<Vec3f> vertices;
+    for (const float y : {0.f, depth})
+        for (const Vec2f &point : profile)
+            vertices.emplace_back(point.x(), y, point.y());
+    std::vector<Vec3i32> faces;
+    for (int i = 0; i < n; ++i) {
+        const int next = (i + 1) % n;
+        faces.emplace_back(i, i + n, next + n);
+        faces.emplace_back(i, next + n, next);
+    }
+    for (const Vec3i32 &tri : cap) {
+        faces.push_back(tri);
+        faces.emplace_back(tri.x() + n, tri.z() + n, tri.y() + n);
+    }
+    return TriangleMesh(std::move(vertices), std::move(faces));
+}
+
 Transform3f rotation_transform(const Vec2d &rotation)
 {
     Transform3f transform = Transform3f::Identity();
@@ -181,7 +209,7 @@ TEST_CASE("Best misalignment rotation tilts an axis-aligned prism away from the 
     CHECK(result_score >= identity_score + 5.);
 }
 
-TEST_CASE("Elevated least-support rotation lowers the slope score below the unrotated prism", "[Rotfinder]")
+TEST_CASE("Elevated least-support rotation beats every axis-aligned pose of the prism", "[Rotfinder]")
 {
     RotObject fixture = asymmetric_prism();
     fixture.object->config.set_key_value("support_object_elevation", new ConfigOptionFloat(4.0));
@@ -193,18 +221,24 @@ TEST_CASE("Elevated least-support rotation lowers the slope score below the unro
     const Vec2d rotation = sla::find_least_supports_rotation(*fixture.object, params);
     check_rotation_range(rotation);
     check_status_values(status);
-    const double identity_score = elevated_support_score(fixture.object->raw_mesh(), Vec2d::Zero());
+    // elevated_support_score restates the documented scoring rule (sqrt(area) * phi^3 per face).
+    // Every axis-aligned pose leaves one face fully overhanging; a tilted pose must beat all six.
+    double best_aligned = std::numeric_limits<double>::max();
+    for (const Vec2d &pose : {Vec2d(0., 0.), Vec2d(PI / 2., 0.), Vec2d(-PI / 2., 0.), Vec2d(PI, 0.), Vec2d(0., PI / 2.), Vec2d(0., -PI / 2.)})
+        best_aligned = std::min(best_aligned, elevated_support_score(fixture.object->raw_mesh(), pose));
     const double result_score = elevated_support_score(fixture.object->raw_mesh(), rotation);
-    INFO("identity " << identity_score << ", result " << result_score);
-    CHECK(result_score < identity_score);
+    INFO("best axis-aligned " << best_aligned << ", result " << result_score);
+    CHECK(result_score < best_aligned);
 }
 
-TEST_CASE("Floor least-support rotation rests the prism on its largest face", "[Rotfinder]")
+TEST_CASE("Floor least-support rotation prefers full contact over the largest hull face", "[Rotfinder]")
 {
-    // The same 3 x 7 x 11 prism with each face size in turn on the bed, so the result cannot come
-    // from search order alone.
-    const Vec3d size = GENERATE(Vec3d(3., 7., 11.), Vec3d(11., 3., 7.), Vec3d(7., 11., 3.));
-    RotObject fixture(make_cube(size.x(), size.y(), size.z()));
+    // A table-like frame with splayed legs. Its largest convex-hull face is the 40 x 20 footprint,
+    // which is the first candidate the search sees, yet the frame only touches that plane with the
+    // two 2 x 20 leg feet. The 20 x 20 top and the 22.4 x 20 outer leg faces rest flat on the bed.
+    RotObject fixture(splayed_frame());
+    // pad_around_object makes an elevated object count as on the floor, so both settings reach
+    // the convex-hull face search.
     const bool pad_around = GENERATE(false, true);
     fixture.object->config.set_key_value("support_object_elevation", new ConfigOptionFloat(pad_around ? 4.0 : 0.0));
     fixture.object->config.set_key_value("pad_around_object", new ConfigOptionBool(pad_around));
@@ -216,12 +250,15 @@ TEST_CASE("Floor least-support rotation rests the prism on its largest face", "[
     const Vec2d rotation = sla::find_least_supports_rotation(*fixture.object, params);
     check_rotation_range(rotation);
     check_status_values(status);
-    const double identity_contact = floor_contact_area(fixture.object->raw_mesh(), Vec2d::Zero());
-    const double result_contact = floor_contact_area(fixture.object->raw_mesh(), rotation);
-    CHECK_THAT(identity_contact, Catch::Matchers::WithinAbs(size.x() * size.y(), 1e-3));
-    // The 7 x 11 face is the largest floor contact (77 mm²); resting on it rather than on the
-    // 21 or 33 mm² faces leaves the smallest side faces to support.
-    CHECK_THAT(result_contact, Catch::Matchers::WithinAbs(77., 1e-2));
+    const TriangleMesh &mesh = fixture.object->raw_mesh();
+    // Profile area 114 mm² (600 mm² trapezoid minus the 486 mm² notch) times the 20 mm depth; a
+    // positive volume also confirms that the faces point outward.
+    REQUIRE_THAT(its_volume(mesh.its), Catch::Matchers::WithinRel(114. * 20., 1e-6));
+    REQUIRE_THAT(floor_contact_area(mesh, Vec2d::Zero()), Catch::Matchers::WithinAbs(2. * 2. * 20., 1e-3));
+    const double result_contact = floor_contact_area(mesh, rotation);
+    INFO("contact " << result_contact);
+    // Resting on the footprint gives 80 mm² of contact; the top gives 400 and an outer leg face 447.
+    CHECK(result_contact > 390.);
 }
 
 TEST_CASE("Minimum Z rotation selects the prism's thinnest dimension", "[Rotfinder]")
