@@ -136,8 +136,9 @@ endif()
 
 # The OrcaSlicer executable needs libslic3r_gui and wxWidgets (OrcaSlicer.cpp includes
 # slic3r/GUI headers), so a headless SLIC3R_GUI=OFF configure stops after the libraries
-# and tools above. Everything below only defines the executable, its runtime copies and
-# its install rules.
+# and tools above. Everything below this point belongs to the GUI executable (its runtime
+# copies, COPY_DLLS/OrcaSlicerSosCopy and its install rules) and is skipped in headless
+# builds, so add anything that isn't GUI-only above this point.
 if (NOT SLIC3R_GUI)
     return()
 endif ()
