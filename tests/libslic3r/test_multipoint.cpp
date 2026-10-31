@@ -96,6 +96,18 @@ Points make_polyline()
               Point(50, 3), Point(60, 0) };
 }
 
+// At this tolerance the oracle drops (10, 1) and (50, 3) from make_polyline() but keeps the
+// other three interior points, so neither an identity nor an endpoints-only result passes.
+constexpr double partial_tolerance = 80.;
+
+Points partial_reference(const Points &input)
+{
+    Points expected = reference_visivalingam(input, partial_tolerance);
+    REQUIRE(expected.size() > 2);
+    REQUIRE(expected.size() < input.size());
+    return expected;
+}
+
 Points transform(const Points &in, coord_t dx, coord_t dy, int scale)
 {
     Points out = in;
@@ -122,7 +134,8 @@ TEST_CASE("Visvalingam keeps endpoints and handles two and three points", "[Mult
     check_exact(MultiPoint::visivalingam(corner, 80.), Points{corner.front(), corner.back()});
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault) and its heap orders node addresses, not areas; fixed by the follow-up fix PR
+// Known bug: visivalingam() indexes a reserved but empty area vector (segfault), and its heap orders node
+// addresses instead of being a min-heap on effective area; fixed by the follow-up fix PR
 TEST_CASE("Visvalingam matches an independent elimination oracle", "[MultiPoint][Visvalingam][.]")
 {
     const Points input = make_polyline();
@@ -135,8 +148,8 @@ TEST_CASE("Visvalingam is translation invariant", "[MultiPoint][Visvalingam][.]"
 {
     const Points input = make_polyline();
     const Points translated = transform(input, 123456, -765432, 1);
-    const Points expected = transform(reference_visivalingam(input, 20.), 123456, -765432, 1);
-    check_exact(MultiPoint::visivalingam(translated, 20.), expected);
+    const Points expected = transform(partial_reference(input), 123456, -765432, 1);
+    check_exact(MultiPoint::visivalingam(translated, partial_tolerance), expected);
 }
 
 // Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
@@ -144,8 +157,8 @@ TEST_CASE("Visvalingam scales tolerance with area", "[MultiPoint][Visvalingam][.
 {
     const Points input = make_polyline();
     const Points scaled = transform(input, 0, 0, 3);
-    const Points expected = transform(reference_visivalingam(input, 20.), 0, 0, 3);
-    check_exact(MultiPoint::visivalingam(scaled, 20. * 9.), expected);
+    const Points expected = transform(partial_reference(input), 0, 0, 3);
+    check_exact(MultiPoint::visivalingam(scaled, partial_tolerance * 9.), expected);
 }
 
 // Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
@@ -154,12 +167,13 @@ TEST_CASE("Visvalingam reverses the retained order", "[MultiPoint][Visvalingam][
     const Points input = make_polyline();
     Points reversed = input;
     std::reverse(reversed.begin(), reversed.end());
-    Points expected = reference_visivalingam(input, 20.);
+    Points expected = partial_reference(input);
     std::reverse(expected.begin(), expected.end());
-    check_exact(MultiPoint::visivalingam(reversed, 20.), expected);
+    check_exact(MultiPoint::visivalingam(reversed, partial_tolerance), expected);
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault) and its heap orders node addresses, not areas; fixed by the follow-up fix PR
+// Known bug: visivalingam() indexes a reserved but empty area vector (segfault), and its heap orders node
+// addresses instead of being a min-heap on effective area; fixed by the follow-up fix PR
 TEST_CASE("Visvalingam preserves a salient high-area turn", "[MultiPoint][Visvalingam][.]")
 {
     const Points input = { Point(0, 0), Point(10, 1), Point(20, 2), Point(30, 40),
@@ -169,7 +183,8 @@ TEST_CASE("Visvalingam preserves a salient high-area turn", "[MultiPoint][Visval
     CHECK(std::find(result.begin(), result.end(), Point(30, 40)) != result.end());
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault) and its heap orders node addresses, not areas; fixed by the follow-up fix PR
+// Known bug: visivalingam() indexes a reserved but empty area vector (segfault), and its heap orders node
+// addresses instead of being a min-heap on effective area; fixed by the follow-up fix PR
 TEST_CASE("Visvalingam removes a shallow run before its neighbors", "[MultiPoint][Visvalingam][.]")
 {
     const Points input = { Point(0, 0), Point(10, 2), Point(20, 4), Point(30, 5),
@@ -181,9 +196,9 @@ TEST_CASE("Visvalingam removes a shallow run before its neighbors", "[MultiPoint
 TEST_CASE("Visvalingam is deterministic for repeated equal input", "[MultiPoint][Visvalingam][.]")
 {
     const Points input = make_polyline();
-    const Points first = MultiPoint::visivalingam(input, 20.);
+    const Points expected = partial_reference(input);
     for (int i = 0; i < 4; ++i)
-        check_exact(MultiPoint::visivalingam(input, 20.), first);
+        check_exact(MultiPoint::visivalingam(input, partial_tolerance), expected);
 }
 
 // Known bug: visivalingam() indexes a reserved but empty area vector (segfault); fixed by the follow-up fix PR
@@ -196,7 +211,8 @@ TEST_CASE("Visvalingam rejects only internal points at a large tolerance", "[Mul
     CHECK(result.back() == input.back());
 }
 
-// Known bug: visivalingam() indexes a reserved but empty area vector (segfault) and its heap orders node addresses, not areas; fixed by the follow-up fix PR
+// Known bug: visivalingam() indexes a reserved but empty area vector (segfault), and its heap orders node
+// addresses instead of being a min-heap on effective area; fixed by the follow-up fix PR
 TEST_CASE("Visvalingam retains a high-area tail node", "[MultiPoint][Visvalingam][.]")
 {
     const Points input = { Point(0, 0), Point(10, 1), Point(20, 2), Point(30, 3),
@@ -274,7 +290,10 @@ TEST_CASE("MultiPoint line distance handles projections, endpoints, and degenera
     const Points remote_point{Point(3, 4), Point(3, 4)};
     CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(point_segment, remote_point),
                WithinAbs(5.0, 1e-9));
+}
 
+TEST_CASE("MultiPoint concave hull keeps a concavity up to its tolerance boundary", "[MultiPoint][MultiPointGap]")
+{
     // For the concavity point (6,2), the source's boundary ratio is exactly
     // 80 / sqrt(6^2 + 8^2) = 8.  The strict boundary keeps the point; a
     // slightly larger tolerance removes it.
