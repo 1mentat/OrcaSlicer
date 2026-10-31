@@ -9,6 +9,8 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
@@ -16,16 +18,20 @@
 #include <boost/filesystem.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <limits>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -307,7 +313,7 @@ namespace {
 void touch(const boost::filesystem::path &path) { std::ofstream(path.string()) << "existing"; }
 std::string file_contents(const boost::filesystem::path &path)
 {
-    std::ifstream file(path.string());
+    std::ifstream file(path.string(), std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 } // namespace
@@ -630,4 +636,414 @@ TEST_CASE("MD5 file fingerprints match standard vectors across the 64 KiB read b
 TEST_CASE("Character filtering removes only requested characters", "[utils]") {
     CHECK(filter_characters("a-b_c!", "-_") == "abc!");
     CHECK(filter_characters("stable", "") == "stable");
+}
+
+namespace {
+void write_bytes(const boost::filesystem::path &path, const std::string &bytes)
+{
+    std::ofstream out(path.string(), std::ios::binary);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(out.good());
+}
+} // namespace
+
+TEST_CASE("File verification distinguishes absent inputs, length differences and changed bytes", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_ORIGIN_NOT_OPENED);
+    write_bytes(a, "abc");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_TARGET_NOT_OPENED);
+    write_bytes(b, "ab");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+    write_bytes(b, "abd");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+    write_bytes(b, "abc");
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+    write_bytes(a, "");
+    write_bytes(b, "");
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+}
+
+TEST_CASE("File verification detects changes after its first eight MiB chunk", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    std::string data(8 * 1024 * 1024 + 17, 'x');
+    data.front() = 'A';
+    data.back()  = 'Z';
+    write_bytes(a, data);
+    write_bytes(b, data);
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+    data.back() = 'Y';
+    write_bytes(b, data);
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+}
+
+TEST_CASE("Verified copies preserve binary bytes and replace an existing destination", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    const std::string data("x\0y\r\nz", 6);
+    write_bytes(a, data);
+    write_bytes(b, "obsolete");
+    std::string error;
+    CHECK(copy_file(a.string(), b.string(), error, true) == SUCCESS);
+    CHECK(file_contents(b) == data);
+#ifndef _WIN32
+    // Off Windows the copy goes through a temporary file beside the destination; none may remain.
+    CHECK_FALSE(boost::filesystem::exists(b.string() + ".tmp"));
+#endif
+}
+
+TEST_CASE("Framework copying recurses through directories and overwrites ordinary files", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src / "sub");
+    boost::filesystem::create_directories(dst);
+    write_bytes(src / "top", "top");
+    write_bytes(src / "sub" / "child", "nested");
+    write_bytes(dst / "top", "old");
+    REQUIRE(copy_framework(src.string(), dst.string()));
+    CHECK(file_contents(dst / "top") == "top");
+    CHECK(file_contents(dst / "sub" / "child") == "nested");
+    CHECK_FALSE(copy_framework((src / "top").string(), (d.path() / "bad").string()));
+    write_bytes(d.path() / "blocked", "file");
+    CHECK_FALSE(copy_framework(src.string(), (d.path() / "blocked").string()));
+}
+
+#ifndef _WIN32
+TEST_CASE("Framework copying preserves relative symlink targets", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    fs::create_directories(src / "Versions" / "A");
+    write_bytes(src / "Versions" / "A" / "binary", "payload");
+    fs::create_symlink("A", src / "Versions" / "Current");
+    REQUIRE(copy_framework(src.string(), dst.string()));
+    CHECK(fs::is_symlink(fs::symlink_status(dst / "Versions" / "Current")));
+    CHECK(fs::read_symlink(dst / "Versions" / "Current").string() == "A");
+    CHECK(file_contents(dst / "Versions" / "Current" / "binary") == "payload");
+}
+#endif
+
+// Known bug: copy_framework (utils.cpp) ignores the result of its recursive call for a nested directory and still returns true; fixed by the follow-up fix PR
+TEST_CASE("Framework copying propagates a failure from a nested directory", "[utils][!shouldfail]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src / "nested");
+    boost::filesystem::create_directories(dst);
+    write_bytes(src / "nested" / "payload", "source");
+    write_bytes(dst / "nested", "occupied by a file");
+    CHECK_FALSE(copy_framework(src.string(), dst.string()));
+    CHECK(file_contents(dst / "nested") == "occupied by a file");
+}
+
+TEST_CASE("Recursive directory copies exclude selected filenames and distinguish replacement from merge", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    fs::create_directories(src / "sub");
+    fs::create_directories(dst / "sub");
+    write_bytes(src / "keep.json", "new");
+    write_bytes(src / "ignore.png", "image");
+    write_bytes(src / "sub" / "child", "child");
+    write_bytes(dst / "stale", "stale");
+    write_bytes(dst / "sub" / "old", "old");
+    copy_directory_recursively(src, dst, [](const std::string &name) { return name == "ignore.png"; }, true);
+    CHECK(file_contents(dst / "keep.json") == "new");
+    CHECK(file_contents(dst / "sub" / "child") == "child");
+    CHECK(fs::exists(dst / "stale"));
+    CHECK(fs::exists(dst / "sub" / "old"));
+    CHECK_FALSE(fs::exists(dst / "ignore.png"));
+    copy_directory_recursively(src, dst, {}, false);
+    CHECK_FALSE(fs::exists(dst / "stale"));
+    CHECK_FALSE(fs::exists(dst / "sub" / "old"));
+    CHECK(file_contents(dst / "ignore.png") == "image");
+}
+
+TEST_CASE("Recursive directory copying throws when a directory occupies a file's destination", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src);
+    boost::filesystem::create_directories(dst / "file.txt" / "occupied");
+    write_bytes(src / "file.txt", "payload");
+    CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
+}
+
+// Known bug: ScopeGuard move leaves the moved-from std::function non-empty on libc++ (double fire); fixed by the follow-up fix PR.
+// ScopeGuard relies on a moved-from std::function being empty. libstdc++ and MSVC empty it; libc++ keeps a
+// small closure in the source, so the moved-from guard fires too. The move tests can only fail where that happens.
+#ifdef _LIBCPP_VERSION
+#define SCOPE_GUARD_MOVE_TAGS "[utils][!shouldfail]"
+#else
+#define SCOPE_GUARD_MOVE_TAGS "[utils]"
+#endif
+
+TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", SCOPE_GUARD_MOVE_TAGS) {
+    size_t calls = 0;
+    {
+        std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
+        ScopeGuard moved(std::move(*source));
+        source.reset();
+        // The moved-from guard gave its callback away, so destroying it runs nothing.
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", SCOPE_GUARD_MOVE_TAGS) {
+    size_t calls = 0;
+    {
+        ScopeGuard guard;
+        std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
+        guard = std::move(*source);
+        source.reset();
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", SCOPE_GUARD_MOVE_TAGS) {
+    size_t calls = 0;
+    {
+        ScopeGuard destination([&calls] { calls += 10; });
+        std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
+        destination = std::move(*source);
+        CHECK(calls == 0);
+        source.reset();
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+#undef SCOPE_GUARD_MOVE_TAGS
+
+TEST_CASE("ScopeGuard reset suppresses the callback", "[utils]") {
+    size_t calls = 0;
+    {
+        ScopeGuard guard([&calls] { ++calls; });
+        guard.reset();
+    }
+    CHECK(calls == 0);
+}
+
+TEST_CASE("File classification checks case-insensitive extensions and regular-file type", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    for (const std::string &name : {"settings.INI", "cache.IdX", "shape.STL"})
+        touch(d.path() / name);
+    fs::create_directories(d.path() / "folder.ini");
+    CHECK(is_ini_file(fs::directory_entry(d.path() / "settings.INI")));
+    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "cache.IdX")));
+    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "folder.ini")));
+    CHECK(is_idx_file(fs::directory_entry(d.path() / "cache.IdX")));
+    CHECK_FALSE(is_idx_file(fs::directory_entry(d.path() / "settings.INI")));
+    CHECK(is_gallery_file(fs::directory_entry(d.path() / "shape.STL"), ".stl"));
+    CHECK_FALSE(is_gallery_file(fs::directory_entry(d.path() / "folder.ini"), ".ini"));
+    CHECK(is_gallery_file(std::string("nested/shape.STL"), ".stl"));
+    CHECK_FALSE(is_gallery_file(std::string("shape.stl.backup"), ".stl"));
+    CHECK(is_img_file("image.PNG"));
+    CHECK(is_img_file("image.SvG"));
+    CHECK_FALSE(is_img_file("image.svg.json"));
+}
+
+TEST_CASE("Configured resource directories resolve against the roots they were given", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    ScopeGuard restore([var = var_dir(), resources = resources_dir(), temp = temporary_dir(), local = localization_dir(),
+                        shapes = sys_shapes_dir(), gcodes = custom_gcodes_dir(), data = data_dir()] {
+        set_var_dir(var);
+        set_resources_dir(resources);
+        set_temporary_dir(temp);
+        set_local_dir(local);
+        set_sys_shapes_dir(shapes);
+        set_custom_gcodes_dir(gcodes);
+        set_data_dir(data);
+    });
+    const fs::path root = d.path();
+    set_var_dir((root / "var").string());
+    set_resources_dir((root / "res").string());
+    set_data_dir((root / "data" / "nested").string());
+    set_local_dir((root / "locale").string());
+    set_sys_shapes_dir((root / "shapes").string());
+    set_custom_gcodes_dir((root / "gcodes").string());
+    set_temporary_dir((root / "temp").string());
+
+    CHECK(var_dir() == (root / "var").string());
+    CHECK(resources_dir() == (root / "res").string());
+    CHECK(data_dir() == (root / "data" / "nested").string());
+    CHECK(localization_dir() == (root / "locale").string());
+    CHECK(sys_shapes_dir() == (root / "shapes").string());
+    CHECK(custom_gcodes_dir() == (root / "gcodes").string());
+    CHECK(temporary_dir() == (root / "temp").string());
+    // set_data_dir creates a missing data directory, including its parents.
+    CHECK(fs::is_directory(root / "data" / "nested"));
+
+    // var() resolves a missing file against the var directory and passes an existing path through.
+    CHECK(var("missing.png") == (root / "var" / "missing.png").make_preferred().string());
+    const fs::path existing = root / "existing.png";
+    touch(existing);
+    CHECK(var(existing.string()) == existing.string());
+
+    CHECK(custom_shapes_dir() == (root / "data" / "nested" / "shapes").string());
+    CHECK(handy_models_dir() == (root / "res" / "handy_models").string());
+    CHECK(is_shapes_dir((root / "shapes").string()));
+    CHECK(is_shapes_dir((root / "data" / "nested" / "shapes").string()));
+    CHECK(is_shapes_dir((root / "res" / "handy_models").string()));
+    CHECK_FALSE(is_shapes_dir((root / "unrelated").string()));
+    CHECK_FALSE(is_shapes_dir((root / "data" / "nested").string()));
+}
+
+TEST_CASE("Perl-compatible path helpers split a path into parent, file name, stem and final extension", "[utils]") {
+    const auto p = boost::filesystem::path("models") / "nested" / "part.v2.3mf";
+    const auto s = p.string();
+    CHECK(PerlUtils::path_to_filename(s.c_str()) == "part.v2.3mf");
+    CHECK(PerlUtils::path_to_stem(s.c_str()) == "part.v2");
+    CHECK(PerlUtils::path_to_extension(s.c_str()) == ".3mf");
+    CHECK(PerlUtils::path_to_parent_path(s.c_str()) == (boost::filesystem::path("models") / "nested").string());
+}
+
+TEST_CASE("Removing an installed vendor removes its profile, cache and presets but no other vendor's", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir temporary;
+    ScopeGuard restore_data_dir([old = data_dir()] { set_data_dir(old); });
+    set_data_dir(temporary.path().string());
+
+    const fs::path system = temporary.path() / PRESET_SYSTEM_DIR;
+    fs::create_directories(system / "Acme" / "machine");
+    fs::create_directories(system / "Other" / "machine");
+    touch(system / "Acme.json");
+    touch(system / "Acme.opc");
+    touch(system / "Acme" / "machine" / "printer.json");
+    // Neighbours: another vendor, and one whose name starts with the removed vendor's.
+    touch(system / "Other.json");
+    touch(system / "Other.opc");
+    touch(system / "Other" / "machine" / "printer.json");
+    touch(system / "AcmeLabs.json");
+
+    remove_installed_vendor("Acme");
+
+    CHECK_FALSE(fs::exists(system / "Acme.json"));
+    CHECK_FALSE(fs::exists(system / "Acme.opc"));
+    CHECK_FALSE(fs::exists(system / "Acme"));
+    CHECK(file_contents(system / "Other.json") == "existing");
+    CHECK(fs::is_regular_file(system / "Other.opc"));
+    CHECK(fs::is_regular_file(system / "Other" / "machine" / "printer.json"));
+    CHECK(fs::is_regular_file(system / "AcmeLabs.json"));
+}
+
+// Sizes beyond a 32-bit size_t are skipped where size_t cannot hold them.
+TEST_CASE("Decimal memory formatting rounds MB and preserves comma groups", "[utils]") {
+    const std::vector<std::pair<std::uint64_t, std::string>>
+        rows{{0, "0MB"},       {499999, "0MB"},      {500000, "1MB"},        {1499999, "1MB"},
+             {1500000, "2MB"}, {999499999, "999MB"}, {999500000, "1,000MB"}, {1002003000000ULL, "1,002,003MB"}};
+    for (const auto &[n, s] : rows) {
+        if (n > std::numeric_limits<size_t>::max())
+            continue;
+        CAPTURE(n);
+        CHECK(format_memsize_MB(static_cast<size_t>(n)) == s);
+    }
+}
+
+TEST_CASE("Binary memory formatting switches units at powers of 1024", "[utils]") {
+    const std::vector<std::tuple<std::uint64_t, unsigned, std::string>> rows{
+        {0, 1, "0 bytes"},
+        {1023, 1, "1023 bytes"},
+        {1024, 1, "1024 bytes (1.0KB)"},
+        {1048576, 1, "1048576 bytes (1.0MB)"},
+        {1073741824ULL, 1, "1073741824 bytes (1.0GB)"},
+        {1099511627776ULL, 1, "1099511627776 bytes (1.0TB)"},
+        {1536, 2, "1536 bytes (1.50KB)"},
+        {1572864, 0, "1572864 bytes (2MB)"},
+        {1610612736ULL, 2, "1610612736 bytes (1.50GB)"},
+        {1649267441664ULL, 3, "1649267441664 bytes (1.500TB)"}};
+    for (const auto &[n, decimals, s] : rows) {
+        if (n > std::numeric_limits<size_t>::max())
+            continue;
+        CAPTURE(n, decimals);
+        CHECK(format_memsize(static_cast<size_t>(n), decimals) == s);
+    }
+}
+
+TEST_CASE("Short time formatting drops seconds and rounds to the minute once hours are shown", "[utils]") {
+    // Under an hour the seconds stay and nothing is rounded.
+    CHECK(short_time("0s") == "0s");
+    CHECK(short_time("0.5s") == "<1s");
+    CHECK(short_time("45s") == "45s");
+    CHECK(short_time("12m 30s") == "12m30s");
+    CHECK(short_time("59m 59s") == "59m59s");
+    // With hours or days the seconds are dropped, rounding half a minute up.
+    CHECK(short_time("1h 29m 29s") == "1h29m");
+    CHECK(short_time("1h 29m 30s") == "1h30m");
+    CHECK(short_time("1d 2h 3m 29s") == "1d2h3m");
+    CHECK(short_time("1d 2h 3m 30s") == "1d2h4m");
+    // The rounding carries into hours and days.
+    CHECK(short_time("1h 59m 30s") == "2h0m");
+    CHECK(short_time("23h 59m 30s") == "1d0h0m");
+}
+
+TEST_CASE("Second-resolution time formatters show day, hour, minute and second units", "[utils]") {
+    CHECK(get_time_dhms(61.f) == "1m 1s");
+    CHECK(get_time_dhms(3661.f) == "1h 1m 1s");
+    CHECK(get_time_dhms(86400.f) == "1d 0h 0m 0s");
+    CHECK(get_bbl_time_dhms(0.f) == "0s");
+    CHECK(get_bbl_time_dhms(61.f) == "1m1s");
+    CHECK(get_bbl_time_dhms(3661.f) == "1h1m1s");
+    CHECK(get_bbl_time_dhms(86400.f) == "1d0h0m0s");
+}
+
+TEST_CASE("Minute-resolution and clock formatters show the units the time needs", "[utils]") {
+    CHECK(get_time_dhm(0.f) == "0m");
+    CHECK(get_time_dhm(60.f) == "1m");
+    CHECK(get_time_dhm(3600.f) == "1h 0m");
+    CHECK(get_time_dhm(86400.f) == "1d 0h 0m");
+    CHECK(get_time_hms(0.f) == "00:00:00");
+    CHECK(get_time_hms(3661.f) == "01:01:01");
+}
+
+TEST_CASE("BBL monitor and remaining time formatters use compact units", "[utils]") {
+    CHECK(get_bbl_monitor_time_dhm(0.f) == "0m");
+    CHECK(get_bbl_monitor_time_dhm(60.f) == "1m");
+    CHECK(get_bbl_monitor_time_dhm(3600.f) == "1h0m");
+    CHECK(get_bbl_remain_time_dhms(61.f) == "1m1s");
+    CHECK(get_bbl_remain_time_dhms(3661.f) == "1h1m1s");
+    CHECK(get_bbl_remain_time_dhms(86400.f) == "1d0h0m0s");
+}
+
+TEST_CASE("Logging level names map the supported severities both ways", "[utils]") {
+    const std::array<std::string, 6> names{"fatal", "error", "warning", "info", "debug", "trace"};
+    for (unsigned i = 0; i < names.size(); ++i) {
+        CHECK(level_string_to_boost(names[i]) == i);
+        CHECK(get_string_logging_level(i) == names[i]);
+    }
+}
+
+TEST_CASE("Published model links accept the canonical site roots over http and https", "[utils]") {
+    CHECK(is_printables_link("https://printables.com"));
+    CHECK(is_printables_link("HTTP://PRINTABLES.COM"));
+    CHECK(is_makerworld_link("https://makerworld.com"));
+    CHECK(is_makerworld_link("http://makerworld.com"));
+    CHECK(is_thingiverse_link("https://www.thingiverse.com"));
+    CHECK_FALSE(is_printables_link("ftp://printables.com"));
+    CHECK_FALSE(is_makerworld_link("https://example.com"));
+    CHECK_FALSE(is_thingiverse_link("https://makerworld.com"));
+}
+
+// Known bug: unescaped '.' in the is_printables_link host pattern (Utils.hpp) matches any character; fixed by the follow-up fix PR
+TEST_CASE("is_printables_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_printables_link("https://printablesXcom"));
+}
+
+// Known bug: unescaped '.' in the is_makerworld_link host pattern (Utils.hpp); fixed by the follow-up fix PR
+TEST_CASE("is_makerworld_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_makerworld_link("https://makerworldXcom"));
+}
+
+// Known bug: unescaped '.' in the is_thingiverse_link host pattern (Utils.hpp); fixed by the follow-up fix PR
+TEST_CASE("is_thingiverse_link matches the dots in its host name literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_thingiverse_link("https://wwwXthingiverse.com"));
+}
+
+// Known bug: is_makerworld_link (Utils.hpp) uses regex_match, so only the bare site root matches and a MakerWorld model URL
+// does not; fixed by the follow-up fix PR
+TEST_CASE("is_makerworld_link accepts a MakerWorld model URL, not only the site root", "[utils][!shouldfail]") {
+    CHECK(is_makerworld_link("https://makerworld.com/en/models/12345"));
 }
