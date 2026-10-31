@@ -6976,6 +6976,39 @@ void set_variant_aware_filament(Preset &preset, double standard_speed, double hi
 
 } // namespace
 
+TEST_CASE("secure full config removes host credentials while retaining slicing values", "[Preset][Bundle][FullConfig]")
+{
+    PresetBundle bundle;
+    bundle.filament_presets = {bundle.filaments.default_preset().name};
+    DynamicPrintConfig &printer = bundle.printers.get_edited_preset().config;
+    const std::vector<std::pair<std::string, std::string>> host_keys{
+        {"print_host", "printer.local"},  {"print_host_webui", "http://printer.local"},
+        {"printhost_apikey", "secret"},   {"printhost_cafile", "/certs/ca.pem"},
+        {"printhost_user", "alice"},      {"printhost_password", "password"},
+        {"printhost_port", "443"},
+    };
+    for (const auto &[key, value] : host_keys)
+        printer.set_key_value(key, new ConfigOptionString(value));
+    printer.set_key_value("printer_notes", new ConfigOptionString("keep me"));
+    bundle.prints.get_edited_preset().config.set_key_value("layer_height", new ConfigOptionFloat(0.23));
+
+    // The plain full config carries every host key, so their absence below is the stripping.
+    const DynamicPrintConfig full = bundle.full_config();
+    for (const auto &[key, value] : host_keys) {
+        CAPTURE(key);
+        REQUIRE(full.has(key));
+        CHECK(full.opt_string(key) == value);
+    }
+
+    const DynamicPrintConfig secure = bundle.full_config_secure();
+    CHECK_THAT(secure.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.23, 1e-9));
+    CHECK(secure.opt_string("printer_notes") == "keep me");
+    for (const auto &[key, value] : host_keys) {
+        CAPTURE(key);
+        CHECK_FALSE(secure.has(key));
+    }
+}
+
 TEST_CASE("full SLA config merges selected profiles and marks SLA technology", "[Preset][Bundle][FullConfig]")
 {
     PresetBundle bundle;
