@@ -151,6 +151,8 @@ struct ScopedAppConfigDataDir {
     const fs::path &path() const { return directory.path(); }
 };
 
+// JSON fixtures end in "\n" like the files save() writes: on Windows, load()
+// expects a line (the MD5 checksum) after the closing brace.
 void write_text(const fs::path &path, const std::string &text)
 {
     boost::nowide::ofstream out(path.string(), std::ios::binary | std::ios::trunc);
@@ -252,10 +254,13 @@ TEST_CASE("AppConfig missing load is side-effect free", "[AppConfig][AppConfigCo
     AppConfig config;
     const fs::path missing = scoped_dir.path() / "missing.conf";
     config.set_loading_path(missing.string());
+    config.set("app", "draft_marker", "kept");
 
     REQUIRE(config.load_if_exists().empty());
-    REQUIRE_FALSE(fs::exists(missing));
-    REQUIRE(config.get_bool("drop_project_action"));
+    // Nothing is written to the data directory (no config, lock or backup
+    // file) and the in-memory state is left as it was.
+    REQUIRE(fs::is_empty(scoped_dir.path()));
+    REQUIRE(config.get("app", "draft_marker") == "kept");
 }
 
 TEST_CASE("AppConfig malformed input reports an error and keeps the file", "[AppConfig][AppConfigContract]")
@@ -263,7 +268,7 @@ TEST_CASE("AppConfig malformed input reports an error and keeps the file", "[App
     ScopedAppConfigDataDir scoped_dir;
     AppConfig config;
     const fs::path malformed = scoped_dir.path() / "malformed.conf";
-    const std::string truncated = R"({"app":{"draft_malformed":true})";
+    const std::string truncated = R"({"app":{"draft_malformed":true})" "\n";
     write_text(malformed, truncated);
     config.set_loading_path(malformed.string());
 
@@ -278,7 +283,7 @@ TEST_CASE("AppConfig numeric defaults clamp and write back", "[AppConfig][AppCon
     AppConfig config;
     const fs::path config_path(config.config_path());
     write_text(config_path,
-               R"({"app":{"opengl_fps_cap":"999","plugin_pages_visible_count":"abc","speed_dial_recent_count":"-3"}})");
+               R"({"app":{"opengl_fps_cap":"999","plugin_pages_visible_count":"abc","speed_dial_recent_count":"-3"}})" "\n");
     REQUIRE(config.load().empty());
     REQUIRE(config.get(SETTING_OPENGL_FPS_CAP) == "240");
     REQUIRE(config.get(SETTING_PLUGIN_PAGES_VISIBLE_COUNT) == std::to_string(PLUGIN_PAGES_VISIBLE_COUNT_DEFAULT));
@@ -304,7 +309,7 @@ TEST_CASE("AppConfig Editor load migrates legacy physical printer", "[AppConfig]
     const fs::path config_path(AppConfig().config_path());
 
     SECTION("an emptied extras section is dropped") {
-        write_text(config_path, R"({"extras":{"physical_printer":"Legacy Draft Printer"}})");
+        write_text(config_path, R"({"extras":{"physical_printer":"Legacy Draft Printer"}})" "\n");
         AppConfig config;
         REQUIRE(config.load().empty());
         REQUIRE(config.get("presets", "physical_printer") == "Legacy Draft Printer");
@@ -312,7 +317,7 @@ TEST_CASE("AppConfig Editor load migrates legacy physical printer", "[AppConfig]
     }
 
     SECTION("other extras keys are kept") {
-        write_text(config_path, R"({"extras":{"physical_printer":"Legacy Draft Printer","draft_extra":"kept"}})");
+        write_text(config_path, R"({"extras":{"physical_printer":"Legacy Draft Printer","draft_extra":"kept"}})" "\n");
         AppConfig config;
         REQUIRE(config.load().empty());
         REQUIRE(config.get("presets", "physical_printer") == "Legacy Draft Printer");
