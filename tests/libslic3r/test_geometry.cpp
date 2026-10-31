@@ -797,8 +797,18 @@ TEST_CASE("Infinite and segment intersections distinguish crossing parallel and 
     CHECK_FALSE(horizontal.intersection_infinite(Line(Point(2, 0), Point(8, 0)), &intersection));
     CHECK(intersection == unchanged);
     CHECK_FALSE(horizontal.intersection(Line(Point(0, 2), Point(10, 2)), &intersection));
+    // Collinear overlapping segments report no intersection. Line.hpp keeps a disabled
+    // (#if 0) alternative that would report them as intersecting; this pins the active one.
     CHECK_FALSE(horizontal.intersection(Line(Point(2, 0), Point(8, 0)), &intersection));
     CHECK(intersection == unchanged);
+
+    // Segment intersection requires the crossing to lie within both segments.
+    CHECK_FALSE(horizontal.intersection(Line(Point(20, -5), Point(20, 5)), &intersection)); // beyond this segment
+    CHECK_FALSE(horizontal.intersection(Line(Point(4, 1), Point(4, 5)), &intersection));    // beyond the other one
+    CHECK(intersection == unchanged);
+    REQUIRE(horizontal.intersection(Line(Point(4, -5), Point(4, 5)), &intersection));
+    CHECK(intersection == Point(4, 0));
+    intersection = unchanged;
 
     const coord_t half_max = std::numeric_limits<coord_t>::max() / 2;
     const Line wide_horizontal(Point(-half_max, 0), Point(half_max, 0));
@@ -807,13 +817,16 @@ TEST_CASE("Infinite and segment intersections distinguish crossing parallel and 
     CHECK(intersection == unchanged);
 }
 
-TEST_CASE("Line perpendicular distances and angle predicates cover degenerate segments",
+TEST_CASE("Line perpendicular distance covers degenerate segments and angle predicates classify directions",
           "[Geometry][Line]")
 {
     const Line horizontal(Point(0, 0), Point(4, 0));
     CHECK_THAT(horizontal.perp_distance_to(Point(2, 3)), Catch::Matchers::WithinAbs(3.0, 1e-12));
     CHECK(horizontal.perpendicular_to(std::acos(-1.0) / 2.0));
     CHECK_FALSE(horizontal.perpendicular_to(0.0));
+    const Line vertical(Point(1, 0), Point(1, 6));
+    CHECK(vertical.perpendicular_to(0.0));
+    CHECK_FALSE(vertical.perpendicular_to(std::acos(-1.0) / 2.0));
 
     const Line point_segment(Point(5, 5), Point(5, 5));
     CHECK_THAT(point_segment.perp_distance_to(Point(8, 9)), Catch::Matchers::WithinAbs(5.0, 1e-12));
