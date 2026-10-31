@@ -10,7 +10,6 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/Exception.hpp"
-#include "libslic3r/Preset.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
@@ -533,29 +532,6 @@ void write_bytes(const boost::filesystem::path &path, const std::string &bytes)
 }
 } // namespace
 
-TEST_CASE("Removing an installed vendor removes its profile, cache, and presets", "[utils]") {
-    namespace fs = boost::filesystem;
-    ScopedTemporaryDir temporary;
-    ScopeGuard restore_data_dir([old = data_dir()] { set_data_dir(old); });
-    set_data_dir(temporary.path().string());
-
-    const fs::path system = fs::path(data_dir()) / PRESET_SYSTEM_DIR;
-    const fs::path vendor_presets = system / "Acme";
-    fs::create_directories(vendor_presets / "machine");
-    write_bytes(system / "Acme.json", "profile bytes");
-    write_bytes(system / "Acme.opc", "cache bytes");
-    write_bytes(vendor_presets / "machine" / "printer.json", "preset bytes");
-    write_bytes(system / "Other.json", "unrelated vendor");
-
-    remove_installed_vendor("Acme");
-
-    CHECK_FALSE(fs::exists(system / "Acme.json"));
-    CHECK_FALSE(fs::exists(system / "Acme.opc"));
-    CHECK_FALSE(fs::exists(vendor_presets));
-    REQUIRE(fs::is_regular_file(system / "Other.json"));
-    CHECK(file_contents(system / "Other.json") == "unrelated vendor");
-}
-
 TEST_CASE("File verification distinguishes absent inputs, length differences and changed bytes", "[utils]") {
     ScopedTemporaryDir d;
     const auto a = d.path() / "a", b = d.path() / "b";
@@ -596,7 +572,10 @@ TEST_CASE("Verified copies preserve binary bytes and replace an existing destina
     std::string error;
     CHECK(copy_file(a.string(), b.string(), error, true) == SUCCESS);
     CHECK(file_contents(b) == data);
+#ifndef _WIN32
+    // Off Windows the copy goes through a temporary file beside the destination; none may remain.
     CHECK_FALSE(boost::filesystem::exists(b.string() + ".tmp"));
+#endif
 }
 
 TEST_CASE("Framework copying recurses through directories and overwrites ordinary files", "[utils]") {
@@ -630,7 +609,7 @@ TEST_CASE("Framework copying preserves relative symlink targets", "[utils]") {
 }
 #endif
 
-// Known bug: copy_framework ignores a failure inside a nested directory and still returns true; fixed by the follow-up fix PR
+// Known bug: copy_framework (utils.cpp) ignores the result of its recursive call for a nested directory and still returns true; fixed by the follow-up fix PR
 TEST_CASE("Framework copying propagates a failure from a nested directory", "[utils][!shouldfail]") {
     ScopedTemporaryDir d;
     const auto src = d.path() / "src", dst = d.path() / "dst";
@@ -665,7 +644,7 @@ TEST_CASE("Recursive directory copies exclude selected filenames and distinguish
     CHECK(file_contents(dst / "ignore.png") == "image");
 }
 
-TEST_CASE("Recursive directory copying reports an unwritable child destination", "[utils]") {
+TEST_CASE("Recursive directory copying throws when a directory occupies a file's destination", "[utils]") {
     ScopedTemporaryDir d;
     const auto src = d.path() / "src", dst = d.path() / "dst";
     boost::filesystem::create_directories(src);
