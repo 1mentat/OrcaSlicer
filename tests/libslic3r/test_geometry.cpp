@@ -1547,6 +1547,78 @@ TEST_CASE("Transformation vector scale setter keeps an existing reflection",
     check_linear_and_offset(mirrored.get_matrix(), quarter_turn_times(Vec3d(4., 3., -5.)), Vec3d(5., -6., 7.));
 }
 
+TEST_CASE("Transformation scale setters leave a uniformly scaled reflection unchanged",
+          "[Geometry][Transformation][Scale][Mirror]")
+{
+    // With repeated singular values the signs on the diagonal of the rotation/scale split do not
+    // encode the reflection, so re-applying the current magnitudes must not rely on them.
+    const double factor = GENERATE(1., 2.);
+    Matrix3d linear = factor * Eigen::AngleAxisd(0.13, Vec3d(1., 2., 3.).normalized()).toRotationMatrix();
+    linear.col(X) = -linear.col(X);
+    Transform3d matrix = Transform3d::Identity();
+    matrix.linear() = linear;
+    matrix.translation() = Vec3d(5., -6., 7.);
+    REQUIRE(matrix.linear().determinant() < 0.);
+
+    Geometry::Transformation by_vector(matrix);
+    by_vector.set_scaling_factor(Vec3d::Constant(factor));
+    check_linear_and_offset(by_vector.get_matrix(), linear, matrix.translation(), 1e-9);
+
+    Geometry::Transformation by_axis(matrix);
+    by_axis.set_scaling_factor(Y, factor);
+    check_linear_and_offset(by_axis.get_matrix(), linear, matrix.translation(), 1e-9);
+}
+
+TEST_CASE("Transformation scale setters keep the reflection of a mirrored larger axis",
+          "[Geometry][Transformation][Scale][Mirror]")
+{
+    const Vec3d offset(5., -6., 7.);
+
+    Geometry::Transformation by_vector = scaled_quarter_turn(Vec3d(-1., 1., 1.));
+    by_vector.set_scaling_factor(Vec3d(4., 3., 5.));
+    check_linear_and_offset(by_vector.get_matrix(), quarter_turn_times(Vec3d(-4., 3., 5.)), offset, 1e-9);
+
+    Geometry::Transformation by_axis = scaled_quarter_turn(Vec3d(-1., 1., 1.));
+    by_axis.set_scaling_factor(X, 6.);
+    check_linear_and_offset(by_axis.get_matrix(), quarter_turn_times(Vec3d(-6., 3., 2.)), offset, 1e-9);
+}
+
+TEST_CASE("Transformation scale setters apply new magnitudes and keep orientation and handedness",
+          "[Geometry][Transformation][Scale][Mirror]")
+{
+    const std::vector<Matrix3d> rotations{
+        Matrix3d::Identity(),
+        Matrix3d(Eigen::AngleAxisd(PI / 2., Vec3d::UnitZ())),
+        Matrix3d(Eigen::AngleAxisd(0.13, Vec3d(1., 2., 3.).normalized())),
+        Matrix3d(Eigen::AngleAxisd(2.4, Vec3d(-3., 1., 0.5).normalized()))};
+    const std::vector<Vec3d> scale_patterns{
+        Vec3d(1., 1., 1.), Vec3d(2., 2., 2.), Vec3d(4., 3., 2.), Vec3d(2., 3., 4.), Vec3d(3., 3., 1.)};
+    const Vec3d new_scale(1.5, 2.5, 0.5);
+
+    for (size_t r = 0; r < rotations.size(); ++r)
+        for (const Vec3d &scale : scale_patterns)
+            for (int mirror_axis = -1; mirror_axis < 3; ++mirror_axis) {
+                Vec3d mirror = Vec3d::Ones();
+                if (mirror_axis >= 0)
+                    mirror[mirror_axis] = -1.;
+                // Orthogonal factor (rotation and mirror) times the per-axis scale.
+                const Matrix3d orthogonal = rotations[r] * mirror.asDiagonal();
+                Transform3d matrix = Transform3d::Identity();
+                matrix.linear() = orthogonal * scale.asDiagonal();
+                CAPTURE(r, scale.transpose(), mirror_axis);
+
+                Geometry::Transformation by_vector(matrix);
+                by_vector.set_scaling_factor(new_scale);
+                CHECK(by_vector.get_matrix().linear().isApprox(orthogonal * new_scale.asDiagonal(), 1e-9));
+                CHECK((by_vector.get_matrix().linear().determinant() < 0.) == (mirror_axis >= 0));
+
+                Geometry::Transformation by_axis(matrix);
+                by_axis.set_scaling_factor(Z, 5.);
+                CHECK(by_axis.get_matrix().linear().isApprox(orthogonal * Vec3d(scale.x(), scale.y(), 5.).asDiagonal(), 1e-9));
+                CHECK((by_axis.get_matrix().linear().determinant() < 0.) == (mirror_axis >= 0));
+            }
+}
+
 TEST_CASE("Transformation rotation reset keeps scale and offset", "[Geometry][Transformation][Reset]")
 {
     const Matrix3d rotation = Eigen::AngleAxisd(0.37, Vec3d::UnitZ()).toRotationMatrix();

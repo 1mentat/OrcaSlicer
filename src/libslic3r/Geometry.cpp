@@ -452,6 +452,20 @@ static std::pair<Transform3d, Transform3d> extract_rotation_scale(const Transfor
     return { Transform3d(rotation), Transform3d(scale) };
 }
 
+// Split the linear part into an orthogonal factor and a symmetric stretch (polar decomposition).
+// A reflection (det < 0) stays in the orthogonal factor, so it is kept together with the orientation
+// whatever the singular values are. Right-handed transforms use the rotation/scale split above.
+static std::pair<Transform3d, Transform3d> extract_orthogonal_stretch(const Transform3d& trafo)
+{
+    if (trafo.linear().determinant() >= 0.0)
+        return extract_rotation_scale(trafo);
+
+    const Eigen::JacobiSVD<Matrix3d> svd(trafo.linear(), Eigen::ComputeFullU | Eigen::ComputeFullV);
+    const Matrix3d orthogonal = svd.matrixU() * svd.matrixV().transpose();
+    const Matrix3d stretch    = svd.matrixV() * svd.singularValues().asDiagonal() * svd.matrixV().transpose();
+    return { Transform3d(orthogonal), Transform3d(stretch) };
+}
+
 static bool contains_skew(const Transform3d& trafo)
 {
     Matrix3d rotation;
@@ -540,15 +554,11 @@ void Transformation::set_scaling_factor(const Vec3d& scaling_factor)
 {
     assert(scaling_factor.x() > 0.0 && scaling_factor.y() > 0.0 && scaling_factor.z() > 0.0);
 
-    // Keep the mirror carried by the signed scale; scaling_factor holds magnitudes only.
-    auto [rotation, scale] = extract_rotation_scale(m_matrix);
-    Vec3d signed_scale = scaling_factor;
-    for (int i = 0; i < 3; ++i)
-        if (scale(i, i) < 0.0)
-            signed_scale[i] = -signed_scale[i];
+    // scaling_factor holds magnitudes; any mirror stays in the orthogonal factor.
+    const Transform3d orthogonal = extract_orthogonal_stretch(m_matrix).first;
 
     const Vec3d offset = get_offset();
-    m_matrix = rotation * scale_transform(signed_scale);
+    m_matrix = orthogonal * scale_transform(scaling_factor);
     m_matrix.translation() = offset;
 }
 
@@ -556,12 +566,12 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
 {
     assert(scaling_factor > 0.0);
 
-    auto [rotation, scale] = extract_rotation_scale(m_matrix);
-    // Keep the mirror carried by the signed scale; scaling_factor is a magnitude.
-    scale(axis, axis) = std::copysign(scaling_factor, scale(axis, axis));
+    // scaling_factor is a magnitude; any mirror stays in the orthogonal factor.
+    auto [orthogonal, stretch] = extract_orthogonal_stretch(m_matrix);
+    stretch(axis, axis) = scaling_factor;
 
     const Vec3d offset = get_offset();
-    m_matrix = rotation * scale;
+    m_matrix = orthogonal * stretch;
     m_matrix.translation() = offset;
 }
 
