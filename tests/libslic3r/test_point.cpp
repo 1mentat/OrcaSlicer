@@ -118,7 +118,6 @@ TEST_CASE("Transform bases ignore translation and identify odd reflections", "[P
     CHECK_FALSE(has_reflection(transform));
 }
 
-
 TEST_CASE("Float point vectors preserve order and input while applying an affine transform", "[Point][PointVectorTransformContracts]")
 {
     Transform3f affine = Transform3f::Identity();
