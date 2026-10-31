@@ -1,20 +1,21 @@
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/TriangleMesh.hpp"
-#include "libslic3r/Polygon.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
-#include <cstddef>
-#include <cmath>
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/libslic3r.h"
+
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_message.hpp>
-#include <vector>
-#include "libslic3r/Point.hpp"
-
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include "libslic3r/BuildVolume.hpp"
-#include "libslic3r/BoundingBox.hpp"
+
+#include <cmath>
+#include <cstddef>
+#include <vector>
 
 using namespace Slic3r;
 
@@ -238,21 +239,27 @@ TEST_CASE("BuildVolume all_paths_inside honors bbox-only calls and ignores non-e
     CHECK(volume.all_paths_inside(empty_paths, BoundingBoxf3{Vec3d(1., 1., 1.), Vec3d(9., 9., 9.)}));
     CHECK_FALSE(volume.all_paths_inside(empty_paths, BoundingBoxf3{Vec3d(-1., 1., 1.), Vec3d(9., 9., 9.)}));
 
-    // Each move lies far outside the bed, but none of them is a printed extrusion.
-    GCodeProcessorResult::MoveVertex travel;
+    // A printed extrusion far outside the bed is rejected. Each variant below changes exactly one
+    // field of that move, so it is accepted only because of the filter guard for that field.
+    const GCodeProcessorResult::MoveVertex outside = extrusion_move(-100.f, -100.f, 1.f);
+    GCodeProcessorResult::MoveVertex travel = outside;
     travel.type = EMoveType::Travel;
-    travel.position = Vec3f(-100.f, -100.f, -100.f);
-    GCodeProcessorResult::MoveVertex custom = extrusion_move(-100.f, -100.f, 1.f);
+    GCodeProcessorResult::MoveVertex custom = outside;
     custom.extrusion_role = erCustom;
-    GCodeProcessorResult::MoveVertex zero_width = extrusion_move(-100.f, -100.f, 1.f);
+    GCodeProcessorResult::MoveVertex zero_width = outside;
     zero_width.width = 0.f;
-    GCodeProcessorResult::MoveVertex zero_height = extrusion_move(-100.f, -100.f, 1.f);
+    GCodeProcessorResult::MoveVertex zero_height = outside;
     zero_height.height = 0.f;
-    for (const GCodeProcessorResult::MoveVertex &move : {travel, custom, zero_width, zero_height}) {
+    const auto inside = [&volume](const GCodeProcessorResult::MoveVertex &move) {
         GCodeProcessorResult paths;
         paths.moves.push_back(move);
-        CHECK(volume.all_paths_inside(paths, BoundingBoxf3{}));
-    }
+        return volume.all_paths_inside(paths, BoundingBoxf3{});
+    };
+    CHECK_FALSE(inside(outside));
+    CHECK(inside(travel));
+    CHECK(inside(custom));
+    CHECK(inside(zero_width));
+    CHECK(inside(zero_height));
 }
 
 TEST_CASE("BuildVolume bounding mesh follows scaled and unscaled bed extents", "[BuildVolume][BuildVolumeVariance]")
