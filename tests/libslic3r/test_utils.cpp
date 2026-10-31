@@ -10,6 +10,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/Exception.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
@@ -895,4 +896,33 @@ TEST_CASE("Perl-compatible path helpers split a path into parent, file name, ste
     CHECK(PerlUtils::path_to_stem(s.c_str()) == "part.v2");
     CHECK(PerlUtils::path_to_extension(s.c_str()) == ".3mf");
     CHECK(PerlUtils::path_to_parent_path(s.c_str()) == (boost::filesystem::path("models") / "nested").string());
+}
+
+TEST_CASE("Removing an installed vendor removes its profile, cache and presets but no other vendor's", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir temporary;
+    ScopeGuard restore_data_dir([old = data_dir()] { set_data_dir(old); });
+    set_data_dir(temporary.path().string());
+
+    const fs::path system = temporary.path() / PRESET_SYSTEM_DIR;
+    fs::create_directories(system / "Acme" / "machine");
+    fs::create_directories(system / "Other" / "machine");
+    touch(system / "Acme.json");
+    touch(system / "Acme.opc");
+    touch(system / "Acme" / "machine" / "printer.json");
+    // Neighbours: another vendor, and one whose name starts with the removed vendor's.
+    touch(system / "Other.json");
+    touch(system / "Other.opc");
+    touch(system / "Other" / "machine" / "printer.json");
+    touch(system / "AcmeLabs.json");
+
+    remove_installed_vendor("Acme");
+
+    CHECK_FALSE(fs::exists(system / "Acme.json"));
+    CHECK_FALSE(fs::exists(system / "Acme.opc"));
+    CHECK_FALSE(fs::exists(system / "Acme"));
+    CHECK(file_contents(system / "Other.json") == "existing");
+    CHECK(fs::is_regular_file(system / "Other.opc"));
+    CHECK(fs::is_regular_file(system / "Other" / "machine" / "printer.json"));
+    CHECK(fs::is_regular_file(system / "AcmeLabs.json"));
 }
