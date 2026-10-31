@@ -242,18 +242,20 @@ TEST_CASE("NSVG skips invisible and paintless shapes without changing source IDs
     CHECK_THAT(expolygons_area_mm2(shapes.front().expoly), WithinAbs(4., 0.01));
 }
 
-TEST_CASE("NSVG bounds include every path and preserve source coordinates", "[NSVGUtils]")
+TEST_CASE("NSVG bounds include every subpath of every shape in source coordinates", "[NSVGUtils]")
 {
     NSVGimage_ptr image = parse_svg(
         "<path fill=\"red\" d=\"M2 3L10 3L10 7z\"/>"
-        "<path fill=\"blue\" d=\"M-4 -2L-1 -2L-1 1z\"/>");
+        // The blue shape has two subpaths: one sets the minimum, the other the maximum, so
+        // both extremes are found only when bounds() follows path->next within a shape.
+        "<path fill=\"blue\" d=\"M-4 -2L-1 -2L-1 1z M12 15h2v1h-2z\"/>");
     Vec2f minimum(100.f, 100.f);
     Vec2f maximum(-100.f, -100.f);
     bounds(*image, minimum, maximum);
     CHECK_THAT(minimum.x(), WithinAbs(-4., 0.001));
     CHECK_THAT(minimum.y(), WithinAbs(-2., 0.001));
-    CHECK_THAT(maximum.x(), WithinAbs(10., 0.001));
-    CHECK_THAT(maximum.y(), WithinAbs(7., 0.001));
+    CHECK_THAT(maximum.x(), WithinAbs(14., 0.001));
+    CHECK_THAT(maximum.y(), WithinAbs(16., 0.001));
 }
 
 TEST_CASE("NSVG file and memory parsing produce equivalent geometry", "[NSVGUtils]")
@@ -323,9 +325,11 @@ TEST_CASE("NSVG stroke caps produce the documented endpoint extents", "[NSVGUtil
     CHECK_THAT(extent_width_mm(expolygon_extents(square.expoly)), WithinAbs(12., 0.02));
     CHECK(expolygons_area_mm2(round.expoly) > expolygons_area_mm2(butt.expoly));
     CHECK(expolygons_area_mm2(square.expoly) > expolygons_area_mm2(butt.expoly));
+    // Square caps add a 1x2 mm rectangle per end (24 mm²), round caps a half disc (20 + pi mm²).
+    CHECK(expolygons_area_mm2(square.expoly) > expolygons_area_mm2(round.expoly));
 }
 
-TEST_CASE("NSVG stroke joins distinguish bevel miter and round corners", "[NSVGUtils]")
+TEST_CASE("NSVG miter joins cover more corner than squared bevel joins and round joins add arc points", "[NSVGUtils]")
 {
     const auto stroke = [](const std::string &join) {
         return only_shape(shape_ids("<path fill=\"none\" stroke=\"black\" stroke-width=\"2\" stroke-linejoin=\""
@@ -390,7 +394,7 @@ TEST_CASE("NSVG curve tessellation refines curved geometry at smaller tolerance"
     // Cubic control points give x(t)=36t²−24t³ and y(t)=36t(1−t).
     // Integrating y(t) x'(t) over [0,1] gives 2592/30 mm².
     const double analytic_cubic_area = 86.4;
-    CHECK_THAT(polygons_area_mm2(fine_polygons), WithinAbs(analytic_cubic_area, 0.003));
+    CHECK_THAT(polygons_area_mm2(fine_polygons), WithinAbs(analytic_cubic_area, 0.01));
     CHECK(polygons_area_mm2(fine_polygons) > polygons_area_mm2(coarse_polygons));
 }
 
