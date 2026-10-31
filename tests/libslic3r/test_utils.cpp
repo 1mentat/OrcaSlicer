@@ -9,6 +9,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
@@ -520,4 +521,33 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     // Non-letters 0x20 apart are not equal.
     CHECK_FALSE(ascii_iequals("[", "{"));
     CHECK_FALSE(ascii_iequals("@", "`"));
+}
+
+TEST_CASE("Removing an installed vendor removes its profile, cache and presets but no other vendor's", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir temporary;
+    ScopeGuard restore_data_dir([old = data_dir()] { set_data_dir(old); });
+    set_data_dir(temporary.path().string());
+
+    const fs::path system = temporary.path() / PRESET_SYSTEM_DIR;
+    fs::create_directories(system / "Acme" / "machine");
+    fs::create_directories(system / "Other" / "machine");
+    touch(system / "Acme.json");
+    touch(system / "Acme.opc");
+    touch(system / "Acme" / "machine" / "printer.json");
+    // Neighbours: another vendor, and one whose name starts with the removed vendor's.
+    touch(system / "Other.json");
+    touch(system / "Other.opc");
+    touch(system / "Other" / "machine" / "printer.json");
+    touch(system / "AcmeLabs.json");
+
+    remove_installed_vendor("Acme");
+
+    CHECK_FALSE(fs::exists(system / "Acme.json"));
+    CHECK_FALSE(fs::exists(system / "Acme.opc"));
+    CHECK_FALSE(fs::exists(system / "Acme"));
+    CHECK(file_contents(system / "Other.json") == "existing");
+    CHECK(fs::is_regular_file(system / "Other.opc"));
+    CHECK(fs::is_regular_file(system / "Other" / "machine" / "printer.json"));
+    CHECK(fs::is_regular_file(system / "AcmeLabs.json"));
 }
