@@ -559,15 +559,24 @@ TEST_CASE("Logging level names map the supported severities both ways", "[utils]
     }
 }
 
-TEST_CASE("Short time formatting preserves its documented rounding branches", "[utils]") {
+TEST_CASE("Short time formatting drops seconds and rounds to the minute once hours are shown", "[utils]") {
+    // Under an hour the seconds stay and nothing is rounded.
+    CHECK(short_time("0s") == "0s");
     CHECK(short_time("0.5s") == "<1s");
+    CHECK(short_time("45s") == "45s");
     CHECK(short_time("12m 30s") == "12m30s");
+    CHECK(short_time("59m 59s") == "59m59s");
+    // With hours or days the seconds are dropped, rounding half a minute up.
+    CHECK(short_time("1h 29m 29s") == "1h29m");
     CHECK(short_time("1h 29m 30s") == "1h30m");
+    CHECK(short_time("1d 2h 3m 29s") == "1d2h3m");
+    CHECK(short_time("1d 2h 3m 30s") == "1d2h4m");
+    // The rounding carries into hours and days.
     CHECK(short_time("1h 59m 30s") == "2h0m");
     CHECK(short_time("23h 59m 30s") == "1d0h0m");
 }
 
-TEST_CASE("Deterministic time formatters preserve day hour minute and second units", "[utils]") {
+TEST_CASE("Second-resolution time formatters show day, hour, minute and second units", "[utils]") {
     CHECK(get_time_dhms(61.f) == "1m 1s");
     CHECK(get_time_dhms(3661.f) == "1h 1m 1s");
     CHECK(get_time_dhms(86400.f) == "1d 0h 0m 0s");
@@ -577,7 +586,7 @@ TEST_CASE("Deterministic time formatters preserve day hour minute and second uni
     CHECK(get_bbl_time_dhms(86400.f) == "1d0h0m0s");
 }
 
-TEST_CASE("Minute and clock-like formatters use bounded arithmetic", "[utils]") {
+TEST_CASE("Minute-resolution and clock formatters show the units the time needs", "[utils]") {
     CHECK(get_time_dhm(0.f) == "0m");
     CHECK(get_time_dhm(60.f) == "1m");
     CHECK(get_time_dhm(3600.f) == "1h 0m");
