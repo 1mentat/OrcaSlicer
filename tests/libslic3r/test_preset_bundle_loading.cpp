@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
+#include <nlohmann/json.hpp>
 #include <cstddef>
 #include <fstream>
 
@@ -90,11 +91,12 @@ void write_preset_with_inherits(const DynamicPrintConfig &default_config, const 
 
 // A user preset file stating nothing but the preset it inherits, so every value it
 // ends up with came from resolving that parent.
-void write_minimal_child(const fs::path &file, const std::string &name, const std::string &inherits)
+void write_minimal_child(const fs::path &file, const std::string &name, const std::string &inherits,
+                         const std::string &type = "process")
 {
     fs::create_directories(file.parent_path());
     std::ofstream(file.string())
-        << R"({"type":"process","name":")" << name << R"(","from":"User","version":"1.0.0","inherits":")"
+        << R"({"type":")" << type << R"(","name":")" << name << R"(","from":"User","version":"1.0.0","inherits":")"
         << inherits << R"("})";
 }
 
@@ -1653,6 +1655,7 @@ TEST_CASE("Switching a printer reselects a compatible process and every filament
 
 TEST_CASE("A user filament preset round-trips inherited multi-variant vectors", "[Preset][Bundle][RoundTrip]")
 {
+    using NullableFloats = ConfigOptionFloatsNullable;
     ScopedTemporaryDir temp_dir;
     auto load_filaments = [&temp_dir](PresetCollection &collection) {
         PresetsConfigSubstitutions substitutions;
@@ -1662,15 +1665,16 @@ TEST_CASE("A user filament preset round-trips inherited multi-variant vectors", 
     PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
                                 static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
     DynamicPrintConfig parent_config = collection.default_preset().config;
-    parent_config.option<ConfigOptionFloats>("filament_diameter", true)->values = { 1.75, 2.85 };
-    parent_config.option<ConfigOptionStrings>("filament_type", true)->values = { "PLA", "PETG" };
     parent_config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
         "Direct Drive Standard", "Direct Drive High Flow"
     };
+    // A nullable per-variant override (in filament_options_with_variant) and a plain vector.
+    parent_config.option<NullableFloats>("filament_retraction_length", true)->values = { 1.0, 2.0 };
+    parent_config.option<ConfigOptionStrings>("filament_type", true)->values = { "PLA" };
     const fs::path filament_dir = temp_dir.path() / PRESET_FILAMENT_NAME;
     const fs::path child_file = filament_dir / "Multi Child.json";
     write_preset_with_inherits(parent_config, filament_dir / "base" / "Multi Base.json", "Multi Base", "");
-    write_minimal_child(child_file, "Multi Child", "Multi Base");
+    write_minimal_child(child_file, "Multi Child", "Multi Base", "filament");
 
     load_filaments(collection);
     Preset *child = collection.find_preset("Multi Child");
@@ -1678,23 +1682,30 @@ TEST_CASE("A user filament preset round-trips inherited multi-variant vectors", 
     REQUIRE(child != nullptr);
     REQUIRE(parent != nullptr);
     CHECK(child->inherits() == "Multi Base");
-    check_double_vector(child->config.option<ConfigOptionFloats>("filament_diameter")->values, { 1.75, 2.85 });
-    CHECK(child->config.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{ "PLA", "PETG" });
     CHECK(child->config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
           std::vector<std::string>{ "Direct Drive Standard", "Direct Drive High Flow" });
+    check_double_vector(child->config.option<NullableFloats>("filament_retraction_length")->values, { 1.0, 2.0 });
+    CHECK(child->config.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{ "PLA" });
 
-    // Edit the second variant only and save against the parent: the file holds just the
-    // difference, so the untouched vectors must come back from the parent on reload.
-    child->config.option<ConfigOptionStrings>("filament_type")->values[1] = "ABS";
+    // Edit only the High Flow variant of the per-variant override, plus the plain vector, and
+    // save against the parent. The per-variant key is stored with the unchanged variant as nil.
+    child->config.option<NullableFloats>("filament_retraction_length")->values[1] = 3.0;
+    child->config.option<ConfigOptionStrings>("filament_type")->values = { "PETG" };
     DynamicPrintConfig parent_values = parent->config;
     REQUIRE(child->save(&parent_values));
-    std::string saved;
+    nlohmann::json saved;
     {
         boost::nowide::ifstream in(child_file.string(), std::ios::binary);
-        saved.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        REQUIRE(in.good());
+        in >> saved;
     }
-    CHECK(saved.find("\"filament_type\"") != std::string::npos);
-    CHECK(saved.find("\"filament_diameter\"") == std::string::npos);
+    REQUIRE(saved.contains("filament_retraction_length"));
+    const nlohmann::json &saved_retraction = saved["filament_retraction_length"];
+    REQUIRE(saved_retraction.size() == 2);
+    CHECK(saved_retraction[0] == "nil");
+    CHECK_THAT(std::stod(saved_retraction[1].get<std::string>()), Catch::Matchers::WithinAbs(3.0, 1e-9));
+    CHECK(saved["filament_type"] == nlohmann::json::array({ "PETG" }));
+    CHECK_FALSE(saved.contains("filament_diameter"));
 
     PresetCollection reloaded(Preset::TYPE_FILAMENT, Preset::filament_options(),
                               static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
@@ -1702,11 +1713,11 @@ TEST_CASE("A user filament preset round-trips inherited multi-variant vectors", 
     const Preset *reloaded_child = reloaded.find_preset("Multi Child");
     REQUIRE(reloaded_child != nullptr);
     CHECK(reloaded_child->inherits() == "Multi Base");
-    check_double_vector(reloaded_child->config.option<ConfigOptionFloats>("filament_diameter")->values, { 1.75, 2.85 });
-    CHECK(reloaded_child->config.option<ConfigOptionStrings>("filament_type")->values ==
-          std::vector<std::string>{ "PLA", "ABS" });
     CHECK(reloaded_child->config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
           std::vector<std::string>{ "Direct Drive Standard", "Direct Drive High Flow" });
+    // The nil Standard slot is filled from the parent again; the edited High Flow slot stays.
+    check_double_vector(reloaded_child->config.option<NullableFloats>("filament_retraction_length")->values, { 1.0, 3.0 });
+    CHECK(reloaded_child->config.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{ "PETG" });
 }
 
 namespace {
@@ -6669,12 +6680,11 @@ TEST_CASE("File preset loading resolves a three-level base chain", "[PresetFiles
                                 static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
     const fs::path print_dir = temp_dir.path() / PRESET_PRINT_NAME;
 
-    // load_presets() intentionally reads each nested <type>/base directory
-    // before its parent directory. Keep each inheritance edge in a completed
-    // traversal level; sibling files are resolved concurrently.
-    // Base sets both values, Middle overrides the density, Leaf overrides it again; the
-    // layer height reaches Leaf only through Middle's resolved copy of Base.
-    write_process(print_dir / "base" / "base" / "Base.json", "Base", {}, "0.24", "20%");
+    // Each parent sits one base/ level deeper than its child, because load_presets() loads
+    // <dir>/base before <dir> and resolves files of one directory concurrently. Base sets both
+    // values (neither is the default); Middle overrides the density, Leaf overrides it again,
+    // so Leaf's layer height can only come from Base through Middle.
+    write_process(print_dir / "base" / "base" / "Base.json", "Base", {}, "0.24", "25%");
     write_process(print_dir / "base" / "Middle.json", "Middle", "Base", {}, "30%");
     write_process(print_dir / "Leaf.json", "Leaf", "Middle", {}, "42%");
 
@@ -6691,7 +6701,7 @@ TEST_CASE("File preset loading resolves a three-level base chain", "[PresetFiles
     CHECK(collection.error_count() == 0);
     CHECK(base->inherits().empty());
     CHECK_THAT(base->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
-    CHECK_THAT(base->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(20.0, 1e-9));
+    CHECK_THAT(base->config.opt_float("sparse_infill_density"), Catch::Matchers::WithinAbs(25.0, 1e-9));
     CHECK(middle->inherits() == "Base");
     CHECK(leaf->inherits() == "Middle");
     CHECK_THAT(middle->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
