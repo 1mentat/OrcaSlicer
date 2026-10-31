@@ -54,6 +54,7 @@ add_executable(${_TEST_NAME}_tests
     test_marchingsquares.cpp
     test_lay_on_face.cpp
     test_model.cpp
+    test_project_task.cpp
     test_utils.cpp
     test_miniz_extension.cpp
     test_timeutils.cpp
