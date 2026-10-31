@@ -8,6 +8,7 @@
 #include <TopAbs_ShapeEnum.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_all.hpp>   // mainline OrcaSlicer ships Catch2 v3 (v2 was catch2/catch.hpp)
 #include <cereal/details/helpers.hpp>
 #include <cereal/cereal.hpp>
@@ -41,6 +42,7 @@
 #include "libslic3r/CAD/SketchImport.hpp"
 #include "libslic3r/CAD/ThreadStandards.hpp"
 #include "libslic3r/Utils.hpp"
+#include "test_utils.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -61,6 +63,9 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <gp_Pnt.hxx>
+#include <TopoDS_Shape.hxx>
+#include <cstddef>
 #include <cereal/archives/binary.hpp>
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
@@ -2291,6 +2296,209 @@ TEST_CASE("an Import solid written by OCCT 7.6 still loads", "[CadDocument][reci
     GProp_GProps props;
     BRepGProp::VolumeProperties(shape, props);
     CHECK_THAT(props.Mass(), WithinRel(expected, 1e-4));
+}
+
+TEST_CASE("CadDocument import features replay into independent bodies", "[CadDocument][import]")
+{
+    using Catch::Matchers::WithinRel;
+
+    const TopoDS_Shape first_shape = BRepPrimAPI_MakeBox(gp_Pnt(0., 0., 0.), 4., 5., 6.).Shape();
+    const TopoDS_Shape second_shape = BRepPrimAPI_MakeBox(gp_Pnt(10., 0., 0.), 2., 3., 4.).Shape();
+    REQUIRE_FALSE(first_shape.IsNull());
+    REQUIRE_FALSE(second_shape.IsNull());
+
+    const auto analytic_volume = [](const TopoDS_Shape& shape) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape, props);
+        return std::abs(props.Mass());
+    };
+    const auto analytic_center = [](const TopoDS_Shape& shape) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape, props);
+        return props.CentreOfMass();
+    };
+    const auto require_valid_mesh = [](const TriangleMesh& mesh) {
+        REQUIRE_FALSE(mesh.empty());
+        REQUIRE_FALSE(mesh.its.vertices.empty());
+        REQUIRE_FALSE(mesh.its.indices.empty());
+        for (const Vec3f& vertex : mesh.its.vertices) {
+            REQUIRE(std::isfinite(double(vertex.x())));
+            REQUIRE(std::isfinite(double(vertex.y())));
+            REQUIRE(std::isfinite(double(vertex.z())));
+        }
+        const int vertex_count = int(mesh.its.vertices.size());
+        for (const auto& triangle : mesh.its.indices) {
+            REQUIRE(triangle[0] >= 0);
+            REQUIRE(triangle[1] >= 0);
+            REQUIRE(triangle[2] >= 0);
+            REQUIRE(triangle[0] < vertex_count);
+            REQUIRE(triangle[1] < vertex_count);
+            REQUIRE(triangle[2] < vertex_count);
+            REQUIRE(triangle[0] != triangle[1]);
+            REQUIRE(triangle[1] != triangle[2]);
+            REQUIRE(triangle[0] != triangle[2]);
+            const Vec3f edge_a = mesh.its.vertices[size_t(triangle[1])] -
+                                  mesh.its.vertices[size_t(triangle[0])];
+            const Vec3f edge_b = mesh.its.vertices[size_t(triangle[2])] -
+                                  mesh.its.vertices[size_t(triangle[0])];
+            const float twice_area = edge_a.cross(edge_b).norm();
+            REQUIRE(std::isfinite(double(twice_area)));
+            REQUIRE(twice_area > 1e-6f);
+        }
+    };
+
+    CadDocument doc;
+    CadFeature first;
+    first.type = CadFeatureType::Import;
+    first.name = "ImportedFirst";
+    first.imported_solid = first_shape;
+    doc.features.push_back(first);
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    REQUIRE(doc.display_body_meshes.size() == 1);
+    CHECK_THAT(analytic_volume(doc.bodies[0].shape), WithinRel(4. * 5. * 6., 1e-8));
+    require_valid_mesh(doc.display_body_meshes[0]);
+    require_valid_mesh(doc.display_mesh);
+
+    CadFeature second;
+    second.type = CadFeatureType::Import;
+    second.name = "ImportedSecond";
+    second.imported_solid = second_shape;
+    doc.features.push_back(second);
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 2);
+    REQUIRE(doc.display_body_meshes.size() == doc.bodies.size());
+    REQUIRE(doc.display_tri_face.size() == doc.display_mesh.its.indices.size());
+    REQUIRE(doc.display_tri_body.size() == doc.display_mesh.its.indices.size());
+    CHECK_THAT(analytic_volume(doc.bodies[0].shape), WithinRel(4. * 5. * 6., 1e-8));
+    CHECK_THAT(analytic_volume(doc.bodies[1].shape), WithinRel(2. * 3. * 4., 1e-8));
+    const gp_Pnt first_center = analytic_center(doc.bodies[0].shape);
+    const gp_Pnt second_center = analytic_center(doc.bodies[1].shape);
+    CHECK_THAT(first_center.X(), Catch::Matchers::WithinAbs(2.0, 1e-8));
+    CHECK_THAT(first_center.Y(), Catch::Matchers::WithinAbs(2.5, 1e-8));
+    CHECK_THAT(first_center.Z(), Catch::Matchers::WithinAbs(3.0, 1e-8));
+    CHECK_THAT(second_center.X(), Catch::Matchers::WithinAbs(11.0, 1e-8));
+    CHECK_THAT(second_center.Y(), Catch::Matchers::WithinAbs(1.5, 1e-8));
+    CHECK_THAT(second_center.Z(), Catch::Matchers::WithinAbs(2.0, 1e-8));
+    require_valid_mesh(doc.display_body_meshes[0]);
+    require_valid_mesh(doc.display_body_meshes[1]);
+    require_valid_mesh(doc.display_mesh);
+    size_t body_triangle_counts[2] = {0, 0};
+    for (const int body_index : doc.display_tri_body) {
+        REQUIRE(body_index >= 0);
+        REQUIRE(body_index < int(doc.bodies.size()));
+        ++body_triangle_counts[size_t(body_index)];
+    }
+    REQUIRE(body_triangle_counts[0] > 0);
+    REQUIRE(body_triangle_counts[1] > 0);
+    REQUIRE(body_triangle_counts[0] == doc.display_body_meshes[0].its.indices.size());
+    REQUIRE(body_triangle_counts[1] == doc.display_body_meshes[1].its.indices.size());
+}
+
+TEST_CASE("STEP export preserves imported solids and applies per-body rigid transforms", "[CadDocument][step]")
+{
+    const int scenario = GENERATE(0, 1, 2);
+    CAPTURE(scenario);
+
+    const TopoDS_Shape first_shape = BRepPrimAPI_MakeBox(gp_Pnt(0., 0., 0.), 4., 5., 6.).Shape();
+    const TopoDS_Shape second_shape = BRepPrimAPI_MakeBox(gp_Pnt(10., 0., 0.), 2., 3., 4.).Shape();
+    REQUIRE_FALSE(first_shape.IsNull());
+    REQUIRE_FALSE(second_shape.IsNull());
+
+    CadDocument doc;
+    CadFeature first;
+    first.type = CadFeatureType::Import;
+    first.name = "ExportFirst";
+    first.imported_solid = first_shape;
+    doc.features.push_back(first);
+
+    CadFeature second;
+    second.type = CadFeatureType::Import;
+    second.name = "ExportSecond";
+    second.imported_solid = second_shape;
+    doc.features.push_back(second);
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 2);
+
+    std::vector<GeometryEngine::MassProps> source_before;
+    source_before.reserve(doc.bodies.size());
+    for (size_t index = 0; index < doc.bodies.size(); ++index) {
+        const auto props = doc.body_mass_properties(int(index));
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        source_before.push_back(props);
+    }
+
+    std::vector<Transform3d> body_transforms(static_cast<size_t>(scenario), Transform3d::Identity());
+    if (scenario == 1) {
+        body_transforms[0].linear() << 0., -1., 0.,
+                                       1.,  0., 0.,
+                                       0.,  0., 1.;
+        body_transforms[0].translation() = Vec3d(10., 20., 30.);
+    } else if (scenario == 2) {
+        body_transforms[1].translation() = Vec3d(-20., 5., 7.);
+    }
+
+    ScopedTemporaryFile step_file(".step");
+    std::string export_error = "previous operation failed";
+    REQUIRE(doc.export_step(step_file.string(), body_transforms, export_error));
+    CHECK(export_error.empty());
+
+    std::string import_error;
+    const std::vector<TopoDS_Shape> exported_solids =
+        GeometryEngine::read_step_solids(step_file.string(), import_error);
+    CHECK(import_error.empty());
+    REQUIRE(exported_solids.size() == 2);
+
+    std::vector<GeometryEngine::MassProps> exported_props;
+    exported_props.reserve(exported_solids.size());
+    for (const TopoDS_Shape &shape : exported_solids) {
+        REQUIRE_FALSE(shape.IsNull());
+        const auto props = GeometryEngine::mass_properties(shape);
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        REQUIRE(std::isfinite(props.volume));
+        REQUIRE(props.volume > 0.);
+        REQUIRE(std::isfinite(props.center_of_mass.x()));
+        REQUIRE(std::isfinite(props.center_of_mass.y()));
+        REQUIRE(std::isfinite(props.center_of_mass.z()));
+        exported_props.push_back(props);
+    }
+    std::sort(exported_props.begin(), exported_props.end(),
+              [](const auto &left, const auto &right) { return left.volume < right.volume; });
+
+    const std::vector<double> expected_volumes = {24., 120.};
+    const std::vector<Vec3d> expected_centers = scenario == 0
+        ? std::vector<Vec3d>{Vec3d(11., 1.5, 2.), Vec3d(2., 2.5, 3.)}
+        : scenario == 1
+            ? std::vector<Vec3d>{Vec3d(11., 1.5, 2.), Vec3d(7.5, 22., 33.)}
+            : std::vector<Vec3d>{Vec3d(-9., 6.5, 9.), Vec3d(2., 2.5, 3.)};
+
+    REQUIRE(exported_props.size() == expected_volumes.size());
+    REQUIRE(exported_props.size() == expected_centers.size());
+    for (size_t index = 0; index < exported_props.size(); ++index) {
+        CHECK_THAT(exported_props[index].volume, Catch::Matchers::WithinRel(expected_volumes[index], 1e-6));
+        CHECK_THAT(exported_props[index].center_of_mass.x(), Catch::Matchers::WithinAbs(expected_centers[index].x(), 1e-6));
+        CHECK_THAT(exported_props[index].center_of_mass.y(), Catch::Matchers::WithinAbs(expected_centers[index].y(), 1e-6));
+        CHECK_THAT(exported_props[index].center_of_mass.z(), Catch::Matchers::WithinAbs(expected_centers[index].z(), 1e-6));
+    }
+
+    REQUIRE(doc.bodies.size() == source_before.size());
+    for (size_t index = 0; index < source_before.size(); ++index) {
+        const auto after = doc.body_mass_properties(int(index));
+        REQUIRE(after.valid);
+        REQUIRE(after.is_solid);
+        CHECK_THAT(after.volume, Catch::Matchers::WithinRel(source_before[index].volume, 1e-6));
+        CHECK_THAT(after.center_of_mass.x(), Catch::Matchers::WithinAbs(source_before[index].center_of_mass.x(), 1e-6));
+        CHECK_THAT(after.center_of_mass.y(), Catch::Matchers::WithinAbs(source_before[index].center_of_mass.y(), 1e-6));
+        CHECK_THAT(after.center_of_mass.z(), Catch::Matchers::WithinAbs(source_before[index].center_of_mass.z(), 1e-6));
+    }
 }
 
 TEST_CASE("a v5 round trip is exact", "[CadDocument][recipe]")
