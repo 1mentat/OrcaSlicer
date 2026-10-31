@@ -758,3 +758,41 @@ TEST_CASE("Convex polygon intersection test prusa polygons", "[Geometry][Rotcali
         REQUIRE(res == ref);
     }
 }
+
+namespace math_gap_contracts {
+
+TEST_CASE("Point nearest-index query accepts mutable point pointers", "[Geometry][Point]")
+{
+    Point first(0, 0);
+    Point second(100, 0);
+    Point query(90, 0);
+    const PointPtrs candidates{&first, &second};
+
+    CHECK(query.nearest_point_index(candidates) == 1);
+    CHECK(query.nearest_point_index(PointPtrs{}) == -1);
+}
+
+TEST_CASE("Point3 nearest query uses XY distance and preserves query Z", "[Geometry][Point]")
+{
+    const Point3 query(12, 1, 77);
+    const Points candidates{Point(0, 0), Point(10, 0)};
+    Point3 nearest(0, 0, -1);
+
+    REQUIRE(query.nearest_point(candidates, &nearest));
+    CHECK(nearest.x() == 10);
+    CHECK(nearest.y() == 0);
+    CHECK(nearest.z() == 77);
+}
+
+TEST_CASE("Point3 nearest query leaves output unchanged when there are no candidates", "[Geometry][Point]")
+{
+    const Point3 query(12, 1, 77);
+    Point3 nearest(4, 5, 6);
+
+    CHECK_FALSE(query.nearest_point(Points{}, &nearest));
+    CHECK(nearest.x() == 4);
+    CHECK(nearest.y() == 5);
+    CHECK(nearest.z() == 6);
+}
+
+} // namespace math_gap_contracts
