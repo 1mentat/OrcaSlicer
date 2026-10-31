@@ -34,6 +34,7 @@ add_executable(${_TEST_NAME}_tests
     test_preset_bundle_loading.cpp
     test_preset_setting_id.cpp
     test_preset_diff.cpp
+    test_printer_preset_collection.cpp
     test_vendor_cache.cpp
     test_preset_options.cpp
     test_elephant_foot_compensation.cpp
@@ -64,8 +65,10 @@ add_executable(${_TEST_NAME}_tests
     test_zipper_archive_import.cpp
     test_step.cpp
     test_stl.cpp
+    test_nsvg_utils.cpp
     test_surface_collection.cpp
     test_svg.cpp
+    test_svg_import.cpp
     test_short_edge_collapse.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp
