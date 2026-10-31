@@ -13,9 +13,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <optional>
-#include <map>
 #include <set>
 #include <utility>
 #include <vector>
@@ -334,9 +334,7 @@ TEST_CASE("Plane projection handles oblique normals and the alternate in-plane b
     CHECK((oblique - origin).norm() > 0.5);
 }
 
-// Known bug: a point on the circle's axis is measured as the radius from the center (axial offset
-// ignored, first witness not the point, center mode ignored); fixed by the follow-up fix PR
-TEST_CASE("Point circle contracts distinguish radial, axial, axis, and center measurements", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Point circle distances cover radial, axial and center-mode measurements", "[Measure][MeasureContracts]")
 {
     const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0);
     const MeasurementResult radial = get_measurement(SurfaceFeature(Vec3d(5.0, 0.0, 0.0)), ring);
@@ -344,11 +342,30 @@ TEST_CASE("Point circle contracts distinguish radial, axial, axis, and center me
     check_vec(radial.distance_strict->from, Vec3d(5.0, 0.0, 0.0));
     check_vec(radial.distance_strict->to, Vec3d(3.0, 0.0, 0.0));
 
+    // Off the axis and off the plane: radial gap 2, axial gap 4.
     const MeasurementResult axial = get_measurement(SurfaceFeature(Vec3d(5.0, 0.0, 4.0)), ring);
     check_witnessed_distance(axial.distance_strict, std::sqrt(20.0));
     check_vec(axial.distance_strict->from, Vec3d(5.0, 0.0, 4.0));
-    check_on_circle(axial.distance_strict->to, ring);
+    check_vec(axial.distance_strict->to, Vec3d(3.0, 0.0, 0.0));
 
+    // With the circle first, the witnesses come back in the caller's order.
+    const MeasurementResult reversed = get_measurement(ring, SurfaceFeature(Vec3d(5.0, 0.0, 4.0)));
+    check_witnessed_distance(reversed.distance_strict, std::sqrt(20.0));
+    check_vec(reversed.distance_strict->from, Vec3d(3.0, 0.0, 0.0));
+    check_vec(reversed.distance_strict->to, Vec3d(5.0, 0.0, 4.0));
+
+    // Center mode measures to the circle center.
+    const MeasurementResult center_mode = get_measurement(SurfaceFeature(Vec3d(5.0, 0.0, 4.0)), ring, true);
+    check_witnessed_distance(center_mode.distance_strict, std::sqrt(41.0));
+    check_vec(center_mode.distance_strict->from, Vec3d(5.0, 0.0, 4.0));
+    check_vec(center_mode.distance_strict->to, Vec3d::Zero());
+}
+
+// Known bug: a point on the circle's axis is measured as the radius from the center (axial offset
+// ignored, first witness not the point, center mode ignored); fixed by the follow-up fix PR
+TEST_CASE("Point on a circle's axis measures to the circle and to its center", "[Measure][MeasureContracts][!shouldfail]")
+{
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0);
     // Every point of the circle is sqrt(3^2 + 4^2) away from a point 4 above or below its center.
     for (const Vec3d &axis_query : {Vec3d(0.0, 0.0, 4.0), Vec3d(0.0, 0.0, -4.0)}) {
         const MeasurementResult on_axis = get_measurement(SurfaceFeature(axis_query), ring);
@@ -356,20 +373,15 @@ TEST_CASE("Point circle contracts distinguish radial, axial, axis, and center me
         check_vec(on_axis.distance_strict->from, axis_query);
         check_on_circle(on_axis.distance_strict->to, ring);
     }
-    // With the circle first, the witnesses come back in the caller's order.
     const MeasurementResult axis_reversed = get_measurement(ring, SurfaceFeature(Vec3d(0.0, 0.0, 4.0)));
     check_witnessed_distance(axis_reversed.distance_strict, 5.0);
     check_on_circle(axis_reversed.distance_strict->from, ring);
     check_vec(axis_reversed.distance_strict->to, Vec3d(0.0, 0.0, 4.0));
 
-    // Center mode measures to the circle center, on or off the axis.
-    const MeasurementResult center_mode = get_measurement(SurfaceFeature(Vec3d(5.0, 0.0, 4.0)), ring, true);
-    check_witnessed_distance(center_mode.distance_strict, std::sqrt(41.0));
+    const MeasurementResult center_mode = get_measurement(SurfaceFeature(Vec3d(0.0, 0.0, -4.0)), ring, true);
+    check_witnessed_distance(center_mode.distance_strict, 4.0);
+    check_vec(center_mode.distance_strict->from, Vec3d(0.0, 0.0, -4.0));
     check_vec(center_mode.distance_strict->to, Vec3d::Zero());
-    const MeasurementResult axis_center_mode = get_measurement(SurfaceFeature(Vec3d(0.0, 0.0, -4.0)), ring, true);
-    check_witnessed_distance(axis_center_mode.distance_strict, 4.0);
-    check_vec(axis_center_mode.distance_strict->from, Vec3d(0.0, 0.0, -4.0));
-    check_vec(axis_center_mode.distance_strict->to, Vec3d::Zero());
 }
 
 TEST_CASE("Pair matrix covers point, edge, circle, and plane branches", "[Measure][MeasureContracts]")
@@ -393,20 +405,34 @@ TEST_CASE("Pair matrix covers point, edge, circle, and plane branches", "[Measur
     CHECK_THAT(skew_edges.angle->angle, WithinAbs(0.5 * PI, 1e-8));
     CHECK_FALSE(skew_edges.angle->coplanar);
 
-    // A secant meets the circle; center mode measures from the closest edge point to the center.
+    // A tangent edge touches the circle at (0, 2, 0); center mode measures from there to the center.
     const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
-    const SurfaceFeature secant = edge(Vec3d(-5.0, 2.0, 0.0), Vec3d(5.0, 2.0, 0.0));
-    check_witnessed_distance(get_measurement(secant, ring).distance_infinite, 0.0);
-    const MeasurementResult edge_ring_center_mode = get_measurement(secant, ring, true);
+    const SurfaceFeature tangent = edge(Vec3d(-5.0, 2.0, 0.0), Vec3d(5.0, 2.0, 0.0));
+    const MeasurementResult edge_ring = get_measurement(tangent, ring);
+    check_witnessed_distance(edge_ring.distance_infinite, 0.0);
+    check_vec(edge_ring.distance_infinite->from, Vec3d(0.0, 2.0, 0.0));
+    const MeasurementResult edge_ring_center_mode = get_measurement(tangent, ring, true);
     check_witnessed_distance(edge_ring_center_mode.distance_infinite, 2.0);
     check_vec(edge_ring_center_mode.distance_infinite->to, Vec3d::Zero());
 
     const MeasurementResult in_plane = get_measurement(edge(Vec3d(-2.0, 1.0, 0.0), Vec3d(3.0, 1.0, 0.0)), z_plane);
     REQUIRE(in_plane.angle.has_value());
     CHECK_THAT(in_plane.angle->angle, WithinAbs(0.0, 1e-8));
+    check_witnessed_distance(in_plane.distance_infinite, 0.0);
 
     const MeasurementResult coplanar_ring = get_measurement(ring, z_plane);
     check_witnessed_distance(coplanar_ring.distance_strict, 0.0);
+}
+
+// Known bug: edge-circle distance only measures from the edge endpoints and from the foot of the circle
+// center on the edge, so it misses where a secant crosses the circle away from those points; needs a fix PR
+TEST_CASE("Edge distance to a circle is zero where a secant crosses it", "[Measure][MeasureContracts][!shouldfail]")
+{
+    // y = 1 cuts the radius-2 circle at x = +-sqrt(3); the center's foot (0, 1, 0) is 1 inside the circle.
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    const MeasurementResult result = get_measurement(edge(Vec3d(-5.0, 1.0, 0.0), Vec3d(5.0, 1.0, 0.0)), ring);
+    check_witnessed_distance(result.distance_infinite, 0.0);
+    check_on_circle(result.distance_infinite->from, ring);
 }
 
 TEST_CASE("Edge angles measure the rays pointing away from the intersection", "[Measure][MeasureContracts]")
@@ -470,23 +496,39 @@ TEST_CASE("Measuring feature selection returns endpoint points and circular prob
     CHECK_THAT(normal.z(), WithinAbs(1.0, 1e-7));
 }
 
-TEST_CASE("Edge-plane angle and boundary-less circle-plane distance match analytic values", "[Measure][MeasureContracts]")
+TEST_CASE("Edge and circle distances to a bounded plane use its boundary edges", "[Measure][MeasureContracts]")
 {
-    const auto no_boundaries = std::make_shared<std::vector<SurfaceFeature>>();
-    const SurfaceFeature floor = plane(7, Vec3d::UnitZ(), Vec3d::Zero(), no_boundaries);
+    // A 2 x 2 face around the origin of the floor.
+    const auto boundary = std::make_shared<std::vector<SurfaceFeature>>(std::vector<SurfaceFeature>{
+        edge(Vec3d(-1.0, -1.0, 0.0), Vec3d(1.0, -1.0, 0.0)), edge(Vec3d(1.0, -1.0, 0.0), Vec3d(1.0, 1.0, 0.0)),
+        edge(Vec3d(1.0, 1.0, 0.0), Vec3d(-1.0, 1.0, 0.0)), edge(Vec3d(-1.0, 1.0, 0.0), Vec3d(-1.0, -1.0, 0.0))});
+    const SurfaceFeature floor = plane(7, Vec3d::UnitZ(), Vec3d::Zero(), boundary);
 
-    // The edge rises 2 over a run of 4.
+    // The edge rises 2 over a run of 4 from (0, 0, 3), which is sqrt(1 + 9) from the nearest boundary points.
     const MeasurementResult diagonal_floor = get_measurement(edge(Vec3d(0.0, 0.0, 3.0), Vec3d(4.0, 0.0, 5.0)), floor);
     REQUIRE(diagonal_floor.angle.has_value());
     CHECK_THAT(diagonal_floor.angle->angle, WithinAbs(std::atan2(2.0, 4.0), 1e-8));
+    check_witnessed_distance(diagonal_floor.distance_infinite, std::sqrt(10.0));
+    check_vec(diagonal_floor.distance_infinite->from, Vec3d(0.0, 0.0, 3.0));
+
+    // A circle standing in the plane x = 4 beside the face: the closest face point is (1, 0, 0), 3 off the
+    // circle's plane and 5 - 2 radially from its center.
+    const SurfaceFeature standing = circle(Vec3d(4.0, 0.0, 5.0), Vec3d::UnitX(), 2.0);
+    const MeasurementResult standing_floor = get_measurement(standing, floor);
+    check_witnessed_distance(standing_floor.distance_infinite, std::sqrt(18.0));
+    // The witness order is not checked: this branch returns them as (face point, circle point).
+    const bool from_is_face = (standing_floor.distance_infinite->from - Vec3d(1.0, 0.0, 0.0)).norm() < 1e-7;
+    check_vec(from_is_face ? standing_floor.distance_infinite->from : standing_floor.distance_infinite->to, Vec3d(1.0, 0.0, 0.0));
+    check_on_circle(from_is_face ? standing_floor.distance_infinite->to : standing_floor.distance_infinite->from, standing);
 
     // Without boundary edges, a parallel circle measures to the plane under its center.
-    const MeasurementResult ring_floor = get_measurement(circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0), floor);
+    const SurfaceFeature unbounded = plane(8, Vec3d::UnitZ(), Vec3d::Zero(), std::make_shared<std::vector<SurfaceFeature>>());
+    const MeasurementResult ring_floor = get_measurement(circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0), unbounded);
     check_witnessed_distance(ring_floor.distance_infinite, 5.0);
     check_vec(ring_floor.distance_infinite->to, Vec3d::Zero());
 }
 
-TEST_CASE("Cylinder extraction identifies circular end faces and stable plane ownership", "[Measure][MeasureContracts]")
+TEST_CASE("Cylinder extraction finds two circular caps and gives each facet one plane", "[Measure][MeasureContracts]")
 {
     const indexed_triangle_set cylinder_mesh = its_make_cylinder(5.0, 10.0, PI / 16.0);
     Measuring measuring(cylinder_mesh);
@@ -527,14 +569,24 @@ TEST_CASE("Cylinder feature selection honors world transforms", "[Measure][Measu
 {
     const indexed_triangle_set cylinder_mesh = its_make_cylinder(4.0, 6.0, PI / 12.0);
     Measuring measuring(cylinder_mesh);
-    const auto &facets = measuring.get_plane_triangle_indices(0);
-    REQUIRE_FALSE(facets.empty());
-    const auto local_plane = measuring.get_feature(facets.front(), Vec3d::Zero(), Transform3d::Identity(), true);
+    // Use a side plane, whose normal is horizontal, rather than a cap.
+    int side_plane = -1;
+    for (int id = 0; id < measuring.get_num_of_planes() && side_plane < 0; ++id) {
+        const auto [index, normal, origin] = measuring.get_plane_features(static_cast<unsigned int>(id)).back().get_plane();
+        if (std::abs(normal.z()) < 0.1)
+            side_plane = id;
+    }
+    REQUIRE(side_plane >= 0);
+    const int facet = measuring.get_plane_triangle_indices(side_plane).front();
+    const Vec3d pick = cylinder_mesh.vertices[cylinder_mesh.indices[facet][0]].cast<double>();
+    const auto local_plane = measuring.get_feature(facet, pick, Transform3d::Identity(), true);
     REQUIRE(local_plane.has_value());
     const auto [local_index, local_normal, local_origin] = local_plane->get_plane();
+    CHECK(local_index == side_plane);
 
-    const Transform3d world = Eigen::Translation3d(11.0, -3.0, 2.0) * Eigen::AngleAxisd(0.25, Vec3d::UnitY());
-    const auto picked_plane = measuring.get_feature(facets.front(), Vec3d::Zero(), world, true);
+    const Transform3d world = Eigen::Translation3d(11.0, -3.0, 2.0) * Eigen::AngleAxisd(0.25, Vec3d::UnitY()) *
+                              Eigen::AngleAxisd(0.6, Vec3d::UnitX());
+    const auto picked_plane = measuring.get_feature(facet, pick, world, true);
     REQUIRE(picked_plane.has_value());
     REQUIRE(picked_plane->get_type() == SurfaceFeatureType::Plane);
     const auto [index, normal, origin] = picked_plane->get_plane();
