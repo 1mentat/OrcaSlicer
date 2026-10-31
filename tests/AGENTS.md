@@ -39,6 +39,11 @@ Use `git -C <source-root>` for private validation snapshots. Preserve leading
 columns when reading porcelain status; `.strip()` changes their meaning.
 For changed-line analysis, require evidence that the intended file was checked;
 an exit-zero run that skipped the file does not establish a tidy pass.
+Derive line filters from the final source diff; earlier revision ranges can omit
+new helper lines. Read hashes from the final manifests instead of transcribing
+them into commands or attestations. When rebinding a compilation database row,
+keep its `file`, `output`, `arguments`, and `command` fields consistent; verify
+the source and output paths before starting the compiler.
 Require the native control's exit status and exact JUnit inventory to pass before
 compiling or running a mutant. Preserve raw assertion text when classifying a
 mutation; reporter punctuation alone must not turn an ordinary assertion failure
