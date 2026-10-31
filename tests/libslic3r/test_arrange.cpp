@@ -643,15 +643,7 @@ TEST_CASE("Arrange rotates an oversized item to fit only when rotations are allo
 
 namespace arrange_param_contracts {
 using Catch::Matchers::WithinAbs;
-
-ArrangePolygon rectangle(double width_mm, double height_mm)
-{
-    ArrangePolygon ap = make_square(scaled(width_mm));
-    for (Point &p : ap.poly.contour.points)
-        if (p.y() > 0)
-            p.y() = scaled(height_mm);
-    return ap;
-}
+using arrange_surface_contracts::rectangle;
 
 // Known bug: ArrangeParams::to_json() ends with a trailing comma and never closes the object, so the
 // logged string is not JSON; fixed by the follow-up fix PR.
