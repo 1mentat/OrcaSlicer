@@ -268,8 +268,7 @@ TEST_CASE("Polyline projection identifies the closest segment and its clamped fo
     CHECK(foot_pt(Points{}, p(0, 0)).first == -1);
     CHECK(foot_pt(Points{p(0, 0)}, p(1, 1)).first == -1);
 }
-// Known bug: equally_spaced_lines() measures from the last split instead of along the path; fixed by the follow-up fix PR
-TEST_CASE("Equally spaced line pieces partition a long straight segment", "[Polyline][PolylineOperations][!shouldfail]")
+TEST_CASE("Equally spaced line pieces partition a long straight segment", "[Polyline][PolylineOperations]")
 {
     const Polyline source{Points{p(0, 0), p(12, 0)}};
     const Polylines pieces = source.equally_spaced_lines(scaled(5.));
@@ -278,8 +277,7 @@ TEST_CASE("Equally spaced line pieces partition a long straight segment", "[Poly
     CHECK(pieces[1].points == Points{p(5, 0), p(10, 0)});
     CHECK(pieces[2].points == Points{p(10, 0), p(12, 0)});
 }
-// Known bug: equally_spaced_lines() measures from the last split instead of along the path; fixed by the follow-up fix PR
-TEST_CASE("Equally spaced line pieces preserve bends and total path length", "[Polyline][PolylineOperations][!shouldfail]")
+TEST_CASE("Equally spaced line pieces preserve bends and total path length", "[Polyline][PolylineOperations]")
 {
     const Polyline source  = elbow();
     const Polylines pieces = source.equally_spaced_lines(scaled(6.));
@@ -307,22 +305,18 @@ TEST_CASE("Equally spaced line pieces handle exact boundaries and repeated verti
     CHECK(Polyline{Points{p(0, 0)}}.equally_spaced_lines(scaled(5.)).empty());
     CHECK(Polyline{Points{p(0, 0), p(0, 0)}}.equally_spaced_lines(scaled(5.)).empty());
 }
-// Known bug: equally_spaced_lines() reads first_point() of an empty polyline (segfault); fixed by the follow-up fix PR
-TEST_CASE("Equally spaced pieces of an empty polyline are empty", "[Polyline][PolylineOperations][.]")
+TEST_CASE("Equally spaced pieces of an empty polyline are empty", "[Polyline][PolylineOperations]")
 {
     CHECK(Polyline{}.equally_spaced_lines(scaled(5.)).empty());
 }
-// Known bug: equally_spaced_lines() measures from the last split instead of along the path; fixed by the follow-up fix PR
-TEST_CASE("Equally spaced line pieces retain a short path and its internal vertices", "[Polyline][PolylineOperations][!shouldfail]")
+TEST_CASE("Equally spaced line pieces retain a short path and its internal vertices", "[Polyline][PolylineOperations]")
 {
     const Polyline source = elbow();
     const auto pieces     = source.equally_spaced_lines(scaled(30.));
     REQUIRE(pieces.size() == 1);
     CHECK(pieces[0].points == source.points);
 }
-// Known bug: equally_spaced_lines() loops forever on a zero or negative distance, appending pieces that never
-// advance along the path; fixed by the follow-up fix PR
-TEST_CASE("Equally spaced pieces terminate for a non-positive distance", "[Polyline][PolylineOperations][.]")
+TEST_CASE("Equally spaced pieces terminate for a non-positive distance", "[Polyline][PolylineOperations]")
 {
     // Only termination is asserted: returning a result and reporting an error are both acceptable.
     const Polyline source = elbow();
@@ -334,8 +328,7 @@ TEST_CASE("Equally spaced pieces terminate for a non-positive distance", "[Polyl
     }
     SUCCEED();
 }
-// Known bug: equally_spaced_lines() measures from the last split instead of along the path; fixed by the follow-up fix PR
-TEST_CASE("Equally spaced line pieces preserve a diagonal path within coordinate rounding", "[Polyline][PolylineOperations][!shouldfail]")
+TEST_CASE("Equally spaced line pieces preserve a diagonal path within coordinate rounding", "[Polyline][PolylineOperations]")
 {
     const Polyline source{Points{p(0, 0), p(9, 12)}};
     const auto pieces = source.equally_spaced_lines(scaled(4.));
@@ -351,8 +344,7 @@ TEST_CASE("Equally spaced line pieces preserve a diagonal path within coordinate
     CHECK(pieces.back().last_point() == source.last_point());
 }
 
-// Known bug: equally_spaced_lines() measures from the last split instead of along the path; fixed by the follow-up fix PR
-TEST_CASE("Unit spacing splits a straight path at every coordinate unit", "[Polyline][PolylineOperations][!shouldfail]")
+TEST_CASE("Unit spacing splits a straight path at every coordinate unit", "[Polyline][PolylineOperations]")
 {
     const Polyline source{Points{Point(0, 0), Point(10, 0)}};
     const auto pieces = source.equally_spaced_lines(1.);
@@ -364,9 +356,7 @@ TEST_CASE("Unit spacing splits a straight path at every coordinate unit", "[Poly
     }
 }
 
-// Known bug: equally_spaced_lines() loops forever when a sub-unit split rounds back onto the previous point;
-// fixed by the follow-up fix PR
-TEST_CASE("Equally spaced pieces terminate for a sub-unit distance", "[Polyline][PolylineOperations][.]")
+TEST_CASE("Equally spaced pieces terminate for a sub-unit distance", "[Polyline][PolylineOperations]")
 {
     // Only termination is asserted: returning a result and reporting an error are both acceptable.
     const Polyline source{Points{Point(0, 0), Point(10, 0), Point(10, 10)}};
@@ -379,8 +369,7 @@ TEST_CASE("Equally spaced pieces terminate for a sub-unit distance", "[Polyline]
     SUCCEED();
 }
 
-// Known bug: equally_spaced_lines() measures from the last split instead of along the path; fixed by the follow-up fix PR
-TEST_CASE("A split rounding onto a bend does not consume the rest of its segment", "[Polyline][PolylineOperations][!shouldfail]")
+TEST_CASE("A split rounding onto a bend does not consume the rest of its segment", "[Polyline][PolylineOperations]")
 {
     const Polyline source{Points{Point(0, 0), Point(3000000, 4000000), Point(100000000, 4000000)}};
     const double distance = 5000000.5;
@@ -418,8 +407,7 @@ TEST_CASE("Foot projection past a repeated vertex selects the nearest real segme
     CHECK(result.second == Point(6, 0));
 }
 
-// Known bug: remove_degenerate() moves survivors' points but leaves their fitting_result behind; fixed by the follow-up fix PR
-TEST_CASE("Compacting polylines preserves each surviving path's arc metadata", "[Polyline][PolylineOperations][!shouldfail]")
+TEST_CASE("Compacting polylines preserves each surviving path's arc metadata", "[Polyline][PolylineOperations]")
 {
     const Polyline expected = arc();
     Polylines paths{Polyline{Points{p(0, 0)}}, expected, Polyline{}, elbow()};
@@ -438,9 +426,7 @@ TEST_CASE("Compacting polylines preserves each surviving path's arc metadata", "
     CHECK_THAT(fit.arc_data.length, WithinAbs(expected.fitting_result.front().arc_data.length, 1.));
 }
 
-// Known bug: equally_spaced_lines() truncates split points in absolute coordinates, so they round differently
-// on the negative side of the origin; fixed by the follow-up fix PR
-TEST_CASE("Translating a bent polyline far from the origin preserves its partitions", "[Polyline][PolylineOperations][!shouldfail]")
+TEST_CASE("Translating a bent polyline far from the origin preserves its partitions", "[Polyline][PolylineOperations]")
 {
     // 3-4-5 diagonals put split points between grid coordinates (513 along the first segment is
     // (307.8, 410.4)), so rounding must not depend on where the path sits. The shift puts Y on the

@@ -8,6 +8,7 @@
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <utility>
 #include <vector>
@@ -185,6 +186,77 @@ TEST_CASE("CGAL merge joins disjoint closed components without changing total vo
     CHECK_THAT(mesh_volume(merged), WithinRel(2000.f, 1e-3f));
     CHECK_THAT(merged.bounding_box().min.x(), WithinAbs(0., 1e-5));
     CHECK_THAT(merged.bounding_box().max.x(), WithinAbs(22., 1e-5));
+}
+
+TEST_CASE("CGAL remeshing caps every edge at 4/3 of the target and keeps a constrained cuboid footprint", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // The prepass only splits the protected (sharp) cube edges; the 14.1 mm face diagonals are
+    // shortened only by the isotropic remeshing pass itself, which splits anything above 4/3 target.
+    const float target = 2.5f;
+    const indexed_triangle_set source = shifted_cube(2.f, -3.f, 4.f).its;
+    const indexed_triangle_set remeshed = MeshBoolean::cgal::remesh_isotropic(source, target, 1, 40., 1);
+    REQUIRE(remeshed.indices.size() > source.indices.size());
+    check_valid_indices(remeshed);
+    CHECK(its_num_open_edges(remeshed) == 0);
+    float max_edge = 0.f;
+    for (const Vec3i32 &face : remeshed.indices)
+        for (int i = 0; i < 3; ++i)
+            max_edge = std::max(max_edge, (remeshed.vertices[face[i]] - remeshed.vertices[face[(i + 1) % 3]]).norm());
+    CHECK(max_edge <= 4.f / 3.f * target);
+    const TriangleMesh result(remeshed);
+    CHECK_THAT(result.bounding_box().min.x(), WithinAbs(2., 1e-4));
+    CHECK_THAT(result.bounding_box().max.x(), WithinAbs(12., 1e-4));
+    CHECK_THAT(result.bounding_box().min.y(), WithinAbs(-3., 1e-4));
+    CHECK_THAT(result.bounding_box().max.y(), WithinAbs(7., 1e-4));
+    CHECK_THAT(result.bounding_box().min.z(), WithinAbs(4., 1e-4));
+    CHECK_THAT(result.bounding_box().max.z(), WithinAbs(14., 1e-4));
+    CHECK_THAT(mesh_volume(result), WithinRel(1000.f, 5e-2f));
+}
+
+TEST_CASE("CGAL remeshing returns invalid requests unchanged", "[MeshBoolean][MeshBooleanContracts]")
+{
+    const indexed_triangle_set source = shifted_cube(0.f).its;
+    const indexed_triangle_set zero_length = MeshBoolean::cgal::remesh_isotropic(source, 0., 2);
+    const indexed_triangle_set empty = MeshBoolean::cgal::remesh_isotropic(indexed_triangle_set{}, 2.);
+    CHECK(zero_length.vertices == source.vertices);
+    CHECK(zero_length.indices == source.indices);
+    CHECK(empty.vertices.empty());
+    CHECK(empty.indices.empty());
+}
+
+TEST_CASE("CGAL LSCM parameterization maps a disk and rejects disconnected patches", "[MeshBoolean][MeshBooleanContracts]")
+{
+    const indexed_triangle_set square = open_square();
+    const auto uv = MeshBoolean::cgal::parameterize_lscm(square);
+    REQUIRE(uv.has_value());
+    REQUIRE(uv->size() == square.vertices.size());
+    for (const Vec2f &point : *uv) {
+        CHECK(std::isfinite(point.x()));
+        CHECK(std::isfinite(point.y()));
+    }
+    const Vec2f e0 = (*uv)[1] - (*uv)[0];
+    const Vec2f e1 = (*uv)[2] - (*uv)[1];
+    const Vec2f e2 = (*uv)[3] - (*uv)[2];
+    const Vec2f e3 = (*uv)[0] - (*uv)[3];
+    const Vec2f d0 = (*uv)[2] - (*uv)[0];
+    const Vec2f d1 = (*uv)[3] - (*uv)[1];
+    const float uv_area = std::abs(e0.x() * e1.y() - e0.y() * e1.x()) * 0.5f +
+                          std::abs(e2.x() * e3.y() - e2.y() * e3.x()) * 0.5f;
+    CHECK(uv_area > 1e-6f);
+    CHECK_THAT(e0.norm(), WithinRel(e1.norm(), 1e-3f));
+    CHECK_THAT(e0.dot(e1), WithinAbs(0.f, 1e-5f));
+    CHECK_THAT(e0.norm(), WithinRel(e2.norm(), 1e-3f));
+    CHECK_THAT(e1.norm(), WithinRel(e3.norm(), 1e-3f));
+    CHECK_THAT(d0.norm(), WithinRel(d1.norm(), 1e-3f));
+
+    indexed_triangle_set disconnected = square;
+    const int offset = static_cast<int>(disconnected.vertices.size());
+    disconnected.vertices.insert(disconnected.vertices.end(), square.vertices.begin(), square.vertices.end());
+    for (Vec3i32 face : square.indices) {
+        face.array() += offset;
+        disconnected.indices.push_back(face);
+    }
+    CHECK_FALSE(MeshBoolean::cgal::parameterize_lscm(disconnected).has_value());
 }
 
 TEST_CASE("CGAL segmentation splits a dumbbell into closed ball and rod parts", "[MeshBoolean][MeshBooleanContracts]")
