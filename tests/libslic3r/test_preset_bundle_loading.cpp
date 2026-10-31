@@ -6642,7 +6642,7 @@ TEST_CASE("Preset bundle physical filament indices exclude only live mixed slots
     }
 }
 
-TEST_CASE("Preset bundle full config applies current project values over selected presets", "[Preset][Bundle][FullConfig]")
+TEST_CASE("Preset bundle full config applies current project values over the edited print preset", "[Preset][Bundle][FullConfig]")
 {
     PresetBundle bundle;
     bundle.prints.get_edited_preset().config.option<ConfigOptionFloat>("layer_height", true)->value = 0.3;
@@ -6761,13 +6761,14 @@ TEST_CASE("Full FFF configuration applies explicit filament volume maps", "[Pres
     set_variant_aware_filament(*petg, 13., 23.);
     REQUIRE(bundle.filaments.select_preset_by_name("PLA", true));
     bundle.filament_presets = {"PLA", "PETG"};
-    // A stale project map that the explicit argument must override.
-    bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values = {int(nvtHighFlow), int(nvtHighFlow)};
+    // A project map of the right size that matches no row, so the explicit argument has to
+    // override it. Both extruders are identical hybrids, so the volume map alone picks each
+    // filament's variant; the filament map only routes the filaments.
+    bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values = {int(nvtHybrid), int(nvtHybrid)};
 
     const DynamicPrintConfig out = bundle.full_config(true, std::vector<int>{1, 2},
                                                       std::vector<int>{int(first_volume), int(second_volume)});
     CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{int(first_volume), int(second_volume)});
-    CHECK(out.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 2});
     CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
           std::vector<std::string>{first_volume == nvtStandard ? "Direct Drive Standard" : "Direct Drive High Flow",
                                    second_volume == nvtStandard ? "Direct Drive Standard" : "Direct Drive High Flow"});
@@ -6775,6 +6776,26 @@ TEST_CASE("Full FFF configuration applies explicit filament volume maps", "[Pres
     CHECK(out.option<ConfigOptionStrings>("filament_settings_id")->values == std::vector<std::string>{"PLA", "PETG"});
     CHECK(out.option<ConfigOptionStrings>("filament_ids")->values == std::vector<std::string>{"PLA-ID", "PETG-ID"});
     CHECK(out.option<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{"PLA", "PETG"});
+}
+
+TEST_CASE("Full FFF configuration falls back to the project filament volume map", "[Preset][Bundle][FullConfig]")
+{
+    PresetBundle bundle;
+    set_hybrid_two_extruder_printer(bundle);
+    add_bundle_filament(bundle, "PLA", "PLA-ID", "PLA");
+    add_bundle_filament(bundle, "PETG", "PETG-ID", "PETG");
+    set_variant_aware_filament(*bundle.filaments.find_preset("PLA", false, true), 12., 22.);
+    set_variant_aware_filament(*bundle.filaments.find_preset("PETG", false, true), 13., 23.);
+    REQUIRE(bundle.filaments.select_preset_by_name("PLA", true));
+    bundle.filament_presets = {"PLA", "PETG"};
+    bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values = {int(nvtHighFlow), int(nvtStandard)};
+
+    // No volume map argument: the project's map, one entry per filament, is used.
+    const DynamicPrintConfig out = bundle.full_config(true, std::vector<int>{1, 2});
+    CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{int(nvtHighFlow), int(nvtStandard)});
+    CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{"Direct Drive High Flow", "Direct Drive Standard"});
+    check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {22., 13.});
 }
 
 TEST_CASE("Full FFF configuration records selected system filament changes", "[Preset][Bundle][FullConfig]")
