@@ -958,6 +958,7 @@ void check_translated_entity(const SketchEntity &actual, const SketchEntity &sou
                              const Vec2d &translation)
 {
     CHECK(actual.type == source.type);
+    CHECK(actual.construction == source.construction);
     switch (source.type) {
     case SketchEntity::Type::Line:
         check_point(actual.p0, source.p0 + translation);
@@ -975,6 +976,7 @@ void check_translated_entity(const SketchEntity &actual, const SketchEntity &sou
         check_point(actual.center, source.center + translation);
         check_point(actual.p0, source.p0 + translation);
         check_point(actual.p1, source.p1 + translation);
+        CHECK_THAT(actual.radius, WithinAbs(source.radius, 1e-9));
         CHECK_THAT(actual.start_angle, WithinAbs(source.start_angle, 1e-9));
         CHECK_THAT(actual.end_angle, WithinAbs(source.end_angle, 1e-9));
         break;
@@ -982,6 +984,8 @@ void check_translated_entity(const SketchEntity &actual, const SketchEntity &sou
         check_point(actual.center, source.center + translation);
         check_point(actual.p0, source.center + translation);
         CHECK_THAT(actual.rotation, WithinAbs(source.rotation, 1e-9));
+        CHECK_THAT(actual.radius, WithinAbs(source.radius, 1e-9));
+        CHECK_THAT(actual.rminor, WithinAbs(source.rminor, 1e-9));
         break;
     case SketchEntity::Type::EllipseArc:
         check_point(actual.center, source.center + translation);
@@ -990,6 +994,8 @@ void check_translated_entity(const SketchEntity &actual, const SketchEntity &sou
         CHECK_THAT(actual.start_angle, WithinAbs(source.start_angle, 1e-9));
         CHECK_THAT(actual.end_angle, WithinAbs(source.end_angle, 1e-9));
         CHECK_THAT(actual.rotation, WithinAbs(source.rotation, 1e-9));
+        CHECK_THAT(actual.radius, WithinAbs(source.radius, 1e-9));
+        CHECK_THAT(actual.rminor, WithinAbs(source.rminor, 1e-9));
         break;
     case SketchEntity::Type::BSpline:
         REQUIRE(actual.ctrl.size() == source.ctrl.size());
@@ -1019,6 +1025,7 @@ TEST_CASE("Linear sketch arrays translate every entity type and preserve the sou
     circle.p0 = circle.center;
     circle.radius = 1.75;
     source.push_back(circle);
+    source[3].construction = true;   // the arc
     const std::vector<SketchEntity> original = source;
     const Vec2d step(4., -2.);
 
@@ -1075,6 +1082,11 @@ TEST_CASE("Polar sketch arrays rotate every typed entity around a pivot and then
         const SketchEntity &line = copies[base];
         check_point(line.p0, rigid_map(source[0].p0, pivot, angle, translation));
         check_point(line.p1, rigid_map(source[0].p1, pivot, angle, translation));
+        if (copy == 1) {
+            // Hand-computed: a quarter turn about (1, -2) takes (3, -2) to (1, 0) and (3, 1) to (-2, 0).
+            check_point(line.p0, Vec2d(1., 0.) + translation);
+            check_point(line.p1, Vec2d(-2., 0.) + translation);
+        }
 
         const SketchEntity &point_copy = copies[base + 1];
         check_point(point_copy.p0, rigid_map(source[1].p0, pivot, angle, translation));
@@ -1083,6 +1095,8 @@ TEST_CASE("Polar sketch arrays rotate every typed entity around a pivot and then
 
         const SketchEntity &circle = copies[base + 2];
         check_point(circle.center, rigid_map(source[2].center, pivot, angle, translation));
+        if (copy == 2)
+            check_point(circle.center, Vec2d(-2., -2.) + 2. * step);   // half turn about (1, -2)
         check_point(circle.p0, circle.center);
         CHECK_THAT(circle.radius, WithinAbs(source[2].radius, 1e-9));
 
@@ -1188,10 +1202,6 @@ TEST_CASE("Chamfer rejects parallel, invalid, and overrun legs without mutating 
     check_source_unchanged({segment_out}, {original_segment_out});
 }
 
-} // namespace sketch_array_chamfer_contracts
-
-namespace sketch_circle_cutter_contracts {
-
 SketchEntity circle_entity(const Vec2d& center, double radius)
 {
     SketchEntity e;
@@ -1202,25 +1212,12 @@ SketchEntity circle_entity(const Vec2d& center, double radius)
     return e;
 }
 
-SketchEntity arc_entity(const Vec2d& center, double radius, double start, double end)
-{
-    SketchEntity e;
-    e.type = SketchEntity::Type::Arc;
-    e.center = center;
-    e.radius = radius;
-    e.start_angle = start;
-    e.end_angle = end;
-    e.p0 = center + radius * Vec2d(std::cos(start), std::sin(start));
-    e.p1 = center + radius * Vec2d(std::cos(end), std::sin(end));
-    return e;
-}
-
-} // namespace sketch_circle_cutter_contracts
+} // namespace sketch_array_chamfer_contracts
 
 TEST_CASE("Circle trim keeps the complement of the pick gap for full circular cutters",
           "[SketchEdit]")
 {
-    using namespace sketch_circle_cutter_contracts;
+    using namespace sketch_array_chamfer_contracts;
 
     const int cutter_kind = GENERATE(0, 1, 2);
     CAPTURE(cutter_kind);
@@ -1267,7 +1264,7 @@ TEST_CASE("Circle trim keeps the complement of the pick gap for full circular cu
 
 TEST_CASE("Circle trim ignores an arc cutter with only one crossing", "[SketchEdit]")
 {
-    using namespace sketch_circle_cutter_contracts;
+    using namespace sketch_array_chamfer_contracts;
 
     SketchEntity subject = circle_entity(Vec2d(0.0, 0.0), 5.0);
     const SketchEntity original = subject;
@@ -1285,7 +1282,7 @@ TEST_CASE("Circle trim ignores an arc cutter with only one crossing", "[SketchEd
 TEST_CASE("Circle trim leaves the subject unchanged for noncrossing circles",
           "[SketchEdit]")
 {
-    using namespace sketch_circle_cutter_contracts;
+    using namespace sketch_array_chamfer_contracts;
 
     const int relationship = GENERATE(0, 1, 2);
     CAPTURE(relationship);
@@ -1309,7 +1306,7 @@ TEST_CASE("Circle trim leaves the subject unchanged for noncrossing circles",
 
 TEST_CASE("Arc extension selects the nearest forward circle intersection", "[SketchEdit]")
 {
-    using namespace sketch_circle_cutter_contracts;
+    using namespace sketch_array_chamfer_contracts;
 
     const int cutter_kind = GENERATE(0, 1, 2);
     CAPTURE(cutter_kind);
@@ -1336,7 +1333,7 @@ TEST_CASE("Arc extension selects the nearest forward circle intersection", "[Ske
 
 TEST_CASE("Line trim follows positive and negative arc-cutter sweeps", "[SketchEdit]")
 {
-    using namespace sketch_circle_cutter_contracts;
+    using namespace sketch_array_chamfer_contracts;
 
     const int sweep_direction = GENERATE(0, 1);
     CAPTURE(sweep_direction);
