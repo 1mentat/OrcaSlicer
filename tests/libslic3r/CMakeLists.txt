@@ -58,6 +58,7 @@ add_executable(${_TEST_NAME}_tests
     test_nozzle_volume_type.cpp
     test_obj.cpp
     test_obj_color_utils.cpp
+    test_sl1.cpp
     test_step.cpp
     test_stl.cpp
     test_surface_collection.cpp
