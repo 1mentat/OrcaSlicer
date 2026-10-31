@@ -220,6 +220,12 @@ TEST_CASE("CGAL LSCM parameterization maps a disk and rejects disconnected patch
         disconnected.indices.push_back(face);
     }
     CHECK_FALSE(MeshBoolean::cgal::parameterize_lscm(disconnected).has_value());
+
+    // A patch plus a separate closed cube still has exactly one boundary loop, so only the
+    // connected-components check can reject it.
+    indexed_triangle_set with_closed_part = square;
+    its_merge(with_closed_part, shifted_cube(20.f).its);
+    CHECK_FALSE(MeshBoolean::cgal::parameterize_lscm(with_closed_part).has_value());
 }
 
 TEST_CASE("MCUT conversion round trips cuboid topology and empty state", "[MeshBoolean][MeshBooleanContracts]")
