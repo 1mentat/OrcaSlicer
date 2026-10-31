@@ -650,9 +650,7 @@ namespace arrange_param_contracts {
 using Catch::Matchers::WithinAbs;
 using arrange_surface_contracts::rectangle;
 
-// Known bug: ArrangeParams::to_json() ends with a trailing comma and never closes the object, so the
-// logged string is not JSON; fixed by the follow-up fix PR.
-TEST_CASE("ArrangeParams serializes the distance and optimization controls as JSON", "[Arrange][ArrangeParams][!shouldfail]")
+TEST_CASE("ArrangeParams serializes the distance and optimization controls as JSON", "[Arrange][ArrangeParams]")
 {
     ArrangeParams params = quiet_params(scaled(1.5));
     params.accuracy = .25f;

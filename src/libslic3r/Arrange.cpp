@@ -44,6 +44,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/multiprecision/integer.hpp>
 #include <boost/rational.hpp>
+#include <nlohmann/json.hpp>
 #include "MultiMaterialSegmentation.hpp"
 
 namespace libnest2d {
@@ -104,6 +105,29 @@ using ItemGroup = std::vector<std::reference_wrapper<Item>>;
 // A coefficient used in separating bigger items and smaller items.
 const double BIG_ITEM_TRESHOLD = 0.02;
 #define VITRIFY_TEMP_DIFF_THRSH 15  // bed temp can be higher than vitrify temp, but not higher than this thresh
+
+std::string ArrangeParams::to_json() const
+{
+    // nlohmann always writes a closed object, and unlike std::to_string its numbers do not depend on the C locale.
+    // Flags stay 0/1 as before so existing log readers see the same values.
+    nlohmann::ordered_json json;
+    json["min_obj_distance"]                    = min_obj_distance;
+    json["accuracy"]                            = accuracy;
+    json["parallel"]                            = int(parallel);
+    json["allow_rotations"]                     = int(allow_rotations);
+    json["do_final_align"]                      = int(do_final_align);
+    json["allow_multi_materials_on_same_plate"] = int(allow_multi_materials_on_same_plate);
+    json["avoid_extrusion_cali_region"]         = int(avoid_extrusion_cali_region);
+    json["is_seq_print"]                        = int(is_seq_print);
+    json["bed_shrink_x"]                        = bed_shrink_x;
+    json["bed_shrink_y"]                        = bed_shrink_y;
+    json["brim_skirt_distance"]                 = brim_skirt_distance;
+    json["clearance_height_to_rod"]             = clearance_height_to_rod;
+    json["clearance_height_to_lid"]             = clearance_height_to_lid;
+    json["clearance_radius"]                    = clearance_radius;
+    json["printable_height"]                    = printable_height;
+    return json.dump();
+}
 
 void update_arrange_params(ArrangeParams& params, const DynamicPrintConfig* print_cfg, const ArrangePolygons& selected)
 {
