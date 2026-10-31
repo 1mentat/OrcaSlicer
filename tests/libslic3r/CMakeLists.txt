@@ -15,14 +15,18 @@ add_executable(${_TEST_NAME}_tests
     test_assemble_list.cpp
     test_bambu_networking.cpp
     test_belt_brim.cpp
+    test_bridge_detector.cpp
     test_buildvolume.cpp
     test_calib.cpp
+    test_circle.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
+    test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
     test_locales_utils.cpp
     test_drc.cpp
+    test_edge_grid.cpp
     test_gcodereader.cpp
     test_toolordering_nozzle_group.cpp
     test_parallel_resolve.cpp
@@ -32,8 +36,12 @@ add_executable(${_TEST_NAME}_tests
     test_vendor_cache.cpp
     test_preset_options.cpp
     test_elephant_foot_compensation.cpp
+    test_expolygon_contracts.cpp
+    test_expolygons_index_contracts.cpp
     test_extrusion_simulator.cpp
+    test_intersection_points_contracts.cpp
     test_fill_corner_smoothing.cpp
+    test_aabb_mesh.cpp
     test_filament_mixer.cpp
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
@@ -41,6 +49,7 @@ add_executable(${_TEST_NAME}_tests
     test_multimaterial_segmentation.cpp
     test_placeholder_parser.cpp
     test_png_read_write.cpp
+    test_point.cpp
     test_polygon.cpp
     test_mutable_polygon.cpp
     test_mutable_priority_queue.cpp
@@ -49,16 +58,20 @@ add_executable(${_TEST_NAME}_tests
     test_obj.cpp
     test_step.cpp
     test_stl.cpp
+    test_surface_collection.cpp
+    test_short_edge_collapse.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp
     test_trianglemesh_slicer.cpp
     test_marchingsquares.cpp
     test_lay_on_face.cpp
     test_model.cpp
+    test_project_task.cpp
     test_utils.cpp
     test_miniz_extension.cpp
     test_timeutils.cpp
     test_voronoi.cpp
+    test_voxel_utils.cpp
     test_wipe_tower_estimate.cpp
     test_wipe_tower.cpp
     test_wipe_path.cpp
