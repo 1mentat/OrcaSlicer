@@ -555,6 +555,7 @@ void Transformation::set_scaling_factor(const Vec3d& scaling_factor)
     assert(scaling_factor.x() > 0.0 && scaling_factor.y() > 0.0 && scaling_factor.z() > 0.0);
 
     // scaling_factor holds magnitudes; any mirror stays in the orthogonal factor.
+    // Unlike the axis setter, this replaces the whole stretch, dropping any skew.
     const Transform3d orthogonal = extract_orthogonal_stretch(m_matrix).first;
 
     const Vec3d offset = get_offset();
@@ -567,7 +568,15 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
     assert(scaling_factor > 0.0);
 
     // scaling_factor is a magnitude; any mirror stays in the orthogonal factor.
+    // The stretch keeps its skew (off-diagonal terms). Scaling its row and column by the same
+    // factor (D * S * D) keeps it positive definite, so the determinant keeps its sign.
     auto [orthogonal, stretch] = extract_orthogonal_stretch(m_matrix);
+    const double k = std::sqrt(scaling_factor / stretch(axis, axis));
+    for (int i = 0; i < 3; ++i)
+        if (i != axis) {
+            stretch(axis, i) *= k;
+            stretch(i, axis) *= k;
+        }
     stretch(axis, axis) = scaling_factor;
 
     const Vec3d offset = get_offset();
