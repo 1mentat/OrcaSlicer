@@ -195,8 +195,12 @@ TEST_CASE("AMF input rejects a damaged ZIP container", "[AMF][AMFArchive]")
 
 TEST_CASE("AMF archives stream model XML across extraction chunks", "[AMF][AMFArchive]")
 {
+    // The padding comes first, so the whole object (names, vertices, triangles) is only seen if the
+    // parser is fed the extraction chunks after the first one (miniz hands out at most 64 KiB at a time).
     auto xml = document();
-    replace(xml, "</amf>", "<metadata type=\"long\">" + std::string(150000, 'x') + "</metadata></amf>");
+    const std::string root = "<amf unit=\"millimeter\">\n";
+    replace(xml, root, root + "<metadata type=\"long\">" + std::string(150000, 'x') + "</metadata>\n");
+    REQUIRE(xml.find("<object") > 150000);
     ScopedTemporaryFile f(".amf");
     archive(f.string(), {{"large.amf", xml}});
     Model m;
@@ -256,7 +260,7 @@ TEST_CASE("AMF constellation axis scales and mirrors remain distinct", "[AMF][AM
     }
 }
 
-TEST_CASE("AMF uniform scale expands to every axis", "[AMF][AMFArchive]")
+TEST_CASE("AMF uniform scale expands to every axis", "[AMF]")
 {
     ScopedTemporaryFile f(".amf");
     write_file(f.string(), document(instance("<scale>2.5</scale>")));
@@ -299,13 +303,14 @@ TEST_CASE("AMF missing constellation targets do not duplicate known geometry", "
     CHECK(m.objects[0]->instances.empty());
 }
 
-TEST_CASE("AMF empty constellation instances preserve uninstanced geometry", "[AMF][AMFArchive]")
+TEST_CASE("AMF empty constellation instances preserve uninstanced geometry", "[AMF]")
 {
     ScopedTemporaryFile f(".amf");
     write_file(f.string(), document(instance("")));
     Model m;
     REQUIRE(load(f.string(), m));
     geometry(m, f.string());
+    // Documents current loader behavior: an instance with no placement fields adds no ModelInstance.
     CHECK(m.objects[0]->instances.empty());
 }
 
@@ -350,7 +355,7 @@ TEST_CASE("AMF archives reject a volume without triangles", "[AMF][AMFArchive]")
     CHECK_FALSE(load(f.string(), m));
 }
 
-TEST_CASE("AMF archived metadata requires its type attribute", "[AMF][AMFArchive]")
+TEST_CASE("AMF archived object metadata requires its type attribute", "[AMF][AMFArchive]")
 {
     auto xml = document();
     replace(xml, "<metadata type=\"name\">", "<metadata>");
