@@ -15,6 +15,7 @@ add_executable(${_TEST_NAME}_tests
     test_assemble_list.cpp
     test_bambu_networking.cpp
     test_belt_brim.cpp
+    test_bridge_detector.cpp
     test_buildvolume.cpp
     test_calib.cpp
     test_circle.cpp
@@ -51,15 +52,20 @@ add_executable(${_TEST_NAME}_tests
     test_point.cpp
     test_polygon.cpp
     test_polyline.cpp
+    test_multipoint.cpp
     test_mutable_polygon.cpp
     test_mutable_priority_queue.cpp
     test_minimum_spanning_tree.cpp
     test_nozzle_volume_type.cpp
     test_obj.cpp
+    test_obj_color_utils.cpp
     test_step.cpp
     test_stl.cpp
+    test_surface_collection.cpp
+    test_short_edge_collapse.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp
+    test_trianglemesh.cpp
     test_trianglemesh_slicer.cpp
     test_marchingsquares.cpp
     test_lay_on_face.cpp
