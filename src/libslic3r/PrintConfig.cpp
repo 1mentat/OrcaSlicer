@@ -1083,6 +1083,7 @@ void PrintConfigDef::init_common_params()
     def->min      = 0;
     def->max      = 1000;
     def->mode     = comAdvanced;
+    def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsNullable{0});
 
     def = this->add("preferred_orientation", coFloat);
@@ -2658,6 +2659,7 @@ void PrintConfigDef::init_fff_params()
     def->ratio_over = "outer_wall_speed";
     def->min = 1;
     def->mode = comAdvanced;
+    def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsOrPercentsNullable{FloatOrPercent(50, true)});
 
     def = this->add("small_support_perimeter_threshold", coFloats);
@@ -2667,6 +2669,7 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = L("mm");	// millimeters, CIS languages need translation
     def->min = 0;
     def->mode = comAdvanced;
+    def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsNullable{0});
 
     def = this->add("wall_sequence", coEnum);

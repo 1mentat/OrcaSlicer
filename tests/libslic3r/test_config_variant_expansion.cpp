@@ -1107,9 +1107,7 @@ TEST_CASE("Support filament identity follows vendor identifiers and generic mate
     }
 }
 
-// Known bug: options registered with nullable=false keep a Nullable default, so archive load
-// rebuilds them as non-nullable options; fixed by the follow-up fix PR
-TEST_CASE("Registered print options round-trip through binary option archives", "[Config][ConfigArchive][!shouldfail]")
+TEST_CASE("Registered print options round-trip through binary option archives", "[Config][ConfigArchive]")
 {
     round_trip_registered_option_archives(print_config_def);
 }
