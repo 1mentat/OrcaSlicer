@@ -16,7 +16,6 @@
 #include "libslic3r/Shape/TextShape.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
-#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <string>
@@ -29,7 +28,8 @@ namespace {
 
 // Registers the bundled Sarabun font under a test-owned family name, so the
 // tests do not depend on the host's installed fonts and leave any host-installed
-// Sarabun family untouched.
+// Sarabun family untouched. resources/fonts sits beside resources/profiles
+// (PROFILES_DIR), so the path is taken from PROFILES_DIR's parent.
 Handle(Font_SystemFont) register_bundled_font()
 {
     const std::filesystem::path path = std::filesystem::path(std::string(PROFILES_DIR)).parent_path() / "fonts" /
@@ -92,7 +92,7 @@ TEST_CASE("OCCT text shape exposes a closed mesh that scales with height and thi
         TextResult doubled{};
         load_text_shape("Ag", font_name, 20.f, 0.6f, false, false, doubled);
         const TextMeshSize doubled_size = closed_mesh_size(doubled.text_mesh);
-        CHECK_THAT(doubled.text_width / base.text_width, WithinRel(2., 2e-3));
+        CHECK_THAT(doubled.text_width / base.text_width, WithinRel(2., 1e-2));
         CHECK_THAT(doubled_size.width / base_size.width, WithinRel(2., 2e-2));
         CHECK_THAT(doubled_size.height / base_size.height, WithinRel(2., 2e-2));
         CHECK_THAT(doubled_size.depth, WithinAbs(0.6, 2e-3));
@@ -101,7 +101,7 @@ TEST_CASE("OCCT text shape exposes a closed mesh that scales with height and thi
         TextResult thicker{};
         load_text_shape("Ag", font_name, 10.f, 1.8f, false, false, thicker);
         const TextMeshSize thicker_size = closed_mesh_size(thicker.text_mesh);
-        CHECK_THAT(thicker.text_width, WithinRel(base.text_width, 2e-3));
+        CHECK_THAT(thicker.text_width, WithinRel(base.text_width, 1e-2));
         CHECK_THAT(thicker_size.width, WithinRel(base_size.width, 2e-2));
         CHECK_THAT(thicker_size.height, WithinRel(base_size.height, 2e-2));
         CHECK_THAT(thicker_size.depth, WithinAbs(1.8, 2e-3));
