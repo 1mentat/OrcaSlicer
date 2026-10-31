@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <random>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -8,6 +9,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/BoundingBox.hpp"
@@ -1335,6 +1337,17 @@ Matrix3d quarter_turn_times(const Vec3d &signed_scale)
     return Eigen::AngleAxisd(PI / 2., Vec3d::UnitZ()).toRotationMatrix() * signed_scale.asDiagonal();
 }
 
+// A rotated, uniformly scaled transform with its X column mirrored: a reflection whose singular
+// values repeat, so the signs on the diagonal of the rotation/scale split do not encode it.
+Transform3d rotated_uniform_mirror(double factor)
+{
+    Transform3d matrix = Transform3d::Identity();
+    matrix.linear() = factor * Eigen::AngleAxisd(0.13, Vec3d(1., 2., 3.).normalized()).toRotationMatrix();
+    matrix.linear().col(X) = -matrix.linear().col(X);
+    matrix.translation() = Vec3d(5., -6., 7.);
+    return matrix;
+}
+
 } // namespace
 
 TEST_CASE("Transformation SVD recognizes axis-aligned anisotropic scale", "[Geometry][Transformation][SVD]")
@@ -1556,22 +1569,167 @@ TEST_CASE("Transformation axis setters change only their own component", "[Geome
     check_linear_and_offset(no_full_turn.get_matrix(), Matrix3d::Identity(), offset);
 }
 
-// Known bug: set_scaling_factor(Axis) overwrites the signed scale entry that carries the reflection with a positive value, un-mirroring the transform; fixed by the follow-up fix PR
 TEST_CASE("Transformation axis scale setter keeps the reflection of the axis it changes",
-          "[Geometry][Transformation][Scale][Mirror][!shouldfail]")
+          "[Geometry][Transformation][Scale][Mirror]")
 {
     Geometry::Transformation mirrored = scaled_quarter_turn(Vec3d(1., 1., -1.));
     mirrored.set_scaling_factor(Z, 5.);
     check_linear_and_offset(mirrored.get_matrix(), quarter_turn_times(Vec3d(4., 3., -5.)), Vec3d(5., -6., 7.));
 }
 
-// Known bug: set_scaling_factor(Vec3d) rebuilds the matrix from the rotation and the new positive scale, dropping any reflection; fixed by the follow-up fix PR
 TEST_CASE("Transformation vector scale setter keeps an existing reflection",
-          "[Geometry][Transformation][Scale][Mirror][!shouldfail]")
+          "[Geometry][Transformation][Scale][Mirror]")
 {
     Geometry::Transformation mirrored = scaled_quarter_turn(Vec3d(1., 1., -1.));
     mirrored.set_scaling_factor(Vec3d(4., 3., 5.));
     check_linear_and_offset(mirrored.get_matrix(), quarter_turn_times(Vec3d(4., 3., -5.)), Vec3d(5., -6., 7.));
+}
+
+TEST_CASE("Transformation vector scale setter leaves a uniformly scaled reflection unchanged",
+          "[Geometry][Transformation][Scale][Mirror]")
+{
+    const double factor = GENERATE(1., 2.);
+    const Transform3d matrix = rotated_uniform_mirror(factor);
+    REQUIRE(matrix.linear().determinant() < 0.);
+
+    Geometry::Transformation transform(matrix);
+    transform.set_scaling_factor(Vec3d::Constant(factor));
+    check_linear_and_offset(transform.get_matrix(), matrix.linear(), matrix.translation(), 1e-9);
+}
+
+// Known bug: set_scaling_factor(Axis) keeps the sign of the rotation/scale split's diagonal entry, which does not encode the reflection when scales repeat, so it changes a rotated uniformly scaled mirror; to be fixed with the scale getter follow-up
+TEST_CASE("Transformation axis scale setter leaves a uniformly scaled reflection unchanged",
+          "[Geometry][Transformation][Scale][Mirror][!shouldfail]")
+{
+    const Transform3d matrix = rotated_uniform_mirror(2.);
+    Geometry::Transformation transform(matrix);
+    transform.set_scaling_factor(Y, 2.);
+    check_linear_and_offset(transform.get_matrix(), matrix.linear(), matrix.translation(), 1e-9);
+}
+
+TEST_CASE("Transformation scale setters keep the reflection of a mirrored larger axis",
+          "[Geometry][Transformation][Scale][Mirror]")
+{
+    const Vec3d offset(5., -6., 7.);
+
+    Geometry::Transformation by_vector = scaled_quarter_turn(Vec3d(-1., 1., 1.));
+    by_vector.set_scaling_factor(Vec3d(4., 3., 5.));
+    check_linear_and_offset(by_vector.get_matrix(), quarter_turn_times(Vec3d(-4., 3., 5.)), offset, 1e-9);
+
+    Geometry::Transformation by_axis = scaled_quarter_turn(Vec3d(-1., 1., 1.));
+    by_axis.set_scaling_factor(X, 6.);
+    check_linear_and_offset(by_axis.get_matrix(), quarter_turn_times(Vec3d(-6., 3., 2.)), offset, 1e-9);
+}
+
+TEST_CASE("Transformation vector scale setter applies new magnitudes and keeps orientation and handedness",
+          "[Geometry][Transformation][Scale][Mirror]")
+{
+    const std::vector<Matrix3d> rotations{
+        Matrix3d::Identity(),
+        Matrix3d(Eigen::AngleAxisd(PI / 2., Vec3d::UnitZ())),
+        Matrix3d(Eigen::AngleAxisd(0.13, Vec3d(1., 2., 3.).normalized())),
+        Matrix3d(Eigen::AngleAxisd(2.4, Vec3d(-3., 1., 0.5).normalized()))};
+    const std::vector<Vec3d> scale_patterns{
+        Vec3d(1., 1., 1.), Vec3d(2., 2., 2.), Vec3d(4., 3., 2.), Vec3d(2., 3., 4.), Vec3d(3., 3., 1.)};
+    const Vec3d new_scale(1.5, 2.5, 0.5);
+
+    for (size_t r = 0; r < rotations.size(); ++r)
+        for (const Vec3d &scale : scale_patterns)
+            for (int mirror_axis = -1; mirror_axis < 3; ++mirror_axis) {
+                Vec3d mirror = Vec3d::Ones();
+                if (mirror_axis >= 0)
+                    mirror[mirror_axis] = -1.;
+                // Orthogonal factor (rotation and mirror) times the per-axis scale.
+                const Matrix3d orthogonal = rotations[r] * mirror.asDiagonal();
+                Transform3d matrix = Transform3d::Identity();
+                matrix.linear() = orthogonal * scale.asDiagonal();
+                CAPTURE(r, scale.transpose(), mirror_axis);
+
+                Geometry::Transformation transform(matrix);
+                transform.set_scaling_factor(new_scale);
+                CHECK(transform.get_matrix().linear().isApprox(orthogonal * new_scale.asDiagonal(), 1e-9));
+                CHECK((transform.get_matrix().linear().determinant() < 0.) == (mirror_axis >= 0));
+            }
+}
+
+TEST_CASE("Transformation vector scale setter keeps the orientation of a skewed reflection",
+          "[Geometry][Transformation][Scale][Mirror][Skew]")
+{
+    Transform3d matrix = Transform3d::Identity();
+    matrix.linear() << -1., -0.5, 0.,
+                        0.5,  1., 0.,
+                        0.,   0., 3.;
+    matrix.translation() = Vec3d(5., -6., 7.);
+    REQUIRE(matrix.linear().determinant() < 0.);
+
+    // Independent polar decomposition: linear = orthogonal * stretch, stretch = sqrt(linearT * linear).
+    const Matrix3d stretch = Eigen::SelfAdjointEigenSolver<Matrix3d>(matrix.linear().transpose() * matrix.linear()).operatorSqrt();
+    const Matrix3d orthogonal = matrix.linear() * stretch.inverse();
+
+    Geometry::Transformation transform(matrix);
+    transform.set_scaling_factor(Vec3d(0.1, 2., 3.));
+    check_linear_and_offset(transform.get_matrix(), orthogonal * Vec3d(0.1, 2., 3.).asDiagonal(), matrix.translation(), 1e-9);
+}
+
+TEST_CASE("Transformation vector scale setter stays finite on singular and near-singular transforms",
+          "[Geometry][Transformation][Scale]")
+{
+    Transform3d rank_one = Transform3d::Identity();
+    rank_one.linear() = Vec3d(1., 2., 3.) * Vec3d(0.5, -1., 2.).transpose();
+    Transform3d near_singular_mirror = Transform3d::Identity();
+    near_singular_mirror.linear() =
+        Eigen::AngleAxisd(0.7, Vec3d(1., -2., 0.5).normalized()).toRotationMatrix() * Vec3d(-1e-9, 2., 3.).asDiagonal();
+
+    for (const Transform3d &matrix : {rank_one, near_singular_mirror}) {
+        CAPTURE(matrix.linear());
+        Geometry::Transformation transform(matrix);
+        transform.set_scaling_factor(Vec3d(1., 2., 3.));
+        CHECK(transform.get_matrix().matrix().allFinite());
+        CHECK((transform.get_matrix().linear().determinant() < 0.) == (matrix.linear().determinant() < 0.));
+    }
+}
+
+TEST_CASE("Transformation scale setters match the plain rotation and scale split on right-handed input",
+          "[Geometry][Transformation][Scale]")
+{
+    std::mt19937 rng(12345);
+    std::normal_distribution<double> normal;
+    std::uniform_real_distribution<double> angle(-PI, PI);
+    const std::vector<Vec3d> scale_patterns{
+        Vec3d(1., 1., 1.), Vec3d(2., 2., 2.), Vec3d(4., 3., 2.), Vec3d(2., 3., 4.), Vec3d(3., 3., 1.), Vec3d(0.5, 7., 7.)};
+    const Vec3d new_scale(1.7, 0.6, 2.9);
+
+    for (int sample = 0; sample < 50; ++sample) {
+        const Vec3d axis = Vec3d(normal(rng), normal(rng), normal(rng)).normalized();
+        const Matrix3d rotation = Eigen::AngleAxisd(angle(rng), axis).toRotationMatrix();
+        for (const Vec3d &scale : scale_patterns) {
+            Transform3d matrix = Transform3d::Identity();
+            matrix.linear() = rotation * scale.asDiagonal();
+            matrix.translation() = Vec3d(5., -6., 7.);
+            CAPTURE(sample, scale.transpose());
+
+            // Reference: the rotation/scale split, as before mirrors were preserved. Compared with a
+            // tolerance, as fused multiply-add contraction may differ between translation units.
+            Matrix3d split_rotation;
+            Matrix3d split_scale;
+            matrix.computeRotationScaling(&split_rotation, &split_scale);
+            Transform3d expected_vector = Transform3d(split_rotation) * Geometry::scale_transform(new_scale);
+            expected_vector.translation() = matrix.translation();
+            Geometry::Transformation by_vector(matrix);
+            by_vector.set_scaling_factor(new_scale);
+            CHECK(by_vector.get_matrix().matrix().isApprox(expected_vector.matrix(), 1e-12));
+
+            for (Axis a : {X, Y, Z}) {
+                Matrix3d replaced = split_scale;
+                replaced(a, a) = new_scale[a];
+                Transform3d expected_axis = Transform3d(split_rotation) * Transform3d(replaced);
+                expected_axis.translation() = matrix.translation();
+                Geometry::Transformation by_axis(matrix);
+                by_axis.set_scaling_factor(a, new_scale[a]);
+                CHECK(by_axis.get_matrix().matrix().isApprox(expected_axis.matrix(), 1e-12));
+            }
+        }
+    }
 }
 
 TEST_CASE("Transformation rotation reset keeps scale and offset", "[Geometry][Transformation][Reset]")
