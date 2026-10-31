@@ -758,3 +758,56 @@ TEST_CASE("Convex polygon intersection test prusa polygons", "[Geometry][Rotcali
         REQUIRE(res == ref);
     }
 }
+
+namespace geometry_contract_family {
+
+TEST_CASE("Convex hull combines the extreme points of open polylines", "[Geometry][GeometryContract]")
+{
+    const Polylines paths{
+        Polyline{{Point(0, 0), Point(10, 0), Point(5, 5)}},
+        Polyline{{Point(0, 10), Point(10, 10)}}
+    };
+
+    const Polygon hull = Geometry::convex_hulll(paths);
+    const Points expected_corners{Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10)};
+    REQUIRE(hull.points.size() == expected_corners.size());
+    for (const Point &corner : expected_corners)
+        CHECK(std::find(hull.points.begin(), hull.points.end(), corner) != hull.points.end());
+    CHECK(hull.contains(Point(5, 5)));
+}
+
+TEST_CASE("Convex polygon chains classify boundaries and reject exterior points", "[Geometry][GeometryContract]")
+{
+    const std::vector<Vec2d> contour{
+        Vec2d(0., 0.), Vec2d(3., 0.), Vec2d(4., 2.),
+        Vec2d(4., 5.), Vec2d(2., 6.), Vec2d(0., 4.)
+    };
+    const auto chains = Geometry::decompose_convex_polygon_top_bottom(contour);
+    REQUIRE(chains.first.size() >= 2);
+    REQUIRE(chains.second.size() >= 2);
+
+    CHECK(Geometry::inside_convex_polygon(chains, Vec2d(0., 2.)));
+    CHECK(Geometry::inside_convex_polygon(chains, Vec2d(2., 0.)));
+    CHECK(Geometry::inside_convex_polygon(chains, Vec2d(2., 3.)));
+    CHECK(Geometry::inside_convex_polygon(chains, Vec2d(4., 3.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(chains, Vec2d(-1., 2.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(chains, Vec2d(5., 2.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(chains, Vec2d(2., -1.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(chains, Vec2d(2., 7.)));
+
+    std::vector<Vec2d> cyclic_start = contour;
+    std::rotate(cyclic_start.begin(), cyclic_start.begin() + 3, cyclic_start.end());
+    const auto rotated_chains = Geometry::decompose_convex_polygon_top_bottom(cyclic_start);
+    REQUIRE(rotated_chains.first.size() >= 2);
+    REQUIRE(rotated_chains.second.size() >= 2);
+    CHECK(Geometry::inside_convex_polygon(rotated_chains, Vec2d(2., 3.)));
+    CHECK_FALSE(Geometry::inside_convex_polygon(rotated_chains, Vec2d(2., 7.)));
+
+    const std::vector<Vec2d> vertical_points{Vec2d(2., 0.), Vec2d(2., 1.), Vec2d(2., 2.)};
+    const auto degenerate_chains = Geometry::decompose_convex_polygon_top_bottom(vertical_points);
+    CHECK(degenerate_chains.first.empty());
+    CHECK(degenerate_chains.second.empty());
+    CHECK_FALSE(Geometry::inside_convex_polygon(degenerate_chains, Vec2d(2., 1.)));
+}
+
+} // namespace geometry_contract_family
