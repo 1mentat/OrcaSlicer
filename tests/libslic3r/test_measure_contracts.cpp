@@ -106,17 +106,25 @@ TEST_CASE("Measure projection and feature transforms preserve analytic geometry"
     SurfaceFeature transformed_point(Vec3d(1.0, 2.0, 3.0));
     transformed_point.translate(rigid);
     check_vec(transformed_point.get_point(), rigid * Vec3d(1.0, 2.0, 3.0));
-    SurfaceFeature transformed_plane_feature = plane(4, Vec3d::UnitZ(), Vec3d(1.0, 2.0, 3.0));
+    // The rotation turns X into Y, so the normals below must change for the checks to pass.
+    SurfaceFeature transformed_edge = edge(Vec3d::Zero(), Vec3d(1.0, 0.0, 0.0), edge_extra);
+    transformed_edge.translate(rigid);
+    const auto [rigid_edge_start, rigid_edge_end] = transformed_edge.get_edge();
+    check_vec(rigid_edge_start, rigid * Vec3d::Zero());
+    check_vec(rigid_edge_end, rigid * Vec3d(1.0, 0.0, 0.0));
+    REQUIRE(transformed_edge.get_extra_point().has_value());
+    check_vec(*transformed_edge.get_extra_point(), rigid * edge_extra);
+    SurfaceFeature transformed_plane_feature = plane(4, Vec3d::UnitX(), Vec3d(1.0, 2.0, 3.0));
     transformed_plane_feature.translate(rigid);
     const auto [transformed_plane_index, transformed_plane_normal, transformed_plane_origin] = transformed_plane_feature.get_plane();
     CHECK(transformed_plane_index == 4);
-    check_vec(transformed_plane_normal, Vec3d::UnitZ());
+    check_vec(transformed_plane_normal, Vec3d::UnitY());
     check_vec(transformed_plane_origin, rigid * Vec3d(1.0, 2.0, 3.0));
-    SurfaceFeature transformed_circle_feature = circle(Vec3d(1.0, 2.0, 3.0), Vec3d::UnitZ(), 2.5);
+    SurfaceFeature transformed_circle_feature = circle(Vec3d(1.0, 2.0, 3.0), Vec3d::UnitX(), 2.5);
     transformed_circle_feature.translate(rigid);
     const auto [transformed_center, transformed_radius, transformed_normal] = transformed_circle_feature.get_circle();
     check_vec(transformed_center, rigid * Vec3d(1.0, 2.0, 3.0));
-    check_vec(transformed_normal, Vec3d::UnitZ());
+    check_vec(transformed_normal, Vec3d::UnitY());
     CHECK_THAT(transformed_radius, WithinAbs(2.5, 1e-8));
 }
 
@@ -176,15 +184,20 @@ TEST_CASE("Measure feature distances and angles match analytic witnesses", "[Mea
     REQUIRE(perpendicular_planes.angle.has_value());
     CHECK_THAT(perpendicular_planes.angle->angle, WithinAbs(0.5 * PI, 1e-8));
 
-    // Non-parallel edge/plane and circle/plane branches consult this pointer.
-    // Supplying it explicitly is part of the public call precondition.
-    const auto plane_features = std::make_shared<std::vector<SurfaceFeature>>();
+    // Edge/plane (edge not perpendicular to the normal) and non-coplanar circle/plane pairs measure
+    // to the boundary edges in world_plane_features: here a 2 x 2 square around the origin.
+    const auto plane_features = std::make_shared<std::vector<SurfaceFeature>>(std::vector<SurfaceFeature>{
+        edge(Vec3d(-1.0, -1.0, 0.0), Vec3d(1.0, -1.0, 0.0)), edge(Vec3d(1.0, -1.0, 0.0), Vec3d(1.0, 1.0, 0.0)),
+        edge(Vec3d(1.0, 1.0, 0.0), Vec3d(-1.0, 1.0, 0.0)), edge(Vec3d(-1.0, 1.0, 0.0), Vec3d(-1.0, -1.0, 0.0))});
     const SurfaceFeature bounded_plane = plane(3, Vec3d::UnitZ(), Vec3d::Zero(), plane_features);
     const MeasurementResult vertical_edge = get_measurement(edge(Vec3d(1.0, 1.0, -1.0), Vec3d(1.0, 1.0, 1.0)), bounded_plane);
     REQUIRE(vertical_edge.angle.has_value());
     CHECK_THAT(vertical_edge.angle->angle, WithinAbs(0.5 * PI, 1e-8));
+    // The edge passes through the corner (1, 1, 0) of the face.
+    check_distance(vertical_edge.distance_infinite, 0.0);
     const MeasurementResult elevated_circle = get_measurement(circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0), bounded_plane);
-    check_distance(elevated_circle.distance_infinite, 5.0);
+    // The r = 2 circle lies outside the face, so the closest face point is a corner, not the centre below.
+    check_distance(elevated_circle.distance_infinite, std::sqrt(sqr(2.0 - std::sqrt(2.0)) + 25.0));
 }
 
 TEST_CASE("Measure assembly and coordinate-distance contracts are explicit", "[Measure][MeasureContracts]")
@@ -270,13 +283,14 @@ TEST_CASE("Measuring groups cube facets into planar features and honors world tr
     check_vec(plane_origin, Vec3d(10.0, 10.0, 0.0));
 
     Transform3d world = Transform3d::Identity();
+    world.linear() = Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX()).toRotationMatrix();
     world.translation() = Vec3d(3.0, 4.0, 5.0);
     const auto transformed_plane = measuring.get_feature(0, Vec3d(10.0, 10.0, 0.0), world, true);
     REQUIRE(transformed_plane.has_value());
     const auto [transformed_index, transformed_normal, transformed_origin] = transformed_plane->get_plane();
     CHECK(transformed_index == 0);
-    check_vec(transformed_normal, plane_normal);
-    check_vec(transformed_origin, Vec3d(13.0, 14.0, 5.0));
+    check_vec(transformed_normal, world.linear() * plane_normal);
+    check_vec(transformed_origin, world * Vec3d(10.0, 10.0, 0.0));
 
     const auto edge_pick = measuring.get_feature(0, Vec3d(10.0, 0.0, 0.0), Transform3d::Identity(), false);
     REQUIRE(edge_pick.has_value());

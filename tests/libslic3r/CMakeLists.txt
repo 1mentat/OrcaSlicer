@@ -73,11 +73,11 @@ add_executable(${_TEST_NAME}_tests
     test_svg_import.cpp
     test_short_edge_collapse.cpp
     test_triangle_selector.cpp
-    test_measure_contracts.cpp
     test_meshboolean.cpp
     test_trianglemesh.cpp
     test_trianglemesh_slicer.cpp
     test_marchingsquares.cpp
+    test_measure_contracts.cpp
     test_lay_on_face.cpp
     test_model.cpp
     test_project_task.cpp
