@@ -829,6 +829,7 @@ TEST_CASE("Shrinking a rectangular bed moves every edge toward its center", "[Ar
 
 namespace model_arrange_contracts {
 using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
 
 // One 20 mm cube object with an instance at each given XY offset.
 Model arrange_model(std::initializer_list<Vec2d> offsets = {Vec2d::Zero()})
@@ -866,17 +867,21 @@ DynamicPrintConfig arrange_config(const char *support_type, bool enable_support)
 // fix PR.
 TEST_CASE("Model arrange polygon is the convex hull of every instance at its position and rotation", "[Arrange][ModelArrange][!shouldfail]")
 {
-    // The first cube turned a quarter about Z spans x 30..50 at its offset (70 if left unrotated),
-    // the second spans 0..20.
+    // The first cube turned a quarter about Z covers x 30..50 at its offset (70 if left unrotated),
+    // the second covers 0..20, so the hull is the 50x20 rectangle spanning both. Their inner corners
+    // (x = 20 and x = 30) lie on its edges and must not be hull vertices.
     Model model = arrange_model({Vec2d(50., 0.), Vec2d(0., 0.)});
     model.objects.front()->instances.front()->set_rotation(Z, PI / 2.);
 
     const ArrangePolygon polygon = get_arrange_poly(model);
-    const BoundingBox box = polygon.poly.contour.bounding_box();
-    CHECK_THAT(unscaled<double>(box.min.x()), WithinAbs(0., .01));
-    CHECK_THAT(unscaled<double>(box.max.x()), WithinAbs(50., .01));
-    CHECK_THAT(unscaled<double>(box.min.y()), WithinAbs(0., .01));
-    CHECK_THAT(unscaled<double>(box.max.y()), WithinAbs(20., .01));
+    const Polygon       &hull    = polygon.poly.contour;
+    CHECK(hull.is_counter_clockwise());
+    CHECK_THAT(hull.area() * SCALING_FACTOR * SCALING_FACTOR, WithinRel(50. * 20., 1e-6));
+    REQUIRE(hull.points.size() == 4);
+    for (const Vec2d &corner : {Vec2d(0., 0.), Vec2d(50., 0.), Vec2d(50., 20.), Vec2d(0., 20.)})
+        CHECK(std::any_of(hull.points.begin(), hull.points.end(), [&corner](const Point &p) {
+            return (unscaled(p) - corner).norm() < .01;
+        }));
 }
 
 TEST_CASE("Model object duplication copies only the original instances", "[Arrange][ModelArrange]")
