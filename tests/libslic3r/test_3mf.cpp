@@ -7,6 +7,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/BrimEarsPoint.hpp"
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/TextConfiguration.hpp"
@@ -2142,3 +2143,230 @@ TEST_CASE("3MF XML entries declaring more than an int can hold fail to load", "[
         CHECK_FALSE(parser.check_3mf_from_prusa(path));
     }
 }
+
+namespace bbs_archive_contracts {
+
+namespace {
+
+struct LoadedProject
+{
+    DynamicPrintConfig config;
+    PlateDataPtrs       plates;
+    std::vector<Preset*> presets;
+    bool                is_bbl{false};
+    bool                is_orca{false};
+    Semver              version;
+    std::unique_ptr<ScopedTemporaryDir> backup;
+
+    ~LoadedProject();
+};
+
+void release_presets(std::vector<Preset*>& presets)
+{
+    for (Preset *preset : presets)
+        delete preset;
+    presets.clear();
+}
+
+LoadedProject::~LoadedProject()
+{
+    release_PlateData_list(plates);
+    release_presets(presets);
+}
+
+void make_model(Model& model, bool two_objects = false, bool assembly = false)
+{
+    ModelObject *base = model.add_object();
+    base->name = "base-object";
+    base->module_name = "base-module";
+    ModelVolume *base_volume = base->add_volume(make_cube(10., 10., 10.));
+    base_volume->name = "base-volume";
+    base_volume->set_material_id("PLA");
+    base->add_instance();
+    ModelInstance *second = base->add_instance();
+    second->set_offset({30., 5., 0.});
+    second->set_rotation(Z, Geometry::deg2rad(17.));
+    second->set_scaling_factor({1.1, 0.9, 1.0});
+
+    if (assembly) {
+        Transform3d assembled = Transform3d::Identity();
+        assembled.linear() = Eigen::AngleAxisd(Geometry::deg2rad(23.), Vec3d::UnitZ()).toRotationMatrix();
+        assembled.translation() = Vec3d(4., 6., 8.);
+        second->set_assemble_from_transform(assembled);
+        second->set_offset_to_assembly({1.5, -2.5, 0.75});
+    }
+
+    if (two_objects) {
+        ModelObject *other = model.add_object();
+        other->name = "second-object";
+        other->module_name = "second-module";
+        ModelVolume *other_volume = other->add_volume(make_cube(6., 8., 4.));
+        other_volume->name = "second-volume";
+        other_volume->set_material_id("PETG");
+        other->add_instance({60., 10., 0.}, {1., 1., 1.}, {0., 0., Geometry::deg2rad(11.)}, {1., 1., 1.});
+    }
+
+    model.add_material("PLA")->attributes["filament_type"] = "PLA";
+    model.add_material("PETG")->attributes["filament_type"] = "PETG";
+}
+
+void make_multi_volume_model(Model& model)
+{
+    ModelObject *object = model.add_object();
+    object->name = "multi-volume";
+    ModelVolume *part = object->add_volume(make_cube(12., 10., 8.));
+    part->name = "printable-part";
+    part->set_material_id("PLA");
+    ModelVolume *negative = object->add_volume(make_cube(3., 3., 3.), ModelVolumeType::NEGATIVE_VOLUME);
+    negative->name = "negative-cavity";
+    negative->set_material_id("PETG");
+    negative->set_offset({2., 2., 2.});
+    object->add_instance();
+    model.add_material("PLA")->attributes["filament_type"] = "PLA";
+    model.add_material("PETG")->attributes["filament_type"] = "PETG";
+}
+
+void store_model(const std::string& path, Model& model, DynamicPrintConfig& config,
+                 PlateDataPtrs& plates, SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence)
+{
+    StoreParams params;
+    params.path = path;
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.strategy = strategy;
+    REQUIRE(store_bbs_3mf(params));
+}
+
+bool load_model(const std::string& path, Model& model, LoadedProject& loaded,
+                Import3mfProgressFn callback = nullptr)
+{
+    loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_ext_load");
+    model.set_backup_path(loaded.backup->string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    const bool result = load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates,
+                                     &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version,
+                                     std::move(callback), LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    return result;
+}
+
+void make_plate(PlateData& plate, int index, const std::vector<std::pair<int, int>>& objects)
+{
+    plate.plate_index = index;
+    plate.plate_name = "plate-" + std::to_string(index + 1);
+    plate.locked = index == 1;
+    plate.objects_and_instances = objects;
+    plate.printer_model_id = "printer-" + std::to_string(index);
+    plate.nozzle_diameters = "0.4;0.6";
+    plate.nozzle_volume_types = "standard;high_flow";
+    plate.gcode_prediction = "{\"time\":42}";
+    plate.gcode_weight = "12.5";
+    plate.toolpath_outside = index == 1;
+    plate.is_support_used = index == 0;
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF preserves multiple objects, instances, and transformed world geometry", "[3MF][Bbs3mfExtended][Geometry]")
+{
+    Model source;
+    make_model(source, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.24));
+    ScopedTemporaryDir backup("orca_bbs_ext_store");
+    source.set_backup_path(backup.string());
+
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}, {0, 1}, {1, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 2);
+    REQUIRE(loaded_model.objects[0]->instances.size() == 2);
+    REQUIRE(loaded_model.objects[1]->instances.size() == 1);
+    CHECK(loaded_model.objects[0]->name == "base-object");
+    CHECK(loaded_model.objects[1]->name == "second-object");
+    for (size_t obj_idx = 0; obj_idx < source.objects.size(); ++obj_idx)
+        for (size_t inst_idx = 0; inst_idx < source.objects[obj_idx]->instances.size(); ++inst_idx) {
+            INFO("object " << obj_idx << " instance " << inst_idx);
+            const BoundingBoxf3 expected = source.objects[obj_idx]->instance_bounding_box(inst_idx);
+            const BoundingBoxf3 actual   = loaded_model.objects[obj_idx]->instance_bounding_box(inst_idx);
+            CHECK((actual.min - expected.min).norm() < 1e-4);
+            CHECK((actual.max - expected.max).norm() < 1e-4);
+        }
+    const BoundingBoxf3 source_bbox = source.mesh().bounding_box();
+    const BoundingBoxf3 loaded_bbox = loaded_model.mesh().bounding_box();
+    CHECK_THAT(loaded_bbox.min.x(), Catch::Matchers::WithinAbs(source_bbox.min.x(), 1e-5));
+    CHECK_THAT(loaded_bbox.min.z(), Catch::Matchers::WithinAbs(source_bbox.min.z(), 1e-5));
+    CHECK_THAT(loaded_bbox.min.y(), Catch::Matchers::WithinAbs(source_bbox.min.y(), 1e-5));
+    CHECK_THAT(loaded_bbox.max.x(), Catch::Matchers::WithinAbs(source_bbox.max.x(), 1e-5));
+    CHECK_THAT(loaded_bbox.max.y(), Catch::Matchers::WithinAbs(source_bbox.max.y(), 1e-5));
+    CHECK_THAT(loaded_bbox.max.z(), Catch::Matchers::WithinAbs(source_bbox.max.z(), 1e-5));
+    CHECK(loaded_model.mesh().its.indices.size() == source.mesh().its.indices.size());
+    REQUIRE(loaded.config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(loaded.config.option<ConfigOptionFloat>("layer_height")->value, Catch::Matchers::WithinAbs(0.24, 1e-6));
+}
+
+TEST_CASE("BBS 3MF preserves assembly transform and assembly offset", "[3MF][Bbs3mfExtended][Assembly]")
+{
+    Model source;
+    make_model(source, false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_assembly_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}, {0, 1}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->instances.size() == 2);
+    ModelInstance *instance = loaded_model.objects.front()->instances[1];
+    REQUIRE(instance->is_assemble_initialized());
+    CHECK(instance->get_assemble_transformation().get_matrix().isApprox(
+        source.objects.front()->instances[1]->get_assemble_transformation().get_matrix(), 1e-5));
+    CHECK(instance->get_offset_to_assembly().isApprox(Vec3d(1.5, -2.5, 0.75), 1e-5));
+}
+
+TEST_CASE("BBS 3MF preserves model metadata and volume types", "[3MF][Bbs3mfExtended][Metadata]")
+{
+    Model source;
+    make_multi_volume_model(source);
+    source.model_info = std::make_shared<ModelInfo>();
+    source.model_info->model_name = "Archive contract";
+    source.model_info->origin = "designer-origin";
+    source.model_info->description = "metadata survives XML escaping: <&>";
+    source.model_info->metadata_items["custom-key"] = "custom-value";
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_metadata_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.model_info != nullptr);
+    CHECK(loaded_model.model_info->model_name == "Archive contract");
+    CHECK(loaded_model.model_info->origin == "designer-origin");
+    CHECK(loaded_model.model_info->description == "metadata survives XML escaping: <&>");
+    CHECK(loaded_model.model_info->metadata_items.at("custom-key") == "custom-value");
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 2);
+    CHECK(loaded_model.objects.front()->volumes[0]->name == "printable-part");
+    CHECK(loaded_model.objects.front()->volumes[1]->name == "negative-cavity");
+    CHECK(loaded_model.objects.front()->volumes[1]->type() == ModelVolumeType::NEGATIVE_VOLUME);
+}
+
+} // namespace bbs_archive_contracts
