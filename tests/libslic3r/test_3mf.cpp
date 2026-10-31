@@ -9,6 +9,8 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/TextConfiguration.hpp"
+#include "libslic3r/EmbossShape.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/Zipper.hpp"
@@ -262,12 +264,13 @@ static const std::string CAD_RECIPE_ENTRY        = "Metadata/orca_cad.bin";
 static const std::string LEGACY_CAD_RECIPE_ENTRY = "Metadata/SnapOrca_cad.bin";
 
 // Pulls one named entry out of a 3mf archive; false when it is absent.
-static bool read_cad_recipe_entry(const std::string& path, std::string& out,
-                                  const std::string& entry = CAD_RECIPE_ENTRY)
+static bool read_3mf_entry(const std::string& path, std::string& out,
+                           const std::string& entry = CAD_RECIPE_ENTRY)
 {
     mz_zip_archive zip;
     mz_zip_zero_struct(&zip);
     REQUIRE(open_zip_reader(&zip, path));
+    const ScopeGuard close_zip([&zip] { close_zip_reader(&zip); });
     bool   found = false;
     mz_uint n    = mz_zip_reader_get_num_files(&zip);
     for (mz_uint i = 0; i < n; ++i) {
@@ -281,7 +284,6 @@ static bool read_cad_recipe_entry(const std::string& path, std::string& out,
             break;
         }
     }
-    close_zip_reader(&zip);
     return found;
 }
 
@@ -539,7 +541,7 @@ SCENARIO("CAD recipe is embedded in the BBS 3mf archive", "[3mf][CAD]") {
 
             THEN("the archive entry is present byte-for-byte") {
                 std::string got;
-                REQUIRE(read_cad_recipe_entry(test_file, got));
+                REQUIRE(read_3mf_entry(test_file, got));
                 REQUIRE(got.size() == recipe.size());
                 REQUIRE(got == recipe);
             }
@@ -580,7 +582,7 @@ SCENARIO("CAD recipe is embedded in the BBS 3mf archive", "[3mf][CAD]") {
 
             THEN("no entry is written at all") {
                 std::string got;
-                REQUIRE_FALSE(read_cad_recipe_entry(test_file, got));
+                REQUIRE_FALSE(read_3mf_entry(test_file, got));
             }
         }
     }
@@ -647,9 +649,9 @@ SCENARIO("a project saved under the pre-rename recipe name still loads", "[3mf][
                 REQUIRE(store_bbs_3mf(sp2));
 
                 std::string got;
-                REQUIRE(read_cad_recipe_entry(resaved, got));
+                REQUIRE(read_3mf_entry(resaved, got));
                 REQUIRE(got == recipe);
-                REQUIRE_FALSE(read_cad_recipe_entry(resaved, got, LEGACY_CAD_RECIPE_ENTRY));
+                REQUIRE_FALSE(read_3mf_entry(resaved, got, LEGACY_CAD_RECIPE_ENTRY));
             }
         }
     }
@@ -1911,6 +1913,158 @@ TEST_CASE("BBS 3MF round-trips cut object identity and connector metadata", "[3m
     CHECK_THAT(loaded_connector->cut_info.radius_tolerance, Catch::Matchers::WithinAbs(0.125, 1e-6));
     CHECK_THAT(loaded_connector->cut_info.height_tolerance, Catch::Matchers::WithinAbs(0.25, 1e-6));
     CHECK(loaded_connector->mesh().its.vertices.size() == connector->mesh().its.vertices.size());
+}
+
+// Every text configuration field set to a non-default value. The text and the font
+// descriptor carry XML special characters; the style name and font names are plain.
+static TextConfiguration make_text_configuration()
+{
+    TextConfiguration tc;
+    tc.text = "A<&\"'\tline\nnext";
+    tc.style.name = "Round-trip style";
+    tc.style.path = "MacFontDescriptor<&\"";
+    tc.style.type = EmbossStyle::Type::wx_mac_font_descr;
+    tc.style.prop.char_gap = 3;
+    tc.style.prop.line_gap = -2;
+    tc.style.prop.boldness = 0.25f;
+    tc.style.prop.skew = -0.125f;
+    tc.style.prop.collection_number = 4;
+    tc.style.prop.per_glyph = true;
+    tc.style.prop.align = {FontProp::HorizontalAlign::right, FontProp::VerticalAlign::bottom};
+    tc.style.prop.size_in_mm = 12.5f;
+    tc.style.prop.family = "Noto Sans";
+    tc.style.prop.face_name = "Noto Sans Display";
+    tc.style.prop.style = "Italic";
+    tc.style.prop.weight = "SemiBold";
+    return tc;
+}
+
+// Stores a volume carrying `expected` through the BBS exporter and checks that the
+// importer restores every field.
+static void check_text_configuration_round_trip(const TextConfiguration &expected)
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *volume = object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+    volume->text_configuration = expected;
+
+    ScopedTemporaryDir backup_dir("orca_text_metadata");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path = temp.string().c_str();
+    store_params.model = &model;
+    store_params.config = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_text_metadata_loaded");
+    REQUIRE(load_project(temp.string(), loaded_model, loaded_backup_dir));
+
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    const ModelVolume &loaded_volume = *loaded_model.objects.front()->volumes.front();
+    REQUIRE(loaded_volume.text_configuration.has_value());
+    const TextConfiguration &actual = *loaded_volume.text_configuration;
+    CHECK(actual.text == expected.text);
+    CHECK(actual.style.name == expected.style.name);
+    CHECK(actual.style.path == expected.style.path);
+    CHECK(actual.style.type == expected.style.type);
+    CHECK(actual.style.prop.char_gap == expected.style.prop.char_gap);
+    CHECK(actual.style.prop.line_gap == expected.style.prop.line_gap);
+    REQUIRE(expected.style.prop.boldness.has_value());
+    REQUIRE(actual.style.prop.boldness.has_value());
+    CHECK_THAT(*actual.style.prop.boldness, Catch::Matchers::WithinAbs(*expected.style.prop.boldness, 1e-5f));
+    REQUIRE(expected.style.prop.skew.has_value());
+    REQUIRE(actual.style.prop.skew.has_value());
+    CHECK_THAT(*actual.style.prop.skew, Catch::Matchers::WithinAbs(*expected.style.prop.skew, 1e-5f));
+    CHECK(actual.style.prop.collection_number == expected.style.prop.collection_number);
+    CHECK(actual.style.prop.per_glyph == expected.style.prop.per_glyph);
+    CHECK(actual.style.prop.align == expected.style.prop.align);
+    CHECK_THAT(actual.style.prop.size_in_mm, Catch::Matchers::WithinAbs(expected.style.prop.size_in_mm, 1e-5f));
+    CHECK(actual.style.prop.family == expected.style.prop.family);
+    CHECK(actual.style.prop.face_name == expected.style.prop.face_name);
+    CHECK(actual.style.prop.style == expected.style.prop.style);
+    CHECK(actual.style.prop.weight == expected.style.prop.weight);
+}
+
+TEST_CASE("BBS 3MF round-trips text configuration metadata with plain font names", "[3mf][EmbossMetadata]")
+{
+    check_text_configuration_round_trip(make_text_configuration());
+}
+
+// Known bug: font family/face/style/weight attributes are written without XML escaping, so the project fails to load; fixed by the follow-up fix PR
+TEST_CASE("BBS 3MF round-trips text configuration metadata", "[3mf][EmbossMetadata][!shouldfail]")
+{
+    TextConfiguration tc = make_text_configuration();
+    // Each escaped attribute (style name, font family, face name, style, weight) holds
+    // characters that make the model XML malformed unless they are escaped.
+    tc.style.name = "Round-trip <style> & \"quotes\" '>'";
+    tc.style.prop.family = "Noto & Sans";
+    tc.style.prop.face_name = "Display<>\"";
+    tc.style.prop.style = "Italic & Oblique";
+    tc.style.prop.weight = "Semi&Bold";
+    check_text_configuration_round_trip(tc);
+}
+
+TEST_CASE("BBS 3MF round-trips an embossed SVG source and projection metadata", "[3mf][EmbossMetadata]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *volume = object->add_volume(make_cube(10., 10., 2.));
+    object->add_instance();
+
+    // Emboss SVGs are discovered by the importer only below the 3D/ folder.
+    const std::string svg_entry = "3D/emboss_source.svg";
+    const std::string svg_data = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0h1v1z\"/></svg>";
+    EmbossShape shape;
+    shape.scale = 2.5;
+    shape.projection.depth = 1.75;
+    shape.projection.use_surface = true;
+    shape.final_shape.is_healed = false;
+    EmbossShape::SvgFile svg_file;
+    svg_file.path = "source.svg";
+    svg_file.path_in_3mf = svg_entry;
+    svg_file.file_data = std::make_shared<std::string>(svg_data);
+    shape.svg_file = std::move(svg_file);
+    volume->emboss_shape = std::move(shape);
+
+    ScopedTemporaryDir backup_dir("orca_emboss_metadata");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile temp(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path = temp.string().c_str();
+    store_params.model = &model;
+    store_params.config = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    std::string archived_svg;
+    REQUIRE(read_3mf_entry(temp.string(), archived_svg, svg_entry));
+    CHECK(archived_svg == svg_data);
+
+    Model loaded_model;
+    ScopedTemporaryDir loaded_backup_dir("orca_emboss_metadata_loaded");
+    REQUIRE(load_project(temp.string(), loaded_model, loaded_backup_dir));
+
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    const ModelVolume &loaded_volume = *loaded_model.objects.front()->volumes.front();
+    REQUIRE(loaded_volume.emboss_shape.has_value());
+    const EmbossShape &actual = *loaded_volume.emboss_shape;
+    CHECK_THAT(actual.scale, Catch::Matchers::WithinAbs(2.5, 1e-6));
+    CHECK_THAT(actual.projection.depth, Catch::Matchers::WithinAbs(1.75, 1e-6));
+    CHECK(actual.projection.use_surface);
+    CHECK_FALSE(actual.final_shape.is_healed);
+    REQUIRE(actual.svg_file.has_value());
+    CHECK(actual.svg_file->path == "source.svg");
+    CHECK(actual.svg_file->path_in_3mf == svg_entry);
+    REQUIRE(actual.svg_file->file_data != nullptr);
+    CHECK(*actual.svg_file->file_data == svg_data);
 }
 
 // Writes a single-entry zip whose central directory carries a zip64 record declaring an
