@@ -8,6 +8,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
 #include "libslic3r/LocalesUtils.hpp"
+#include "libslic3r/Point.hpp"
 
 #include "test_utils.hpp"
 
@@ -709,6 +710,53 @@ TEST_CASE("save_to_json round-trips plugin capability references as strings", "[
     REQUIRE(reloaded.load_from_json(tmp.string(), substitutions, true, key_values, reason) == 0);
     CHECK(reason.empty());
     CHECK(reloaded.option<ConfigOptionStrings>("slicing_pipeline_plugin")->values == refs);
+}
+
+TEST_CASE("Config JSON loading honors grouped geometry and declared vector aliases", "[Config]") {
+    const std::string area_json = GENERATE(
+        std::string(R"(["0x0,20x0,20x20,0x20","5x5,15x5,15x15,5x15"])"),
+        std::string(R"([["0x0,20x0,20x20,0x20"],["5x5,15x5,15x15,5x15"]])"));
+    ScopedTemporaryFile tmp(".json");
+    {
+        boost::nowide::ofstream out(tmp.string());
+        REQUIRE(out.is_open());
+        out << "{\"extruder_printable_area\":" << area_json
+            << R"(,"perimeter_feed_rate":["37","64"]})";
+        out.close();
+        REQUIRE(out.good());
+    }
+
+    // Exercise ConfigBase's schema-driven JSON loader without DynamicPrintConfig's
+    // print-specific legacy filtering, while retaining the registered print option types.
+    struct PrintSchemaConfig : DynamicConfig {
+        const ConfigDef *def() const override { return &print_config_def; }
+    };
+    PrintSchemaConfig config;
+    const ConfigSubstitutions substitutions = config.load(
+        tmp.string(), ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(substitutions.empty());
+
+    const ConfigOptionPointsGroups *areas = config.option<ConfigOptionPointsGroups>("extruder_printable_area");
+    REQUIRE(areas != nullptr);
+    REQUIRE(areas->values.size() == 2);
+    const Vec2ds expected_areas[] = {
+        { Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.) },
+        { Vec2d(5., 5.), Vec2d(15., 5.), Vec2d(15., 15.), Vec2d(5., 15.) },
+    };
+    for (size_t group = 0; group < areas->values.size(); ++group) {
+        REQUIRE(areas->values[group].size() == expected_areas[group].size());
+        for (size_t point = 0; point < expected_areas[group].size(); ++point) {
+            CHECK_THAT(areas->values[group][point].x(), Catch::Matchers::WithinAbs(expected_areas[group][point].x(), 1e-9));
+            CHECK_THAT(areas->values[group][point].y(), Catch::Matchers::WithinAbs(expected_areas[group][point].y(), 1e-9));
+        }
+    }
+
+    // perimeter_feed_rate is the declared alias of inner_wall_speed.
+    const ConfigOptionFloatsNullable *inner_wall_speeds = config.option<ConfigOptionFloatsNullable>("inner_wall_speed");
+    REQUIRE(inner_wall_speeds != nullptr);
+    REQUIRE(inner_wall_speeds->values.size() == 2);
+    CHECK_THAT(inner_wall_speeds->values[0], Catch::Matchers::WithinAbs(37., 1e-9));
+    CHECK_THAT(inner_wall_speeds->values[1], Catch::Matchers::WithinAbs(64., 1e-9));
 }
 
 TEST_CASE("load_from_json hands a preset's include list to the caller instead of the config", "[Config]") {
