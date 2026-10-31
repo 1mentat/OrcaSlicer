@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "names": [
+    "FocusedSettingsVariance::Bridge density changes external bridge deposition",
+    "FocusedSettingsVariance::Bridge flow changes external bridge deposition",
+    "FocusedSettingsVariance::Bridge line width changes external bridge deposition",
+    "FocusedSettingsVariance::Infill combination height cap bounds and changes sparse path heights",
+    "FocusedSettingsVariance::Internal bridge angle overrides automatic direction",
+    "FocusedSettingsVariance::Internal bridge density changes deposited bridge volume",
+    "FocusedSettingsVariance::Internal bridge flow scales extrusion at fixed path length",
+    "FocusedSettingsVariance::Locked-zag skin controls change distinct public fill properties",
+    "FocusedSettingsVariance::Relative internal bridge angle adds to automatic direction"
+  ],
+  "control_regex": "^FocusedSettingsVariance::(Infill combination height cap bounds and changes sparse path heights|Internal bridge angle overrides automatic direction|Relative internal bridge angle adds to automatic direction|Bridge density changes external bridge deposition|Bridge flow changes external bridge deposition|Internal bridge density changes deposited bridge volume|Bridge line width changes external bridge deposition|Internal bridge flow scales extrusion at fixed path length|Locked-zag skin controls change distinct public fill properties)$"
+}

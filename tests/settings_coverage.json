@@ -1206,12 +1206,13 @@
     },
     "bridge_line_width": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsWallBridgeVariance]",
+      "tag": "[BridgeInfillBoundary]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "External bridge widths 0.25 and 0.35 mm produce positive, distinct deposited volumes. Numeric representatives only; validation-boundary tests also exist under ValidationContracts in test_print.cpp."
+      "reason": "On the pinned 0.6 mm nozzle fixture, registered minimum 0 matched explicit 0.55 mm configured fallback in bridge-path count and deposited volume; the registered 100% maximum resolved to a distinct 0.6 mm width while 0.25/0.35 mm representatives remained. All controls passed native execution."
     },
     "tree_support_tip_diameter": {
       "test": "tests/fff_print/test_tree_support.cpp",
@@ -1694,12 +1695,13 @@
     },
     "infill_combination_max_layer_height": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsWallBridgeVariance]",
+      "tag": "[BridgeInfillBoundary]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Caps of 0.2, 0.4, and 0.6 mm bound every sparse path height; the 0.6 mm case must emit a path taller than 0.2 mm. Numeric representatives only, not a complete boundary or interaction matrix."
+      "reason": "The real combined-infill fixture retained 0.2/0.6 mm representatives and compared registered minimum 0 with documented 100% nozzle sentinel on a 0.8 mm nozzle. Both sentinel rows matched sparse path/surface/void evidence and emitted paths above 0.6 mm while remaining nozzle bounded."
     },
     "thick_internal_bridges": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -1712,12 +1714,13 @@
     },
     "internal_bridge_angle": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsWallBridgeVariance]",
+      "tag": "[BridgeInfillBoundary]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Explicit 30- and 120-degree directions are checked against every internal bridge surface angle on a stepped fixture. Other angles and automatic direction remain outside this claim."
+      "reason": "The stepped bridge fixture checks explicit 30/120-degree representatives plus exact 0/180-degree registered endpoints; explicit directions are compared modulo pi. Angle zero remains automatic, verified by the selected relative-angle case comparing its observed automatic direction and distinct absolute mode. The initial native run exposed a representation assumption; the corrected modulo-pi oracle passed all nine controls."
     },
     "detect_overhang_wall": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -1730,30 +1733,33 @@
     },
     "bridge_density": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsWallBridgeVariance]",
+      "tag": "[BridgeInfillBoundary]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "External bridges at 50% and 100% density have positive output, and full density deposits more volume. Numeric representatives only."
+      "reason": "External bridge slices cover registered minimum 10%, existing 50% and 100% representatives, and registered maximum 125%. Every row emitted positive bridge paths and deposited volume; volume increased across all four levels. The bridge-density-ignored mutant was killed by the volume comparisons."
     },
     "bridge_flow": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsWallBridgeVariance]",
+      "tag": "[BridgeInfillBoundary]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "External bridge flow ratios 0.5 and 1.0 produce positive but distinct deposited volumes; spacing compensation makes a monotonic-volume claim inappropriate. Numeric representatives only."
+      "reason": "The registered 0 minimum is explicitly rejected by public config validation; valid 0.5/1.0 representatives and maximum 2.0 emitted bridge paths and distinct deposited volumes. No monotonic-volume claim is made because spacing compensation affects deposition. The bridge-flow-fixed-to-nominal mutant was killed by the endpoint volume checks."
     },
     "internal_bridge_density": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsWallBridgeVariance]",
+      "tag": "[BridgeInfillBoundary]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "Internal bridges at 25% and 100% density have positive output, and full density deposits more volume. Numeric representatives only."
+      "reason": "Internal bridge slices cover registered 10%/125% boundaries and existing 25%/100% representatives. Every row emitted positive bridge paths and deposited volume, with measured volume increasing across all tested levels."
     },
     "interlocking_beam": {
       "test": "tests/fff_print/test_interlocking.cpp",
@@ -2535,12 +2541,13 @@
     },
     "internal_bridge_flow": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsFamilyVariance]",
+      "tag": "[BridgeInfillBoundary]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "A ledged two-volume fixture emits internal-bridge paths; changing 1.00 to 1.35 preserves path count and XY length while changing summed E by 1.35."
+      "reason": "The registered 0 minimum is rejected by public config validation. Valid 1.0/1.35 controls and maximum 2.0 were checked in emitted G-code: move count and XY path stayed fixed while E scaled to the configured ratio. The internal-bridge-flow-fixed-to-nominal mutant was killed by the 1.35 extrusion check."
     },
     "overhang_1_4_speed": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -4444,12 +4451,13 @@
     },
     "infill_lock_depth": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance][SolidSkinInfill]",
+      "tag": "[BridgeInfillBoundary]",
       "dimensions": [
         "representative_values",
-        "pipeline_oracle"
+        "pipeline_oracle",
+        "boundary_values"
       ],
-      "reason": "The public locked-zag fixture independently varies infill_lock_depth from 0.0 to 0.8 mm with skin density and skin depth held at their control values. The locked row increases internal-fill length and flow length while retaining positive finite paths and unchanged perimeter length within 0.01 mm. Numeric boundaries and interactions remain unclaimed."
+      "reason": "The public locked-zag fixture covers registered minimum 0, default 1.0 mm, existing 0.8 mm representative, and registered maximum 100 mm with other skin settings pinned. Each row retained finite positive fill; default/max increased fill and flow length over zero, maximum exceeded 0.8 mm, and perimeter length remained stable. The locked-zag-depth-ignored mutant was killed by the default-boundary comparison."
     },
     "minimum_sparse_infill_area": {
       "test": "tests/fff_print/test_settings_variance.cpp",

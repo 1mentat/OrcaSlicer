@@ -1049,9 +1049,9 @@ TEST_CASE("Infill combination turns lower layers into void and bounds sparse pat
     CHECK(sparse_layers < baseline_sparse_layers);
 }
 
-TEST_CASE("Infill combination height cap bounds and changes sparse path heights", "[SettingsVariance][SettingsWallBridgeVariance]")
+TEST_CASE("Infill combination height cap bounds and changes sparse path heights", "[SettingsVariance][SettingsWallBridgeVariance][BridgeInfillBoundary]")
 {
-    auto run = [](double max_height) {
+    auto run = [](const std::string &max_height) {
         DynamicPrintConfig config = wall_infill_config();
         config.set_deserialize_strict({
             {"wall_loops", 1},
@@ -1065,13 +1065,19 @@ TEST_CASE("Infill combination height cap bounds and changes sparse path heights"
         process(print, model, config);
         return infill(print);
     };
-    const InfillSnapshot low = run(0.2);
-    const InfillSnapshot high = run(0.6);
-    CAPTURE(low.sparse_surface_count, high.sparse_surface_count,
-            low.void_surface_count, high.void_surface_count,
-            low.sparse_path_heights, high.sparse_path_heights);
+    const InfillSnapshot low = run("0.2");
+    const InfillSnapshot high = run("0.6");
+    const InfillSnapshot zero_boundary = run("0");
+    const InfillSnapshot percent_sentinel = run("100%");
+    CAPTURE(low.sparse_surface_count, high.sparse_surface_count, zero_boundary.sparse_surface_count,
+            percent_sentinel.sparse_surface_count, low.void_surface_count, high.void_surface_count,
+            zero_boundary.void_surface_count, percent_sentinel.void_surface_count,
+            low.sparse_path_heights, high.sparse_path_heights, zero_boundary.sparse_path_heights,
+            percent_sentinel.sparse_path_heights);
     REQUIRE_FALSE(low.sparse_path_heights.empty());
     REQUIRE_FALSE(high.sparse_path_heights.empty());
+    REQUIRE_FALSE(zero_boundary.sparse_path_heights.empty());
+    REQUIRE_FALSE(percent_sentinel.sparse_path_heights.empty());
     for (double height : low.sparse_path_heights) {
         REQUIRE(height > 0.0);
         CHECK(height <= 0.2 + 1e-6);
@@ -1084,6 +1090,19 @@ TEST_CASE("Infill combination height cap bounds and changes sparse path heights"
                       [](double height) { return height > 0.2 + 1e-6; }));
     CHECK(low.sparse_surface_count != high.sparse_surface_count);
     CHECK(low.void_surface_count != high.void_surface_count);
+    // Zero is a semantic boundary that selects the limiting nozzle diameter.
+    // The fixture pins both nozzle diameters to 0.8 mm, so this row can combine
+    // paths above the 0.6 mm representative cap while remaining nozzle-bounded.
+    CHECK(std::all_of(zero_boundary.sparse_path_heights.begin(), zero_boundary.sparse_path_heights.end(),
+                      [](double height) { return height <= 0.8 + 1e-6; }));
+    CHECK(std::any_of(zero_boundary.sparse_path_heights.begin(), zero_boundary.sparse_path_heights.end(),
+                      [](double height) { return height > 0.6 + 1e-6; }));
+    // The schema documents zero and 100% as equivalent nozzle-diameter
+    // sentinels. Compare the resulting public sparse-fill evidence directly.
+    CHECK(zero_boundary.sparse_path_count == percent_sentinel.sparse_path_count);
+    CHECK(zero_boundary.sparse_surface_count == percent_sentinel.sparse_surface_count);
+    CHECK(zero_boundary.void_surface_count == percent_sentinel.void_surface_count);
+    CHECK(zero_boundary.sparse_path_heights == percent_sentinel.sparse_path_heights);
 }
 
 TEST_CASE("Changing infill combination invalidates the prepared sparse surfaces", "[SettingsVariance][SettingsWallBridgeVariance]")
@@ -1134,9 +1153,9 @@ TEST_CASE("Thick internal bridges change deposited bridge flow", "[SettingsVaria
     CHECK(thick.volume > regular.volume);
 }
 
-TEST_CASE("Internal bridge angle overrides automatic direction", "[SettingsVariance][SettingsWallBridgeVariance]")
+TEST_CASE("Internal bridge angle overrides automatic direction", "[SettingsVariance][SettingsWallBridgeVariance][BridgeInfillBoundary]")
 {
-    const double angle = GENERATE(30.0, 120.0);
+    const double angle = GENERATE(0.0, 30.0, 120.0, 180.0);
     DynamicPrintConfig config = bridge_config();
     config.set_deserialize_strict({{"internal_bridge_angle", angle}});
     Print print;
@@ -1147,12 +1166,25 @@ TEST_CASE("Internal bridge angle overrides automatic direction", "[SettingsVaria
     REQUIRE(actual.surfaces > 0);
     REQUIRE(actual.paths > 0);
     REQUIRE_FALSE(actual.angles.empty());
-    const double expected = std::fmod(Geometry::deg2rad(angle), PI);
-    for (double observed : actual.angles)
-        CHECK_THAT(observed, Catch::Matchers::WithinAbs(expected, 1e-3));
+    if (angle == 0.0) {
+        // The selected relative-angle case verifies automatic direction at this registered minimum.
+        // Automatic directions are not necessarily represented in [0, pi].
+        CHECK(std::all_of(actual.angles.begin(), actual.angles.end(),
+                          [](double observed) { return std::isfinite(observed); }));
+    } else {
+        auto modulo_pi = [](double value) {
+            const double result = std::fmod(value, PI);
+            return result < 0.0 ? result + PI : result;
+        };
+        const double expected = modulo_pi(Geometry::deg2rad(angle));
+        for (double observed : actual.angles) {
+            REQUIRE(std::isfinite(observed));
+            CHECK_THAT(modulo_pi(observed), Catch::Matchers::WithinAbs(expected, 1e-3));
+        }
+    }
 }
 
-TEST_CASE("Relative internal bridge angle adds to automatic direction", "[SettingsVariance][SettingsWallBridgeVariance][RelativeBridgeAngle]")
+TEST_CASE("Relative internal bridge angle adds to automatic direction", "[SettingsVariance][SettingsWallBridgeVariance][RelativeBridgeAngle][BridgeInfillBoundary]")
 {
     struct Run {
         BridgeSnapshot snapshot;
@@ -1261,7 +1293,7 @@ TEST_CASE("Overhang detection partitions perimeter roles", "[SettingsVariance][S
         CHECK(overhang_paths == 0);
 }
 
-TEST_CASE("Bridge density changes external bridge deposition", "[SettingsVariance][SettingsWallBridgeVariance]")
+TEST_CASE("Bridge density changes external bridge deposition", "[SettingsVariance][SettingsWallBridgeVariance][BridgeInfillBoundary]")
 {
     auto run = [](double density) {
         DynamicPrintConfig config = wall_infill_config();
@@ -1280,16 +1312,20 @@ TEST_CASE("Bridge density changes external bridge deposition", "[SettingsVarianc
         process(print, model, config);
         return external_bridges(print);
     };
+    const ExternalBridgeSnapshot minimum = run(10.0);
     const ExternalBridgeSnapshot sparse = run(50.0);
     const ExternalBridgeSnapshot full = run(100.0);
-    REQUIRE(sparse.paths > 0);
-    REQUIRE(full.paths > 0);
-    REQUIRE(sparse.volume > 0.0);
-    REQUIRE(full.volume > 0.0);
+    const ExternalBridgeSnapshot maximum = run(125.0);
+    for (const ExternalBridgeSnapshot &row : {minimum, sparse, full, maximum}) {
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.volume > 0.0);
+    }
+    CHECK(minimum.volume < sparse.volume);
     CHECK(full.volume > sparse.volume);
+    CHECK(maximum.volume > full.volume);
 }
 
-TEST_CASE("Bridge flow changes external bridge deposition", "[SettingsVariance][SettingsWallBridgeVariance]")
+TEST_CASE("Bridge flow changes external bridge deposition", "[SettingsVariance][SettingsWallBridgeVariance][BridgeInfillBoundary]")
 {
     auto run = [](double flow) {
         DynamicPrintConfig config = wall_infill_config();
@@ -1307,18 +1343,27 @@ TEST_CASE("Bridge flow changes external bridge deposition", "[SettingsVariance][
         process(print, model, config);
         return external_bridges(print);
     };
+    DynamicPrintConfig zero_boundary = wall_infill_config();
+    zero_boundary.set_deserialize_strict({{"bridge_flow", 0.0}});
+    const auto zero_errors = zero_boundary.validate();
+    CHECK(zero_errors.find("bridge_flow") != zero_errors.end());
+
     const ExternalBridgeSnapshot low = run(0.5);
     const ExternalBridgeSnapshot nominal = run(1.0);
+    const ExternalBridgeSnapshot maximum = run(2.0);
     REQUIRE(low.paths > 0);
     REQUIRE(nominal.paths > 0);
+    REQUIRE(maximum.paths > 0);
     REQUIRE(low.volume > 0.0);
     REQUIRE(nominal.volume > 0.0);
+    REQUIRE(maximum.volume > 0.0);
     // Flow changes width while bridge spacing compensates, so total deposited
     // volume is expected to change but is not monotonic in this fixture.
     CHECK(std::abs(low.volume - nominal.volume) > 0.001);
+    CHECK(std::abs(maximum.volume - nominal.volume) > 0.001);
 }
 
-TEST_CASE("Internal bridge density changes deposited bridge volume", "[SettingsVariance][SettingsWallBridgeVariance]")
+TEST_CASE("Internal bridge density changes deposited bridge volume", "[SettingsVariance][SettingsWallBridgeVariance][BridgeInfillBoundary]")
 {
     auto run = [](double density) {
         DynamicPrintConfig config = bridge_config();
@@ -1329,22 +1374,28 @@ TEST_CASE("Internal bridge density changes deposited bridge volume", "[SettingsV
         process(print, model, config);
         return bridges(print);
     };
+    const BridgeSnapshot minimum = run(10.0);
     const BridgeSnapshot sparse = run(25.0);
     const BridgeSnapshot full = run(100.0);
-    REQUIRE(sparse.paths > 0);
-    REQUIRE(full.paths > 0);
-    REQUIRE(sparse.volume > 0.0);
-    REQUIRE(full.volume > 0.0);
+    const BridgeSnapshot maximum = run(125.0);
+    for (const BridgeSnapshot &row : {minimum, sparse, full, maximum}) {
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.volume > 0.0);
+    }
+    CHECK(minimum.volume < sparse.volume);
     CHECK(full.volume > sparse.volume);
+    CHECK(maximum.volume > full.volume);
 }
 
-TEST_CASE("Bridge line width changes external bridge deposition", "[SettingsVariance][SettingsWallBridgeVariance]")
+TEST_CASE("Bridge line width changes external bridge deposition", "[SettingsVariance][SettingsWallBridgeVariance][BridgeInfillBoundary]")
 {
-    auto run = [](double width) {
+    auto run = [](const std::string &width) {
         DynamicPrintConfig config = wall_infill_config();
         config.set_deserialize_strict({
+            {"nozzle_diameter", "0.6"},
             {"bridge_density", 100.0},
             {"bridge_line_width", width},
+            {"internal_solid_infill_line_width", 0.55},
             {"bridge_flow", 0.75},
             {"bridge_no_support", true},
             {"support_remove_small_overhang", false},
@@ -1357,13 +1408,25 @@ TEST_CASE("Bridge line width changes external bridge deposition", "[SettingsVari
         process(print, model, config);
         return external_bridges(print);
     };
-    const ExternalBridgeSnapshot narrow = run(0.25);
-    const ExternalBridgeSnapshot wide = run(0.35);
-    REQUIRE(narrow.paths > 0);
-    REQUIRE(wide.paths > 0);
-    REQUIRE(narrow.volume > 0.0);
-    REQUIRE(wide.volume > 0.0);
+    const ExternalBridgeSnapshot minimum = run("0");
+    const ExternalBridgeSnapshot fallback_reference = run("0.55");
+    const ExternalBridgeSnapshot narrow = run("0.25");
+    const ExternalBridgeSnapshot wide = run("0.35");
+    const ExternalBridgeSnapshot maximum = run("100%");
+    for (const ExternalBridgeSnapshot &row : {minimum, narrow, wide, maximum}) {
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.volume > 0.0);
+    }
+    REQUIRE(fallback_reference.paths > 0);
+    REQUIRE(fallback_reference.volume > 0.0);
     CHECK(std::abs(narrow.volume - wide.volume) > 0.001);
+    // With a 0.6 mm nozzle, zero must fall back to the configured 0.55 mm
+    // internal-solid width. Its bridge paths and deposited volume must match
+    // the same fixture with 0.55 mm set explicitly.
+    CHECK(minimum.paths == fallback_reference.paths);
+    CHECK_THAT(minimum.volume, Catch::Matchers::WithinRel(fallback_reference.volume, 1e-6));
+    // 100% resolves to the pinned 0.6 mm nozzle and remains physically distinct.
+    CHECK(std::abs(minimum.volume - maximum.volume) > 0.001);
 }
 
 namespace sparse_infill_density_incremental_contracts {
@@ -2032,7 +2095,7 @@ TEST_CASE("Support base and interface speeds reach their labeled support roles",
     CHECK(std::none_of(motion.interface_feeds.begin(), motion.interface_feeds.end(), [](double f) { return std::abs(f - 1080.) < 1e-3; }));
 }
 
-TEST_CASE("Internal bridge flow scales extrusion at fixed path length", "[SettingsFamilyVariance][InternalBridgeFlow]")
+TEST_CASE("Internal bridge flow scales extrusion at fixed path length", "[SettingsFamilyVariance][InternalBridgeFlow][BridgeInfillBoundary]")
 {
     DynamicPrintConfig base = family_config();
     base.set_deserialize_strict({
@@ -2042,6 +2105,11 @@ TEST_CASE("Internal bridge flow scales extrusion at fixed path length", "[Settin
         {"bottom_shell_layers", 2},
         {"thick_internal_bridges", false},
     });
+    DynamicPrintConfig zero_boundary = base;
+    zero_boundary.set_deserialize_strict({{"internal_bridge_flow", 0.0}});
+    const auto zero_errors = zero_boundary.validate();
+    CHECK(zero_errors.find("internal_bridge_flow") != zero_errors.end());
+
     const InternalBridgeMotion nominal = internal_bridge_motion(export_mesh(internal_bridge_fixture(), base), base);
     REQUIRE(nominal.moves > 0);
     REQUIRE(nominal.xy > 0.);
@@ -2052,6 +2120,13 @@ TEST_CASE("Internal bridge flow scales extrusion at fixed path length", "[Settin
     REQUIRE(scaled.moves == nominal.moves);
     REQUIRE_THAT(scaled.xy, Catch::Matchers::WithinRel(nominal.xy, 1e-9));
     REQUIRE_THAT(scaled.e / nominal.e, Catch::Matchers::WithinRel(1.35, 0.03));
+
+    DynamicPrintConfig maximum = base;
+    maximum.set_deserialize_strict({{"internal_bridge_flow", 2.0}});
+    const InternalBridgeMotion max_flow = internal_bridge_motion(export_mesh(internal_bridge_fixture(), maximum), maximum);
+    REQUIRE(max_flow.moves == nominal.moves);
+    REQUIRE_THAT(max_flow.xy, Catch::Matchers::WithinRel(nominal.xy, 1e-9));
+    REQUIRE_THAT(max_flow.e / nominal.e, Catch::Matchers::WithinRel(2.0, 0.03));
 }
 
 TEST_CASE("Overhang speed gate and two configured bands affect the caged slope", "[SettingsFamilyVariance][OverhangSpeedBands]")
@@ -4327,14 +4402,16 @@ OverlapEvidence run_top_bottom_overlap(double overlap)
 } // namespace infill_settings_contracts
 
 TEST_CASE("Locked-zag skin controls change distinct public fill properties",
-          "[SettingsVariance][SolidSkinInfill]")
+          "[SettingsVariance][SolidSkinInfill][BridgeInfillBoundary]")
 {
     const auto base = infill_settings_contracts::run_locked_zag(35.0, 1.0, 0.0);
     const auto dense = infill_settings_contracts::run_locked_zag(70.0, 1.0, 0.0);
     const auto deep = infill_settings_contracts::run_locked_zag(35.0, 2.0, 0.0);
+    const auto default_locked = infill_settings_contracts::run_locked_zag(35.0, 1.0, 1.0);
     const auto locked = infill_settings_contracts::run_locked_zag(35.0, 1.0, 0.8);
+    const auto max_locked = infill_settings_contracts::run_locked_zag(35.0, 1.0, 100.0);
 
-    for (const auto &row : {base, dense, deep, locked}) {
+    for (const auto &row : {base, dense, deep, default_locked, locked, max_locked}) {
         REQUIRE(row.finite);
         REQUIRE(row.paths > 0);
         REQUIRE(row.length > 0.0);
@@ -4351,9 +4428,13 @@ TEST_CASE("Locked-zag skin controls change distinct public fill properties",
     // region. Both directional changes are part of the FillLockedZag contract.
     REQUIRE(deep.length > base.length + 0.05);
     REQUIRE(deep.flow_length > base.flow_length + 0.01);
+    REQUIRE(default_locked.length > base.length + 0.05);
+    REQUIRE(default_locked.flow_length > base.flow_length + 0.01);
     REQUIRE(locked.length > base.length + 0.05);
     REQUIRE(locked.flow_length > base.flow_length + 0.01);
-    for (const auto &row : {dense, deep, locked})
+    REQUIRE(max_locked.length > locked.length + 0.05);
+    REQUIRE(max_locked.flow_length > locked.flow_length + 0.01);
+    for (const auto &row : {dense, deep, default_locked, locked, max_locked})
         CHECK_THAT(row.perimeter_length, Catch::Matchers::WithinAbs(base.perimeter_length, 0.01));
 }
 

@@ -1494,6 +1494,12 @@ python3 scripts/slicer_mutation.py run --root . --build-dir build \
 Use `fff_print_gcodeprocessor_tests`, `^FocusedGCodeProcessor::`,
 `tests/controls/gcode_processor.json`, and
 `tests/mutations/processor_min_rate_modes.json` for the processor cohort.
+For bridge/infill boundaries, use `fff_print_settings_variance_tests`, the
+`control_regex` value from `tests/controls/settings_boundaries.json`, that file
+as `--expected-control-inventory`, and
+`tests/mutations/bridge_infill_boundaries.json`. Its nine controls preserve the
+existing geometry and G-code checks while testing registered endpoints.
+
 Pass `--cmake` and `--ctest` when the configured worker needs specific tools.
 Keep the worker's existing CPU, memory, swap, and locale limits.
 
