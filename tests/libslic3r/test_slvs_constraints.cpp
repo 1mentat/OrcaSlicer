@@ -7,7 +7,7 @@
 #include <catch2/catch_all.hpp>   // mainline OrcaSlicer ships Catch2 v3 (v2 was catch2/catch.hpp)
 #include "libslic3r/Point.hpp"
 #include <cmath>
-#include <math.h>
+#include <math.h>   // M_PI; clang-tidy (misc-include-cleaner) maps it here, not to <cmath>
 #include <vector>
 #include <cstddef>
 using Catch::Approx;   // v3 scopes Approx into the Catch namespace; v2 had it at global scope
@@ -411,7 +411,7 @@ TEST_CASE("slvs: reference-based constraint adds no degrees of freedom", "[slvs]
     CHECK(res.dof == 1);
 }
 
-TEST_CASE("slvs: a solved EllipseArc end stays on the ellipse and keeps its sweep direction", "[slvs]")
+TEST_CASE("slvs: a solved EllipseArc end is put back on the ellipse and keeps its sweep direction", "[slvs]")
 {
     using Catch::Matchers::WithinAbs;
     // Ellipse centre (2, -1), semi-axes 6 and 2.5, major axis rotated by 0.4 rad.
@@ -428,7 +428,9 @@ TEST_CASE("slvs: a solved EllipseArc end stays on the ellipse and keeps its swee
     };
 
     // A short arc from t = 2.8 to 3.0 (or its mirror, -2.8 to -3.0) has its end dragged across
-    // the parameter seam at t = +-pi to t = -2.8 (or 2.8) by a coincident fixed point.
+    // the parameter seam at t = +-pi by a coincident fixed point. The point sits 10% outside the
+    // ellipse along the ray from the centre to t = -2.8 (or 2.8): the solver, which has no conic,
+    // leaves the end there, and the reflow has to put it back on the ellipse at that parameter.
     const int direction = GENERATE(1, -1);
     CAPTURE(direction);
     const double start  = 2.8 * direction;
@@ -440,7 +442,7 @@ TEST_CASE("slvs: a solved EllipseArc end stays on the ellipse and keeps its swee
 
     SketchEntity point;
     point.type = SketchEntity::Type::Point;
-    point.p0   = at(target);
+    point.p0   = arc.center + 1.1 * (at(target) - arc.center);
     std::vector<SketchEntity> ents{arc, point};
     const std::vector<SketchEntityConstraintDef> cons{
         con(CT::Fix, 0, R::Center, 0, R::Center),
@@ -454,10 +456,15 @@ TEST_CASE("slvs: a solved EllipseArc end stays on the ellipse and keeps its swee
     CHECK(solved.type == SketchEntity::Type::EllipseArc);
     CHECK_THAT((solved.center - arc.center).norm(), WithinAbs(0.0, 1e-8));
     CHECK_THAT((solved.p0 - at(start)).norm(), WithinAbs(0.0, 1e-7));
+    // On the ellipse: (x/a)^2 + (y/b)^2 = 1 in the ellipse's own frame.
+    const Vec2d d = solved.p1 - arc.center;
+    const double lx =  d.x() * std::cos(arc.rotation) + d.y() * std::sin(arc.rotation);
+    const double ly = -d.x() * std::sin(arc.rotation) + d.y() * std::cos(arc.rotation);
+    CHECK_THAT(lx * lx / (arc.radius * arc.radius) + ly * ly / (arc.rminor * arc.rminor), WithinAbs(1.0, 1e-9));
     CHECK_THAT((solved.p1 - at(target)).norm(), WithinAbs(0.0, 1e-7));
     CHECK_THAT(solved.start_angle, WithinAbs(start, 1e-7));
-    // The sweep keeps its sign, so the end angle goes the long way past the seam rather than
-    // jumping back to the raw atan2 value.
+    // The sweep keeps its sign: the end angle continues past +-pi to +-3.48 (a 0.68 rad sweep)
+    // instead of jumping back to the raw atan2 value of -+2.8, which would reverse the arc.
     CHECK_THAT(solved.end_angle, WithinAbs(target + 2.0 * M_PI * direction, 1e-7));
     CHECK_THAT(solved.radius, WithinAbs(arc.radius, 1e-12));
     CHECK_THAT(solved.rminor, WithinAbs(arc.rminor, 1e-12));
