@@ -1737,31 +1737,38 @@ SCENARIO("bbs_3mf_is_published detects only genuinely published 3MFs", "[3mf]") 
     }
 }
 
-// Known bug: font family/face/style/weight attributes are written without XML escaping, so the project fails to load; fixed by the follow-up fix PR
-TEST_CASE("BBS 3MF round-trips text configuration metadata", "[3MF][EmbossMetadata][!shouldfail]")
+// Every text configuration field set to a non-default value. Text, style name and
+// descriptor carry XML special characters; the font names are plain.
+static TextConfiguration make_text_configuration()
+{
+    TextConfiguration tc;
+    tc.text = "A<&\"'\tline\nnext";
+    tc.style.name = "Round-trip style";
+    tc.style.path = "MacFontDescriptor<&\"";
+    tc.style.type = EmbossStyle::Type::wx_mac_font_descr;
+    tc.style.prop.char_gap = 3;
+    tc.style.prop.line_gap = -2;
+    tc.style.prop.boldness = 0.25f;
+    tc.style.prop.skew = -0.125f;
+    tc.style.prop.collection_number = 4;
+    tc.style.prop.per_glyph = true;
+    tc.style.prop.align = {FontProp::HorizontalAlign::right, FontProp::VerticalAlign::bottom};
+    tc.style.prop.size_in_mm = 12.5f;
+    tc.style.prop.family = "Noto Sans";
+    tc.style.prop.face_name = "Noto Sans Display";
+    tc.style.prop.style = "Italic";
+    tc.style.prop.weight = "SemiBold";
+    return tc;
+}
+
+// Stores a volume carrying `expected` through the BBS exporter and checks that the
+// importer restores every field.
+static void check_text_configuration_round_trip(const TextConfiguration &expected)
 {
     Model model;
     ModelObject *object = model.add_object();
     ModelVolume *volume = object->add_volume(make_cube(10., 10., 2.));
     object->add_instance();
-
-    TextConfiguration expected;
-    expected.text = "A<&\"'\tline\nnext";
-    expected.style.name = "Round-trip style";
-    expected.style.path = "MacFontDescriptor<&\"";
-    expected.style.type = EmbossStyle::Type::wx_mac_font_descr;
-    expected.style.prop.char_gap = 3;
-    expected.style.prop.line_gap = -2;
-    expected.style.prop.boldness = 0.25f;
-    expected.style.prop.skew = -0.125f;
-    expected.style.prop.collection_number = 4;
-    expected.style.prop.per_glyph = true;
-    expected.style.prop.align = {FontProp::HorizontalAlign::right, FontProp::VerticalAlign::bottom};
-    expected.style.prop.size_in_mm = 12.5f;
-    expected.style.prop.family = "Noto & Sans";
-    expected.style.prop.face_name = "Display<>\"";
-    expected.style.prop.style = "Italic & Oblique";
-    expected.style.prop.weight = "Semi&Bold";
     volume->text_configuration = expected;
 
     ScopedTemporaryDir backup_dir("orca_text_metadata");
@@ -1806,7 +1813,23 @@ TEST_CASE("BBS 3MF round-trips text configuration metadata", "[3MF][EmbossMetada
     CHECK(actual.style.prop.weight == expected.style.prop.weight);
 }
 
-TEST_CASE("BBS 3MF round-trips an embossed SVG source and projection metadata", "[3MF][EmbossMetadata]")
+TEST_CASE("BBS 3MF round-trips text configuration metadata with plain font names", "[3mf][EmbossMetadata]")
+{
+    check_text_configuration_round_trip(make_text_configuration());
+}
+
+// Known bug: font family/face/style/weight attributes are written without XML escaping, so the project fails to load; fixed by the follow-up fix PR
+TEST_CASE("BBS 3MF round-trips text configuration metadata", "[3mf][EmbossMetadata][!shouldfail]")
+{
+    TextConfiguration tc = make_text_configuration();
+    tc.style.prop.family = "Noto & Sans";
+    tc.style.prop.face_name = "Display<>\"";
+    tc.style.prop.style = "Italic & Oblique";
+    tc.style.prop.weight = "Semi&Bold";
+    check_text_configuration_round_trip(tc);
+}
+
+TEST_CASE("BBS 3MF round-trips an embossed SVG source and projection metadata", "[3mf][EmbossMetadata]")
 {
     Model model;
     ModelObject *object = model.add_object();
