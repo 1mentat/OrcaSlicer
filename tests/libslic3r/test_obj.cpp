@@ -1,33 +1,34 @@
-#include "libslic3r/TexturePainting.hpp"
-#include "libslic3r/BoundingBox.hpp"
-#include "libslic3r/Model.hpp"
-#include "libslic3r/Format/objparser.hpp"
-#include <catch2/catch_message.hpp>
-#include <iterator>
-#include <cstdint>
-#include <limits>
-#include <boost/filesystem/path.hpp>
 #include <algorithm>
-#include <vector>
-#include <utility>
-#include <map>
+#include <array>
 #include <cmath>
-#include <sstream>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <ios>
-#include <array>
-#include <catch2/catch_all.hpp>
-
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <catch2/matchers/catch_matchers.hpp>
-#include <catch2/catch_test_macros.hpp>
-#include "libslic3r/TriangleMesh.hpp"
-#include "libslic3r/Format/OBJ.hpp"
-
-#include <boost/nowide/fstream.hpp>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/filesystem/path.hpp>
+#include <boost/nowide/fstream.hpp>
+
+#include <catch2/catch_all.hpp>
+#include <catch2/catch_message.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Format/OBJ.hpp"
+#include "libslic3r/Format/objparser.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
-#include <cstddef>
+#include "libslic3r/TexturePainting.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include "test_utils.hpp"
 
@@ -324,7 +325,7 @@ TEST_CASE("OBJ parser accepts CRLF, indentation and harmless unknown records", "
     CHECK(data.vertices[2].coordIdx == 2);
 }
 
-TEST_CASE("OBJ MTL parser preserves ordered materials and texture options", "[OBJParser][OBJ]")
+TEST_CASE("OBJ MTL parser preserves ordered materials and extracts the texture filename past option flags", "[OBJParser][OBJ]")
 {
     ScopedTemporaryFile mtl(".mtl");
     write_text(mtl,
@@ -353,6 +354,7 @@ TEST_CASE("OBJ MTL parser preserves ordered materials and texture options", "[OB
     CHECK_THAT(coat.Ks[0], WithinAbs(.7, 1e-5));
     CHECK_THAT(coat.Ke[2], WithinAbs(.07, 1e-5));
     CHECK_THAT(coat.Tf[0], WithinAbs(.2, 1e-5));
+    // The -o, -s and -bm options are skipped, not stored; only the filename after them is kept.
     CHECK(coat.map_Kd == "coat.png");
 }
 
@@ -546,6 +548,7 @@ TEST_CASE("OBJ textured import maps materials, texture bytes and flipped V coord
     CHECK(std::string(texture_bytes.begin(), texture_bytes.end()) == "not-an-image-but-a-stable-byte-payload");
     REQUIRE(textured.material_colors.size() == 1);
     CHECK_THAT(textured.material_colors[0][0], WithinAbs(.2, 1e-6));
+    // Current behavior: the MTL Tr value is stored as the alpha channel unchanged (not as 1 - Tr).
     CHECK_THAT(textured.material_colors[0][3], WithinAbs(.75, 1e-6));
     REQUIRE(textured.material_texture_map.size() == 1);
     CHECK(textured.material_texture_map[0] == 0);
@@ -633,8 +636,8 @@ void save_fixture(const ScopedTemporaryFile &file)
 
 } // namespace
 
-// Known bug: objbinload reads the size_t version as an int, so every later count is read 4 bytes off and
-// becomes a multi-gigabyte allocation; fixed by the follow-up fix PR. Hidden because it can exhaust memory.
+// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
+// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
 TEST_CASE("OBJ binary cache roundtrips geometry, names, groups, materials and smoothing", "[OBJBinary][OBJParser][.]")
 {
     ScopedTemporaryFile cache(".objbin");
@@ -670,8 +673,8 @@ TEST_CASE("OBJ binary cache roundtrips geometry, names, groups, materials and sm
     CHECK(loaded.vertices == original.vertices);
 }
 
-// Known bug: objbinload reads the size_t version as an int, so every later count is read 4 bytes off and
-// becomes a multi-gigabyte allocation; fixed by the follow-up fix PR. Hidden because it can exhaust memory.
+// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
+// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
 TEST_CASE("OBJ binary cache supports an empty data set and clears prior records", "[OBJBinary][OBJParser][.]")
 {
     ScopedTemporaryFile full(".objbin");
@@ -699,7 +702,8 @@ TEST_CASE("OBJ binary cache supports an empty data set and clears prior records"
 TEST_CASE("OBJ binary cache rejects short and unsupported headers", "[OBJBinary][OBJBinarySafe][OBJParser]")
 {
     ScopedTemporaryFile short_header(".objbin");
-    write_bytes(short_header, {1, 0, 0, 0});
+    // Three bytes are shorter than the version field of any build, so the version read itself fails.
+    write_bytes(short_header, {1, 0, 0});
     ObjParser::ObjData loaded;
     CHECK_FALSE(ObjParser::objbinload(short_header.string().c_str(), loaded));
 
@@ -711,7 +715,8 @@ TEST_CASE("OBJ binary cache rejects short and unsupported headers", "[OBJBinary]
     CHECK_FALSE(ObjParser::objbinload(unsupported.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version as an int and does not bound counts; fixed by the follow-up fix PR
+// Known bug: objbinload allocates whatever count the file claims, so this throws std::length_error instead of
+// returning false; fixed by the follow-up OBJ binary cache fix PR
 TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary][OBJParser][!shouldfail]")
 {
     ScopedTemporaryFile cache(".objbin");
@@ -726,8 +731,8 @@ TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version as an int, so every later count is read 4 bytes off and
-// becomes a multi-gigabyte allocation; fixed by the follow-up fix PR. Hidden because it can exhaust memory.
+// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
+// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
 TEST_CASE("OBJ binary cache rejects a truncated numeric vector", "[OBJBinary][OBJParser][.]")
 {
     ScopedTemporaryFile cache(".objbin");
@@ -742,8 +747,8 @@ TEST_CASE("OBJ binary cache rejects a truncated numeric vector", "[OBJBinary][OB
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version as an int, so every later count is read 4 bytes off and
-// becomes a multi-gigabyte allocation; fixed by the follow-up fix PR. Hidden because it can exhaust memory.
+// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
+// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
 TEST_CASE("OBJ binary cache rejects a truncated named record", "[OBJBinary][OBJParser][.]")
 {
     ScopedTemporaryFile cache(".objbin");
@@ -770,9 +775,9 @@ TEST_CASE("OBJ binary cache rejects a truncated named record", "[OBJBinary][OBJP
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version as an int, so every later count is read 4 bytes off and
-// becomes a multi-gigabyte allocation; fixed by the follow-up fix PR. Hidden because it can exhaust memory.
-TEST_CASE("OBJ binary cache rejects a truncated smoothing or face vector", "[OBJBinary][OBJParser][.]")
+// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
+// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
+TEST_CASE("OBJ binary cache rejects a truncated smoothing group vector", "[OBJBinary][OBJParser][.]")
 {
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
@@ -790,7 +795,28 @@ TEST_CASE("OBJ binary cache rejects a truncated smoothing or face vector", "[OBJ
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version as an int and does not bound counts; fixed by the follow-up fix PR
+// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
+// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
+TEST_CASE("OBJ binary cache rejects a truncated face vertex vector", "[OBJBinary][OBJParser][.]")
+{
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    const size_t version = 1;
+    const size_t zero = 0;
+    const size_t one = 1;
+    append_raw(bytes, version);
+    // every vector before the face vertices is empty, including the smoothing groups
+    for (int i = 0; i < 9; ++i)
+        append_raw(bytes, zero);
+    append_raw(bytes, one); // face vertex count, but no record bytes
+    write_bytes(cache, bytes);
+
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
+}
+
+// Known bug: objbinload reads the size_t version into an int, so version 0x100000001 is accepted as version 1;
+// fixed by the follow-up OBJ binary cache fix PR
 TEST_CASE("OBJ binary cache rejects unsupported bits across its complete native version", "[OBJBinary][OBJBinaryWidthControl][OBJParser][!shouldfail]")
 {
     ScopedTemporaryFile cache(".objbin");
@@ -809,8 +835,8 @@ TEST_CASE("OBJ binary cache rejects unsupported bits across its complete native 
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
-// Known bug: objbinload reads the size_t version as an int, so every later count is read 4 bytes off and
-// becomes a multi-gigabyte allocation; fixed by the follow-up fix PR. Hidden because it can exhaust memory.
+// Known bug: objbinload reads the size_t version into an int, so every later count is read 4 bytes off; fixed by the
+// follow-up OBJ binary cache fix PR, which removes this [.]. Hidden because the misread count allocates gigabytes.
 TEST_CASE("OBJ binary cache rejects every proper prefix of a valid cache", "[OBJBinary][OBJParser][.]")
 {
     ScopedTemporaryFile full(".objbin");
