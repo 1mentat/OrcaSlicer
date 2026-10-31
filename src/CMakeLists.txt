@@ -134,6 +134,14 @@ if(ORCA_TOOLS)
     target_compile_definitions(OrcaSlicer_profile_validator PRIVATE -DBOOST_ALL_NO_LIB -DBOOST_USE_WINAPI_VERSION=0x602 -DBOOST_SYSTEM_USE_UTF8)
 endif()
 
+# The OrcaSlicer executable needs libslic3r_gui and wxWidgets (OrcaSlicer.cpp includes
+# slic3r/GUI headers), so a headless SLIC3R_GUI=OFF configure stops after the libraries
+# and tools above. Everything below only defines the executable, its runtime copies and
+# its install rules.
+if (NOT SLIC3R_GUI)
+    return()
+endif ()
+
 # Create a slic3r executable
 # Process manifests for various platforms.
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/msw/OrcaSlicer.rc.in ${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.rc @ONLY)

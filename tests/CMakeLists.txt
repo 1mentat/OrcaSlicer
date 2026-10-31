@@ -90,7 +90,10 @@ endfunction()
 
 add_subdirectory(libnest2d)
 add_subdirectory(libslic3r)
-add_subdirectory(slic3rutils)
+# slic3rutils_tests links libslic3r_gui, which only exists in GUI builds.
+if (SLIC3R_GUI)
+    add_subdirectory(slic3rutils)
+endif ()
 add_subdirectory(fff_print)
 add_subdirectory(sla_print)
 add_subdirectory(filament_group)
