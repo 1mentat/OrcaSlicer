@@ -10,6 +10,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/Exception.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
@@ -839,4 +840,89 @@ TEST_CASE("File classification checks case-insensitive extensions and regular-fi
     CHECK(is_img_file("image.PNG"));
     CHECK(is_img_file("image.SvG"));
     CHECK_FALSE(is_img_file("image.svg.json"));
+}
+
+TEST_CASE("Configured resource directories resolve against the roots they were given", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    ScopeGuard restore([var = var_dir(), resources = resources_dir(), temp = temporary_dir(), local = localization_dir(),
+                        shapes = sys_shapes_dir(), gcodes = custom_gcodes_dir(), data = data_dir()] {
+        set_var_dir(var);
+        set_resources_dir(resources);
+        set_temporary_dir(temp);
+        set_local_dir(local);
+        set_sys_shapes_dir(shapes);
+        set_custom_gcodes_dir(gcodes);
+        set_data_dir(data);
+    });
+    const fs::path root = d.path();
+    set_var_dir((root / "var").string());
+    set_resources_dir((root / "res").string());
+    set_data_dir((root / "data" / "nested").string());
+    set_local_dir((root / "locale").string());
+    set_sys_shapes_dir((root / "shapes").string());
+    set_custom_gcodes_dir((root / "gcodes").string());
+    set_temporary_dir((root / "temp").string());
+
+    CHECK(var_dir() == (root / "var").string());
+    CHECK(resources_dir() == (root / "res").string());
+    CHECK(data_dir() == (root / "data" / "nested").string());
+    CHECK(localization_dir() == (root / "locale").string());
+    CHECK(sys_shapes_dir() == (root / "shapes").string());
+    CHECK(custom_gcodes_dir() == (root / "gcodes").string());
+    CHECK(temporary_dir() == (root / "temp").string());
+    // set_data_dir creates a missing data directory, including its parents.
+    CHECK(fs::is_directory(root / "data" / "nested"));
+
+    // var() resolves a missing file against the var directory and passes an existing path through.
+    CHECK(var("missing.png") == (root / "var" / "missing.png").make_preferred().string());
+    const fs::path existing = root / "existing.png";
+    touch(existing);
+    CHECK(var(existing.string()) == existing.string());
+
+    CHECK(custom_shapes_dir() == (root / "data" / "nested" / "shapes").string());
+    CHECK(handy_models_dir() == (root / "res" / "handy_models").string());
+    CHECK(is_shapes_dir((root / "shapes").string()));
+    CHECK(is_shapes_dir((root / "data" / "nested" / "shapes").string()));
+    CHECK(is_shapes_dir((root / "res" / "handy_models").string()));
+    CHECK_FALSE(is_shapes_dir((root / "unrelated").string()));
+    CHECK_FALSE(is_shapes_dir((root / "data" / "nested").string()));
+}
+
+TEST_CASE("Perl-compatible path helpers split a path into parent, file name, stem and final extension", "[utils]") {
+    const auto p = boost::filesystem::path("models") / "nested" / "part.v2.3mf";
+    const auto s = p.string();
+    CHECK(PerlUtils::path_to_filename(s.c_str()) == "part.v2.3mf");
+    CHECK(PerlUtils::path_to_stem(s.c_str()) == "part.v2");
+    CHECK(PerlUtils::path_to_extension(s.c_str()) == ".3mf");
+    CHECK(PerlUtils::path_to_parent_path(s.c_str()) == (boost::filesystem::path("models") / "nested").string());
+}
+
+TEST_CASE("Removing an installed vendor removes its profile, cache and presets but no other vendor's", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir temporary;
+    ScopeGuard restore_data_dir([old = data_dir()] { set_data_dir(old); });
+    set_data_dir(temporary.path().string());
+
+    const fs::path system = temporary.path() / PRESET_SYSTEM_DIR;
+    fs::create_directories(system / "Acme" / "machine");
+    fs::create_directories(system / "Other" / "machine");
+    touch(system / "Acme.json");
+    touch(system / "Acme.opc");
+    touch(system / "Acme" / "machine" / "printer.json");
+    // Neighbours: another vendor, and one whose name starts with the removed vendor's.
+    touch(system / "Other.json");
+    touch(system / "Other.opc");
+    touch(system / "Other" / "machine" / "printer.json");
+    touch(system / "AcmeLabs.json");
+
+    remove_installed_vendor("Acme");
+
+    CHECK_FALSE(fs::exists(system / "Acme.json"));
+    CHECK_FALSE(fs::exists(system / "Acme.opc"));
+    CHECK_FALSE(fs::exists(system / "Acme"));
+    CHECK(file_contents(system / "Other.json") == "existing");
+    CHECK(fs::is_regular_file(system / "Other.opc"));
+    CHECK(fs::is_regular_file(system / "Other" / "machine" / "printer.json"));
+    CHECK(fs::is_regular_file(system / "AcmeLabs.json"));
 }
