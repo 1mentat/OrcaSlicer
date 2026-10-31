@@ -16,6 +16,7 @@
 #include <boost/filesystem.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -612,4 +613,12 @@ TEST_CASE("Round up divide handles exact and partial bounded quotients", "[utils
     CHECK(round_up_divide<long long>(1, 3) == 1);
     CHECK(round_up_divide<long long>(3, 3) == 1);
     CHECK(round_up_divide<long long>(4, 3) == 2);
+}
+
+TEST_CASE("Logging level names map the supported severities both ways", "[utils]") {
+    const std::array<std::string, 6> names{"fatal", "error", "warning", "info", "debug", "trace"};
+    for (unsigned i = 0; i < names.size(); ++i) {
+        CHECK(level_string_to_boost(names[i]) == i);
+        CHECK(get_string_logging_level(i) == names[i]);
+    }
 }
