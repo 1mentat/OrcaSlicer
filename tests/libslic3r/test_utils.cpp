@@ -521,3 +521,44 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     CHECK_FALSE(ascii_iequals("[", "{"));
     CHECK_FALSE(ascii_iequals("@", "`"));
 }
+
+TEST_CASE("Default ScopeGuard accepts ownership and runs it on destruction", "[utils]") {
+    size_t calls = 0;
+    {
+        ScopeGuard guard;
+        {
+            ScopeGuard source([&calls] { ++calls; });
+            guard = std::move(source);
+        }
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+TEST_CASE("ScopeGuard move construction transfers the callback once", "[utils]") {
+    size_t calls = 0;
+    {
+        ScopeGuard original([&calls] { ++calls; });
+        ScopeGuard moved(std::move(original));
+    }
+    CHECK(calls == 1);
+}
+
+TEST_CASE("ScopeGuard move assignment replaces the destination callback", "[utils]") {
+    size_t calls = 0;
+    {
+        ScopeGuard source([&calls] { ++calls; });
+        ScopeGuard destination([&calls] { calls += 10; });
+        destination = std::move(source);
+    }
+    CHECK(calls == 1);
+}
+
+TEST_CASE("ScopeGuard reset suppresses the callback", "[utils]") {
+    size_t calls = 0;
+    {
+        ScopeGuard guard([&calls] { ++calls; });
+        guard.reset();
+    }
+    CHECK(calls == 0);
+}
