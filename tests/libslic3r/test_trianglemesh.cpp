@@ -618,9 +618,8 @@ TEST_CASE("Empty TriangleMesh operations keep the mesh empty", "[TriangleMesh][T
     CHECK_THAT(mesh.volume(), WithinAbs(0.f, 1e-7f));
 }
 
-// Known bug: TriangleMesh::rotate(double, Point*) leaves the cached bounds stale; fixed by the follow-up fix PR
 TEST_CASE("Legacy center rotation keeps mesh bounds and size synchronized",
-          "[TriangleMesh][TriangleMeshContracts][TriangleMeshRotateCache][Regression][!shouldfail]")
+          "[TriangleMesh][TriangleMeshContracts][TriangleMeshRotateCache][Regression]")
 {
     TriangleMesh mesh = make_cube(20., 10., 2.);
     Point center(10, 5);
