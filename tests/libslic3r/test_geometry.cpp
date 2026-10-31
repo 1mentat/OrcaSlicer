@@ -289,6 +289,29 @@ SCENARIO("Circle Fit, TaubinFit with Newton's method", "[Geometry]") {
     }
 }
 
+TEST_CASE("Circle fit APIs reject underdetermined samples and recover an exact circle", "[Geometry][CircleFit]")
+{
+    const Vec2ds underdetermined{Vec2d(9., -3.), Vec2d(4., 2.)};
+    CHECK(Geometry::circle_taubin_newton(underdetermined).invalid());
+    CHECK(Geometry::circle_ransac(underdetermined).invalid());
+
+    // Four axis points provide an exact, non-vacuous fit oracle for center and radius.
+    const Vec2ds exact_circle{Vec2d(9., -3.), Vec2d(4., 2.), Vec2d(-1., -3.), Vec2d(4., -8.)};
+    const Geometry::Circled taubin = Geometry::circle_taubin_newton(exact_circle);
+    REQUIRE(taubin.valid());
+    CHECK_THAT(taubin.center.x(), Catch::Matchers::WithinAbs(4., 1e-8));
+    CHECK_THAT(taubin.center.y(), Catch::Matchers::WithinAbs(-3., 1e-8));
+    CHECK_THAT(taubin.radius, Catch::Matchers::WithinAbs(5., 1e-8));
+
+    double ransac_error = -1.;
+    const Geometry::Circled ransac = Geometry::circle_ransac(exact_circle, 16, &ransac_error);
+    REQUIRE(ransac.valid());
+    CHECK_THAT(ransac.center.x(), Catch::Matchers::WithinAbs(4., 1e-8));
+    CHECK_THAT(ransac.center.y(), Catch::Matchers::WithinAbs(-3., 1e-8));
+    CHECK_THAT(ransac.radius, Catch::Matchers::WithinAbs(5., 1e-8));
+    CHECK_THAT(ransac_error, Catch::Matchers::WithinAbs(0., 1e-8));
+}
+
 TEST_CASE("smallest_enclosing_circle_welzl", "[Geometry]") {
     // Some random points in plane.
     Points pts { 
@@ -1516,8 +1539,9 @@ TEST_CASE("Transformation axis setters change only their own component", "[Geome
     positive.set_scaling_factor(Y, 5.);
     check_linear_and_offset(positive.get_matrix(), quarter_turn_times(Vec3d(4., 5., 2.)), offset);
 
-    // The reflection of X survives a scale change of another axis, whichever axis the
-    // decomposition attributes it to.
+    // X is mirrored, but the decomposition carries the reflection on the smallest-scale axis
+    // (Z) and compensates with a half turn. Changing the X or Y scale leaves that entry alone,
+    // so the reflection survives; changing Z is covered by the test below.
     Geometry::Transformation mirrored = scaled_quarter_turn(Vec3d(-1., 1., 1.));
     mirrored.set_scaling_factor(Y, 5.);
     check_linear_and_offset(mirrored.get_matrix(), quarter_turn_times(Vec3d(-4., 5., 2.)), offset);
@@ -1583,4 +1607,50 @@ TEST_CASE("Transformation skew reset removes shear while keeping offset and volu
     CHECK(transform.get_offset().isApprox(offset, 1e-12));
     // The shear is upper triangular, so the volume scale is the product of the diagonal.
     CHECK_THAT(transform.get_matrix().linear().determinant(), WithinAbs(24., 1e-9));
+}
+
+TEST_CASE("Bounding boxes rotate around an explicit center", "[Geometry][BoundingBox]")
+{
+    const BoundingBox source(Point(10, 20), Point(14, 22));
+    const BoundingBox rotated = source.rotated(PI / 2., Point(7, 17));
+
+    REQUIRE(rotated.defined);
+    CHECK(rotated.min == Point(2, 20));
+    CHECK(rotated.max == Point(4, 24));
+}
+
+TEST_CASE("3D bounding boxes merge point clouds and expose xy footprints in both units",
+          "[Geometry][BoundingBox]")
+{
+    const Pointf3s points{
+        Vec3d(4., -7., 2.),
+        Vec3d(10., 3., 15.),
+        Vec3d(-2., 8., 9.)
+    };
+    BoundingBoxf3 bounds;
+    bounds.merge(points);
+
+    REQUIRE(bounds.defined);
+    CHECK(bounds.min.isApprox(Vec3d(-2., -7., 2.), 1e-12));
+    CHECK(bounds.max.isApprox(Vec3d(10., 8., 15.), 1e-12));
+    CHECK(bounds.size().isApprox(Vec3d(12., 15., 13.), 1e-12));
+    CHECK_THAT(bounds.max_size(), Catch::Matchers::WithinAbs(15., 1e-12));
+
+    const Vec3d before_empty_merge_min = bounds.min;
+    const Vec3d before_empty_merge_max = bounds.max;
+    bounds.merge(BoundingBoxf3{});
+    CHECK(bounds.defined);
+    CHECK(bounds.min.isApprox(before_empty_merge_min, 1e-12));
+    CHECK(bounds.max.isApprox(before_empty_merge_max, 1e-12));
+
+    const Points raw_expected{
+        Point(-2, -7), Point(10, -7), Point(10, 8), Point(-2, 8)
+    };
+    CHECK(bounds.polygon(false).points == raw_expected);
+
+    const Points scaled_expected{
+        Point::new_scale(-2., -7.), Point::new_scale(10., -7.),
+        Point::new_scale(10., 8.), Point::new_scale(-2., 8.)
+    };
+    CHECK(bounds.polygon(true).points == scaled_expected);
 }
