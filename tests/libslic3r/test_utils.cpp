@@ -21,6 +21,7 @@
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <set>
 #include <string>
 #include <thread>
 #include <system_error>
@@ -520,4 +521,46 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     // Non-letters 0x20 apart are not equal.
     CHECK_FALSE(ascii_iequals("[", "{"));
     CHECK_FALSE(ascii_iequals("@", "`"));
+}
+
+namespace {
+// Checks one-based layers 1..last against the layers a pattern must select.
+void check_layer_pattern(const std::string &pattern, const std::set<int> &one_based, int last = 20)
+{
+    for (int n = 1; n <= last; ++n) {
+        INFO("pattern=" << pattern << ", layer=" << n);
+        CHECK(check_layer_id_pattern(pattern, n - 1) == (one_based.count(n) != 0));
+    }
+}
+} // namespace
+
+TEST_CASE("Layer patterns use one-based interval starts and repeat bounded spans", "[utils]") {
+    check_layer_pattern("5", {5, 10, 15, 20});
+    check_layer_pattern("5#2", {5, 6, 10, 11, 15, 16, 20});
+    check_layer_pattern("5#", {5, 10, 15, 20});
+    check_layer_pattern("1", {1, 2, 3, 4, 5}, 5);
+    check_layer_pattern("3#5", {3, 4, 5, 6, 7, 8, 9, 10}, 10);
+}
+
+TEST_CASE("Layer patterns strip whitespace and surrounding quote forms", "[utils]") {
+    for (const std::string &p : {" 5 # 2 ", "\t\"5#2\"\r\n", "' 5 # 2 '"})
+        check_layer_pattern(p, {5, 6, 10, 11, 15, 16, 20});
+    check_layer_pattern("\"1, 7, 9\"", {1, 7, 9});
+}
+
+TEST_CASE("Layer lists keep independent ranges and do not repeat their entries", "[utils]") {
+    check_layer_pattern("1,7,9", {1, 7, 9});
+    check_layer_pattern("5,9#2,18", {5, 9, 10, 18});
+    check_layer_pattern(",,3#,7#3,,12,", {3, 7, 8, 9, 12});
+}
+
+TEST_CASE("Layer lists ignore malformed entries without losing subsequent valid ranges", "[utils]") {
+    check_layer_pattern("bad,3,0#2,-1#2,5#0,6#-1,8#2,9999999999999999999999", {3, 8, 9});
+    check_layer_pattern("bad,#2,5#bad", {});
+}
+
+TEST_CASE("Layer patterns reject empty, negative, nonnumeric and nonpositive intervals", "[utils]") {
+    for (const std::string &p : {"", " ", "\"\"", "''", "bad", "#2", "5#bad", "0", "-2", "2#0", "2#-1", "9999999999999999999999"})
+        check_layer_pattern(p, {});
+    CHECK_FALSE(check_layer_id_pattern("1", -1));
 }
