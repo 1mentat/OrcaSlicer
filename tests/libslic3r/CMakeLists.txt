@@ -63,6 +63,7 @@ add_executable(${_TEST_NAME}_tests
     test_miniz_extension.cpp
     test_timeutils.cpp
     test_voronoi.cpp
+    test_voxel_utils.cpp
     test_wipe_tower_estimate.cpp
     test_wipe_tower.cpp
     test_wipe_path.cpp
