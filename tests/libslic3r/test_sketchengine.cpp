@@ -18,6 +18,7 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Wire.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
@@ -76,8 +77,10 @@ TEST_CASE("SketchPlane derives a local frame from a curved face", "[SketchEngine
     CHECK_THAT(plane.normal.dot(plane.x_axis), Catch::Matchers::WithinAbs(0., 1e-9));
     CHECK_THAT(plane.normal.dot(plane.y_axis), Catch::Matchers::WithinAbs(0., 1e-9));
     CHECK_THAT(plane.x_axis.dot(plane.y_axis), Catch::Matchers::WithinAbs(0., 1e-9));
+    // Right-handed: x cross y gives the normal, not its opposite.
+    CHECK_THAT((plane.x_axis.cross(plane.y_axis) - plane.normal).norm(), Catch::Matchers::WithinAbs(0., 1e-9));
 
-    // The origin is a mesh node on the cylinder wall.
+    // The origin is a mesh node on the cylinder wall (which node is up to the OCCT mesher).
     CHECK(plane.origin.z() >= 7. - 1e-6);
     CHECK(plane.origin.z() <= 27. + 1e-6);
     CHECK_THAT(std::hypot(plane.origin.x() - 3., plane.origin.y() + 2.), Catch::Matchers::WithinAbs(10., .02));
@@ -95,7 +98,7 @@ TEST_CASE("SketchProfile rejects a profile with fewer than two points", "[Sketch
     REQUIRE_THROWS_AS(profile.to_occt_wire(SketchPlane::XY()), std::runtime_error);
 }
 
-TEST_CASE("SketchEngine rejects a zero-length prism direction", "[SketchEngine]")
+TEST_CASE("SketchEngine::make_prism rejects a zero vector and extrudes a face to area times depth", "[SketchEngine]")
 {
     SketchProfile profile;
     profile.points = {Vec2d(0., 0.), Vec2d(4., 0.), Vec2d(4., 3.), Vec2d(0., 3.)};
