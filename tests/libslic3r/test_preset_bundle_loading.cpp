@@ -6567,6 +6567,24 @@ TEST_CASE("A user filament whose derived compatible printer cannot be written ba
 }
 #endif
 
+// The filament combo box shows a dirty preset as Preset::label(), which carries the
+// "modified" marker; storing that label as the slot's preset name would point at no preset.
+TEST_CASE("filament selection canonicalizes the actual dirty preset label", "[Preset][Bundle][PresetSelection]")
+{
+    PresetBundle bundle;
+    bundle.set_num_filaments(1, "#FF0000");
+    Preset dirty(Preset::TYPE_FILAMENT, "Selected PLA");
+    dirty.set_dirty();
+    const std::string displayed = dirty.label(true);
+    REQUIRE(displayed != "Selected PLA");
+    bundle.set_filament_preset(0, displayed);
+    CHECK(bundle.filament_presets.front() == "Selected PLA");
+
+    const std::vector<std::string> before = bundle.filament_presets;
+    bundle.set_filament_preset(bundle.filament_presets.size(), "ignored");
+    CHECK(bundle.filament_presets == before);
+}
+
 TEST_CASE("Preset bundle filament sizing keeps maps and mixed metadata aligned", "[Preset][Bundle][Filament]")
 {
     PresetBundle bundle;
