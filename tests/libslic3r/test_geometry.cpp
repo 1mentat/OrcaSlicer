@@ -998,6 +998,7 @@ TEST_CASE("Wave seeds retain source IDs across shared boundary vertices", "[Geom
 #ifndef NDEBUG
     // wave_seeds() handles seeds whose endpoints are both existing boundary
     // vertices, but a stale assert above that branch still rejects them.
+    // Follow-up: relax that assert in RegionExpansion.cpp and drop this skip.
     SKIP("wave_seeds asserts on the shared-vertex case it handles in Release builds");
 #endif
     const coord_t mm = scale_(1.0);
