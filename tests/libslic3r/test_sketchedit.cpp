@@ -1025,7 +1025,7 @@ TEST_CASE("Linear sketch arrays translate every entity type and preserve the sou
     circle.p0 = circle.center;
     circle.radius = 1.75;
     source.push_back(circle);
-    source[3].construction = true;   // the arc
+    source[3].construction = true;   // the ellipse
     const std::vector<SketchEntity> original = source;
     const Vec2d step(4., -2.);
 
@@ -1345,15 +1345,19 @@ TEST_CASE("Line trim follows positive and negative arc-cutter sweeps", "[SketchE
     const double start = M_PI / 2.0;
     const double end = sweep_direction == 0 ? 3.0 * M_PI / 2.0 : -M_PI / 2.0;
     const SketchEntity cutter = arc_entity(Vec2d(0.0, 0.0), 5.0, start, end);
-    const Vec2d pick = sweep_direction == 0 ? Vec2d(-8.0, 0.0) : Vec2d(8.0, 0.0);
+    // The line meets the cutter's full circle at x = -5 and x = +5, but the arc covers only one
+    // of them: the left half (positive sweep) or the right half (negative sweep). The pick sits
+    // beyond the crossing the arc does NOT cover, so honouring the sweep removes everything up to
+    // the covered crossing, while ignoring it would only remove the short end piece.
+    const Vec2d pick = sweep_direction == 0 ? Vec2d(8.0, 0.0) : Vec2d(-8.0, 0.0);
 
     REQUIRE(SketchEngine::trim_entity(subject, {cutter}, pick));
     if (sweep_direction == 0) {
-        CHECK_THAT((subject.p0 - Vec2d(-5.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
-        CHECK_THAT((subject.p1 - Vec2d(10.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
-    } else {
         CHECK_THAT((subject.p0 - Vec2d(-10.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
-        CHECK_THAT((subject.p1 - Vec2d(5.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
+        CHECK_THAT((subject.p1 - Vec2d(-5.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
+    } else {
+        CHECK_THAT((subject.p0 - Vec2d(5.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
+        CHECK_THAT((subject.p1 - Vec2d(10.0, 0.0)).norm(), WithinAbs(0.0, 1e-9));
     }
 }
 
