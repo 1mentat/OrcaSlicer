@@ -1763,3 +1763,280 @@ TEST_CASE("Belt rotation enum values select distinct public transform and floor 
         CHECK(floor.from_axis == row.from_axis);
     }
 }
+
+
+// These writer-facing cases exercise the configured belt angles through the
+// same coordinate-emission boundary used by the belt G-code exporter. The input
+// point is an independently constructed presliced coordinate; the oracle checks
+// physical projections of the emitted gantry/feed coordinates instead of
+// reusing the production transform matrix.
+namespace {
+
+struct BeltWriterEndpoint {
+    size_t g1_count = 0;
+    bool   full_xyz = false;
+    bool   has_e = false;
+    Vec3d  xyz = Vec3d::Zero();
+    double e = 0.;
+};
+
+static const char *belt_writer_axis_name(BeltRotationAxis axis)
+{
+    switch (axis) {
+    case BeltRotationAxis::X: return "X";
+    case BeltRotationAxis::Y: return "Y";
+    case BeltRotationAxis::Z: return "Z";
+    default:                  return "None";
+    }
+}
+
+// Independent standard right-handed rotations describe the coordinates the
+// slicer would hand to GCodeWriter after the mesh-side preslice rotation.
+static Vec3d belt_writer_presliced_point(const Vec3d &model, BeltRotationAxis axis, double angle_deg)
+{
+    const double rad = angle_deg * (std::acos(-1.) / 180.);
+    const double s = std::sin(rad);
+    const double c = std::cos(rad);
+    switch (axis) {
+    case BeltRotationAxis::X: return Vec3d(model.x(), c * model.y() - s * model.z(), s * model.y() + c * model.z());
+    case BeltRotationAxis::Y: return Vec3d(c * model.x() + s * model.z(), model.y(), -s * model.x() + c * model.z());
+    case BeltRotationAxis::Z: return Vec3d(c * model.x() - s * model.y(), s * model.x() + c * model.y(), model.z());
+    default:                  return model;
+    }
+}
+
+static GCodeWriter belt_writer_for_config(const PrintConfig &config)
+{
+    GCodeWriter writer;
+    writer.apply_print_config(config);
+    writer.set_extruders({0});
+    writer.init_extruder(0);
+    if (config.belt_printer.value) {
+        install_belt_kinematics(writer, config);
+        writer.set_axis_remap(static_cast<int>(config.gcode_remap_x.value),
+                              static_cast<int>(config.gcode_remap_y.value),
+                              static_cast<int>(config.gcode_remap_z.value));
+    }
+    return writer;
+}
+
+static BeltWriterEndpoint belt_writer_parse_endpoint(const std::string &gcode)
+{
+    BeltWriterEndpoint result;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&result](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("G1"))
+            return;
+        ++result.g1_count;
+        result.full_xyz = line.has(X) && line.has(Y) && line.has(Z);
+        if (result.full_xyz) {
+            result.xyz = Vec3d(line.x(), line.y(), line.z());
+            result.has_e = line.has(E);
+            if (result.has_e)
+                result.e = line.e();
+        }
+    });
+    return result;
+}
+
+static void belt_writer_apply_remap_for_tilt(PrintConfig &config, BeltRotationAxis axis)
+{
+    if (axis == BeltRotationAxis::Y) {
+        // The Y-tilt gantry is machine X; model height becomes X and belt feed
+        // remains on the remapped machine Z axis.
+        config.gcode_remap_x.value = RemapAxis::PosZ;
+        config.gcode_remap_y.value = RemapAxis::PosY;
+        config.gcode_remap_z.value = RemapAxis::PosX;
+    } else {
+        // The usual X-tilt belt maps model height to machine Y and belt feed to Z.
+        config.gcode_remap_x.value = RemapAxis::PosX;
+        config.gcode_remap_y.value = RemapAxis::PosZ;
+        config.gcode_remap_z.value = RemapAxis::PosY;
+    }
+}
+
+static void belt_writer_check_physical_projection(const Vec3d &machine, const Vec3d &model,
+                                                  BeltRotationAxis axis, double frame_angle_deg,
+                                                  bool frame_active)
+{
+    constexpr double kCoordinateTolerance = 0.002; // G1 XYZ formatter precision plus parser rounding.
+    if (!frame_active) {
+        if (axis == BeltRotationAxis::Y) {
+            CHECK_THAT(machine.x(), Catch::Matchers::WithinAbs(model.z(), kCoordinateTolerance));
+            CHECK_THAT(machine.y(), Catch::Matchers::WithinAbs(model.y(), kCoordinateTolerance));
+            CHECK_THAT(machine.z(), Catch::Matchers::WithinAbs(model.x(), kCoordinateTolerance));
+        } else {
+            CHECK_THAT(machine.x(), Catch::Matchers::WithinAbs(model.x(), kCoordinateTolerance));
+            CHECK_THAT(machine.y(), Catch::Matchers::WithinAbs(model.z(), kCoordinateTolerance));
+            CHECK_THAT(machine.z(), Catch::Matchers::WithinAbs(model.y(), kCoordinateTolerance));
+        }
+        return;
+    }
+
+    const double rad = frame_angle_deg * (std::acos(-1.) / 180.);
+    const double sine = std::sin(rad);
+    const double cosine = std::cos(rad);
+    const double signed_projection = std::copysign(1., sine);
+    if (axis == BeltRotationAxis::X) {
+        CHECK_THAT(machine.x(), Catch::Matchers::WithinAbs(model.x(), kCoordinateTolerance));
+        // Independent inverse projection: machine gantry height projected onto
+        // the tilted plane recovers model height; removing the horizontal
+        // projection recovers model belt-feed position.
+        CHECK_THAT(machine.y() * std::abs(sine), Catch::Matchers::WithinAbs(model.z(), kCoordinateTolerance));
+        CHECK_THAT(machine.z() - signed_projection * machine.y() * cosine,
+                   Catch::Matchers::WithinAbs(model.y(), kCoordinateTolerance));
+    } else {
+        CHECK_THAT(machine.y(), Catch::Matchers::WithinAbs(model.y(), kCoordinateTolerance));
+        CHECK_THAT(machine.x() * std::abs(sine), Catch::Matchers::WithinAbs(model.z(), kCoordinateTolerance));
+        CHECK_THAT(machine.z() + signed_projection * machine.x() * cosine,
+                   Catch::Matchers::WithinAbs(model.x(), kCoordinateTolerance));
+    }
+}
+
+static void belt_writer_check_real_endpoint(const BeltWriterEndpoint &endpoint)
+{
+    REQUIRE(endpoint.g1_count == 1);
+    REQUIRE(endpoint.full_xyz);
+    REQUIRE(endpoint.has_e);
+    CHECK(std::isfinite(endpoint.xyz.x()));
+    CHECK(std::isfinite(endpoint.xyz.y()));
+    CHECK(std::isfinite(endpoint.xyz.z()));
+    CHECK(std::isfinite(endpoint.e));
+    CHECK(endpoint.e > 0.);
+    CHECK(endpoint.xyz.norm() > 0.);
+}
+
+} // namespace
+
+TEST_CASE("Belt writer coordinates follow the decoupled machine-frame tilt", "[GCodeWriter][belt]")
+{
+    struct AngleCase { const char *name; bool use_default; double angle; bool frame_active; };
+    const std::array<AngleCase, 7> cases = {{
+        {"default 45", true, 45., true},
+        {"explicit 45", false, 45., true},
+        {"zero", false, 0., false},
+        {"negative representative", false, -30., true},
+        {"positive representative", false, 30., true},
+        {"minimum", false, -89.9, true},
+        {"maximum", false, 89.9, true},
+    }};
+    const std::array<BeltRotationAxis, 2> axes = {{BeltRotationAxis::X, BeltRotationAxis::Y}};
+    const Vec3d model(23., 41., 17.);
+
+    for (BeltRotationAxis axis : axes) {
+        for (const AngleCase &row : cases) {
+            INFO("axis=" << belt_writer_axis_name(axis) << ", frame-angle case=" << row.name);
+            PrintConfig config;
+            config.belt_printer.value = true;
+            config.belt_slice_rotation.value = axis;
+            config.belt_slice_rotation_angle.value = 30.; // keep preslice inversion active and independent
+            config.belt_frame_tilt_decouple.value = true;
+            if (!row.use_default)
+                config.belt_frame_tilt_angle.value = row.angle;
+            belt_writer_apply_remap_for_tilt(config, axis);
+
+            const double frame_angle = config.belt_frame_tilt_angle.value;
+            CHECK_THAT(frame_angle, Catch::Matchers::WithinAbs(row.angle, 1e-12));
+            CHECK(config.belt_frame_tilt_decouple.value);
+            CHECK(config.belt_printer.value);
+
+            GCodeWriter writer = belt_writer_for_config(config);
+            const Vec3d sliced = belt_writer_presliced_point(model, axis, config.belt_slice_rotation_angle.value);
+            const BeltWriterEndpoint endpoint = belt_writer_parse_endpoint(
+                writer.extrude_to_xyz(sliced, 0.8, "belt frame endpoint"));
+            belt_writer_check_real_endpoint(endpoint);
+            belt_writer_check_physical_projection(endpoint.xyz, model, axis, frame_angle, row.frame_active);
+        }
+    }
+}
+
+TEST_CASE("Belt writer coordinates follow the slicing tilt when frame tilt stays coupled", "[GCodeWriter][belt]")
+{
+    struct AngleCase { const char *name; bool use_default; double angle; bool frame_active; };
+    const std::array<AngleCase, 7> cases = {{
+        {"default 45", true, 45., true},
+        {"explicit 45", false, 45., true},
+        {"zero", false, 0., false},
+        {"negative representative", false, -30., true},
+        {"positive representative", false, 30., true},
+        {"minimum", false, -180., false},
+        {"maximum", false, 180., false},
+    }};
+    const std::array<BeltRotationAxis, 2> axes = {{BeltRotationAxis::X, BeltRotationAxis::Y}};
+    const Vec3d model(23., 41., 17.);
+
+    for (BeltRotationAxis axis : axes) {
+        for (const AngleCase &row : cases) {
+            INFO("axis=" << belt_writer_axis_name(axis) << ", slice-angle case=" << row.name);
+            PrintConfig config;
+            config.belt_printer.value = true;
+            config.belt_slice_rotation.value = axis;
+            if (!row.use_default)
+                config.belt_slice_rotation_angle.value = row.angle;
+            config.belt_frame_tilt_decouple.value = false;
+            config.belt_frame_tilt_angle.value = -89.9; // ignored while decoupling is off
+            belt_writer_apply_remap_for_tilt(config, axis);
+
+            const double slice_angle = config.belt_slice_rotation_angle.value;
+            CHECK_THAT(slice_angle, Catch::Matchers::WithinAbs(row.angle, 1e-12));
+            CHECK_FALSE(config.belt_frame_tilt_decouple.value);
+            CHECK(config.belt_printer.value);
+
+            GCodeWriter writer = belt_writer_for_config(config);
+            const Vec3d sliced = belt_writer_presliced_point(model, axis, slice_angle);
+            const BeltWriterEndpoint endpoint = belt_writer_parse_endpoint(
+                writer.extrude_to_xyz(sliced, 0.8, "belt slicing endpoint"));
+            belt_writer_check_real_endpoint(endpoint);
+            belt_writer_check_physical_projection(endpoint.xyz, model, axis, slice_angle, row.frame_active);
+        }
+    }
+}
+
+TEST_CASE("Belt writer respects disabled belt and axis transforms", "[GCodeWriter][belt]")
+{
+    struct GateCase {
+        const char *name;
+        bool belt_printer;
+        BeltRotationAxis axis;
+        bool apply_preslice_rotation;
+        bool identity_remap;
+    };
+    const std::array<GateCase, 3> cases = {{
+        {"belt mode disabled", false, BeltRotationAxis::X, false, true},
+        {"no tilt axis", true, BeltRotationAxis::None, false, false},
+        {"in-plane Z rotation", true, BeltRotationAxis::Z, true, false},
+    }};
+    const Vec3d model(23., 41., 17.);
+
+    for (const GateCase &row : cases) {
+        INFO("inactive gate=" << row.name);
+        PrintConfig config;
+        config.belt_printer.value = row.belt_printer;
+        config.belt_slice_rotation.value = row.axis;
+        config.belt_slice_rotation_angle.value = 30.;
+        config.belt_frame_tilt_decouple.value = true;
+        config.belt_frame_tilt_angle.value = 30.;
+        if (row.identity_remap) {
+            config.gcode_remap_x.value = RemapAxis::PosX;
+            config.gcode_remap_y.value = RemapAxis::PosY;
+            config.gcode_remap_z.value = RemapAxis::PosZ;
+        } else {
+            belt_writer_apply_remap_for_tilt(config, BeltRotationAxis::X);
+        }
+
+        GCodeWriter writer = belt_writer_for_config(config);
+        const Vec3d input = row.apply_preslice_rotation
+            ? belt_writer_presliced_point(model, row.axis, config.belt_slice_rotation_angle.value)
+            : model;
+        const BeltWriterEndpoint endpoint = belt_writer_parse_endpoint(
+            writer.extrude_to_xyz(input, 0.8, "belt axis-gate endpoint"));
+        belt_writer_check_real_endpoint(endpoint);
+        if (!row.belt_printer) {
+            CHECK_THAT(endpoint.xyz.x(), Catch::Matchers::WithinAbs(model.x(), 0.002));
+            CHECK_THAT(endpoint.xyz.y(), Catch::Matchers::WithinAbs(model.y(), 0.002));
+            CHECK_THAT(endpoint.xyz.z(), Catch::Matchers::WithinAbs(model.z(), 0.002));
+        } else {
+            belt_writer_check_physical_projection(endpoint.xyz, model, BeltRotationAxis::X, 0., false);
+        }
+    }
+}

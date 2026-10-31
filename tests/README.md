@@ -1364,6 +1364,15 @@ first-layer speed and fan, filament selection, instances, and exact hook counts
 before the first object layer. Disabling and inner-only controls must suppress
 the leading apron; widening and lengthening must increase the emitted path.
 
+The `[belt]` GCodeWriter cases check emitted XYZ and positive extrusion against
+independent physical projections for both belt axes. They cover signed frame
+and slicing angle limits, defaults, zero, decoupling, and inactive belt/axis
+gates. Build `fff_print_belt_writer_angle_tests` for focused feedback; its CTest
+registration is opt-in with `SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY`.
+`tests/mutations/belt_writer_angles.json` probes ignored angles and artificial
+45-degree clamps. These writer-level fixtures supply independently presliced
+coordinates; they do not substitute for full mesh-to-G-code export tests.
+
 `[NSVGUtils]` checks SVG import against analytic fill areas, stroke bounds,
 dash periods, and a cubic Bézier area integral, along with lazy loading, source
 IDs, holes, and coordinate transforms. Odd dash arrays must repeat after twice

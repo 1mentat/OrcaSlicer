@@ -5907,6 +5907,26 @@
         "pipeline_oracle"
       ],
       "reason": "The public Print fixture uses a triangular prism whose sliced rightmost tip has a 126.87 degree interior angle (about a 53.13 degree turn). A test-local 130 degree brim_ears_max_angle makes that corner eligible: Brim.cpp passes 50 degrees to Polygon::convex_points, while 91 degrees had passed an 89 degree threshold and excluded this tip. The 0.5 mm outward tip is below the positive 1 mm Douglas-Peucker tolerance. The requested 5 mm brim width is quantized by Brim.cpp to floor(5/(2\u00d70.45708))\u00d72\u00d70.45708\u22484.57080 mm. Brim.cpp then sets the ear radius to quantized width minus object gap minus flow spacing, about 4.11372 mm. The 4.9 mm point-to-segment window is about 0.78628 mm beyond that construction radius. With the nib removed, adjacent cube-corner ear circles are at least sqrt(10\u00b2+0.5\u00b2)-4.11372\u22485.8988 mm from the nib tip, beyond the 4.9 mm window. Public slice bounds must show the expected 20.5 mm X by 20.0 mm Y footprint. Zero/default-1/positive-2 outputs must keep model bounds unchanged and finite positive brim deposition. No maximum or broader angle/shape interaction is claimed."
+    },
+    "belt_frame_tilt_angle": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[belt]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Writer-emitted G1 XYZ/E endpoints cover omitted and explicit 45-degree defaults, zero, -30/+30, and the registered -89.9/+89.9 limits on both X/Y belt axes. With decoupling enabled, slicing stays at 30 degrees; independent physical height/feed projections distinguish the frame angle. Coupled, disabled-belt, None/Z-axis and zero-angle controls retain their actual activation semantics. Ignoring decoupling and clamping the frame to 45 degrees each fail ordinary assertions. This is a real GCodeWriter endpoint contract with independently presliced input, not a full Print export or arbitrary angle-interaction claim."
+    },
+    "belt_slice_rotation_angle": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[belt]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Writer-emitted G1 XYZ/E endpoints cover omitted and explicit 45-degree defaults, zero, -30/+30, and the registered -180/+180 limits on X/Y belt axes. Coupled frame tilt deliberately ignores an extreme decoupled-angle value. Independently rotated input and physical height/feed projections test real writer output; +/-180 degrees undo preslicing while the near-zero-sine frame gate stays inactive. Constant/default and 45-degree-clamped inverse rotations each fail ordinary assertions. This writer-level contract does not claim full mesh slicing or Print export for every angle."
     }
   }
 }

@@ -275,6 +275,20 @@ set_property(TARGET fff_print_extrusion_entity_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_extrusion_entity_tests)
 slicer_enable_llvm_source_coverage(fff_print_extrusion_entity_tests)
 
+
+# Focused belt-angle writer contracts, opt-in to avoid duplicate CTest registration.
+add_executable(fff_print_belt_writer_angle_tests EXCLUDE_FROM_ALL
+    fff_print_tests.cpp
+    test_helpers.cpp
+    test_gcodewriter.cpp)
+target_link_libraries(fff_print_belt_writer_angle_tests test_common libslic3r Catch2::Catch2WithMain)
+set_property(TARGET fff_print_belt_writer_angle_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(fff_print_belt_writer_angle_tests)
+slicer_enable_llvm_source_coverage(fff_print_belt_writer_angle_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_belt_writer_angle_tests TEST_PREFIX "FocusedBeltWriter::")
+endif()
+
 # Opt-in composite target for the current focused PR selection. Keep one FFF
 # main (and therefore one NanoSVG implementation) and register shared helpers once.
 add_executable(fff_print_composite_focused_tests EXCLUDE_FROM_ALL
