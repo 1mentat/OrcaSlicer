@@ -125,6 +125,27 @@ TEST_CASE("The cut caps a nested inward-facing cavity without filling it",
     CHECK(its_num_open_edges(lower) == 0);
     CHECK_THAT(std::abs(its_volume(upper)), Catch::Matchers::WithinAbs(1072.f, 1e-2f));
     CHECK_THAT(std::abs(its_volume(lower)), Catch::Matchers::WithinAbs(1072.f, 1e-2f));
+
+    // Watertightness and signed volume would also hold for a full outer cap plus an oppositely wound
+    // cap over the cavity. A holed cap covers only the 20 x 14 section minus the 4 x 6 cavity, and
+    // none of its triangles lies inside the cavity outline.
+    for (const indexed_triangle_set *half : { &upper, &lower }) {
+        double       cap_area             = 0.;
+        unsigned int triangles_in_cavity = 0;
+        for (const Vec3i32 &face : half->indices) {
+            const Vec3f &a = half->vertices[face[0]];
+            const Vec3f &b = half->vertices[face[1]];
+            const Vec3f &c = half->vertices[face[2]];
+            if (a.z() != 4.f || b.z() != 4.f || c.z() != 4.f)
+                continue;
+            cap_area += 0.5 * double((b - a).cross(c - a).norm());
+            const Vec3f centroid = (a + b + c) / 3.f;
+            if (centroid.x() > 8.f && centroid.x() < 12.f && centroid.y() > 4.f && centroid.y() < 10.f)
+                ++triangles_in_cavity;
+        }
+        CHECK_THAT(cap_area, Catch::Matchers::WithinAbs(20. * 14. - 4. * 6., 1e-3));
+        CHECK(triangles_in_cavity == 0);
+    }
 }
 
 TEST_CASE("The cut preserves a plane vertex when adjacent facets cross the plane",
@@ -153,4 +174,3 @@ TEST_CASE("The cut preserves a plane vertex when adjacent facets cross the plane
     CHECK(its_num_open_edges(lower_only) == 0);
     CHECK_THAT(std::abs(its_volume(lower_only)), Catch::Matchers::WithinAbs(125.f / 3.f, 1e-2f));
 }
-
