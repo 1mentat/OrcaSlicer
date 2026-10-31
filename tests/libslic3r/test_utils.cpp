@@ -521,3 +521,13 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     CHECK_FALSE(ascii_iequals("[", "{"));
     CHECK_FALSE(ascii_iequals("@", "`"));
 }
+
+TEST_CASE("Published model links accept only their canonical URL forms", "[utils]") {
+    CHECK(is_printables_link("https://printables.com"));
+    CHECK(is_printables_link("HTTP://PRINTABLES.COM"));
+    CHECK_FALSE(is_printables_link("https://printables.com/model/1"));
+    CHECK(is_makerworld_link("https://makerworld.com"));
+    CHECK_FALSE(is_makerworld_link("https://makerworld.com/model/1"));
+    CHECK(is_thingiverse_link("https://www.thingiverse.com"));
+    CHECK_FALSE(is_thingiverse_link("https://thingiverse.com"));
+}
