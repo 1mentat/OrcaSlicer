@@ -3,6 +3,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <Eigen/Core>
 #include <libslic3r/Point.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
@@ -239,6 +240,24 @@ TEST_CASE("MCUT intersection returns the shared volume of overlapping solids", "
         volume += mesh_volume(mesh);
     }
     CHECK_THAT(volume, WithinRel(500.f, 1e-2f));
+}
+
+TEST_CASE("Eigen conversion round trips and self-union merges overlapping cuboids", "[MeshBoolean][MeshBooleanContracts]")
+{
+    // Two overlapping cubes in one mesh: the raw signed volume counts the 500 mm^3 overlap twice.
+    TriangleMesh source = shifted_cube(0.f);
+    TriangleMesh second = shifted_cube(5.f);
+    its_merge(source.its, second.its);
+    const MeshBoolean::EigenMesh eigen = MeshBoolean::triangle_mesh_to_eigen(source);
+    REQUIRE(eigen.first.rows() == static_cast<Eigen::Index>(source.its.vertices.size()));
+    REQUIRE(eigen.second.rows() == static_cast<Eigen::Index>(source.its.indices.size()));
+    const TriangleMesh round_trip = MeshBoolean::eigen_to_triangle_mesh(eigen);
+    CHECK_THAT(mesh_volume(round_trip), WithinRel(2000.f, 1e-5f));
+
+    MeshBoolean::EigenMesh union_input = eigen;
+    MeshBoolean::self_union(union_input);
+    const TriangleMesh union_mesh = MeshBoolean::eigen_to_triangle_mesh(union_input);
+    CHECK_THAT(mesh_volume(union_mesh), WithinRel(1500.f, 1e-3f));
 }
 
 TEST_CASE("MCUT difference preserves analytic hole volume for a centered tool", "[MeshBoolean][MeshBooleanContracts]")
