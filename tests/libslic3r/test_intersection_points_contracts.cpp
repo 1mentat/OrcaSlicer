@@ -77,8 +77,7 @@ TEST_CASE("IntersectionPoints checks every contour in an ExPolygon", "[Intersect
     CHECK(get_intersections(square_with_hole).empty());
 }
 
-// Known bug: compute_intersections' neighbour filter computes node_index - 1 in size_t, which wraps at 0; fixed by the follow-up fix PR
-TEST_CASE("IntersectionPoints reports a crossing with line 0 in ascending index order", "[IntersectionPoints][!shouldfail]")
+TEST_CASE("IntersectionPoints reports a crossing with line 0 in ascending index order", "[IntersectionPoints]")
 {
     const Lines lines {
         Line { Point { 0, 0 }, Point { 100, 100 } },
@@ -95,8 +94,7 @@ TEST_CASE("IntersectionPoints reports a crossing with line 0 in ascending index 
     CHECK(intersections.front().intersection.isApprox(Vec2d { 50., 50. }));
 }
 
-// Known bug: compute_intersections' neighbour filter computes node_index - 1 in size_t, which wraps at 0; fixed by the follow-up fix PR
-TEST_CASE("IntersectionPoints reports a crossing with line 0 only once", "[IntersectionPoints][!shouldfail]")
+TEST_CASE("IntersectionPoints reports a crossing with line 0 only once", "[IntersectionPoints]")
 {
     const Lines lines {
         Line { Point { 0, 0 }, Point { 100, 100 } },
