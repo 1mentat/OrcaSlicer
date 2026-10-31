@@ -26,8 +26,7 @@ TEST_CASE("IntersectionPoints reports one genuine crossing among independent lin
     CHECK(intersections.front().intersection.isApprox(Vec2d { 50., 50. }));
 }
 
-// Known bug: `node_index - 1 <= li` skips the pair (li, li + 1) even when the lines are not polygon neighbours; fixed by the follow-up fix PR
-TEST_CASE("IntersectionPoints remains unique when the lines are reordered", "[IntersectionPoints][!shouldfail]")
+TEST_CASE("IntersectionPoints remains unique when the lines are reordered", "[IntersectionPoints]")
 {
     const Lines reordered {
         Line { Point { 200, 200 }, Point { 300, 200 } },
@@ -43,8 +42,7 @@ TEST_CASE("IntersectionPoints remains unique when the lines are reordered", "[In
     CHECK(intersections.front().intersection.isApprox(Vec2d { 50., 50. }));
 }
 
-// Known bug: inputs with fewer than 3 lines return early, and the pair (0, 1) is skipped as neighbours; fixed by the follow-up fix PR
-TEST_CASE("IntersectionPoints finds a crossing in a two-line input", "[IntersectionPoints][!shouldfail]")
+TEST_CASE("IntersectionPoints finds a crossing in a two-line input", "[IntersectionPoints]")
 {
     const Lines lines {
         Line { Point { 0, 0 }, Point { 100, 100 } },
@@ -79,8 +77,7 @@ TEST_CASE("IntersectionPoints checks every contour in an ExPolygon", "[Intersect
     CHECK(get_intersections(square_with_hole).empty());
 }
 
-// Known bug: compute_intersections' neighbour filter computes node_index - 1 in size_t, which wraps at 0; fixed by the follow-up fix PR
-TEST_CASE("IntersectionPoints reports a crossing with line 0 in ascending index order", "[IntersectionPoints][!shouldfail]")
+TEST_CASE("IntersectionPoints reports a crossing with line 0 in ascending index order", "[IntersectionPoints]")
 {
     const Lines lines {
         Line { Point { 0, 0 }, Point { 100, 100 } },
@@ -97,8 +94,7 @@ TEST_CASE("IntersectionPoints reports a crossing with line 0 in ascending index 
     CHECK(intersections.front().intersection.isApprox(Vec2d { 50., 50. }));
 }
 
-// Known bug: compute_intersections' neighbour filter computes node_index - 1 in size_t, which wraps at 0; fixed by the follow-up fix PR
-TEST_CASE("IntersectionPoints reports a crossing with line 0 only once", "[IntersectionPoints][!shouldfail]")
+TEST_CASE("IntersectionPoints reports a crossing with line 0 only once", "[IntersectionPoints]")
 {
     const Lines lines {
         Line { Point { 0, 0 }, Point { 100, 100 } },
