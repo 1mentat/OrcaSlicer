@@ -8,6 +8,7 @@
 #include <TopAbs_ShapeEnum.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_all.hpp>   // mainline OrcaSlicer ships Catch2 v3 (v2 was catch2/catch.hpp)
 #include <cereal/details/helpers.hpp>
 #include <cereal/cereal.hpp>
@@ -41,6 +42,7 @@
 #include "libslic3r/CAD/SketchImport.hpp"
 #include "libslic3r/CAD/ThreadStandards.hpp"
 #include "libslic3r/Utils.hpp"
+#include "test_utils.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -61,6 +63,9 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <gp_Pnt.hxx>
+#include <TopoDS_Shape.hxx>
+#include <cstddef>
 #include <cereal/archives/binary.hpp>
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
@@ -102,6 +107,120 @@ TEST_CASE("CadDocument legacy Rectangle sketch still works", "[CadDocument]")
     REQUIRE(ok);
     REQUIRE(doc.error.empty());
     REQUIRE(doc.display_mesh.facets_count() > 0);
+}
+
+namespace cad_feature_editing {
+
+// A 10 x 10 x 5 box: a rectangle sketch on XY and a New extrude. Volume 500.
+void make_box(CadDocument& doc, int& sketch, int& extrude)
+{
+    sketch  = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 10.0, 10.0, 0.0, "Profile");
+    extrude = doc.add_extrude(sketch, 5.0, false, BooleanMode::New, "Solid");
+    REQUIRE(sketch == 0);
+    REQUIRE(extrude == 1);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    REQUIRE_THAT(doc.body_mass_properties(0).volume, Catch::Matchers::WithinRel(500.0, 1e-9));
+}
+
+} // namespace cad_feature_editing
+
+TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "[CadDocument]")
+{
+    CadDocument doc;
+    int sketch = -1, extrude = -1;
+    cad_feature_editing::make_box(doc, sketch, extrude);
+
+    // The editor payload deliberately carries a different name, type and sketch link. Only the
+    // solid parameters are taken; the feature keeps its identity and link.
+    CadFeature edited;
+    edited.name       = "EditedPayload";
+    edited.type       = CadFeatureType::Sketch;
+    edited.sketch_ref = 9999;
+    edited.distance   = 8.0;
+    edited.mode       = BooleanMode::New;
+    REQUIRE(doc.replace_feature(extrude, edited));
+
+    CHECK(doc.features[extrude].name == "Solid");
+    CHECK(doc.features[extrude].type == CadFeatureType::Extrude);
+    CHECK(doc.features[extrude].sketch_ref == sketch);
+    CHECK_THAT(doc.features[extrude].distance, Catch::Matchers::WithinAbs(8.0, 1e-12));
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    CHECK_THAT(doc.body_mass_properties(0).volume, Catch::Matchers::WithinRel(800.0, 1e-9));
+}
+
+TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter sets", "[CadDocument]")
+{
+    CadDocument doc;
+    int sketch = -1, extrude = -1;
+    cad_feature_editing::make_box(doc, sketch, extrude);
+
+    // Every field differs from the box: a radius-3 circle on a plane moved to x = 5, extruded
+    // 4 in Add mode with the symmetric flag set.
+    CadFeature edited;
+    edited.type      = CadFeatureType::Extrude;
+    edited.shape     = SketchShape::Circle;
+    edited.plane     = SketchPlane::XY();
+    edited.plane.origin = Vec3d(5.0, 0.0, 0.0);
+    edited.width     = 12.0;
+    edited.height    = 8.0;
+    edited.radius    = 3.0;
+    edited.distance  = 4.0;
+    edited.symmetric = true;
+    edited.mode      = BooleanMode::Add;
+    REQUIRE(doc.replace_sketch_extrude(sketch, extrude, edited));
+
+    const CadFeature& sk = doc.features[sketch];
+    const CadFeature& ex = doc.features[extrude];
+    CHECK(sk.name == "Profile");
+    CHECK(sk.type == CadFeatureType::Sketch);
+    CHECK(sk.shape == SketchShape::Circle);
+    CHECK_THAT((sk.plane.origin - Vec3d(5.0, 0.0, 0.0)).norm(), Catch::Matchers::WithinAbs(0.0, 1e-12));
+    CHECK_THAT(sk.width, Catch::Matchers::WithinAbs(12.0, 1e-12));
+    CHECK_THAT(sk.height, Catch::Matchers::WithinAbs(8.0, 1e-12));
+    CHECK_THAT(sk.radius, Catch::Matchers::WithinAbs(3.0, 1e-12));
+    CHECK(ex.name == "Solid");
+    CHECK(ex.type == CadFeatureType::Extrude);
+    CHECK(ex.sketch_ref == sketch);
+    CHECK_THAT(ex.distance, Catch::Matchers::WithinAbs(4.0, 1e-12));
+    CHECK(ex.symmetric);
+    CHECK(ex.mode == BooleanMode::Add);
+
+    // The rebuilt body is the circle at the moved plane: area 9 pi times length 4.
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    const auto props = doc.body_mass_properties(0);
+    CHECK_THAT(props.volume, Catch::Matchers::WithinRel(9.0 * M_PI * 4.0, 1e-6));
+    CHECK_THAT(props.center_of_mass.x(), Catch::Matchers::WithinAbs(5.0, 1e-6));
+    CHECK_THAT(props.center_of_mass.y(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("Feature replacement rejects bad indices and rolls back a failed rebuild", "[CadDocument]")
+{
+    CadDocument doc;
+    int sketch = -1, extrude = -1;
+    cad_feature_editing::make_box(doc, sketch, extrude);
+    const int feature_count = int(doc.features.size());
+
+    CadFeature edited = doc.features[extrude];
+    edited.distance = 8.0;
+    CHECK_FALSE(doc.replace_feature(-1, edited));
+    CHECK_FALSE(doc.replace_feature(feature_count, edited));
+    CHECK_FALSE(doc.replace_sketch_extrude(-1, extrude, edited));
+    CHECK_FALSE(doc.replace_sketch_extrude(sketch, feature_count, edited));
+    CHECK_THAT(doc.features[extrude].distance, Catch::Matchers::WithinAbs(5.0, 1e-12));
+
+    // A zero-length extrude cannot be built: the edit is refused, the error says why, and the
+    // previous feature and body come back.
+    edited.distance = 0.0;
+    CHECK_FALSE(doc.replace_feature(extrude, edited));
+    CHECK_FALSE(doc.error.empty());
+    REQUIRE(int(doc.features.size()) == feature_count);
+    CHECK_THAT(doc.features[extrude].distance, Catch::Matchers::WithinAbs(5.0, 1e-12));
+    REQUIRE(doc.bodies.size() == 1);
+    CHECK_THAT(doc.body_mass_properties(0).volume, Catch::Matchers::WithinRel(500.0, 1e-9));
 }
 
 TEST_CASE("CadDocument preview with profile on self-contained candidate", "[CadDocument]")
@@ -161,6 +280,103 @@ TEST_CASE("CadDocument solve_sketch_feature snaps a rough quad to a rectangle", 
     doc.add_extrude(sk, 5.0, false, BooleanMode::New, "E");
     REQUIRE(doc.recompute());
     REQUIRE(doc.display_mesh.facets_count() > 0);
+}
+
+TEST_CASE("CadDocument history exposes redo and invalidates it after a new edit", "[CadDocument][history]")
+{
+    CadDocument doc;
+    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                      20.0, 20.0, 0.0, "BaseSketch");
+    REQUIRE(sketch >= 0);
+    const int extrude = doc.add_extrude(sketch, 10.0, false, BooleanMode::New, "Base");
+    REQUIRE(extrude >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+
+    auto bbox = [](const CadDocument& d) {
+        Bnd_Box box;
+        BRepBndLib::Add(d.bodies.at(0).shape, box);
+        double x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        return std::make_pair(Vec3d(x0, y0, z0), Vec3d(x1, y1, z1));
+    };
+
+    const auto initial_box = bbox(doc);
+    const double initial_volume = doc.body_mass_properties(0).volume;
+    REQUIRE_THAT(initial_volume, Catch::Matchers::WithinRel(4000.0, 1e-6));
+    REQUIRE_THAT(initial_box.first.x(), Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(initial_box.second.x(), Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_FALSE(doc.can_undo());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 0);
+    REQUIRE(doc.redo_depth() == 0);
+
+    doc.checkpoint();
+    const int shift = doc.add_transform(0, Vec3d(5.0, 0.0, 0.0), Vec3d(0.0, 0.0, 1.0),
+                                        Vec3d(0.0, 0.0, 0.0), 0.0, false, "Shift");
+    REQUIRE(shift >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    const auto shifted_box = bbox(doc);
+    REQUIRE(doc.can_undo());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 1);
+    REQUIRE(doc.redo_depth() == 0);
+    REQUIRE_THAT(shifted_box.first.x(), Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(shifted_box.second.x(), Catch::Matchers::WithinAbs(15.0, 1e-6));
+    REQUIRE_THAT(doc.body_mass_properties(0).volume,
+                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
+
+    REQUIRE(doc.features.size() == 3);
+    REQUIRE(doc.undo());
+    REQUIRE(doc.error.empty());
+    const auto undone_box = bbox(doc);
+    REQUIRE(doc.features.size() == 2);   // the Shift feature is gone again
+    REQUIRE_FALSE(doc.can_undo());
+    REQUIRE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 0);
+    REQUIRE(doc.redo_depth() == 1);
+    REQUIRE_THAT(undone_box.first.x(), Catch::Matchers::WithinAbs(initial_box.first.x(), 1e-6));
+    REQUIRE_THAT(undone_box.second.x(), Catch::Matchers::WithinAbs(initial_box.second.x(), 1e-6));
+    REQUIRE_THAT(doc.body_mass_properties(0).volume,
+                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
+
+    REQUIRE(doc.redo());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.features.size() == 3);
+    const auto redone_box = bbox(doc);
+    REQUIRE(doc.can_undo());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.undo_depth() == 1);
+    REQUIRE(doc.redo_depth() == 0);
+    REQUIRE_THAT(redone_box.first.x(), Catch::Matchers::WithinAbs(shifted_box.first.x(), 1e-6));
+    REQUIRE_THAT(redone_box.second.x(), Catch::Matchers::WithinAbs(shifted_box.second.x(), 1e-6));
+    REQUIRE_THAT(doc.body_mass_properties(0).volume,
+                 Catch::Matchers::WithinRel(initial_volume, 1e-9));
+
+    // A new checkpoint is a new edit branch and must discard the old redo snapshot.
+    REQUIRE(doc.undo());
+    REQUIRE(doc.can_redo());
+    doc.checkpoint();
+    const int second_shift = doc.add_transform(0, Vec3d(-2.0, 0.0, 0.0), Vec3d(0.0, 0.0, 1.0),
+                                               Vec3d(0.0, 0.0, 0.0), 0.0, false, "NewBranch");
+    REQUIRE(second_shift >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_FALSE(doc.can_redo());
+    REQUIRE(doc.redo_depth() == 0);
+    REQUIRE(doc.undo_depth() == 1);
+    const auto branch_box = bbox(doc);
+    REQUIRE_THAT(branch_box.first.x(), Catch::Matchers::WithinAbs(-12.0, 1e-6));
+    REQUIRE_THAT(branch_box.second.x(), Catch::Matchers::WithinAbs(8.0, 1e-6));
+
+    // Undoing the new branch goes back to the original box, not to the discarded shift.
+    REQUIRE(doc.undo());
+    REQUIRE(doc.features.size() == 2);
+    const auto restored_box = bbox(doc);
+    REQUIRE_THAT(restored_box.first.x(), Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(restored_box.second.x(), Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_FALSE(doc.can_undo());
 }
 
 TEST_CASE("sketch entities -> wire -> extrude", "[CadDocument]")
@@ -2291,6 +2507,209 @@ TEST_CASE("an Import solid written by OCCT 7.6 still loads", "[CadDocument][reci
     GProp_GProps props;
     BRepGProp::VolumeProperties(shape, props);
     CHECK_THAT(props.Mass(), WithinRel(expected, 1e-4));
+}
+
+TEST_CASE("CadDocument import features replay into independent bodies", "[CadDocument][import]")
+{
+    using Catch::Matchers::WithinRel;
+
+    const TopoDS_Shape first_shape = BRepPrimAPI_MakeBox(gp_Pnt(0., 0., 0.), 4., 5., 6.).Shape();
+    const TopoDS_Shape second_shape = BRepPrimAPI_MakeBox(gp_Pnt(10., 0., 0.), 2., 3., 4.).Shape();
+    REQUIRE_FALSE(first_shape.IsNull());
+    REQUIRE_FALSE(second_shape.IsNull());
+
+    const auto analytic_volume = [](const TopoDS_Shape& shape) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape, props);
+        return std::abs(props.Mass());
+    };
+    const auto analytic_center = [](const TopoDS_Shape& shape) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape, props);
+        return props.CentreOfMass();
+    };
+    const auto require_valid_mesh = [](const TriangleMesh& mesh) {
+        REQUIRE_FALSE(mesh.empty());
+        REQUIRE_FALSE(mesh.its.vertices.empty());
+        REQUIRE_FALSE(mesh.its.indices.empty());
+        for (const Vec3f& vertex : mesh.its.vertices) {
+            REQUIRE(std::isfinite(double(vertex.x())));
+            REQUIRE(std::isfinite(double(vertex.y())));
+            REQUIRE(std::isfinite(double(vertex.z())));
+        }
+        const int vertex_count = int(mesh.its.vertices.size());
+        for (const auto& triangle : mesh.its.indices) {
+            REQUIRE(triangle[0] >= 0);
+            REQUIRE(triangle[1] >= 0);
+            REQUIRE(triangle[2] >= 0);
+            REQUIRE(triangle[0] < vertex_count);
+            REQUIRE(triangle[1] < vertex_count);
+            REQUIRE(triangle[2] < vertex_count);
+            REQUIRE(triangle[0] != triangle[1]);
+            REQUIRE(triangle[1] != triangle[2]);
+            REQUIRE(triangle[0] != triangle[2]);
+            const Vec3f edge_a = mesh.its.vertices[size_t(triangle[1])] -
+                                  mesh.its.vertices[size_t(triangle[0])];
+            const Vec3f edge_b = mesh.its.vertices[size_t(triangle[2])] -
+                                  mesh.its.vertices[size_t(triangle[0])];
+            const float twice_area = edge_a.cross(edge_b).norm();
+            REQUIRE(std::isfinite(double(twice_area)));
+            REQUIRE(twice_area > 1e-6f);
+        }
+    };
+
+    CadDocument doc;
+    CadFeature first;
+    first.type = CadFeatureType::Import;
+    first.name = "ImportedFirst";
+    first.imported_solid = first_shape;
+    doc.features.push_back(first);
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+    REQUIRE(doc.display_body_meshes.size() == 1);
+    CHECK_THAT(analytic_volume(doc.bodies[0].shape), WithinRel(4. * 5. * 6., 1e-8));
+    require_valid_mesh(doc.display_body_meshes[0]);
+    require_valid_mesh(doc.display_mesh);
+
+    CadFeature second;
+    second.type = CadFeatureType::Import;
+    second.name = "ImportedSecond";
+    second.imported_solid = second_shape;
+    doc.features.push_back(second);
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 2);
+    REQUIRE(doc.display_body_meshes.size() == doc.bodies.size());
+    REQUIRE(doc.display_tri_face.size() == doc.display_mesh.its.indices.size());
+    REQUIRE(doc.display_tri_body.size() == doc.display_mesh.its.indices.size());
+    CHECK_THAT(analytic_volume(doc.bodies[0].shape), WithinRel(4. * 5. * 6., 1e-8));
+    CHECK_THAT(analytic_volume(doc.bodies[1].shape), WithinRel(2. * 3. * 4., 1e-8));
+    const gp_Pnt first_center = analytic_center(doc.bodies[0].shape);
+    const gp_Pnt second_center = analytic_center(doc.bodies[1].shape);
+    CHECK_THAT(first_center.X(), Catch::Matchers::WithinAbs(2.0, 1e-8));
+    CHECK_THAT(first_center.Y(), Catch::Matchers::WithinAbs(2.5, 1e-8));
+    CHECK_THAT(first_center.Z(), Catch::Matchers::WithinAbs(3.0, 1e-8));
+    CHECK_THAT(second_center.X(), Catch::Matchers::WithinAbs(11.0, 1e-8));
+    CHECK_THAT(second_center.Y(), Catch::Matchers::WithinAbs(1.5, 1e-8));
+    CHECK_THAT(second_center.Z(), Catch::Matchers::WithinAbs(2.0, 1e-8));
+    require_valid_mesh(doc.display_body_meshes[0]);
+    require_valid_mesh(doc.display_body_meshes[1]);
+    require_valid_mesh(doc.display_mesh);
+    size_t body_triangle_counts[2] = {0, 0};
+    for (const int body_index : doc.display_tri_body) {
+        REQUIRE(body_index >= 0);
+        REQUIRE(body_index < int(doc.bodies.size()));
+        ++body_triangle_counts[size_t(body_index)];
+    }
+    REQUIRE(body_triangle_counts[0] > 0);
+    REQUIRE(body_triangle_counts[1] > 0);
+    REQUIRE(body_triangle_counts[0] == doc.display_body_meshes[0].its.indices.size());
+    REQUIRE(body_triangle_counts[1] == doc.display_body_meshes[1].its.indices.size());
+}
+
+TEST_CASE("STEP export preserves imported solids and applies per-body rigid transforms", "[CadDocument][step]")
+{
+    const int scenario = GENERATE(0, 1, 2);
+    CAPTURE(scenario);
+
+    const TopoDS_Shape first_shape = BRepPrimAPI_MakeBox(gp_Pnt(0., 0., 0.), 4., 5., 6.).Shape();
+    const TopoDS_Shape second_shape = BRepPrimAPI_MakeBox(gp_Pnt(10., 0., 0.), 2., 3., 4.).Shape();
+    REQUIRE_FALSE(first_shape.IsNull());
+    REQUIRE_FALSE(second_shape.IsNull());
+
+    CadDocument doc;
+    CadFeature first;
+    first.type = CadFeatureType::Import;
+    first.name = "ExportFirst";
+    first.imported_solid = first_shape;
+    doc.features.push_back(first);
+
+    CadFeature second;
+    second.type = CadFeatureType::Import;
+    second.name = "ExportSecond";
+    second.imported_solid = second_shape;
+    doc.features.push_back(second);
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 2);
+
+    std::vector<GeometryEngine::MassProps> source_before;
+    source_before.reserve(doc.bodies.size());
+    for (size_t index = 0; index < doc.bodies.size(); ++index) {
+        const auto props = doc.body_mass_properties(int(index));
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        source_before.push_back(props);
+    }
+
+    std::vector<Transform3d> body_transforms(static_cast<size_t>(scenario), Transform3d::Identity());
+    if (scenario == 1) {
+        body_transforms[0].linear() << 0., -1., 0.,
+                                       1.,  0., 0.,
+                                       0.,  0., 1.;
+        body_transforms[0].translation() = Vec3d(10., 20., 30.);
+    } else if (scenario == 2) {
+        body_transforms[1].translation() = Vec3d(-20., 5., 7.);
+    }
+
+    ScopedTemporaryFile step_file(".step");
+    std::string export_error = "previous operation failed";
+    REQUIRE(doc.export_step(step_file.string(), body_transforms, export_error));
+    CHECK(export_error.empty());
+
+    std::string import_error;
+    const std::vector<TopoDS_Shape> exported_solids =
+        GeometryEngine::read_step_solids(step_file.string(), import_error);
+    CHECK(import_error.empty());
+    REQUIRE(exported_solids.size() == 2);
+
+    std::vector<GeometryEngine::MassProps> exported_props;
+    exported_props.reserve(exported_solids.size());
+    for (const TopoDS_Shape &shape : exported_solids) {
+        REQUIRE_FALSE(shape.IsNull());
+        const auto props = GeometryEngine::mass_properties(shape);
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        REQUIRE(std::isfinite(props.volume));
+        REQUIRE(props.volume > 0.);
+        REQUIRE(std::isfinite(props.center_of_mass.x()));
+        REQUIRE(std::isfinite(props.center_of_mass.y()));
+        REQUIRE(std::isfinite(props.center_of_mass.z()));
+        exported_props.push_back(props);
+    }
+    std::sort(exported_props.begin(), exported_props.end(),
+              [](const auto &left, const auto &right) { return left.volume < right.volume; });
+
+    const std::vector<double> expected_volumes = {24., 120.};
+    const std::vector<Vec3d> expected_centers = scenario == 0
+        ? std::vector<Vec3d>{Vec3d(11., 1.5, 2.), Vec3d(2., 2.5, 3.)}
+        : scenario == 1
+            ? std::vector<Vec3d>{Vec3d(11., 1.5, 2.), Vec3d(7.5, 22., 33.)}
+            : std::vector<Vec3d>{Vec3d(-9., 6.5, 9.), Vec3d(2., 2.5, 3.)};
+
+    REQUIRE(exported_props.size() == expected_volumes.size());
+    REQUIRE(exported_props.size() == expected_centers.size());
+    for (size_t index = 0; index < exported_props.size(); ++index) {
+        CHECK_THAT(exported_props[index].volume, Catch::Matchers::WithinRel(expected_volumes[index], 1e-6));
+        CHECK_THAT(exported_props[index].center_of_mass.x(), Catch::Matchers::WithinAbs(expected_centers[index].x(), 1e-6));
+        CHECK_THAT(exported_props[index].center_of_mass.y(), Catch::Matchers::WithinAbs(expected_centers[index].y(), 1e-6));
+        CHECK_THAT(exported_props[index].center_of_mass.z(), Catch::Matchers::WithinAbs(expected_centers[index].z(), 1e-6));
+    }
+
+    REQUIRE(doc.bodies.size() == source_before.size());
+    for (size_t index = 0; index < source_before.size(); ++index) {
+        const auto after = doc.body_mass_properties(int(index));
+        REQUIRE(after.valid);
+        REQUIRE(after.is_solid);
+        CHECK_THAT(after.volume, Catch::Matchers::WithinRel(source_before[index].volume, 1e-6));
+        CHECK_THAT(after.center_of_mass.x(), Catch::Matchers::WithinAbs(source_before[index].center_of_mass.x(), 1e-6));
+        CHECK_THAT(after.center_of_mass.y(), Catch::Matchers::WithinAbs(source_before[index].center_of_mass.y(), 1e-6));
+        CHECK_THAT(after.center_of_mass.z(), Catch::Matchers::WithinAbs(source_before[index].center_of_mass.z(), 1e-6));
+    }
 }
 
 TEST_CASE("a v5 round trip is exact", "[CadDocument][recipe]")
@@ -9303,3 +9722,86 @@ TEST_CASE("A hole owns its bore", "[CadDocument][highlight]")
         CHECK(made_face_type(doc, bf) == GeomAbs_Cylinder);
     CHECK(doc.faces_made_by(ex).size() == 6);
 }
+
+namespace cad_legacy_thread_contracts {
+
+constexpr double legacy_radius = 3.0;
+constexpr double legacy_pitch = 1.0;
+constexpr double legacy_height = 4.0;
+constexpr double legacy_depth = 0.3;
+
+TEST_CASE("Saved legacy external threads retain crests outside the reference cylinder",
+          "[CadDocument][thread]")
+{
+    CadDocument source;
+    const int thread = source.add_thread(legacy_radius, legacy_pitch, legacy_height,
+        legacy_depth, false, 0., 0., SketchPlane::XY(), "LegacyExternal");
+    REQUIRE(thread >= 0);
+    source.features[thread].thread_major_nominal = false;
+
+    // Geometry is replayed from the saved feature fields; the recipe stores no solid.
+    CadDocument restored;
+    const bool loaded = restored.deserialize_recipe(source.serialize_recipe());
+    INFO(restored.error);
+    REQUIRE(loaded);
+    REQUIRE(restored.features.size() == 1);
+    REQUIRE_FALSE(restored.features[thread].thread_major_nominal);
+    REQUIRE(restored.bodies.size() == 1);
+    const auto properties = restored.body_mass_properties(0);
+    REQUIRE(properties.valid);
+    REQUIRE(properties.is_solid);
+
+    // Legacy threads add a ridge to a full reference cylinder. A missing ridge,
+    // or interpreting this old radius as the new major radius, cannot satisfy this.
+    const double reference_cylinder_volume = M_PI * legacy_radius * legacy_radius * legacy_height;
+    CHECK(properties.volume > reference_cylinder_volume + 0.05);
+    const auto bounds = restored.display_mesh.bounding_box();
+    CHECK(bounds.max.x() > legacy_radius + 0.1);
+    CHECK(bounds.max.x() < legacy_radius + legacy_depth + 0.05);
+    CHECK(bounds.min.x() < -legacy_radius - 0.1);
+    CHECK(bounds.min.x() > -legacy_radius - legacy_depth - 0.05);
+}
+
+// Known bug: legacy internal threads cut the bore before the helical groove, and OCCT then returns only the bore, so the groove is lost; fixed by the follow-up fix PR.
+TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groove",
+          "[CadDocument][thread][!shouldfail]")
+{
+    constexpr double stock_radius = 6.0;
+    CadDocument source;
+    const int sketch = source.add_sketch(SketchShape::Circle, SketchPlane::XY(),
+        0., 0., stock_radius, "StockProfile");
+    REQUIRE(sketch >= 0);
+    source.add_extrude(sketch, legacy_height, false, BooleanMode::New, "Stock");
+    const int thread = source.add_thread(legacy_radius, legacy_pitch, legacy_height,
+        legacy_depth, true, 0., 0., SketchPlane::XY(), "LegacyInternal");
+    REQUIRE(thread >= 0);
+    source.features[thread].thread_major_nominal = false;
+
+    CadDocument restored;
+    const bool loaded = restored.deserialize_recipe(source.serialize_recipe());
+    INFO(restored.error);
+    REQUIRE(loaded);
+    REQUIRE(restored.features.size() == source.features.size());
+    REQUIRE_FALSE(restored.features[thread].thread_major_nominal);
+    REQUIRE(restored.bodies.size() == 1);
+    const auto properties = restored.body_mass_properties(0);
+    REQUIRE(properties.valid);
+    REQUIRE(properties.is_solid);
+
+    const double stock_volume = M_PI * stock_radius * stock_radius * legacy_height;
+    const double minor_radius = legacy_radius - legacy_depth;
+    const double plain_bore_volume = M_PI * minor_radius * minor_radius * legacy_height;
+    const double enclosing_bore_volume = M_PI * (legacy_radius + legacy_depth) *
+        (legacy_radius + legacy_depth) * legacy_height;
+    // A groove removes more than the plain minor bore, but cannot remove stock
+    // outside its enclosing cylinder. These bounds require both bore and groove.
+    CHECK(properties.volume < stock_volume - plain_bore_volume - 0.05);
+    CHECK(properties.volume > stock_volume - enclosing_bore_volume + 0.05);
+    const auto bounds = restored.display_mesh.bounding_box();
+    CHECK_THAT(bounds.size().x(), Catch::Matchers::WithinAbs(2. * stock_radius, 0.05));
+    CHECK_THAT(bounds.size().y(), Catch::Matchers::WithinAbs(2. * stock_radius, 0.05));
+    CHECK_THAT(bounds.min.z(), Catch::Matchers::WithinAbs(0., 0.05));
+    CHECK_THAT(bounds.max.z(), Catch::Matchers::WithinAbs(legacy_height, 0.05));
+}
+
+} // namespace cad_legacy_thread_contracts
