@@ -41,6 +41,7 @@
 #include <nlohmann/json.hpp>
 
 #include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <algorithm>
@@ -2474,76 +2475,96 @@ TEST_CASE("BBS 3MF gates slice metadata while retaining every plate instance map
     CHECK(loaded_sliced.obj_inst_map.begin()->second.first == 1);
 }
 
+namespace {
+
+// A one-object project with a single plate, for the cancellation tests.
+struct CancellationFixture
+{
+    Model              model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup{"orca_bbs_cancel_store"};
+    PlateData          plate;
+
+    CancellationFixture()
+    {
+        make_model(model);
+        model.set_backup_path(backup.string());
+        make_plate(plate, 0, {{0, 0}});
+    }
+
+    StoreParams store_params(const std::string& path)
+    {
+        StoreParams params;
+        params.path = path;
+        params.model = &model;
+        params.config = &config;
+        params.plate_data_list = {&plate};
+        params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+        return params;
+    }
+};
+
+// Seeds the outputs of a load with sentinel content, so a cancelled load can be shown to
+// leave them alone rather than to have produced nothing.
+void seed_load_outputs(Model& model, LoadedProject& loaded)
+{
+    model.add_object()->name = "sentinel-object";
+    loaded.plates.push_back(new PlateData());
+    loaded.plates.back()->plate_name = "sentinel-plate";
+}
+
+void check_load_outputs_untouched(const Model& model, const LoadedProject& loaded, const PlateData* sentinel_plate)
+{
+    REQUIRE(model.objects.size() == 1);
+    CHECK(model.objects.front()->name == "sentinel-object");
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK(loaded.plates.front() == sentinel_plate);
+    CHECK(loaded.plates.front()->plate_name == "sentinel-plate");
+}
+
+void read_file(const boost::filesystem::path& path, std::string& out)
+{
+    boost::nowide::ifstream input(path.string(), std::ios::binary);
+    REQUIRE(input.good());
+    out.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
 TEST_CASE("BBS 3MF import cancellation returns false at the public progress seam", "[3MF][Bbs3mfExtended][Cancellation]")
 {
-    Model source;
-    make_model(source);
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    ScopedTemporaryDir backup("orca_bbs_ext_cancel_store");
-    source.set_backup_path(backup.string());
-    PlateData plate;
-    make_plate(plate, 0, {{0, 0}});
-    PlateDataPtrs plates{&plate};
+    CancellationFixture fixture;
     ScopedTemporaryFile archive(".3mf");
-    store_model(archive.string(), source, config, plates);
-
-    bool called = false;
-    Model loaded_model;
-    LoadedProject loaded;
-    const bool result = load_model(archive.string(), loaded_model, loaded,
-        [&called](int stage, int, int, bool& cancel) {
-            called = true;
-            cancel = stage == IMPORT_STAGE_OPEN;
-        });
-    CHECK(called);
-    CHECK_FALSE(result);
-}
-
-TEST_CASE("BBS 3MF export cancellation stops before writing a project", "[3MF][Bbs3mfExtended][Cancellation]")
-{
-    Model source;
-    make_model(source);
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    ScopedTemporaryDir backup("orca_bbs_ext_export_cancel");
-    source.set_backup_path(backup.string());
-    PlateData plate;
-    make_plate(plate, 0, {{0, 0}});
-    PlateDataPtrs plates{&plate};
-    ScopedTemporaryFile archive(".3mf");
-    bool called = false;
-    StoreParams params;
-    params.path = archive.string();
-    params.model = &source;
-    params.config = &config;
-    params.plate_data_list = plates;
-    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
-    params.proFn = [&called](int, int, int, bool& cancel) {
-        called = true;
-        cancel = true;
-    };
-    CHECK_FALSE(store_bbs_3mf(params));
-    CHECK(called);
-    CHECK_FALSE(boost::filesystem::exists(archive.path()));
-    CHECK_FALSE(boost::filesystem::exists(archive.string() + ".tmp"));
-}
-
-TEST_CASE("BBS 3MF import cancellation leaves plate output untouched at loading",
-          "[3MF][Bbs3mfLateCancellation][Import]")
-{
-    Model source;
-    make_model(source);
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    ScopedTemporaryDir backup("orca_bbs_late_import_cancel_store");
-    source.set_backup_path(backup.string());
-    PlateData plate;
-    make_plate(plate, 0, {{0, 0}});
-    PlateDataPtrs plates{&plate};
-    ScopedTemporaryFile archive(".3mf");
-    store_model(archive.string(), source, config, plates);
+    StoreParams store_params = fixture.store_params(archive.string());
+    REQUIRE(store_bbs_3mf(store_params));
 
     std::vector<int> stages;
     Model loaded_model;
     LoadedProject loaded;
+    seed_load_outputs(loaded_model, loaded);
+    const PlateData *sentinel_plate = loaded.plates.front();
+    const bool result = load_model(archive.string(), loaded_model, loaded,
+        [&stages](int stage, int, int, bool& cancel) {
+            stages.push_back(stage);
+            cancel = stage == IMPORT_STAGE_OPEN;
+        });
+    CHECK_FALSE(result);
+    CHECK(stages == std::vector<int>{IMPORT_STAGE_OPEN});
+    check_load_outputs_untouched(loaded_model, loaded, sentinel_plate);
+}
+
+TEST_CASE("BBS 3MF import cancellation leaves plate output untouched at loading", "[3MF][Bbs3mfExtended][Cancellation]")
+{
+    CancellationFixture fixture;
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams store_params = fixture.store_params(archive.string());
+    REQUIRE(store_bbs_3mf(store_params));
+
+    std::vector<int> stages;
+    Model loaded_model;
+    LoadedProject loaded;
+    seed_load_outputs(loaded_model, loaded);
+    const PlateData *sentinel_plate = loaded.plates.front();
     const bool result = load_model(archive.string(), loaded_model, loaded,
         [&stages](int stage, int, int, bool& cancel) {
             stages.push_back(stage);
@@ -2551,68 +2572,72 @@ TEST_CASE("BBS 3MF import cancellation leaves plate output untouched at loading"
         });
 
     CHECK_FALSE(result);
-    REQUIRE(std::find(stages.begin(), stages.end(), IMPORT_STAGE_LOADING_PLATES) != stages.end());
-    CHECK(loaded.plates.empty());
+    REQUIRE_FALSE(stages.empty());
+    CHECK(stages.back() == IMPORT_STAGE_LOADING_PLATES);
+    // The plate list is only replaced after this stage; the model has been loaded by now.
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK(loaded.plates.front() == sentinel_plate);
+    CHECK(loaded.plates.front()->plate_name == "sentinel-plate");
 }
 
-TEST_CASE("BBS 3MF export cancellation removes unfinished archives at late stages",
-          "[3MF][Bbs3mfLateCancellation][Export]")
+TEST_CASE("BBS 3MF export cancellation stops before writing a project", "[3MF][Bbs3mfExtended][Cancellation]")
 {
-    const int target_stage = GENERATE(EXPORT_STAGE_ADD_MODELS, EXPORT_STAGE_FINISH);
+    CancellationFixture fixture;
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params = fixture.store_params(archive.string());
+    std::vector<int> stages;
+    params.proFn = [&stages](int stage, int, int, bool& cancel) {
+        stages.push_back(stage);
+        cancel = stage == EXPORT_STAGE_OPEN_3MF;
+    };
+    CHECK_FALSE(store_bbs_3mf(params));
+    // Cancelled at the seam before the archive is opened: no later stage runs and
+    // nothing is written.
+    CHECK(stages == std::vector<int>{EXPORT_STAGE_OPEN_3MF});
+    CHECK_FALSE(boost::filesystem::exists(archive.path()));
+    CHECK_FALSE(boost::filesystem::exists(archive.string() + ".tmp"));
+}
+
+TEST_CASE("BBS 3MF export cancellation removes unfinished archives after the archive is opened", "[3MF][Bbs3mfExtended][Cancellation]")
+{
+    // Stages that run for this fixture once the archive is open. EXPORT_STAGE_ADD_PROJECT_CONFIG
+    // only runs for projects with embedded presets.
+    const int target_stage = GENERATE(EXPORT_STAGE_ADD_MODELS, EXPORT_STAGE_ADD_RELATIONS, EXPORT_STAGE_FINISH);
     const bool preserve_existing = GENERATE(false, true);
     INFO("target export stage " << target_stage);
     INFO("pre-existing destination " << preserve_existing);
 
-    Model source;
-    make_model(source);
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    ScopedTemporaryDir backup("orca_bbs_late_export_cancel_store");
-    source.set_backup_path(backup.string());
-    PlateData plate;
-    make_plate(plate, 0, {{0, 0}});
-    PlateDataPtrs plates{&plate};
-
-    ScopedTemporaryDir output_dir("orca_bbs_late_export_cancel_output");
+    CancellationFixture fixture;
+    ScopedTemporaryDir output_dir("orca_bbs_cancel_output");
     const boost::filesystem::path output = output_dir.path() / ("cancelled-" + std::to_string(target_stage) + ".3mf");
-    std::vector<int> stages;
-    StoreParams params;
-    params.path = output.string();
-    params.model = &source;
-    params.config = &config;
-    params.plate_data_list = plates;
-    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    StoreParams params = fixture.store_params(output.string());
 
-    const auto read_file = [&output]() {
-        boost::nowide::ifstream input(output.string(), std::ios::binary);
-        REQUIRE(input.good());
-        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-    };
     std::string existing_archive;
     if (preserve_existing) {
         REQUIRE(store_bbs_3mf(params));
-        existing_archive = read_file();
+        read_file(output, existing_archive);
         REQUIRE_FALSE(existing_archive.empty());
     }
 
-    bool cancellation_requested = false;
-    bool progress_after_cancellation = false;
-    params.proFn = [&stages, target_stage, &cancellation_requested, &progress_after_cancellation]
-                   (int stage, int, int, bool& cancel) {
-        progress_after_cancellation |= cancellation_requested;
+    std::vector<int> stages;
+    params.proFn = [&stages, target_stage](int stage, int, int, bool& cancel) {
         stages.push_back(stage);
         cancel = stage == target_stage;
-        cancellation_requested |= cancel;
     };
 
     CHECK_FALSE(store_bbs_3mf(params));
-    REQUIRE(std::find(stages.begin(), stages.end(), target_stage) != stages.end());
-    CHECK_FALSE(progress_after_cancellation);
+    // The cancelling stage is the last one reported.
+    REQUIRE_FALSE(stages.empty());
+    CHECK(stages.back() == target_stage);
     CHECK_FALSE(boost::filesystem::exists(output.string() + ".tmp"));
 
-    if (preserve_existing)
-        CHECK(read_file() == existing_archive);
-    else
+    if (preserve_existing) {
+        std::string preserved;
+        read_file(output, preserved);
+        CHECK(preserved == existing_archive);
+    } else {
         CHECK_FALSE(boost::filesystem::exists(output));
+    }
 }
 
 } // namespace bbs_archive_contracts
