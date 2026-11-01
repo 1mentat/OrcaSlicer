@@ -1656,6 +1656,146 @@ TEST_CASE("datum plane: offset + tilt resolution and sketching on it", "[CadDocu
     REQUIRE(only_plane.bodies.empty());
 }
 
+TEST_CASE("CadDocument tangent datum touches a cylinder with an outward normal and turns counter-clockwise with its angle", "[CadDocument][datum]")
+{
+    CadDocument doc;
+    const int sketch = doc.add_sketch(SketchShape::Circle, SketchPlane::XY(),
+                                      0.0, 0.0, 5.0, "CylinderSketch");
+    REQUIRE(sketch >= 0);
+    doc.add_extrude(sketch, 20.0, false, BooleanMode::New, "Cylinder");
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    int cylindrical_face = -1;
+    const int face_count = GeometryEngine::face_count(doc.bodies[0].shape);
+    for (int index = 0; index < face_count; ++index) {
+        const TopoDS_Face face = GeometryEngine::face_by_index(doc.bodies[0].shape, index);
+        if (BRepAdaptor_Surface(face).GetType() == GeomAbs_Cylinder) {
+            cylindrical_face = index;
+            break;
+        }
+    }
+    REQUIRE(cylindrical_face >= 0);
+    const auto cylinder = GeometryEngine::cylinder_of_face(
+        GeometryEngine::face_by_index(doc.bodies[0].shape, cylindrical_face));
+    REQUIRE(cylinder.ok);
+    REQUIRE_THAT(cylinder.radius, Catch::Matchers::WithinAbs(5.0, 1e-6));
+
+    CadFeature tangent;
+    tangent.type            = CadFeatureType::Plane;
+    tangent.name            = "TangentCylinder";
+    tangent.plane_type      = PlaneType::Tangent;
+    tangent.plane_face_body = 0;
+    tangent.plane_face      = cylindrical_face;
+    tangent.plane_angle_tilt = 0.0;
+    doc.features.push_back(tangent);
+
+    std::vector<SketchPlane> resolved_planes;
+    const std::vector<double> angles{ 0.0, 90.0, 180.0 };
+    for (double angle : angles) {
+        INFO("tangent angle=" << angle);
+        doc.features.back().plane_angle_tilt = angle;
+        const auto planes = doc.resolve_datum_planes();
+        REQUIRE(planes.size() == 1);
+        const SketchPlane &resolved = planes.front().second;
+        const Vec3d axial_point = cylinder.base + cylinder.axis *
+            (resolved.origin - cylinder.base).dot(cylinder.axis);
+        const Vec3d radial = resolved.origin - axial_point;
+        CHECK_THAT(radial.norm(), Catch::Matchers::WithinAbs(cylinder.radius, 1e-6));
+        // The touch point lies at the axial position of the cylinder's base point.
+        CHECK_THAT((resolved.origin - cylinder.base).dot(cylinder.axis), Catch::Matchers::WithinAbs(0.0, 1e-6));
+        CHECK_THAT(resolved.normal.norm(), Catch::Matchers::WithinAbs(1.0, 1e-6));
+        CHECK_THAT(std::abs(resolved.normal.dot(cylinder.axis)),
+                   Catch::Matchers::WithinAbs(0.0, 1e-6));
+        // The normal points outward, away from the axis.
+        CHECK_THAT(resolved.normal.dot(radial.normalized()), Catch::Matchers::WithinAbs(1.0, 1e-6));
+        resolved_planes.push_back(resolved);
+    }
+
+    // Relative rotations and chord lengths do not depend on the kernel's angular
+    // reference or a fixed face ordinal. A quarter/half turn must change the plane.
+    CHECK_THAT(resolved_planes[0].normal.dot(resolved_planes[1].normal),
+               Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(resolved_planes[0].normal.dot(resolved_planes[2].normal),
+               Catch::Matchers::WithinAbs(-1.0, 1e-6));
+    CHECK_THAT((resolved_planes[0].origin - resolved_planes[1].origin).norm(),
+               Catch::Matchers::WithinAbs(std::sqrt(2.0) * cylinder.radius, 1e-6));
+    CHECK_THAT((resolved_planes[0].origin - resolved_planes[2].origin).norm(),
+               Catch::Matchers::WithinAbs(2.0 * cylinder.radius, 1e-6));
+    // A positive tilt turns the plane counter-clockwise about the cylinder axis.
+    CHECK_THAT(cylinder.axis.dot(resolved_planes[0].normal.cross(resolved_planes[1].normal)),
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+}
+
+TEST_CASE("CadDocument two-edge datum uses the cross-product normal", "[CadDocument][datum]")
+{
+    CadDocument doc;
+    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                      20.0, 20.0, 10.0, "BoxSketch");
+    REQUIRE(sketch >= 0);
+    doc.add_extrude(sketch, 20.0, false, BooleanMode::New, "Box");
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    const auto edges = GeometryEngine::edges_of(doc.bodies[0].shape);
+    REQUIRE(edges.size() >= 2);
+    int edge_a = -1;
+    int edge_b = -1;
+    Vec3d a0 = Vec3d::Zero(), a_dir = Vec3d::Zero(), expected_normal = Vec3d::Zero();
+    for (size_t i = 0; i < edges.size() && edge_a < 0; ++i) {
+        const auto a_points = GeometryEngine::sample_edge_world(edges[i]);
+        if (a_points.size() < 2) continue;
+        const Vec3d dir_a = (a_points.back() - a_points.front()).normalized();
+        for (size_t j = i + 1; j < edges.size(); ++j) {
+            const auto b_points = GeometryEngine::sample_edge_world(edges[j]);
+            if (b_points.size() < 2) continue;
+            const Vec3d dir_b = (b_points.back() - b_points.front()).normalized();
+            const Vec3d cross = dir_a.cross(dir_b);
+            if (cross.norm() < 0.9) continue;
+            // Require both public edge samples to start at the shared vertex. This makes the
+            // alternate parallel-edge fallback's v = eA_dir x (eB_p0-eA_p0) exactly zero.
+            const bool shared_start = (a_points.front() - b_points.front()).norm() < 1e-6;
+            if (!shared_start || a_points.front().norm() < 1e-3) continue;
+            edge_a = static_cast<int>(i);
+            edge_b = static_cast<int>(j);
+            a0 = a_points.front();
+            a_dir = dir_a;
+            expected_normal = cross.normalized();
+            break;
+        }
+    }
+    REQUIRE(edge_a >= 0);
+    REQUIRE(edge_b >= 0);
+
+    CadFeature two_edges;
+    two_edges.type             = CadFeatureType::Plane;
+    two_edges.name             = "TwoEdges";
+    two_edges.plane_type       = PlaneType::TwoEdges;
+    two_edges.plane_edge_body  = 0;
+    two_edges.plane_edge       = edge_a;
+    two_edges.plane_edge2_body = 0;
+    two_edges.plane_edge2      = edge_b;
+    doc.features.push_back(two_edges);
+
+    const auto planes = doc.resolve_datum_planes();
+    REQUIRE(planes.size() == 1);
+    const SketchPlane &resolved = planes.front().second;
+    CHECK_THAT((resolved.origin - a0).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT((resolved.normal - expected_normal).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(resolved.normal.norm(), Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT(std::abs(resolved.normal.dot(a_dir)),
+               Catch::Matchers::WithinAbs(0.0, 1e-6));
+
+    // The operand order matters: with the edges swapped the normal is the opposite cross product.
+    doc.features.back().plane_edge  = edge_b;
+    doc.features.back().plane_edge2 = edge_a;
+    const auto swapped = doc.resolve_datum_planes();
+    REQUIRE(swapped.size() == 1);
+    CHECK_THAT((swapped.front().second.normal + expected_normal).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+}
+
 TEST_CASE("loft builds a solid skinning two profiles on parallel planes", "[CadDocument]")
 {
     using Catch::Matchers::WithinRel;
