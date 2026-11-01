@@ -7349,6 +7349,98 @@ TEST_CASE("Preset cloning reports collisions and supports an explicit rewrite", 
     CHECK_THAT(layer_height("Original Process"), Catch::Matchers::WithinAbs(0.20, 1e-9));
 }
 
+TEST_CASE("Saving a preset into the project embeds a child of its parent and reset removes only embedded presets", "[Preset][Bundle][PresetLifecycle][Project]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    bundle.prints.load_preset("", "Editable Process", print_config(bundle, 0.18), true);
+    bundle.prints.get_edited_preset().config.opt<ConfigOptionFloat>("layer_height")->value = 0.31;
+
+    // Keep the source preset as the parent (no detach) so the embedded copy can be written as a diff.
+    bundle.prints.save_current_preset("Embedded Process", false, true);
+    const Preset *embedded = bundle.prints.find_preset("Embedded Process");
+    REQUIRE(embedded != nullptr);
+    CHECK(embedded->is_project_embedded);
+    CHECK_FALSE(embedded->is_system);
+    CHECK(embedded->inherits() == "Editable Process");
+    CHECK(embedded->config.opt_string("print_settings_id") == "Embedded Process");
+    CHECK_THAT(embedded->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+    CHECK(bundle.prints.get_selected_preset().name == "Embedded Process");
+    // A project-embedded preset is serialized by the project writer, not into the user library.
+    CHECK_FALSE(fs::exists(embedded->file));
+    // The parent keeps its own value.
+    const Preset *parent = bundle.prints.find_preset("Editable Process");
+    REQUIRE(parent != nullptr);
+    CHECK_FALSE(parent->is_project_embedded);
+    CHECK_THAT(parent->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.18, 1e-9));
+
+    // An ordinary user save next to it is not project-embedded.
+    bundle.prints.get_edited_preset().config.opt<ConfigOptionFloat>("layer_height")->value = 0.27;
+    bundle.prints.save_current_preset("Library Process", false, false);
+    const Preset *library = bundle.prints.find_preset("Library Process");
+    REQUIRE(library != nullptr);
+    CHECK_FALSE(library->is_project_embedded);
+    CHECK(fs::exists(library->file));
+
+    {
+        std::vector<Preset *> project_presets = bundle.prints.get_project_embedded_presets();
+        const ScopeGuard free_presets([&project_presets] {
+            for (Preset *preset : project_presets)
+                delete preset;
+        });
+        REQUIRE(project_presets.size() == 1);
+        CHECK(project_presets.front()->name == "Embedded Process");
+        CHECK(project_presets.front()->inherits() == "Editable Process");
+    }
+
+    // The selected preset is a "Library Process" now, so removing the embedded copy needs no reselection.
+    CHECK_FALSE(bundle.prints.reset_project_embedded_presets());
+    CHECK(bundle.prints.find_preset("Embedded Process") == nullptr);
+    CHECK(bundle.prints.find_preset("Editable Process") != nullptr);
+    CHECK(bundle.prints.find_preset("Library Process") != nullptr);
+    CHECK(bundle.prints.get_selected_preset().name == "Library Process");
+}
+
+TEST_CASE("Resetting project-embedded presets reports when the selected preset was removed", "[Preset][Bundle][PresetLifecycle][Project]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    bundle.prints.load_preset("", "Editable Process", print_config(bundle, 0.18), true);
+    bundle.prints.get_edited_preset().config.opt<ConfigOptionFloat>("layer_height")->value = 0.31;
+    bundle.prints.save_current_preset("Embedded Process", false, true);
+    REQUIRE(bundle.prints.get_selected_preset().name == "Embedded Process");
+
+    CHECK(bundle.prints.reset_project_embedded_presets());
+    CHECK(bundle.prints.find_preset("Embedded Process") == nullptr);
+    CHECK(bundle.prints.find_preset("Editable Process") != nullptr);
+    // Nothing is left to remove.
+    CHECK_FALSE(bundle.prints.reset_project_embedded_presets());
+}
+
+TEST_CASE("save_changes_for_preset reverts unselected edits and embeds the saved copy", "[Preset][Bundle][PresetLifecycle][Project]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    bundle.prints.load_preset("", "Save Parent", print_config(bundle, 0.20), true);
+    auto &edited = bundle.prints.get_edited_preset().config;
+    edited.opt<ConfigOptionFloat>("layer_height")->value = 0.34;
+    edited.opt<ConfigOptionInt>("wall_loops")->value = 7;
+
+    // layer_height is deselected in the save dialog; wall_loops stays selected.
+    bundle.save_changes_for_preset("Embedded Save", Preset::TYPE_PRINT, {"layer_height"}, true);
+    const Preset *saved = bundle.prints.find_preset("Embedded Save");
+    REQUIRE(saved != nullptr);
+    CHECK(saved->is_project_embedded);
+    CHECK(saved->inherits() == "Save Parent");
+    CHECK_THAT(saved->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    CHECK(saved->config.opt_int("wall_loops") == 7);
+    CHECK_FALSE(fs::exists(saved->file));
+
+    bundle.reset_project_embedded_presets();
+    CHECK(bundle.prints.find_preset("Embedded Save") == nullptr);
+    CHECK(bundle.prints.find_preset("Save Parent") != nullptr);
+}
+
 } // namespace preset_lifecycle_contracts
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
