@@ -968,6 +968,25 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             add_point_edge_distance(e1.second, e2);
             add_point_edge_distance(e2.first, e1);
             add_point_edge_distance(e2.second, e1);
+            // The closest points of skew segments can lie inside both of them, away from every endpoint.
+            {
+                const Vec3d d1 = e1.second - e1.first;
+                const Vec3d d2 = e2.second - e2.first;
+                const Vec3d r = e1.first - e2.first;
+                const double d1d1 = d1.dot(d1), d1d2 = d1.dot(d2), d1r = d1.dot(r), d2d2 = d2.dot(d2), d2r = d2.dot(r);
+                // denom = |d1|^2 |d2|^2 sin^2(angle): skip only edges parallel to within roundoff, which the
+                // endpoint candidates handle.
+                const double denom = d1d1 * d2d2 - d1d2 * d1d2;
+                if (denom > 1e-12 * d1d1 * d2d2) {
+                    const double s = (d1d2 * d2r - d1r * d2d2) / denom;
+                    const double t = (d1d1 * d2r - d1d2 * d1r) / denom;
+                    if (s > 0.0 && s < 1.0 && t > 0.0 && t < 1.0) {
+                        const Vec3d p1 = e1.first + s * d1;
+                        const Vec3d p2 = e2.first + t * d2;
+                        distances.emplace_back((p2 - p1).norm(), p1, p2);
+                    }
+                }
+            }
             auto it = std::min_element(distances.begin(), distances.end(),
                 [](const DistAndPoints& item1, const DistAndPoints& item2) {
                     return item1.dist < item2.dist;
