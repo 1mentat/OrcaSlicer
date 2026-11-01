@@ -1617,7 +1617,7 @@ TEST_CASE("datum plane: offset + tilt resolution and sketching on it", "[CadDocu
     REQUIRE(only_plane.bodies.empty());
 }
 
-TEST_CASE("CadDocument tangent datum follows a cylindrical face", "[CadDocument][datum]")
+TEST_CASE("CadDocument tangent datum touches a cylinder with an outward normal and turns counter-clockwise with its angle", "[CadDocument][datum]")
 {
     CadDocument doc;
     const int sketch = doc.add_sketch(SketchShape::Circle, SketchPlane::XY(),
@@ -1663,13 +1663,14 @@ TEST_CASE("CadDocument tangent datum follows a cylindrical face", "[CadDocument]
         const Vec3d axial_point = cylinder.base + cylinder.axis *
             (resolved.origin - cylinder.base).dot(cylinder.axis);
         const Vec3d radial = resolved.origin - axial_point;
-        REQUIRE(radial.norm() > 1e-6);
         CHECK_THAT(radial.norm(), Catch::Matchers::WithinAbs(cylinder.radius, 1e-6));
+        // The touch point lies at the axial position of the cylinder's base point.
+        CHECK_THAT((resolved.origin - cylinder.base).dot(cylinder.axis), Catch::Matchers::WithinAbs(0.0, 1e-6));
         CHECK_THAT(resolved.normal.norm(), Catch::Matchers::WithinAbs(1.0, 1e-6));
         CHECK_THAT(std::abs(resolved.normal.dot(cylinder.axis)),
                    Catch::Matchers::WithinAbs(0.0, 1e-6));
-        CHECK_THAT(std::abs(resolved.normal.dot(radial.normalized())),
-                   Catch::Matchers::WithinAbs(1.0, 1e-6));
+        // The normal points outward, away from the axis.
+        CHECK_THAT(resolved.normal.dot(radial.normalized()), Catch::Matchers::WithinAbs(1.0, 1e-6));
         resolved_planes.push_back(resolved);
     }
 
@@ -1683,6 +1684,9 @@ TEST_CASE("CadDocument tangent datum follows a cylindrical face", "[CadDocument]
                Catch::Matchers::WithinAbs(std::sqrt(2.0) * cylinder.radius, 1e-6));
     CHECK_THAT((resolved_planes[0].origin - resolved_planes[2].origin).norm(),
                Catch::Matchers::WithinAbs(2.0 * cylinder.radius, 1e-6));
+    // A positive tilt turns the plane counter-clockwise about the cylinder axis.
+    CHECK_THAT(cylinder.axis.dot(resolved_planes[0].normal.cross(resolved_planes[1].normal)),
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
 }
 
 TEST_CASE("CadDocument two-edge datum uses the cross-product normal", "[CadDocument][datum]")
@@ -1700,7 +1704,7 @@ TEST_CASE("CadDocument two-edge datum uses the cross-product normal", "[CadDocum
     REQUIRE(edges.size() >= 2);
     int edge_a = -1;
     int edge_b = -1;
-    Vec3d a0, a_dir, expected_normal;
+    Vec3d a0 = Vec3d::Zero(), a_dir = Vec3d::Zero(), expected_normal = Vec3d::Zero();
     for (size_t i = 0; i < edges.size() && edge_a < 0; ++i) {
         const auto a_points = GeometryEngine::sample_edge_world(edges[i]);
         if (a_points.size() < 2) continue;
@@ -1740,11 +1744,17 @@ TEST_CASE("CadDocument two-edge datum uses the cross-product normal", "[CadDocum
     REQUIRE(planes.size() == 1);
     const SketchPlane &resolved = planes.front().second;
     CHECK_THAT((resolved.origin - a0).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
-    CHECK_THAT(std::abs(resolved.normal.dot(expected_normal)),
-               Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT((resolved.normal - expected_normal).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
     CHECK_THAT(resolved.normal.norm(), Catch::Matchers::WithinAbs(1.0, 1e-6));
     CHECK_THAT(std::abs(resolved.normal.dot(a_dir)),
                Catch::Matchers::WithinAbs(0.0, 1e-6));
+
+    // The operand order matters: with the edges swapped the normal is the opposite cross product.
+    doc.features.back().plane_edge  = edge_b;
+    doc.features.back().plane_edge2 = edge_a;
+    const auto swapped = doc.resolve_datum_planes();
+    REQUIRE(swapped.size() == 1);
+    CHECK_THAT((swapped.front().second.normal + expected_normal).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
 }
 
 TEST_CASE("loft builds a solid skinning two profiles on parallel planes", "[CadDocument]")
