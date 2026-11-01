@@ -396,16 +396,12 @@ TEST_CASE("Coplanar circles report disjoint, tangent and nested gaps", "[Measure
                         1.0); // reverse nested
 }
 
-// Known bug: when the projected circles intersect, the parallel branch returns the two centers as
-// witnesses and their distance; fixed by the follow-up fix PR
-TEST_CASE("Intersecting coplanar circles report zero distance at a common point", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Intersecting coplanar circles report zero distance at a common point", "[Measure][MeasureContracts]")
 {
     check_parallel_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0), circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 2.0), 0.0);
 }
 
-// Known bug: for parallel circles in different planes the distance ignores the axial gap; fixed by the
-// follow-up fix PR
-TEST_CASE("Parallel circles in different planes include the axial gap", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Parallel circles in different planes include the axial gap", "[Measure][MeasureContracts]")
 {
     const SurfaceFeature radius2 = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
     check_parallel_pair(radius2, circle(Vec3d(5.0, 0.0, 3.0), Vec3d::UnitZ(), 1.0), std::sqrt(13.0));  // disjoint, above
@@ -416,8 +412,7 @@ TEST_CASE("Parallel circles in different planes include the axial gap", "[Measur
     check_parallel_pair(radius2, circle(Vec3d(1.0, 0.0, 2.0), Vec3d::UnitZ(), 2.0), 2.0);  // projections intersect
 }
 
-// Known bug: as above, parallel circles in different planes lose the axial gap; fixed by the follow-up fix PR
-TEST_CASE("Parallel circle analytic sweep preserves axial and radial gaps", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Parallel circle analytic sweep preserves axial and radial gaps", "[Measure][MeasureContracts]")
 {
     struct Case {
         double radius0;
