@@ -512,11 +512,27 @@ TEST_CASE("Edge distance to a circle is zero where a secant crosses it", "[Measu
     check_witnessed_distance(piercing.distance_infinite, 0.0);
     check_vec(piercing.distance_infinite->from, Vec3d(2.0, 0.0, 0.0));
 
-    // Moved out to x = 3 it pierces the plane 1 outside the circle.
+    // Moved out to x = 3 it pierces the plane 1 outside the circle. (A regression guard: the center's foot on
+    // this edge is the same point, so it does not depend on the pierce candidate.)
     const MeasurementResult missing = get_measurement(edge(Vec3d(3.0, 0.0, -1.0), Vec3d(3.0, 0.0, 1.0)), ring);
     check_witnessed_distance(missing.distance_infinite, 1.0);
     check_vec(missing.distance_infinite->from, Vec3d(3.0, 0.0, 0.0));
     check_vec(missing.distance_infinite->to, Vec3d(2.0, 0.0, 0.0));
+
+    // A very shallow secant (slope 5e-5) crosses the radius-5 circle at (3, 4, 0).
+    const SurfaceFeature ring5 = circle(Vec3d::Zero(), Vec3d::UnitZ(), 5.0);
+    const MeasurementResult shallow = get_measurement(edge(Vec3d(-10.0, 4.0, -0.00065), Vec3d(10.0, 4.0, 0.00035)), ring5);
+    check_witnessed_distance(shallow.distance_infinite, 0.0);
+    check_vec(shallow.distance_infinite->from, Vec3d(3.0, 4.0, 0.0), 1e-6);
+
+    // An edge parallel to the plane, 1 above the disc: the points above the circle are 1 away.
+    const MeasurementResult over_disc = get_measurement(edge(Vec3d(-5.0, 1.0, 1.0), Vec3d(5.0, 1.0, 1.0)), ring);
+    check_witnessed_distance(over_disc.distance_infinite, 1.0);
+    check_on_circle(over_disc.distance_infinite->to, ring);
+
+    // Center mode of a zero-length edge is the distance of its point from the center.
+    const MeasurementResult point_edge = get_measurement(edge(Vec3d(3.0, 0.0, 0.0), Vec3d(3.0, 0.0, 0.0)), ring, true);
+    check_witnessed_distance(point_edge.distance_infinite, 3.0);
 }
 
 TEST_CASE("Edge angles measure the rays pointing away from the intersection", "[Measure][MeasureContracts]")

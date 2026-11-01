@@ -991,18 +991,19 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             const Vec3d                              inter   = line.intersectionPoint(plane);
             const Vec3d                              e1inter = inter - e.first;
             if (e1inter.dot(e1e2) >= 0.0 && e1inter.norm() < e1e2.norm()) distances.emplace_back(*get_measurement(SurfaceFeature(inter), f2).distance_strict);
-            // The edge can cross the circle away from those points: where its line pierces the circle's plane,
-            // or, for an edge in that plane, where its line cuts the circle.
+            // The edge can cross the circle away from those points: where its line pierces the circle's plane
+            // (any slope beyond roundoff), or, for an edge parallel to that plane, above where its projection
+            // cuts the circle (in the plane, that is where it crosses the circle).
             const auto add_if_on_edge = [&](const Vec3d& p) {
                 const Vec3d e1p = p - e.first;
                 if (e1p.dot(e1e2) >= 0.0 && e1p.norm() < e1e2.norm())
                     distances.emplace_back(*get_measurement(SurfaceFeature(p), f2).distance_strict);
             };
             const Eigen::Hyperplane<double, 3> circle_plane(normal.normalized(), center);
-            if (std::abs(e1e2_unit.dot(normal.normalized())) > EPSILON)
+            if (std::abs(e1e2_unit.dot(normal.normalized())) > 1e-12)
                 add_if_on_edge(line.intersectionPoint(circle_plane));
-            else if (circle_plane.absDistance(e.first) < EPSILON && (inter - center).squaredNorm() < sqr(radius)) {
-                const double half_chord = std::sqrt(sqr(radius) - (inter - center).squaredNorm());
+            else if (const double foot_sq = (circle_plane.projection(inter) - center).squaredNorm(); foot_sq < sqr(radius)) {
+                const double half_chord = std::sqrt(sqr(radius) - foot_sq);
                 add_if_on_edge(inter - half_chord * e1e2_unit);
                 add_if_on_edge(inter + half_chord * e1e2_unit);
             }
@@ -1014,7 +1015,8 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             else{
                 // Center mode: measure from the edge point nearest the center, which need not be the point
                 // nearest the circle.
-                const double t = std::clamp((center - e.first).dot(e1e2) / e1e2.squaredNorm(), 0.0, 1.0);
+                const double len_sq = e1e2.squaredNorm();
+                const double t = len_sq > 0.0 ? std::clamp((center - e.first).dot(e1e2) / len_sq, 0.0, 1.0) : 0.0;
                 const Vec3d nearest = e.first + t * e1e2;
                 result.distance_infinite = std::make_optional(DistAndPoints{(nearest - center).norm(), nearest, center});
             }
