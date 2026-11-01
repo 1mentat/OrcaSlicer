@@ -21,6 +21,24 @@
       ],
       "reason": "The exported-G-code line-end case explicitly generates ooze_prevention false and true on a two-filament non-SEMM print with preheat_time 30; the emitted preheat T marker must match the configured boolean. Both values passed in the accepted native full run."
     },
+    "preheat_time": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GcpPreheat]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The XL G-code post processor exercises the registered 0 and 120 second endpoints plus 60 seconds. It checks the emitted preheat command count, positive time window, rewritten extrusion records, and output line IDs. The ordinary 154-case control suite and source-local mutations pass; other printer models are not claimed."
+    },
+    "preheat_steps": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GcpPreheat]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The XL G-code post processor exercises the registered 1 and 10 step endpoints with preheat enabled. It checks the emitted command count and descending time schedule against the rewritten output. The ordinary 154-case control suite and source-local mutations pass; other printer models are not claimed."
+    },
     "enable_prime_tower": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[WipeTower]",

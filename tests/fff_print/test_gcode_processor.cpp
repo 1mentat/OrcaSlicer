@@ -1793,12 +1793,18 @@ constexpr std::uintmax_t kMaxOutputBytes = 512 * 1024;
 struct Processed {
     std::string output;
     GCodeProcessorResult result;
+    bool backtrace_enabled{false};
     Processed() = default;
-    Processed(Processed &&other) noexcept : output(std::move(other.output)) { result = std::move(other.result); }
+    Processed(Processed &&other) noexcept
+        : output(std::move(other.output)), backtrace_enabled(other.backtrace_enabled)
+    {
+        result = std::move(other.result);
+    }
     Processed &operator=(Processed &&other) noexcept
     {
         output = std::move(other.output);
         result = std::move(other.result);
+        backtrace_enabled = other.backtrace_enabled;
         return *this;
     }
     Processed(const Processed &) = delete;
@@ -1888,6 +1894,7 @@ Processed process_post(const std::string &gcode, FullPrintConfig config = {}, bo
     Processed result;
     result.output = output.str();
     REQUIRE(result.output.size() <= kMaxOutputBytes);
+    result.backtrace_enabled = processor.get_result().backtrace_enabled;
     result.result = std::move(processor.extract_result());
     if (group)
         check_group_mapping(result.result);
@@ -2825,3 +2832,177 @@ TEST_CASE("Filament summaries use diameter, density, and price settings",
     CHECK(no_price.output.find("; filament used [g] = 3.93\n") != std::string::npos);
     CHECK(no_price.output.find("; filament cost = 0.00\n") != std::string::npos);
 }
+
+// Vary both scalar controls through the ordinary FullPrintConfig path. The XL marker selects
+// ExportLines' time-based T-command backtrace; both its rewritten G-code and extrusion output are
+// checked after finalization.
+namespace gcode_processor_reachable_contracts {
+namespace preheat_variance_contracts {
+namespace {
+
+struct XLBacktraceCommand {
+    float delay;
+    float temperature;
+};
+
+struct RewrittenExtrusion {
+    float x;
+    float y;
+    float z;
+    float delta_e;
+    unsigned int output_line_id;
+};
+
+std::string measured_xl_backtrace_window()
+{
+    std::string gcode = "; MACHINE_START_GCODE_END\nG90\nM83\n";
+    for (int x = 10; x <= 400; x += 10) {
+        if (x == 210)
+            gcode += "T1\n";
+        gcode += "G1 X" + std::to_string(x) + " Y0 Z0.2 E0.1 F60\n";
+    }
+    return gcode + "; MACHINE_END_GCODE_START\n";
+}
+
+std::vector<XLBacktraceCommand> xl_backtrace_commands(const std::string &output)
+{
+    std::vector<XLBacktraceCommand> commands;
+    GCodeReader reader;
+    reader.parse_buffer(output, [&commands](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("M104.1"))
+            return;
+        float tool = -1.f;
+        if (!line.has_value('T', tool) || std::abs(tool - 1.f) > 1e-6f)
+            return;
+        float delay = -1.f;
+        float temperature = -1.f;
+        REQUIRE(line.has_value('P', delay));
+        REQUIRE(line.has_value('S', temperature));
+        CHECK(std::isfinite(delay));
+        CHECK(delay > 0.f);
+        commands.push_back({delay, temperature});
+    });
+    return commands;
+}
+
+std::vector<RewrittenExtrusion> rewritten_extrusions(const std::string &output)
+{
+    std::vector<RewrittenExtrusion> extrusions;
+    unsigned int output_line_id = 0;
+    GCodeReader reader;
+    reader.parse_buffer(output, [&extrusions, &output_line_id](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        ++output_line_id;
+        if (!line.cmd_is("G1"))
+            return;
+        float delta_e = 0.f;
+        if (!line.has_value('E', delta_e))
+            return;
+        float x = 0.f;
+        float y = 0.f;
+        float z = 0.f;
+        REQUIRE(line.has_value('X', x));
+        REQUIRE(line.has_value('Y', y));
+        REQUIRE(line.has_value('Z', z));
+        extrusions.push_back({x, y, z, delta_e, output_line_id});
+    });
+    return extrusions;
+}
+
+} // namespace
+
+TEST_CASE("Preheat time and steps control XL backtrace commands",
+          "[GCodeProcessor][GcpPreheat][GCodeProcessorBacktraceControls]")
+{
+    struct Scenario {
+        float preheat_time;
+        int preheat_steps;
+        size_t expected_commands;
+    };
+    // Registered endpoints plus an interior time point: preheat_time [0, 120], steps [1, 10].
+    constexpr std::array<Scenario, 4> scenarios{{
+        { 0.f,   1,  0 },
+        { 60.f,  1,  1 },
+        { 120.f, 1,  1 },
+        { 120.f, 10, 10 },
+    }};
+    constexpr float kOneMoveTimeTolerance = 10.1f;
+
+    for (const Scenario &scenario : scenarios) {
+        CAPTURE(scenario.preheat_time, scenario.preheat_steps);
+        FullPrintConfig config = preheat_config();
+        config.ooze_prevention.value = true;
+        config.printer_notes.value = "PRINTER_VENDOR_PRUSA3D PRINTER_MODEL_XL";
+        config.enable_pre_heating.value = false;
+        config.preheat_time.value = scenario.preheat_time;
+        config.preheat_steps.value = scenario.preheat_steps;
+
+        const Processed processed = process_post(measured_xl_backtrace_window(), config);
+        const bool backtrace_enabled = scenario.preheat_time > 0.f;
+        CHECK(processed.backtrace_enabled == backtrace_enabled);
+        const auto commands = xl_backtrace_commands(processed.output);
+        REQUIRE(commands.size() == scenario.expected_commands);
+        if (!commands.empty()) {
+            // The earliest generated command must reach the configured positive-time window,
+            // within one measured move. This rejects a shorter but still-positive backtrace.
+            CHECK(std::abs(commands.front().delay - scenario.preheat_time) <= kOneMoveTimeTolerance);
+            for (size_t i = 0; i < commands.size(); ++i) {
+                CAPTURE(i);
+                CHECK(commands[i].delay <= scenario.preheat_time + kOneMoveTimeTolerance);
+                CHECK_THAT(commands[i].temperature, WithinAbs(225.f, 1e-4f));
+                if (i > 0)
+                    CHECK(commands[i].delay < commands[i - 1].delay);
+            }
+        }
+
+        // Read the post-processed file, not pre-rewrite processor vertices: the positive E
+        // records and endpoints must survive insertion of the backtrace commands.
+        const auto extrusions = rewritten_extrusions(processed.output);
+        REQUIRE(extrusions.size() == 40);
+        float total_deposition = 0.f;
+        for (size_t i = 0; i < extrusions.size(); ++i) {
+            CAPTURE(i);
+            CHECK(std::isfinite(extrusions[i].delta_e));
+            CHECK(extrusions[i].delta_e > 0.f);
+            total_deposition += extrusions[i].delta_e;
+            CHECK_THAT(extrusions[i].x, WithinAbs(10.f * static_cast<float>(i + 1), 1e-4f));
+            CHECK_THAT(extrusions[i].y, WithinAbs(0.f, 1e-4f));
+            CHECK_THAT(extrusions[i].z, WithinAbs(0.2f, 1e-4f));
+        }
+        CHECK_THAT(total_deposition, WithinAbs(4.f, 1e-4f));
+
+        // The processor's move IDs must still identify their physical G1 output lines after
+        // the inserted backtrace commands. This checks the original-to-rewritten line map,
+        // not just the rewritten extrusion values.
+        // Time-machine processing may also insert internal interpolation samples with positive E.
+        // Select only the fixture's 40 known physical (X,Y,Z,E) tuples so gcode_id remains an
+        // independent oracle for the original-to-rewritten output line mapping.
+        constexpr float kFixtureMoveTolerance = 1e-4f;
+        std::vector<const GCodeProcessorResult::MoveVertex *> deposition_moves;
+        deposition_moves.reserve(40);
+        for (size_t i = 0; i < 40; ++i) {
+            const float expected_x = 10.f * static_cast<float>(i + 1);
+            std::vector<const GCodeProcessorResult::MoveVertex *> matching_moves;
+            for (const auto &move : processed.result.moves) {
+                if (move.type != EMoveType::Extrude || move.delta_extruder <= 0.f)
+                    continue;
+                if (std::abs(move.position.x() - expected_x) <= kFixtureMoveTolerance &&
+                    std::abs(move.position.y()) <= kFixtureMoveTolerance &&
+                    std::abs(move.position.z() - 0.2f) <= kFixtureMoveTolerance &&
+                    std::abs(move.delta_extruder - 0.1f) <= kFixtureMoveTolerance)
+                    matching_moves.push_back(&move);
+            }
+            CAPTURE(i, expected_x);
+            REQUIRE(matching_moves.size() == 1);
+            deposition_moves.push_back(matching_moves.front());
+        }
+        REQUIRE(deposition_moves.size() == extrusions.size());
+        for (size_t i = 0; i < extrusions.size(); ++i) {
+            CAPTURE(i);
+            CHECK_THAT(deposition_moves[i]->position.x(), WithinAbs(extrusions[i].x, 1e-4f));
+            CHECK(deposition_moves[i]->gcode_id == extrusions[i].output_line_id);
+        }
+    }
+}
+
+} // namespace preheat_variance_contracts
+} // namespace gcode_processor_reachable_contracts
