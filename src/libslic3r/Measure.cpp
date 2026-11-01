@@ -157,8 +157,9 @@ void MeasuringImpl::update_planes()
     m_face_to_plane.resize(num_of_facets, size_t(-1));
     const std::vector<Vec3f> face_normals = its_face_normals(m_its);
     const std::vector<Vec3i32> face_neighbors = its_face_neighbors(m_its);
-    std::vector<int>         facet_queue(num_of_facets, 0);
-    int                      facet_queue_cnt = 0;
+    // A facet can be queued by several neighbours before it is visited, so the queue grows as needed and
+    // a facet already assigned to a plane is skipped when popped.
+    std::vector<int>         facet_queue;
     const stl_normal*        normal_ptr      = nullptr;
     size_t seed_facet_idx = 0;
 
@@ -178,17 +179,19 @@ void MeasuringImpl::update_planes()
         // Find next unvisited triangle:
         for (; seed_facet_idx < num_of_facets; ++ seed_facet_idx)
             if (m_face_to_plane[seed_facet_idx] == size_t(-1)) {
-                facet_queue[facet_queue_cnt ++] = seed_facet_idx;
+                facet_queue.push_back(int(seed_facet_idx));
                 normal_ptr = &face_normals[seed_facet_idx];
-                m_face_to_plane[seed_facet_idx] = m_planes.size();
                 m_planes.emplace_back();
                 break;
             }
         if (seed_facet_idx == num_of_facets)
             break; // Everything was visited already
 
-        while (facet_queue_cnt > 0) {
-            int facet_idx = facet_queue[-- facet_queue_cnt];
+        while (! facet_queue.empty()) {
+            const int facet_idx = facet_queue.back();
+            facet_queue.pop_back();
+            if (m_face_to_plane[facet_idx] != size_t(-1))
+                continue;
             const stl_normal& this_normal = face_normals[facet_idx];
             if (is_same_normal(this_normal, *normal_ptr)) {
 //                const Vec3i32& face = m_its.indices[facet_idx];
@@ -197,7 +200,7 @@ void MeasuringImpl::update_planes()
                 m_planes.back().facets.emplace_back(facet_idx);
                 for (int j = 0; j < 3; ++ j)
                     if (int neighbor_idx = face_neighbors[facet_idx][j]; neighbor_idx >= 0 && m_face_to_plane[neighbor_idx] == size_t(-1))
-                        facet_queue[facet_queue_cnt ++] = neighbor_idx;
+                        facet_queue.push_back(neighbor_idx);
             }
         }
 

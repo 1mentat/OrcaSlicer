@@ -701,10 +701,7 @@ TEST_CASE("Cylinder feature selection honors world transforms", "[Measure][Measu
     check_vec(origin, world * local_origin);
 }
 
-// Known bug: MeasuringImpl::update_planes marks a facet as visited only when it is popped, so a facet
-// queued by two neighbours is appended to its plane twice (and the fixed-size queue can overflow);
-// needs a fix PR
-TEST_CASE("Measuring lists each facet of a plane once", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Measuring lists each facet of a plane once", "[Measure][MeasureContracts]")
 {
     // The cap fans of a cylinder put the seed's neighbours next to each other.
     const indexed_triangle_set cylinder_mesh = its_make_cylinder(5.0, 10.0, PI / 16.0);
