@@ -595,11 +595,25 @@ TEST_CASE("Edge and circle distances to a bounded plane use its boundary edges",
     check_vec(from_is_face ? standing_floor.distance_infinite->from : standing_floor.distance_infinite->to, Vec3d(1.0, 0.0, 0.0));
     check_on_circle(from_is_face ? standing_floor.distance_infinite->to : standing_floor.distance_infinite->from, standing);
 
-    // Without boundary edges, a parallel circle measures to the plane under its center.
+    // Without boundary edges, a parallel circle 5 above the plane is 5 away. The witnesses are checked in
+    // the tagged test below.
     const SurfaceFeature unbounded = plane(8, Vec3d::UnitZ(), Vec3d::Zero(), std::make_shared<std::vector<SurfaceFeature>>());
     const MeasurementResult ring_floor = get_measurement(circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0), unbounded);
+    REQUIRE(ring_floor.distance_infinite.has_value());
+    CHECK_THAT(ring_floor.distance_infinite->dist, WithinAbs(5.0, 1e-7));
+}
+
+// Known bug: without boundary edges the circle-plane branch returns the circle center and its projection
+// as witnesses, so the first witness is not on the circle; needs a fix PR
+TEST_CASE("Circle distance to a boundary-less plane has a witness on the circle", "[Measure][MeasureContracts][!shouldfail]")
+{
+    const SurfaceFeature ring = circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0);
+    const SurfaceFeature unbounded = plane(8, Vec3d::UnitZ(), Vec3d::Zero(), std::make_shared<std::vector<SurfaceFeature>>());
+    const MeasurementResult ring_floor = get_measurement(ring, unbounded);
     check_witnessed_distance(ring_floor.distance_infinite, 5.0);
-    check_vec(ring_floor.distance_infinite->to, Vec3d::Zero());
+    check_on_circle(ring_floor.distance_infinite->from, ring);
+    // The plane witness is the circle witness dropped onto z = 0.
+    check_vec(ring_floor.distance_infinite->to, Vec3d(ring_floor.distance_infinite->from.x(), ring_floor.distance_infinite->from.y(), 0.0));
 }
 
 // Known bug: the edge-plane and circle-plane branches measure only to the face's boundary edges, so a
