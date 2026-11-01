@@ -735,11 +735,20 @@ TEST_CASE("Emboss text conversion yields one shape per character and caches glyp
     CHECK(Emboss::get_count_lines(std::string("A B\nC")) == 2);
     CHECK(Emboss::get_count_lines(first) == 2);
 
+    // The converted glyphs are cached, and a repeated conversion reads them from the cache: blanking the
+    // cached outline of A leaves A without an outline the second time, while B and C keep theirs.
     const size_t cache_size = cached.cache->size();
     REQUIRE(cache_size >= 3);
+    const auto cached_a = cached.cache->find(static_cast<int>(L'A'));
+    REQUIRE(cached_a != cached.cache->end());
+    REQUIRE_FALSE(cached_a->second.shape.empty());
+    cached_a->second.shape.clear();
     const ExPolygonsWithIds repeated = Emboss::text2vshapes(cached, text, prop);
     CHECK(cached.cache->size() == cache_size);
-    CHECK_THAT(glyph_area(repeated), WithinAbs(glyph_area(first), 1e-9));
+    REQUIRE(repeated.size() == text.size());
+    CHECK(repeated[0].expoly.empty()); // A
+    CHECK_FALSE(repeated[2].expoly.empty()); // B
+    CHECK_FALSE(repeated[4].expoly.empty()); // C
 
     const HealedExPolygons healed = Emboss::text2shapes(cached, "A B\nC", prop);
     CHECK_FALSE(healed.expolygons.empty());
