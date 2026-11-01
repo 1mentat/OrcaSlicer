@@ -1346,6 +1346,45 @@ TEST_CASE("revolve builds a solid of revolution about an in-plane axis", "[CadDo
     REQUIRE(double(ydoc->display_mesh.volume()) == Approx(9424.78).epsilon(0.05));
 }
 
+// A 10 x 10 square at y = 10..20 on XY, revolved a full turn about the plane's X axis: a ring of
+// volume 2 pi * 15 (centroid radius) * 100 (area), spanning x -5..5 and y, z -20..20.
+TEST_CASE("A Revolve with its own entity loop and no sketch builds the analytic ring", "[CadDocument]")
+{
+    const std::vector<SketchEntity> entities = {
+        {SketchEntity::Type::Line, Vec2d(-5.0, 10.0), Vec2d(5.0, 10.0)},
+        {SketchEntity::Type::Line, Vec2d(5.0, 10.0), Vec2d(5.0, 20.0)},
+        {SketchEntity::Type::Line, Vec2d(5.0, 20.0), Vec2d(-5.0, 20.0)},
+        {SketchEntity::Type::Line, Vec2d(-5.0, 20.0), Vec2d(-5.0, 10.0)},
+    };
+
+    CadDocument doc;
+    const int revolve = doc.add_revolve_entities(entities, SketchPlane::XY(), 360.0, 0,
+                                                 false, BooleanMode::New, "EntityRevolve");
+    REQUIRE(revolve == 0);
+    REQUIRE(doc.features.at(revolve).sketch_ref == -1);
+    REQUIRE(doc.features.at(revolve).entities.size() == 4);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    const auto props = doc.body_mass_properties(0);
+    REQUIRE(props.valid);
+    REQUIRE(props.is_solid);
+    REQUIRE_THAT(props.volume, Catch::Matchers::WithinRel(2.0 * M_PI * 15.0 * 100.0, 1e-6));
+
+    Bnd_Box box;
+    // Compare the analytic solid bounds; Add() includes display-mesh deflection.
+    BRepBndLib::AddOptimal(doc.bodies.at(0).shape, box, false, false);
+    double x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    REQUIRE_THAT(x0, Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(x1, Catch::Matchers::WithinAbs(5.0, 1e-6));
+    REQUIRE_THAT(y0, Catch::Matchers::WithinAbs(-20.0, 1e-6));
+    REQUIRE_THAT(y1, Catch::Matchers::WithinAbs(20.0, 1e-6));
+    REQUIRE_THAT(z0, Catch::Matchers::WithinAbs(-20.0, 1e-6));
+    REQUIRE_THAT(z1, Catch::Matchers::WithinAbs(20.0, 1e-6));
+}
+
 TEST_CASE("sweep builds a solid by sweeping a profile along a path", "[CadDocument]")
 {
     CadDocument doc;
@@ -1615,6 +1654,146 @@ TEST_CASE("datum plane: offset + tilt resolution and sketching on it", "[CadDocu
     REQUIRE(only_plane.recompute());
     REQUIRE(only_plane.error.empty());
     REQUIRE(only_plane.bodies.empty());
+}
+
+TEST_CASE("CadDocument tangent datum touches a cylinder with an outward normal and turns counter-clockwise with its angle", "[CadDocument][datum]")
+{
+    CadDocument doc;
+    const int sketch = doc.add_sketch(SketchShape::Circle, SketchPlane::XY(),
+                                      0.0, 0.0, 5.0, "CylinderSketch");
+    REQUIRE(sketch >= 0);
+    doc.add_extrude(sketch, 20.0, false, BooleanMode::New, "Cylinder");
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    int cylindrical_face = -1;
+    const int face_count = GeometryEngine::face_count(doc.bodies[0].shape);
+    for (int index = 0; index < face_count; ++index) {
+        const TopoDS_Face face = GeometryEngine::face_by_index(doc.bodies[0].shape, index);
+        if (BRepAdaptor_Surface(face).GetType() == GeomAbs_Cylinder) {
+            cylindrical_face = index;
+            break;
+        }
+    }
+    REQUIRE(cylindrical_face >= 0);
+    const auto cylinder = GeometryEngine::cylinder_of_face(
+        GeometryEngine::face_by_index(doc.bodies[0].shape, cylindrical_face));
+    REQUIRE(cylinder.ok);
+    REQUIRE_THAT(cylinder.radius, Catch::Matchers::WithinAbs(5.0, 1e-6));
+
+    CadFeature tangent;
+    tangent.type            = CadFeatureType::Plane;
+    tangent.name            = "TangentCylinder";
+    tangent.plane_type      = PlaneType::Tangent;
+    tangent.plane_face_body = 0;
+    tangent.plane_face      = cylindrical_face;
+    tangent.plane_angle_tilt = 0.0;
+    doc.features.push_back(tangent);
+
+    std::vector<SketchPlane> resolved_planes;
+    const std::vector<double> angles{ 0.0, 90.0, 180.0 };
+    for (double angle : angles) {
+        INFO("tangent angle=" << angle);
+        doc.features.back().plane_angle_tilt = angle;
+        const auto planes = doc.resolve_datum_planes();
+        REQUIRE(planes.size() == 1);
+        const SketchPlane &resolved = planes.front().second;
+        const Vec3d axial_point = cylinder.base + cylinder.axis *
+            (resolved.origin - cylinder.base).dot(cylinder.axis);
+        const Vec3d radial = resolved.origin - axial_point;
+        CHECK_THAT(radial.norm(), Catch::Matchers::WithinAbs(cylinder.radius, 1e-6));
+        // The touch point lies at the axial position of the cylinder's base point.
+        CHECK_THAT((resolved.origin - cylinder.base).dot(cylinder.axis), Catch::Matchers::WithinAbs(0.0, 1e-6));
+        CHECK_THAT(resolved.normal.norm(), Catch::Matchers::WithinAbs(1.0, 1e-6));
+        CHECK_THAT(std::abs(resolved.normal.dot(cylinder.axis)),
+                   Catch::Matchers::WithinAbs(0.0, 1e-6));
+        // The normal points outward, away from the axis.
+        CHECK_THAT(resolved.normal.dot(radial.normalized()), Catch::Matchers::WithinAbs(1.0, 1e-6));
+        resolved_planes.push_back(resolved);
+    }
+
+    // Relative rotations and chord lengths do not depend on the kernel's angular
+    // reference or a fixed face ordinal. A quarter/half turn must change the plane.
+    CHECK_THAT(resolved_planes[0].normal.dot(resolved_planes[1].normal),
+               Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(resolved_planes[0].normal.dot(resolved_planes[2].normal),
+               Catch::Matchers::WithinAbs(-1.0, 1e-6));
+    CHECK_THAT((resolved_planes[0].origin - resolved_planes[1].origin).norm(),
+               Catch::Matchers::WithinAbs(std::sqrt(2.0) * cylinder.radius, 1e-6));
+    CHECK_THAT((resolved_planes[0].origin - resolved_planes[2].origin).norm(),
+               Catch::Matchers::WithinAbs(2.0 * cylinder.radius, 1e-6));
+    // A positive tilt turns the plane counter-clockwise about the cylinder axis.
+    CHECK_THAT(cylinder.axis.dot(resolved_planes[0].normal.cross(resolved_planes[1].normal)),
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+}
+
+TEST_CASE("CadDocument two-edge datum uses the cross-product normal", "[CadDocument][datum]")
+{
+    CadDocument doc;
+    const int sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                      20.0, 20.0, 10.0, "BoxSketch");
+    REQUIRE(sketch >= 0);
+    doc.add_extrude(sketch, 20.0, false, BooleanMode::New, "Box");
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    const auto edges = GeometryEngine::edges_of(doc.bodies[0].shape);
+    REQUIRE(edges.size() >= 2);
+    int edge_a = -1;
+    int edge_b = -1;
+    Vec3d a0 = Vec3d::Zero(), a_dir = Vec3d::Zero(), expected_normal = Vec3d::Zero();
+    for (size_t i = 0; i < edges.size() && edge_a < 0; ++i) {
+        const auto a_points = GeometryEngine::sample_edge_world(edges[i]);
+        if (a_points.size() < 2) continue;
+        const Vec3d dir_a = (a_points.back() - a_points.front()).normalized();
+        for (size_t j = i + 1; j < edges.size(); ++j) {
+            const auto b_points = GeometryEngine::sample_edge_world(edges[j]);
+            if (b_points.size() < 2) continue;
+            const Vec3d dir_b = (b_points.back() - b_points.front()).normalized();
+            const Vec3d cross = dir_a.cross(dir_b);
+            if (cross.norm() < 0.9) continue;
+            // Require both public edge samples to start at the shared vertex. This makes the
+            // alternate parallel-edge fallback's v = eA_dir x (eB_p0-eA_p0) exactly zero.
+            const bool shared_start = (a_points.front() - b_points.front()).norm() < 1e-6;
+            if (!shared_start || a_points.front().norm() < 1e-3) continue;
+            edge_a = static_cast<int>(i);
+            edge_b = static_cast<int>(j);
+            a0 = a_points.front();
+            a_dir = dir_a;
+            expected_normal = cross.normalized();
+            break;
+        }
+    }
+    REQUIRE(edge_a >= 0);
+    REQUIRE(edge_b >= 0);
+
+    CadFeature two_edges;
+    two_edges.type             = CadFeatureType::Plane;
+    two_edges.name             = "TwoEdges";
+    two_edges.plane_type       = PlaneType::TwoEdges;
+    two_edges.plane_edge_body  = 0;
+    two_edges.plane_edge       = edge_a;
+    two_edges.plane_edge2_body = 0;
+    two_edges.plane_edge2      = edge_b;
+    doc.features.push_back(two_edges);
+
+    const auto planes = doc.resolve_datum_planes();
+    REQUIRE(planes.size() == 1);
+    const SketchPlane &resolved = planes.front().second;
+    CHECK_THAT((resolved.origin - a0).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT((resolved.normal - expected_normal).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(resolved.normal.norm(), Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT(std::abs(resolved.normal.dot(a_dir)),
+               Catch::Matchers::WithinAbs(0.0, 1e-6));
+
+    // The operand order matters: with the edges swapped the normal is the opposite cross product.
+    doc.features.back().plane_edge  = edge_b;
+    doc.features.back().plane_edge2 = edge_a;
+    const auto swapped = doc.resolve_datum_planes();
+    REQUIRE(swapped.size() == 1);
+    CHECK_THAT((swapped.front().second.normal + expected_normal).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
 }
 
 TEST_CASE("loft builds a solid skinning two profiles on parallel planes", "[CadDocument]")
@@ -5901,6 +6080,60 @@ TEST_CASE("thicken surface fills the corners of a closed-loop wall", "[CadDocume
     }
 }
 
+TEST_CASE("Thickening a flat sheet grows along its normal, or against it when flipped", "[CadDocument][surface]")
+{
+    auto make_plate = [](bool flip) {
+        CadDocument d;
+        const int sketch = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                        20.0, 20.0, 0.0, "PlateSketch");
+        REQUIRE(sketch >= 0);
+        REQUIRE(d.add_surface_fill(sketch, "PlateFace") >= 0);
+        REQUIRE(d.recompute());
+        REQUIRE(d.error.empty());
+        const int thick = d.add_thicken_surface(0, 2.0, flip, flip ? "PlateMinus" : "PlatePlus");
+        REQUIRE(thick >= 0);
+        REQUIRE(d.recompute());
+        REQUIRE(d.error.empty());
+        REQUIRE(d.bodies.size() == 2);
+        REQUIRE(d.features.at(thick).type == CadFeatureType::ThickenSurface);
+        REQUIRE(d.bodies.at(1).source_feature == thick);
+        return d;
+    };
+
+    CadDocument plus = make_plate(false);
+    CadDocument minus = make_plate(true);
+    const auto plus_props = plus.body_mass_properties(1);
+    const auto minus_props = minus.body_mass_properties(1);
+    REQUIRE(plus_props.valid);
+    REQUIRE(plus_props.is_solid);
+    REQUIRE(minus_props.valid);
+    REQUIRE(minus_props.is_solid);
+    REQUIRE_THAT(plus_props.volume, Catch::Matchers::WithinRel(800.0, 1e-6));
+    REQUIRE_THAT(minus_props.volume, Catch::Matchers::WithinRel(800.0, 1e-6));
+
+    Bnd_Box plus_box;
+    BRepBndLib::AddOptimal(plus.bodies.at(1).shape, plus_box, false, false);   // exact, no tolerance gap
+    double px0, py0, pz0, px1, py1, pz1;
+    plus_box.Get(px0, py0, pz0, px1, py1, pz1);
+    REQUIRE_THAT(px0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(px1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(py0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(py1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(pz0, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(pz1, Catch::Matchers::WithinAbs(2.0, 1e-6));
+
+    Bnd_Box minus_box;
+    BRepBndLib::AddOptimal(minus.bodies.at(1).shape, minus_box, false, false);
+    double mx0, my0, mz0, mx1, my1, mz1;
+    minus_box.Get(mx0, my0, mz0, mx1, my1, mz1);
+    REQUIRE_THAT(mx0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(mx1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(my0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(my1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(mz0, Catch::Matchers::WithinAbs(-2.0, 1e-6));
+    REQUIRE_THAT(mz1, Catch::Matchers::WithinAbs(0.0, 1e-6));
+}
+
 TEST_CASE("surface-offset creates another sheet shifted outward", "[CadDocument][surface]")
 {
 
@@ -9762,9 +9995,8 @@ TEST_CASE("Saved legacy external threads retain crests outside the reference cyl
     CHECK(bounds.min.x() > -legacy_radius - legacy_depth - 0.05);
 }
 
-// Known bug: legacy internal threads cut the bore before the helical groove, and OCCT then returns only the bore, so the groove is lost; fixed by the follow-up fix PR.
 TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groove",
-          "[CadDocument][thread][!shouldfail]")
+          "[CadDocument][thread]")
 {
     constexpr double stock_radius = 6.0;
     CadDocument source;
@@ -9805,3 +10037,288 @@ TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groov
 }
 
 } // namespace cad_legacy_thread_contracts
+
+TEST_CASE("CadDocument body Boolean intersection keeps the analytic overlap", "[CadDocument][boolean]")
+{
+    CadDocument doc;
+    const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                           20.0, 20.0, 0.0, "BaseSketch");
+    doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base");
+
+    SketchPlane shifted = SketchPlane::XY();
+    shifted.origin = Vec3d(10.0, 5.0, 0.0);
+    const int tool_sketch = doc.add_sketch(SketchShape::Rectangle, shifted,
+                                           20.0, 20.0, 0.0, "ToolSketch");
+    doc.add_extrude(tool_sketch, 10.0, false, BooleanMode::New, "Tool");
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 2);
+
+    const int common = doc.add_boolean(BooleanMode::Intersect, 0, 1, false, 0.0, -1, -1, "Common");
+    REQUIRE(common >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    const auto props = doc.body_mass_properties(0);
+    REQUIRE(props.valid);
+    REQUIRE(props.is_solid);
+    // The centered base is [-10,10]x[-10,10]x[0,10]; the shifted tool is
+    // [0,20]x[-5,15]x[0,10], so their common is 10*15*10.
+    CHECK_THAT(props.volume, Catch::Matchers::WithinRel(1500.0, 1e-6));
+
+    const auto bb = doc.display_mesh.bounding_box();
+    CHECK_THAT(bb.min.x(), Catch::Matchers::WithinAbs(0.0, 0.05));
+    CHECK_THAT(bb.max.x(), Catch::Matchers::WithinAbs(10.0, 0.05));
+    CHECK_THAT(bb.min.y(), Catch::Matchers::WithinAbs(-5.0, 0.05));
+    CHECK_THAT(bb.max.y(), Catch::Matchers::WithinAbs(10.0, 0.05));
+    CHECK_THAT(bb.min.z(), Catch::Matchers::WithinAbs(0.0, 0.05));
+    CHECK_THAT(bb.max.z(), Catch::Matchers::WithinAbs(10.0, 0.05));
+}
+
+TEST_CASE("CadDocument extrude intersection clips the active body to the tool", "[CadDocument][boolean]")
+{
+    CadDocument doc;
+    const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                           20.0, 20.0, 0.0, "BaseSketch");
+    doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base");
+
+    SketchPlane shifted = SketchPlane::XY();
+    shifted.origin = Vec3d(10.0, 5.0, 0.0);
+    const int tool_sketch = doc.add_sketch(SketchShape::Rectangle, shifted,
+                                           12.0, 8.0, 0.0, "ToolSketch");
+    const int intersect = doc.add_extrude(tool_sketch, 10.0, false,
+                                          BooleanMode::Intersect, "IntersectExtrude");
+    REQUIRE(intersect >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    const auto props = doc.body_mass_properties(0);
+    REQUIRE(props.valid);
+    REQUIRE(props.is_solid);
+    // The tool is [4,16]x[1,9]x[0,10]; common with the base is 6*8*10.
+    CHECK_THAT(props.volume, Catch::Matchers::WithinRel(480.0, 1e-6));
+
+    const auto bb = doc.display_mesh.bounding_box();
+    CHECK_THAT(bb.min.x(), Catch::Matchers::WithinAbs(4.0, 0.05));
+    CHECK_THAT(bb.max.x(), Catch::Matchers::WithinAbs(10.0, 0.05));
+    CHECK_THAT(bb.min.y(), Catch::Matchers::WithinAbs(1.0, 0.05));
+    CHECK_THAT(bb.max.y(), Catch::Matchers::WithinAbs(9.0, 0.05));
+    CHECK_THAT(bb.min.z(), Catch::Matchers::WithinAbs(0.0, 0.05));
+    CHECK_THAT(bb.max.z(), Catch::Matchers::WithinAbs(10.0, 0.05));
+}
+
+TEST_CASE("CadDocument sweep Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean]")
+{
+    const std::vector<BooleanMode> modes = {
+        BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect
+    };
+    const double base_volume = 20.0 * 20.0 * 10.0;
+    const double tool_volume = M_PI * 3.0 * 3.0 * 10.0;
+    // The excluded x<-1 circular segment has chord distance1 from the center.
+    const double cap_area = 9.0 * std::acos(1.0 / 3.0) - std::sqrt(8.0);
+    const double overlap_volume = tool_volume - cap_area * 10.0;
+
+    for (const BooleanMode mode : modes) {
+        INFO("sweep Boolean mode " << static_cast<int>(mode));
+        CadDocument doc;
+
+        // The base spans x=[-1,19], y=[-10,10], z=[0,10].  The circular sweep is
+        // centered at the origin and therefore has a partial, analytically known overlap.
+        SketchProfile base;
+        base.points = {{-1.0, -10.0}, {19.0, -10.0}, {19.0, 10.0}, {-1.0, 10.0}};
+        base.closed = true;
+        const int base_sketch = doc.add_sketch_profile(base, SketchPlane::XY(), "Base");
+        REQUIRE(base_sketch >= 0);
+        REQUIRE(doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "BaseExtrude") >= 0);
+
+        SketchEntity circle;
+        circle.type = SketchEntity::Type::Circle;
+        circle.center = Vec2d(0.0, 0.0);
+        circle.radius = 3.0;
+        const int profile = doc.add_sketch_entities({circle}, SketchPlane::XY(), "SweepProfile");
+        REQUIRE(profile >= 0);
+
+        SketchEntity spine;
+        spine.type = SketchEntity::Type::Line;
+        spine.p0 = Vec2d(0.0, 0.0);
+        spine.p1 = Vec2d(0.0, 10.0);
+        const int path = doc.add_sketch_entities({spine}, SketchPlane::XZ(), "SweepPath");
+        REQUIRE(path >= 0);
+        REQUIRE(doc.add_sweep(profile, path, mode, "SweepBoolean") >= 0);
+
+        REQUIRE(doc.recompute());
+        REQUIRE(doc.error.empty());
+        REQUIRE(doc.bodies.size() == 1);
+        const auto props = doc.body_mass_properties(0);
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        REQUIRE(std::isfinite(props.volume));
+        REQUIRE(props.volume > 0.0);
+
+        // Compare the changed material itself so a tolerance on the large base
+        // cannot hide a missing or incorrectly sized Boolean operation.
+        const double effect = mode == BooleanMode::Add ? props.volume - base_volume :
+                              mode == BooleanMode::Cut ? base_volume - props.volume : props.volume;
+        const double expected_effect = mode == BooleanMode::Add ? tool_volume - overlap_volume : overlap_volume;
+        CHECK_THAT(effect, Catch::Matchers::WithinRel(expected_effect, 1e-4));
+
+        if (mode == BooleanMode::Add) {
+            REQUIRE(props.volume > base_volume + 1.0);
+            REQUIRE(props.volume < base_volume + tool_volume + 1.0);
+        } else if (mode == BooleanMode::Cut) {
+            REQUIRE(props.volume < base_volume - 1.0);
+            REQUIRE(props.volume > base_volume - tool_volume - 1.0);
+        } else {
+            // Only the circular segment x>=-1 lies in the base.  It is strictly less
+            // than 95% of the full cylinder and strictly greater than zero.
+            REQUIRE(props.volume < tool_volume * 0.95);
+            REQUIRE(props.volume > 1.0);
+        }
+    }
+}
+
+TEST_CASE("CadDocument loft Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean]")
+{
+    const std::vector<BooleanMode> modes = {
+        BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect
+    };
+    const double base_volume = 20.0 * 20.0 * 10.0;
+    const double tool_volume = 8.0 * 8.0 * 10.0;
+    const double overlap_volume = 2.0 * 8.0 * 10.0;
+
+    for (const BooleanMode mode : modes) {
+        INFO("loft Boolean mode " << static_cast<int>(mode));
+        CadDocument doc;
+
+        // The base spans x=[-1,19], y=[-10,10], z=[0,10].  The ruled loft is an
+        // 8x8 prism at x=[17,25], so its overlap is the independently known 2x8x10 slab.
+        SketchProfile base;
+        base.points = {{-1.0, -10.0}, {19.0, -10.0}, {19.0, 10.0}, {-1.0, 10.0}};
+        base.closed = true;
+        const int base_sketch = doc.add_sketch_profile(base, SketchPlane::XY(), "Base");
+        REQUIRE(base_sketch >= 0);
+        REQUIRE(doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "BaseExtrude") >= 0);
+
+        SketchProfile bottom;
+        bottom.points = {{17.0, -4.0}, {25.0, -4.0}, {25.0, 4.0}, {17.0, 4.0}};
+        bottom.closed = true;
+        const int bottom_ref = doc.add_sketch_profile(bottom, SketchPlane::XY(), "LoftBottom");
+        REQUIRE(bottom_ref >= 0);
+
+        SketchPlane top_plane = SketchPlane::XY();
+        top_plane.origin = Vec3d(0.0, 0.0, 10.0);
+        SketchProfile top;
+        top.points = bottom.points;
+        top.closed = true;
+        const int top_ref = doc.add_sketch_profile(top, top_plane, "LoftTop");
+        REQUIRE(top_ref >= 0);
+        REQUIRE(doc.add_loft({bottom_ref, top_ref}, true, mode, "LoftBoolean") >= 0);
+
+        REQUIRE(doc.recompute());
+        REQUIRE(doc.error.empty());
+        REQUIRE(doc.bodies.size() == 1);
+        const auto props = doc.body_mass_properties(0);
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        REQUIRE(std::isfinite(props.volume));
+        REQUIRE(props.volume > 0.0);
+
+        // Compare the changed material itself so a tolerance on the large base
+        // cannot hide a missing or incorrectly sized Boolean operation.
+        const double effect = mode == BooleanMode::Add ? props.volume - base_volume :
+                              mode == BooleanMode::Cut ? base_volume - props.volume : props.volume;
+        const double expected_effect = mode == BooleanMode::Add ? tool_volume - overlap_volume : overlap_volume;
+        CHECK_THAT(effect, Catch::Matchers::WithinRel(expected_effect, 1e-4));
+
+        if (mode == BooleanMode::Add) {
+            REQUIRE(props.volume > base_volume + 1.0);
+            REQUIRE(props.volume < base_volume + tool_volume + 1.0);
+        } else if (mode == BooleanMode::Cut) {
+            REQUIRE(props.volume < base_volume - 1.0);
+            REQUIRE(props.volume > base_volume - tool_volume - 1.0);
+        } else {
+            REQUIRE(props.volume < tool_volume * 0.95);
+            REQUIRE(props.volume > 1.0);
+        }
+    }
+}
+
+namespace cad_boolean_contracts {
+
+// A 10x10x10 base centred on the origin and a same-size tool shifted to x = 5.
+void add_overlapping_pair(CadDocument& d)
+{
+    const int base_sketch = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                         10.0, 10.0, 0.0, "BaseSketch");
+    REQUIRE(base_sketch >= 0);
+    REQUIRE(d.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base") >= 0);
+
+    SketchPlane shifted = SketchPlane::XY();
+    shifted.origin = Vec3d(5.0, 0.0, 0.0);
+    const int tool_sketch = d.add_sketch(SketchShape::Rectangle, shifted,
+                                         10.0, 10.0, 0.0, "ToolSketch");
+    REQUIRE(tool_sketch >= 0);
+    REQUIRE(d.add_extrude(tool_sketch, 10.0, false, BooleanMode::New, "Tool") >= 0);
+}
+
+} // namespace cad_boolean_contracts
+
+TEST_CASE("CadDocument keeps a boolean tool body when requested", "[CadDocument][boolean]")
+{
+    using cad_boolean_contracts::add_overlapping_pair;
+
+    CadDocument kept;
+    add_overlapping_pair(kept);
+    REQUIRE(kept.recompute());
+    REQUIRE(kept.error.empty());
+    REQUIRE(kept.bodies.size() == 2);
+
+    const int fuse = kept.add_boolean(BooleanMode::Add, 0, 1, true, 0.0, -1, -1, "KeepToolFuse");
+    REQUIRE(fuse >= 0);
+    REQUIRE(kept.recompute());
+    REQUIRE(kept.error.empty());
+    REQUIRE(kept.bodies.size() == 2);
+    REQUIRE(kept.features.at(fuse).type == CadFeatureType::Boolean);
+    REQUIRE(kept.features.at(fuse).bool_keep_tool);
+
+    const auto target = kept.body_mass_properties(0);
+    const auto tool = kept.body_mass_properties(1);
+    REQUIRE(target.valid);
+    REQUIRE(target.is_solid);
+    REQUIRE(tool.valid);
+    REQUIRE(tool.is_solid);
+    REQUIRE_THAT(target.volume, Catch::Matchers::WithinRel(1500.0, 1e-6));
+    REQUIRE_THAT(tool.volume, Catch::Matchers::WithinRel(1000.0, 1e-6));
+
+    Bnd_Box target_box;
+    BRepBndLib::Add(kept.bodies.at(0).shape, target_box);
+    double tx0, ty0, tz0, tx1, ty1, tz1;
+    target_box.Get(tx0, ty0, tz0, tx1, ty1, tz1);
+    REQUIRE_THAT(tx0, Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(tx1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(tz0, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(tz1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+
+    // The kept tool is untouched: still the shifted box at x = 0..10.
+    Bnd_Box tool_box;
+    BRepBndLib::Add(kept.bodies.at(1).shape, tool_box);
+    double ux0, uy0, uz0, ux1, uy1, uz1;
+    tool_box.Get(ux0, uy0, uz0, ux1, uy1, uz1);
+    REQUIRE_THAT(ux0, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(ux1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+}
+
+TEST_CASE("CadDocument rejects a New-mode Boolean between two bodies", "[CadDocument][boolean]")
+{
+    using cad_boolean_contracts::add_overlapping_pair;
+    CadDocument invalid;
+    add_overlapping_pair(invalid);
+    REQUIRE(invalid.recompute());
+    REQUIRE(invalid.error.empty());
+    invalid.add_boolean(BooleanMode::New, 0, 1, false, 0.0, -1, -1, "InvalidNewBoolean");
+    REQUIRE_FALSE(invalid.recompute());
+    REQUIRE_CONTAINS(invalid.error, "choose Union");
+}

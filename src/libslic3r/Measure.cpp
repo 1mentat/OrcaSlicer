@@ -157,8 +157,9 @@ void MeasuringImpl::update_planes()
     m_face_to_plane.resize(num_of_facets, size_t(-1));
     const std::vector<Vec3f> face_normals = its_face_normals(m_its);
     const std::vector<Vec3i32> face_neighbors = its_face_neighbors(m_its);
-    std::vector<int>         facet_queue(num_of_facets, 0);
-    int                      facet_queue_cnt = 0;
+    // A facet can be queued by several neighbours before it is visited, so the queue grows as needed and
+    // a facet already assigned to a plane is skipped when popped.
+    std::vector<int>         facet_queue;
     const stl_normal*        normal_ptr      = nullptr;
     size_t seed_facet_idx = 0;
 
@@ -178,17 +179,19 @@ void MeasuringImpl::update_planes()
         // Find next unvisited triangle:
         for (; seed_facet_idx < num_of_facets; ++ seed_facet_idx)
             if (m_face_to_plane[seed_facet_idx] == size_t(-1)) {
-                facet_queue[facet_queue_cnt ++] = seed_facet_idx;
+                facet_queue.push_back(int(seed_facet_idx));
                 normal_ptr = &face_normals[seed_facet_idx];
-                m_face_to_plane[seed_facet_idx] = m_planes.size();
                 m_planes.emplace_back();
                 break;
             }
         if (seed_facet_idx == num_of_facets)
             break; // Everything was visited already
 
-        while (facet_queue_cnt > 0) {
-            int facet_idx = facet_queue[-- facet_queue_cnt];
+        while (! facet_queue.empty()) {
+            const int facet_idx = facet_queue.back();
+            facet_queue.pop_back();
+            if (m_face_to_plane[facet_idx] != size_t(-1))
+                continue;
             const stl_normal& this_normal = face_normals[facet_idx];
             if (is_same_normal(this_normal, *normal_ptr)) {
 //                const Vec3i32& face = m_its.indices[facet_idx];
@@ -197,7 +200,7 @@ void MeasuringImpl::update_planes()
                 m_planes.back().facets.emplace_back(facet_idx);
                 for (int j = 0; j < 3; ++ j)
                     if (int neighbor_idx = face_neighbors[facet_idx][j]; neighbor_idx >= 0 && m_face_to_plane[neighbor_idx] == size_t(-1))
-                        facet_queue[facet_queue_cnt ++] = neighbor_idx;
+                        facet_queue.push_back(neighbor_idx);
             }
         }
 
@@ -902,8 +905,17 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             const Eigen::Hyperplane<double, 3> circle_plane(n, c);
             const Vec3d proj = circle_plane.projection(f1.get_point());
             if (proj.isApprox(c)) {
+                // A point on the axis is equally far from every circle point: measure to one of them,
+                // or to the center in center mode.
                 const Vec3d p_on_circle = c + radius * get_orthogonal(n, true);
-                result.distance_strict = std::make_optional(DistAndPoints{ radius, c, p_on_circle });
+                if (deal_circle_result == false) {
+                    result.distance_strict = std::make_optional(
+                        DistAndPoints{(f1.get_point() - p_on_circle).norm(), f1.get_point(), p_on_circle});
+                }
+                else {
+                    const double dist = (f1.get_point() - c).norm();
+                    result.distance_strict = std::make_optional(DistAndPoints{dist, f1.get_point(), c});
+                }
             }
             else {
                 if (deal_circle_result == false) {
@@ -956,6 +968,25 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             add_point_edge_distance(e1.second, e2);
             add_point_edge_distance(e2.first, e1);
             add_point_edge_distance(e2.second, e1);
+            // The closest points of skew segments can lie inside both of them, away from every endpoint.
+            {
+                const Vec3d d1 = e1.second - e1.first;
+                const Vec3d d2 = e2.second - e2.first;
+                const Vec3d r = e1.first - e2.first;
+                const double d1d1 = d1.dot(d1), d1d2 = d1.dot(d2), d1r = d1.dot(r), d2d2 = d2.dot(d2), d2r = d2.dot(r);
+                // denom = |d1|^2 |d2|^2 sin^2(angle): skip only edges parallel to within roundoff, which the
+                // endpoint candidates handle.
+                const double denom = d1d1 * d2d2 - d1d2 * d1d2;
+                if (denom > 1e-12 * d1d1 * d2d2) {
+                    const double s = (d1d2 * d2r - d1r * d2d2) / denom;
+                    const double t = (d1d1 * d2r - d1d2 * d1r) / denom;
+                    if (s > 0.0 && s < 1.0 && t > 0.0 && t < 1.0) {
+                        const Vec3d p1 = e1.first + s * d1;
+                        const Vec3d p2 = e2.first + t * d2;
+                        distances.emplace_back((p2 - p1).norm(), p1, p2);
+                    }
+                }
+            }
             auto it = std::min_element(distances.begin(), distances.end(),
                 [](const DistAndPoints& item1, const DistAndPoints& item2) {
                     return item1.dist < item2.dist;
