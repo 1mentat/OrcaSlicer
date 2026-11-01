@@ -9810,13 +9810,13 @@ TEST_CASE("CadDocument body Boolean intersection keeps the analytic overlap", "[
 {
     CadDocument doc;
     const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
-                                           20.0, 20.0, 10.0, "BaseSketch");
+                                           20.0, 20.0, 0.0, "BaseSketch");
     doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base");
 
     SketchPlane shifted = SketchPlane::XY();
     shifted.origin = Vec3d(10.0, 5.0, 0.0);
     const int tool_sketch = doc.add_sketch(SketchShape::Rectangle, shifted,
-                                           20.0, 20.0, 10.0, "ToolSketch");
+                                           20.0, 20.0, 0.0, "ToolSketch");
     doc.add_extrude(tool_sketch, 10.0, false, BooleanMode::New, "Tool");
 
     REQUIRE(doc.recompute());
@@ -9849,13 +9849,13 @@ TEST_CASE("CadDocument extrude intersection clips the active body to the tool", 
 {
     CadDocument doc;
     const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
-                                           20.0, 20.0, 10.0, "BaseSketch");
+                                           20.0, 20.0, 0.0, "BaseSketch");
     doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base");
 
     SketchPlane shifted = SketchPlane::XY();
     shifted.origin = Vec3d(10.0, 5.0, 0.0);
     const int tool_sketch = doc.add_sketch(SketchShape::Rectangle, shifted,
-                                           12.0, 8.0, 6.0, "ToolSketch");
+                                           12.0, 8.0, 0.0, "ToolSketch");
     const int intersect = doc.add_extrude(tool_sketch, 10.0, false,
                                           BooleanMode::Intersect, "IntersectExtrude");
     REQUIRE(intersect >= 0);
@@ -10014,22 +10014,29 @@ TEST_CASE("CadDocument loft Boolean modes preserve the analytic overlap volume",
     }
 }
 
-TEST_CASE("CadDocument keeps a boolean tool when requested and rejects a new-mode pair",
-          "[CadDocument][boolean]")
-{
-    auto add_overlapping_pair = [](CadDocument& d) {
-        const int base_sketch = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
-                                             10.0, 10.0, 0.0, "BaseSketch");
-        REQUIRE(base_sketch >= 0);
-        REQUIRE(d.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base") >= 0);
+namespace cad_boolean_contracts {
 
-        SketchPlane shifted = SketchPlane::XY();
-        shifted.origin = Vec3d(5.0, 0.0, 0.0);
-        const int tool_sketch = d.add_sketch(SketchShape::Rectangle, shifted,
-                                             10.0, 10.0, 0.0, "ToolSketch");
-        REQUIRE(tool_sketch >= 0);
-        REQUIRE(d.add_extrude(tool_sketch, 10.0, false, BooleanMode::New, "Tool") >= 0);
-    };
+// A 10x10x10 base centred on the origin and a same-size tool shifted to x = 5.
+void add_overlapping_pair(CadDocument& d)
+{
+    const int base_sketch = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                         10.0, 10.0, 0.0, "BaseSketch");
+    REQUIRE(base_sketch >= 0);
+    REQUIRE(d.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base") >= 0);
+
+    SketchPlane shifted = SketchPlane::XY();
+    shifted.origin = Vec3d(5.0, 0.0, 0.0);
+    const int tool_sketch = d.add_sketch(SketchShape::Rectangle, shifted,
+                                         10.0, 10.0, 0.0, "ToolSketch");
+    REQUIRE(tool_sketch >= 0);
+    REQUIRE(d.add_extrude(tool_sketch, 10.0, false, BooleanMode::New, "Tool") >= 0);
+}
+
+} // namespace cad_boolean_contracts
+
+TEST_CASE("CadDocument keeps a boolean tool body when requested", "[CadDocument][boolean]")
+{
+    using cad_boolean_contracts::add_overlapping_pair;
 
     CadDocument kept;
     add_overlapping_pair(kept);
@@ -10063,6 +10070,18 @@ TEST_CASE("CadDocument keeps a boolean tool when requested and rejects a new-mod
     REQUIRE_THAT(tz0, Catch::Matchers::WithinAbs(0.0, 1e-6));
     REQUIRE_THAT(tz1, Catch::Matchers::WithinAbs(10.0, 1e-6));
 
+    // The kept tool is untouched: still the shifted box at x = 0..10.
+    Bnd_Box tool_box;
+    BRepBndLib::Add(kept.bodies.at(1).shape, tool_box);
+    double ux0, uy0, uz0, ux1, uy1, uz1;
+    tool_box.Get(ux0, uy0, uz0, ux1, uy1, uz1);
+    REQUIRE_THAT(ux0, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(ux1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+}
+
+TEST_CASE("CadDocument rejects a New-mode Boolean between two bodies", "[CadDocument][boolean]")
+{
+    using cad_boolean_contracts::add_overlapping_pair;
     CadDocument invalid;
     add_overlapping_pair(invalid);
     REQUIRE(invalid.recompute());
