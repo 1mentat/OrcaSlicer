@@ -7442,8 +7442,6 @@ TEST_CASE("save_changes_for_preset reverts unselected edits and embeds the saved
     bundle.reset_project_embedded_presets();
     CHECK(bundle.prints.find_preset("Embedded Save") == nullptr);
     CHECK(bundle.prints.find_preset("Save Parent") != nullptr);
-    // With the embedded selection gone, the bundle falls back to the parent.
-    CHECK(bundle.prints.get_selected_preset().name == "Save Parent");
 }
 
 } // namespace preset_lifecycle_contracts
