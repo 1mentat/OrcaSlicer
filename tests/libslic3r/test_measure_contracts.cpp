@@ -526,9 +526,7 @@ TEST_CASE("Edge angles measure the rays pointing away from the intersection", "[
     }
 }
 
-// Known bug: edge-edge distance only tries endpoint pairs and endpoint-to-segment feet, so it misses
-// interior closest points of skew segments; needs a fix PR
-TEST_CASE("Edge distance finds interior closest points of skew segments", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Edge distance finds interior closest points of skew segments", "[Measure][MeasureContracts]")
 {
     // The segments cross over each other 2 apart at x = 2, away from all four endpoints.
     const MeasurementResult result = get_measurement(edge(Vec3d(4.0, 0.0, 0.0), Vec3d::Zero()),
