@@ -1775,3 +1775,127 @@ TEST_CASE("Project JSON migration records support and wall-order differences", "
     for (size_t index = 0; index < expected.size(); ++index)
         CHECK(different->values[index] == expected[index]);
 }
+
+TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contract", "[PrintConfigBehavior][Config]")
+{
+    struct Migration {
+        const char *old_key;
+        const char *old_value;
+        const char *new_key;
+        const char *new_value;
+    };
+    const Migration migrations[] = {
+        {"enable_wipe_tower", "1", "enable_prime_tower", "1"},
+        {"wipe_tower_width", "42", "prime_tower_width", "42"},
+        {"bridge_fan_speed", "77", "overhang_fan_speed", "77"},
+        {"support_material_angle", "55", "support_angle", "55"},
+        {"support_material_enforce_layers", "3", "enforce_support_layers", "3"},
+        {"top_one_wall_type", "outer", "only_one_wall_top", "1"},
+        {"sparse_infill_anchor", "35", "infill_anchor", "35"},
+        {"chamber_temperatures", "60,65", "chamber_temperature", "60,65"},
+        {"thumbnail_size", "96x96", "thumbnails", "96x96"},
+        {"counterbole_hole_bridging", "bridges", "counterbore_hole_bridging", "bridges"},
+    };
+
+    for (const Migration &migration : migrations) {
+        DYNAMIC_SECTION(migration.old_key << " -> " << migration.new_key) {
+            t_config_option_key key = migration.old_key;
+            std::string value       = migration.old_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == migration.new_key);
+            CHECK(value == migration.new_value);
+        }
+    }
+}
+
+TEST_CASE("PrintConfig legacy enum spellings become current canonical values", "[PrintConfigBehavior][Config]")
+{
+    struct Conversion {
+        const char *key;
+        const char *old_value;
+        const char *new_value;
+    };
+    const Conversion conversions[] = {
+        {"support_type", "normal", "normal(manual)"},
+        {"support_type", "tree", "tree(manual)"},
+        {"support_type", "hybrid(auto)", "tree(auto)"},
+        {"support_base_pattern", "none", "hollow"},
+        {"sparse_infill_pattern", "zig-zag", "rectilinear"},
+        {"top_surface_pattern", "zig-zag", "rectilinear"},
+        {"filament_map_mode", "Auto", "Auto For Flush"},
+        {"extruder_type", "DirectDrive", "Direct Drive"},
+        {"enable_power_loss_recovery", "true", "enable"},
+        {"ensure_vertical_shell_thickness", "0", "ensure_moderate"},
+        {"wall_direction", "auto", "ccw"},
+    };
+
+    for (const Conversion &conversion : conversions) {
+        DYNAMIC_SECTION(conversion.key << " = " << conversion.old_value) {
+            t_config_option_key key = conversion.key;
+            std::string value       = conversion.old_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == conversion.key);
+            CHECK(value == conversion.new_value);
+        }
+    }
+
+    SECTION("rotate_solid_infill_direction = 1 becomes a rotation template") {
+        t_config_option_key key = "rotate_solid_infill_direction";
+        std::string value       = "1";
+        PrintConfigDef::handle_legacy(key, value);
+        CHECK(key == "solid_infill_rotate_template");
+        CHECK(value == "0,90");
+    }
+}
+
+TEST_CASE("PrintConfig legacy values that cannot be represented are discarded", "[PrintConfigBehavior][Config]")
+{
+    // Percent speeds and distances are dropped by their own guard. "scale" and "bed_size" are on the
+    // obsolete list and the future key is unregistered; for those the final unknown-key check would
+    // also clear them, so these rows only pin the outcome.
+    const std::pair<const char *, const char *> obsolete[] = {
+        {"initial_layer_speed", "50%"},
+        {"outer_wall_speed", "80%"},
+        {"support_object_xy_distance", "25%"},
+        {"scale", "1.2"},
+        {"bed_size", "220,220"},
+        {"key_from_a_future_release", "1"},
+    };
+    for (const auto &[old_key, old_value] : obsolete) {
+        DYNAMIC_SECTION(old_key) {
+            t_config_option_key key = old_key;
+            std::string value       = old_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key.empty());
+        }
+    }
+}
+
+TEST_CASE("PrintConfig legacy migrations normalize bed and wall-order spellings", "[PrintConfigActive][Config]")
+{
+    struct Row {
+        const char *input_key;
+        const char *input_value;
+        const char *expected_key;
+        const char *expected_value;
+    };
+    const Row rows[] = {
+        {"curr_bed_type", "SuperTack Plate", "curr_bed_type", "Supertack Plate"},
+        {"wall_infill_order", "inner wall/outer wall/infill", "wall_sequence", "inner wall/outer wall"},
+        {"wall_infill_order", "infill/inner wall/outer wall", "wall_sequence", "inner wall/outer wall"},
+        {"wall_infill_order", "outer wall/inner wall/infill", "wall_sequence", "outer wall/inner wall"},
+        {"wall_infill_order", "infill/outer wall/inner wall", "wall_sequence", "outer wall/inner wall"},
+        {"wall_infill_order", "inner-outer-inner wall/infill", "wall_sequence", "inner-outer-inner wall"},
+        {"wall_infill_order", "legacy spelling", "wall_sequence", "legacy spelling"},
+    };
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.input_key << " = " << row.input_value) {
+            t_config_option_key key = row.input_key;
+            std::string value = row.input_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == row.expected_key);
+            CHECK(value == row.expected_value);
+        }
+    }
+}
