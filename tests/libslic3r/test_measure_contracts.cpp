@@ -612,6 +612,20 @@ TEST_CASE("Circle distance to a boundary-less plane has a witness on the circle"
     check_on_circle(ring_floor.distance_infinite->from, ring);
     // The plane witness is the circle witness dropped onto z = 0.
     check_vec(ring_floor.distance_infinite->to, Vec3d(ring_floor.distance_infinite->from.x(), ring_floor.distance_infinite->from.y(), 0.0));
+
+    // Tilted 45 degrees about Y, the circle's lowest point (sqrt(2), 0, 5 - sqrt(2)) is nearest the plane.
+    const Vec3d tilt = Vec3d(1.0, 0.0, 1.0).normalized();
+    const SurfaceFeature tilted = circle(Vec3d(0.0, 0.0, 5.0), tilt, 2.0);
+    const MeasurementResult tilted_floor = get_measurement(tilted, unbounded);
+    check_witnessed_distance(tilted_floor.distance_infinite, 5.0 - std::sqrt(2.0));
+    check_vec(tilted_floor.distance_infinite->from, Vec3d(std::sqrt(2.0), 0.0, 5.0 - std::sqrt(2.0)));
+
+    // Lowered to z = 1, the tilted circle cuts the plane: distance 0 at a circle point on z = 0.
+    const SurfaceFeature cutting = circle(Vec3d(0.0, 0.0, 1.0), tilt, 2.0);
+    const MeasurementResult cutting_floor = get_measurement(cutting, unbounded);
+    check_witnessed_distance(cutting_floor.distance_infinite, 0.0);
+    check_on_circle(cutting_floor.distance_infinite->from, cutting);
+    CHECK_THAT(cutting_floor.distance_infinite->from.z(), WithinAbs(0.0, 1e-7));
 }
 
 // Known bug: the edge-plane and circle-plane branches measure only to the face's boundary edges, so a
