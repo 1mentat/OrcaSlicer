@@ -5933,20 +5933,24 @@ TEST_CASE("Thickening a flat sheet grows along its normal, or against it when fl
     REQUIRE_THAT(minus_props.volume, Catch::Matchers::WithinRel(800.0, 1e-6));
 
     Bnd_Box plus_box;
-    BRepBndLib::Add(plus.bodies.at(1).shape, plus_box);
+    BRepBndLib::AddOptimal(plus.bodies.at(1).shape, plus_box, false, false);   // exact, no tolerance gap
     double px0, py0, pz0, px1, py1, pz1;
     plus_box.Get(px0, py0, pz0, px1, py1, pz1);
     REQUIRE_THAT(px0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
     REQUIRE_THAT(px1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(py0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(py1, Catch::Matchers::WithinAbs(10.0, 1e-6));
     REQUIRE_THAT(pz0, Catch::Matchers::WithinAbs(0.0, 1e-6));
     REQUIRE_THAT(pz1, Catch::Matchers::WithinAbs(2.0, 1e-6));
 
     Bnd_Box minus_box;
-    BRepBndLib::Add(minus.bodies.at(1).shape, minus_box);
+    BRepBndLib::AddOptimal(minus.bodies.at(1).shape, minus_box, false, false);
     double mx0, my0, mz0, mx1, my1, mz1;
     minus_box.Get(mx0, my0, mz0, mx1, my1, mz1);
     REQUIRE_THAT(mx0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
     REQUIRE_THAT(mx1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(my0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(my1, Catch::Matchers::WithinAbs(10.0, 1e-6));
     REQUIRE_THAT(mz0, Catch::Matchers::WithinAbs(-2.0, 1e-6));
     REQUIRE_THAT(mz1, Catch::Matchers::WithinAbs(0.0, 1e-6));
 }
