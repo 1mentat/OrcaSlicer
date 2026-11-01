@@ -7156,6 +7156,199 @@ TEST_CASE("Preset bundle metadata accepts legacy fields and rejects malformed fi
     CHECK_FALSE(loaded.load_from_json((temp.path() / "missing.json").string()));
 }
 
+namespace {
+
+// Loads empty user preset directories so clones have a place to write their files.
+struct ScopedPresetBundle {
+    ScopedTemporaryDir directory {"orca-preset-lifecycle"};
+    ScopedDataDir data_dir {directory.path()};
+    PresetBundle bundle;
+
+    ScopedPresetBundle()
+    {
+        PresetsConfigSubstitutions substitutions;
+        for (const char *kind : {PRESET_PRINT_NAME, PRESET_FILAMENT_NAME, PRESET_PRINTER_NAME})
+            fs::create_directories(directory.path() / kind / "base");
+        bundle.prints.load_presets(directory.string(), PRESET_PRINT_NAME, substitutions,
+                                  ForwardCompatibilitySubstitutionRule::Disable);
+        bundle.filaments.load_presets(directory.string(), PRESET_FILAMENT_NAME, substitutions,
+                                     ForwardCompatibilitySubstitutionRule::Disable);
+        bundle.printers.load_presets(directory.string(), PRESET_PRINTER_NAME, substitutions,
+                                    ForwardCompatibilitySubstitutionRule::Disable);
+    }
+};
+
+DynamicPrintConfig print_config(PresetBundle &bundle, double layer_height)
+{
+    DynamicPrintConfig config = bundle.prints.default_preset().config;
+    config.set_key_value("layer_height", new ConfigOptionFloat(layer_height));
+    return config;
+}
+
+DynamicPrintConfig filament_config(PresetBundle &bundle, const std::string &vendor,
+                                   const std::string &printer)
+{
+    DynamicPrintConfig config = bundle.filaments.default_preset().config;
+    config.opt<ConfigOptionStrings>("filament_vendor")->values = { vendor };
+    config.opt<ConfigOptionStrings>("filament_type")->values = { "PLA" };
+    config.opt<ConfigOptionStrings>("compatible_printers")->values = { printer };
+    config.opt<ConfigOptionString>("compatible_printers_condition")->value.clear();
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("Cloning filaments for a printer rewrites name, compatibility and identity", "[Preset][Bundle][PresetLifecycle][Clone]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    // The first name already carries a printer suffix and the second contains a path separator;
+    // both must be normalised into "<prefix> @<printer>".
+    Preset &first = bundle.filaments.load_preset("", "Source PLA @Old Printer",
+                                                 filament_config(bundle, "Vendor A", "Old Printer"), false);
+    first.filament_id = "first-family";
+    first.is_system = true;
+    Preset &second = bundle.filaments.load_preset("", "Brand/Silk PLA",
+                                                  filament_config(bundle, "Vendor B", "Other Printer"), false);
+    second.filament_id = "second-family";
+    // Loading inserts into a sorted vector, so take the pointers only after both are loaded.
+    std::vector<Preset const *> templates{bundle.filaments.find_preset("Source PLA @Old Printer"),
+                                          bundle.filaments.find_preset("Brand/Silk PLA")};
+    std::vector<std::string> failures;
+
+    REQUIRE(bundle.filaments.clone_presets_for_printer(
+        templates, failures, "Target Printer",
+        [](std::string prefix) { return "derived-" + prefix; }));
+    CHECK(failures.empty());
+
+    const Preset *copy1 = bundle.filaments.find_preset("Source PLA @Target Printer");
+    REQUIRE(copy1 != nullptr);
+    CHECK(copy1->is_user());
+    CHECK(copy1->is_visible);
+    CHECK(copy1->filament_id == "derived-Source PLA");
+    CHECK(copy1->config.opt<ConfigOptionStrings>("compatible_printers")->values ==
+          std::vector<std::string>{"Target Printer"});
+    CHECK(copy1->config.opt<ConfigOptionStrings>("filament_vendor")->values ==
+          std::vector<std::string>{"Vendor A"});
+    CHECK(copy1->config.opt<ConfigOptionStrings>("filament_settings_id")->values.front() == copy1->name);
+    CHECK(fs::exists(copy1->file));
+
+    const Preset *copy2 = bundle.filaments.find_preset("Brand-Silk PLA @Target Printer");
+    REQUIRE(copy2 != nullptr);
+    CHECK(copy2->filament_id == "derived-Brand-Silk PLA");
+    CHECK(copy2->config.opt<ConfigOptionStrings>("compatible_printers")->values ==
+          std::vector<std::string>{"Target Printer"});
+    CHECK(copy2->config.opt<ConfigOptionStrings>("filament_vendor")->values ==
+          std::vector<std::string>{"Vendor B"});
+
+    // The templates are untouched.
+    const Preset *source1 = bundle.filaments.find_preset("Source PLA @Old Printer");
+    REQUIRE(source1 != nullptr);
+    CHECK(source1->is_system);
+    CHECK(source1->filament_id == "first-family");
+    CHECK(source1->config.opt<ConfigOptionStrings>("compatible_printers")->values ==
+          std::vector<std::string>{"Old Printer"});
+}
+
+TEST_CASE("Cloning a filament with new material metadata applies only the metadata overrides", "[Preset][Bundle][PresetLifecycle][Clone]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    DynamicPrintConfig source_config = filament_config(bundle, "Old Vendor", "Printer A");
+    source_config.opt<ConfigOptionFloats>("filament_cost")->values = {42.5};
+    source_config.opt<ConfigOptionFloats>("filament_density")->values = {1.31};
+    Preset &source = bundle.filaments.load_preset("", "Base Material", source_config, false);
+    source.filament_id = "base-family";
+
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("filament_vendor", new ConfigOptionStrings({"New Vendor"}));
+    overrides.set_key_value("filament_type", new ConfigOptionStrings({"PETG"}));
+    overrides.set_key_value("compatible_printers", new ConfigOptionStrings({"Printer B"}));
+    // Not one of the three metadata keys, so it must be ignored.
+    overrides.set_key_value("filament_density", new ConfigOptionFloats({9.5}));
+    std::vector<std::string> failures;
+    REQUIRE(bundle.filaments.clone_presets_for_filament(
+        &source, failures, "Derived Material", "derived-family", overrides, "Printer B"));
+    CHECK(failures.empty());
+
+    const Preset *copy = bundle.filaments.find_preset("Derived Material @Printer B");
+    REQUIRE(copy != nullptr);
+    CHECK(copy->filament_id == "derived-family");
+    CHECK(copy->config.opt<ConfigOptionStrings>("filament_vendor")->values ==
+          std::vector<std::string>{"New Vendor"});
+    CHECK(copy->config.opt<ConfigOptionStrings>("filament_type")->values ==
+          std::vector<std::string>{"PETG"});
+    CHECK(copy->config.opt<ConfigOptionStrings>("compatible_printers")->values ==
+          std::vector<std::string>{"Printer B"});
+    CHECK_THAT(copy->config.opt<ConfigOptionFloats>("filament_cost")->values.front(),
+               Catch::Matchers::WithinAbs(42.5, 1e-9));
+    CHECK_THAT(copy->config.opt<ConfigOptionFloats>("filament_density")->values.front(),
+               Catch::Matchers::WithinAbs(1.31, 1e-9));
+    // The source keeps its own metadata.
+    const Preset *source_after = bundle.filaments.find_preset("Base Material");
+    REQUIRE(source_after != nullptr);
+    CHECK(source_after->filament_id == "base-family");
+    CHECK(source_after->config.opt<ConfigOptionStrings>("filament_vendor")->values ==
+          std::vector<std::string>{"Old Vendor"});
+}
+
+TEST_CASE("Cloning a filament without a compatible printer override falls back to the target printer", "[Preset][Bundle][PresetLifecycle][Clone]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    DynamicPrintConfig source_config = filament_config(bundle, "Old Vendor", "Printer A");
+    source_config.opt<ConfigOptionStrings>("compatible_printers")->values.clear();
+    Preset &source = bundle.filaments.load_preset("", "Universal Material", source_config, false);
+
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("filament_vendor", new ConfigOptionStrings({"New Vendor"}));
+    std::vector<std::string> failures;
+    REQUIRE(bundle.filaments.clone_presets_for_filament(
+        &source, failures, "Derived Material", "derived-family", overrides, "Printer B"));
+
+    const Preset *copy = bundle.filaments.find_preset("Derived Material @Printer B");
+    REQUIRE(copy != nullptr);
+    CHECK(copy->config.opt<ConfigOptionStrings>("compatible_printers")->values ==
+          std::vector<std::string>{"Printer B"});
+    CHECK(copy->config.opt<ConfigOptionStrings>("filament_vendor")->values ==
+          std::vector<std::string>{"New Vendor"});
+}
+
+TEST_CASE("Preset cloning reports collisions and supports an explicit rewrite", "[Preset][Bundle][PresetLifecycle][Clone]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    bundle.prints.load_preset("", "Original Process", print_config(bundle, 0.20), false);
+    double copied_height = 0.24;
+    auto rename = [&copied_height](Preset &preset, Preset::Type &) {
+        preset.name = "Copied Process";
+        preset.config.opt<ConfigOptionFloat>("layer_height")->value = copied_height;
+    };
+    auto layer_height = [&bundle](const char *name) {
+        const Preset *preset = bundle.prints.find_preset(name);
+        REQUIRE(preset != nullptr);
+        return preset->config.opt_float("layer_height");
+    };
+    std::vector<std::string> failures;
+
+    REQUIRE(bundle.prints.clone_presets({bundle.prints.find_preset("Original Process")}, failures, rename));
+    CHECK(failures.empty());
+    CHECK_THAT(layer_height("Copied Process"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK(bundle.prints.find_preset("Copied Process")->config.opt_string("print_settings_id") == "Copied Process");
+
+    // A second clone onto the same name is refused and leaves the existing copy alone.
+    copied_height = 0.25;
+    CHECK_FALSE(bundle.prints.clone_presets({bundle.prints.find_preset("Original Process")}, failures, rename));
+    CHECK(failures == std::vector<std::string>{"Copied Process"});
+    CHECK_THAT(layer_height("Copied Process"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+
+    failures.clear();
+    copied_height = 0.26;
+    REQUIRE(bundle.prints.clone_presets({bundle.prints.find_preset("Original Process")}, failures, rename, true));
+    CHECK_THAT(layer_height("Copied Process"), Catch::Matchers::WithinAbs(0.26, 1e-9));
+    CHECK_THAT(layer_height("Original Process"), Catch::Matchers::WithinAbs(0.20, 1e-9));
+}
+
 } // namespace preset_lifecycle_contracts
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
