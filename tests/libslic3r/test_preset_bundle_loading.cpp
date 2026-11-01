@@ -7391,6 +7391,9 @@ TEST_CASE("Saving a preset into the project embeds a child of its parent and res
         REQUIRE(project_presets.size() == 1);
         CHECK(project_presets.front()->name == "Embedded Process");
         CHECK(project_presets.front()->inherits() == "Editable Process");
+        // The exported child is what the project writer serializes, so it must carry the edit.
+        REQUIRE(project_presets.front()->config.has("layer_height"));
+        CHECK_THAT(project_presets.front()->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
     }
 
     // The selected preset is a "Library Process" now, so removing the embedded copy needs no reselection.
@@ -7421,24 +7424,26 @@ TEST_CASE("save_changes_for_preset reverts unselected edits and embeds the saved
 {
     ScopedPresetBundle scoped;
     PresetBundle &bundle = scoped.bundle;
-    bundle.prints.load_preset("", "Save Parent", print_config(bundle, 0.20), true);
+    bundle.prints.load_preset("", "Save Parent", print_config(bundle, 0.22), true);
     auto &edited = bundle.prints.get_edited_preset().config;
     edited.opt<ConfigOptionFloat>("layer_height")->value = 0.34;
     edited.opt<ConfigOptionInt>("wall_loops")->value = 7;
 
-    // layer_height is deselected in the save dialog; wall_loops stays selected.
+    // layer_height (parent 0.22, default 0.20, edited 0.34) is deselected in the save dialog; wall_loops stays selected.
     bundle.save_changes_for_preset("Embedded Save", Preset::TYPE_PRINT, {"layer_height"}, true);
     const Preset *saved = bundle.prints.find_preset("Embedded Save");
     REQUIRE(saved != nullptr);
     CHECK(saved->is_project_embedded);
     CHECK(saved->inherits() == "Save Parent");
-    CHECK_THAT(saved->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    CHECK_THAT(saved->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.22, 1e-9));
     CHECK(saved->config.opt_int("wall_loops") == 7);
     CHECK_FALSE(fs::exists(saved->file));
 
     bundle.reset_project_embedded_presets();
     CHECK(bundle.prints.find_preset("Embedded Save") == nullptr);
     CHECK(bundle.prints.find_preset("Save Parent") != nullptr);
+    // With the embedded selection gone, the bundle falls back to the parent.
+    CHECK(bundle.prints.get_selected_preset().name == "Save Parent");
 }
 
 } // namespace preset_lifecycle_contracts
