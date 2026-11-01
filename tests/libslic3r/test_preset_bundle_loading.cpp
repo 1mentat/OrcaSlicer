@@ -7089,6 +7089,75 @@ TEST_CASE("The complete preset configuration groups the metadata of every filame
     CHECK(process_group->values == std::vector<std::string>{"filament process 0", "filament process 1"});
 }
 
+namespace preset_lifecycle_contracts {
+
+TEST_CASE("Preset bundle metadata round-trips every field and stores preset names as bare filenames", "[Preset][Bundle][PresetLifecycle][Metadata]")
+{
+    ScopedTemporaryDir temp;
+    ScopedDataDir data_dir(temp.path());
+    const fs::path metadata_path = temp.path() / "bundle_metadata.json";
+
+    BundleMetadata saved;
+    saved.id = "bundle-id";
+    saved.name = "Cloud bundle";
+    saved.version = "2.4.0";
+    saved.description = "A test bundle";
+    saved.author = "profile-owner";
+    saved.imported_time = 101;
+    saved.updated_time = 202;
+    saved.print_presets = {"process/0.20mm.json", "nested/0.28mm.json"};
+    saved.filament_presets = {"filament/PLA.json"};
+    saved.printer_presets = {"printer/Machine.json"};
+
+    REQUIRE(saved.save_to_json(metadata_path.string()));
+    BundleMetadata loaded;
+    REQUIRE(loaded.load_from_json(metadata_path.string()));
+    CHECK(loaded.id == saved.id);
+    CHECK(loaded.name == saved.name);
+    CHECK(loaded.version == saved.version);
+    CHECK(loaded.description == saved.description);
+    CHECK(loaded.author == saved.author);
+    CHECK(loaded.imported_time == 101);
+    CHECK(loaded.updated_time == 202);
+    // The metadata format stores the bundle-local filename, not an absolute or
+    // nested path that would escape the bundle on extraction.
+    CHECK(loaded.print_presets == std::vector<std::string>{"0.20mm.json", "0.28mm.json"});
+    CHECK(loaded.filament_presets == std::vector<std::string>{"PLA.json"});
+    CHECK(loaded.printer_presets == std::vector<std::string>{"Machine.json"});
+}
+
+TEST_CASE("Preset bundle metadata accepts legacy fields and rejects malformed files", "[Preset][Bundle][PresetLifecycle][Metadata]")
+{
+    ScopedTemporaryDir temp;
+    ScopedDataDir data_dir(temp.path());
+    const fs::path legacy = temp.path() / "legacy.json";
+    std::ofstream(legacy.string())
+        << R"({"bundle_id":"legacy-id","bundle_type":"legacy description","version":"1.0.0"})";
+
+    BundleMetadata loaded;
+    REQUIRE(loaded.load_from_json(legacy.string()));
+    CHECK(loaded.id.empty());
+    CHECK(loaded.name == "legacy-id");
+    CHECK(loaded.version == "1.0.0");
+    CHECK(loaded.description == "legacy description");
+
+    // The current keys win over the legacy ones when both are present.
+    const fs::path both = temp.path() / "both.json";
+    std::ofstream(both.string())
+        << R"({"bundle_id":"legacy-id","name":"current name","bundle_type":"legacy description","description":"current description"})";
+    BundleMetadata current;
+    REQUIRE(current.load_from_json(both.string()));
+    CHECK(current.name == "current name");
+    CHECK(current.description == "current description");
+
+    const fs::path malformed = temp.path() / "malformed.json";
+    std::ofstream(malformed.string()) << "{\"id\": [";
+    CHECK_FALSE(loaded.load_from_json(malformed.string()));
+    CHECK_FALSE(loaded.load_from_json((temp.path() / "missing.json").string()));
+}
+
+} // namespace preset_lifecycle_contracts
+
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
 // "modified" marker; storing that label as the slot's preset name would point at no preset.
 TEST_CASE("filament selection canonicalizes the actual dirty preset label", "[Preset][Bundle][PresetSelection]")
