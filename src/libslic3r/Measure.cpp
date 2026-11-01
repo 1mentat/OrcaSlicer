@@ -902,8 +902,17 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             const Eigen::Hyperplane<double, 3> circle_plane(n, c);
             const Vec3d proj = circle_plane.projection(f1.get_point());
             if (proj.isApprox(c)) {
+                // A point on the axis is equally far from every circle point: measure to one of them,
+                // or to the center in center mode.
                 const Vec3d p_on_circle = c + radius * get_orthogonal(n, true);
-                result.distance_strict = std::make_optional(DistAndPoints{ radius, c, p_on_circle });
+                if (deal_circle_result == false) {
+                    result.distance_strict = std::make_optional(
+                        DistAndPoints{(f1.get_point() - p_on_circle).norm(), f1.get_point(), p_on_circle});
+                }
+                else {
+                    const double dist = (f1.get_point() - c).norm();
+                    result.distance_strict = std::make_optional(DistAndPoints{dist, f1.get_point(), c});
+                }
             }
             else {
                 if (deal_circle_result == false) {

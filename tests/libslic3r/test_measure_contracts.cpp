@@ -431,9 +431,7 @@ TEST_CASE("Point circle distances cover radial, axial and center-mode measuremen
     check_vec(center_mode.distance_strict->to, Vec3d::Zero());
 }
 
-// Known bug: a point on the circle's axis is measured as the radius from the center (axial offset
-// ignored, first witness not the point, center mode ignored); fixed by the follow-up fix PR
-TEST_CASE("Point on a circle's axis measures to the circle and to its center", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Point on a circle's axis measures to the circle and to its center", "[Measure][MeasureContracts]")
 {
     const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0);
     // Every point of the circle is sqrt(3^2 + 4^2) away from a point 4 above or below its center.
