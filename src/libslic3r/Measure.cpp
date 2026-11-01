@@ -1298,16 +1298,18 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                 else {
                     // Measure from the circle point nearest the plane: from the center, step the radius
                     // along the plane normal projected into the circle's plane, towards the plane. If that
-                    // point is across the plane, the circle meets it.
+                    // point is on or across the plane (including a center on the plane), the circle meets it. Only a
+                    // circle parallel to the plane within roundoff, where every point is equally near, takes an
+                    // arbitrary direction.
                     const Eigen::Hyperplane<double, 3> plane(normal2.normalized(), origin2);
                     const Vec3d n1 = normal1.normalized();
                     const double center_dist = plane.signedDistance(center);
                     const Vec3d toward = plane.normal() - plane.normal().dot(n1) * n1;
-                    const Vec3d dir = toward.norm() > EPSILON ? Vec3d((center_dist >= 0.0 ? -1.0 : 1.0) * toward.normalized()) :
+                    const Vec3d dir = toward.norm() > 1e-12 ? Vec3d((center_dist >= 0.0 ? -1.0 : 1.0) * toward.normalized()) :
                                                                 Vec3d(get_orthogonal(n1, true));
                     Vec3d closest = center + radius * dir;
                     const double dir_rate = radius * plane.normal().dot(dir);
-                    if (plane.signedDistance(closest) * center_dist < 0.0 && std::abs(dir_rate) > 0.0) {
+                    if (plane.signedDistance(closest) * center_dist <= 0.0 && std::abs(dir_rate) > 0.0) {
                         // The circle crosses the plane at angle t from dir, where its distance is zero.
                         const double cos_t = std::clamp(-center_dist / dir_rate, -1.0, 1.0);
                         closest = center + radius * (cos_t * dir + std::sqrt(1.0 - sqr(cos_t)) * n1.cross(dir));
