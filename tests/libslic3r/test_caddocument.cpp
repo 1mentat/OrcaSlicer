@@ -9805,3 +9805,269 @@ TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groov
 }
 
 } // namespace cad_legacy_thread_contracts
+
+TEST_CASE("CadDocument body Boolean intersection keeps the analytic overlap", "[CadDocument][boolean]")
+{
+    CadDocument doc;
+    const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                           20.0, 20.0, 10.0, "BaseSketch");
+    doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base");
+
+    SketchPlane shifted = SketchPlane::XY();
+    shifted.origin = Vec3d(10.0, 5.0, 0.0);
+    const int tool_sketch = doc.add_sketch(SketchShape::Rectangle, shifted,
+                                           20.0, 20.0, 10.0, "ToolSketch");
+    doc.add_extrude(tool_sketch, 10.0, false, BooleanMode::New, "Tool");
+
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 2);
+
+    const int common = doc.add_boolean(BooleanMode::Intersect, 0, 1, false, 0.0, -1, -1, "Common");
+    REQUIRE(common >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    const auto props = doc.body_mass_properties(0);
+    REQUIRE(props.valid);
+    REQUIRE(props.is_solid);
+    // The centered base is [-10,10]x[-10,10]x[0,10]; the shifted tool is
+    // [0,20]x[-5,15]x[0,10], so their common is 10*15*10.
+    CHECK_THAT(props.volume, Catch::Matchers::WithinRel(1500.0, 1e-6));
+
+    const auto bb = doc.display_mesh.bounding_box();
+    CHECK_THAT(bb.min.x(), Catch::Matchers::WithinAbs(0.0, 0.05));
+    CHECK_THAT(bb.max.x(), Catch::Matchers::WithinAbs(10.0, 0.05));
+    CHECK_THAT(bb.min.y(), Catch::Matchers::WithinAbs(-5.0, 0.05));
+    CHECK_THAT(bb.max.y(), Catch::Matchers::WithinAbs(10.0, 0.05));
+    CHECK_THAT(bb.min.z(), Catch::Matchers::WithinAbs(0.0, 0.05));
+    CHECK_THAT(bb.max.z(), Catch::Matchers::WithinAbs(10.0, 0.05));
+}
+
+TEST_CASE("CadDocument extrude intersection clips the active body to the tool", "[CadDocument][boolean]")
+{
+    CadDocument doc;
+    const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                           20.0, 20.0, 10.0, "BaseSketch");
+    doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base");
+
+    SketchPlane shifted = SketchPlane::XY();
+    shifted.origin = Vec3d(10.0, 5.0, 0.0);
+    const int tool_sketch = doc.add_sketch(SketchShape::Rectangle, shifted,
+                                           12.0, 8.0, 6.0, "ToolSketch");
+    const int intersect = doc.add_extrude(tool_sketch, 10.0, false,
+                                          BooleanMode::Intersect, "IntersectExtrude");
+    REQUIRE(intersect >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    const auto props = doc.body_mass_properties(0);
+    REQUIRE(props.valid);
+    REQUIRE(props.is_solid);
+    // The tool is [4,16]x[1,9]x[0,10]; common with the base is 6*8*10.
+    CHECK_THAT(props.volume, Catch::Matchers::WithinRel(480.0, 1e-6));
+
+    const auto bb = doc.display_mesh.bounding_box();
+    CHECK_THAT(bb.min.x(), Catch::Matchers::WithinAbs(4.0, 0.05));
+    CHECK_THAT(bb.max.x(), Catch::Matchers::WithinAbs(10.0, 0.05));
+    CHECK_THAT(bb.min.y(), Catch::Matchers::WithinAbs(1.0, 0.05));
+    CHECK_THAT(bb.max.y(), Catch::Matchers::WithinAbs(9.0, 0.05));
+    CHECK_THAT(bb.min.z(), Catch::Matchers::WithinAbs(0.0, 0.05));
+    CHECK_THAT(bb.max.z(), Catch::Matchers::WithinAbs(10.0, 0.05));
+}
+
+TEST_CASE("CadDocument sweep Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean]")
+{
+    const std::vector<BooleanMode> modes = {
+        BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect
+    };
+    const double base_volume = 20.0 * 20.0 * 10.0;
+    const double tool_volume = M_PI * 3.0 * 3.0 * 10.0;
+    // The excluded x<-1 circular segment has chord distance1 from the center.
+    const double cap_area = 9.0 * std::acos(1.0 / 3.0) - std::sqrt(8.0);
+    const double overlap_volume = tool_volume - cap_area * 10.0;
+
+    for (const BooleanMode mode : modes) {
+        INFO("sweep Boolean mode " << static_cast<int>(mode));
+        CadDocument doc;
+
+        // The base spans x=[-1,19], y=[-10,10], z=[0,10].  The circular sweep is
+        // centered at the origin and therefore has a partial, analytically known overlap.
+        SketchProfile base;
+        base.points = {{-1.0, -10.0}, {19.0, -10.0}, {19.0, 10.0}, {-1.0, 10.0}};
+        base.closed = true;
+        const int base_sketch = doc.add_sketch_profile(base, SketchPlane::XY(), "Base");
+        REQUIRE(base_sketch >= 0);
+        REQUIRE(doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "BaseExtrude") >= 0);
+
+        SketchEntity circle;
+        circle.type = SketchEntity::Type::Circle;
+        circle.center = Vec2d(0.0, 0.0);
+        circle.radius = 3.0;
+        const int profile = doc.add_sketch_entities({circle}, SketchPlane::XY(), "SweepProfile");
+        REQUIRE(profile >= 0);
+
+        SketchEntity spine;
+        spine.type = SketchEntity::Type::Line;
+        spine.p0 = Vec2d(0.0, 0.0);
+        spine.p1 = Vec2d(0.0, 10.0);
+        const int path = doc.add_sketch_entities({spine}, SketchPlane::XZ(), "SweepPath");
+        REQUIRE(path >= 0);
+        REQUIRE(doc.add_sweep(profile, path, mode, "SweepBoolean") >= 0);
+
+        REQUIRE(doc.recompute());
+        REQUIRE(doc.error.empty());
+        REQUIRE(doc.bodies.size() == 1);
+        const auto props = doc.body_mass_properties(0);
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        REQUIRE(std::isfinite(props.volume));
+        REQUIRE(props.volume > 0.0);
+
+        // Compare the changed material itself so a tolerance on the large base
+        // cannot hide a missing or incorrectly sized Boolean operation.
+        const double effect = mode == BooleanMode::Add ? props.volume - base_volume :
+                              mode == BooleanMode::Cut ? base_volume - props.volume : props.volume;
+        const double expected_effect = mode == BooleanMode::Add ? tool_volume - overlap_volume : overlap_volume;
+        CHECK_THAT(effect, Catch::Matchers::WithinRel(expected_effect, 1e-4));
+
+        if (mode == BooleanMode::Add) {
+            REQUIRE(props.volume > base_volume + 1.0);
+            REQUIRE(props.volume < base_volume + tool_volume + 1.0);
+        } else if (mode == BooleanMode::Cut) {
+            REQUIRE(props.volume < base_volume - 1.0);
+            REQUIRE(props.volume > base_volume - tool_volume - 1.0);
+        } else {
+            // Only the circular segment x>=-1 lies in the base.  It is strictly less
+            // than 95% of the full cylinder and strictly greater than zero.
+            REQUIRE(props.volume < tool_volume * 0.95);
+            REQUIRE(props.volume > 1.0);
+        }
+    }
+}
+
+TEST_CASE("CadDocument loft Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean]")
+{
+    const std::vector<BooleanMode> modes = {
+        BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect
+    };
+    const double base_volume = 20.0 * 20.0 * 10.0;
+    const double tool_volume = 8.0 * 8.0 * 10.0;
+    const double overlap_volume = 2.0 * 8.0 * 10.0;
+
+    for (const BooleanMode mode : modes) {
+        INFO("loft Boolean mode " << static_cast<int>(mode));
+        CadDocument doc;
+
+        // The base spans x=[-1,19], y=[-10,10], z=[0,10].  The ruled loft is an
+        // 8x8 prism at x=[17,25], so its overlap is the independently known 2x8x10 slab.
+        SketchProfile base;
+        base.points = {{-1.0, -10.0}, {19.0, -10.0}, {19.0, 10.0}, {-1.0, 10.0}};
+        base.closed = true;
+        const int base_sketch = doc.add_sketch_profile(base, SketchPlane::XY(), "Base");
+        REQUIRE(base_sketch >= 0);
+        REQUIRE(doc.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "BaseExtrude") >= 0);
+
+        SketchProfile bottom;
+        bottom.points = {{17.0, -4.0}, {25.0, -4.0}, {25.0, 4.0}, {17.0, 4.0}};
+        bottom.closed = true;
+        const int bottom_ref = doc.add_sketch_profile(bottom, SketchPlane::XY(), "LoftBottom");
+        REQUIRE(bottom_ref >= 0);
+
+        SketchPlane top_plane = SketchPlane::XY();
+        top_plane.origin = Vec3d(0.0, 0.0, 10.0);
+        SketchProfile top;
+        top.points = bottom.points;
+        top.closed = true;
+        const int top_ref = doc.add_sketch_profile(top, top_plane, "LoftTop");
+        REQUIRE(top_ref >= 0);
+        REQUIRE(doc.add_loft({bottom_ref, top_ref}, true, mode, "LoftBoolean") >= 0);
+
+        REQUIRE(doc.recompute());
+        REQUIRE(doc.error.empty());
+        REQUIRE(doc.bodies.size() == 1);
+        const auto props = doc.body_mass_properties(0);
+        REQUIRE(props.valid);
+        REQUIRE(props.is_solid);
+        REQUIRE(std::isfinite(props.volume));
+        REQUIRE(props.volume > 0.0);
+
+        // Compare the changed material itself so a tolerance on the large base
+        // cannot hide a missing or incorrectly sized Boolean operation.
+        const double effect = mode == BooleanMode::Add ? props.volume - base_volume :
+                              mode == BooleanMode::Cut ? base_volume - props.volume : props.volume;
+        const double expected_effect = mode == BooleanMode::Add ? tool_volume - overlap_volume : overlap_volume;
+        CHECK_THAT(effect, Catch::Matchers::WithinRel(expected_effect, 1e-4));
+
+        if (mode == BooleanMode::Add) {
+            REQUIRE(props.volume > base_volume + 1.0);
+            REQUIRE(props.volume < base_volume + tool_volume + 1.0);
+        } else if (mode == BooleanMode::Cut) {
+            REQUIRE(props.volume < base_volume - 1.0);
+            REQUIRE(props.volume > base_volume - tool_volume - 1.0);
+        } else {
+            REQUIRE(props.volume < tool_volume * 0.95);
+            REQUIRE(props.volume > 1.0);
+        }
+    }
+}
+
+TEST_CASE("CadDocument keeps a boolean tool when requested and rejects a new-mode pair",
+          "[CadDocument][boolean]")
+{
+    auto add_overlapping_pair = [](CadDocument& d) {
+        const int base_sketch = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                             10.0, 10.0, 0.0, "BaseSketch");
+        REQUIRE(base_sketch >= 0);
+        REQUIRE(d.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base") >= 0);
+
+        SketchPlane shifted = SketchPlane::XY();
+        shifted.origin = Vec3d(5.0, 0.0, 0.0);
+        const int tool_sketch = d.add_sketch(SketchShape::Rectangle, shifted,
+                                             10.0, 10.0, 0.0, "ToolSketch");
+        REQUIRE(tool_sketch >= 0);
+        REQUIRE(d.add_extrude(tool_sketch, 10.0, false, BooleanMode::New, "Tool") >= 0);
+    };
+
+    CadDocument kept;
+    add_overlapping_pair(kept);
+    REQUIRE(kept.recompute());
+    REQUIRE(kept.error.empty());
+    REQUIRE(kept.bodies.size() == 2);
+
+    const int fuse = kept.add_boolean(BooleanMode::Add, 0, 1, true, 0.0, -1, -1, "KeepToolFuse");
+    REQUIRE(fuse >= 0);
+    REQUIRE(kept.recompute());
+    REQUIRE(kept.error.empty());
+    REQUIRE(kept.bodies.size() == 2);
+    REQUIRE(kept.features.at(fuse).type == CadFeatureType::Boolean);
+    REQUIRE(kept.features.at(fuse).bool_keep_tool);
+
+    const auto target = kept.body_mass_properties(0);
+    const auto tool = kept.body_mass_properties(1);
+    REQUIRE(target.valid);
+    REQUIRE(target.is_solid);
+    REQUIRE(tool.valid);
+    REQUIRE(tool.is_solid);
+    REQUIRE_THAT(target.volume, Catch::Matchers::WithinRel(1500.0, 1e-6));
+    REQUIRE_THAT(tool.volume, Catch::Matchers::WithinRel(1000.0, 1e-6));
+
+    Bnd_Box target_box;
+    BRepBndLib::Add(kept.bodies.at(0).shape, target_box);
+    double tx0, ty0, tz0, tx1, ty1, tz1;
+    target_box.Get(tx0, ty0, tz0, tx1, ty1, tz1);
+    REQUIRE_THAT(tx0, Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(tx1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(tz0, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(tz1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+
+    CadDocument invalid;
+    add_overlapping_pair(invalid);
+    REQUIRE(invalid.recompute());
+    REQUIRE(invalid.error.empty());
+    invalid.add_boolean(BooleanMode::New, 0, 1, false, 0.0, -1, -1, "InvalidNewBoolean");
+    REQUIRE_FALSE(invalid.recompute());
+    REQUIRE_CONTAINS(invalid.error, "choose Union");
+}
