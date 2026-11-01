@@ -1187,20 +1187,26 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                 const Vec3d normProj = N0dD * n0;
                 const Vec3d compProj = D - normProj;
                 Vec3d U = compProj;
-                const double d = U.norm();
-                U.normalize();
+                double d = U.norm();
+                // A projected separation at roundoff level relative to the feature size is concentric:
+                // normalizing it would give an arbitrary direction, and the witnesses below follow U.
+                const double roundoff = 64.0 * std::numeric_limits<double>::epsilon() *
+                                        std::max({ D.norm(), std::abs(r0), std::abs(r1), std::numeric_limits<double>::min() });
+                if (d <= roundoff) {
+                    d = 0.0;
+                    U = Vec3d::Zero();
+                } else
+                    U /= d;
 
                 // The configuration is determined by the relative location of the
                 // intervals of projection of the circles on to the D-line.
                 // Circle0 projects to [-r0,r0] and circle1 projects to
                 // [d-r1,d+r1].
                 const double dmr1 = d - r1;
-                double distance;
                 if (dmr1 >= r0) {
                     // d >= r0 + r1
                     // The circles are separated (d > r0 + r1) or tangent with one
                     // outside the other (d = r0 + r1).
-                    distance = dmr1 - r0;
                     info.circle0Closest = c0 + r0 * U;
                     info.circle1Closest = c1 - r1 * U;
                 }
@@ -1210,7 +1216,6 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                     const double dpr1 = d + r1;
                     if (dpr1 <= r0) {
                         // Circle1 is inside circle0.
-                        distance = r0 - dpr1;
                         if (d > 0.0) {
                             info.circle0Closest = c0 + r0 * U;
                             info.circle1Closest = c1 + r1 * U;
@@ -1226,7 +1231,6 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                     }
                     else if (dmr1 <= -r0) {
                         // Circle0 is inside circle1.
-                        distance = -r0 - dmr1;
                         if (d > 0.0) {
                             info.circle0Closest = c0 - r0 * U;
                             info.circle1Closest = c1 - r1 * U;
@@ -1241,13 +1245,20 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                         }
                     }
                     else {
-                        distance = (c1 - c0).norm();
-                        info.circle0Closest = c0;
-                        info.circle1Closest = c1;
+                        // The projected circles intersect: the closest points lie over a common point of
+                        // the projections. d > 0 here, because every d == 0 case is nested.
+                        assert(d > 0.0);
+                        const double x = (r0 * r0 - r1 * r1 + d * d) / (2.0 * d);
+                        const double h_sq = std::max(r0 * r0 - x * x, 0.0);
+                        const Vec3d V = n0.cross(U).normalized();
+                        const Vec3d offset = x * U + std::sqrt(h_sq) * V;
+                        info.circle0Closest = c0 + offset;
+                        info.circle1Closest = c1 - (d - x) * U + std::sqrt(h_sq) * V;
                     }
                 }
 
-                info.sqrDistance = distance * distance;
+                // Measure between the witnesses, so the distance includes the axial gap.
+                info.sqrDistance = (info.circle1Closest - info.circle0Closest).squaredNorm();
             }
             if (deal_circle_result == false) {
                 result.distance_infinite = std::make_optional(
