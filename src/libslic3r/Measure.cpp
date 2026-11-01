@@ -979,6 +979,21 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             const Vec3d                              inter   = line.intersectionPoint(plane);
             const Vec3d                              e1inter = inter - e.first;
             if (e1inter.dot(e1e2) >= 0.0 && e1inter.norm() < e1e2.norm()) distances.emplace_back(*get_measurement(SurfaceFeature(inter), f2).distance_strict);
+            // The edge can cross the circle away from those points: where its line pierces the circle's plane,
+            // or, for an edge in that plane, where its line cuts the circle.
+            const auto add_if_on_edge = [&](const Vec3d& p) {
+                const Vec3d e1p = p - e.first;
+                if (e1p.dot(e1e2) >= 0.0 && e1p.norm() <= e1e2.norm())
+                    distances.emplace_back(*get_measurement(SurfaceFeature(p), f2).distance_strict);
+            };
+            const Eigen::Hyperplane<double, 3> circle_plane(normal.normalized(), center);
+            if (std::abs(e1e2_unit.dot(normal.normalized())) > EPSILON)
+                add_if_on_edge(line.intersectionPoint(circle_plane));
+            else if (circle_plane.absDistance(e.first) < EPSILON && (inter - center).squaredNorm() < sqr(radius)) {
+                const double half_chord = std::sqrt(sqr(radius) - (inter - center).squaredNorm());
+                add_if_on_edge(inter - half_chord * e1e2_unit);
+                add_if_on_edge(inter + half_chord * e1e2_unit);
+            }
 
             auto it = std::min_element(distances.begin(), distances.end(), [](const DistAndPoints &item1, const DistAndPoints &item2) { return item1.dist < item2.dist; });
             if (deal_circle_result == false) {

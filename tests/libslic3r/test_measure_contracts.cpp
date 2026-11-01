@@ -494,9 +494,7 @@ TEST_CASE("Pair matrix covers point, edge, circle, and plane branches", "[Measur
     check_witnessed_distance(coplanar_ring.distance_strict, 0.0);
 }
 
-// Known bug: edge-circle distance only measures from the edge endpoints and from the foot of the circle
-// center on the edge, so it misses where a secant crosses the circle away from those points; needs a fix PR
-TEST_CASE("Edge distance to a circle is zero where a secant crosses it", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Edge distance to a circle is zero where a secant crosses it", "[Measure][MeasureContracts]")
 {
     // y = 1 cuts the radius-2 circle at x = +-sqrt(3); the center's foot (0, 1, 0) is 1 inside the circle.
     const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
