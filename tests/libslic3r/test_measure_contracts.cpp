@@ -603,9 +603,7 @@ TEST_CASE("Edge and circle distances to a bounded plane use its boundary edges",
     CHECK_THAT(ring_floor.distance_infinite->dist, WithinAbs(5.0, 1e-7));
 }
 
-// Known bug: without boundary edges the circle-plane branch returns the circle center and its projection
-// as witnesses, so the first witness is not on the circle; needs a fix PR
-TEST_CASE("Circle distance to a boundary-less plane has a witness on the circle", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Circle distance to a boundary-less plane has a witness on the circle", "[Measure][MeasureContracts]")
 {
     const SurfaceFeature ring = circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0);
     const SurfaceFeature unbounded = plane(8, Vec3d::UnitZ(), Vec3d::Zero(), std::make_shared<std::vector<SurfaceFeature>>());
