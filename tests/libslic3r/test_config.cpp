@@ -1710,6 +1710,47 @@ TEST_CASE("Static and dynamic print defaults retain named enum lists", "[Config]
     }
 }
 
+TEST_CASE("Core FFF numeric validation rejects values below their semantic floors", "[Config][Validation]")
+{
+    struct Boundary {
+        const char *key;
+        const char *invalid;
+        const char *valid;
+    };
+    // These floors are semantic constraints enforced by validate(), beyond the GUI
+    // metadata (which intentionally permits zero for several editable fields). Each
+    // valid value sits at or just above the floor and differs from the default.
+    const Boundary boundaries[] = {
+        {"layer_height", "0", "0.05"},
+        {"filament_diameter", "0.9", "1.0"},
+        {"nozzle_diameter", "0.004", "0.005"},
+        {"wall_loops", "-1", "0"},
+        {"top_shell_layers", "-1", "0"},
+        {"bottom_shell_layers", "-1", "0"},
+        {"skirt_height", "-1", "0"},
+        {"bridge_flow", "0", "0.01"},
+        {"internal_bridge_flow", "0", "0.01"},
+        {"extruder_clearance_radius", "0", "0.1"},
+        {"nozzle_height", "0", "0.1"},
+        {"filament_flow_ratio", "0", "0.01"},
+    };
+
+    for (const Boundary &boundary : boundaries) {
+        DYNAMIC_SECTION(boundary.key) {
+            DynamicPrintConfig invalid = DynamicPrintConfig::full_print_config();
+            invalid.set_deserialize_strict(boundary.key, boundary.invalid);
+            const auto invalid_errors = invalid.validate();
+            CHECK(invalid_errors.find(boundary.key) != invalid_errors.end());
+
+            DynamicPrintConfig valid = DynamicPrintConfig::full_print_config();
+            REQUIRE(valid.opt_serialize(boundary.key) != boundary.valid);
+            valid.set_deserialize_strict(boundary.key, boundary.valid);
+            const auto valid_errors = valid.validate();
+            CHECK(valid_errors.find(boundary.key) == valid_errors.end());
+        }
+    }
+}
+
 TEST_CASE("Project JSON migration records support and wall-order differences", "[Config][ConfigJsonMigration]")
 {
     const auto [seed_existing, keep_wall_order] = GENERATE(
