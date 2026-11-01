@@ -2374,4 +2374,103 @@ TEST_CASE("BBS 3MF preserves model metadata and volume types", "[3MF][Bbs3mfExte
     }
 }
 
+TEST_CASE("BBS 3MF preserves multiple plate records and plate-scoped metadata", "[3MF][Bbs3mfExtended][Plates]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_plate_store");
+    source.set_backup_path(backup.string());
+    PlateData plate0;
+    PlateData plate1;
+    make_plate(plate0, 0, {{0, 0}});
+    make_plate(plate1, 1, {{0, 1}});
+    plate0.plate_name = "plate-1";
+    plate1.plate_name = "plate-2";
+    plate1.locked = true;
+    PlateDataPtrs plates{&plate0, &plate1};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 2);
+    CHECK(loaded.plates[0]->plate_name == "plate-1");
+    CHECK(loaded.plates[1]->plate_name == "plate-2");
+    CHECK_FALSE(loaded.plates[0]->locked);
+    CHECK(loaded.plates[1]->locked);
+    // Each plate keeps its own instance of the single object.
+    REQUIRE(loaded.plates[0]->obj_inst_map.size() == 1);
+    REQUIRE(loaded.plates[1]->obj_inst_map.size() == 1);
+    CHECK(loaded.plates[0]->obj_inst_map.begin()->second.first == 0);
+    CHECK(loaded.plates[1]->obj_inst_map.begin()->second.first == 1);
+}
+
+TEST_CASE("BBS 3MF gates slice metadata while retaining every plate instance mapping", "[3MF][Bbs3mfExtended][Plates][SliceInfo]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_slice_info_store");
+    source.set_backup_path(backup.string());
+
+    PlateData unsliced;
+    PlateData sliced;
+    make_plate(unsliced, 0, {{0, 0}});
+    make_plate(sliced, 1, {{0, 1}});
+
+    // Both records carry slice-only values. Only the valid sliced record may write them
+    // to slice_info.config; the model-settings plate entries still carry the
+    // object/instance mapping of both.
+    unsliced.printer_model_id = "must-not-be-written";
+    unsliced.gcode_prediction = "999";
+    unsliced.gcode_weight = "888";
+    unsliced.toolpath_outside = true;
+    unsliced.is_support_used = true;
+    unsliced.is_sliced_valid = false;
+
+    sliced.printer_model_id = "sliced-printer";
+    // The GUI reads these as numbers, and they are written verbatim into XML attributes.
+    sliced.gcode_prediction = "42";
+    sliced.gcode_weight = "12.5";
+    sliced.toolpath_outside = true;
+    sliced.is_support_used = true;
+    sliced.is_sliced_valid = true;
+
+    PlateDataPtrs plates{&unsliced, &sliced};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 2);
+
+    const PlateData &loaded_unsliced = *loaded.plates[0];
+    const PlateData &loaded_sliced = *loaded.plates[1];
+
+    // No slice-info plate is written for the unsliced record, so its slice-only values
+    // stay at the parser defaults.
+    CHECK(loaded_unsliced.printer_model_id.empty());
+    CHECK(loaded_unsliced.gcode_prediction.empty());
+    CHECK(loaded_unsliced.gcode_weight.empty());
+    CHECK_FALSE(loaded_unsliced.toolpath_outside);
+    CHECK_FALSE(loaded_unsliced.is_support_used);
+
+    CHECK(loaded_sliced.printer_model_id == "sliced-printer");
+    CHECK(loaded_sliced.gcode_prediction == "42");
+    CHECK(loaded_sliced.gcode_weight == "12.5");
+    CHECK(loaded_sliced.toolpath_outside);
+    CHECK(loaded_sliced.is_support_used);
+
+    // Plate membership comes from model settings, independent of the slice-info gate:
+    // the same object, a different source instance on each plate.
+    REQUIRE(loaded_unsliced.obj_inst_map.size() == 1);
+    REQUIRE(loaded_sliced.obj_inst_map.size() == 1);
+    CHECK(loaded_unsliced.obj_inst_map.begin()->first == loaded_sliced.obj_inst_map.begin()->first);
+    CHECK(loaded_unsliced.obj_inst_map.begin()->second.first == 0);
+    CHECK(loaded_sliced.obj_inst_map.begin()->second.first == 1);
+}
+
 } // namespace bbs_archive_contracts
