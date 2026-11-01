@@ -858,8 +858,10 @@ TEST_CASE("Extra emboss line gap changes only multi-line baseline spacing", "[Em
     CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::top, 3, *face, prop), WithinAbs(-8., 1e-5));
 }
 
-TEST_CASE("Emboss layout selects metrics from the requested font collection entry", "[Emboss][EmbossFont]")
+TEST_CASE("Emboss vertical offsets use the metrics record at the requested collection number", "[Emboss][EmbossFont]")
 {
+    // Only the offset helper's choice of metrics record is checked: the bundled fonts are single-face,
+    // so the second record is supplied rather than read from a real font collection.
     const auto face = load_font();
     Emboss::FontFile::Info second{};
     second.ascent      = 1200;
@@ -867,6 +869,10 @@ TEST_CASE("Emboss layout selects metrics from the requested font collection entr
     second.linegap     = 100;
     second.unit_per_em = 2000;
     face->infos = {simple_metrics(), second};
+    FontProp first_prop(20.f);
+    first_prop.collection_number = 0;
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::top, 1, *face, first_prop), WithinAbs(-16., 1e-5));
+    CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::bottom, 2, *face, first_prop), WithinAbs(24., 1e-5));
     FontProp prop(20.f);
     prop.collection_number = 1;
     CHECK_THAT(Emboss::get_align_y_offset_in_mm(FontProp::VerticalAlign::top, 1, *face, prop), WithinAbs(-12., 1e-5));
