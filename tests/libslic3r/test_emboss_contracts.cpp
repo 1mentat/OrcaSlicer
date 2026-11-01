@@ -78,9 +78,7 @@ static ExPolygons close_point_shape()
     };
 }
 
-// Known bug: divide_segments_for_close_point passes the radius to AABBTreeLines::all_lines_in_radius, which expects
-// it squared, so the search radius is sqrt(distance); fixed by the follow-up fix PR.
-TEST_CASE("Close-point division honors a Euclidean radius boundary", "[Emboss][EmbossHealing][!shouldfail]")
+TEST_CASE("Close-point division honors a Euclidean radius boundary", "[Emboss][EmbossHealing]")
 {
     const double unit = 1. / SCALING_FACTOR;
     const size_t original_points = close_point_shape().front().contour.size();

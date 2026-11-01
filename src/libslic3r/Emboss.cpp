@@ -342,7 +342,7 @@ bool Emboss::divide_segments_for_close_point(ExPolygons &expolygons, double dist
     auto check_points = [&divs, &point_index, &lines, &tree, &distance, &ids, &expolygons](const Points &pts) {
         for (const Point &p : pts) {
             Vec2d p_d = p.cast<double>();
-            std::vector<size_t> close_lines = AABBTreeLines::all_lines_in_radius(lines, tree, p_d, distance);
+            std::vector<size_t> close_lines = AABBTreeLines::all_lines_in_radius(lines, tree, p_d, distance * distance);
             for (size_t index : close_lines) {
                 // skip point neighbour lines indices
                 if (index == point_index) continue;
