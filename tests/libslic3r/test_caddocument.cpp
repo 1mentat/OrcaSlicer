@@ -9762,9 +9762,8 @@ TEST_CASE("Saved legacy external threads retain crests outside the reference cyl
     CHECK(bounds.min.x() > -legacy_radius - legacy_depth - 0.05);
 }
 
-// Known bug: legacy internal threads cut the bore before the helical groove, and OCCT then returns only the bore, so the groove is lost; fixed by the follow-up fix PR.
 TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groove",
-          "[CadDocument][thread][!shouldfail]")
+          "[CadDocument][thread]")
 {
     constexpr double stock_radius = 6.0;
     CadDocument source;
