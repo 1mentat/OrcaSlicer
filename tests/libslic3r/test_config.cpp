@@ -19,7 +19,13 @@
 
 #include <boost/nowide/fstream.hpp>
 #include "libslic3r/Config.hpp"
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
+#include <iomanip>
+#include <limits>
+#include <string>
 #include <initializer_list>
 #include <memory>
 #include <map>
@@ -1611,6 +1617,82 @@ template<class Source> void check_member_apply_matches_key_apply(const Source &s
     CHECK_FALSE(differing_keys(by_member, FullPrintConfig()).empty());
 }
 
+bool is_numeric_option_type(const ConfigOptionType type)
+{
+    switch (type) {
+    case coFloat:
+    case coFloats:
+    case coInt:
+    case coInts:
+    case coPercent:
+    case coPercents:
+    case coFloatOrPercent:
+    case coFloatsOrPercents:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_integer_option_type(const ConfigOptionType type)
+{
+    return type == coInt || type == coInts;
+}
+
+bool is_percent_option_type(const ConfigOptionType type)
+{
+    return type == coPercent || type == coPercents;
+}
+
+std::string serialize_numeric_boundary(const ConfigOptionType type, const double value)
+{
+    std::ostringstream stream;
+    if (is_integer_option_type(type))
+        stream << static_cast<long long>(std::llround(value));
+    else
+        stream << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    if (is_percent_option_type(type))
+        stream << '%';
+    return stream.str();
+}
+
+// An empty aggregate has no unambiguous serialized representation: its
+// deserializer treats empty input as one empty group. Keep the one registered
+// case explicit while exercising every other default below.
+const std::set<std::string> expected_empty_aggregate_defaults = {"extruder_printable_area"};
+
+std::string representative_serialization(const ConfigOptionDef &def, const ConfigOption &option)
+{
+    const std::string serialized = option.serialize();
+    if (!serialized.empty())
+        return serialized;
+
+    switch (def.type) {
+    case coString:
+        return "schema-roundtrip";
+    case coStrings:
+        return "schema-roundtrip;second-value";
+    case coPoint:
+        return "1,2";
+    case coPoints:
+        return "1x2,3x4";
+    case coPointsGroups:
+        return "1x2,3x4#5x6";
+    case coIntsGroups:
+        return "1,2#3";
+    case coBools:
+        return "0,1";
+    case coFloats:
+    case coInts:
+    case coPercents:
+    case coFloatsOrPercents:
+        return is_percent_option_type(def.type) ? "0%" : "0";
+    default:
+        return serialized;
+    }
+}
+
+
 } // namespace
 
 TEST_CASE("A static config applies itself onto a config of its type as a lookup by name would", "[Config]")
@@ -1673,6 +1755,254 @@ TEST_CASE("Default options of enum lists get their definition's keys map", "[Con
         ++enum_lists;
     }
     CHECK(enum_lists > 0);
+}
+
+TEST_CASE("Every registered print option has a complete schema contract", "[Config][Schema]")
+{
+    // `extruder` is an object-level override whose zero value means "inherit". It is
+    // intentionally represented by an empty option rather than a preset default. Any
+    // newly registered option without a default should make this allowlist fail loudly.
+    const std::set<std::string> expected_defaultless = {"extruder"};
+    std::set<std::string>       actual_defaultless;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        INFO(key);
+        CHECK(def.opt_key == key);
+        CHECK(def.serialization_key_ordinal > 0);
+
+        if (def.default_value.get() == nullptr)
+            actual_defaultless.insert(key);
+        else
+            CHECK(def.default_value->type() == def.type);
+
+        // Every definition must be able to materialize its normal dynamic value. The
+        // two grouped point/int types are static-only containers and are deliberately
+        // excluded from create_empty_option()'s scalar/vector factory.
+        const std::unique_ptr<ConfigOption> default_option(def.create_default_option());
+        REQUIRE(default_option != nullptr);
+        CHECK(default_option->type() == def.type);
+
+        // Nullable enum lists carry their meaningful empty state in the default
+        // clone (create_empty_option() intentionally has no nullable coEnums
+        // branch). Keep this exception explicit so a new unsupported nullable
+        // type cannot silently bypass the factory contract.
+        const bool empty_factory_supported = !(def.nullable && def.type == coEnums);
+        if (def.type != coPointsGroups && def.type != coIntsGroups && empty_factory_supported) {
+            const std::unique_ptr<ConfigOption> empty_option(def.create_empty_option());
+            REQUIRE(empty_option != nullptr);
+            CHECK(empty_option->type() == def.type);
+            CHECK(empty_option->nullable() == def.nullable);
+        }
+
+        if (def.type == coEnum || def.type == coEnums) {
+            REQUIRE(def.enum_keys_map != nullptr);
+            REQUIRE_FALSE(def.enum_values.empty());
+            const std::set<std::string> unique_values(def.enum_values.begin(), def.enum_values.end());
+            CHECK(unique_values.size() == def.enum_values.size());
+            for (const std::string &value : def.enum_values) {
+                const bool canonical = def.enum_keys_map->find(value) != def.enum_keys_map->end();
+                if (!canonical) {
+                    // filament_map_mode keeps the UI-only "Default" menu
+                    // sentinel in enum_values even though it is not a
+                    // serialized enum key. Any other missing map key is a
+                    // schema drift that this inventory must report.
+                    CHECK(key == "filament_map_mode");
+                    CHECK(value == "Default");
+                }
+            }
+            // enum_values is the UI-facing menu. It may intentionally omit
+            // canonical aliases or firmware tokens that remain valid through
+            // enum_keys_map; the round-trip test below exercises every map key.
+        }
+    }
+
+    CHECK(actual_defaultless == expected_defaultless);
+}
+
+TEST_CASE("Every registered option has a strict default serialization round-trip", "[Config][Schema][RoundTrip]")
+{
+    std::set<std::string> empty_aggregate_defaults;
+    size_t                roundtripped = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        INFO(key);
+        const std::unique_ptr<ConfigOption> source(def.create_default_option());
+        REQUIRE(source != nullptr);
+        const std::string serialized = source->serialize();
+
+        if (serialized.empty() && (def.type == coPointsGroups || def.type == coIntsGroups)) {
+            empty_aggregate_defaults.insert(key);
+            continue;
+        }
+
+        const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+        REQUIRE(restored != nullptr);
+        REQUIRE(restored->deserialize(serialized));
+        // A few legacy vector defaults originate from float literals (for
+        // example 0.01f) but are stored as doubles.  Their decimal wire form
+        // is intentionally shorter than the promoted binary value, so the
+        // object equality operator is too strict for this serialization
+        // contract.  Stable canonical serialization is the invariant here.
+        CHECK(restored->serialize() == serialized);
+        ++roundtripped;
+    }
+
+    CHECK(empty_aggregate_defaults == expected_empty_aggregate_defaults);
+    CHECK(roundtripped + empty_aggregate_defaults.size() == print_config_def.options.size());
+}
+
+TEST_CASE("Registered option representatives serialize and deserialize strictly", "[Config][Schema][RoundTrip]")
+{
+    size_t roundtripped = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        INFO(key);
+        const std::unique_ptr<ConfigOption> source(def.create_default_option());
+        REQUIRE(source != nullptr);
+        const std::string representative = representative_serialization(def, *source);
+        REQUIRE_FALSE(representative.empty());
+
+        const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+        REQUIRE(restored != nullptr);
+        REQUIRE(restored->deserialize(representative));
+        CHECK(restored->serialize() == representative);
+        ++roundtripped;
+    }
+
+    CHECK(roundtripped == print_config_def.options.size());
+}
+
+TEST_CASE("All registered enum values round-trip through their serialized form", "[Config][Schema][Enum]")
+{
+    size_t enum_options = 0;
+    for (const auto &[key, def] : print_config_def.options) {
+        if (def.type != coEnum && def.type != coEnums)
+            continue;
+        ++enum_options;
+        REQUIRE(def.enum_keys_map != nullptr);
+        // Iterate the enum key map, because enum_values can also contain a
+        // UI-only menu sentinel (filament_map_mode/Default).
+        for (const auto &[value, enum_value] : *def.enum_keys_map) {
+            (void)enum_value;
+            INFO(key << " = " << value);
+            const bool empty_factory_supported = !(def.nullable && def.type == coEnums);
+            const std::unique_ptr<ConfigOption> option(empty_factory_supported ?
+                def.create_empty_option() : def.create_default_option());
+            REQUIRE(option != nullptr);
+            REQUIRE(option->deserialize(value));
+            CHECK(option->serialize() == value);
+        }
+    }
+    CHECK(enum_options > 0);
+}
+
+TEST_CASE("All registered boolean settings accept only the canonical serialized values", "[Config][Schema][Bool]")
+{
+    size_t bool_options = 0;
+    for (const auto &[key, def] : print_config_def.options) {
+        if (def.type != coBool && def.type != coBools)
+            continue;
+        ++bool_options;
+
+        INFO(key);
+        const std::unique_ptr<ConfigOption> option(def.create_empty_option());
+        REQUIRE(option != nullptr);
+        REQUIRE(option->deserialize("0"));
+        CHECK(option->serialize() == "0");
+        REQUIRE(option->deserialize("1"));
+        CHECK(option->serialize() == "1");
+        CHECK_FALSE(option->deserialize("2"));
+
+        if (def.type == coBools) {
+            REQUIRE(option->deserialize("0,1"));
+            CHECK(option->serialize() == "0,1");
+            if (def.nullable) {
+                REQUIRE(option->deserialize("nil"));
+                CHECK(option->serialize() == "nil");
+            }
+        }
+    }
+    CHECK(bool_options > 0);
+}
+
+TEST_CASE("Numeric option definitions enforce their declared finite boundaries", "[Config][Schema][Numeric]")
+{
+    const double float_limit = static_cast<double>(std::numeric_limits<float>::max()) / 2.;
+    size_t       bounded_options = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        switch (def.type) {
+        case coFloat:
+        case coFloats:
+        case coInt:
+        case coInts:
+        case coPercent:
+        case coPercents:
+        case coFloatOrPercent:
+        case coFloatsOrPercents:
+            break;
+        default:
+            continue;
+        }
+
+        const bool has_min = static_cast<double>(def.min) > -float_limit;
+        const bool has_max = static_cast<double>(def.max) < float_limit;
+        if (!has_min && !has_max)
+            continue;
+        ++bounded_options;
+
+        INFO(key);
+        if (has_min) {
+            CHECK(def.is_value_valid(def.min));
+            const double delta = std::max(1., std::abs(static_cast<double>(def.min)) * 0.01);
+            CHECK_FALSE(def.is_value_valid(static_cast<double>(def.min) - delta));
+        }
+        if (has_max) {
+            CHECK(def.is_value_valid(def.max));
+            const double delta = std::max(1., std::abs(static_cast<double>(def.max)) * 0.01);
+            CHECK_FALSE(def.is_value_valid(static_cast<double>(def.max) + delta));
+        }
+    }
+
+    CHECK(bounded_options > 0);
+}
+
+TEST_CASE("Registered numeric boundaries round-trip through strict serialization", "[Config][Schema][Numeric][RoundTrip]")
+{
+    const double float_limit = static_cast<double>(std::numeric_limits<float>::max()) / 2.;
+    size_t       boundary_values = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        if (!is_numeric_option_type(def.type))
+            continue;
+
+        const bool has_min = static_cast<double>(def.min) > -float_limit;
+        const bool has_max = static_cast<double>(def.max) < float_limit;
+        const std::array<double, 2> boundaries = {
+            has_min ? static_cast<double>(def.min) : std::numeric_limits<double>::quiet_NaN(),
+            has_max ? static_cast<double>(def.max) : std::numeric_limits<double>::quiet_NaN(),
+        };
+        for (const double boundary : boundaries) {
+            if (!std::isfinite(boundary))
+                continue;
+
+            INFO(key << " boundary=" << boundary);
+            CHECK(def.is_value_valid(boundary));
+            const std::string serialized_boundary = serialize_numeric_boundary(def.type, boundary);
+            const std::unique_ptr<ConfigOption> source(def.create_default_option());
+            REQUIRE(source != nullptr);
+            REQUIRE(source->deserialize(serialized_boundary));
+
+            const std::string canonical = source->serialize();
+            const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+            REQUIRE(restored != nullptr);
+            REQUIRE(restored->deserialize(canonical));
+            CHECK(restored->serialize() == canonical);
+            ++boundary_values;
+        }
+    }
+
+    CHECK(boundary_values > 0);
 }
 
 TEST_CASE("Project JSON migration records support and wall-order differences", "[Config][ConfigJsonMigration]")
