@@ -431,9 +431,7 @@ TEST_CASE("Point circle distances cover radial, axial and center-mode measuremen
     check_vec(center_mode.distance_strict->to, Vec3d::Zero());
 }
 
-// Known bug: a point on the circle's axis is measured as the radius from the center (axial offset
-// ignored, first witness not the point, center mode ignored); fixed by the follow-up fix PR
-TEST_CASE("Point on a circle's axis measures to the circle and to its center", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Point on a circle's axis measures to the circle and to its center", "[Measure][MeasureContracts]")
 {
     const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0);
     // Every point of the circle is sqrt(3^2 + 4^2) away from a point 4 above or below its center.
@@ -717,10 +715,7 @@ TEST_CASE("Cylinder feature selection honors world transforms", "[Measure][Measu
     check_vec(origin, world * local_origin);
 }
 
-// Known bug: MeasuringImpl::update_planes marks a facet as visited only when it is popped, so a facet
-// queued by two neighbours is appended to its plane twice (and the fixed-size queue can overflow);
-// needs a fix PR
-TEST_CASE("Measuring lists each facet of a plane once", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Measuring lists each facet of a plane once", "[Measure][MeasureContracts]")
 {
     // The cap fans of a cylinder put the seed's neighbours next to each other.
     const indexed_triangle_set cylinder_mesh = its_make_cylinder(5.0, 10.0, PI / 16.0);
