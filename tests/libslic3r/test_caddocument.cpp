@@ -1346,6 +1346,45 @@ TEST_CASE("revolve builds a solid of revolution about an in-plane axis", "[CadDo
     REQUIRE(double(ydoc->display_mesh.volume()) == Approx(9424.78).epsilon(0.05));
 }
 
+// A 10 x 10 square at y = 10..20 on XY, revolved a full turn about the plane's X axis: a ring of
+// volume 2 pi * 15 (centroid radius) * 100 (area), spanning x -5..5 and y, z -20..20.
+TEST_CASE("A Revolve with its own entity loop and no sketch builds the analytic ring", "[CadDocument]")
+{
+    const std::vector<SketchEntity> entities = {
+        {SketchEntity::Type::Line, Vec2d(-5.0, 10.0), Vec2d(5.0, 10.0)},
+        {SketchEntity::Type::Line, Vec2d(5.0, 10.0), Vec2d(5.0, 20.0)},
+        {SketchEntity::Type::Line, Vec2d(5.0, 20.0), Vec2d(-5.0, 20.0)},
+        {SketchEntity::Type::Line, Vec2d(-5.0, 20.0), Vec2d(-5.0, 10.0)},
+    };
+
+    CadDocument doc;
+    const int revolve = doc.add_revolve_entities(entities, SketchPlane::XY(), 360.0, 0,
+                                                 false, BooleanMode::New, "EntityRevolve");
+    REQUIRE(revolve == 0);
+    REQUIRE(doc.features.at(revolve).sketch_ref == -1);
+    REQUIRE(doc.features.at(revolve).entities.size() == 4);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.bodies.size() == 1);
+
+    const auto props = doc.body_mass_properties(0);
+    REQUIRE(props.valid);
+    REQUIRE(props.is_solid);
+    REQUIRE_THAT(props.volume, Catch::Matchers::WithinRel(2.0 * M_PI * 15.0 * 100.0, 1e-6));
+
+    Bnd_Box box;
+    // Compare the analytic solid bounds; Add() includes display-mesh deflection.
+    BRepBndLib::AddOptimal(doc.bodies.at(0).shape, box, false, false);
+    double x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    REQUIRE_THAT(x0, Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(x1, Catch::Matchers::WithinAbs(5.0, 1e-6));
+    REQUIRE_THAT(y0, Catch::Matchers::WithinAbs(-20.0, 1e-6));
+    REQUIRE_THAT(y1, Catch::Matchers::WithinAbs(20.0, 1e-6));
+    REQUIRE_THAT(z0, Catch::Matchers::WithinAbs(-20.0, 1e-6));
+    REQUIRE_THAT(z1, Catch::Matchers::WithinAbs(20.0, 1e-6));
+}
+
 TEST_CASE("sweep builds a solid by sweeping a profile along a path", "[CadDocument]")
 {
     CadDocument doc;
