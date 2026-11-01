@@ -6080,6 +6080,60 @@ TEST_CASE("thicken surface fills the corners of a closed-loop wall", "[CadDocume
     }
 }
 
+TEST_CASE("Thickening a flat sheet grows along its normal, or against it when flipped", "[CadDocument][surface]")
+{
+    auto make_plate = [](bool flip) {
+        CadDocument d;
+        const int sketch = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                        20.0, 20.0, 0.0, "PlateSketch");
+        REQUIRE(sketch >= 0);
+        REQUIRE(d.add_surface_fill(sketch, "PlateFace") >= 0);
+        REQUIRE(d.recompute());
+        REQUIRE(d.error.empty());
+        const int thick = d.add_thicken_surface(0, 2.0, flip, flip ? "PlateMinus" : "PlatePlus");
+        REQUIRE(thick >= 0);
+        REQUIRE(d.recompute());
+        REQUIRE(d.error.empty());
+        REQUIRE(d.bodies.size() == 2);
+        REQUIRE(d.features.at(thick).type == CadFeatureType::ThickenSurface);
+        REQUIRE(d.bodies.at(1).source_feature == thick);
+        return d;
+    };
+
+    CadDocument plus = make_plate(false);
+    CadDocument minus = make_plate(true);
+    const auto plus_props = plus.body_mass_properties(1);
+    const auto minus_props = minus.body_mass_properties(1);
+    REQUIRE(plus_props.valid);
+    REQUIRE(plus_props.is_solid);
+    REQUIRE(minus_props.valid);
+    REQUIRE(minus_props.is_solid);
+    REQUIRE_THAT(plus_props.volume, Catch::Matchers::WithinRel(800.0, 1e-6));
+    REQUIRE_THAT(minus_props.volume, Catch::Matchers::WithinRel(800.0, 1e-6));
+
+    Bnd_Box plus_box;
+    BRepBndLib::AddOptimal(plus.bodies.at(1).shape, plus_box, false, false);   // exact, no tolerance gap
+    double px0, py0, pz0, px1, py1, pz1;
+    plus_box.Get(px0, py0, pz0, px1, py1, pz1);
+    REQUIRE_THAT(px0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(px1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(py0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(py1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(pz0, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(pz1, Catch::Matchers::WithinAbs(2.0, 1e-6));
+
+    Bnd_Box minus_box;
+    BRepBndLib::AddOptimal(minus.bodies.at(1).shape, minus_box, false, false);
+    double mx0, my0, mz0, mx1, my1, mz1;
+    minus_box.Get(mx0, my0, mz0, mx1, my1, mz1);
+    REQUIRE_THAT(mx0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(mx1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(my0, Catch::Matchers::WithinAbs(-10.0, 1e-6));
+    REQUIRE_THAT(my1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(mz0, Catch::Matchers::WithinAbs(-2.0, 1e-6));
+    REQUIRE_THAT(mz1, Catch::Matchers::WithinAbs(0.0, 1e-6));
+}
+
 TEST_CASE("surface-offset creates another sheet shifted outward", "[CadDocument][surface]")
 {
 
