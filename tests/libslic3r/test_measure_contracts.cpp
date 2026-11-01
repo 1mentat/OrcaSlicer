@@ -498,9 +498,27 @@ TEST_CASE("Edge distance to a circle is zero where a secant crosses it", "[Measu
 {
     // y = 1 cuts the radius-2 circle at x = +-sqrt(3); the center's foot (0, 1, 0) is 1 inside the circle.
     const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
-    const MeasurementResult result = get_measurement(edge(Vec3d(-5.0, 1.0, 0.0), Vec3d(5.0, 1.0, 0.0)), ring);
+    const SurfaceFeature secant = edge(Vec3d(-5.0, 1.0, 0.0), Vec3d(5.0, 1.0, 0.0));
+    const MeasurementResult result = get_measurement(secant, ring);
     check_witnessed_distance(result.distance_infinite, 0.0);
     check_on_circle(result.distance_infinite->from, ring);
+    // Center mode still measures from the edge point nearest the center.
+    const MeasurementResult center_mode = get_measurement(secant, ring, true);
+    check_witnessed_distance(center_mode.distance_infinite, 1.0);
+    check_vec(center_mode.distance_infinite->from, Vec3d(0.0, 1.0, 0.0));
+    check_vec(center_mode.distance_infinite->to, Vec3d::Zero());
+
+    // A slanted edge pierces the circle at (2, 0, 0); its ends are sqrt(2) from the circle, and the center's
+    // foot on its line is an end.
+    const MeasurementResult piercing = get_measurement(edge(Vec3d(1.0, 0.0, -1.0), Vec3d(3.0, 0.0, 1.0)), ring);
+    check_witnessed_distance(piercing.distance_infinite, 0.0);
+    check_vec(piercing.distance_infinite->from, Vec3d(2.0, 0.0, 0.0));
+
+    // Moved out to x = 3 it pierces the plane 1 outside the circle.
+    const MeasurementResult missing = get_measurement(edge(Vec3d(3.0, 0.0, -1.0), Vec3d(3.0, 0.0, 1.0)), ring);
+    check_witnessed_distance(missing.distance_infinite, 1.0);
+    check_vec(missing.distance_infinite->from, Vec3d(3.0, 0.0, 0.0));
+    check_vec(missing.distance_infinite->to, Vec3d(2.0, 0.0, 0.0));
 }
 
 TEST_CASE("Edge angles measure the rays pointing away from the intersection", "[Measure][MeasureContracts]")

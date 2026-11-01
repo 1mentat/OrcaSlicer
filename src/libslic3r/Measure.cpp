@@ -983,7 +983,7 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             // or, for an edge in that plane, where its line cuts the circle.
             const auto add_if_on_edge = [&](const Vec3d& p) {
                 const Vec3d e1p = p - e.first;
-                if (e1p.dot(e1e2) >= 0.0 && e1p.norm() <= e1e2.norm())
+                if (e1p.dot(e1e2) >= 0.0 && e1p.norm() < e1e2.norm())
                     distances.emplace_back(*get_measurement(SurfaceFeature(p), f2).distance_strict);
             };
             const Eigen::Hyperplane<double, 3> circle_plane(normal.normalized(), center);
@@ -1000,8 +1000,11 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                 result.distance_infinite = std::make_optional(DistAndPoints{it->dist, it->from, it->to});
             }
             else{
-                const double dist      = (it->from - center).norm();
-                result.distance_infinite = std::make_optional(DistAndPoints{dist, it->from, center});
+                // Center mode: measure from the edge point nearest the center, which need not be the point
+                // nearest the circle.
+                const double t = std::clamp((center - e.first).dot(e1e2) / e1e2.squaredNorm(), 0.0, 1.0);
+                const Vec3d nearest = e.first + t * e1e2;
+                result.distance_infinite = std::make_optional(DistAndPoints{(nearest - center).norm(), nearest, center});
             }
     ///////////////////////////////////////////////////////////////////////////
         } else if (f2.get_type() == SurfaceFeatureType::Plane) {
