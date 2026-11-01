@@ -7091,9 +7091,10 @@ TEST_CASE("The complete preset configuration groups the metadata of every filame
 
 namespace preset_lifecycle_contracts {
 
-TEST_CASE("Preset bundle metadata round-trips names and timestamps", "[Preset][Bundle][PresetLifecycle][Metadata]")
+TEST_CASE("Preset bundle metadata round-trips every field and stores preset names as bare filenames", "[Preset][Bundle][PresetLifecycle][Metadata]")
 {
     ScopedTemporaryDir temp;
+    ScopedDataDir data_dir(temp.path());
     const fs::path metadata_path = temp.path() / "bundle_metadata.json";
 
     BundleMetadata saved;
@@ -7128,19 +7129,29 @@ TEST_CASE("Preset bundle metadata round-trips names and timestamps", "[Preset][B
 TEST_CASE("Preset bundle metadata accepts legacy fields and rejects malformed files", "[Preset][Bundle][PresetLifecycle][Metadata]")
 {
     ScopedTemporaryDir temp;
+    ScopedDataDir data_dir(temp.path());
     const fs::path legacy = temp.path() / "legacy.json";
     std::ofstream(legacy.string())
         << R"({"bundle_id":"legacy-id","bundle_type":"legacy description","version":"1.0.0"})";
 
     BundleMetadata loaded;
     REQUIRE(loaded.load_from_json(legacy.string()));
+    CHECK(loaded.id.empty());
     CHECK(loaded.name == "legacy-id");
     CHECK(loaded.version == "1.0.0");
     CHECK(loaded.description == "legacy description");
 
+    // The current keys win over the legacy ones when both are present.
+    const fs::path both = temp.path() / "both.json";
+    std::ofstream(both.string())
+        << R"({"bundle_id":"legacy-id","name":"current name","bundle_type":"legacy description","description":"current description"})";
+    BundleMetadata current;
+    REQUIRE(current.load_from_json(both.string()));
+    CHECK(current.name == "current name");
+    CHECK(current.description == "current description");
+
     const fs::path malformed = temp.path() / "malformed.json";
     std::ofstream(malformed.string()) << "{\"id\": [";
-    REQUIRE(fs::file_size(malformed) > 0);
     CHECK_FALSE(loaded.load_from_json(malformed.string()));
     CHECK_FALSE(loaded.load_from_json((temp.path() / "missing.json").string()));
 }
