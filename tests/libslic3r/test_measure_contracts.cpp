@@ -625,6 +625,11 @@ TEST_CASE("Circle distance to a boundary-less plane has a witness on the circle"
     const MeasurementResult tilted_floor = get_measurement(tilted, unbounded);
     check_witnessed_distance(tilted_floor.distance_infinite, 5.0 - std::sqrt(2.0));
     check_vec(tilted_floor.distance_infinite->from, Vec3d(std::sqrt(2.0), 0.0, 5.0 - std::sqrt(2.0)));
+    // Center mode measures from the center instead.
+    const MeasurementResult tilted_center_mode = get_measurement(tilted, unbounded, true);
+    check_witnessed_distance(tilted_center_mode.distance_infinite, 5.0);
+    check_vec(tilted_center_mode.distance_infinite->from, Vec3d(0.0, 0.0, 5.0));
+    check_vec(tilted_center_mode.distance_infinite->to, Vec3d::Zero());
 
     // Lowered to z = 1, the tilted circle cuts the plane: distance 0 at a circle point on z = 0.
     const SurfaceFeature cutting = circle(Vec3d(0.0, 0.0, 1.0), tilt, 2.0);

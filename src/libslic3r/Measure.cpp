@@ -1345,6 +1345,9 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                         const double cos_t = std::clamp(-center_dist / dir_rate, -1.0, 1.0);
                         closest = center + radius * (cos_t * dir + std::sqrt(1.0 - sqr(cos_t)) * n1.cross(dir));
                     }
+                    if (deal_circle_result)
+                        // Center mode measures from the circle center.
+                        closest = center;
                     result.distance_infinite = std::make_optional(DistAndPoints{plane.absDistance(closest), closest, plane.projection(closest)});
                 }
             }
