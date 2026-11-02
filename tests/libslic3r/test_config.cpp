@@ -2853,8 +2853,7 @@ std::string help_text(const ConfigDef &definition, bool defaults = true)
 }
 
 void check_schema(const ConfigDef &definition,
-                  std::initializer_list<std::pair<const std::string, ConfigOptionType>> expected,
-                  const std::set<std::string> &type_not_checked = {})
+                  std::initializer_list<std::pair<const std::string, ConfigOptionType>> expected)
 {
     const std::map<std::string, ConfigOptionType> types(expected);
     REQUIRE(definition.options.size() == types.size());
@@ -2864,8 +2863,7 @@ void check_schema(const ConfigDef &definition,
         const ConfigOptionDef *option = definition.get(key);
         REQUIRE(option != nullptr);
         CHECK(option->opt_key == key);
-        if (type_not_checked.count(key) == 0)
-            CHECK(option->type == type);
+        CHECK(option->type == type);
         CHECK_FALSE(option->label.empty());
         REQUIRE(option->serialization_key_ordinal > 0);
         const auto entry = definition.by_serialization_key_ordinal.find(option->serialization_key_ordinal);
@@ -3089,21 +3087,9 @@ TEST_CASE("Timestamp placeholders retain textual timestamps and numeric calendar
 
 TEST_CASE("Preset placeholders retain the public textual name fields", "[Config][ConfigDefinition][PlaceholderSchema]")
 {
-    // The coString listed for filament_preset is not checked here (see the known-bug test below); the row only
-    // keeps the key in the expected option set.
     check_schema(OtherPresetsConfigDef{}, {
-        {"print_preset", coString}, {"filament_preset", coString},
-        {"printer_preset", coString}, {"physical_printer_preset", coString}}, {"filament_preset"});
-}
-
-// Known bug: filament_preset is declared coString, but its tooltip describes one name per extruder and
-// PrintApply.cpp fills it from filament_settings_id (coStrings); fixed by the follow-up fix PR
-TEST_CASE("The filament preset placeholder is a vector of names", "[Config][ConfigDefinition][PlaceholderSchema][!shouldfail]")
-{
-    const OtherPresetsConfigDef definition;
-    const ConfigOptionDef *option = definition.get("filament_preset");
-    REQUIRE(option != nullptr);
-    CHECK(option->type == coStrings);
+        {"print_preset", coString}, {"filament_preset", coStrings},
+        {"printer_preset", coString}, {"physical_printer_preset", coString}});
 }
 
 } // namespace config_definition_contracts
