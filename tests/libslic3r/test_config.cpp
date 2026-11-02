@@ -9,10 +9,10 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
 #include "libslic3r/LocalesUtils.hpp"
-#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
-#include "libslic3r/Polygon.hpp"
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/BoundingBox.hpp"
 
 #include "test_utils.hpp"
 
