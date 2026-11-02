@@ -34,17 +34,6 @@ using Catch::Matchers::WithinAbs;
 
 namespace {
 
-using Color = std::array<std::size_t, 3>;
-
-constexpr Color red{{255, 0, 0}};
-
-TriMesh one_triangle()
-{
-    return TriMesh(
-        {stl_triangle_vertex_indices(0, 1, 2)},
-        {stl_vertex(0.f, 0.f, 0.f), stl_vertex(1.f, 0.f, 0.f), stl_vertex(0.f, 1.f, 0.f)});
-}
-
 std::vector<std::vector<Vec2f>> one_face_uv()
 {
     return {{Vec2f(0.f, 0.f), Vec2f(1.f, 0.f), Vec2f(0.f, 1.f)}};
@@ -58,18 +47,6 @@ std::vector<std::vector<Vec2f>> tetrahedron_uvs()
         {Vec2f(0.f, 0.f), Vec2f(1.f, 0.f), Vec2f(0.f, 1.f)},
         {Vec2f(0.f, 0.f), Vec2f(1.f, 0.f), Vec2f(0.f, 1.f)},
     };
-}
-
-TextureToColorSettings bounded_settings()
-{
-    TextureToColorSettings settings;
-    settings.target_colors_num = 1;
-    settings.smooth_weight = 0.0;
-    settings.oversampling_iters = 0;
-    settings.oversampling_min_face_count = 4;
-    settings.oversampling_max_face_count = 32;
-    settings.mesh_repair_decision = MeshRepairDecision::ImportWithoutRepair;
-    return settings;
 }
 
 
@@ -158,13 +135,6 @@ TEST_CASE("TextureToColor preserves repaired topology after pre-repair oversampl
 
     const Color expected_red{{233, 19, 7}};
     const Color expected_blue{{7, 19, 233}};
-    auto matches_color = [](const Color &actual, const Color &expected) {
-        for (std::size_t channel = 0; channel < expected.size(); ++channel) {
-            if (std::abs(static_cast<double>(actual[channel]) - static_cast<double>(expected[channel])) > 2.0)
-                return false;
-        }
-        return true;
-    };
     std::size_t red_count = 0;
     std::size_t blue_count = 0;
     for (const Color &color : repaired_colors) {
@@ -266,31 +236,37 @@ TEST_CASE("Texture-to-color rejects invalid texture inputs and clears outputs", 
     CHECK(face_colors.empty());
 }
 
-TEST_CASE("TextureToColor samples a closed tetrahedron through the public route",
+TEST_CASE("TextureToColor samples each face from its own UVs and returns RGB",
           "[TextureToColor]")
 {
+    // Two-tone BGR texture: columns 0-1 are (7,19,233) and columns 2-3 are (233,19,7). Faces 0 and 2 look
+    // up column 0, faces 1 and 3 column 2, so a face that read another face's UVs, or a BGR/RGB mix-up,
+    // would get the wrong colour.
     const TriMesh mesh = closed_tetrahedron();
-    const auto uv_coords = tetrahedron_uvs();
-    const Color expected_rgb{{233, 19, 7}};
-    // Weighted texture sampling and the Lab round trip quantize RGB channels.
-    constexpr double kColorQuantizationTolerance = 2.0;
-    cv::Mat texture(1, 1, CV_8UC3, cv::Scalar(7, 19, 233));
+    const std::vector<Vec2f> left{{0.f, 0.f}, {0.f, 0.f}, {0.f, 0.f}};
+    const std::vector<Vec2f> right{{2.f / 3.f, 0.f}, {2.f / 3.f, 0.f}, {2.f / 3.f, 0.f}};
+    const std::vector<std::vector<Vec2f>> uv_coords{left, right, left, right};
+    const Color left_rgb{{233, 19, 7}};
+    const Color right_rgb{{7, 19, 233}};
+    TextureToColorSettings settings = bounded_settings();
+    settings.target_colors_num = 2;
 
     TriMesh color_mesh;
     std::vector<Color> face_colors;
-    REQUIRE(TextureToColor(mesh, uv_coords, texture, color_mesh, face_colors, bounded_settings()));
-    REQUIRE_FALSE(color_mesh.indices.empty());
-    REQUIRE(face_colors.size() == color_mesh.indices.size());
-    for (const Color &color : face_colors) {
-        for (std::size_t channel = 0; channel < expected_rgb.size(); ++channel)
-            CHECK_THAT(static_cast<double>(color[channel]),
-                       WithinAbs(static_cast<double>(expected_rgb[channel]),
-                                 kColorQuantizationTolerance));
-    }
+    REQUIRE(TextureToColor(mesh, uv_coords, two_tone_texture(), color_mesh, face_colors, settings));
+    // No oversampling beyond the four input faces, so output face i is input face i.
+    REQUIRE(color_mesh.indices.size() == 4);
+    REQUIRE(face_colors.size() == 4);
+    CHECK(matches_color(face_colors[0], left_rgb));
+    CHECK(matches_color(face_colors[1], right_rgb));
+    CHECK(matches_color(face_colors[2], left_rgb));
+    CHECK(matches_color(face_colors[3], right_rgb));
     check_finite_and_valid(color_mesh);
 }
 
-TEST_CASE("TextureToColor cancellation clears outputs before returning",
+// Only the immediate case: the outputs are cleared on entry, before any stage can be cancelled. The
+// header does not promise what a later cancellation leaves in the outputs, so that is not asserted.
+TEST_CASE("Immediate cancellation returns false with the outputs cleared on entry",
           "[TextureToColor]")
 {
     const TriMesh mesh = closed_tetrahedron();
