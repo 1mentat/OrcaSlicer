@@ -1402,6 +1402,86 @@ TEST_CASE("read_cli parses a points vector in the NxM coordinate form", "[Config
 }
 
 // logfile is a CLI-only option, so it needs the config type whose def pulls in cli_misc_config_def.
+TEST_CASE("Forward-compatible settings import substitutes typed defaults and records changes",
+          "[Config][ConfigSubstitution]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const ConfigOption *flavor_before = config.option("gcode_flavor");
+    REQUIRE(flavor_before != nullptr);
+    const std::string default_flavor = flavor_before->serialize();
+    // Start each option away from its default so a substitution with the default is observable.
+    config.set_deserialize_strict("gcode_flavor", default_flavor == "klipper" ? "reprapfirmware" : "klipper");
+    REQUIRE(config.option("gcode_flavor")->serialize() != default_flavor);
+
+    ConfigSubstitutionContext enum_context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("gcode_flavor", "future_flavor", enum_context);
+    REQUIRE(enum_context.substitutions.size() == 1);
+    CHECK(enum_context.substitutions.front().old_value == "future_flavor");
+    REQUIRE(enum_context.substitutions.front().new_value != nullptr);
+    CHECK(enum_context.substitutions.front().new_value->serialize() == default_flavor);
+    CHECK(config.option("gcode_flavor")->serialize() == default_flavor);
+
+    config.set_deserialize_strict("gcode_comments", "0");
+    ConfigSubstitutionContext bool_context(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(config.set_deserialize_nothrow("gcode_comments", "on", bool_context));
+    CHECK(config.opt<ConfigOptionBool>("gcode_comments")->value);
+    CHECK(bool_context.substitutions.empty());
+
+    config.set_deserialize_strict("enable_overhang_bridge_fan", "0");
+    ConfigSubstitutionContext default_true_context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("enable_overhang_bridge_fan", "future_cooling_value", default_true_context);
+    CHECK(config.opt<ConfigOptionBools>("enable_overhang_bridge_fan")->values == std::vector<unsigned char>{1});
+    REQUIRE(default_true_context.substitutions.size() == 1);
+    CHECK(default_true_context.substitutions.front().new_value->serialize() == "1");
+
+    config.set_deserialize_strict("filament_soluble", "1");
+    ConfigSubstitutionContext default_false_context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("filament_soluble", "future_material_value", default_false_context);
+    CHECK(config.opt<ConfigOptionBools>("filament_soluble")->values == std::vector<unsigned char>{0});
+    REQUIRE(default_false_context.substitutions.size() == 1);
+    CHECK(default_false_context.substitutions.front().new_value->serialize() == "0");
+
+    ConfigSubstitutionContext numeric_context(ForwardCompatibilitySubstitutionRule::Enable);
+    CHECK_FALSE(config.set_deserialize_nothrow("layer_height", "not-a-number", numeric_context));
+    CHECK(numeric_context.substitutions.empty());
+
+    ConfigSubstitutionContext nil_context(ForwardCompatibilitySubstitutionRule::Enable);
+    CHECK_THROWS_AS(config.set_deserialize("filament_soluble", "nil", nil_context), ConfigurationError);
+
+    DynamicConfig no_definition;
+    ConfigSubstitutionContext no_definition_context(ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK_THROWS_AS(no_definition.set_deserialize("some_option", "1", no_definition_context), NoDefinitionException);
+}
+
+TEST_CASE("Config substitutions order by option key and old value", "[Config][ConfigSubstitution]")
+{
+    ConfigOptionDef first_definition;
+    first_definition.opt_key = "first_option";
+    ConfigOptionDef second_definition;
+    second_definition.opt_key = "second_option";
+
+    ConfigSubstitution first;
+    first.opt_def = &first_definition;
+    first.old_value = "old-a";
+    ConfigSubstitution same_value;
+    same_value.opt_def = &first_definition;
+    same_value.old_value = "old-a";
+    ConfigSubstitution later_value;
+    later_value.opt_def = &first_definition;
+    later_value.old_value = "old-b";
+    ConfigSubstitution later_option;
+    later_option.opt_def = &second_definition;
+    // An older value on a later key: the key orders first, then the old value.
+    later_option.old_value = "old-0";
+
+    CHECK(first == same_value);
+    CHECK_FALSE(first == later_value);
+    CHECK(first < later_value);
+    CHECK_FALSE(later_value < first);
+    CHECK(first < later_option);
+    CHECK_FALSE(later_option < first);
+}
+
 TEST_CASE("read_cli stores the log file path as a string", "[Config]") {
     Slic3r::DynamicPrintAndCLIConfig config;
     t_config_option_keys extra, keys;
