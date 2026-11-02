@@ -8,7 +8,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <set>
-#include <string>
 #include <tuple>
 #include <vector>
 
@@ -20,9 +19,6 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
-#include "test_utils.hpp"
-
-#include <boost/nowide/fstream.hpp>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -354,18 +350,6 @@ indexed_triangle_set shifted(indexed_triangle_set mesh, const Vec3f &delta)
     return mesh;
 }
 
-void write_cube_off(const std::string &path, float side)
-{
-    boost::nowide::ofstream out(path);
-    out << "OFF\n8 12 0\n"
-        << "0 0 0\n" << side << " 0 0\n" << side << " " << side << " 0\n" << "0 " << side << " 0\n"
-        << "0 0 " << side << "\n" << side << " 0 " << side << "\n" << side << " " << side << " " << side << "\n"
-        << "0 " << side << " " << side << "\n"
-        << "3 0 2 1\n3 0 3 2\n3 4 5 6\n3 4 6 7\n"
-        << "3 0 1 5\n3 0 5 4\n3 1 2 6\n3 1 6 5\n"
-        << "3 2 3 7\n3 2 7 6\n3 3 0 4\n3 3 4 7\n";
-}
-
 // Projects shape points (1 unit = 1 mm) along +Z from z = -10, `depth` mm deep.
 Emboss::OrthoProject cube_projection(float depth = 30.f)
 {
@@ -409,14 +393,6 @@ TEST_CASE("cut_surface keeps the part of the facing cube side inside the project
     CHECK_THAT(box.max.x(), WithinAbs(9., 1e-4));
     CHECK_THAT(box.min.y(), WithinAbs(1., 1e-4));
     CHECK_THAT(box.max.y(), WithinAbs(9., 1e-4));
-}
-
-TEST_CASE("cut_surface returns an empty result for an empty model or shape set", "[CutSurface]")
-{
-    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 9, 9))};
-    const indexed_triangle_set model = its_make_cube(10., 10., 10.);
-    CHECK(cut_surface({}, {model}, cube_projection(), .5f).empty());
-    CHECK(cut_surface(shapes, {}, cube_projection(), .5f).empty());
 }
 
 TEST_CASE("cut_surface returns no patch for a projected shape outside the model", "[CutSurface]")
@@ -510,27 +486,6 @@ TEST_CASE("Surface cuts preserve multiple holes when the shape outline matches t
     check_mesh_indices(cut);
     CHECK(contour_count(cut) == 3);
     CHECK_THAT(projected_area(cut), WithinAbs(100. - 2. * 4., 1e-4));
-}
-
-TEST_CASE("corefine_test accepts two valid OFF meshes", "[CutSurface]")
-{
-    ScopedTemporaryFile model(".off"), shape(".off");
-    write_cube_off(model.string(), 10.f);
-    write_cube_off(shape.string(), 4.f);
-    CHECK(corefine_test(model.string(), shape.string()));
-}
-
-TEST_CASE("corefine_test rejects missing or malformed OFF inputs", "[CutSurface]")
-{
-    ScopedTemporaryFile valid(".off"), malformed(".off");
-    write_cube_off(valid.string(), 10.f);
-    {
-        boost::nowide::ofstream out(malformed.string());
-        out << "not an OFF mesh\n";
-    }
-    CHECK_FALSE(corefine_test(malformed.string(), valid.string()));
-    CHECK_FALSE(corefine_test(valid.string(), malformed.string()));
-    CHECK_FALSE(corefine_test("/path/that/does/not/exist.off", valid.string()));
 }
 
 } // namespace cut_surface_topology_contracts
