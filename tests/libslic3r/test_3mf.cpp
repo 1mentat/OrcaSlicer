@@ -2222,14 +2222,15 @@ void store_model(const std::string& path, Model& model, DynamicPrintConfig& conf
     REQUIRE(store_bbs_3mf(params));
 }
 
-bool load_model(const std::string& path, Model& model, LoadedProject& loaded, Import3mfProgressFn callback = nullptr)
+bool load_model(const std::string& path, Model& model, LoadedProject& loaded, Import3mfProgressFn callback = nullptr,
+                LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
 {
     loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_ext_load");
     model.set_backup_path(loaded.backup->string());
     ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
     return load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates, &loaded.presets,
                         &loaded.is_bbl, &loaded.is_orca, &loaded.version, std::move(callback),
-                        LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+                        strategy);
 }
 
 // A plate record holding the given (object, instance) pairs.
@@ -2905,6 +2906,78 @@ TEST_CASE("BBS 3MF loads a valid embedded print preset with its identity", "[3MF
     CHECK(preset->version == *expected_version);
     REQUIRE(preset->config.option<ConfigOptionFloat>("layer_height") != nullptr);
     CHECK_THAT(preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(.31, 1e-6));
+}
+
+TEST_CASE("BBS 3MF project config keeps valid JSON values when unrelated entries are present", "[3MF][Bbs3mfExtended][ProjectConfig]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_height", new ConfigOptionFloat(.27));
+    ScopedTemporaryDir backup("orca_bbs_ext_project_config_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string&, std::string&) { return false; },
+        {{"Metadata/archive-variant-unrelated.txt", "ignored by the project loader"}}));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(loaded.config.opt_float("layer_height"), Catch::Matchers::WithinAbs(.27, 1e-6));
+}
+
+TEST_CASE("BBS 3MF LoadModel strategy does not load project configuration", "[3MF][Bbs3mfExtended][ProjectConfig]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_height", new ConfigOptionFloat(.27));
+    ScopedTemporaryDir backup("orca_bbs_ext_load_model_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded, nullptr, LoadStrategy::LoadModel));
+    CHECK(loaded.config.empty());
+    CHECK(loaded_model.objects.size() == 1);
+}
+
+TEST_CASE("BBS 3MF rejects malformed project JSON without accepting a fake config", "[3MF][Bbs3mfExtended][ProjectConfig]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_bad_project_config_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string& name, std::string& data) {
+        const size_t brace = name == "Metadata/project_settings.config" ? data.find('{') : std::string::npos;
+        if (brace == std::string::npos)
+            return false;
+        data.replace(brace, 1, "not-json");
+        return true;
+    }));
+
+    // The model still loads; the project settings are dropped rather than replaced.
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    CHECK(loaded.config.empty());
+    CHECK(loaded_model.objects.size() == 1);
 }
 
 } // namespace bbs_archive_contracts
