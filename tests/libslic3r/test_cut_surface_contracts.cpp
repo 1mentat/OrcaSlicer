@@ -333,14 +333,15 @@ BoundingBoxf3 vertex_bounds(const SurfaceCut &cut)
     return box;
 }
 
-// Requires a flat patch lying on one of the two given Z planes.
-void check_on_face(const SurfaceCut &cut, double z_a, double z_b)
+// Requires a flat patch lying on the plane z = `z`.
+// cut_surface only cuts faces whose normal points along the projection direction (set_skip_by_angle keeps faces
+// within 89.9 degrees of it), so for these +Z projections the candidates are the cubes' top faces. The
+// projection ratio then picks the candidate closest to front + ratio * depth.
+void check_on_plane(const SurfaceCut &cut, double z)
 {
     const BoundingBoxf3 box = vertex_bounds(cut);
-    CHECK_THAT(box.max.z() - box.min.z(), WithinAbs(0., 1e-4));
-    const bool on_a = std::abs(box.min.z() - z_a) < 1e-4;
-    const bool on_b = std::abs(box.min.z() - z_b) < 1e-4;
-    CHECK(on_a != on_b);
+    CHECK_THAT(box.min.z(), WithinAbs(z, 1e-4));
+    CHECK_THAT(box.max.z(), WithinAbs(z, 1e-4));
 }
 
 indexed_triangle_set shifted(indexed_triangle_set mesh, const Vec3f &delta)
@@ -361,13 +362,13 @@ Emboss::OrthoProject cube_projection(float depth = 30.f)
 // Two 10 mm cubes, at x = 0..10 and x = 20..30.
 indexed_triangle_set second_cube() { return shifted(its_make_cube(10., 10., 10.), Vec3f(20.f, 0.f, 0.f)); }
 
-// The cut of a 1..29 x 1..9 strip over both cubes: a 9 x 8 patch on the same face (bottom or top) of each cube.
+// The cut of a 1..29 x 1..9 strip over both cubes: a 9 x 8 patch on each cube's top face.
 void check_two_cube_patches(const SurfaceCut &cut)
 {
     check_mesh_indices(cut);
     CHECK(contour_count(cut) == 2);
     CHECK_THAT(projected_area(cut), WithinAbs(2. * 9. * 8., 1e-4));
-    check_on_face(cut, 0., 10.);
+    check_on_plane(cut, 10.);
     size_t left = 0, right = 0;
     for (const Vec3f &vertex : cut.vertices) {
         left += vertex.x() <= 10.f;
@@ -386,8 +387,8 @@ TEST_CASE("cut_surface keeps the part of the facing cube side inside the project
     check_mesh_indices(cut);
     CHECK(contour_count(cut) == 1);
     CHECK_THAT(projected_area(cut), WithinAbs(64., 1e-4));
-    // The patch is flat on one cube face and spans exactly the shape.
-    check_on_face(cut, 0., 10.);
+    // The patch lies on the cube's top face (the only face pointing along the projection), spanning the shape.
+    check_on_plane(cut, 10.);
     const BoundingBoxf3 box = vertex_bounds(cut);
     CHECK_THAT(box.min.x(), WithinAbs(1., 1e-4));
     CHECK_THAT(box.max.x(), WithinAbs(9., 1e-4));
@@ -441,8 +442,9 @@ TEST_CASE("Surface cuts preserve disconnected components in one source mesh", "[
 
 TEST_CASE("Surface cuts select the requested depth across stacked models", "[CutSurface]")
 {
-    // A near cube at z = 0..10 and a far one at z = 20..30 under the same shape: ratio 0 cuts a face of the near
-    // cube, ratio 1 a face of the far one.
+    // A near cube at z = 0..10 and a far one at z = 20..30 under the same shape, projected from z = -10 over 50 mm.
+    // The candidates are the top faces at z = 10 and 30; the ratio picks the one closest to -10 + 50 * ratio, so
+    // ratios 0 and 0.5 (targets -10 and 15) cut the near cube and ratios 0.75 and 1 (27.5 and 40) the far one.
     const ExPolygons shapes{ExPolygon(rectangle(1, 1, 9, 9))};
     const indexed_triangle_set near_model = its_make_cube(10., 10., 10.);
     const indexed_triangle_set far_model = shifted(its_make_cube(10., 10., 10.), Vec3f(0.f, 0.f, 20.f));
@@ -454,8 +456,10 @@ TEST_CASE("Surface cuts select the requested depth across stacked models", "[Cut
     CHECK(contour_count(back) == 1);
     CHECK_THAT(projected_area(front), WithinAbs(64., 1e-4));
     CHECK_THAT(projected_area(back), WithinAbs(64., 1e-4));
-    check_on_face(front, 0., 10.);
-    check_on_face(back, 20., 30.);
+    check_on_plane(front, 10.);
+    check_on_plane(back, 30.);
+    check_on_plane(cut_surface(shapes, {near_model, far_model}, cube_projection(50.f), .5f), 10.);
+    check_on_plane(cut_surface(shapes, {near_model, far_model}, cube_projection(50.f), .75f), 30.);
 }
 
 TEST_CASE("Surface cuts preserve multiple projected holes inside the face", "[CutSurface]")
