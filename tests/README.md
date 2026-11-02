@@ -104,6 +104,11 @@ Set `CCACHE_DIR` to a volume with adequate free space before compiling, since th
 default user cache may fill the root filesystem even when the build volume has
 room. Retain the configured build for subsequent runs using the reuse commands
 below; a fresh cache does not replace compiled-object reuse.
+Enable a compiler cache explicitly through CMake's
+`CMAKE_C_COMPILER_LAUNCHER` and `CMAKE_CXX_COMPILER_LAUNCHER`. `CCACHE_DIR`
+chooses storage; it does not enable the launcher. Check actual compiler argv
+and require a warm cache hit with the selected precompiled-header and coverage
+flags before using cache statistics to estimate feedback time.
 Verify parent-death, memory-limit, and timeout cleanup with small synthetic
 processes when adopting a new worker. Preserve failed logs and binaries before
 rebuilding; an interrupted run is incomplete evidence.
