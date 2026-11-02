@@ -3050,3 +3050,44 @@ TEST_CASE("normalize_fdm backfills unset filament roles from the legacy extruder
         }
     }
 }
+
+TEST_CASE("get_real_skirt_dist follows skirt, draft shield, line width and nozzle fallbacks", "[Config][Skirt]")
+{
+    struct Row {
+        int                 skirt_height;
+        int                 skirt_loops;
+        const char         *draft_shield;
+        double              distance;
+        double              initial_width;
+        double              line_width;
+        std::vector<double> nozzle_diameters;
+        double              expected;
+    };
+    const Row rows[] = {
+        {0, 0, "disabled", 1.5, 0.6, 0.4, {0.4}, 0.0},          // no skirt at all
+        {1, 0, "disabled", 1.5, 0.6, 0.4, {0.4}, 0.0},          // no loops
+        {0, 2, "disabled", 1.5, 0.6, 0.4, {0.4}, 0.0},          // no height
+        {1, 2, "disabled", 1.5, 0.6, 0.4, {0.4}, 2.7},          // distance + loops * initial layer width
+        {1, 2, "disabled", 1.0, 0.0, 0.5, {0.4}, 2.0},          // falls back to line_width
+        {1, 1, "disabled", 0.2, 0.0, 0.0, {0.45, 0.6}, 0.8},    // then to the largest nozzle
+        {1, 1, "disabled", 0.1, 0.0, 0.0, {}, 0.5},             // then to 0.4 mm
+        {0, 0, "enabled",  0.3, 0.7, 0.4, {0.4}, 1.0},          // a draft shield counts as one loop
+        {0, 3, "enabled",  0.3, 0.7, 0.4, {0.4}, 2.4},          // but keeps an explicit loop count
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.skirt_height << " height, " << row.skirt_loops << " loops, draft " << row.draft_shield
+                        << ", distance " << row.distance << ", widths " << row.initial_width << '/' << row.line_width
+                        << ", " << row.nozzle_diameters.size() << " nozzles") {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("skirt_height", row.skirt_height);
+            config.set("skirt_loops", row.skirt_loops);
+            config.set("skirt_distance", row.distance);
+            config.set_deserialize_strict("draft_shield", row.draft_shield);
+            config.set("initial_layer_line_width", row.initial_width);
+            config.set("line_width", row.line_width);
+            config.option<ConfigOptionFloats>("nozzle_diameter")->values = row.nozzle_diameters;
+
+            CHECK_THAT(get_real_skirt_dist(config), Catch::Matchers::WithinAbs(row.expected, 1e-5));
+        }
+    }
+}
