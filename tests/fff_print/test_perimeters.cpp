@@ -1981,7 +1981,271 @@ TEST_CASE("Perlin fuzzy skin persistence controls emitted external-wall displace
     }
 }
 
+ } // namespace fuzzy_mode_pipeline_contracts
+
+namespace fuzzy_mode_pipeline_contracts {
+
+struct RipplePipelineSettings {
+    int cycles;
+    double offset_percent;
+    int layers_per_group;
+};
+
+struct RipplePipelinePrint {
+    std::vector<OuterPerimeterSnapshot> perimeters;
+};
+
+DynamicPrintConfig ripple_pipeline_config(bool enabled, const RipplePipelineSettings &settings)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "classic"},
+        {"wall_direction", "ccw"},
+        {"wall_loops", 1},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"initial_layer_line_width", 0.45},
+        {"outer_wall_line_width", 0.45},
+        {"line_width", 0.45},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"fuzzy_skin", enabled ? "external" : "none"},
+        {"fuzzy_skin_first_layer", true},
+        {"fuzzy_skin_mode", "displacement"},
+        {"fuzzy_skin_noise_type", "ripple"},
+        {"fuzzy_skin_thickness", 0.4},
+        {"fuzzy_skin_point_distance", 0.5},
+        {"fuzzy_skin_ripples_per_layer", settings.cycles},
+        {"fuzzy_skin_ripple_offset", settings.offset_percent},
+        {"fuzzy_skin_layers_between_ripple_offset", settings.layers_per_group},
+        {"detect_overhang_wall", false},
+        {"overhang_reverse", false},
+        {"seam_position", "aligned"},
+        {"enable_arc_fitting", false},
+        {"elephant_foot_compensation", 0},
+        {"use_relative_e_distances", false},
+        {"nozzle_diameter", "0.4"},
+    });
+    return config;
+}
+
+RipplePipelinePrint slice_ripple_pipeline_print(bool enabled, const RipplePipelineSettings &settings)
+{
+    Print print;
+    Model model;
+    init_print({make_cube(20., 20., 2.4)}, print, model, ripple_pipeline_config(enabled, settings));
+    const StringObjectException validation = print.validate();
+    INFO("Print validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->config().wall_generator.value == PerimeterGeneratorType::Classic);
+    const auto &layers = print.objects().front()->layers();
+    REQUIRE(layers.size() == 12); // 2.4 mm / 0.2 mm produces 12 object layers.
+    REQUIRE(layers[1]->regions().size() == 1);
+    const PrintRegionConfig &resolved = layers[1]->regions().front()->region().config();
+    REQUIRE(resolved.fuzzy_skin_noise_type.value == NoiseType::Ripple);
+    REQUIRE(resolved.fuzzy_skin_ripples_per_layer.value == settings.cycles);
+    REQUIRE_THAT(resolved.fuzzy_skin_ripple_offset.value,
+                 Catch::Matchers::WithinAbs(settings.offset_percent, 1e-9));
+    REQUIRE(resolved.fuzzy_skin_layers_between_ripple_offset.value == settings.layers_per_group);
+    REQUIRE_FALSE(resolved.detect_overhang_wall.value);
+
+    RipplePipelinePrint result;
+    result.perimeters.reserve(layers.size());
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id)
+        result.perimeters.push_back(outer_perimeters_at(print, layer_id));
+    return result;
+}
+
+struct SignedRippleSample {
+    double arc_mm = 0.;
+    double signed_offset_mm = 0.;
+    Vec2d projection_mm = Vec2d::Zero();
+};
+
+std::vector<SignedRippleSample> signed_ripple_samples(const OuterPerimeterSnapshot &actual,
+                                                       const OuterPerimeterSnapshot &reference)
+{
+    std::vector<double> segment_start_mm(reference.segments.size(), 0.);
+    double accumulated_mm = 0.;
+    for (size_t i = 0; i < reference.segments.size(); ++i) {
+        const Segment &segment = reference.segments[i];
+        segment_start_mm[i] = accumulated_mm;
+        accumulated_mm += unscale_((segment.b - segment.a).cast<double>().norm());
+    }
+
+    std::vector<SignedRippleSample> samples;
+    for (const Point &point : actual.points) {
+        const SafePerlinReference nearest = nearest_safe_perlin_reference(point, reference);
+        if (!nearest.interior)
+            continue;
+        const Segment &segment = reference.segments[nearest.segment_index];
+        const Vec2d a(unscale_(segment.a.x()), unscale_(segment.a.y()));
+        const Vec2d b(unscale_(segment.b.x()), unscale_(segment.b.y()));
+        const Vec2d tangent = (b - a).normalized();
+        const Vec2d normal(-tangent.y(), tangent.x());
+        const Vec2d point_mm(unscale_(point.x()), unscale_(point.y()));
+        const double along_mm = (nearest.projection_mm - a).dot(tangent);
+        samples.push_back({segment_start_mm[nearest.segment_index] + along_mm,
+                           (point_mm - nearest.projection_mm).dot(normal),
+                           nearest.projection_mm});
+    }
+    std::stable_sort(samples.begin(), samples.end(), [](const SignedRippleSample &a, const SignedRippleSample &b) {
+        return a.arc_mm < b.arc_mm;
+    });
+    return samples;
+}
+
+size_t ripple_sign_changes(const std::vector<SignedRippleSample> &samples)
+{
+    std::vector<int> signs;
+    signs.reserve(samples.size());
+    for (const SignedRippleSample &sample : samples) {
+        if (sample.signed_offset_mm > 0.01)
+            signs.push_back(1);
+        else if (sample.signed_offset_mm < -0.01)
+            signs.push_back(-1);
+    }
+    if (signs.size() < 2)
+        return 0;
+    size_t changes = 0;
+    for (size_t i = 0; i < signs.size(); ++i)
+        changes += signs[i] != signs[(i + 1) % signs.size()];
+    return changes;
+}
+
+struct RipplePairSummary {
+    size_t paired_samples = 0;
+    size_t nontrivial_pairs = 0;
+    double maximum_projection_delta_mm = 0.;
+    double maximum_offset_relation_error_mm = 0.;
+};
+
+RipplePairSummary summarize_ripple_relation(const std::vector<SignedRippleSample> &a,
+                                             const std::vector<SignedRippleSample> &b,
+                                             double expected_sign)
+{
+    REQUIRE(a.size() == b.size());
+    RipplePairSummary result;
+    result.paired_samples = a.size();
+    for (size_t i = 0; i < a.size(); ++i) {
+        result.maximum_projection_delta_mm = std::max(
+            result.maximum_projection_delta_mm, (a[i].projection_mm - b[i].projection_mm).norm());
+        result.maximum_offset_relation_error_mm = std::max(
+            result.maximum_offset_relation_error_mm,
+            std::abs(a[i].signed_offset_mm - expected_sign * b[i].signed_offset_mm));
+        if (std::abs(a[i].signed_offset_mm) > 0.05 && std::abs(b[i].signed_offset_mm) > 0.05)
+            ++result.nontrivial_pairs;
+    }
+    return result;
+}
+
+void require_ripple_relation(const std::vector<SignedRippleSample> &a,
+                             const std::vector<SignedRippleSample> &b,
+                             double expected_sign)
+{
+    const RipplePairSummary summary = summarize_ripple_relation(a, b, expected_sign);
+    CAPTURE(expected_sign, summary.paired_samples, summary.nontrivial_pairs,
+            summary.maximum_projection_delta_mm, summary.maximum_offset_relation_error_mm);
+    REQUIRE(summary.paired_samples >= 16);
+    REQUIRE(summary.nontrivial_pairs >= 8);
+    CHECK(summary.maximum_projection_delta_mm <= 0.002);
+    CHECK(summary.maximum_offset_relation_error_mm <= 0.002);
+}
+
+void require_ripple_numeric_registration(const char *key, ConfigOptionType type,
+                                         double minimum, double nominal,
+                                         bool check_maximum, double maximum)
+{
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    CHECK(definition->type == type);
+    CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(minimum, 1e-6));
+    if (check_maximum)
+        CHECK_THAT(definition->max, Catch::Matchers::WithinAbs(maximum, 1e-6));
+    if (type == coInt)
+        CHECK(definition->get_default_value<ConfigOptionInt>()->value == int(nominal));
+    else if (type == coPercent)
+        CHECK_THAT(definition->get_default_value<ConfigOptionPercent>()->value,
+                   Catch::Matchers::WithinAbs(nominal, 1e-9));
+}
+
 } // namespace fuzzy_mode_pipeline_contracts
+
+TEST_CASE("Ripple fuzzy skin emits the configured number of contour cycles",
+          "[FuzzySkinRippleSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_ripple_numeric_registration("fuzzy_skin_ripples_per_layer", coInt, 1, 15, false, 0.);
+    const RipplePipelineSettings control_settings{15, 0., 1};
+    const RipplePipelinePrint control = slice_ripple_pipeline_print(false, control_settings);
+    for (const int cycles : {1, 8, 15}) {
+        CAPTURE(cycles);
+        const RipplePipelinePrint actual = slice_ripple_pipeline_print(true, {cycles, 0., 1});
+        const std::vector<SignedRippleSample> samples =
+            signed_ripple_samples(actual.perimeters[1], control.perimeters[1]);
+        const size_t sign_changes = ripple_sign_changes(samples);
+        CAPTURE(samples.size(), sign_changes);
+        REQUIRE(samples.size() >= size_t(4 * cycles));
+        CHECK(sign_changes == size_t(2 * cycles));
+    }
+}
+
+TEST_CASE("Ripple fuzzy skin offset endpoints preserve and invert the printed phase",
+          "[FuzzySkinRippleSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_ripple_numeric_registration("fuzzy_skin_ripple_offset", coPercent, 0, 50, true, 100);
+    const RipplePipelineSettings settings{15, 50., 1};
+    const RipplePipelinePrint control = slice_ripple_pipeline_print(false, settings);
+    const RipplePipelinePrint zero = slice_ripple_pipeline_print(true, {15, 0., 1});
+    const RipplePipelinePrint half = slice_ripple_pipeline_print(true, {15, 50., 1});
+    const RipplePipelinePrint full = slice_ripple_pipeline_print(true, {15, 100., 1});
+    const auto zero_layer1 = signed_ripple_samples(zero.perimeters[1], control.perimeters[1]);
+    const auto zero_layer2 = signed_ripple_samples(zero.perimeters[2], control.perimeters[2]);
+    const auto half_layer1 = signed_ripple_samples(half.perimeters[1], control.perimeters[1]);
+    const auto half_layer2 = signed_ripple_samples(half.perimeters[2], control.perimeters[2]);
+    const auto half_layer3 = signed_ripple_samples(half.perimeters[3], control.perimeters[3]);
+    const auto full_layer1 = signed_ripple_samples(full.perimeters[1], control.perimeters[1]);
+
+    require_ripple_relation(zero_layer1, zero_layer2, 1.);
+    require_ripple_relation(full_layer1, zero_layer1, 1.);
+    require_ripple_relation(half_layer1, half_layer2, -1.);
+    require_ripple_relation(half_layer1, half_layer3, 1.);
+}
+
+TEST_CASE("Ripple fuzzy skin applies offsets once per configured layer group",
+          "[FuzzySkinRippleSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_ripple_numeric_registration("fuzzy_skin_layers_between_ripple_offset", coInt, 1, 1, false, 0.);
+    const RipplePipelineSettings settings{15, 50., 1};
+    const RipplePipelinePrint control = slice_ripple_pipeline_print(false, settings);
+    const RipplePipelinePrint every_layer = slice_ripple_pipeline_print(true, {15, 50., 1});
+    const RipplePipelinePrint every_three_layers = slice_ripple_pipeline_print(true, {15, 50., 3});
+    const auto group3_layer1 = signed_ripple_samples(every_three_layers.perimeters[1], control.perimeters[1]);
+    const auto group3_layer2 = signed_ripple_samples(every_three_layers.perimeters[2], control.perimeters[2]);
+    const auto group3_layer3 = signed_ripple_samples(every_three_layers.perimeters[3], control.perimeters[3]);
+    const auto group3_layer4 = signed_ripple_samples(every_three_layers.perimeters[4], control.perimeters[4]);
+    const auto group3_layer5 = signed_ripple_samples(every_three_layers.perimeters[5], control.perimeters[5]);
+    const auto group3_layer6 = signed_ripple_samples(every_three_layers.perimeters[6], control.perimeters[6]);
+    const auto group3_layer8 = signed_ripple_samples(every_three_layers.perimeters[8], control.perimeters[8]);
+    const auto group1_layer1 = signed_ripple_samples(every_layer.perimeters[1], control.perimeters[1]);
+    const auto group1_layer2 = signed_ripple_samples(every_layer.perimeters[2], control.perimeters[2]);
+    const auto group1_layer3 = signed_ripple_samples(every_layer.perimeters[3], control.perimeters[3]);
+
+    require_ripple_relation(group3_layer1, group3_layer2, 1.);
+    require_ripple_relation(group3_layer3, group3_layer4, 1.);
+    require_ripple_relation(group3_layer4, group3_layer5, 1.);
+    require_ripple_relation(group3_layer1, group3_layer3, -1.);
+    require_ripple_relation(group3_layer1, group3_layer6, 1.);
+    require_ripple_relation(group3_layer6, group3_layer8, 1.);
+    require_ripple_relation(group1_layer1, group1_layer2, -1.);
+    require_ripple_relation(group1_layer1, group1_layer3, 1.);
+}
 
 
 namespace fuzzy_mode_pipeline_contracts {

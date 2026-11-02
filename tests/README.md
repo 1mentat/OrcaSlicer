@@ -697,6 +697,12 @@ clipping is disabled to isolate displacement; other noise types and overhang
 interactions are not claimed. Ten consecutive triplet runs passed, and each
 ignored-parameter mutant is killed by ordinary residual assertions. Its probes
 are in `fuzzy_skin_noise_parameters_pipeline.json`.
+`[FuzzySkinRippleSettingsPipeline]` checks signed emitted outer-wall cycles and
+layer phase through a validated classic-wall Print pipeline. It covers cycle
+counts 1, 8, and 15; phase offsets 0%, 50%, and 100%; and layer groups 1 and 3.
+Overhang clipping is disabled, phase checks are relative, and no maximum cycle
+count or layer-group length is claimed. Its source-local probes are in
+`fuzzy_skin_ripple_settings_pipeline.json`.
 `[GapFillFilterSettings]` slices the same thin square tube with zero and a
 high gap-length threshold, checking that short classic-wall gap paths disappear
 without changing contour, hole, or inner-wall classes. Its two source-local
