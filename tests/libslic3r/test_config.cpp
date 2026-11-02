@@ -3107,7 +3107,7 @@ TEST_CASE("set_num_filaments grows filament vectors with their first value and s
     }
 }
 
-TEST_CASE("get_real_skirt_dist follows skirt, draft shield, line width and nozzle fallbacks", "[Config][Skirt]")
+TEST_CASE("get_real_skirt_dist follows skirt, loop, line width and nozzle fallbacks", "[Config][Skirt]")
 {
     struct Row {
         int                 skirt_height;
@@ -3127,8 +3127,7 @@ TEST_CASE("get_real_skirt_dist follows skirt, draft shield, line width and nozzl
         {1, 2, "disabled", 1.0, 0.0, 0.5, {0.4}, 2.0},          // falls back to line_width
         {1, 1, "disabled", 0.2, 0.0, 0.0, {0.45, 0.6}, 0.8},    // then to the largest nozzle
         {1, 1, "disabled", 0.1, 0.0, 0.0, {}, 0.5},             // then to 0.4 mm
-        {0, 0, "enabled",  0.3, 0.7, 0.4, {0.4}, 1.0},          // a draft shield counts as one loop
-        {0, 3, "enabled",  0.3, 0.7, 0.4, {0.4}, 2.4},          // but keeps an explicit loop count
+        {0, 3, "enabled",  0.3, 0.7, 0.4, {0.4}, 2.4},          // a draft shield alone counts the explicit loops
     };
     for (const Row &row : rows) {
         DYNAMIC_SECTION(row.skirt_height << " height, " << row.skirt_loops << " loops, draft " << row.draft_shield
