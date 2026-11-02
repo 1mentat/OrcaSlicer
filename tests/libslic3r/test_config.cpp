@@ -2849,6 +2849,7 @@ TEST_CASE("Bridge line width is limited by the smallest nozzle while other width
         {"0.4,0.6", "0.4",  false},
         {"0.4",     "100%", false},
         {"0.4,0.6", "60%",  false},  // below 100% of every extruder's own nozzle
+        {"0.4,0.6", "101%", true},   // above 100% of the 0.4 mm nozzle
     };
     for (const Row &row : rows) {
         DYNAMIC_SECTION("nozzles " << row.nozzles << ", bridge " << row.bridge_width) {
@@ -2871,11 +2872,9 @@ TEST_CASE("Bridge line width is limited by the smallest nozzle while other width
     CHECK_THAT(error_message(config.validate(), "outer_wall_line_width"), Catch::Matchers::ContainsSubstring("too large line width"));
 }
 
-// Known bug: validate() resolves a percent bridge_line_width against the LARGEST nozzle and compares it with the
-// SMALLEST, while printing (LayerRegion::bridging_flow, Print::validate) resolves it against the nozzle of the
-// extruder that prints the bridge, so a percentage of at most 100% never exceeds that extruder's own nozzle;
-// fixed by the follow-up fix PR.
-TEST_CASE("Percent bridge line width is accepted when it fits each extruder's own nozzle", "[Config][Validation][!shouldfail]")
+// Printing resolves a percentage against the nozzle of the extruder that prints the bridge, so a percentage of at
+// most 100% never exceeds that extruder's own nozzle.
+TEST_CASE("Percent bridge line width is accepted when it fits each extruder's own nozzle", "[Config][Validation]")
 {
     for (const char *width : {"70%", "100%"}) {
         DYNAMIC_SECTION("bridge " << width << " with 0.4 and 0.6 mm nozzles") {
