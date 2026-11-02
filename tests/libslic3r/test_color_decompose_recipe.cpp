@@ -76,15 +76,6 @@ void require_valid_shape(const ColorDecomposeRecipeResult &result,
     CHECK(ratio_sum == 100);
 }
 
-bool is_hex6(const std::string &value)
-{
-    if (value.size() != 7 || value.front() != '#')
-        return false;
-    return std::all_of(value.begin() + 1, value.end(), [](char c) {
-        return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
-    });
-}
-
 bool contains_index(const ColorDecomposeRecipeResult &result, unsigned int index)
 {
     return std::any_of(result.components.begin(), result.components.end(),
