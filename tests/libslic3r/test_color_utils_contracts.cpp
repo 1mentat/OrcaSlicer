@@ -1,4 +1,7 @@
+#include "libslic3r/Point.hpp"
 #include "libslic3r/TextureToColor/ColorUtils.hpp"
+#include "libslic3r/TextureToColor/TriMesh.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -8,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -417,5 +421,172 @@ TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
                Catch::Matchers::WithinAbs(mean_hue_wrap_expected, 1e-6));
     CHECK_THAT(calc_rgb_color_difference_by_ciede2000(mean_hue_wrap_b, mean_hue_wrap_a),
                Catch::Matchers::WithinAbs(mean_hue_wrap_expected, 1e-6));
+}
+
+namespace {
+
+TriMesh cube_mesh(double side = 10.)
+{
+    const TriangleMesh mesh = make_cube(side, side, side);
+    return TriMesh(mesh.its);
+}
+
+TriMesh two_cubes_mesh()
+{
+    TriangleMesh mesh = make_cube(10., 10., 10.);
+    TriangleMesh second = make_cube(10., 10., 10.);
+    second.translate(Vec3f(30.f, 0.f, 0.f));
+    mesh.merge(second);
+    return TriMesh(mesh.its);
+}
+
+// Re-split the first cube's top square along its other diagonal, so the fixture no longer matches
+// the default triangulation and a component that re-triangulated its faces would differ.
+void flip_first_top_diagonal(TriMesh &mesh)
+{
+    std::vector<std::size_t> top;
+    for (std::size_t i = 0; i < mesh.indices.size() && top.size() < 2; ++i) {
+        const TriFace &face = mesh.indices[i];
+        bool on_top = true;
+        for (int corner = 0; corner < 3; ++corner)
+            on_top = on_top && mesh.vertices[face[corner]].z() == 10.f && mesh.vertices[face[corner]].x() <= 10.f;
+        if (on_top)
+            top.push_back(i);
+    }
+    REQUIRE(top.size() == 2);
+    const TriFace a = mesh.indices[top[0]];
+    const TriFace b = mesh.indices[top[1]];
+    const auto in = [](const TriFace &face, int v) { return face[0] == v || face[1] == v || face[2] == v; };
+    // Rotate a so it starts with its vertex that b lacks: a = (u1, x, y) with x-y the shared diagonal.
+    int r = 0;
+    while (in(b, a[r]))
+        ++r;
+    const int u1 = a[r], x = a[(r + 1) % 3], y = a[(r + 2) % 3];
+    int u2 = -1;
+    for (int corner = 0; corner < 3; ++corner)
+        if (!in(a, b[corner]))
+            u2 = b[corner];
+    REQUIRE(u2 >= 0);
+    mesh.indices[top[0]] = TriFace(u1, x, u2);
+    mesh.indices[top[1]] = TriFace(u1, u2, y);
+}
+
+// A face as its three corner positions, order-insensitive.
+using FaceKey = std::array<std::array<float, 3>, 3>;
+
+FaceKey face_key(const TriMesh &mesh, const TriFace &face)
+{
+    FaceKey key;
+    for (int corner = 0; corner < 3; ++corner) {
+        const TriVertex &v = mesh.vertices[face[corner]];
+        key[std::size_t(corner)] = {v.x(), v.y(), v.z()};
+    }
+    std::sort(key.begin(), key.end());
+    return key;
+}
+
+std::multiset<FaceKey> face_keys(const TriMesh &mesh)
+{
+    std::multiset<FaceKey> keys;
+    for (const TriFace &face : mesh.indices)
+        keys.insert(face_key(mesh, face));
+    return keys;
+}
+
+TriMesh open_square_mesh()
+{
+    TriVertices vertices{
+        TriVertex(0.f, 0.f, 0.f), TriVertex(10.f, 0.f, 0.f),
+        TriVertex(10.f, 10.f, 0.f), TriVertex(0.f, 10.f, 0.f)};
+    TriFaces faces{
+        TriFace(0, 1, 2), TriFace(0, 2, 3)};
+    return TriMesh(std::move(faces), std::move(vertices));
+}
+
+// UV = (x + 0.1 y, y + 0.1 z). Injective on the cubes' corner grid, so every vertex has its own UV and
+// a vertex given another vertex's UV is caught.
+Vec2f uv_of(const TriVertex &vertex)
+{
+    return Vec2f(vertex.x() + 0.1f * vertex.y(), vertex.y() + 0.1f * vertex.z());
+}
+
+std::vector<Vec2f> indexed_uvs(const TriMesh &mesh)
+{
+    std::vector<Vec2f> uvs;
+    uvs.reserve(mesh.vertices.size());
+    for (const TriVertex &vertex : mesh.vertices)
+        uvs.push_back(uv_of(vertex));
+    return uvs;
+}
+
+} // namespace
+
+TEST_CASE("Color mesh closure distinguishes watertight and open geometry", "[ColorUtils]")
+{
+    CHECK(is_closed(cube_mesh()));
+    CHECK_FALSE(is_closed(open_square_mesh()));
+}
+
+TEST_CASE("Connected color mesh components retain faces, vertices, and UVs", "[ColorUtils]")
+{
+    TriMesh input = two_cubes_mesh();
+    flip_first_top_diagonal(input);
+    REQUIRE(face_keys(input) != face_keys(two_cubes_mesh()));   // the fixture really differs from the default split
+    const std::vector<Vec2f> uvs = indexed_uvs(input);
+    std::vector<TriMesh> components;
+    std::vector<std::vector<Vec2f>> component_uvs;
+
+    REQUIRE(get_components(input, uvs, components, component_uvs));
+    REQUIRE(components.size() == 2);
+    REQUIRE(component_uvs.size() == components.size());
+
+    std::size_t total_faces = 0;
+    for (std::size_t i = 0; i < components.size(); ++i) {
+        CHECK(components[i].indices.size() == 12);
+        CHECK(components[i].vertices.size() == 8);
+        CHECK(component_uvs[i].size() == components[i].vertices.size());
+        CHECK(is_closed(components[i]));
+        for (std::size_t vertex_id = 0; vertex_id < components[i].vertices.size(); ++vertex_id) {
+            const TriVertex &vertex = components[i].vertices[vertex_id];
+            const Vec2f &uv = component_uvs[i][vertex_id];
+            CHECK_THAT(uv.x(), Catch::Matchers::WithinAbs(uv_of(vertex).x(), 1e-5));
+            CHECK_THAT(uv.y(), Catch::Matchers::WithinAbs(uv_of(vertex).y(), 1e-5));
+        }
+        total_faces += components[i].indices.size();
+    }
+    CHECK(total_faces == input.indices.size());
+    // The components hold exactly the input triangles, compared by corner positions, so a component
+    // that re-split a square along the other diagonal would not match.
+    std::multiset<FaceKey> component_faces;
+    for (const TriMesh &component : components)
+        for (const TriFace &face : component.indices)
+            component_faces.insert(face_key(component, face));
+    CHECK(component_faces == face_keys(input));
+
+    // One component is the cube at x = 0..10, the other the one moved to x = 30..40.
+    std::vector<float> min_x;
+    for (const TriMesh &component : components) {
+        float lo = component.vertices.front().x(), hi = lo;
+        for (const TriVertex &vertex : component.vertices) {
+            lo = std::min(lo, vertex.x());
+            hi = std::max(hi, vertex.x());
+        }
+        CHECK_THAT(hi - lo, Catch::Matchers::WithinAbs(10.f, 1e-5f));
+        min_x.push_back(lo);
+    }
+    std::sort(min_x.begin(), min_x.end());
+    CHECK_THAT(min_x[0], Catch::Matchers::WithinAbs(0.f, 1e-5f));
+    CHECK_THAT(min_x[1], Catch::Matchers::WithinAbs(30.f, 1e-5f));
+}
+
+TEST_CASE("Component extraction clears stale outputs on a UV cardinality error", "[ColorUtils]")
+{
+    const TriMesh input = cube_mesh();
+    std::vector<TriMesh> components{cube_mesh()};
+    std::vector<std::vector<Vec2f>> component_uvs{{Vec2f(1.f, 2.f)}};
+    std::vector<Vec2f> malformed(input.vertices.size() - 1, Vec2f(0.f, 0.f));
+    CHECK_FALSE(get_components(input, malformed, components, component_uvs));
+    CHECK(components.empty());
+    CHECK(component_uvs.empty());
 }
 
