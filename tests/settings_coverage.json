@@ -324,12 +324,13 @@
     },
     "tpms_interior_density": {
       "test": "tests/fff_print/test_fill.cpp",
-      "tag": "[Fill]",
+      "tag": "[Fill][TpmsAdaptiveDensity]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Adaptive TPMS fixtures use five, twenty-five, and forty percent interior density and compare measured core and shell infill; numeric boundaries are not claimed."
+      "reason": "The existing adaptive TPMS fixtures use five, twenty-five, and forty percent representative targets. A validated full-Print fixture fixes tpmsd/lobes/linear gradient and twenty-five percent surface density on a 40 mm cube, then checks measured core infill at the registered one and one-hundred percent interior endpoints against five and twenty-five percent controls; one-percent output remains nonempty in a broader region. This boundary claim is limited to that pattern, mode, gradient, and geometry; other interactions remain unclaimed."
     },
     "tpms_adaptive_gradient": {
       "test": "tests/fff_print/test_fill.cpp",

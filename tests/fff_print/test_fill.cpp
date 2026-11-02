@@ -2899,6 +2899,61 @@ TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior densi
     }
 }
 
+TEST_CASE("Adaptive TPMS interior density endpoints change measured core infill", "[Fill][TpmsAdaptiveDensity]")
+{
+    constexpr double side = 40.;
+    constexpr double half = side / 2.;
+    constexpr double z_min = side * 5. / 12.;
+    constexpr double z_max = side * 7. / 12.;
+    const Polygons core = centered_square(half / 3.);
+    const Polygons broad = centered_square(half * 0.95);
+
+    auto slice = [](const std::string &adaptive, const std::string &interior_density, Print &print) {
+        Model model;
+        Slic3r::Test::init_print({Slic3r::Test::cube(side)}, print, model,
+                                 {{"sparse_infill_pattern", "tpmsd"},
+                                  {"sparse_infill_density", "25%"},
+                                  {"tpms_adaptive", adaptive},
+                                  {"tpms_interior_density", interior_density},
+                                  {"tpms_adaptive_gradient", "linear"},
+                                  {"detect_overhang_wall", false},
+                                  {"nozzle_diameter", "0.4"},
+                                  {"layer_height", 0.2},
+                                  {"initial_layer_print_height", 0.2},
+                                  {"use_relative_e_distances", false},
+                                  {"layer_change_gcode", ""}});
+        const auto validation = print.validate();
+        CAPTURE(validation.opt_key);
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        REQUIRE_NOTHROW(print.process());
+    };
+
+    Print uniform;
+    slice("disabled", "5%", uniform);
+    Print minimum;
+    slice("lobes", "1%", minimum);
+    Print nominal;
+    slice("lobes", "5%", nominal);
+    Print maximum;
+    slice("lobes", "100%", maximum);
+
+    const double core_uniform = sparse_infill_length(uniform, z_min, z_max, core);
+    const double core_minimum = sparse_infill_length(minimum, z_min, z_max, core);
+    const double core_nominal = sparse_infill_length(nominal, z_min, z_max, core);
+    const double core_maximum = sparse_infill_length(maximum, z_min, z_max, core);
+    CAPTURE(core_uniform, core_minimum, core_nominal, core_maximum);
+    REQUIRE(core_uniform > 0.);
+    REQUIRE(core_nominal > 0.);
+    REQUIRE(core_maximum > 0.);
+    CHECK(core_minimum < core_nominal);
+    CHECK(core_nominal < core_uniform);
+    CHECK(core_maximum > core_uniform);
+
+    // The minimum setting still produces measured infill in the broader object region.
+    CHECK(sparse_infill_length(minimum, z_min, z_max, broad) > 0.);
+}
+
 TEST_CASE("Adaptive TPMS infill of a tall object is sparsest at its middle height", "[Fill]")
 {
     // A 30 x 30 x 90 mm box in 0.4 mm layers: its center is 45 mm high, the middle of its core, not a column.

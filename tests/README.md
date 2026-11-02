@@ -749,6 +749,13 @@ mutations are in `cut_surface_topology.json`, `cut_surface_boundary.json` and
 `tpms_normal_y.json`. The surface-boundary regression includes an outer contour
 coincident with the model boundary, with two holes whose area must remain removed.
 
+`[TpmsAdaptiveDensity]` measures core and broader-region infill in validated
+full-Print fixtures for the one- and one-hundred-percent interior-density
+endpoints, with fixed twenty-five-percent surface density and five- and
+25-percent controls. Its endpoint probes are in
+`tests/mutations/tpms_density_consolidation.json`; the claim is limited to the
+`tpmsd` pattern, `lobes` mode, linear gradient, and 40 mm cube fixture.
+
 `[ZContouringSettings]` checks all four combinations of Z contouring and its
 infill-direction flag through emitted sparse paths. It also checks two minimum-Z
 values against the resulting slice planes. `[ZContouringPerimeter]` compares

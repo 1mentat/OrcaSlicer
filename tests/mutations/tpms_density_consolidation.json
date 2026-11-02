@@ -11,6 +11,26 @@
       "test_filter": "TpmsAdaptiveDensity",
       "ordinary_assertion_only": true,
       "description": "Use surface density in the TPMS-D interior; the retained full-Print core-to-uniform contrast must fail."
+    },
+    {
+      "id": "tpms-interior-minimum-clamped-to-five-percent",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "std::max(1.f, float(region_config.tpms_interior_density))",
+      "new": "std::max(5.f, float(region_config.tpms_interior_density))",
+      "expected_matches": 1,
+      "test_filter": "TpmsAdaptiveDensity",
+      "ordinary_assertion_only": true,
+      "description": "Clamp the registered one-percent minimum to five percent; the measured core length must be lower at one percent than at the five-percent control."
+    },
+    {
+      "id": "tpms-interior-maximum-capped-at-surface-density",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "std::max(1.f, float(region_config.tpms_interior_density))",
+      "new": "std::min(25.f, float(region_config.tpms_interior_density))",
+      "expected_matches": 1,
+      "test_filter": "TpmsAdaptiveDensity",
+      "ordinary_assertion_only": true,
+      "description": "Cap the registered one-hundred-percent maximum at the twenty-five-percent surface density; the measured core must be denser than the fixed-density uniform control."
     }
   ]
 }
