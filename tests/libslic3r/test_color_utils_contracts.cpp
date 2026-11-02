@@ -4,6 +4,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -999,4 +1000,84 @@ TEST_CASE("Smoothing rejects a label count that does not match the faces", "[Col
     CHECK_FALSE(smooth_region(mesh, wrong_count, parameters));
     CHECK(mesh.vertices == original.vertices);
     CHECK(mesh.indices == original.indices);
+}
+
+TEST_CASE("Remeshing rejects a label count that does not match the faces before changing geometry", "[ColorUtils]")
+{
+    TriMesh mesh           = cube_mesh(6.);
+    const TriMesh original = mesh;
+    const int delta        = GENERATE(-1, 1);
+    std::vector<std::size_t> labels(static_cast<std::size_t>(static_cast<int>(mesh.indices.size()) + delta), 5);
+    const std::vector<std::size_t> original_labels = labels;
+    CHECK_FALSE(remesh_mesh(mesh, labels, 0.7));
+    CHECK(mesh.vertices == original.vertices);
+    CHECK(mesh.indices == original.indices);
+    CHECK(labels == original_labels);
+}
+
+namespace {
+
+// Labels 7 for faces whose centroid lies above `height`, 3 otherwise. remesh_mesh constrains the edges
+// whose two faces carry different labels. On this cube those are the side-face diagonals and any
+// vertical edge whose adjacent side triangles differ in label; the cube has no vertices at mid-height, so
+// there are no edges at the split, and the top and bottom edges (same label on both sides) stay
+// unconstrained, so the remesher may only approximate them.
+std::vector<std::size_t> labels_split_at_height(const TriMesh &mesh, float height)
+{
+    std::vector<std::size_t> labels(mesh.indices.size(), 3);
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+        const auto &face = mesh.indices[i];
+        const float z    = (mesh.vertices[face[0]].z() + mesh.vertices[face[1]].z() + mesh.vertices[face[2]].z()) / 3.f;
+        if (z > height)
+            labels[i] = 7;
+    }
+    return labels;
+}
+
+double mean_edge_length(const TriMesh &mesh)
+{
+    double sum = 0.;
+    for (const auto &face : mesh.indices)
+        for (int i = 0; i < 3; ++i)
+            sum += (mesh.vertices[face[i]] - mesh.vertices[face[(i + 1) % 3]]).cast<double>().norm();
+    return sum / (3. * double(mesh.indices.size()));
+}
+
+} // namespace
+
+// Isotropic remeshing only approximates the input surface, so the unconstrained sharp edges may be
+// rounded. A 10% volume tolerance allows that. Measured for reference: a single-label cube (no
+// constrained edges) loses 50% of its volume at ratio 0.6 and all of it at 1.4, this fixture loses ~0%.
+TEST_CASE("Remeshing a closed two-label cube approximately keeps its volume, closure, and both labels", "[ColorUtils]")
+{
+    const double ratio    = GENERATE(0.6, 1.4);
+    constexpr double side = 8.;
+    TriMesh mesh          = cube_mesh(side);
+    std::vector<std::size_t> labels = labels_split_at_height(mesh, 4.f);
+    REQUIRE(remesh_mesh(mesh, labels, ratio));
+    REQUIRE(mesh.indices.size() > 0);
+    CHECK(labels.size() == mesh.indices.size());
+    CHECK(is_closed(mesh));
+    CHECK_THAT(std::abs(signed_volume(mesh)), Catch::Matchers::WithinRel(side * side * side, 0.1));
+    const auto low  = std::count(labels.begin(), labels.end(), std::size_t(3));
+    const auto high = std::count(labels.begin(), labels.end(), std::size_t(7));
+    CHECK(low > 0);
+    CHECK(high > 0);
+    CHECK(low + high == static_cast<std::ptrdiff_t>(labels.size()));
+    check_finite_mesh(mesh);
+}
+
+TEST_CASE("Remeshing with a smaller target edge ratio yields shorter edges and more faces", "[ColorUtils]")
+{
+    TriMesh coarse = cube_mesh(8.);
+    TriMesh fine   = cube_mesh(8.);
+    std::vector<std::size_t> coarse_labels = labels_split_at_height(coarse, 4.f);
+    std::vector<std::size_t> fine_labels   = labels_split_at_height(fine, 4.f);
+    REQUIRE(remesh_mesh(coarse, coarse_labels, 1.4));
+    REQUIRE(remesh_mesh(fine, fine_labels, 0.6));
+    REQUIRE(coarse.indices.size() > 0);
+    CHECK(fine.indices.size() > coarse.indices.size());
+    CHECK(mean_edge_length(fine) < mean_edge_length(coarse));
+    CHECK(is_closed(coarse));
+    CHECK(is_closed(fine));
 }
