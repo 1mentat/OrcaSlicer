@@ -2016,7 +2016,7 @@ TEST_CASE("All registered enum values round-trip through their serialized form",
     CHECK(enum_options >= 60); // 72 today
 }
 
-TEST_CASE("All registered boolean settings accept only the canonical serialized values", "[Config][Schema][Bool]")
+TEST_CASE("All registered boolean settings accept 0 and 1 and reject other values", "[Config][Schema][Bool]")
 {
     size_t bool_options = 0;
     for (const auto &[key, def] : print_config_def.options) {
@@ -2032,6 +2032,15 @@ TEST_CASE("All registered boolean settings accept only the canonical serialized 
         REQUIRE(option->deserialize("1"));
         CHECK(option->serialize() == "1");
         CHECK_FALSE(option->deserialize("2"));
+        CHECK_FALSE(option->deserialize("true"));
+
+        if (def.type == coBool) {
+            // A scalar boolean takes the first element of comma-separated input.
+            REQUIRE(option->deserialize("1,0"));
+            CHECK(option->serialize() == "1");
+            REQUIRE(option->deserialize("0,1"));
+            CHECK(option->serialize() == "0");
+        }
 
         if (def.type == coBools) {
             REQUIRE(option->deserialize("0,1"));
@@ -2111,6 +2120,12 @@ TEST_CASE("Registered numeric boundaries round-trip through strict serialization
             REQUIRE(restored != nullptr);
             REQUIRE(restored->deserialize(canonical));
             CHECK(restored->serialize() == canonical);
+            // Round trip is decode -> serialize -> decode: the restored option must hold the same boundary.
+            // The canonical text drops digits beyond float precision (def.min/max are floats, so
+            // e.g. 0.1f widens to 0.10000000149), hence the looser relative tolerance.
+            const auto [restored_value, restored_percent] = first_numeric_value(*restored);
+            CHECK_THAT(restored_value, Catch::Matchers::WithinAbs(expected, 1e-6 * std::max(1., std::abs(expected))));
+            CHECK(restored_percent == percent);
             ++boundary_values;
         }
     }
