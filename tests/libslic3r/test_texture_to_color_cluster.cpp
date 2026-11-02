@@ -28,45 +28,9 @@ using Catch::Matchers::WithinAbs;
 
 namespace {
 
-using Color = std::array<std::size_t, 3>;
-
-constexpr Color red{{255, 0, 0}};
-constexpr Color blue{{0, 0, 255}};
-constexpr Color green{{0, 255, 0}};
-
-TriMesh one_triangle()
-{
-    return TriMesh(
-        {stl_triangle_vertex_indices(0, 1, 2)},
-        {stl_vertex(0.f, 0.f, 0.f), stl_vertex(1.f, 0.f, 0.f), stl_vertex(0.f, 1.f, 0.f)});
-}
-
-TextureToColorSettings bounded_settings()
-{
-    TextureToColorSettings settings;
-    settings.target_colors_num = 1;
-    settings.smooth_weight = 0.0;
-    settings.oversampling_iters = 0;
-    settings.oversampling_min_face_count = 4;
-    settings.oversampling_max_face_count = 32;
-    settings.mesh_repair_decision = MeshRepairDecision::ImportWithoutRepair;
-    return settings;
-}
-
-
 Vec3d as_vec3d(const TriVertex &vertex)
 {
     return Vec3d(vertex[0], vertex[1], vertex[2]);
-}
-
-// True when every channel is within the 2-unit Lab round-trip quantisation of the expected colour.
-bool matches_color(const Color &actual, const Color &expected)
-{
-    for (std::size_t channel = 0; channel < expected.size(); ++channel) {
-        if (std::abs(static_cast<double>(actual[channel]) - static_cast<double>(expected[channel])) > 2.0)
-            return false;
-    }
-    return true;
 }
 
 } // namespace
@@ -135,6 +99,8 @@ TEST_CASE("Vertex color splitting preserves a three-way boundary triangulation",
     TriMesh out_mesh;
     std::vector<Color> out_face_colors;
     REQUIRE(ClusterAndSmooth(mesh, input_face_colors, out_mesh, out_face_colors, settings, nullptr, nullptr, vertex_colors));
+    // Every edge is split at its midpoint and the centre triangle is cut once: 3 corners + 3 edge
+    // midpoints + 1 interior point, 3 corner faces + 2 centre faces.
     REQUIRE(out_mesh.indices.size() == 5);
     REQUIRE(out_mesh.vertices.size() == 7);
     REQUIRE(out_face_colors.size() == out_mesh.indices.size());
@@ -235,13 +201,13 @@ TEST_CASE("ClusterAndSmooth honors the adaptive cluster cap on its generic publi
     CHECK(distinct_colors.size() == 2);
     // The cap merges the two closest input colours (red and blue, closer in Lab than either is to
     // green) into one centre and keeps green on its own.
-    CHECK(std::find(distinct_colors.begin(), distinct_colors.end(), green) != distinct_colors.end());
+    CHECK(std::any_of(distinct_colors.begin(), distinct_colors.end(), [](const Color &c) { return matches_color(c, green); }));
     for (const Color &color : distinct_colors) {
-        if (color == green)
+        if (matches_color(color, green))
             continue;
-        CHECK(color[0] > 0);
-        CHECK(color[1] == 0);
-        CHECK(color[2] > 0);
+        CHECK(color[0] > 2);
+        CHECK(color[1] <= 2);
+        CHECK(color[2] > 2);
     }
 }
 
@@ -264,7 +230,10 @@ TEST_CASE("ClusterAndSmooth requests a repair decision for an open mesh",
     CHECK(out_colors.empty());
 }
 
-TEST_CASE("ClusterAndSmooth repairs an inconsistently wound tetrahedron",
+// Only the outcome: ClusterAndSmooth exposes no hole-filling limits, so this cannot tell an in-place
+// reorientation from dropping and refilling the conflicting face; #235 proves the in-place case on
+// RepairMesh itself.
+TEST_CASE("ClusterAndSmooth returns a closed, consistently wound mesh for an inconsistently wound tetrahedron",
           "[TextureToColor]")
 {
     TriMesh input = closed_tetrahedron();
@@ -393,44 +362,65 @@ TEST_CASE("Adaptive vertex-color clustering splits only the distinct color bound
     }
 }
 
-// With a fixed palette, ensure_all_cluster_centers_used() puts every centre back into use after
-// smoothing, so the one-face minority colour survives even at full smoothing weight.
-TEST_CASE("ClusterAndSmooth keeps every fixed palette colour in use after full smoothing",
-          "[TextureToColor]")
+namespace {
+
+// A 10 mm cube, white except for one bottom and one top triangle, which are black. The two black
+// faces do not touch, so each is surrounded by white.
+std::pair<TriMesh, std::vector<Color>> cube_with_two_isolated_black_faces()
 {
-    const TriMesh input = closed_tetrahedron();
-    const Color minority{{0, 0, 0}};
-    const Color majority{{255, 255, 255}};
-    const std::vector<Color> input_face_colors{minority, majority, majority, majority};
+    TriMesh cube(make_cube(10., 10., 10.).its);
+    std::vector<Color> colors(cube.indices.size(), Color{{255, 255, 255}});
+    const auto first_face_at = [&cube](float z) {
+        for (std::size_t i = 0; i < cube.indices.size(); ++i) {
+            const auto &face = cube.indices[i];
+            if (cube.vertices[face[0]].z() == z && cube.vertices[face[1]].z() == z && cube.vertices[face[2]].z() == z)
+                return i;
+        }
+        return cube.indices.size();
+    };
+    const std::size_t bottom = first_face_at(0.f);
+    const std::size_t top = first_face_at(10.f);
+    REQUIRE(bottom < colors.size());
+    REQUIRE(top < colors.size());
+    colors[bottom] = Color{{0, 0, 0}};
+    colors[top] = Color{{0, 0, 0}};
+    return {cube, colors};
+}
+
+std::size_t count_faces(const std::vector<Color> &colors, const Color &expected)
+{
+    return std::size_t(std::count_if(colors.begin(), colors.end(), [&](const Color &c) { return matches_color(c, expected); }));
+}
+
+} // namespace
+
+// Smoothing relabels both isolated black faces white; with a fixed palette,
+// ensure_all_cluster_centers_used() then puts black back on one face so every palette colour stays in use.
+TEST_CASE("Fixed-palette smoothing changes labels but keeps every palette colour in use", "[TextureToColor]")
+{
+    const auto [cube, colors] = cube_with_two_isolated_black_faces();
+    const Color black{{0, 0, 0}};
+    const Color white{{255, 255, 255}};
     TextureToColorSettings settings = bounded_settings();
     settings.target_colors_num = 2;
-    settings.smooth_weight = 1.0;
+    settings.oversampling_min_face_count = cube.indices.size();
 
-    TriMesh out_mesh;
-    std::vector<Color> out_colors;
-    REQUIRE(ClusterAndSmooth(input, input_face_colors, out_mesh, out_colors, settings));
-    REQUIRE(out_mesh.indices.size() == input.indices.size());
-    REQUIRE(out_colors.size() == out_mesh.indices.size());
-    CHECK(color_utils::is_closed(out_mesh));
-    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))),
-               WithinAbs(1.0 / 6.0, 1e-5));
-    check_finite_and_valid(out_mesh);
-    std::size_t majority_faces = 0;
-    std::size_t minority_faces = 0;
-    bool all_colors_in_fixed_palette = true;
-    for (const Color &color : out_colors) {
-        const bool is_majority = matches_color(color, majority);
-        const bool is_minority = matches_color(color, minority);
-        if (is_majority)
-            ++majority_faces;
-        if (is_minority)
-            ++minority_faces;
-        if (!is_majority && !is_minority)
-            all_colors_in_fixed_palette = false;
-    }
-    CHECK(all_colors_in_fixed_palette);
-    CHECK(majority_faces == 3);
-    CHECK(minority_faces == 1);
+    const auto run = [&](double smooth_weight) {
+        settings.smooth_weight = smooth_weight;
+        TriMesh out_mesh;
+        std::vector<Color> out_colors;
+        REQUIRE(ClusterAndSmooth(cube, colors, out_mesh, out_colors, settings));
+        REQUIRE(out_colors.size() == cube.indices.size());
+        return out_colors;
+    };
+
+    const std::vector<Color> unsmoothed = run(0.0);
+    CHECK(count_faces(unsmoothed, black) == 2);
+    CHECK(count_faces(unsmoothed, white) == cube.indices.size() - 2);
+
+    const std::vector<Color> smoothed = run(1.0);
+    CHECK(count_faces(smoothed, black) == 1);
+    CHECK(count_faces(smoothed, white) == cube.indices.size() - 1);
 }
 
 TEST_CASE("Adaptive smoothing absorbs a one-face colour that the unsmoothed result keeps",
