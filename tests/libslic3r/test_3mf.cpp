@@ -2755,4 +2755,38 @@ TEST_CASE("Published probe distinguishes published archives from ordinary and mi
     }
 }
 
+TEST_CASE("BBS 3MF restores filament, nozzle, and optimal-assignment sequences", "[3MF][Bbs3mfExtended][Plates][Sequences]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_sequence_store");
+    source.set_backup_path(backup.string());
+    // Different sequences on each plate, so a loader that mixed up plates would show it.
+    PlateData plate0;
+    PlateData plate1;
+    make_plate(plate0, 0, {{0, 0}});
+    make_plate(plate1, 1, {{0, 1}});
+    plate0.filament_change_sequence = {1, 3, 0};
+    plate0.nozzle_change_sequence = {2, 1};
+    plate0.optimal_assignment = {1, 0, 2};
+    plate1.filament_change_sequence = {2};
+    plate1.nozzle_change_sequence = {0, 1, 0};
+    plate1.optimal_assignment = {2, 1};
+    PlateDataPtrs plates{&plate0, &plate1};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 2);
+    for (size_t i = 0; i < plates.size(); ++i) {
+        INFO("plate " << i);
+        CHECK(loaded.plates[i]->filament_change_sequence == plates[i]->filament_change_sequence);
+        CHECK(loaded.plates[i]->nozzle_change_sequence == plates[i]->nozzle_change_sequence);
+        CHECK(loaded.plates[i]->optimal_assignment == plates[i]->optimal_assignment);
+    }
+}
+
 } // namespace bbs_archive_contracts
