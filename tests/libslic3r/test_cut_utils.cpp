@@ -30,6 +30,12 @@ BoundingBoxf3 world_bounding_box(const ModelVolume *volume)
     return volume->mesh().transformed_bounding_box(volume->get_matrix());
 }
 
+// The bounds of a cut result volume in world space: cut objects carry their placement on the instance.
+BoundingBoxf3 placed_bounding_box(const ModelObject *part, const ModelVolume *volume)
+{
+    return volume->mesh().transformed_bounding_box(part->instances.front()->get_matrix() * volume->get_matrix());
+}
+
 // A box spanning [0, x] x [0, y] x [0, z].
 ModelObject *add_box(Model &model, double x, double y, double z)
 {
@@ -60,16 +66,18 @@ TEST_CASE("Cut plane splits a box into two closed halves at the plane", "[CutUti
         REQUIRE(volume->is_model_part());
         CHECK(its_num_open_edges(volume->mesh().its) == 0);
 
-        const BoundingBoxf3 box = world_bounding_box(volume);
+        const BoundingBoxf3 box = placed_bounding_box(part, volume);
         CHECK_THAT(box.size().x(), Catch::Matchers::WithinAbs(20., COORD_EPSILON));
         CHECK_THAT(box.size().y(), Catch::Matchers::WithinAbs(20., COORD_EPSILON));
         if (box.size().z() < 10.) {
             ++lower_count;
-            CHECK_THAT(box.size().z(), Catch::Matchers::WithinAbs(6., COORD_EPSILON));
+            CHECK_THAT(box.min.z(), Catch::Matchers::WithinAbs(0., COORD_EPSILON));
+            CHECK_THAT(box.max.z(), Catch::Matchers::WithinAbs(6., COORD_EPSILON));
             CHECK_THAT(mesh_volume(volume), Catch::Matchers::WithinRel(20. * 20. * 6., 1e-5));
         } else {
             ++upper_count;
-            CHECK_THAT(box.size().z(), Catch::Matchers::WithinAbs(14., COORD_EPSILON));
+            CHECK_THAT(box.min.z(), Catch::Matchers::WithinAbs(6., COORD_EPSILON));
+            CHECK_THAT(box.max.z(), Catch::Matchers::WithinAbs(20., COORD_EPSILON));
             CHECK_THAT(mesh_volume(volume), Catch::Matchers::WithinRel(20. * 20. * 14., 1e-5));
         }
     }
@@ -143,13 +151,26 @@ TEST_CASE("Cut plane copies modifiers to both halves and splits an unprocessed d
         CHECK_THAT(part_connector->cut_info.radius_tolerance, Catch::Matchers::WithinAbs(0.1, 1e-6));
         CHECK_THAT(part_connector->cut_info.height_tolerance, Catch::Matchers::WithinAbs(0.2, 1e-6));
 
-        const BoundingBoxf3 connector_box = world_bounding_box(part_connector);
-        // CutUtils offsets the two preview halves by 0.05 mm in opposite
-        // directions, so classify the connector halves by their centers.
-        if (connector_box.center().z() < 10.)
+        // Before the split the dowel gets its tolerances: 4 mm grows by the 0.1 radius tolerance to 4.4 mm
+        // across, its height by the 0.2 height tolerance to 4.8 mm about its centre (7.6..12.4), then it is
+        // raised by half the height tolerance (7.7..12.5). The halves are cut at z = 10 and moved 0.05 mm
+        // apart for the preview.
+        const BoundingBoxf3 connector_box = placed_bounding_box(part, part_connector);
+        CHECK_THAT(connector_box.size().x(), Catch::Matchers::WithinAbs(4.4, COORD_EPSILON));
+        CHECK_THAT(connector_box.size().y(), Catch::Matchers::WithinAbs(4.4, COORD_EPSILON));
+        if (connector_box.center().z() < 10.) {
             found_lower_connector = true;
-        if (connector_box.center().z() > 10.)
+            CHECK_THAT(connector_box.min.z(), Catch::Matchers::WithinAbs(7.7 + .05, COORD_EPSILON));
+            CHECK_THAT(connector_box.max.z(), Catch::Matchers::WithinAbs(10. + .05, COORD_EPSILON));
+            CHECK_THAT(mesh_volume(part_connector) * part_connector->get_scaling_factor().prod(),
+                       Catch::Matchers::WithinRel(4.4 * 4.4 * 2.3, 1e-4));
+        } else {
             found_upper_connector = true;
+            CHECK_THAT(connector_box.min.z(), Catch::Matchers::WithinAbs(10. - .05, COORD_EPSILON));
+            CHECK_THAT(connector_box.max.z(), Catch::Matchers::WithinAbs(12.5 - .05, COORD_EPSILON));
+            CHECK_THAT(mesh_volume(part_connector) * part_connector->get_scaling_factor().prod(),
+                       Catch::Matchers::WithinRel(4.4 * 4.4 * 2.5, 1e-4));
+        }
     }
 
     CHECK(found_lower_connector);
