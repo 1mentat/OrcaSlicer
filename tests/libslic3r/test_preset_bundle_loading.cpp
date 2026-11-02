@@ -7444,6 +7444,95 @@ TEST_CASE("save_changes_for_preset reverts unselected edits and embeds the saved
     CHECK(bundle.prints.find_preset("Save Parent") != nullptr);
 }
 
+TEST_CASE("Preset deletion refuses system, default and bundle presets unless forced", "[Preset][Bundle][PresetLifecycle][Delete]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    const fs::path bundle_file = scoped.directory.path() / PRESET_PRINT_NAME / "Bundle Process.json";
+    const DynamicPrintConfig bundle_config = print_config(bundle, 0.22);
+    write_print_preset(bundle_config, bundle_file, "Bundle Process");
+    Preset &from_bundle = bundle.prints.load_preset(bundle_file.string(), "Bundle Process", bundle_config, false);
+    from_bundle.bundle_id = "bundle-1";
+    REQUIRE(from_bundle.is_from_bundle());
+    Preset &system = bundle.prints.load_preset("", "System Process", print_config(bundle, 0.24), false);
+    system.is_system = true;
+    const std::string default_name = bundle.prints.default_preset().name;
+
+    CHECK_FALSE(bundle.prints.delete_preset("System Process"));
+    CHECK(bundle.prints.find_preset("System Process") != nullptr);
+    CHECK_FALSE(bundle.prints.delete_preset(default_name));
+    CHECK(bundle.prints.find_preset(default_name) != nullptr);
+    CHECK_FALSE(bundle.prints.delete_preset("Bundle Process"));
+    CHECK(bundle.prints.find_preset("Bundle Process") != nullptr);
+    CHECK(fs::exists(bundle_file));
+    CHECK_FALSE(bundle.prints.delete_preset("does-not-exist"));
+
+    // Forcing is what bundle cleanup uses: it removes both the entry and its file.
+    REQUIRE(bundle.prints.delete_preset("Bundle Process", true));
+    CHECK(bundle.prints.find_preset("Bundle Process") == nullptr);
+    CHECK_FALSE(fs::exists(bundle_file));
+    REQUIRE(bundle.prints.delete_preset("System Process", true));
+    CHECK(bundle.prints.find_preset("System Process") == nullptr);
+}
+
+TEST_CASE("Deleting a user preset removes its own files and leaves the others", "[Preset][Bundle][PresetLifecycle][Delete]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    const fs::path dir = scoped.directory.path() / PRESET_PRINT_NAME;
+    auto load_user = [&](const std::string &name, double layer_height) {
+        const fs::path file = dir / (name + ".json");
+        const DynamicPrintConfig config = print_config(bundle, layer_height);
+        write_print_preset(config, file, name);
+        Preset &preset = bundle.prints.load_preset(file.string(), name, config, false);
+        preset.save_info();
+        return file;
+    };
+    const fs::path doomed = load_user("Local Process", 0.22);
+    const fs::path kept = load_user("Kept Process", 0.26);
+    fs::path doomed_info = doomed, kept_info = kept;
+    doomed_info.replace_extension(".info");
+    kept_info.replace_extension(".info");
+    REQUIRE(fs::exists(doomed));
+    REQUIRE(fs::exists(doomed_info));
+
+    REQUIRE(bundle.prints.delete_preset("Local Process"));
+    CHECK(bundle.prints.find_preset("Local Process") == nullptr);
+    CHECK_FALSE(fs::exists(doomed));
+    CHECK_FALSE(fs::exists(doomed_info));
+    const Preset *other = bundle.prints.find_preset("Kept Process");
+    REQUIRE(other != nullptr);
+    CHECK_THAT(other->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.26, 1e-9));
+    CHECK(fs::exists(kept));
+    CHECK(fs::exists(kept_info));
+}
+
+TEST_CASE("Deleting a cloud-synced user preset keeps its info file marked for deletion", "[Preset][Bundle][PresetLifecycle][Delete]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    const fs::path file = scoped.directory.path() / PRESET_PRINT_NAME / "Cloud Process.json";
+    const DynamicPrintConfig config = print_config(bundle, 0.22);
+    write_print_preset(config, file, "Cloud Process");
+    Preset &preset = bundle.prints.load_preset(file.string(), "Cloud Process", config, false);
+    preset.setting_id = "cloud-setting-id";
+    preset.user_id = "cloud-user";
+    preset.save_info();
+    fs::path info = file;
+    info.replace_extension(".info");
+    REQUIRE(fs::exists(info));
+
+    REQUIRE(bundle.prints.delete_preset("Cloud Process"));
+    CHECK(bundle.prints.find_preset("Cloud Process") == nullptr);
+    CHECK_FALSE(fs::exists(file));
+    // The sync logic still needs the info file to tell the server about the deletion.
+    REQUIRE(fs::exists(info));
+    std::ifstream in(info.string());
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(content.find("sync_info = delete") != std::string::npos);
+    CHECK(content.find("setting_id = cloud-setting-id") != std::string::npos);
+}
+
 } // namespace preset_lifecycle_contracts
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
