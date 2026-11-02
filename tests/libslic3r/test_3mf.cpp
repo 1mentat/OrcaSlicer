@@ -3151,14 +3151,12 @@ void append_entry_with_extra(const std::string& archive_path, const std::string&
     REQUIRE(mz_zip_writer_finalize_archive(&zip));
 }
 
-// The decoder's `p + 4 + len < e` check also rejects a field that ends the extra data exactly, but
-// mz_zip_reader_get_extra appends a trailing NUL that hides this from every loader-level test, so it
-// has none.
 // Decoded names stay ASCII so the on-disk assertions do not depend on the platform's local path encoding.
+constexpr const char* unicode_aux_payload = "unicode-auxiliary-contract";
+
 // Appends the ASCII-named entry "Auxiliaries/docs/ascii.txt" whose extra data carries a Unicode
 // path field for `decoded_name`: optionally behind `prefix_extra_bytes` of unrelated extra data,
 // and optionally followed by an empty field.
-constexpr const char* unicode_aux_payload = "unicode-auxiliary-contract";
 void append_unicode_auxiliary(const std::string& archive_path, const std::string& decoded_name,
                               bool trailing_field = true, bool valid_crc = true, unsigned char version = 1,
                               size_t prefix_extra_bytes = 0)
@@ -3227,13 +3225,11 @@ TEST_CASE("BBS 3MF validates auxiliary paths after decoding Unicode metadata", "
     }
 }
 
-TEST_CASE("BBS 3MF decodes long Unicode path metadata", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra][!shouldfail]")
+TEST_CASE("BBS 3MF decodes long Unicode path metadata", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra]")
 {
-    // Known bug: the decoder reads the field length through signed char, so a length byte of 128 or more
-    // gives a wrong length; fixed by the follow-up fix PR.
     const bool trailing_field = GENERATE(false, true);
     CAPTURE(trailing_field);
-    // A 130 character leaf makes the low byte of the field length exceed 127.
+    // A 139 character leaf makes the field length 161, so its low byte exceeds 127.
     const std::string leaf = std::string(130, 'a') + "-long.txt";
     ScopedTemporaryFile archive(".3mf");
     store_unicode_fixture(archive.string());
@@ -3248,6 +3244,7 @@ TEST_CASE("BBS 3MF decodes long Unicode path metadata", "[3MF][Bbs3mfExtended][A
     CHECK(contents == unicode_aux_payload);
     CHECK_FALSE(boost::filesystem::exists(root / "docs" / "ascii.txt"));
 }
+
 TEST_CASE("BBS 3MF ignores Unicode metadata with an unsupported version", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra]")
 {
     ScopedTemporaryFile archive(".3mf");
@@ -3264,9 +3261,8 @@ TEST_CASE("BBS 3MF ignores Unicode metadata with an unsupported version", "[3MF]
     CHECK_FALSE(boost::filesystem::exists(root / "docs" / "untrusted.txt"));
 }
 
-TEST_CASE("BBS 3MF ignores Unicode metadata with an invalid checksum", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra][!shouldfail]")
+TEST_CASE("BBS 3MF ignores Unicode metadata with an invalid checksum", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra]")
 {
-    // Known bug: the decoder never compares the field checksum with the stored name; fixed by the follow-up fix PR.
     ScopedTemporaryFile archive(".3mf");
     store_unicode_fixture(archive.string());
     append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/untrusted.txt", true, false);
@@ -3281,11 +3277,9 @@ TEST_CASE("BBS 3MF ignores Unicode metadata with an invalid checksum", "[3MF][Bb
     CHECK_FALSE(boost::filesystem::exists(root / "docs" / "untrusted.txt"));
 }
 
-TEST_CASE("BBS 3MF reads Unicode metadata located beyond 1024 bytes of extra data", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra][!shouldfail]")
+TEST_CASE("BBS 3MF reads Unicode metadata located beyond 1024 bytes of extra data", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra]")
 {
-    // Known bug: only the first 1024 bytes of the extra data are read; fixed by the follow-up fix PR.
-    // The 1100 byte filler field keeps its length byte below 128 and places the Unicode field past offset 1023,
-    // so the 1024 byte limit is the only reason this fails.
+    // The 1100 byte filler field keeps its length byte below 128 and places the Unicode field past offset 1023.
     const bool trailing_field = GENERATE(false, true);
     CAPTURE(trailing_field);
     ScopedTemporaryFile archive(".3mf");
