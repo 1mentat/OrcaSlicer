@@ -2776,3 +2776,51 @@ TEST_CASE("Spiral mode validation reports each incompatible process setting only
         }
     }
 }
+
+TEST_CASE("normalize_fdm backfills unset filament roles from the legacy extruder and from related roles", "[Config][NormalizeFdm]")
+{
+    // normalize_fdm(0) and normalize_fdm_1() share the role logic; with 0 used filaments
+    // normalize_fdm skips the prime tower step.
+    const bool split_step = GENERATE(false, true);
+    CAPTURE(split_step);
+
+    constexpr int no_legacy_extruder = -1;
+    // Role order: sparse infill, internal solid, top surface, bottom surface, outer wall, inner wall.
+    struct Row {
+        const char *name;
+        int         legacy_extruder;
+        int         roles[6];
+        int         expected[6];
+    };
+    const Row rows[] = {
+        {"legacy extruder fills every unset role but keeps an explicit one", 2, {0, 0, 0, 0, 3, 0}, {2, 2, 2, 2, 3, 2}},
+        {"legacy extruder never overrides explicit roles",                   9, {2, 3, 4, 5, 6, 7}, {2, 3, 4, 5, 6, 7}},
+        {"sparse infill role fills the unset solid roles",                   no_legacy_extruder, {4, 0, 0, 0, 0, 0}, {4, 4, 4, 4, 0, 0}},
+        {"explicit solid role is not replaced by the sparse infill role",    no_legacy_extruder, {4, 3, 0, 0, 0, 0}, {4, 3, 3, 3, 0, 0}},
+        {"solid role fills the unset top and bottom roles",                  no_legacy_extruder, {0, 7, 0, 0, 0, 0}, {0, 7, 7, 7, 0, 0}},
+        {"explicit roles are left alone without a legacy extruder",          no_legacy_extruder, {2, 3, 4, 5, 6, 7}, {2, 3, 4, 5, 6, 7}},
+    };
+    const char *const role_keys[6] = {"sparse_infill_filament_id", "internal_solid_filament_id", "top_surface_filament_id",
+                                      "bottom_surface_filament_id", "outer_wall_filament_id", "inner_wall_filament_id"};
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.name) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            if (row.legacy_extruder != no_legacy_extruder)
+                config.option<ConfigOptionInt>("extruder", true)->value = row.legacy_extruder;
+            for (size_t i = 0; i < 6; ++i)
+                config.set(role_keys[i], row.roles[i]);
+
+            if (split_step)
+                config.normalize_fdm_1();
+            else
+                config.normalize_fdm(0);
+
+            CHECK_FALSE(config.has("extruder"));
+            for (size_t i = 0; i < 6; ++i) {
+                INFO(role_keys[i]);
+                CHECK(config.opt_int(role_keys[i]) == row.expected[i]);
+            }
+        }
+    }
+}
