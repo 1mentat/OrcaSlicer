@@ -2,8 +2,12 @@
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
+#include <utility>
+#include <vector>
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/CutUtils.hpp"
@@ -69,13 +73,18 @@ Cut::Groove perpendicular_groove()
 struct GrooveHalves {
     double upper = 0.;
     double lower = 0.;
+    // The part of the upper half below the cut plane is only the tongues: their spans across the groove
+    // direction, their common extent along it, and their lowest point.
+    std::vector<std::pair<double, double>> tongues;
+    std::pair<double, double> length{0., 0.};
+    double tongue_min_z = 0.;
 };
 
 // The volumes of the halves of a box [0, x] x [0, y] x [0, 20] cut at z = 10 by `count` perpendicular
 // grooves whose tongues run along Y (or along X when `along_x`). The lower half keeps everything below the
 // groove layer plus the layer outside the tongues; the upper half keeps everything above plus the
 // tongues, trimmed by the depth tolerance at the tip and half the width tolerance on each side.
-GrooveHalves expected_halves(double x, double y, const Cut::Groove &g, bool along_x = false, int count = 1)
+GrooveHalves expected_halves(double x, double y, const Cut::Groove &g, bool along_x = false, int count = 1, double gap = 0.)
 {
     const double length = along_x ? x : y;
     const double across = along_x ? y : x;
@@ -83,7 +92,42 @@ GrooveHalves expected_halves(double x, double y, const Cut::Groove &g, bool alon
     GrooveHalves halves;
     halves.upper = outside_layer + count * (g.width - g.width_tolerance) * (g.depth - g.depth_tolerance) * length;
     halves.lower = outside_layer + (across - count * g.width) * g.depth * length;
+    // Tongues of width (w - wt), spaced (gap + w) apart around the box centre, with their tip trimmed by dt.
+    for (int i = 0; i < count; ++i) {
+        const double centre = across / 2. + (i - .5 * (count - 1)) * (gap + g.width);
+        halves.tongues.emplace_back(centre - .5 * (g.width - g.width_tolerance), centre + .5 * (g.width - g.width_tolerance));
+    }
+    halves.length = {0., length};
+    halves.tongue_min_z = 10. - g.depth / 2. + g.depth_tolerance;
     return halves;
+}
+
+// Measures the tongues: the upper half's vertices below the cut plane, grouped across the groove direction
+// wherever consecutive coordinates are more than 3 mm apart (the tests space tongues further apart than
+// that and keep each narrower).
+void measure_tongues(const ModelObject &upper, bool along_x, GrooveHalves &halves)
+{
+    const ModelVolume &volume = *upper.volumes.front();
+    const Transform3d to_world = upper.instances.front()->get_matrix() * volume.get_matrix();
+    std::vector<double> across;
+    halves.length = {std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest()};
+    halves.tongue_min_z = std::numeric_limits<double>::max();
+    for (const Vec3f &v : volume.mesh().its.vertices) {
+        const Vec3d p = to_world * v.cast<double>();
+        if (p.z() >= 10.)
+            continue;
+        across.push_back(along_x ? p.y() : p.x());
+        const double along = along_x ? p.x() : p.y();
+        halves.length.first = std::min(halves.length.first, along);
+        halves.length.second = std::max(halves.length.second, along);
+        halves.tongue_min_z = std::min(halves.tongue_min_z, p.z());
+    }
+    std::sort(across.begin(), across.end());
+    for (size_t i = 0; i < across.size(); ++i) {
+        if (i == 0 || across[i] - across[i - 1] > 3.)
+            halves.tongues.emplace_back(across[i], across[i]);
+        halves.tongues.back().second = across[i];
+    }
 }
 
 // Cuts the box [0, x] x [0, y] x [0, 20] at its centre with the grooves turned `angle` about Z and returns
@@ -115,12 +159,29 @@ GrooveHalves cut_box_with_groove(double x, double y, const Cut::Groove &groove, 
         const bool is_upper = part->instance_bounding_box(0).min.z() > COORD_EPSILON;
         uppers += is_upper;
         (is_upper ? halves.upper : halves.lower) = mesh_volume(volume);
+        if (is_upper)
+            measure_tongues(*part, std::abs(std::sin(angle)) > .5, halves);
     }
     CHECK(uppers == 1);
     return halves;
 }
 
 void check_halves(const GrooveHalves &actual, const GrooveHalves &expected)
+{
+    CHECK_THAT(actual.upper, WithinRel(expected.upper, 1e-5));
+    CHECK_THAT(actual.lower, WithinRel(expected.lower, 1e-5));
+    REQUIRE(actual.tongues.size() == expected.tongues.size());
+    for (size_t i = 0; i < expected.tongues.size(); ++i) {
+        CHECK_THAT(actual.tongues[i].first, WithinAbs(expected.tongues[i].first, 1e-4));
+        CHECK_THAT(actual.tongues[i].second, WithinAbs(expected.tongues[i].second, 1e-4));
+    }
+    CHECK_THAT(actual.length.first, WithinAbs(expected.length.first, 1e-4));
+    CHECK_THAT(actual.length.second, WithinAbs(expected.length.second, 1e-4));
+    CHECK_THAT(actual.tongue_min_z, WithinAbs(expected.tongue_min_z, 1e-4));
+}
+
+// Keep-as-parts returns no separate upper object to measure the tongues of, so only volumes are compared.
+void check_volumes(const GrooveHalves &actual, const GrooveHalves &expected)
 {
     CHECK_THAT(actual.upper, WithinRel(expected.upper, 1e-5));
     CHECK_THAT(actual.lower, WithinRel(expected.lower, 1e-5));
@@ -187,15 +248,15 @@ TEST_CASE("A groove turned a quarter about the cut normal runs its tongue along 
 
 TEST_CASE("Multiple grooves cut a separate tongue for every requested slot", "[CutUtils][CutUtilsGroove]")
 {
-    // Two 2 mm grooves 2 mm apart in a 40 mm box: tongues at x = 17..19 and 21..23.
+    // Two 2 mm grooves 4 mm apart in a 40 mm box: tongues at x = 16.05..17.95 and 22.05..23.95.
     const Cut::Groove groove = perpendicular_groove();
-    check_halves(cut_box_with_groove(40., 20., groove, 0., 2, 2.f), expected_halves(40., 20., groove, false, 2));
+    check_halves(cut_box_with_groove(40., 20., groove, 0., 2, 4.f), expected_halves(40., 20., groove, false, 2, 4.));
 }
 
 TEST_CASE("Keep-as-parts returns both groove halves as parts of one object", "[CutUtils][CutUtilsGroove]")
 {
     const Cut::Groove groove = perpendicular_groove();
-    check_halves(cut_box_with_groove(30., 20., groove, 0., 1, 0.f, true), expected_halves(30., 20., groove));
+    check_volumes(cut_box_with_groove(30., 20., groove, 0., 1, 0.f, true), expected_halves(30., 20., groove));
 }
 
 } // namespace groove_contracts
