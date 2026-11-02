@@ -517,10 +517,7 @@ TEST_CASE("Surface cuts preserve multiple projected holes inside the face", "[Cu
     CHECK_THAT(projected_area(cut), WithinAbs(64. - 2. * 4., 1e-4));
 }
 
-// Known bug: when the projected shape's outline coincides with the edge of the cut face, cut_surface classifies
-// faces through an invalid face descriptor (out-of-range write; asserts in debug), so it crashes or corrupts the
-// result; fixed by the follow-up fix PR.
-TEST_CASE("Surface cuts preserve multiple holes when the shape outline matches the face edge", "[CutSurface][.]")
+TEST_CASE("Surface cuts preserve multiple holes when the shape outline matches the face edge", "[CutSurface]")
 {
     ExPolygon shape(rectangle(0, 0, 10, 10));
     shape.holes.emplace_back(rectangle(2, 2, 4, 4));
@@ -683,11 +680,7 @@ TEST_CASE("Surface cuts retain the exterior patches of intersecting solids", "[C
     check_mesh_indices(embossed);
 }
 
-// Known bug: cut_surface segfaults when an edge of a solid lies exactly on the shape outline (here the roof's
-// bottom edges at x = 1 and 9 under the 1..9 shape); the same roof spanning x = 0..10 cuts fine. The cause is
-// not narrowed down beyond that; fixed by the follow-up fix PR. Run it with:
-//   libslic3r_tests "Surface cuts survive a solid edge lying on the shape outline"
-TEST_CASE("Surface cuts survive a solid edge lying on the shape outline", "[CutSurface][.]")
+TEST_CASE("Surface cuts survive a solid edge lying on the shape outline", "[CutSurface]")
 {
     const std::vector<indexed_triangle_set> models{its_make_cube(10., 10., 10.), overlapping_roof(12.f, 4.f)};
     const SurfaceCut cut = cut_surface({ExPolygon(rectangle(1, 1, 9, 9))}, models, cube_projection(30.f), 1.f);
