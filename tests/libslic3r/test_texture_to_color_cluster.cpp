@@ -33,6 +33,23 @@ Vec3d as_vec3d(const TriVertex &vertex)
     return Vec3d(vertex[0], vertex[1], vertex[2]);
 }
 
+// True when the mesh has a vertex at the given point.
+bool has_vertex_at(const TriMesh &mesh, const TriVertex &point)
+{
+    return std::any_of(mesh.vertices.begin(), mesh.vertices.end(),
+                       [&point](const TriVertex &v) { return (v - point).norm() <= 1e-6f; });
+}
+
+// one_triangle() with a different colour at vertex 0 than at vertices 1 and 2: only the two edges at
+// vertex 0 cross the colour boundary, so only they get midpoints and the 1-2 edge stays whole.
+void check_split_only_at_vertex_zero_edges(const TriMesh &out_mesh)
+{
+    CHECK(out_mesh.vertices.size() == 5);
+    CHECK(has_vertex_at(out_mesh, TriVertex(0.5f, 0.f, 0.f)));
+    CHECK(has_vertex_at(out_mesh, TriVertex(0.f, 0.5f, 0.f)));
+    CHECK_FALSE(has_vertex_at(out_mesh, TriVertex(0.5f, 0.5f, 0.f)));
+}
+
 } // namespace
 
 TEST_CASE("Vertex color clustering splits a face only at palette boundaries", "[TextureToColor]")
@@ -70,6 +87,7 @@ TEST_CASE("Vertex color clustering splits a face only at palette boundaries", "[
     // (v0, m01, m20), blue the other two faces.
     CHECK(red_count == 1);
     CHECK(blue_count == 2);
+    check_split_only_at_vertex_zero_edges(out_mesh);
 }
 
 TEST_CASE("Vertex color splitting preserves a three-way boundary triangulation",
@@ -343,6 +361,7 @@ TEST_CASE("Adaptive vertex-color clustering splits only the distinct color bound
     CHECK_THAT(area, WithinAbs(0.5, 1e-6));
 
     if (max_cluster_k == 2) {
+        check_split_only_at_vertex_zero_edges(out_mesh);
         std::size_t red_faces = 0;
         std::size_t green_faces = 0;
         bool all_colors_in_expected_palette = true;
@@ -398,7 +417,10 @@ std::size_t count_faces(const std::vector<Color> &colors, const Color &expected)
 // ensure_all_cluster_centers_used() then puts black back on one face so every palette colour stays in use.
 TEST_CASE("Fixed-palette smoothing changes labels but keeps every palette colour in use", "[TextureToColor]")
 {
-    const auto [cube, colors] = cube_with_two_isolated_black_faces();
+    // Plain references (not structured bindings) so the lambda below can capture them in C++17.
+    const auto fixture = cube_with_two_isolated_black_faces();
+    const TriMesh &cube = fixture.first;
+    const std::vector<Color> &colors = fixture.second;
     const Color black{{0, 0, 0}};
     const Color white{{255, 255, 255}};
     TextureToColorSettings settings = bounded_settings();
