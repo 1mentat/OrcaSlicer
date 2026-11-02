@@ -135,7 +135,7 @@ TEST_CASE("its_mask keeps a fully selected mesh intact", "[CutSurface]")
     CHECK_THAT(its_volume(selected), WithinAbs(its_volume(input), 1e-4));
 }
 
-TEST_CASE("its_mask compacts disjoint selected faces without retaining unreferenced vertices", "[CutSurface]")
+TEST_CASE("its_mask keeps only the vertices of a sparse face selection", "[CutSurface]")
 {
     const indexed_triangle_set input = its_make_cube(10., 20., 30.);
     std::vector<bool> mask(input.indices.size(), false);
@@ -145,6 +145,19 @@ TEST_CASE("its_mask compacts disjoint selected faces without retaining unreferen
     const indexed_triangle_set selected = its_mask(input, mask);
     CHECK(face_corners(selected) == face_corners(input, mask));
     CHECK(selected.vertices.size() == referenced_vertex_count(input, mask));
+}
+
+TEST_CASE("its_mask compacts disjoint selected faces without retaining unreferenced vertices", "[CutSurface]")
+{
+    // Faces 0 (corners 0, 1, 2 on the bottom) and 2 (corners 4, 5, 6 on the top) share no vertex.
+    const indexed_triangle_set input = its_make_cube(10., 20., 30.);
+    std::vector<bool> mask(input.indices.size(), false);
+    mask[0] = true;
+    mask[2] = true;
+
+    const indexed_triangle_set selected = its_mask(input, mask);
+    CHECK(face_corners(selected) == face_corners(input, mask));
+    CHECK(selected.vertices.size() == 6);
 }
 
 TEST_CASE("its_cut_AoI keeps triangles that intersect the projected bounds", "[CutSurface]")
@@ -178,6 +191,17 @@ TEST_CASE("its_cut_AoI keeps a triangle crossing one side of the projected bound
     const indexed_triangle_set input = {
         {{0, 1, 2}},
         {stl_vertex(-2.f, 1.f, 0.f), stl_vertex(2.f, 1.f, 0.f), stl_vertex(0.f, 4.f, 0.f)}};
+    const indexed_triangle_set selected = its_cut_AoI(input, BoundingBox(Point(0, 0), Point(3, 3)), Emboss::ProjectZ(5.));
+    CHECK(face_corners(selected) == face_corners(input));
+}
+
+TEST_CASE("its_cut_AoI keeps a triangle whose edge crosses the bounds with every vertex outside", "[CutSurface]")
+{
+    // Left of, right of and below the 3 x 3 box: no single side holds all three, and the edge at y = 1
+    // passes through the box.
+    const indexed_triangle_set input = {
+        {{0, 1, 2}},
+        {stl_vertex(-2.f, 1.f, 0.f), stl_vertex(5.f, 1.f, 0.f), stl_vertex(1.5f, -3.f, 0.f)}};
     const indexed_triangle_set selected = its_cut_AoI(input, BoundingBox(Point(0, 0), Point(3, 3)), Emboss::ProjectZ(5.));
     CHECK(face_corners(selected) == face_corners(input));
 }
