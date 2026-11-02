@@ -587,8 +587,10 @@ TEST_CASE("Surface cuts fill the gap between two outer cubes from an unselected 
 TEST_CASE("Surface cuts choose the closest of two stacked middle cubes to the projection ratio", "[CutSurface]")
 {
     const ExPolygon shape(scaled_rectangle(1., 1., 29., 9.));
-    // Two candidates cover the middle gap, with tops at z = 30 and z = 50. Ratio 0 targets the front of the
-    // projection, so the lower one wins; ratio 1 targets the back, so the higher one wins.
+    // Two candidates cover the middle gap, with tops at z = 30 and z = 50. Two different steps pick them:
+    // at ratio 1 the first shape corner already sees the middle candidates and picks the one nearest the back of the projection
+    // (z = 50) straight away; at ratio 0 it picks an outer patch, and the gap-fill step then takes the middle
+    // candidate whose depth is closest to the patches already used (z = 30).
     const std::vector<indexed_triangle_set> models{
         its_make_cube(10., 10., 10.), shifted(its_make_cube(10., 10., 10.), Vec3f(20.f, 0.f, 0.f)),
         shifted(its_make_cube(10., 10., 10.), Vec3f(10.f, 0.f, 20.f)),
