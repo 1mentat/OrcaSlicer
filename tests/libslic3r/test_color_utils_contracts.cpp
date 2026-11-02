@@ -1019,8 +1019,9 @@ TEST_CASE("Remeshing rejects a label count that does not match the faces before 
 
 namespace {
 
-// Labels 7 for faces whose centroid lies above `height`, 3 otherwise. The label border is a loop of
-// constrained edges around the cube, so the remesher cannot cut the cube's corners.
+// Labels 7 for faces whose centroid lies above `height`, 3 otherwise. Edges between the two labels
+// (the side-face diagonals and the horizontal edges at the split) become constrained; the cube's
+// sharp top and bottom edges stay unconstrained, so the remesher may only approximate them.
 std::vector<std::size_t> labels_split_at_height(const TriMesh &mesh, float height)
 {
     std::vector<std::size_t> labels(mesh.indices.size(), 3);
@@ -1044,16 +1045,20 @@ double mean_edge_length(const TriMesh &mesh)
 
 } // namespace
 
-TEST_CASE("Remeshing a closed two-label cube preserves volume, closure, and both labels", "[ColorUtils]")
+// Isotropic remeshing only approximates the input surface, so the unconstrained sharp edges may be
+// rounded. A 10% volume tolerance allows that, while a cube with no constrained edges loses 50% or
+// more of its volume at these ratios.
+TEST_CASE("Remeshing a closed two-label cube approximately keeps its volume, closure, and both labels", "[ColorUtils]")
 {
+    const double ratio    = GENERATE(0.6, 1.4);
     constexpr double side = 8.;
     TriMesh mesh          = cube_mesh(side);
     std::vector<std::size_t> labels = labels_split_at_height(mesh, 4.f);
-    REQUIRE(remesh_mesh(mesh, labels, 0.6));
+    REQUIRE(remesh_mesh(mesh, labels, ratio));
     REQUIRE(mesh.indices.size() > 0);
     CHECK(labels.size() == mesh.indices.size());
     CHECK(is_closed(mesh));
-    CHECK_THAT(std::abs(signed_volume(mesh)), Catch::Matchers::WithinRel(side * side * side, 1e-4));
+    CHECK_THAT(std::abs(signed_volume(mesh)), Catch::Matchers::WithinRel(side * side * side, 0.1));
     const auto low  = std::count(labels.begin(), labels.end(), std::size_t(3));
     const auto high = std::count(labels.begin(), labels.end(), std::size_t(7));
     CHECK(low > 0);
