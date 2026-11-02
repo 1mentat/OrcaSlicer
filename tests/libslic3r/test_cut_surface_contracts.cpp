@@ -1,5 +1,6 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -597,6 +598,127 @@ TEST_CASE("Surface cuts choose the closest of two stacked middle cubes to the pr
         shifted(its_make_cube(10., 10., 10.), Vec3f(10.f, 0.f, 40.f))};
     check_three_cube_cut(cut_surface({shape}, models, scaled_cube_projection(100.f), 0.f), 30.);
     check_three_cube_cut(cut_surface({shape}, models, scaled_cube_projection(100.f), 1.f), 50.);
+}
+
+// A closed triangular prism with its ridge at x = 5, spanning x = 5 +- `half_width`, and y from -1 to 11. Its roof
+// crosses the cube's z = 10 face twice, so cutting leaves two flat patches around a raised one.
+indexed_triangle_set overlapping_roof(float peak, float half_width)
+{
+    indexed_triangle_set mesh;
+    mesh.vertices = {
+        Vec3f(5.f - half_width, -1.f, 8.f), Vec3f(5.f + half_width, -1.f, 8.f), Vec3f(5.f, -1.f, peak),
+        Vec3f(5.f - half_width, 11.f, 8.f), Vec3f(5.f + half_width, 11.f, 8.f), Vec3f(5.f, 11.f, peak)
+    };
+    mesh.indices = {
+        stl_triangle_vertex_indices(0, 1, 2), stl_triangle_vertex_indices(3, 5, 4),
+        stl_triangle_vertex_indices(0, 3, 4), stl_triangle_vertex_indices(0, 4, 1),
+        stl_triangle_vertex_indices(1, 4, 5), stl_triangle_vertex_indices(1, 5, 2),
+        stl_triangle_vertex_indices(0, 2, 5), stl_triangle_vertex_indices(0, 5, 3)
+    };
+    return mesh;
+}
+
+TEST_CASE("Surface cuts retain the exterior patches of intersecting solids", "[CutSurface]")
+{
+    const float peak = GENERATE(12.f, 16.f);
+    const bool reverse_models = GENERATE(false, true);
+    CAPTURE(peak, reverse_models);
+    std::vector<indexed_triangle_set> models{its_make_cube(10., 10., 10.), overlapping_roof(peak, 5.f)};
+    if (reverse_models)
+        std::reverse(models.begin(), models.end());
+
+    const ExPolygon shape(rectangle(1, 1, 9, 9));
+    // Use the back projection: the roof is the farther exposed surface, while ratio .5 would target the z = 5
+    // midpoint and prefer the cube top at z = 10.
+    const SurfaceCut cut = cut_surface({shape}, models, cube_projection(30.f), 1.f);
+    REQUIRE_FALSE(cut.vertices.empty());
+    REQUIRE_FALSE(cut.indices.empty());
+    check_mesh_indices(cut);
+    CHECK(contour_count(cut) >= 3);
+
+    // Independently intersect the two sloping roof planes with z = 10. The projected shape has area 64; the
+    // raised roof and the two flat sides partition it.
+    const double rise = double(peak) - 8.;
+    const double left = 10. / rise;
+    const double right = 10. - 10. / rise;
+    const double raised_area_expected = (right - left) * 8.;
+    double flat_area = 0.;
+    double raised_area = 0.;
+    float max_z = cut.vertices.front().z();
+    for (const Vec3f &vertex : cut.vertices) {
+        CHECK(vertex.x() >= 1.f - 1e-4f);
+        CHECK(vertex.x() <= 9.f + 1e-4f);
+        CHECK(vertex.y() >= 1.f - 1e-4f);
+        CHECK(vertex.y() <= 9.f + 1e-4f);
+        const double roof_z = 8. + rise * (5. - std::abs(double(vertex.x()) - 5.)) / 5.;
+        CHECK_THAT(double(vertex.z()), WithinAbs(std::max(10., roof_z), 1e-4));
+        max_z = std::max(max_z, vertex.z());
+    }
+    CHECK_THAT(double(max_z), WithinAbs(double(peak), 1e-4));
+    for (const auto &face : cut.indices) {
+        const Vec3f &a = cut.vertices[face[0]];
+        const Vec3f &b = cut.vertices[face[1]];
+        const Vec3f &c = cut.vertices[face[2]];
+        const double area = std::abs(double(b.x() - a.x()) * (c.y() - a.y()) -
+                                     double(b.y() - a.y()) * (c.x() - a.x())) / 2.;
+        const double center_x = (double(a.x()) + b.x() + c.x()) / 3.;
+        const bool flat = std::abs(a.z() - 10.f) < 1e-4f && std::abs(b.z() - 10.f) < 1e-4f &&
+                          std::abs(c.z() - 10.f) < 1e-4f;
+        if (flat) {
+            flat_area += area;
+            CHECK_FALSE((center_x > left + 1e-4 && center_x < right - 1e-4));
+        } else {
+            raised_area += area;
+            CHECK(center_x >= left - 1e-4);
+            CHECK(center_x <= right + 1e-4);
+        }
+    }
+    CHECK_THAT(flat_area, WithinAbs(64. - raised_area_expected, 1e-4));
+    CHECK_THAT(raised_area, WithinAbs(raised_area_expected, 1e-4));
+    CHECK_THAT(projected_area(cut), WithinAbs(64., 1e-4));
+
+    // cut2model turns the contours into side walls; duplicate output points must not create zero-area faces there.
+    const indexed_triangle_set embossed = cut2model(cut, Emboss::OrthoProject3d(Vec3d(0., 0., 30.)));
+    REQUIRE_FALSE(embossed.indices.empty());
+    check_mesh_indices(embossed);
+}
+
+// Known bug: cut_surface segfaults when an edge of a solid lies exactly on the shape outline (here the roof's
+// bottom edges at x = 1 and 9 under the 1..9 shape); the same roof spanning x = 0..10 cuts fine. The cause is
+// not narrowed down beyond that; fixed by the follow-up fix PR. Run it with:
+//   libslic3r_tests "Surface cuts survive a solid edge lying on the shape outline"
+TEST_CASE("Surface cuts survive a solid edge lying on the shape outline", "[CutSurface][.]")
+{
+    const std::vector<indexed_triangle_set> models{its_make_cube(10., 10., 10.), overlapping_roof(12.f, 4.f)};
+    const SurfaceCut cut = cut_surface({ExPolygon(rectangle(1, 1, 9, 9))}, models, cube_projection(30.f), 1.f);
+    REQUIRE_FALSE(cut.indices.empty());
+    check_mesh_indices(cut);
+    CHECK_THAT(projected_area(cut), WithinAbs(64., 1e-4));
+}
+
+TEST_CASE("Surface cuts keep positive faces whose squared area is below 1e-10", "[CutSurface]")
+{
+    // A 1e-3 mm square has a positive float cross product near 1e-6, whose squared norm (about 1e-12) is below a
+    // 1e-10 cutoff but far from subnormal arithmetic.
+    const coord_t width_scaled = GENERATE(coord_t(1000), coord_t(2000));
+    const double width = double(width_scaled) * SCALING_FACTOR;
+    const Point corner = Point::new_scale(2., 2.);
+    const ExPolygon shape(rectangle(corner.x(), corner.y(), corner.x() + width_scaled, corner.y() + width_scaled));
+    CAPTURE(width);
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(10., 10., 10.)}, scaled_cube_projection(30.f), .5f);
+    REQUIRE_FALSE(cut.indices.empty());
+    check_mesh_indices(cut);
+
+    bool has_positive_sub_epsilon_face = false;
+    for (const stl_triangle_vertex_indices &face : cut.indices) {
+        const Vec3d edge_a = cut.vertices[face[1]].cast<double>() - cut.vertices[face[0]].cast<double>();
+        const Vec3d edge_b = cut.vertices[face[2]].cast<double>() - cut.vertices[face[0]].cast<double>();
+        const double squared_area = edge_a.cross(edge_b).squaredNorm();
+        has_positive_sub_epsilon_face = has_positive_sub_epsilon_face || (squared_area > 0. && squared_area < 1e-10);
+    }
+    CHECK(has_positive_sub_epsilon_face);
+    // Float output near 2 mm rounds each coordinate by less than 2.5e-7 mm.
+    CHECK_THAT(projected_area(cut), WithinAbs(width * width, width * 1e-6));
 }
 
 } // namespace cut_surface_topology_contracts
