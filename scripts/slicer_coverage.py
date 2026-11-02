@@ -1082,11 +1082,20 @@ def _parser() -> argparse.ArgumentParser:
                      help="new directory for GCC runtime profiles (default: OUT/gcov-data); relative to root")
     run.add_argument("--gcov-jobs", type=int, default=1,
                      help="maximum concurrent gcov processes for --backend gcov (default: 1)")
+    run.add_argument("--gcov-catch-batch", action="store_true",
+                     help="opt in to serial Catch batches for GCC/gcov; CTest remains selection source")
+    run.add_argument("--gcov-catch-batch-timeout", type=float,
+                     help="whole Catch batch timeout in seconds (defaults to --timeout)")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.gcov_catch_batch and args.backend != "gcov":
+        parser.error("--gcov-catch-batch requires --backend gcov")
+    if args.gcov_catch_batch_timeout is not None and not args.gcov_catch_batch:
+        parser.error("--gcov-catch-batch-timeout requires --gcov-catch-batch")
     try:
         if args.action == "run" and args.backend == "gcov":
             from slicer_gcov_coverage import run_gcov_coverage

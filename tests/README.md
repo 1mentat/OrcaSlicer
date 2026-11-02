@@ -2067,6 +2067,16 @@ resolve to their canonical paths. The epoch path must not already exist,
 including as a symlink, to keep prior profiles intact. The run records its actual prefix and retains
 the counter files there, so preserve that directory with the report evidence.
 
+For an explicit opt-in alternative to launching CTest once per case, add
+`--gcov-catch-batch` to a gcov run. CTest's live `--show-only=json-v1`
+discovery remains the exact selection source, and the adapter checks the
+selected Catch identities before executing them. Batches run serially; on
+Linux, registrations with `PROCESSOR_AFFINITY` receive a verified CPU mask
+matching their CTest `PROCESSORS` count, and the caller must provide enough
+available CPUs. `--gcov-catch-batch-timeout` (or `--timeout` when no override
+is given) limits each whole batch process, not individual test cases. The
+default runner continues to execute the selected suite through CTest.
+
 ## Nullable motion variants and boundaries
 
 The `[NullableMotionBatch]` contract loads real parent/child process presets, maps

@@ -466,8 +466,47 @@ def _junit_summary(path: Path) -> tuple[Counter[str], list[dict[str, str]]]:
     return names, problems
 
 
+def _junit_credit_assessment(
+        path: Path, selected_names: list[str]
+) -> tuple[Counter[str], list[dict[str, str]], dict[str, Any]]:
+    names, problems = _junit_summary(path)
+    mismatch = compare_test_identities(selected_names, names)
+    assessment = {
+        "test_count": sum(names.values()), "name_mismatch": mismatch,
+        "problems": problems,
+        "eligible_for_coverage": names == Counter(selected_names) and not problems,
+    }
+    return names, problems, assessment
+
+
 def _sha_artifact(common: Any, path: Path) -> dict[str, Any]:
     return common._artifact_provenance(path)
+
+
+def _copy_catch_junit(source: Path, destination: Path, receipt_path: Path) -> dict[str, Any]:
+    """Copy adapter JUnit to the shared gcov gate path without replacement."""
+    if destination.exists() or destination.is_symlink() or receipt_path.exists() or receipt_path.is_symlink():
+        raise ValueError("refusing to replace catch batch JUnit or its copy receipt")
+    source_hash = _hash_file(source)
+    with source.open("rb") as reader, destination.open("xb") as writer:
+        shutil.copyfileobj(reader, writer)
+        writer.flush()
+        os.fsync(writer.fileno())
+    destination_hash = _hash_file(destination)
+    if destination_hash != source_hash:
+        raise ValueError("copied Catch batch JUnit hash does not match source")
+    receipt = {
+        "schema": "slicer-catch-batch-junit-copy-v1",
+        "source": str(source.resolve()), "source_sha256": source_hash,
+        "destination": str(destination.resolve()), "destination_sha256": destination_hash,
+        "byte_identical": True,
+    }
+    with receipt_path.open("x", encoding="utf-8") as stream:
+        json.dump(receipt, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return receipt
 
 
 def _run_gcov_coverage(args: Any, *, common: Any) -> int:
@@ -640,18 +679,40 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         command.append("--no-tests=error")
     if any(arg == "--show-only" or arg.startswith("--output-junit") for arg in command):
         _fail(common, "test command must not preselect CTest listing or JUnit output options")
-    preview = common._run([*command, "--show-only=json-v1"], cwd=root, timeout=args.timeout)
-    if preview.returncode != 0:
-        _fail(common, f"CTest discovery failed: {preview.stderr}")
-    try:
-        discovery = json.loads(preview.stdout)
-        selected_names = [test["name"] for test in discovery["tests"]]
-    except (KeyError, TypeError, json.JSONDecodeError) as exc:
-        _fail(common, f"CTest discovery JSON is invalid: {exc}")
+    requested_ctest_argv = list(command)
+    catch_batch_enabled = bool(getattr(args, "gcov_catch_batch", False))
+    catch_discovery_receipt: dict[str, Any] | None = None
+    catch_discovery_raw: bytes | None = None
+    if catch_batch_enabled:
+        from slicer_catch_batch import ctest_selection_argv, discover_ctest
+        try:
+            command = ctest_selection_argv(command)
+            command, discovery, catch_discovery_receipt = discover_ctest(
+                command, build_dir=build_dir, cwd=root,
+                out_dir=out / "catch-batch-discovery",
+                discovery_timeout_seconds=args.timeout)
+            discovery_source = Path(catch_discovery_receipt["ctest_json"])
+            catch_discovery_raw = discovery_source.read_bytes()
+            selected_names = [test["name"] for test in discovery["tests"]]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            _fail(common, f"Catch batch CTest discovery failed: {exc}")
+        preview_stdout = catch_discovery_raw.decode("utf-8")
+        preview_argv = list(catch_discovery_receipt["argv"])
+    else:
+        preview = common._run([*command, "--show-only=json-v1"], cwd=root, timeout=args.timeout)
+        if preview.returncode != 0:
+            _fail(common, f"CTest discovery failed: {preview.stderr}")
+        try:
+            discovery = json.loads(preview.stdout)
+            selected_names = [test["name"] for test in discovery["tests"]]
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            _fail(common, f"CTest discovery JSON is invalid: {exc}")
+        preview_stdout = preview.stdout
+        preview_argv = [*command, "--show-only=json-v1"]
     if not selected_names or len(set(selected_names)) != len(selected_names):
         _fail(common, "CTest selection is empty or contains duplicate test identities")
     discovery_path = out / "ctest-discovery.json"
-    discovery_path.write_text(preview.stdout, encoding="utf-8")
+    discovery_path.write_text(preview_stdout, encoding="utf-8")
 
     source_tree_before = _source_tree_snapshot(source_root)
     source_hashes_before = {str(source): _hash_file(source)
@@ -670,11 +731,49 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
     env["GCOV_PREFIX"] = str(gcov_prefix)
     env["GCOV_PREFIX_STRIP"] = "0"
     started = __import__("time").monotonic()
-    test = common._run([*command, "--output-junit", str(junit_path)], cwd=root,
-                       env=env, timeout=args.timeout)
+    catch_batch_report: dict[str, Any] | None = None
+    catch_junit_copy_receipt: dict[str, Any] | None = None
+    if catch_batch_enabled:
+        from slicer_catch_batch import run_discovered_batches
+        if catch_discovery_receipt is None or catch_discovery_raw is None:
+            _fail(common, "Catch batch mode has no validated live CTest discovery artifact")
+        batch_timeout = getattr(args, "gcov_catch_batch_timeout", None)
+        if batch_timeout is None:
+            batch_timeout = args.timeout
+        batch_out = out / "catch-batch"
+        catch_batch_report = run_discovered_batches(
+            discovery, ctest_argv=command, build_dir=build_dir, out_dir=batch_out,
+            batch_timeout_seconds=batch_timeout,
+            discovery_argv=catch_discovery_receipt["argv"],
+            discovery_sha256=catch_discovery_receipt["ctest_json_sha256"],
+            discovery_raw_json=catch_discovery_raw,
+            parent_env=env)
+        source_junit = catch_batch_report.get("junit")
+        if source_junit:
+            catch_junit_copy_receipt = _copy_catch_junit(
+                Path(source_junit), junit_path, out / "catch-batch-junit-copy.json")
+        catch_status = catch_batch_report.get("status")
+        catch_returncode = 0 if catch_status == "pass" else (
+            124 if catch_status == "incomplete_timeout" else 42)
+        test_summary = {
+            "executor": "catch_batch", "status": catch_status,
+            "selected_count": catch_batch_report.get("selected_count"),
+            "batch_count": catch_batch_report.get("batch_count"),
+            "junit": str(junit_path) if junit_path.is_file() else None,
+        }
+        test = subprocess.CompletedProcess(
+            ["catch_batch", str(batch_out / "batch-report.json")], catch_returncode,
+            json.dumps(test_summary, sort_keys=True), "")
+        test_stdout_path = out / "catch-batch.stdout.log"
+        test_stderr_path = out / "catch-batch.stderr.log"
+    else:
+        test = common._run([*command, "--output-junit", str(junit_path)], cwd=root,
+                           env=env, timeout=args.timeout)
+        test_stdout_path = out / "ctest.stdout.log"
+        test_stderr_path = out / "ctest.stderr.log"
     elapsed = __import__("time").monotonic() - started
-    (out / "ctest.stdout.log").write_text(test.stdout or "", encoding="utf-8")
-    (out / "ctest.stderr.log").write_text(test.stderr or "", encoding="utf-8")
+    test_stdout_path.write_text(test.stdout or "", encoding="utf-8")
+    test_stderr_path.write_text(test.stderr or "", encoding="utf-8")
     source_tree_after = _source_tree_snapshot(source_root)
     artifact_hashes_after = _artifact_snapshot(common, artifact_paths, require_present=False)
     source_tree_before_meta = {"file_count": len(source_tree_before),
@@ -684,19 +783,54 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
     artifact_hash_failures = sorted(
         path for path in artifact_hashes_before
         if artifact_hashes_before[path] != artifact_hashes_after.get(path))
-    run_record: dict[str, Any] = {
-        "argv": [*command, "--output-junit", str(junit_path)],
-        "preview_argv": [*command, "--show-only=json-v1"],
-        "selected_test_count": len(selected_names), "selected_test_names": selected_names,
-        "discovery": _sha_artifact(common, discovery_path),
-        "returncode": test.returncode, "timed_out": test.returncode == 124,
-        "duration_seconds": elapsed,
-        "stdout_sha256": _hash_file(out / "ctest.stdout.log"),
-        "stderr_sha256": _hash_file(out / "ctest.stderr.log"),
-        "junit": _sha_artifact(common, junit_path),
-        "gcov_prefix": str(gcov_prefix), "gcov_prefix_strip": 0,
-        "gcov_jobs": gcov_jobs,
-    }
+    if catch_batch_enabled:
+        if catch_batch_report is None or catch_discovery_receipt is None:
+            _fail(common, "Catch batch mode produced no run report")
+        batch_report_path = out / "catch-batch" / "batch-report.json"
+        batch_argvs = [info["batch_argv"] for info in catch_batch_report.get("batches", [])
+                       if "batch_argv" in info]
+        run_record = {
+            "executor": "catch_batch",
+            "requested_ctest_argv": requested_ctest_argv,
+            "selection_ctest_argv": command,
+            "preview_argv": preview_argv,
+            "discovery_argv": catch_discovery_receipt["argv"],
+            "discovery_command_receipt": _sha_artifact(
+                common, Path(catch_discovery_receipt["receipt"])),
+            "discovery_gcov_prefix": catch_discovery_receipt["discovery_gcov_prefix"],
+            "discovery_llvm_profile_file": catch_discovery_receipt["discovery_llvm_profile_file"],
+            "selected_test_count": len(selected_names), "selected_test_names": selected_names,
+            "discovery": _sha_artifact(common, discovery_path),
+            "returncode": test.returncode, "timed_out": test.returncode == 124,
+            "duration_seconds": elapsed,
+            "stdout_path": str(test_stdout_path), "stdout_sha256": _hash_file(test_stdout_path),
+            "stderr_path": str(test_stderr_path), "stderr_sha256": _hash_file(test_stderr_path),
+            "junit": _sha_artifact(common, junit_path),
+            "junit_copy_receipt": catch_junit_copy_receipt,
+            "batch_runner_report": _sha_artifact(common, batch_report_path),
+            "batch_status": catch_batch_report.get("status"),
+            "batch_count": catch_batch_report.get("batch_count",
+                                                   len(catch_batch_report.get("batches", []))),
+            "batch_argvs_started_count": len(batch_argvs), "batch_argvs": batch_argvs,
+            "batch_timeout_seconds": catch_batch_report.get("batch_timeout_seconds"),
+            "batch_timeout_scope": catch_batch_report.get("timeout_semantics"),
+            "gcov_prefix": str(gcov_prefix), "gcov_prefix_strip": 0,
+            "gcov_jobs": gcov_jobs,
+        }
+    else:
+        run_record = {
+            "argv": [*command, "--output-junit", str(junit_path)],
+            "preview_argv": preview_argv,
+            "selected_test_count": len(selected_names), "selected_test_names": selected_names,
+            "discovery": _sha_artifact(common, discovery_path),
+            "returncode": test.returncode, "timed_out": test.returncode == 124,
+            "duration_seconds": elapsed,
+            "stdout_sha256": _hash_file(test_stdout_path),
+            "stderr_sha256": _hash_file(test_stderr_path),
+            "junit": _sha_artifact(common, junit_path),
+            "gcov_prefix": str(gcov_prefix), "gcov_prefix_strip": 0,
+            "gcov_jobs": gcov_jobs,
+        }
     if test.returncode != 0 or not junit_path.is_file():
         report = {"status": "test_failed" if test.returncode else "missing_junit",
                   "backend": "gcc-gcov", "denominator": "gcc physical lines only",
@@ -712,14 +846,16 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         (out / "coverage-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         return 2
     try:
-        junit_names, junit_problems = _junit_summary(junit_path)
+        junit_names, junit_problems, junit_assessment = _junit_credit_assessment(
+            junit_path, selected_names)
     except (ET.ParseError, OSError, ValueError) as exc:
         _fail(common, f"cannot validate CTest JUnit output: {exc}")
     expected_names = Counter(selected_names)
     run_record["junit_test_count"] = sum(junit_names.values())
-    run_record["junit_name_mismatch"] = compare_test_identities(selected_names, junit_names)
+    run_record["junit_name_mismatch"] = junit_assessment["name_mismatch"]
     run_record["junit_problems"] = junit_problems
-    if junit_names != expected_names or junit_problems:
+    run_record["junit_eligible_for_coverage"] = junit_assessment["eligible_for_coverage"]
+    if not junit_assessment["eligible_for_coverage"]:
         (out / "coverage-report.json").write_text(json.dumps({
             "status": "test_identity_or_junit_failure", "backend": "gcc-gcov",
             "denominator": "gcc physical lines only", "run": run_record,
