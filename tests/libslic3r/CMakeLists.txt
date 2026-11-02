@@ -103,6 +103,7 @@ add_executable(${_TEST_NAME}_tests
     test_indexed_triangle_set.cpp
     test_connected_bodies.cpp
     test_texture_displacement.cpp
+    test_texture_to_color_repair.cpp
     test_instance_lock.cpp
     ../libnest2d/printer_parts.cpp
     )
@@ -127,7 +128,7 @@ endif()
 find_package(Draco REQUIRED)
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r draco::draco Catch2::Catch2WithMain)
 # The TextureToColor headers include "Point.hpp" without the libslic3r/ prefix.
-set_property(SOURCE test_texture_to_color_contracts.cpp APPEND PROPERTY
+set_property(SOURCE test_texture_to_color_contracts.cpp test_texture_to_color_repair.cpp APPEND PROPERTY
     INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/src/libslic3r")
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
