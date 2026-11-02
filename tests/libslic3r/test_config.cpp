@@ -1776,7 +1776,19 @@ TEST_CASE("Project JSON migration records support and wall-order differences", "
         CHECK(different->values[index] == expected[index]);
 }
 
-TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contract", "[PrintConfigBehavior][Config]")
+namespace {
+
+// The migrated key and value must be accepted by the current option definition.
+void check_migrated_value_deserializes(const std::string &key, const std::string &value)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK_NOTHROW(config.set_deserialize_strict(key, value));
+    CHECK(config.opt_serialize(key) == value);
+}
+
+} // namespace
+
+TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contract", "[Config][ConfigLegacy]")
 {
     struct Migration {
         const char *old_key;
@@ -1794,7 +1806,7 @@ TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contrac
         {"sparse_infill_anchor", "35", "infill_anchor", "35"},
         {"chamber_temperatures", "60,65", "chamber_temperature", "60,65"},
         {"thumbnail_size", "96x96", "thumbnails", "96x96"},
-        {"counterbole_hole_bridging", "bridges", "counterbore_hole_bridging", "bridges"},
+        {"counterbole_hole_bridging", "partiallybridge", "counterbore_hole_bridging", "partiallybridge"},
     };
 
     for (const Migration &migration : migrations) {
@@ -1804,11 +1816,12 @@ TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contrac
             PrintConfigDef::handle_legacy(key, value);
             CHECK(key == migration.new_key);
             CHECK(value == migration.new_value);
+            check_migrated_value_deserializes(key, value);
         }
     }
 }
 
-TEST_CASE("PrintConfig legacy enum spellings become current canonical values", "[PrintConfigBehavior][Config]")
+TEST_CASE("PrintConfig legacy enum spellings become current canonical values", "[Config][ConfigLegacy]")
 {
     struct Conversion {
         const char *key;
@@ -1836,6 +1849,10 @@ TEST_CASE("PrintConfig legacy enum spellings become current canonical values", "
             PrintConfigDef::handle_legacy(key, value);
             CHECK(key == conversion.key);
             CHECK(value == conversion.new_value);
+            // Known bug (see "Static and dynamic print defaults retain named enum lists"): coEnums defaults such as
+            // extruder_type have no keys map, so deserializing into full_print_config() dereferences null.
+            if (key != "extruder_type")
+                check_migrated_value_deserializes(key, value);
         }
     }
 
@@ -1845,10 +1862,11 @@ TEST_CASE("PrintConfig legacy enum spellings become current canonical values", "
         PrintConfigDef::handle_legacy(key, value);
         CHECK(key == "solid_infill_rotate_template");
         CHECK(value == "0,90");
+        check_migrated_value_deserializes(key, value);
     }
 }
 
-TEST_CASE("PrintConfig legacy values that cannot be represented are discarded", "[PrintConfigBehavior][Config]")
+TEST_CASE("PrintConfig legacy values that cannot be represented are discarded", "[Config][ConfigLegacy]")
 {
     // Percent speeds and distances are dropped by their own guard. "scale" and "bed_size" are on the
     // obsolete list and the future key is unregistered; for those the final unknown-key check would
@@ -1871,7 +1889,7 @@ TEST_CASE("PrintConfig legacy values that cannot be represented are discarded", 
     }
 }
 
-TEST_CASE("PrintConfig legacy migrations normalize bed and wall-order spellings", "[PrintConfigActive][Config]")
+TEST_CASE("PrintConfig legacy migrations normalize bed and wall-order spellings", "[Config][ConfigLegacy]")
 {
     struct Row {
         const char *input_key;
@@ -1896,6 +1914,34 @@ TEST_CASE("PrintConfig legacy migrations normalize bed and wall-order spellings"
             PrintConfigDef::handle_legacy(key, value);
             CHECK(key == row.expected_key);
             CHECK(value == row.expected_value);
+            // An unknown wall_infill_order spelling is passed through for wall_sequence to reject.
+            if (std::string(row.input_value) != "legacy spelling")
+                check_migrated_value_deserializes(key, value);
+        }
+    }
+}
+
+TEST_CASE("PrintConfig legacy handling leaves current keys and values unchanged", "[Config][ConfigLegacy]")
+{
+    // Current spellings next to the legacy ones converted above.
+    const std::pair<const char *, const char *> current[] = {
+        {"layer_height", "0.2"},
+        {"support_type", "tree(auto)"},
+        {"timelapse_type", "0"},
+        {"overhang_fan_threshold", "25%"},
+        {"sparse_infill_pattern", "gyroid"},
+        {"curr_bed_type", "Supertack Plate"},
+        {"wall_sequence", "inner wall/outer wall"},
+        {"wall_direction", "cw"},
+        {"filament_map_mode", "Manual"},
+    };
+    for (const auto &[current_key, current_value] : current) {
+        DYNAMIC_SECTION(current_key << " = " << current_value) {
+            t_config_option_key key = current_key;
+            std::string value       = current_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == current_key);
+            CHECK(value == current_value);
         }
     }
 }
