@@ -301,6 +301,21 @@ def gcda_path_for_object(prefix: Path, object_path: Path) -> Path:
     return prefix / Path(str(gcda_source).lstrip(os.sep))
 
 
+def create_gcov_data_dir(root: Path, out: Path, override: str | None) -> Path:
+    """Create an exclusive profile epoch, optionally on a separate filesystem."""
+    candidate = Path(override) if override is not None else out / "gcov-data"
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    if candidate.is_symlink():
+        raise ValueError(f"gcov data path must not be a symlink: {candidate}")
+    prefix = candidate.resolve()
+    try:
+        prefix.mkdir(parents=True)
+    except OSError as exc:
+        raise ValueError(f"gcov data directory must be new and writable: {prefix}: {exc}") from exc
+    return prefix
+
+
 def _record_source_path(record: dict[str, Any], path_base: Path | None = None) -> Path:
     if not isinstance(record, dict) or not isinstance(record.get("file"), str):
         raise ValueError("gcov JSON file record is missing its source path")
@@ -646,8 +661,10 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         artifact_hashes_before = _artifact_snapshot(common, artifact_paths)
     except ValueError as exc:
         _fail(common, str(exc))
-    gcov_prefix = out / "gcov-data"
-    gcov_prefix.mkdir()
+    try:
+        gcov_prefix = create_gcov_data_dir(root, out, getattr(args, "gcov_data_dir", None))
+    except ValueError as exc:
+        _fail(common, str(exc))
     junit_path = out / "ctest-junit.xml"
     env = dict(os.environ)
     env["GCOV_PREFIX"] = str(gcov_prefix)

@@ -20,6 +20,43 @@ import slicer_coverage as common  # noqa: E402
 
 
 class GcovPhysicalLineTests(unittest.TestCase):
+    def test_separate_gcov_data_directory_preserves_report_location_and_prefix_mapping(self):
+        args = common._parser().parse_args([
+            "run", "--backend", "gcov", "--object", "libslic3r_tests",
+            "--test-command", "ctest", "--gcov-data-dir", "runtime/epoch-1",
+        ])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            out = root / "reports"
+            out.mkdir()
+            prefix = gcov.create_gcov_data_dir(root, out, args.gcov_data_dir)
+            self.assertEqual(prefix, root / "runtime/epoch-1")
+            self.assertEqual(list(out.iterdir()), [])
+            obj = root / "build/lib.cpp.o"
+            self.assertEqual(gcov.gcda_path_for_object(prefix, obj),
+                             prefix / obj.with_suffix(".gcda").relative_to(obj.anchor))
+            default = gcov.create_gcov_data_dir(root, out, None)
+            self.assertEqual(default, out / "gcov-data")
+            absolute = gcov.create_gcov_data_dir(root, out, str(root / "absolute-epoch"))
+            self.assertEqual(absolute, root / "absolute-epoch")
+
+    def test_gcov_data_directory_never_reuses_or_follows_existing_profile_epoch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            epoch = root / "epoch"
+            epoch.mkdir()
+            with self.assertRaisesRegex(ValueError, "must be new"):
+                gcov.create_gcov_data_dir(root, root, str(epoch))
+            prior = epoch / "old.gcda"
+            prior.write_bytes(b"retained coverage")
+            alias = root / "alias"
+            alias.symlink_to(epoch, target_is_directory=True)
+            for path in (epoch, prior, alias):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    gcov.create_gcov_data_dir(root, root, str(path))
+            self.assertEqual(prior.read_bytes(), b"retained coverage")
+            self.assertEqual(list(epoch.iterdir()), [prior])
+
     def test_gcov_jobs_cli_defaults_to_one_and_backend_requires_positive_integer(self):
         args = common._parser().parse_args([
             "run", "--backend", "gcov", "--object", "libslic3r_tests",
