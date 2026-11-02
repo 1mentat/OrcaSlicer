@@ -22,6 +22,8 @@
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/ProjectTask.hpp"
 #include "libslic3r/PublishSettings.hpp"
+#include "libslic3r/PNGReadWrite.hpp"
+#include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/CustomGCode.hpp"
 
 #include "test_utils.hpp"
@@ -37,6 +39,7 @@
 #include <memory>
 #include <cstdint>
 #include <ios>
+#include <array>
 #include <iterator>
 #include <nlohmann/json.hpp>
 
@@ -3052,6 +3055,51 @@ TEST_CASE("BBS 3MF ignores auxiliary path traversal entries", "[3MF][Bbs3mfExten
     REQUIRE(auxiliary_root.parent_path() == loaded.backup->path());
     CHECK(boost::filesystem::exists(auxiliary_root / "kept.txt"));
     CHECK_FALSE(boost::filesystem::exists(auxiliary_root.parent_path() / "escaped.txt"));
+}
+
+TEST_CASE("BBS 3MF thumbnail accessor returns the stored plate PNG", "[3MF][Bbs3mfExtended][Thumbnail]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_thumbnail_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    // Each column gets its own colour, so the decoded image can only match the stored one.
+    constexpr unsigned int size = 16;
+    const auto expected_pixel = [](unsigned int column) {
+        return std::array<unsigned char, 4>{static_cast<unsigned char>(column * 16), 0x40, static_cast<unsigned char>(255 - column * 16), 0xff};
+    };
+    ThumbnailData thumbnail;
+    thumbnail.set(size, size);
+    for (unsigned int row = 0; row < size; ++row)
+        for (unsigned int column = 0; column < size; ++column)
+            std::copy_n(expected_pixel(column).begin(), 4, thumbnail.pixels.begin() + 4 * (row * size + column));
+
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params;
+    params.path = archive.string();
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.thumbnail_data = {&thumbnail};
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    const std::string png = bbs_3mf_get_thumbnail(archive.string().c_str());
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{png.data(), png.size()}, decoded));
+    REQUIRE(decoded.cols == size);
+    REQUIRE(decoded.rows == size);
+    REQUIRE(decoded.bytes_per_pixel == 4);
+    REQUIRE(decoded.buf.size() == 4 * size * size);
+    for (unsigned int row = 0; row < size; ++row)
+        for (unsigned int column = 0; column < size; ++column) {
+            INFO("row " << row << " column " << column);
+            const std::array<unsigned char, 4> expected = expected_pixel(column);
+            CHECK(std::equal(expected.begin(), expected.end(), decoded.buf.begin() + 4 * (row * size + column)));
+        }
 }
 
 } // namespace bbs_archive_contracts
