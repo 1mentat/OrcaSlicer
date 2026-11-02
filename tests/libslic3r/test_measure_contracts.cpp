@@ -688,16 +688,23 @@ TEST_CASE("Circle distance to a boundary-less plane it does not lie in has a wit
     check_vec(upright_floor.distance_infinite->from, Vec3d(0.0, 0.0, 3.0));
 }
 
-// Known bug: for a circle lying in the plane the circle-plane branch returns the circle center and the plane
-// origin as witnesses of distance 0, so the first is not on the circle and they can be far apart; needs a fix PR
-TEST_CASE("Circle lying in a plane has witnesses at a common circle point", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Circle lying in a plane has witnesses at a common circle point", "[Measure][MeasureContracts]")
 {
     const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
-    // The plane's origin is away from the circle; it has no boundary edges.
-    const SurfaceFeature floor = plane(8, Vec3d::UnitZ(), Vec3d(5.0, 5.0, 0.0), std::make_shared<std::vector<SurfaceFeature>>());
-    const MeasurementResult result = get_measurement(ring, floor);
-    check_witnessed_distance(result.distance_strict, 0.0);
-    check_on_circle(result.distance_strict->from, ring);
+    // A plane without boundary edges whose origin is away from the circle.
+    const SurfaceFeature unbounded = plane(8, Vec3d::UnitZ(), Vec3d(5.0, 5.0, 0.0), std::make_shared<std::vector<SurfaceFeature>>());
+    const MeasurementResult free_result = get_measurement(ring, unbounded);
+    check_witnessed_distance(free_result.distance_strict, 0.0);
+    check_on_circle(free_result.distance_strict->from, ring);
+
+    // The same holds for a bounded face around the circle.
+    const auto boundary = std::make_shared<std::vector<SurfaceFeature>>(std::vector<SurfaceFeature>{
+        edge(Vec3d(-3.0, -3.0, 0.0), Vec3d(3.0, -3.0, 0.0)), edge(Vec3d(3.0, -3.0, 0.0), Vec3d(3.0, 3.0, 0.0)),
+        edge(Vec3d(3.0, 3.0, 0.0), Vec3d(-3.0, 3.0, 0.0)), edge(Vec3d(-3.0, 3.0, 0.0), Vec3d(-3.0, -3.0, 0.0))});
+    const SurfaceFeature face = plane(9, Vec3d::UnitZ(), Vec3d(1.0, 1.0, 0.0), boundary);
+    const MeasurementResult face_result = get_measurement(ring, face);
+    check_witnessed_distance(face_result.distance_strict, 0.0);
+    check_on_circle(face_result.distance_strict->from, ring);
 }
 
 // Known bug: the edge-plane and circle-plane branches measure only to the face's boundary edges, so a
