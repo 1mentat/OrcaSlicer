@@ -3182,7 +3182,17 @@ TEST_CASE("Mixed filament components, ratios and gradients validate their semant
         {"a curve that is not numeric", curve("a,b|c,d"), "filament_mixed_gradient_curve", "at least 2 valid control points"},
         {"control points are separated by a bar, not a semicolon", curve("0,0.2;1,0.8"), "filament_mixed_gradient_curve", "at least 2 valid control points"},
         {"a curve with tangent fields is accepted", curve("0,0.2,,|1,0.8,,"), nullptr, nullptr},
-        {"an empty curve string is accepted", curve(""), nullptr, nullptr},
+        {"an empty curve string is accepted next to a slot with a curve",
+         [](DynamicPrintConfig &c) {
+             // Slot 4 keeps a curve, so curves are specified and slot 3's empty curve must be skipped, not parsed.
+             set_bools(c, "filament_is_mixed", {0, 0, 1, 1, 0});
+             set_strings(c, "filament_mixed_components", {"", "", "1,2", "1,2", ""});
+             set_strings(c, "filament_mixed_sublayer_ratios", {"", "", "0.5,0.5", "1,1", ""});
+             set_bools(c, "filament_mixed_gradient", {0, 0, 1, 1, 0});
+             set_strings(c, "filament_mixed_gradient_range", {"", "", "0.2,0.8", "0.3,0.7", ""});
+             set_strings(c, "filament_mixed_gradient_curve", {"", "", "", "0,0.2|1,0.8", ""});
+         },
+         nullptr, nullptr},
         {"a slot without a gradient is not checked for range or curve",
          [](DynamicPrintConfig &c) {
              // Slot 3 has a valid gradient; slot 4 has none, so its malformed range and curve are ignored.
