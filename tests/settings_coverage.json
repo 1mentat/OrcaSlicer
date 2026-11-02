@@ -6113,6 +6113,24 @@
         "nullable_behavior"
       ],
       "reason": "A real Print export checks nil inheritance at 0%, explicit 100% over machine 0%, and explicit 0% over machine 100%. Parsed post-wipe and wipe-time E moves account for the configured 0.8 mm retraction, with the other percentage pinned to zero. Interior percentages and combined percentage interactions are not claimed."
+    },
+    "filament_mixed_components": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[MixedFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A validated Print export uses components 2,1 with positive non-unit ratios 2,3. Parsed component material IDs must preserve the weights through ID sorting: material 1 receives weight 0.6 and ends 0.08 mm below each nominal layer; material 2 receives weight 0.4 and ends at the nominal layer. Both deposit positive XY/E paths, while the virtual mixed slot does not. A separate empty-ratio fixture uses component order 1,2 with equal weights. These selected supported lists and this fixed geometry do not claim arbitrary component strings or permutations."
+    },
+    "filament_mixed_sublayer_ratios": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[MixedFilament]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Validated Print exports check that positive ratios 2,3 normalize to input component weights 0.4,0.6, while an empty string falls back to equal 0.5,0.5 weights. Parsed deposited material IDs, sublayer Z positions and positive XY/E fractions supply independent oracles; the existing 60/40 and whole-layer controls remain. Source mutations for normalization, paired-height sorting and equal fallback each fail their targeted output assertion. Other ratio strings, counts, rejected inputs and geometry interactions are unclaimed."
     }
   }
 }

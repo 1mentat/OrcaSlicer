@@ -857,6 +857,16 @@ sublayers, the encoded single-instance BBL label, and conserved deposition.
 Marlin object definitions are validated separately from body boundaries.
 `mixed_bbl_labels.json` challenges each BBL boundary and its dedicated end flush.
 
+`[MixedComponents]` and `[SublayerRatios]` check real deposited material for a reversed
+component list and positive non-unit ratios, then checks the supported empty-ratio
+equal-weight fallback. The observer distinguishes component material IDs from the virtual
+mixed slot and requires positive finite XY/E paths at the expected sub-layer Z.
+`tests/mutations/mixed_filament_sublayer_ratios.json` challenges normalization,
+component-to-height pairing through the physical-ID sort, and the empty-input
+fallback. Other component strings, permutations, and ratio lists are not claimed.
+Target-mode runs use `fff_print_tests` and the five-case control inventory and
+regex in `tests/controls/mixed_filament_ratios.json`.
+
 `[AdaptivePressureAdvanceRamps]` checks emitted pressure-advance values against a
 linear calibration model for overhang events with an immediate feed update,
 including retained values when duplicate commands are omitted. A disabled

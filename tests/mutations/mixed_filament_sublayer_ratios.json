@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary public G-code assertions for mixed component order and sublayer ratio normalization/fallback.",
+  "mutants": [
+    {
+      "id": "mixed-sublayer-nonunit-ratios-not-normalized",
+      "path": "src/libslic3r/FilamentMixer.cpp",
+      "old": "    double sum = std::accumulate(ratios.begin(), ratios.end(), 0.0);\n    if (sum > 0.0 && std::abs(sum - 1.0) > 1e-6) {\n        for (double &r : ratios)\n            r /= sum;\n    }\n",
+      "new": "",
+      "expected_matches": 1,
+      "test_filter": "MixedComponents",
+      "ordinary_assertion_only": true,
+      "description": "Skip sum normalization for the valid 2,3 input; the independent component-to-height extrusion oracle fails at the expected component bucket."
+    },
+    {
+      "id": "mixed-sublayer-sort-keeps-component-height-pair",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "                        sorted_heights.push_back(grp.sub_heights[i]);",
+      "new": "                        sorted_heights.push_back(grp.sub_heights[sorted_heights.size()]);",
+      "expected_matches": 1,
+      "test_filter": "MixedComponents",
+      "ordinary_assertion_only": true,
+      "description": "Break the component/height association when physical IDs are sorted; the reversed 2,1 input must fail the expected material-ID and sub-layer-Z relationship."
+    },
+    {
+      "id": "mixed-sublayer-empty-ratios-not-equal-fallback",
+      "path": "src/libslic3r/FilamentMixer.cpp",
+      "old": "        ratios.assign(n_components, n_components > 0 ? 1.0 / n_components : 0.0);",
+      "new": "        if (n_components == 2)\n            ratios = {0.6, 0.4};\n        else\n            ratios.assign(n_components, n_components > 0 ? 1.0 / n_components : 0.0);",
+      "expected_matches": 1,
+      "test_filter": "SublayerRatios",
+      "ordinary_assertion_only": true,
+      "description": "Replace the two-component empty-input equal fallback with a valid positive 60/40 split; the targeted G-code Z/flow oracle must reject it."
+    }
+  ]
+}

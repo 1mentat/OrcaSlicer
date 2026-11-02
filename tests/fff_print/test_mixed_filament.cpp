@@ -331,6 +331,107 @@ void check_volume_run(const std::vector<PositiveExtrusion> &samples, const Print
     }
 }
 
+void check_sublayer_ratio_export(const std::string &components, const char *ratios,
+                                 double expected_tool_0_ratio)
+{
+    constexpr double layer_height = 0.2;
+    DynamicPrintConfig config = mixed_config(true, ratios);
+    config.set_deserialize_strict({
+        { "filament_mixed_components", std::string(";;") + components },
+        { "filament_flow_ratio", "1,1,1" },
+        { "layer_height", layer_height },
+        { "initial_layer_print_height", layer_height },
+        { "wall_loops", 1 },
+        { "top_shell_layers", 0 },
+        { "bottom_shell_layers", 0 },
+        { "sparse_infill_density", "0%" },
+        { "skirt_loops", 0 },
+        { "brim_type", "no_brim" },
+        { "enable_prime_tower", false },
+        { "machine_start_gcode", "" },
+        { "machine_end_gcode", "" },
+        { "use_relative_e_distances", false },
+        { "layer_change_gcode", "" },
+    });
+
+    Model model;
+    Print print;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(make_cube(6., 6., 2.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+
+    const StringObjectException validation = print.validate();
+    INFO("validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE(print.config().filament_mixed_components.values.size() == 3);
+    CHECK(print.config().filament_mixed_components.values[2] == components);
+    REQUIRE(print.config().filament_mixed_sublayer_ratios.values.size() == 3);
+    CHECK(print.config().filament_mixed_sublayer_ratios.values[2] == ratios);
+
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *print_object = print.objects().front();
+    REQUIRE(print_object != nullptr);
+    REQUIRE(print_object->instances().size() == 1);
+    REQUIRE(print_object->layers().size() > 2);
+
+    const auto bbox = volume->mesh().bounding_box();
+    REQUIRE(bbox.defined);
+    const double instance_shift_x = unscale<double>(print_object->instances().front().shift.x());
+    const double center_offset_x = unscale<double>(print_object->center_offset().x());
+    const XBounds bounds{bbox.min.x() + instance_shift_x - center_offset_x,
+                         bbox.max.x() + instance_shift_x - center_offset_x};
+
+    const unsigned int initial_tool = print.tool_ordering().first_extruder();
+    REQUIRE(initial_tool < 3);
+    const auto samples = read_positive_extrusions(output, print.config(), static_cast<int>(initial_tool));
+    REQUIRE_FALSE(samples.empty());
+    std::vector<size_t> positive_lines(3, 0);
+    for (const PositiveExtrusion &sample : samples) {
+        REQUIRE(sample.tool >= 0);
+        REQUIRE(sample.tool < static_cast<int>(positive_lines.size()));
+        REQUIRE(std::isfinite(sample.x));
+        REQUIRE(std::isfinite(sample.z));
+        REQUIRE(std::isfinite(sample.e));
+        REQUIRE(std::isfinite(sample.xy));
+        REQUIRE(sample.e > 0.);
+        REQUIRE(sample.xy >= 0.01);
+        ++positive_lines[static_cast<size_t>(sample.tool)];
+    }
+    REQUIRE(positive_lines[0] > 0);
+    REQUIRE(positive_lines[1] > 0);
+    CHECK(positive_lines[2] == 0);
+
+    for (size_t layer_idx = 1; layer_idx < print_object->layers().size(); ++layer_idx) {
+        const Layer *layer = print_object->layers()[layer_idx];
+        REQUIRE(layer != nullptr);
+        const double tool_0_top_z = layer->print_z - layer_height + expected_tool_0_ratio * layer_height;
+        const Bucket tool_0 = bucket_at(samples, bounds, tool_0_top_z, 0);
+        const Bucket tool_1 = bucket_at(samples, bounds, layer->print_z, 1);
+        INFO("layer=" << layer_idx << " nominal_z=" << layer->print_z << " tool_0_top_z=" << tool_0_top_z);
+        REQUIRE(tool_0.lines > 0);
+        REQUIRE(tool_1.lines > 0);
+        REQUIRE(std::isfinite(tool_0.e));
+        REQUIRE(std::isfinite(tool_1.e));
+        REQUIRE(std::isfinite(tool_0.xy));
+        REQUIRE(std::isfinite(tool_1.xy));
+        REQUIRE(tool_0.e > 0.);
+        REQUIRE(tool_1.e > 0.);
+        REQUIRE(tool_0.xy > 0.1);
+        REQUIRE(tool_1.xy > 0.1);
+        const double total_e = tool_0.e + tool_1.e;
+        REQUIRE(total_e > 0.);
+        CHECK_THAT(tool_0.e / total_e, Catch::Matchers::WithinAbs(expected_tool_0_ratio, 0.04));
+        CHECK_THAT(tool_1.e / total_e, Catch::Matchers::WithinAbs(1. - expected_tool_0_ratio, 0.04));
+    }
+}
+
 } // namespace mixed_gradient_gcode_contracts
 
 TEST_CASE("Mixed filament gradient scales emitted volume flow", "[MixedFilament][MixedGradientGCode]")
@@ -442,6 +543,24 @@ TEST_CASE("Mixed filament gradient scales emitted volume flow", "[MixedFilament]
             CHECK(upper_short_events == 0);
         }
     }
+}
+
+TEST_CASE("Mixed filament sublayer ratios stay paired with permuted components",
+          "[MixedFilament][MixedComponents][SettingsVariance]")
+{
+    using namespace mixed_gradient_gcode_contracts;
+
+    // The configured order assigns 0.4 to component 2 and 0.6 to component 1. The
+    // consumer normalizes 2,3 to 0.4,0.6, then sorts components for physical emission
+    // while preserving each component's paired height: tool 0 therefore receives 0.6.
+    check_sublayer_ratio_export("2,1", "2,3", 0.6);
+}
+
+TEST_CASE("Mixed filament empty sublayer ratios use equal component weights",
+          "[MixedFilament][SublayerRatios][SettingsVariance]")
+{
+    using namespace mixed_gradient_gcode_contracts;
+    check_sublayer_ratio_export("1,2", "", 0.5);
 }
 
 TEST_CASE("enable_mixed_color_sublayer reaches the Print config", "[MixedFilament]")
