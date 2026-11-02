@@ -1532,6 +1532,84 @@ TEST_CASE("min_object_distance yields no floor when an FFF config lacks the opti
     }
 }
 
+namespace {
+
+struct MigrationDefinition : ConfigDef {
+    MigrationDefinition()
+    {
+        add("new_int", coInt)->set_default_value(new ConfigOptionInt(0));
+    }
+};
+
+struct MigrationConfig : DynamicConfig {
+    MigrationDefinition definition;
+
+    const ConfigDef *def() const override { return &definition; }
+
+protected:
+    void handle_legacy(t_config_option_key &key, std::string &value) const override
+    {
+        if (key == "legacy_int") {
+            key = "new_int";
+            value = "42";
+        } else if (key == "removed_int") {
+            key.clear();
+        }
+    }
+};
+
+} // namespace
+
+TEST_CASE("ConfigBase migration rewrites and records removed keys, then rejects unknown keys", "[Config][ConfigMigration]")
+{
+    MigrationConfig config;
+    ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::Disable);
+
+    REQUIRE(config.set_deserialize_nothrow("legacy_int", "7", context));
+    REQUIRE(config.opt<ConfigOptionInt>("new_int") != nullptr);
+    CHECK(config.opt<ConfigOptionInt>("new_int")->value == 42);
+
+    REQUIRE(config.set_deserialize_nothrow("removed_int", "ignored", context));
+    REQUIRE(config.set_deserialize_nothrow("removed_int", "ignored-again", context));
+    CHECK(context.unrecogized_keys == std::vector<std::string>{"removed_int"});
+    CHECK(context.empty());
+    REQUIRE_THROWS_AS(config.set_deserialize_strict("future_int", "7"), UnknownOptionException);
+}
+
+namespace {
+
+struct AliasContractDefinition : ConfigDef {
+    AliasContractDefinition()
+    {
+        ConfigOptionDef *canonical = add("canonical_int", coInt);
+        canonical->set_default_value(new ConfigOptionInt(0));
+        canonical->aliases.emplace_back("legacy_int_alias");
+    }
+};
+
+struct AliasContractConfig : DynamicConfig {
+    AliasContractDefinition definition;
+
+    const ConfigDef *def() const override { return &definition; }
+};
+
+} // namespace
+
+TEST_CASE("Config aliases deserialize into their canonical setting",
+          "[Config][ConfigMigration]")
+{
+    AliasContractConfig config;
+    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+    config.set_deserialize("legacy_int_alias", "42", substitutions);
+
+    const ConfigOptionInt *canonical = config.opt<ConfigOptionInt>("canonical_int");
+    REQUIRE(canonical != nullptr);
+    CHECK(canonical->value == 42);
+    CHECK(config.opt<ConfigOptionInt>("legacy_int_alias") == nullptr);
+    CHECK_THROWS_AS(config.set_deserialize("unknown_config_contract_key", "1", substitutions), UnknownOptionException);
+    CHECK(canonical->value == 42);
+}
+
 TEST_CASE("Static print configs compare, order and hash by their option values", "[Config]")
 {
     // PrintObjectConfig comes from PRINT_CONFIG_CLASS_DEFINE; PrintConfig combines MachineEnvelopeConfig
