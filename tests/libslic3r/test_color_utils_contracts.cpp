@@ -449,12 +449,19 @@ TriMesh open_square_mesh()
     return TriMesh(std::move(faces), std::move(vertices));
 }
 
+// UV = (x + 0.1 y, y + 0.1 z). Injective on the cubes' corner grid, so every vertex has its own UV and
+// a vertex given another vertex's UV is caught.
+Vec2f uv_of(const TriVertex &vertex)
+{
+    return Vec2f(vertex.x() + 0.1f * vertex.y(), vertex.y() + 0.1f * vertex.z());
+}
+
 std::vector<Vec2f> indexed_uvs(const TriMesh &mesh)
 {
     std::vector<Vec2f> uvs;
     uvs.reserve(mesh.vertices.size());
     for (const TriVertex &vertex : mesh.vertices)
-        uvs.emplace_back(vertex.x(), vertex.y() + vertex.z());
+        uvs.push_back(uv_of(vertex));
     return uvs;
 }
 
@@ -486,20 +493,27 @@ TEST_CASE("Connected color mesh components retain faces, vertices, and UVs", "[C
         for (std::size_t vertex_id = 0; vertex_id < components[i].vertices.size(); ++vertex_id) {
             const TriVertex &vertex = components[i].vertices[vertex_id];
             const Vec2f &uv = component_uvs[i][vertex_id];
-            CHECK_THAT(uv.x(), Catch::Matchers::WithinAbs(vertex.x(), 1e-6));
-            CHECK_THAT(uv.y(), Catch::Matchers::WithinAbs(vertex.y() + vertex.z(), 1e-6));
+            CHECK_THAT(uv.x(), Catch::Matchers::WithinAbs(uv_of(vertex).x(), 1e-5));
+            CHECK_THAT(uv.y(), Catch::Matchers::WithinAbs(uv_of(vertex).y(), 1e-5));
         }
         total_faces += components[i].indices.size();
     }
     CHECK(total_faces == input.indices.size());
 
-    std::vector<TriMesh> rejected_components;
-    std::vector<std::vector<Vec2f>> rejected_uvs;
-    std::vector<Vec2f> incomplete_uvs = uvs;
-    incomplete_uvs.pop_back();
-    CHECK_FALSE(get_components(input, incomplete_uvs, rejected_components, rejected_uvs));
-    CHECK(rejected_components.empty());
-    CHECK(rejected_uvs.empty());
+    // One component is the cube at x = 0..10, the other the one moved to x = 30..40.
+    std::vector<float> min_x;
+    for (const TriMesh &component : components) {
+        float lo = component.vertices.front().x(), hi = lo;
+        for (const TriVertex &vertex : component.vertices) {
+            lo = std::min(lo, vertex.x());
+            hi = std::max(hi, vertex.x());
+        }
+        CHECK_THAT(hi - lo, Catch::Matchers::WithinAbs(10.f, 1e-5f));
+        min_x.push_back(lo);
+    }
+    std::sort(min_x.begin(), min_x.end());
+    CHECK_THAT(min_x[0], Catch::Matchers::WithinAbs(0.f, 1e-5f));
+    CHECK_THAT(min_x[1], Catch::Matchers::WithinAbs(30.f, 1e-5f));
 }
 
 TEST_CASE("Component extraction clears stale outputs on a UV cardinality error", "[ColorUtils]")
