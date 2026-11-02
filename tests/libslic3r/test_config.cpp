@@ -3003,3 +3003,60 @@ TEST_CASE("Firmware retraction validation rejects wipe on any extruder", "[Confi
     both.set("use_firmware_retraction", true);
     CHECK_THAT(error_message(both.validate(), "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
 }
+
+TEST_CASE("get_parameter_size scales per-extruder options by their variant counts", "[Config][ConfigVariants]")
+{
+    // The three variant counts differ (and none is twice another) so each option group is told apart.
+    DynamicPrintConfig config;
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow"}));
+    config.set_key_value("filament_extruder_variant",
+                         new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"}));
+    config.set_key_value("print_extruder_variant",
+                         new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard", "Bowden High Flow", "Bowden Other"}));
+
+    CHECK(config.get_parameter_size("nozzle_volume", 9) == 2);                // one value per printer variant
+    CHECK(config.get_parameter_size("machine_max_acceleration_x", 9) == 4);   // two values (limit pair) per printer variant
+    CHECK(config.get_parameter_size("machine_max_speed_x", 9) == 4);
+    CHECK(config.get_parameter_size("filament_flow_ratio", 9) == 3);
+    CHECK(config.get_parameter_size("outer_wall_speed", 9) == 5);
+    CHECK(config.get_parameter_size("unknown_option", 9) == 9);               // everything else follows the extruder count
+
+    // Without the variant lists every variant group has a single entry.
+    DynamicPrintConfig bare;
+    CHECK(bare.get_parameter_size("nozzle_volume", 9) == 1);
+    CHECK(bare.get_parameter_size("machine_max_acceleration_x", 9) == 2);
+    CHECK(bare.get_parameter_size("filament_flow_ratio", 9) == 1);
+    CHECK(bare.get_parameter_size("outer_wall_speed", 9) == 1);
+    CHECK(bare.get_parameter_size("unknown_option", 9) == 9);
+}
+
+// Known bug: PrintConfigDef never calls init_filament_option_keys(), so filament_option_keys() is empty and
+// set_num_filaments() resizes nothing; fixed by the follow-up fix PR.
+TEST_CASE("set_num_filaments resizes the filament vectors while preserving the prefix", "[Config][ConfigVariants][!shouldfail]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"#112233", "#445566"}));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.70, 1.80}));
+    config.set_key_value("default_filament_profile", new ConfigOptionStrings({"profile"}));
+    const double default_diameter = FullPrintConfig::defaults().filament_diameter.values.front();
+    REQUIRE(default_diameter != 1.70);
+    REQUIRE(default_diameter != 1.80);
+
+    config.set_num_filaments(3);
+    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values.size() == 3);
+    REQUIRE(config.option<ConfigOptionFloats>("filament_diameter")->values.size() == 3);
+    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values[0] == "#112233");
+    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values[1] == "#445566");
+    CHECK_THAT(config.option<ConfigOptionFloats>("filament_diameter")->values[0], Catch::Matchers::WithinAbs(1.70, 1e-12));
+    CHECK_THAT(config.option<ConfigOptionFloats>("filament_diameter")->values[1], Catch::Matchers::WithinAbs(1.80, 1e-12));
+    // The new slot takes the default.
+    CHECK_THAT(config.option<ConfigOptionFloats>("filament_diameter")->values[2], Catch::Matchers::WithinAbs(default_diameter, 1e-12));
+    // default_filament_profile is deliberately not resized.
+    CHECK(config.option<ConfigOptionStrings>("default_filament_profile")->values == std::vector<std::string>{"profile"});
+
+    config.set_num_filaments(1);
+    REQUIRE(config.option<ConfigOptionStrings>("filament_colour")->values.size() == 1);
+    REQUIRE(config.option<ConfigOptionFloats>("filament_diameter")->values.size() == 1);
+    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values.front() == "#112233");
+    CHECK_THAT(config.option<ConfigOptionFloats>("filament_diameter")->values.front(), Catch::Matchers::WithinAbs(1.70, 1e-12));
+}
