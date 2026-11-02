@@ -1,4 +1,5 @@
 #include "libslic3r/TextureToColor/Callbacks.hpp"
+#include "libslic3r/TextureToColor/CgalUtils.hpp"
 #include "libslic3r/TextureToColor/ColorUtils.hpp"
 #include "libslic3r/TextureToColor/Repair.hpp"
 #include "libslic3r/TextureToColor/TriMesh.hpp"
@@ -98,15 +99,20 @@ TEST_CASE("RepairMesh corrects face orientation and removes a degenerate face",
 {
     const TriMesh input = reversed_tetrahedron_with_degenerate_face();
     std::shared_ptr<TriMesh> repaired;
+    // Hole filling is disabled, so a closed result can only come from reorienting the flipped
+    // face in place. Dropping the conflicting face and filling the hole it leaves would end open.
+    RepairSetting no_hole_filling;
+    no_hole_filling.max_hole_edges = 0;
+    no_hole_filling.max_boundary_edges = 0;
 
-    REQUIRE(RepairMesh(input, repaired));
+    REQUIRE(RepairMesh(input, repaired, nullptr, nullptr, no_hole_filling));
     REQUIRE(repaired);
     check_finite_and_valid(*repaired);
     CHECK(repaired->vertices.size() == 4);
     CHECK(repaired->indices.size() == 4);
     CHECK(color_utils::is_closed(*repaired));
-    // Closing and the face count depend on consistent winding. The volume alone cannot show it:
-    // the flipped face lies in z = 0, through the origin, and adds nothing to the signed sum.
+    // The volume alone cannot show the winding: the flipped face lies in z = 0, through the
+    // origin, and adds nothing to the signed sum.
     CHECK_THAT(std::abs(its_volume(*repaired)), WithinAbs(1.f / 6.f, 1e-5f));
 }
 
@@ -146,6 +152,11 @@ TEST_CASE("RepairMesh limits the largest hole and the total boundary separately"
 {
     const TriMesh input = cube_with_two_holes();
     REQUIRE(input.indices.size() == 9);
+    // Lock the premise: two boundary cycles, the larger of 4 edges, 7 edges in total.
+    const BoundaryEdgeStats stats = ComputeBoundaryEdgeStats(cgalutils::trimesh_to_cgal(input));
+    REQUIRE(stats.cycle_count == 2);
+    REQUIRE(stats.max_cycle_edges == 4);
+    REQUIRE(stats.total_boundary_edges == 7);
     // {max_hole_edges, max_boundary_edges, closes}: both limits must be met. The last row allows
     // each hole on its own (4 <= 7 per hole) but not their 7-edge total.
     const auto [max_hole_edges, max_boundary_edges, closes] = GENERATE(
