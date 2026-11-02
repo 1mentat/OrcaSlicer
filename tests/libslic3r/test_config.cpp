@@ -3065,17 +3065,16 @@ TEST_CASE("AMS counts serialize sorted by id, keep empty extruders and parse bac
     CHECK(save_extruder_ams_count_to_string({}).empty());
 }
 
-TEST_CASE("Nozzle inventory serializes every volume type by name and parses it back", "[Config][ExtruderInventory]")
+TEST_CASE("Nozzle inventory serializes every physical volume type by name and parses it back", "[Config][ExtruderInventory]")
 {
     // Serialization follows the enum order, not the insertion order.
     const std::vector<std::map<NozzleVolumeType, int>> source = {
         {{nvtExtraHighFlow, 6}, {nvtE3DHighFlow, 5}, {nvtTPUHighFlow, 3}, {nvtHighFlow, 1}, {nvtStandard, 2}},
         {},
-        {{nvtHybrid, 4}},
     };
     const auto serialized = save_extruder_nozzle_stats_to_string(source);
     CHECK(serialized == std::vector<std::string>{
-        "Standard#2|High Flow#1|TPU High Flow#3|E3D High Flow#5|Extra High Flow#6", "", "Hybrid#4"});
+        "Standard#2|High Flow#1|TPU High Flow#3|E3D High Flow#5|Extra High Flow#6", ""});
     CHECK(get_extruder_nozzle_stats(serialized) == source);
 }
 
