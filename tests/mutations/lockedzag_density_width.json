@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Isolated public LockedZag probes for skeleton density and both selected zone-flow mappings.",
+  "mutants": [
+    {
+      "id": "lockedzag-skeleton-density-fixed-at-25-percent",
+      "path": "src/libslic3r/Fill/FillRectilinear.cpp",
+      "old": "zig_params.density    = it->first;",
+      "new": "zig_params.density    = 0.25f; // private mutant: ignore skeleton density",
+      "expected_matches": 1,
+      "test_filter": "LockedZagDensityBoundary",
+      "ordinary_assertion_only": true,
+      "description": "Replace the selected skeleton density with 25%; the 1/25/100% path-length and flow-length ordering checks must fail. The separate zero-skeleton observer also failed when run with this source variant."
+    },
+    {
+      "id": "lockedzag-skin-lines-use-skeleton-flow-map",
+      "path": "src/libslic3r/Fill/FillRectilinear.cpp",
+      "old": "generate_for_different_flow(this->lock_param.skin_flow_params, skin_lines);",
+      "new": "generate_for_different_flow(this->lock_param.skeleton_flow_params, skin_lines); // private mutant",
+      "expected_matches": 1,
+      "test_filter": "LockedZagLineWidthBoundary",
+      "ordinary_assertion_only": true,
+      "description": "Route skin polylines through the skeleton flow map; auto and 0.6 mm skin width output checks must fail."
+    },
+    {
+      "id": "lockedzag-skeleton-lines-use-skin-flow-map",
+      "path": "src/libslic3r/Fill/FillRectilinear.cpp",
+      "old": "generate_for_different_flow(this->lock_param.skeleton_flow_params, skeloton_lines);",
+      "new": "generate_for_different_flow(this->lock_param.skin_flow_params, skeloton_lines); // private mutant",
+      "expected_matches": 1,
+      "test_filter": "LockedZagLineWidthBoundary",
+      "ordinary_assertion_only": true,
+      "description": "Route skeleton polylines through the skin flow map; auto and 0.6 mm skeleton width output checks must fail."
+    }
+  ]
+}

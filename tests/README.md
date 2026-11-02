@@ -1596,8 +1596,12 @@ Use `fff_print_gcodeprocessor_tests`, `^FocusedGCodeProcessor::`,
 For bridge/infill boundaries, use `fff_print_settings_variance_tests`, the
 `control_regex` value from `tests/controls/settings_boundaries.json`, that file
 as `--expected-control-inventory`, and
-`tests/mutations/bridge_infill_boundaries.json`. Its nine controls preserve the
-existing geometry and G-code checks while testing registered endpoints.
+`tests/mutations/bridge_infill_boundaries.json`. Its fifteen controls preserve
+the existing geometry and G-code checks while testing registered endpoints.
+The LockedZag skin/skeleton cases also check density and selected width values
+through actual internal-infill paths. Their source-local density and flow-map
+probes are cataloged in `tests/mutations/lockedzag_density_width.json`; width
+coverage remains partial for percent-form inputs and the wider dynamic range.
 
 Pass `--cmake` and `--ctest` when the configured worker needs specific tools.
 Keep the worker's existing CPU, memory, swap, and locale limits.

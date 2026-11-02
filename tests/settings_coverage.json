@@ -1252,20 +1252,22 @@
       "reason": "The WidthPipeline cases slice automatic, 0.50 mm, and 125% widths at 0.4/0.6 mm nozzles using Classic walls, regular monotonic solid fills, and narrow-solid detection disabled. They compare actual extrusion-path widths with independent expectations and reconcile role material with emitted G-code E. Regular solid widths allow the bounded 20% spacing adjustment plus coordinate/float rounding. Other patterns, wall generators, and multi-extruder interactions remain unclaimed. Existing validation-boundary evidence remains in tests/fff_print/test_print.cpp [ValidationContracts]."
     },
     "skin_infill_line_width": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[LockedZagLineWidthBoundary]",
       "dimensions": [
-        "boundary_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Print::validate tests selected absolute boundary cases (0, 0.2 mm invalid, 0.45 mm valid, and 4 mm invalid) for this width option. The isolated LockedZag pipeline additionally checks 0/auto (0.45 mm at a 0.4 mm nozzle), 0.4 mm, and 0.6 mm absolute output widths. The option has no registered maximum; percent-form resolution and the broader dynamically valid width extent remain unclaimed, so this setting remains partial."
     },
     "skeleton_infill_line_width": {
-      "test": "tests/fff_print/test_print.cpp",
-      "tag": "[ValidationContracts]",
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[LockedZagLineWidthBoundary]",
       "dimensions": [
-        "boundary_values"
+        "representative_values",
+        "pipeline_oracle"
       ],
-      "reason": "Automatic, layer-height-equal, nominal, and oversized widths exercise validation; outer width also has absolute and percent partitions. These tests call Print::validate; a complete sliced-output matrix is not claimed."
+      "reason": "Print::validate tests selected absolute boundary cases (0, 0.2 mm invalid, 0.45 mm valid, and 4 mm invalid) for this width option. The isolated LockedZag pipeline additionally checks 0/auto (0.45 mm at a 0.4 mm nozzle), 0.4 mm, and 0.6 mm absolute output widths. The option has no registered maximum; percent-form resolution and the broader dynamically valid width extent remain unclaimed, so this setting remains partial."
     },
     "bridge_line_width": {
       "test": "tests/fff_print/test_settings_variance.cpp",
@@ -4524,14 +4526,25 @@
       ],
       "reason": "Full a44 native run passes the exact case \"SLA pad_around_object selects the standard or around-object pad\" once for both states on the same public no-support cube fixture: false produces a finite positive standard pad footprint/volume and true produces the documented empty around-object result. This is a bounded boolean pipeline claim; pad geometry ranges and interactions remain unclaimed."
     },
-    "skin_infill_density": {
+    "skeleton_infill_density": {
       "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[SettingsVariance][SolidSkinInfill][SkinInfillBoundary]",
+      "tag": "[SettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The existing 35%/70% public locked-zag comparison is retained. The new fixed-depth rows add a finite positive 1% low sentinel, the registered default 25%, the existing 70% representative, and the registered maximum 100%; the max row must exceed the 70% row in actual generated internal-fill path length and path-length-times-mm3-per-mm, with unchanged perimeter. The registered 0% minimum is deliberately not executed: Fill.cpp appends the zero-valued skin density into the consumer map, and FillRectilinear.cpp asserts density > 0.0001 then divides line spacing by density. Therefore boundary_values remains uncredited and this setting remains partial until the consumer handles zero safely."
+      "reason": "The public classic-wall LockedZag fixture pins skin depth to 0 mm so the interior footprint is skeleton. Density 0% requires no internal-infill paths after Print::validate; the 1%, 25%, and 100% rows require finite positive fill and deposition and strictly increase path-length and flow-length evidence. This covers the registered 0–100% density bounds for this fixed fixture; other patterns and geometry interactions remain unclaimed."
+    },
+    "skin_infill_density": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The existing fixed-depth LockedZag rows exercise 1%, 25%, 70%, and 100%; the added 0% row sets skin depth to 100 mm so the tested interior footprint is in the skin zone, then requires zero internal-infill paths and retained perimeter after Print::validate. Positive rows retain finite path and deposition evidence with increasing density comparisons. This covers the registered 0–100% bounds for this fixed classic-wall LockedZag fixture; other patterns and geometry interactions remain unclaimed."
     },
     "skin_infill_depth": {
       "test": "tests/fff_print/test_settings_variance.cpp",

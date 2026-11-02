@@ -4305,10 +4305,16 @@ struct LockedZagEvidence {
     double length = 0.0;
     double flow_length = 0.0;
     double perimeter_length = 0.0;
+    double min_width = std::numeric_limits<double>::infinity();
+    double max_width = 0.0;
+    double length_weighted_width = 0.0;
     bool finite = true;
 };
 
-DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, double lock_depth)
+DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, double lock_depth,
+                                     double skeleton_density = 10.0,
+                                     double skin_line_width = 0.4,
+                                     double skeleton_line_width = 0.4)
 {
     DynamicPrintConfig config = variance_config();
     config.set_deserialize_strict({
@@ -4323,9 +4329,9 @@ DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, dou
         {"sparse_infill_density", "35%"},
         {"sparse_infill_pattern", "lockedzag"},
         {"sparse_infill_line_width", 0.4},
-        {"skin_infill_line_width", 0.4},
-        {"skeleton_infill_line_width", 0.4},
-        {"skeleton_infill_density", 10.0},
+        {"skin_infill_line_width", skin_line_width},
+        {"skeleton_infill_line_width", skeleton_line_width},
+        {"skeleton_infill_density", skeleton_density},
         {"minimum_sparse_infill_area", 0.0},
         {"skin_infill_density", skin_density},
         {"skin_infill_depth", skin_depth},
@@ -4342,9 +4348,13 @@ DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, dou
     return config;
 }
 
-LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double lock_depth)
+LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double lock_depth,
+                                  double skeleton_density = 10.0,
+                                  double skin_line_width = 0.4,
+                                  double skeleton_line_width = 0.4)
 {
-    const DynamicPrintConfig config = locked_zag_config(skin_density, skin_depth, lock_depth);
+    const DynamicPrintConfig config = locked_zag_config(skin_density, skin_depth, lock_depth,
+                                                        skeleton_density, skin_line_width, skeleton_line_width);
     Print print;
     Model model;
     init_print({make_cube(20.0, 20.0, 1.6)}, print, model, config, nullptr, false);
@@ -4378,12 +4388,17 @@ LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double 
                 ++evidence.paths;
                 evidence.length += length;
                 evidence.flow_length += length * path.mm3_per_mm;
+                evidence.min_width = std::min(evidence.min_width, double(path.width));
+                evidence.max_width = std::max(evidence.max_width, double(path.width));
+                evidence.length_weighted_width += length * path.width;
             });
         }
     }
     evidence.finite = std::isfinite(evidence.length) &&
                        std::isfinite(evidence.flow_length) &&
-                       std::isfinite(evidence.perimeter_length);
+                       std::isfinite(evidence.perimeter_length) &&
+                       std::isfinite(evidence.length_weighted_width) &&
+                       (evidence.paths == 0 || (std::isfinite(evidence.min_width) && std::isfinite(evidence.max_width)));
     return evidence;
 }
 
@@ -4677,6 +4692,82 @@ TEST_CASE("Locked-zag skin density and depth exercise safe boundary points",
     for (const auto &row : {density_low, density_representative, density_max, depth_zero, depth_max})
         CHECK_THAT(row.perimeter_length,
                    Catch::Matchers::WithinAbs(density_default_depth.perimeter_length, 0.01));
+}
+
+TEST_CASE("Locked-zag zero skin density emits no skin paths after validation",
+          "[SettingsVariance][LockedZagZeroDensity]")
+{
+    const auto zero = infill_settings_contracts::run_locked_zag(0.0, 100.0, 0.0, 25.0, 0.4, 0.4);
+    REQUIRE(zero.finite);
+    CHECK(zero.paths == 0);
+    CHECK(zero.perimeter_length > 0.0);
+}
+
+TEST_CASE("Locked-zag zero skeleton density emits no skeleton paths after validation",
+          "[SettingsVariance][LockedZagZeroDensity]")
+{
+    const auto zero = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 0.0, 0.4, 0.4);
+    REQUIRE(zero.finite);
+    CHECK(zero.paths == 0);
+    CHECK(zero.perimeter_length > 0.0);
+}
+
+TEST_CASE("Locked-zag skeleton density boundaries change isolated sparse fill",
+          "[SettingsVariance][LockedZagDensityBoundary]")
+{
+    const auto minimum = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 1.0);
+    const auto nominal = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 25.0);
+    const auto maximum = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 100.0);
+
+    for (const auto &row : {minimum, nominal, maximum}) {
+        REQUIRE(row.finite);
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.length > 0.0);
+        REQUIRE(row.flow_length > 0.0);
+        REQUIRE(row.perimeter_length > 0.0);
+    }
+
+    // Zero skin depth leaves this footprint in the skeleton. Its registered
+    // 1%, 25%, and 100% densities must change the sparse-fill spacing.
+    CHECK(nominal.length > minimum.length + 0.05);
+    CHECK(maximum.length > nominal.length + 0.05);
+    CHECK(nominal.flow_length > minimum.flow_length + 0.01);
+    CHECK(maximum.flow_length > nominal.flow_length + 0.01);
+    CHECK_THAT(minimum.perimeter_length, Catch::Matchers::WithinAbs(nominal.perimeter_length, 0.01));
+    CHECK_THAT(maximum.perimeter_length, Catch::Matchers::WithinAbs(nominal.perimeter_length, 0.01));
+}
+
+TEST_CASE("Locked-zag skin and skeleton line width boundaries reach their isolated paths",
+          "[SettingsVariance][LockedZagLineWidthBoundary]")
+{
+    const auto skin_auto = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0, 25.0, 0.0, 0.4);
+    const auto skin_nominal = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0, 25.0, 0.4, 0.4);
+    const auto skin_wide = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0, 25.0, 0.6, 0.4);
+    const auto skeleton_auto = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 25.0, 0.4, 0.0);
+    const auto skeleton_nominal = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 25.0, 0.4, 0.4);
+    const auto skeleton_wide = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 25.0, 0.4, 0.6);
+
+    for (const auto &row : {skin_auto, skin_nominal, skin_wide,
+                            skeleton_auto, skeleton_nominal, skeleton_wide}) {
+        REQUIRE(row.finite);
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.length > 0.0);
+        REQUIRE(row.flow_length > 0.0);
+        REQUIRE(row.perimeter_length > 0.0);
+        CHECK_THAT(row.min_width, Catch::Matchers::WithinAbs(row.max_width, 0.0001));
+    }
+
+    // With a 0.4 mm nozzle, zero requests the frInfill default (1.125 * nozzle).
+    // Positive absolute widths are carried to the selected zone's extrusion paths.
+    CHECK_THAT(skin_auto.min_width, Catch::Matchers::WithinAbs(0.45, 0.001));
+    CHECK_THAT(skin_nominal.min_width, Catch::Matchers::WithinAbs(0.4, 0.001));
+    CHECK_THAT(skin_wide.min_width, Catch::Matchers::WithinAbs(0.6, 0.001));
+    CHECK_THAT(skeleton_auto.min_width, Catch::Matchers::WithinAbs(0.45, 0.001));
+    CHECK_THAT(skeleton_nominal.min_width, Catch::Matchers::WithinAbs(0.4, 0.001));
+    CHECK_THAT(skeleton_wide.min_width, Catch::Matchers::WithinAbs(0.6, 0.001));
+
+    for (const auto &row : {skin_nominal, skin_wide, skeleton_auto, skeleton_nominal, skeleton_wide})
+        CHECK_THAT(row.perimeter_length, Catch::Matchers::WithinAbs(skin_auto.perimeter_length, 0.01));
 }
 
 TEST_CASE("Minimum sparse area promotes only the analytically small component",
