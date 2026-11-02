@@ -24,10 +24,10 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <string>
-#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <map>
@@ -3007,16 +3007,17 @@ TEST_CASE("Firmware retraction validation rejects wipe on any extruder", "[Confi
 
 namespace {
 
-// Three slots: two physical filaments and one mixed slot blending them with a gradient.
+// Four slots: physical filaments 1 and 2, a mixed slot 3 blending them with a gradient, and a trailing physical
+// filament 4 (so that shortening an array does not touch the mixed slot).
 DynamicPrintConfig valid_mixed_filament_config()
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, false, true}));
-    config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "1,2"}));
-    config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "0.5,0.5"}));
-    config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, true}));
-    config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "0.2,0.8"}));
-    config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "0,0.2|1,0.8"}));
+    config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, false, true, false}));
+    config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "1,2", ""}));
+    config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "0.5,0.5", ""}));
+    config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, true, false}));
+    config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "0.2,0.8", ""}));
+    config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "0,0.2|1,0.8", ""}));
     return config;
 }
 
@@ -3060,23 +3061,23 @@ TEST_CASE("Mixed filament parameters validate against the filament slot cardinal
          },
          nullptr, nullptr},
         {"components array shorter than the slot count",
-         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_components", {"", ""}); },
-         "filament_mixed_components", "does not match filament slot count 3"},
+         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_components", {"", "", "1,2"}); },
+         "filament_mixed_components", "array size 3 does not match filament slot count 4"},
         {"ratios array shorter than the slot count",
-         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_sublayer_ratios", {"", ""}); },
-         "filament_mixed_sublayer_ratios", "does not match filament slot count 3"},
+         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_sublayer_ratios", {"", "", "0.5,0.5"}); },
+         "filament_mixed_sublayer_ratios", "does not match filament slot count 4"},
         {"gradient array shorter than the slot count",
-         [](DynamicPrintConfig &c) { set_bools(c, "filament_mixed_gradient", {0, 1}); },
-         "filament_mixed_gradient", "does not match filament slot count 3"},
+         [](DynamicPrintConfig &c) { set_bools(c, "filament_mixed_gradient", {0, 0, 1}); },
+         "filament_mixed_gradient", "does not match filament slot count 4"},
         {"gradient range array shorter than the slot count",
-         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_gradient_range", {"", "0.2,0.8"}); },
-         "filament_mixed_gradient_range", "does not match filament slot count 3"},
+         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_gradient_range", {"", "", "0.2,0.8"}); },
+         "filament_mixed_gradient_range", "does not match filament slot count 4"},
         {"curve array shorter than the slot count",
-         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_gradient_curve", {"", "0,0.2|1,0.8"}); },
-         "filament_mixed_gradient_curve", "does not match filament slot count 3"},
+         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_gradient_curve", {"", "", "0,0.2|1,0.8"}); },
+         "filament_mixed_gradient_curve", "does not match filament slot count 4"},
         {"longer arrays are also a mismatch",
-         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_components", {"", "", "1,2", ""}); },
-         "filament_mixed_components", "array size 4 does not match filament slot count 3"},
+         [](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_components", {"", "", "1,2", "", ""}); },
+         "filament_mixed_components", "array size 5 does not match filament slot count 4"},
         {"gradient arrays are not required when no slot has a gradient",
          [](DynamicPrintConfig &c) {
              set_bools(c, "filament_mixed_gradient", {0});
@@ -3119,20 +3120,20 @@ TEST_CASE("Mixed filament components, ratios and gradients validate their semant
         set_strings(c, "filament_mixed_gradient_curve", {"", "", "", "", ""});
     };
     const auto components = [](const char *value) {
-        return [value](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_components", {"", "", value}); };
+        return [value](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_components", {"", "", value, ""}); };
     };
     const auto ratios = [](const char *value) {
-        return [value](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_sublayer_ratios", {"", "", value}); };
+        return [value](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_sublayer_ratios", {"", "", value, ""}); };
     };
     const auto range = [](const char *value) {
-        return [value](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_gradient_range", {"", "", value}); };
+        return [value](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_gradient_range", {"", "", value, ""}); };
     };
     const auto curve = [](const char *value) {
-        return [value](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_gradient_curve", {"", "", value}); };
+        return [value](DynamicPrintConfig &c) { set_strings(c, "filament_mixed_gradient_curve", {"", "", value, ""}); };
     };
     const Row rows[] = {
         {"two physical components are accepted", components("2,1"), nullptr, nullptr},
-        {"a component past the last physical filament", components("1,3"), "filament_mixed_components", "component 3 out of range"},
+        {"a component past the last physical filament", components("1,4"), "filament_mixed_components", "component 4 out of range"},
         {"component zero", components("0,2"), "filament_mixed_components", "must be >= 1"},
         {"a non-numeric component", components("a,2"), "filament_mixed_components", "invalid component index"},
         {"an empty component entry", components("1,,2"), "filament_mixed_components", "empty component index"},
@@ -3172,6 +3173,8 @@ TEST_CASE("Mixed filament components, ratios and gradients validate their semant
         {"range starting at zero", range("0,0.8"), "filament_mixed_gradient_range", "must be in (0, 1)"},
         {"range ending at one", range("0.2,1"), "filament_mixed_gradient_range", "must be in (0, 1)"},
         {"range just inside the open interval is accepted", range("0.001,0.999"), nullptr, nullptr},
+        {"range ending at zero", range("0.5,0"), "filament_mixed_gradient_range", "must be in (0, 1)"},
+        {"range starting at one", range("1,0.5"), "filament_mixed_gradient_range", "must be in (0, 1)"},
         {"range with one value", range("0.2"), "filament_mixed_gradient_range", "two comma-separated floats"},
         {"range that is not numeric", range("a,b"), "filament_mixed_gradient_range", "two comma-separated floats"},
         {"an empty range string is accepted", range(""), nullptr, nullptr},
@@ -3180,6 +3183,27 @@ TEST_CASE("Mixed filament components, ratios and gradients validate their semant
         {"control points are separated by a bar, not a semicolon", curve("0,0.2;1,0.8"), "filament_mixed_gradient_curve", "at least 2 valid control points"},
         {"a curve with tangent fields is accepted", curve("0,0.2,,|1,0.8,,"), nullptr, nullptr},
         {"an empty curve string is accepted", curve(""), nullptr, nullptr},
+        {"a slot without a gradient is not checked for range or curve",
+         [](DynamicPrintConfig &c) {
+             // Slot 3 has a valid gradient; slot 4 has none, so its malformed range and curve are ignored.
+             set_bools(c, "filament_is_mixed", {0, 0, 1, 1, 0});
+             set_strings(c, "filament_mixed_components", {"", "", "1,2", "1,2", ""});
+             set_strings(c, "filament_mixed_sublayer_ratios", {"", "", "0.5,0.5", "1,1", ""});
+             set_bools(c, "filament_mixed_gradient", {0, 0, 1, 0, 0});
+             set_strings(c, "filament_mixed_gradient_range", {"", "", "0.2,0.8", "0,5", ""});
+             set_strings(c, "filament_mixed_gradient_curve", {"", "", "0,0.2|1,0.8", "x", ""});
+         },
+         nullptr, nullptr},
+        {"every bad mixed slot is reported on the same key",
+         [](DynamicPrintConfig &c) {
+             set_bools(c, "filament_is_mixed", {0, 0, 1, 1, 0});
+             set_strings(c, "filament_mixed_components", {"", "", "1", "2,2", ""});
+             set_strings(c, "filament_mixed_sublayer_ratios", {"", "", "", "1,1", ""});
+             set_bools(c, "filament_mixed_gradient", {0, 0, 0, 0, 0});
+             set_strings(c, "filament_mixed_gradient_range", {"", "", "", "", ""});
+             set_strings(c, "filament_mixed_gradient_curve", {"", "", "", "", ""});
+         },
+         "filament_mixed_components", "slot 3: at least 2 components required (got 1); slot 4: duplicate component index 2"},
     };
     for (const Row &row : rows) {
         DYNAMIC_SECTION(row.name) {
