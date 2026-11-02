@@ -2008,6 +2008,9 @@ TEST_CASE("Post processing rewrites all filament summary dimensions independentl
     config.filament_diameter.values = {1.75, 2.0};
     config.filament_density.values = {1.24, 1.10};
     config.filament_cost.values = {100.0, 200.0};
+    // T1 is a second filament, even though both filaments share the first extruder.
+    config.filament_map.values     = {1, 1};
+    REQUIRE(config.filament_map.values.size() == config.filament_diameter.values.size());
     const std::string summaries = "; filament used [mm] = 0, 0\n; filament used [g] = 0, 0\n"
                                    "; total filament used [g] = 0\n; filament used [cm3] = 0, 0\n"
                                    "; filament cost = 0, 0\n; total filament cost = 0\n";
