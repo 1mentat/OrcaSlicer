@@ -2421,6 +2421,88 @@ TEST_CASE("Core FFF numeric validation rejects values below their semantic floor
     }
 }
 
+TEST_CASE("normalize_fdm applies spiral mode safety values and is idempotent", "[Config][NormalizeFdm]")
+{
+    const bool split_step = GENERATE(false, true);
+    CAPTURE(split_step);
+    const auto normalize = [split_step](DynamicPrintConfig &config) {
+        if (split_step)
+            config.normalize_fdm_1();
+        else
+            config.normalize_fdm(0);
+    };
+    const auto make_config = [](bool spiral) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set("spiral_mode", spiral);
+        config.set("alternate_extra_wall", true);
+        config.set("wall_loops", 4);
+        config.set("top_shell_layers", 3);
+        config.set("bottom_shell_layers", 5);
+        config.set_deserialize_strict("sparse_infill_density", "20");
+        config.set_deserialize_strict("retract_when_changing_layer", "1,1");
+        config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true)->values = {true, true};
+        return config;
+    };
+    const auto check_unchanged = [](const DynamicPrintConfig &config) {
+        CHECK(config.opt_bool("alternate_extra_wall"));
+        CHECK(config.opt_int("wall_loops") == 4);
+        CHECK(config.opt_int("top_shell_layers") == 3);
+        CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(20., 1e-12));
+        CHECK(config.opt<ConfigOptionBools>("retract_when_changing_layer")->values == std::vector<unsigned char>{1, 1});
+        CHECK(config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer")->values == std::vector<unsigned char>{1, 1});
+    };
+
+    SECTION("spiral mode forces a single hollow wall without retraction on layer change")
+    {
+        DynamicPrintConfig config = make_config(true);
+        for (int pass = 0; pass < 2; ++pass) {
+            CAPTURE(pass); // the second pass proves idempotence
+            normalize(config);
+            CHECK(config.opt_int("wall_loops") == 1);
+            CHECK_FALSE(config.opt_bool("alternate_extra_wall"));
+            CHECK(config.opt_int("top_shell_layers") == 0);
+            CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(0., 1e-12));
+            CHECK(config.opt<ConfigOptionBools>("retract_when_changing_layer")->values == std::vector<unsigned char>{0, 0});
+            CHECK(config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer")->values == std::vector<unsigned char>{0, 0});
+            // Unrelated shell settings are untouched.
+            CHECK(config.opt_int("bottom_shell_layers") == 5);
+        }
+    }
+
+    SECTION("the same values are left alone when spiral mode is off")
+    {
+        DynamicPrintConfig config = make_config(false);
+        normalize(config);
+        check_unchanged(config);
+        CHECK(config.opt_int("bottom_shell_layers") == 5);
+    }
+}
+
+TEST_CASE("normalize_fdm raises resolution to the 1 micron floor and keeps larger values", "[Config][NormalizeFdm]")
+{
+    const bool split_step = GENERATE(false, true);
+    CAPTURE(split_step);
+    const std::pair<const char *, double> rows[] = {
+        {"0.0001", 0.001},
+        {"0.0009", 0.001},
+        {"0.001",  0.001},
+        {"0.0011", 0.0011},
+        {"0.5",    0.5},
+    };
+    for (const auto &[input, expected] : rows) {
+        DYNAMIC_SECTION("resolution " << input) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("resolution", input);
+            REQUIRE(config.opt_serialize("resolution") == input);
+            if (split_step)
+                config.normalize_fdm_1();
+            else
+                config.normalize_fdm(0);
+            CHECK_THAT(config.opt_float("resolution"), Catch::Matchers::WithinAbs(expected, 1e-12));
+        }
+    }
+}
+
 TEST_CASE("Project JSON migration records support and wall-order differences", "[Config][ConfigJsonMigration]")
 {
     const auto [seed_existing, keep_wall_order] = GENERATE(
@@ -2498,6 +2580,85 @@ void check_migrated_value_deserializes(const std::string &key, const std::string
 }
 
 } // namespace
+
+TEST_CASE("normalize_fdm_2 disables the prime tower or independent support layers and reports what it changed", "[Config][NormalizeFdm]")
+{
+    struct Row {
+        const char *name;
+        int         num_objects;
+        int         used_filaments;
+        const char *print_sequence;
+        const char *timelapse_type; // "1" is smooth
+        bool        wrapping_detection;
+        bool        mixed_filament;
+        bool        start_tower;
+        bool        tower;
+        bool        independent_layers;
+        t_config_option_keys changed;
+    };
+    const t_config_option_keys tower_changed = {"enable_prime_tower"};
+    const t_config_option_keys layers_changed = {"independent_support_layer_height"};
+    const Row rows[] = {
+        {"single filament drops the tower", 1, 1, "by layer", "0", false, false, true, false, true, tower_changed},
+        {"several filaments keep the tower and drop independent layers", 1, 2, "by layer", "0", false, false, true, true, false, layers_changed},
+        {"a mixed filament counts as several", 1, 1, "by layer", "0", false, true, true, true, false, layers_changed},
+        {"wrapping detection keeps the tower", 1, 1, "by layer", "0", true, false, true, true, false, layers_changed},
+        {"smooth timelapse keeps the tower", 1, 1, "by layer", "1", false, false, true, true, false, layers_changed},
+        {"several by-object objects drop the tower", 2, 2, "by object", "0", false, false, true, false, true, tower_changed},
+        {"a single by-object object keeps the tower", 1, 2, "by object", "0", false, false, true, true, false, layers_changed},
+        {"no tower leaves independent layers alone", 1, 2, "by layer", "0", false, false, false, false, true, {}},
+        {"no used filaments changes nothing", 1, 0, "by layer", "0", false, false, true, true, true, {}},
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.name) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("enable_prime_tower", row.start_tower);
+            config.set("independent_support_layer_height", true);
+            config.set("enable_wrapping_detection", row.wrapping_detection);
+            config.set_deserialize_strict("timelapse_type", row.timelapse_type);
+            config.set_deserialize_strict("print_sequence", row.print_sequence);
+            config.set_key_value("filament_is_mixed", new ConfigOptionBools({row.mixed_filament}));
+
+            CHECK(config.normalize_fdm_2(row.num_objects, row.used_filaments) == row.changed);
+            CHECK(config.opt_bool("enable_prime_tower") == row.tower);
+            CHECK(config.opt_bool("independent_support_layer_height") == row.independent_layers);
+            // Normalizing again has nothing left to change.
+            CHECK(config.normalize_fdm_2(row.num_objects, row.used_filaments).empty());
+        }
+    }
+}
+
+TEST_CASE("normalize_fdm applies the used-filament prime tower policy", "[Config][NormalizeFdm]")
+{
+    struct Row {
+        int         used_filaments;
+        const char *print_sequence;
+        const char *timelapse_type;
+        bool        tower;
+        bool        independent_layers;
+    };
+    const Row rows[] = {
+        {1, "by layer",  "0", false, true},
+        {2, "by layer",  "0", true,  false},
+        {2, "by object", "0", false, true},
+        {1, "by layer",  "1", true,  false},
+        {0, "by layer",  "0", true,  true}, // no used filaments: the policy is skipped
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.used_filaments << " filaments, " << row.print_sequence << ", timelapse " << row.timelapse_type) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("enable_prime_tower", true);
+            config.set("independent_support_layer_height", true);
+            config.set_deserialize_strict("print_sequence", row.print_sequence);
+            config.set_deserialize_strict("timelapse_type", row.timelapse_type);
+
+            config.normalize_fdm(row.used_filaments);
+
+            CHECK(config.opt_bool("enable_prime_tower") == row.tower);
+            CHECK(config.opt_bool("independent_support_layer_height") == row.independent_layers);
+        }
+    }
+}
 
 TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contract", "[Config][ConfigLegacy]")
 {
@@ -2724,4 +2885,121 @@ TEST_CASE("Percent bridge line width is accepted when it fits each extruder's ow
             CHECK_FALSE(has_error(config.validate(), "bridge_line_width"));
         }
     }
+}
+
+TEST_CASE("Spiral mode validation reports each incompatible process setting only for the CLI", "[Config][Validation]")
+{
+    struct Rule {
+        const char *key;
+        const char *violating;
+    };
+    // Every other spiral-incompatible setting is held at its compliant value, so each
+    // row violates exactly one rule. wall_loops != 1 is rejected on both sides of 1.
+    const Rule rules[] = {
+        {"wall_loops", "0"},
+        {"wall_loops", "2"},
+        {"sparse_infill_density", "0.01%"},  // any positive density
+        {"sparse_infill_density", "15%"},
+        {"top_shell_layers", "1"},
+        {"enable_support", "1"},
+        {"enforce_support_layers", "1"},
+    };
+    const char *const keys[] = {"wall_loops", "sparse_infill_density", "top_shell_layers", "enable_support", "enforce_support_layers"};
+
+    for (const Rule &rule : rules) {
+        DYNAMIC_SECTION(rule.key << " = " << rule.violating) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("wall_loops", 1);
+            config.set_deserialize_strict("sparse_infill_density", "0");
+            config.set("top_shell_layers", 0);
+            config.set("enable_support", false);
+            config.set("enforce_support_layers", 0);
+            config.set("spiral_mode", true);
+            // The compliant baseline is accepted.
+            for (const char *key : keys)
+                CHECK_FALSE(has_error(config.validate(true), key));
+
+            config.set_deserialize_strict(rule.key, rule.violating);
+            REQUIRE(config.opt_serialize(rule.key) == rule.violating);
+            const auto errors = config.validate(true);
+            for (const char *key : keys)
+                CHECK(has_error(errors, key) == (std::string(key) == rule.key));
+            CHECK_THAT(error_message(errors, rule.key), Catch::Matchers::ContainsSubstring("spiral vase mode is enabled"));
+
+            // Outside the CLI the settings are corrected by a dialog instead, so validate() stays silent.
+            for (const char *key : keys)
+                CHECK_FALSE(has_error(config.validate(false), key));
+
+            // Without spiral mode the same values are ordinary settings.
+            config.set("spiral_mode", false);
+            for (const char *key : keys)
+                CHECK_FALSE(has_error(config.validate(true), key));
+        }
+    }
+}
+
+TEST_CASE("Firmware retraction validation accepts only firmware flavors that implement it", "[Config][Validation]")
+{
+    // Every GCodeFlavor key. The unsupported ones are not among gcode_flavor's selectable enum
+    // values, so validate() reports "gcode_flavor" for them too; only use_firmware_retraction is checked here.
+    const std::pair<const char *, bool> flavors[] = {
+        {"marlin", true},         {"marlin2", true},    {"klipper", true},   {"reprap", true},
+        {"reprapfirmware", true}, {"repetier", true},   {"smoothie", true},  {"machinekit", true},
+        {"teacup", false},        {"makerware", false}, {"sailfish", false}, {"mach3", false},
+        {"no-extrusion", false},
+    };
+    for (const auto &[flavor, supported] : flavors) {
+        DYNAMIC_SECTION(flavor) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("gcode_flavor", flavor);
+            config.set_deserialize_strict("wipe", "0");
+
+            config.set("use_firmware_retraction", true);
+            const auto errors = config.validate();
+            CHECK(has_error(errors, "use_firmware_retraction") == !supported);
+            if (!supported)
+                CHECK_THAT(error_message(errors, "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
+
+            // The flavor restriction applies only while firmware retraction is requested.
+            config.set("use_firmware_retraction", false);
+            CHECK_FALSE(has_error(config.validate(), "use_firmware_retraction"));
+        }
+    }
+}
+
+TEST_CASE("Firmware retraction validation rejects wipe on any extruder", "[Config][Validation]")
+{
+    struct Row {
+        const char *wipe;
+        bool        firmware_retraction;
+        bool        rejected;
+    };
+    const Row rows[] = {
+        {"1",   true,  true},
+        {"0,1", true,  true},   // only the second extruder wipes
+        {"1,0", true,  true},
+        {"0,0", true,  false},
+        {"0",   true,  false},
+        {"1,1", false, false},  // wipe alone is fine without firmware retraction
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION("wipe " << row.wipe << (row.firmware_retraction ? " with" : " without") << " firmware retraction") {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("gcode_flavor", "klipper");
+            config.set_deserialize_strict("wipe", row.wipe);
+            config.set("use_firmware_retraction", row.firmware_retraction);
+            const auto errors = config.validate();
+            CHECK(has_error(errors, "use_firmware_retraction") == row.rejected);
+            if (row.rejected)
+                CHECK_THAT(error_message(errors, "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("not compatible with --wipe"));
+        }
+    }
+
+    // When both rules are violated the flavor message is the one reported (the wipe message
+    // does not replace it).
+    DynamicPrintConfig both = DynamicPrintConfig::full_print_config();
+    both.set_deserialize_strict("gcode_flavor", "teacup");
+    both.set_deserialize_strict("wipe", "1");
+    both.set("use_firmware_retraction", true);
+    CHECK_THAT(error_message(both.validate(), "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
 }
