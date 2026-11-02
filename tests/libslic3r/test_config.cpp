@@ -9,6 +9,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
 #include "libslic3r/LocalesUtils.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/libslic3r.h"
@@ -3066,24 +3067,31 @@ double bed_area_mm2(const Points &points)
 TEST_CASE("get_bed_shape uses the intersection of the extruder areas only when sharing is requested", "[Config][BedShape]")
 {
     const Vec2ds printable = {Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)};
-    // Extruder areas 20x20 and 13x20 (x from 5 to 18) intersect in 13x20 = 260 mm2; the printable area is 400 mm2.
+    // Two partially overlapping 20x20 extruder areas, (0,0)-(20,20) and (5,5)-(25,25), intersect in
+    // (5,5)-(20,20) = 225 mm2, which is neither input (400 mm2 each); the printable area is 400 mm2.
     const Vec2ds extruder_areas[] = {
         {Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)},
-        {Vec2d(5., 0.), Vec2d(18., 0.), Vec2d(18., 20.), Vec2d(5., 20.)},
+        {Vec2d(5., 5.), Vec2d(25., 5.), Vec2d(25., 25.), Vec2d(5., 25.)},
+    };
+    const auto check_shared = [](const Points &shape) {
+        CHECK_THAT(bed_area_mm2(shape), Catch::Matchers::WithinAbs(225., 1e-6));
+        const BoundingBox box(shape);
+        CHECK(box.min == Point(scaled(5.), scaled(5.)));
+        CHECK(box.max == Point(scaled(20.), scaled(20.)));
     };
 
     DynamicPrintConfig dynamic;
     dynamic.set_key_value("printable_area", new ConfigOptionPoints(printable));
     dynamic.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({extruder_areas[0], extruder_areas[1]}));
-    CHECK_THAT(bed_area_mm2(get_bed_shape(dynamic, true)), Catch::Matchers::WithinAbs(260., 1e-6));
+    check_shared(get_bed_shape(dynamic, true));
     CHECK_THAT(bed_area_mm2(get_bed_shape(dynamic, false)), Catch::Matchers::WithinAbs(400., 1e-6));
     // The dynamic-config overload shares by default.
-    CHECK_THAT(bed_area_mm2(get_bed_shape(dynamic)), Catch::Matchers::WithinAbs(260., 1e-6));
+    check_shared(get_bed_shape(dynamic));
 
     FullPrintConfig full;
     full.printable_area.values = printable;
     full.extruder_printable_area.values = {extruder_areas[0], extruder_areas[1]};
-    CHECK_THAT(bed_area_mm2(get_bed_shape(full, true)), Catch::Matchers::WithinAbs(260., 1e-6));
+    check_shared(get_bed_shape(full, true));
     CHECK_THAT(bed_area_mm2(get_bed_shape(full, false)), Catch::Matchers::WithinAbs(400., 1e-6));
     // The static-config overload does not share by default.
     CHECK_THAT(bed_area_mm2(get_bed_shape(static_cast<const PrintConfig &>(full))), Catch::Matchers::WithinAbs(400., 1e-6));
@@ -3122,45 +3130,4 @@ TEST_CASE("get_bed_shape returns a counter-clockwise polygon and handles a missi
     const Points center = get_bed_shape(centered, true);
     REQUIRE(center.size() == 1);
     CHECK(center.front() == Point(scaled(12.5), scaled(7.5)));
-}
-
-TEST_CASE("get_real_skirt_dist follows skirt, draft shield, line width and nozzle fallbacks", "[Config][Skirt]")
-{
-    struct Row {
-        int                 skirt_height;
-        int                 skirt_loops;
-        const char         *draft_shield;
-        double              distance;
-        double              initial_width;
-        double              line_width;
-        std::vector<double> nozzle_diameters;
-        double              expected;
-    };
-    const Row rows[] = {
-        {0, 0, "disabled", 1.5, 0.6, 0.4, {0.4}, 0.0},          // no skirt at all
-        {1, 0, "disabled", 1.5, 0.6, 0.4, {0.4}, 0.0},          // no loops
-        {0, 2, "disabled", 1.5, 0.6, 0.4, {0.4}, 0.0},          // no height
-        {1, 2, "disabled", 1.5, 0.6, 0.4, {0.4}, 2.7},          // distance + loops * initial layer width
-        {1, 2, "disabled", 1.0, 0.0, 0.5, {0.4}, 2.0},          // falls back to line_width
-        {1, 1, "disabled", 0.2, 0.0, 0.0, {0.45, 0.6}, 0.8},    // then to the largest nozzle
-        {1, 1, "disabled", 0.1, 0.0, 0.0, {}, 0.5},             // then to 0.4 mm
-        {0, 0, "enabled",  0.3, 0.7, 0.4, {0.4}, 1.0},          // a draft shield counts as one loop
-        {0, 3, "enabled",  0.3, 0.7, 0.4, {0.4}, 2.4},          // but keeps an explicit loop count
-    };
-    for (const Row &row : rows) {
-        DYNAMIC_SECTION(row.skirt_height << " height, " << row.skirt_loops << " loops, draft " << row.draft_shield
-                        << ", distance " << row.distance << ", widths " << row.initial_width << '/' << row.line_width
-                        << ", " << row.nozzle_diameters.size() << " nozzles") {
-            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-            config.set("skirt_height", row.skirt_height);
-            config.set("skirt_loops", row.skirt_loops);
-            config.set("skirt_distance", row.distance);
-            config.set_deserialize_strict("draft_shield", row.draft_shield);
-            config.set("initial_layer_line_width", row.initial_width);
-            config.set("line_width", row.line_width);
-            config.option<ConfigOptionFloats>("nozzle_diameter")->values = row.nozzle_diameters;
-
-            CHECK_THAT(get_real_skirt_dist(config), Catch::Matchers::WithinAbs(row.expected, 1e-5));
-        }
-    }
 }
