@@ -532,6 +532,71 @@ TEST_CASE("Surface cuts preserve multiple holes when the shape outline matches t
     CHECK_THAT(projected_area(cut), WithinAbs(100. - 2. * 4., 1e-4));
 }
 
+// Shape coordinates in scaled units (1 mm = 1e6), as the emboss tool produces them, projected back to millimetres.
+Polygon scaled_rectangle(double x0, double y0, double x1, double y1)
+{
+    return rectangle(scale_(x0), scale_(y0), scale_(x1), scale_(y1));
+}
+
+Emboss::OrthoProject scaled_cube_projection(float depth)
+{
+    Transform3d matrix = Transform3d::Identity();
+    matrix.translate(Vec3d(0., 0., -10.));
+    matrix.scale(Vec3d(SCALING_FACTOR, SCALING_FACTOR, 1.));
+    return Emboss::OrthoProject(matrix, Vec3d(0., 0., depth));
+}
+
+// The cut of a 1..29 x 1..9 strip over three 10 mm cubes side by side (x = 0..10, 10..20, 20..30) is one 28 x 8
+// patch, split into the three cubes' top faces. Vertices strictly inside the middle cube or an outer cube pin
+// which candidate supplied each part; vertices on the shared edges (x = 10, 20) may belong to either.
+void check_three_cube_cut(const SurfaceCut &cut, double middle_z)
+{
+    check_mesh_indices(cut);
+    CHECK(contour_count(cut) >= 3);
+    CHECK_THAT(projected_area(cut), WithinAbs(28. * 8., 1e-4));
+    const BoundingBoxf3 box = vertex_bounds(cut);
+    CHECK_THAT(box.min.x(), WithinAbs(1., 1e-4));
+    CHECK_THAT(box.max.x(), WithinAbs(29., 1e-4));
+    CHECK_THAT(box.min.y(), WithinAbs(1., 1e-4));
+    CHECK_THAT(box.max.y(), WithinAbs(9., 1e-4));
+    size_t outer = 0, middle = 0;
+    for (const Vec3f &vertex : cut.vertices) {
+        if (vertex.x() < 9.99f || vertex.x() > 20.01f) {
+            CHECK_THAT(vertex.z(), WithinAbs(10., 1e-4));
+            ++outer;
+        } else if (vertex.x() > 10.01f && vertex.x() < 19.99f) {
+            CHECK_THAT(vertex.z(), WithinAbs(middle_z, 1e-4));
+            ++middle;
+        }
+    }
+    CHECK(outer > 0);
+    CHECK(middle > 0);
+}
+
+TEST_CASE("Surface cuts fill the gap between two outer cubes from an unselected middle cube", "[CutSurface]")
+{
+    const ExPolygon shape(scaled_rectangle(1., 1., 29., 9.));
+    // The outer cubes are listed first and touch the shape ends; the middle cube lies entirely in the gap.
+    const SurfaceCut cut = cut_surface({shape},
+        {its_make_cube(10., 10., 10.), shifted(its_make_cube(10., 10., 10.), Vec3f(20.f, 0.f, 0.f)),
+         shifted(its_make_cube(10., 10., 10.), Vec3f(10.f, 0.f, 0.f))},
+        scaled_cube_projection(80.f), .5f);
+    check_three_cube_cut(cut, 10.);
+}
+
+TEST_CASE("Surface cuts choose the closest of two stacked middle cubes to the projection ratio", "[CutSurface]")
+{
+    const ExPolygon shape(scaled_rectangle(1., 1., 29., 9.));
+    // Two candidates cover the middle gap, with tops at z = 30 and z = 50. Ratio 0 targets the front of the
+    // projection, so the lower one wins; ratio 1 targets the back, so the higher one wins.
+    const std::vector<indexed_triangle_set> models{
+        its_make_cube(10., 10., 10.), shifted(its_make_cube(10., 10., 10.), Vec3f(20.f, 0.f, 0.f)),
+        shifted(its_make_cube(10., 10., 10.), Vec3f(10.f, 0.f, 20.f)),
+        shifted(its_make_cube(10., 10., 10.), Vec3f(10.f, 0.f, 40.f))};
+    check_three_cube_cut(cut_surface({shape}, models, scaled_cube_projection(100.f), 0.f), 30.);
+    check_three_cube_cut(cut_surface({shape}, models, scaled_cube_projection(100.f), 1.f), 50.);
+}
+
 } // namespace cut_surface_topology_contracts
 
 namespace cut_surface_corefine_contracts {
