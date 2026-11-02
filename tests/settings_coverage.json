@@ -279,10 +279,11 @@
       "test": "tests/fff_print/test_fill.cpp",
       "tag": "[Fill]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Multiple fill families compare unsmoothed and fully smoothed paths using point, turn, and connectivity oracles; intermediate percentages are not claimed exhaustive."
+      "reason": "The registered 0% and 100% endpoints are applied through the Print pipeline in multiple fill families. Point, turn, length, and connectivity checks distinguish unsmoothed from fully smoothed paths; intermediate percentages are not claimed exhaustive."
     },
     "fill_multiline": {
       "test": "tests/fff_print/test_fill.cpp",
