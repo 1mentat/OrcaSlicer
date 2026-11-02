@@ -10,9 +10,9 @@
 #include "libslic3r/PrintConfigConstants.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Point.hpp"
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/Polygon.hpp"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/libslic3r.h"
 
 #include "test_utils.hpp"
 
@@ -3392,6 +3392,45 @@ TEST_CASE("get_real_skirt_dist reserves no clearance for a draft shield without 
     config.option<ConfigOptionFloats>("nozzle_diameter")->values = {0.4};
 
     CHECK_THAT(get_real_skirt_dist(config), Catch::Matchers::WithinAbs(0., 1e-5));
+}
+
+TEST_CASE("AMS counts serialize sorted by id, keep empty extruders and parse back", "[Config][ExtruderInventory]")
+{
+    const std::vector<std::map<int, int>> source = {
+        {{2, 5}, {1, 3}},
+        {},
+        {{4, 1}},
+    };
+    const auto serialized = save_extruder_ams_count_to_string(source);
+    CHECK(serialized == std::vector<std::string>{"1#3|2#5", "", "4#1"});
+    CHECK(get_extruder_ams_count(serialized) == source);
+    CHECK(get_extruder_ams_count({}).empty());
+    CHECK(save_extruder_ams_count_to_string({}).empty());
+}
+
+TEST_CASE("Nozzle inventory serializes every physical volume type by name and parses it back", "[Config][ExtruderInventory]")
+{
+    // Serialization follows the enum order, not the insertion order.
+    const std::vector<std::map<NozzleVolumeType, int>> source = {
+        {{nvtExtraHighFlow, 6}, {nvtE3DHighFlow, 5}, {nvtTPUHighFlow, 3}, {nvtHighFlow, 1}, {nvtStandard, 2}},
+        {},
+    };
+    const auto serialized = save_extruder_nozzle_stats_to_string(source);
+    CHECK(serialized == std::vector<std::string>{
+        "Standard#2|High Flow#1|TPU High Flow#3|E3D High Flow#5|Extra High Flow#6", ""});
+    CHECK(get_extruder_nozzle_stats(serialized) == source);
+}
+
+TEST_CASE("Nozzle inventory parsing skips tokens it cannot interpret and keeps the rest", "[Config][ExtruderInventory]")
+{
+    const auto parsed = get_extruder_nozzle_stats({"Standard#2|Broken|High Flow#1", "Unknown#9|E3D High Flow#3", ""});
+    REQUIRE(parsed.size() == 3);
+    // "Broken" has no count.
+    CHECK(parsed[0] == std::map<NozzleVolumeType, int>{{nvtStandard, 2}, {nvtHighFlow, 1}});
+    // "Unknown" is not a volume type name.
+    CHECK(parsed[1] == std::map<NozzleVolumeType, int>{{nvtE3DHighFlow, 3}});
+    CHECK(parsed[2].empty());
+    CHECK(save_extruder_nozzle_stats_to_string(parsed) == std::vector<std::string>{"Standard#2|High Flow#1", "E3D High Flow#3", ""});
 }
 
 namespace {
