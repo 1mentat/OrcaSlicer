@@ -25,11 +25,6 @@ double mesh_volume(const ModelVolume *volume)
     return std::abs(static_cast<double>(mesh.volume()));
 }
 
-BoundingBoxf3 world_bounding_box(const ModelVolume *volume)
-{
-    return volume->mesh().transformed_bounding_box(volume->get_matrix());
-}
-
 // A box spanning [0, x] x [0, y] x [0, z].
 ModelObject *add_box(Model &model, double x, double y, double z)
 {
