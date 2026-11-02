@@ -590,3 +590,320 @@ TEST_CASE("Component extraction clears stale outputs on a UV cardinality error",
     CHECK(component_uvs.empty());
 }
 
+
+namespace {
+
+TriMesh ambiguous_fan_mesh()
+{
+    TriVertices vertices{
+        TriVertex(0.f, 0.f, 0.f), TriVertex(2.f, 0.f, 0.f), TriVertex(0.f, 2.f, 0.f),
+        TriVertex(1.f, -2.f, 0.f), TriVertex(3.f, 1.f, 0.f)};
+    TriFaces faces{
+        TriFace(0, 1, 2), // ambiguous center: exactly two adjacent seed faces
+        TriFace(1, 0, 3), // red seed
+        TriFace(2, 1, 4)  // blue seed
+    };
+    return TriMesh(std::move(faces), std::move(vertices));
+}
+
+TriMesh disconnected_open_squares_mesh()
+{
+    TriVertices vertices{
+        TriVertex(0.f, 0.f, 0.f), TriVertex(10.f, 0.f, 0.f), TriVertex(10.f, 10.f, 0.f), TriVertex(0.f, 10.f, 0.f),
+        TriVertex(30.f, 0.f, 0.f), TriVertex(40.f, 0.f, 0.f), TriVertex(40.f, 10.f, 0.f), TriVertex(30.f, 10.f, 0.f)};
+    TriFaces faces{
+        TriFace(0, 1, 2), TriFace(0, 2, 3),
+        TriFace(4, 5, 6), TriFace(4, 6, 7)};
+    return TriMesh(std::move(faces), std::move(vertices));
+}
+
+constexpr Color kRedCenter  {{220, 40, 40}};
+constexpr Color kBlueCenter {{40, 40, 220}};
+constexpr Color kThirdCenter{{130, 130, 130}};
+constexpr Color kPatchA     {{31, 113, 170}};
+constexpr Color kPatchB     {{196, 149, 45}};
+
+TriMesh weighted_component_mesh(const bool swap_patch_areas)
+{
+    // The four faces form a connected strip: red seed -> patch A -> patch B ->
+    // blue seed.  The two variants swap the patch areas (2/8 versus 8/2) while
+    // retaining the same face adjacency and seed colors.
+    TriVertices vertices;
+    if (!swap_patch_areas) {
+        vertices = {
+            TriVertex(0.f, 0.f, 0.f), TriVertex(2.f, 0.f, 0.f), TriVertex(0.f, 2.f, 0.f),
+            TriVertex(2.f, 2.f, 0.f), TriVertex(0.f, 10.f, 0.f), TriVertex(4.f, 10.f, 0.f)};
+    } else {
+        vertices = {
+            TriVertex(0.f, 0.f, 0.f), TriVertex(2.f, 0.f, 0.f), TriVertex(0.f, 2.f, 0.f),
+            TriVertex(2.f, 8.f, 0.f), TriVertex(0.f, 4.f, 0.f), TriVertex(4.f, 16.f, 0.f)};
+    }
+    return TriMesh(
+        TriFaces{TriFace(0, 1, 2), TriFace(1, 3, 2), TriFace(2, 3, 4), TriFace(3, 5, 4)},
+        std::move(vertices));
+}
+
+double triangle_area(const TriMesh &mesh, const std::size_t face_id)
+{
+    const auto &face = mesh.indices[face_id];
+    const auto &a = mesh.vertices[face[0]];
+    const auto &b = mesh.vertices[face[1]];
+    const auto &c = mesh.vertices[face[2]];
+    return std::abs(static_cast<double>(b.x() - a.x()) * static_cast<double>(c.y() - a.y())
+                  - static_cast<double>(b.y() - a.y()) * static_cast<double>(c.x() - a.x())) * 0.5;
+}
+
+} // namespace
+
+TEST_CASE("Mesh color clustering snaps every face to its nearest supplied centre", "[ColorUtils]")
+{
+    // Alternate faces are slightly off red and off blue (well under 3 dE), so each must snap to its
+    // centre rather than keep its own colour.
+    const TriMesh mesh = cube_mesh();
+    const Color off_red{{250, 4, 6}};
+    const Color off_blue{{5, 3, 250}};
+    std::vector<Color> face_colors;
+    face_colors.reserve(mesh.indices.size());
+    for (std::size_t i = 0; i < mesh.indices.size(); ++i)
+        face_colors.push_back(i % 2 == 0 ? off_red : off_blue);
+
+    std::vector<std::size_t> face_ids;
+    REQUIRE(mesh_cluster(mesh, {red, blue}, face_colors, face_ids));
+    REQUIRE(face_colors.size() == mesh.indices.size());
+    REQUIRE(face_ids.size() == mesh.indices.size());
+    for (std::size_t i = 0; i < face_colors.size(); ++i) {
+        CHECK(face_ids[i] == (i % 2 == 0 ? 0u : 1u));
+        CHECK(face_colors[i] == (i % 2 == 0 ? red : blue));
+    }
+}
+
+TEST_CASE("Mesh clustering with a single centre recolours every face", "[ColorUtils]")
+{
+    const TriMesh mesh = cube_mesh();
+    std::vector<Color> colors(mesh.indices.size(), Color{{12, 34, 56}});
+    std::vector<std::size_t> ids;
+    REQUIRE(mesh_cluster(mesh, {Color{{9, 8, 7}}}, colors, ids));
+    REQUIRE(colors.size() == mesh.indices.size());
+    for (const Color &color : colors)
+        CHECK(color == Color{{9, 8, 7}});
+}
+
+// Known bug: mesh_cluster documents map_face_to_cluster_id as an [out] per-face centre ID, but with a
+// single centre it returns early and never fills it; a follow-up fix fills the IDs and removes this tag.
+TEST_CASE("Mesh clustering with a single centre reports centre 0 for every face", "[ColorUtils][!shouldfail]")
+{
+    const TriMesh mesh = cube_mesh();
+    std::vector<Color> colors(mesh.indices.size(), Color{{12, 34, 56}});
+    std::vector<std::size_t> ids;
+    REQUIRE(mesh_cluster(mesh, {Color{{9, 8, 7}}}, colors, ids));
+    REQUIRE(ids.size() == mesh.indices.size());
+    for (const std::size_t id : ids)
+        CHECK(id == 0);
+}
+
+TEST_CASE("Mesh clustering seeds a face by the distance ratio when it is beyond the absolute threshold", "[ColorUtils]")
+{
+    // A dull red face next to a blue seed. It is more than 3 dE from red, so only the ratio test
+    // (nearest centre at least 1.5 times closer than the second) seeds it red. Without that test it
+    // would be left for the flood and inherit its blue neighbour.
+    const TriMesh adjacent = open_square_mesh();
+    const Color dull_red{{220, 30, 30}};
+    const double to_red = calc_rgb_color_difference_by_ciede2000(dull_red, red);
+    const double to_blue = calc_rgb_color_difference_by_ciede2000(dull_red, blue);
+    REQUIRE(to_red > 3.0);
+    REQUIRE(to_red * 1.5 < to_blue);
+    std::vector<Color> pair_colors{blue, dull_red};
+    std::vector<std::size_t> pair_ids;
+    REQUIRE(mesh_cluster(adjacent, {red, blue}, pair_colors, pair_ids));
+    REQUIRE(pair_ids.size() == 2);
+    CHECK(pair_ids[0] == 1);
+    CHECK(pair_ids[1] == 0);
+    CHECK(pair_colors[0] == blue);
+    CHECK(pair_colors[1] == red);
+}
+
+TEST_CASE("Mesh clustering rejects empty and mismatched face inputs without mutating colors", "[ColorUtils]")
+{
+    const TriMesh mesh = cube_mesh();
+    const std::vector<Color> original(mesh.indices.size(), red);
+    std::vector<Color> malformed = original;
+    malformed.pop_back();
+    std::vector<std::size_t> ids;
+    CHECK_FALSE(mesh_cluster(mesh, {red, blue}, malformed, ids));
+    CHECK(malformed == std::vector<Color>(original.begin(), original.end() - 1));
+    std::vector<Color> empty_centers = original;
+    CHECK_FALSE(mesh_cluster(mesh, {}, empty_centers, ids));
+    CHECK(empty_centers == original);
+}
+
+TEST_CASE("Mesh clustering propagates ambiguous faces through connected and disconnected regions",
+          "[ColorUtils]")
+{
+    const Color gray{{128, 128, 128}};
+    const Color blue_leaning{{140, 140, 180}};
+    const double gray_to_red = calc_rgb_color_difference_by_ciede2000(gray, red);
+    const double gray_to_blue = calc_rgb_color_difference_by_ciede2000(gray, blue);
+    const double blue_to_red = calc_rgb_color_difference_by_ciede2000(blue_leaning, red);
+    const double blue_to_blue = calc_rgb_color_difference_by_ciede2000(blue_leaning, blue);
+    const double gray_min = std::min(gray_to_red, gray_to_blue);
+    const double gray_max = std::max(gray_to_red, gray_to_blue);
+    const double blue_min = std::min(blue_to_red, blue_to_blue);
+    const double blue_max = std::max(blue_to_red, blue_to_blue);
+    // These are setup preconditions for the public seed/flood route.  They
+    // deliberately fail closed if a future color-math change makes either
+    // ambiguous fixture a direct seed or too far from the 1.5 ratio boundary.
+    REQUIRE(gray_to_red > 3.0);
+    REQUIRE(gray_to_blue > 3.0);
+    REQUIRE(gray_min * 1.5 >= gray_max);
+    REQUIRE(blue_to_red > 3.0);
+    REQUIRE(blue_to_blue > 3.0);
+    REQUIRE(blue_min * 1.5 >= blue_max);
+    REQUIRE(blue_to_blue < blue_to_red);
+
+    // One valid neighbor is a strict majority. The neutral face is neither a
+    // first-pass seed nor a direct color center, so the public flood route must
+    // inherit the definitive red neighbor.
+    {
+        const TriMesh mesh = open_square_mesh();
+        std::vector<Color> colors{red, gray};
+        std::vector<std::size_t> ids;
+        REQUIRE(mesh_cluster(mesh, {red, blue}, colors, ids));
+        REQUIRE(ids.size() == mesh.indices.size());
+        CHECK(ids[0] == 0);
+        CHECK(ids[1] == 0);
+        CHECK(colors[0] == red);
+        CHECK(colors[1] == red);
+
+        std::vector<Color> blue_colors{blue, gray};
+        std::vector<std::size_t> blue_ids;
+        REQUIRE(mesh_cluster(mesh, {red, blue}, blue_colors, blue_ids));
+        REQUIRE(blue_ids.size() == mesh.indices.size());
+        CHECK(blue_ids[0] == 1);
+        CHECK(blue_ids[1] == 1);
+        CHECK(blue_colors[0] == blue);
+        CHECK(blue_colors[1] == blue);
+    }
+
+    // The center has one red and one blue adjacent seed, so majority flooding
+    // cannot decide it. It ends up blue, its nearest adjacent centre. (Outcome only: both the
+    // nearest-adjacent flood rule and the final component pass would pick blue here.)
+    {
+        const TriMesh mesh = ambiguous_fan_mesh();
+        std::vector<Color> colors{blue_leaning, red, blue};
+        std::vector<std::size_t> ids;
+        REQUIRE(mesh_cluster(mesh, {red, blue}, colors, ids));
+        REQUIRE(ids.size() == mesh.indices.size());
+        CHECK(ids[0] == 1);
+        CHECK(ids[1] == 0);
+        CHECK(ids[2] == 1);
+        CHECK(colors[0] == blue);
+        CHECK(colors[1] == red);
+        CHECK(colors[2] == blue);
+    }
+
+    // Each disconnected two-face component has one seed and one ambiguous
+    // face, so one valid neighbor is a strict majority in both components.
+    {
+        const TriMesh mesh = disconnected_open_squares_mesh();
+        std::vector<Color> colors{red, gray, blue, gray};
+        std::vector<std::size_t> ids;
+        REQUIRE(mesh_cluster(mesh, {red, blue}, colors, ids));
+        REQUIRE(ids.size() == mesh.indices.size());
+        CHECK(ids[0] == 0);
+        CHECK(ids[1] == 0);
+        CHECK(ids[2] == 1);
+        CHECK(ids[3] == 1);
+        CHECK(colors[0] == red);
+        CHECK(colors[1] == red);
+        CHECK(colors[2] == blue);
+        CHECK(colors[3] == blue);
+    }
+}
+
+TEST_CASE("Mesh clustering weights an unresolved connected component by face area",
+          "[ColorUtils]")
+{
+
+    const std::vector<Color> centers{kRedCenter, kBlueCenter, kThirdCenter};
+    const std::vector<Color> input_colors{kRedCenter, kPatchA, kPatchB, kBlueCenter};
+    REQUIRE(input_colors[0] == kRedCenter);
+    REQUIRE(input_colors[3] == kBlueCenter);
+
+    // Production CIEDE checks are route preconditions only. The fixed output
+    // expectations below use independently calculated weighted RGB colors.
+    const auto require_step3_patch = [&](const Color &patch) {
+        const double red_distance   = calc_rgb_color_difference_by_ciede2000(patch, kRedCenter);
+        const double blue_distance  = calc_rgb_color_difference_by_ciede2000(patch, kBlueCenter);
+        const double third_distance = calc_rgb_color_difference_by_ciede2000(patch, kThirdCenter);
+        const double second_distance = std::min(red_distance, blue_distance);
+        REQUIRE(third_distance < second_distance);
+        REQUIRE(second_distance - third_distance > 0.5);
+        REQUIRE(third_distance > 3.0);
+        REQUIRE(third_distance * 1.5 - second_distance > 2.0);
+    };
+    require_step3_patch(kPatchA);
+    require_step3_patch(kPatchB);
+
+    const auto weighted_average = [](const Color &a, const Color &b, const std::size_t area_a, const std::size_t area_b) {
+        const std::size_t total = area_a + area_b;
+        return Color{{(area_a * a[0] + area_b * b[0]) / total,
+                      (area_a * a[1] + area_b * b[1]) / total,
+                      (area_a * a[2] + area_b * b[2]) / total}};
+    };
+    const Color original_average = weighted_average(kPatchA, kPatchB, 2, 8);
+    const Color swapped_average = weighted_average(kPatchA, kPatchB, 8, 2);
+    // The weighted averages are worked out above by hand. The margins below are measured with the
+    // production CIEDE2000 and only document how far each average is from the decision boundary:
+    // (163,141,70) is 29.05 closer to red than to blue, (64,120,145) 28.49 closer to blue than to red.
+    REQUIRE(original_average == Color{{163, 141, 70}});
+    REQUIRE(swapped_average == Color{{64, 120, 145}});
+    const double original_margin = calc_rgb_color_difference_by_ciede2000(original_average, kBlueCenter)
+                                 - calc_rgb_color_difference_by_ciede2000(original_average, kRedCenter);
+    const double swapped_margin = calc_rgb_color_difference_by_ciede2000(swapped_average, kRedCenter)
+                                - calc_rgb_color_difference_by_ciede2000(swapped_average, kBlueCenter);
+    CHECK_THAT(original_margin, Catch::Matchers::WithinAbs(29.0498, 0.25));
+    CHECK_THAT(swapped_margin, Catch::Matchers::WithinAbs(28.4872, 0.25));
+
+    for (const bool swap_patch_areas : {false, true}) {
+        const TriMesh mesh = weighted_component_mesh(swap_patch_areas);
+        REQUIRE(mesh.vertices.size() == 6);
+        REQUIRE(mesh.indices.size() == 4);
+        REQUIRE(triangle_area(mesh, 0) > 0.0);
+        REQUIRE(triangle_area(mesh, 1) > 0.0);
+        REQUIRE(triangle_area(mesh, 2) > 0.0);
+        REQUIRE(triangle_area(mesh, 3) > 0.0);
+        const double patch_a_area = triangle_area(mesh, 1);
+        const double patch_b_area = triangle_area(mesh, 2);
+        if (!swap_patch_areas) {
+            CHECK_THAT(patch_a_area, Catch::Matchers::WithinAbs(2.0, 1e-6));
+            CHECK_THAT(patch_b_area, Catch::Matchers::WithinAbs(8.0, 1e-6));
+        } else {
+            CHECK_THAT(patch_a_area, Catch::Matchers::WithinAbs(8.0, 1e-6));
+            CHECK_THAT(patch_b_area, Catch::Matchers::WithinAbs(2.0, 1e-6));
+        }
+
+        const TriMesh original_mesh = mesh;
+        std::vector<Color> face_colors = input_colors;
+        std::vector<std::size_t> face_ids;
+        REQUIRE(mesh_cluster(mesh, centers, face_colors, face_ids));
+        REQUIRE(face_ids.size() == mesh.indices.size());
+        REQUIRE(face_colors.size() == mesh.indices.size());
+        CHECK(face_ids[0] == 0);
+        CHECK(face_ids[3] == 1);
+        CHECK(face_colors[0] == kRedCenter);
+        CHECK(face_colors[3] == kBlueCenter);
+        if (!swap_patch_areas) {
+            CHECK(face_ids[1] == 0);
+            CHECK(face_ids[2] == 0);
+            CHECK(face_colors[1] == kRedCenter);
+            CHECK(face_colors[2] == kRedCenter);
+        } else {
+            CHECK(face_ids[1] == 1);
+            CHECK(face_ids[2] == 1);
+            CHECK(face_colors[1] == kBlueCenter);
+            CHECK(face_colors[2] == kBlueCenter);
+        }
+        CHECK(mesh.vertices == original_mesh.vertices);
+        CHECK(mesh.indices == original_mesh.indices);
+    }
+}

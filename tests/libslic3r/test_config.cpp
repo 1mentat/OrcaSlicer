@@ -10,6 +10,9 @@
 #include "libslic3r/PrintConfigConstants.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/libslic3r.h"
 
 #include "test_utils.hpp"
 
@@ -3332,4 +3335,270 @@ TEST_CASE("Mixed filament components, ratios and gradients validate their semant
             }
         }
     }
+}
+
+TEST_CASE("get_real_skirt_dist follows skirt, loop, line width and nozzle fallbacks", "[Config][Skirt]")
+{
+    struct Row {
+        int                 skirt_height;
+        int                 skirt_loops;
+        const char         *draft_shield;
+        double              distance;
+        double              initial_width;
+        double              line_width;
+        std::vector<double> nozzle_diameters;
+        double              expected;
+    };
+    const Row rows[] = {
+        {0, 0, "disabled", 1.5, 0.6, 0.4, {0.4}, 0.0},          // no skirt at all
+        {1, 0, "disabled", 1.5, 0.6, 0.4, {0.4}, 0.0},          // no loops
+        {0, 2, "disabled", 1.5, 0.6, 0.4, {0.4}, 0.0},          // no height
+        {1, 2, "disabled", 1.5, 0.6, 0.4, {0.4}, 2.7},          // distance + loops * initial layer width
+        {1, 2, "disabled", 1.0, 0.0, 0.5, {0.4}, 2.0},          // falls back to line_width
+        {1, 1, "disabled", 0.2, 0.0, 0.0, {0.45, 0.6}, 0.8},    // then to the largest nozzle
+        {1, 1, "disabled", 0.1, 0.0, 0.0, {}, 0.5},             // then to 0.4 mm
+        {0, 3, "enabled",  0.3, 0.7, 0.4, {0.4}, 2.4},          // a draft shield alone counts the explicit loops
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.skirt_height << " height, " << row.skirt_loops << " loops, draft " << row.draft_shield
+                        << ", distance " << row.distance << ", widths " << row.initial_width << '/' << row.line_width
+                        << ", " << row.nozzle_diameters.size() << " nozzles") {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("skirt_height", row.skirt_height);
+            config.set("skirt_loops", row.skirt_loops);
+            config.set("skirt_distance", row.distance);
+            config.set_deserialize_strict("draft_shield", row.draft_shield);
+            config.set("initial_layer_line_width", row.initial_width);
+            config.set("line_width", row.line_width);
+            config.option<ConfigOptionFloats>("nozzle_diameter")->values = row.nozzle_diameters;
+
+            CHECK_THAT(get_real_skirt_dist(config), Catch::Matchers::WithinAbs(row.expected, 1e-5));
+        }
+    }
+}
+
+TEST_CASE("get_real_skirt_dist reserves no clearance for a draft shield without skirt loops", "[Config][Skirt]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set("skirt_height", 0);
+    config.set("skirt_loops", 0);
+    config.set("skirt_distance", 0.3);
+    config.set_deserialize_strict("draft_shield", "enabled");
+    config.set("initial_layer_line_width", 0.7);
+    config.set("line_width", 0.4);
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values = {0.4};
+
+    CHECK_THAT(get_real_skirt_dist(config), Catch::Matchers::WithinAbs(0., 1e-5));
+}
+
+TEST_CASE("AMS counts serialize sorted by id, keep empty extruders and parse back", "[Config][ExtruderInventory]")
+{
+    const std::vector<std::map<int, int>> source = {
+        {{2, 5}, {1, 3}},
+        {},
+        {{4, 1}},
+    };
+    const auto serialized = save_extruder_ams_count_to_string(source);
+    CHECK(serialized == std::vector<std::string>{"1#3|2#5", "", "4#1"});
+    CHECK(get_extruder_ams_count(serialized) == source);
+    CHECK(get_extruder_ams_count({}).empty());
+    CHECK(save_extruder_ams_count_to_string({}).empty());
+}
+
+TEST_CASE("Nozzle inventory serializes every physical volume type by name and parses it back", "[Config][ExtruderInventory]")
+{
+    // Serialization follows the enum order, not the insertion order.
+    const std::vector<std::map<NozzleVolumeType, int>> source = {
+        {{nvtExtraHighFlow, 6}, {nvtE3DHighFlow, 5}, {nvtTPUHighFlow, 3}, {nvtHighFlow, 1}, {nvtStandard, 2}},
+        {},
+    };
+    const auto serialized = save_extruder_nozzle_stats_to_string(source);
+    CHECK(serialized == std::vector<std::string>{
+        "Standard#2|High Flow#1|TPU High Flow#3|E3D High Flow#5|Extra High Flow#6", ""});
+    CHECK(get_extruder_nozzle_stats(serialized) == source);
+}
+
+TEST_CASE("Nozzle inventory parsing skips tokens it cannot interpret and keeps the rest", "[Config][ExtruderInventory]")
+{
+    const auto parsed = get_extruder_nozzle_stats({"Standard#2|Broken|High Flow#1", "Unknown#9|E3D High Flow#3", ""});
+    REQUIRE(parsed.size() == 3);
+    // "Broken" has no count.
+    CHECK(parsed[0] == std::map<NozzleVolumeType, int>{{nvtStandard, 2}, {nvtHighFlow, 1}});
+    // "Unknown" is not a volume type name.
+    CHECK(parsed[1] == std::map<NozzleVolumeType, int>{{nvtE3DHighFlow, 3}});
+    CHECK(parsed[2].empty());
+    CHECK(save_extruder_nozzle_stats_to_string(parsed) == std::vector<std::string>{"Standard#2|High Flow#1", "E3D High Flow#3", ""});
+}
+
+namespace {
+
+double bed_area_mm2(const Points &points)
+{
+    return Polygon(points).area() * SCALING_FACTOR * SCALING_FACTOR;
+}
+
+} // namespace
+
+TEST_CASE("get_bed_shape uses the intersection of the extruder areas only when sharing is requested", "[Config][BedShape]")
+{
+    const Vec2ds printable = {Vec2d(0., 0.), Vec2d(30., 0.), Vec2d(30., 16.), Vec2d(0., 16.)};
+    // Two partially overlapping 20x20 extruder areas, (0,0)-(20,20) and (5,5)-(25,25), intersect in
+    // (5,5)-(20,20) = 225 mm2, which is neither input (400 mm2 each). The printable area, (0,0)-(30,16) = 480 mm2, differs from both
+    // extruder areas so that each call is pinned to the source it should read.
+    const Vec2ds extruder_areas[] = {
+        {Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)},
+        {Vec2d(5., 5.), Vec2d(25., 5.), Vec2d(25., 25.), Vec2d(5., 25.)},
+    };
+    const auto check_shared = [](const Points &shape) {
+        CHECK_THAT(bed_area_mm2(shape), Catch::Matchers::WithinAbs(225., 1e-6));
+        const BoundingBox box(shape);
+        CHECK(box.min == Point(scaled(5.), scaled(5.)));
+        CHECK(box.max == Point(scaled(20.), scaled(20.)));
+    };
+
+    const auto check_printable = [](const Points &shape) {
+        CHECK_THAT(bed_area_mm2(shape), Catch::Matchers::WithinAbs(480., 1e-6));
+        const BoundingBox box(shape);
+        CHECK(box.min == Point(0, 0));
+        CHECK(box.max == Point(scaled(30.), scaled(16.)));
+    };
+
+    DynamicPrintConfig dynamic;
+    dynamic.set_key_value("printable_area", new ConfigOptionPoints(printable));
+    dynamic.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({extruder_areas[0], extruder_areas[1]}));
+    check_shared(get_bed_shape(dynamic, true));
+    check_printable(get_bed_shape(dynamic, false));
+    // The dynamic-config overload shares by default.
+    check_shared(get_bed_shape(dynamic));
+
+    FullPrintConfig full;
+    full.printable_area.values = printable;
+    full.extruder_printable_area.values = {extruder_areas[0], extruder_areas[1]};
+    check_shared(get_bed_shape(full, true));
+    check_printable(get_bed_shape(full, false));
+    // The static-config overload does not share by default.
+    check_printable(get_bed_shape(static_cast<const PrintConfig &>(full)));
+
+    SECTION("a single extruder area replaces the printable area when sharing")
+    {
+        dynamic.set_key_value("extruder_printable_area",
+                              new ConfigOptionPointsGroups({Vec2ds{Vec2d(0., 0.), Vec2d(10., 0.), Vec2d(10., 10.), Vec2d(0., 10.)}}));
+        CHECK_THAT(bed_area_mm2(get_bed_shape(dynamic, true)), Catch::Matchers::WithinAbs(100., 1e-6));
+        check_printable(get_bed_shape(dynamic, false));
+    }
+
+    SECTION("without extruder areas the printable area is used")
+    {
+        dynamic.erase("extruder_printable_area");
+        full.extruder_printable_area.values.clear();
+        check_printable(get_bed_shape(dynamic, true));
+        check_printable(get_bed_shape(full, true));
+    }
+}
+
+TEST_CASE("get_bed_shape returns a counter-clockwise polygon and handles a missing bed", "[Config][BedShape]")
+{
+    DynamicPrintConfig config;
+    // A clockwise printable area.
+    config.set_key_value("printable_area", new ConfigOptionPoints({Vec2d(0., 0.), Vec2d(0., 20.), Vec2d(30., 20.), Vec2d(30., 0.)}));
+    const Points shape = get_bed_shape(config, false);
+    REQUIRE(shape.size() == 4);
+    CHECK(Polygon(shape).is_counter_clockwise());
+    CHECK_THAT(bed_area_mm2(shape), Catch::Matchers::WithinAbs(600., 1e-6));
+
+    // Without a printable area the shape is empty, or just the configured center.
+    CHECK(get_bed_shape(DynamicPrintConfig{}, false).empty());
+    DynamicPrintConfig centered;
+    centered.set_key_value("center", new ConfigOptionPoint(Vec2d(12.5, 7.5)));
+    const Points center = get_bed_shape(centered, true);
+    REQUIRE(center.size() == 1);
+    CHECK(center.front() == Point(scaled(12.5), scaled(7.5)));
+}
+
+TEST_CASE("Variant vector replacement restores kept slots and takes the rest from the source", "[Config][ConfigVariantRestore]")
+{
+    ConfigOptionInts destination({10, 20, 30, 40});
+    ConfigOptionInts source({100, 200, 300});
+    // Replace the two slots at 1..2. Each new slot restores the old destination value at its index, or takes
+    // the source value when the index is -1 or past the old vector.
+    std::vector<int> restore_index{3, -1, 99};
+
+    destination.set_with_restore_2(&source, restore_index, 1, 2);
+
+    CHECK(destination.values == std::vector<int>{10, 40, 200, 300, 40});
+    CHECK(source.values == std::vector<int>{100, 200, 300});
+    CHECK(restore_index == std::vector<int>{3, -1, 99});
+}
+
+TEST_CASE("Variant vector replacement clamps its range and pads a short source on request", "[Config][ConfigVariantRestore]")
+{
+    SECTION("the requested removal is clamped at the vector end") {
+        ConfigOptionInts destination({1, 2, 3});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 2, 8);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 9});
+    }
+
+    SECTION("a start at the end of the vector appends") {
+        ConfigOptionInts destination({1, 2});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 2, 0);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 9});
+    }
+
+    SECTION("a zero-length replacement inserts without deleting the following slot") {
+        ConfigOptionInts destination({1, 2});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 1, 0);
+
+        CHECK(destination.values == std::vector<int>{1, 9, 2});
+    }
+
+    SECTION("a short source supplies its first value for unmatched slots when asked") {
+        ConfigOptionInts destination({1, 2, 3, 4, 5});
+        ConfigOptionInts source({8});
+        std::vector<int> restore_index{1, -1, -1};
+
+        destination.set_with_restore_2(&source, restore_index, 1, 2, true);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 8, 8, 4, 5});
+    }
+}
+
+TEST_CASE("Variant vector replacement reports an invalid start, type or restore map", "[Config][ConfigVariantRestore]")
+{
+    ConfigOptionInts destination({1, 2});
+    ConfigOptionInts integer_source({9});
+    ConfigOptionFloats float_source({9.0});
+    std::vector<int> one_slot{-1};
+
+    CHECK_THROWS_WITH(destination.set_with_restore_2(&integer_source, one_slot, 3, 0),
+                      Catch::Matchers::ContainsSubstring("invalid size found"));
+    CHECK_THROWS_WITH(destination.set_with_restore_2(&float_source, one_slot, 0, 0),
+                      Catch::Matchers::ContainsSubstring("incompatible type"));
+
+    std::vector<int> wrong_shape{-1, -1};
+    CHECK_THROWS_WITH(destination.set_with_restore_2(&integer_source, wrong_shape, 0, 1),
+                      Catch::Matchers::ContainsSubstring("invalid restore_index size"));
+}
+
+// Known bug: set_with_restore_2 takes its source as const but const_casts it and resizes it when padding a short
+// source, so the caller's vector grows; fixed by a follow-up fix PR.
+TEST_CASE("Variant vector replacement leaves a short source unchanged when padding", "[Config][ConfigVariantRestore][!shouldfail]")
+{
+    ConfigOptionInts destination({1, 2, 3, 4, 5});
+    ConfigOptionInts source({8}); // not const: the library const_casts it when padding
+    std::vector<int> restore_index{1, -1, -1};
+
+    destination.set_with_restore_2(&source, restore_index, 1, 2, true);
+
+    CHECK(source.values == std::vector<int>{8});
 }
