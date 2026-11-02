@@ -1401,7 +1401,6 @@ TEST_CASE("read_cli parses a points vector in the NxM coordinate form", "[Config
     REQUIRE_THAT(points[3].y(), Catch::Matchers::WithinAbs(200.0, 1e-9));
 }
 
-// logfile is a CLI-only option, so it needs the config type whose def pulls in cli_misc_config_def.
 TEST_CASE("Forward-compatible settings import substitutes typed defaults and records changes",
           "[Config][ConfigSubstitution]")
 {
@@ -1482,6 +1481,7 @@ TEST_CASE("Config substitutions order by option key and old value", "[Config][Co
     CHECK_FALSE(later_option < first);
 }
 
+// logfile is a CLI-only option, so it needs the config type whose def pulls in cli_misc_config_def.
 TEST_CASE("read_cli stores the log file path as a string", "[Config]") {
     Slic3r::DynamicPrintAndCLIConfig config;
     t_config_option_keys extra, keys;
