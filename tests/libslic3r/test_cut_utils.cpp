@@ -113,6 +113,14 @@ TEST_CASE("Cut plane copies modifiers to both halves and splits an unprocessed d
     connector->set_offset(Vec3d(0., 0., 10.));
     connector->cut_info = ModelVolume::CutInfo(CutConnectorType::Dowel, 0.1f, 0.2f, false);
 
+    // add_volume() centres each mesh on its volume offset, so both volumes straddle the z = 10 cut plane.
+    const BoundingBoxf3 modifier_box = world_bounding_box(modifier);
+    CHECK_THAT(modifier_box.min.z(), Catch::Matchers::WithinAbs(6., COORD_EPSILON));
+    CHECK_THAT(modifier_box.max.z(), Catch::Matchers::WithinAbs(14., COORD_EPSILON));
+    const BoundingBoxf3 connector_source_box = world_bounding_box(connector);
+    CHECK_THAT(connector_source_box.min.z(), Catch::Matchers::WithinAbs(8., COORD_EPSILON));
+    CHECK_THAT(connector_source_box.max.z(), Catch::Matchers::WithinAbs(12., COORD_EPSILON));
+
     Cut cut(source_object, 0, Geometry::translation_transform(Vec3d(0., 0., 10.)), keep_both);
     const ModelObjectPtrs &parts = cut.perform_with_plane();
 
