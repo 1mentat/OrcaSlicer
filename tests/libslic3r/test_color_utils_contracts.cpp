@@ -655,37 +655,54 @@ double triangle_area(const TriMesh &mesh, const std::size_t face_id)
 
 } // namespace
 
-TEST_CASE("Mesh color clustering assigns every face to a supplied center", "[ColorUtils]")
+TEST_CASE("Mesh color clustering snaps every face to its nearest supplied centre", "[ColorUtils]")
 {
+    // Alternate faces are slightly off red and off blue (well under 3 dE), so each must snap to its
+    // centre rather than keep its own colour.
     const TriMesh mesh = cube_mesh();
-    std::vector<Color> input_face_colors;
-    input_face_colors.reserve(mesh.indices.size());
+    const Color off_red{{250, 4, 6}};
+    const Color off_blue{{5, 3, 250}};
+    std::vector<Color> face_colors;
+    face_colors.reserve(mesh.indices.size());
     for (std::size_t i = 0; i < mesh.indices.size(); ++i)
-        input_face_colors.push_back(i % 2 == 0 ? red : blue);
-    std::vector<Color> face_colors = input_face_colors;
+        face_colors.push_back(i % 2 == 0 ? off_red : off_blue);
 
     std::vector<std::size_t> face_ids;
     REQUIRE(mesh_cluster(mesh, {red, blue}, face_colors, face_ids));
     REQUIRE(face_colors.size() == mesh.indices.size());
     REQUIRE(face_ids.size() == mesh.indices.size());
     for (std::size_t i = 0; i < face_colors.size(); ++i) {
-        const std::size_t expected_id = input_face_colors[i] == red ? 0 : 1;
-        CHECK(face_ids[i] == expected_id);
-        CHECK(face_colors[i] == input_face_colors[i]);
+        CHECK(face_ids[i] == (i % 2 == 0 ? 0u : 1u));
+        CHECK(face_colors[i] == (i % 2 == 0 ? red : blue));
     }
-
 }
 
-TEST_CASE("Mesh clustering maps a single centre onto every face and seeds a face by the distance ratio", "[ColorUtils]")
+TEST_CASE("Mesh clustering with a single centre recolours every face", "[ColorUtils]")
 {
     const TriMesh mesh = cube_mesh();
     std::vector<Color> colors(mesh.indices.size(), Color{{12, 34, 56}});
     std::vector<std::size_t> ids;
     REQUIRE(mesh_cluster(mesh, {Color{{9, 8, 7}}}, colors, ids));
     REQUIRE(colors.size() == mesh.indices.size());
-    for (const Color& color : colors)
+    for (const Color &color : colors)
         CHECK(color == Color{{9, 8, 7}});
+}
 
+// Known bug: mesh_cluster documents map_face_to_cluster_id as an [out] per-face centre ID, but with a
+// single centre it returns early and never fills it; a follow-up fix fills the IDs and removes this tag.
+TEST_CASE("Mesh clustering with a single centre reports centre 0 for every face", "[ColorUtils][!shouldfail]")
+{
+    const TriMesh mesh = cube_mesh();
+    std::vector<Color> colors(mesh.indices.size(), Color{{12, 34, 56}});
+    std::vector<std::size_t> ids;
+    REQUIRE(mesh_cluster(mesh, {Color{{9, 8, 7}}}, colors, ids));
+    REQUIRE(ids.size() == mesh.indices.size());
+    for (const std::size_t id : ids)
+        CHECK(id == 0);
+}
+
+TEST_CASE("Mesh clustering seeds a face by the distance ratio when it is beyond the absolute threshold", "[ColorUtils]")
+{
     // A dull red face next to a blue seed. It is more than 3 dE from red, so only the ratio test
     // (nearest centre at least 1.5 times closer than the second) seeds it red. Without that test it
     // would be left for the flood and inherit its blue neighbour.
@@ -835,8 +852,9 @@ TEST_CASE("Mesh clustering weights an unresolved connected component by face are
     };
     const Color original_average = weighted_average(kPatchA, kPatchB, 2, 8);
     const Color swapped_average = weighted_average(kPatchA, kPatchB, 8, 2);
-    // Independent oracle: (163,141,70) has red-vs-blue margin 29.0498;
-    // (64,120,145) has blue-vs-red margin 28.4872.
+    // The weighted averages are worked out above by hand. The margins below are measured with the
+    // production CIEDE2000 and only document how far each average is from the decision boundary:
+    // (163,141,70) is 29.05 closer to red than to blue, (64,120,145) 28.49 closer to blue than to red.
     REQUIRE(original_average == Color{{163, 141, 70}});
     REQUIRE(swapped_average == Color{{64, 120, 145}});
     const double original_margin = calc_rgb_color_difference_by_ciede2000(original_average, kBlueCenter)
