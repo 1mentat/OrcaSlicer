@@ -93,6 +93,17 @@ On Linux, `systemd-logind` can remove a user's shared-memory files after the
 last session closes; a disk-backed bind mount below `/dev/shm` does not protect
 its contents from this cleanup. Check free space on both the build volume and
 the root filesystem, which may still hold Git metadata and service logs.
+Before a large build on a shared filesystem, compile and run a tiny executable
+from the intended runtime directory. A volume may permit compilation and linking
+while failing to execute the result. If needed, set
+`-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/absolute/path/on/local/disk` while retaining
+source, objects, and logs on the larger build volume. Check the generated Catch2
+`TEST_EXECUTABLE` and CTest command paths, then run a listed test from the actual
+binary; the CMake cache entry alone does not prove the runtime path is correct.
+Set `CCACHE_DIR` to a volume with adequate free space before compiling, since the
+default user cache may fill the root filesystem even when the build volume has
+room. Retain the configured build for subsequent runs using the reuse commands
+below; a fresh cache does not replace compiled-object reuse.
 Verify parent-death, memory-limit, and timeout cleanup with small synthetic
 processes when adopting a new worker. Preserve failed logs and binaries before
 rebuilding; an interrupted run is incomplete evidence.
