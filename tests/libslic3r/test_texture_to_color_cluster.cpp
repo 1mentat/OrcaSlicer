@@ -219,6 +219,7 @@ TEST_CASE("ClusterAndSmooth honors the adaptive cluster cap on its generic publi
     CHECK(distinct_colors.size() == 2);
     // The cap merges the two closest input colours (red and blue, closer in Lab than either is to
     // green) into one centre and keeps green on its own.
+    // (Checked to hold with the CIEDE2000 T-term and mean-hue corrections applied as well.)
     CHECK(std::any_of(distinct_colors.begin(), distinct_colors.end(), [](const Color &c) { return matches_color(c, green); }));
     for (const Color &color : distinct_colors) {
         if (matches_color(color, green))
@@ -249,8 +250,8 @@ TEST_CASE("ClusterAndSmooth requests a repair decision for an open mesh",
 }
 
 // Only the outcome: ClusterAndSmooth exposes no hole-filling limits, so this cannot tell an in-place
-// reorientation from dropping and refilling the conflicting face; #235 proves the in-place case on
-// RepairMesh itself.
+// reorientation from dropping and refilling the conflicting face; the RepairMesh tests prove the
+// in-place case.
 TEST_CASE("ClusterAndSmooth returns a closed, consistently wound mesh for an inconsistently wound tetrahedron",
           "[TextureToColor]")
 {
@@ -270,7 +271,7 @@ TEST_CASE("ClusterAndSmooth returns a closed, consistently wound mesh for an inc
     check_finite_and_valid(out_mesh);
 
     // Repair makes neighbouring faces consistently oriented. The global sign is not asserted: the
-    // repair can leave the solid inside out, which #235 tags as a known RepairMesh bug. The
+    // repair can leave the solid inside out (a known RepairMesh bug, tagged in its own tests). The
     // tetrahedron's centroid gives an independent sign.
     const Vec3d interior(0.25, 0.25, 0.25);
     int orientation = 0;
