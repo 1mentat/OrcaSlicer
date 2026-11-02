@@ -4,6 +4,7 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
@@ -2194,6 +2195,73 @@ TEST_CASE("PrintConfig legacy handling leaves current keys and values unchanged"
             PrintConfigDef::handle_legacy(key, value);
             CHECK(key == current_key);
             CHECK(value == current_value);
+        }
+    }
+}
+
+namespace {
+
+bool has_error(const std::map<std::string, std::string> &errors, const char *key)
+{
+    return errors.find(key) != errors.end();
+}
+
+// The reported message for `key`, or an empty string when validation did not flag it.
+std::string error_message(const std::map<std::string, std::string> &errors, const char *key)
+{
+    const auto it = errors.find(key);
+    return it == errors.end() ? std::string() : it->second;
+}
+
+} // namespace
+
+TEST_CASE("Spiral mode validation reports each incompatible process setting only for the CLI", "[Config][Validation]")
+{
+    struct Rule {
+        const char *key;
+        const char *violating;
+    };
+    // Every other spiral-incompatible setting is held at its compliant value, so each
+    // row violates exactly one rule. wall_loops != 1 is rejected on both sides of 1.
+    const Rule rules[] = {
+        {"wall_loops", "0"},
+        {"wall_loops", "2"},
+        {"sparse_infill_density", "0.01%"},  // any positive density
+        {"sparse_infill_density", "15%"},
+        {"top_shell_layers", "1"},
+        {"enable_support", "1"},
+        {"enforce_support_layers", "1"},
+    };
+    const char *const keys[] = {"wall_loops", "sparse_infill_density", "top_shell_layers", "enable_support", "enforce_support_layers"};
+
+    for (const Rule &rule : rules) {
+        DYNAMIC_SECTION(rule.key << " = " << rule.violating) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("wall_loops", 1);
+            config.set_deserialize_strict("sparse_infill_density", "0");
+            config.set("top_shell_layers", 0);
+            config.set("enable_support", false);
+            config.set("enforce_support_layers", 0);
+            config.set("spiral_mode", true);
+            // The compliant baseline is accepted.
+            for (const char *key : keys)
+                CHECK_FALSE(has_error(config.validate(true), key));
+
+            config.set_deserialize_strict(rule.key, rule.violating);
+            REQUIRE(config.opt_serialize(rule.key) == rule.violating);
+            const auto errors = config.validate(true);
+            for (const char *key : keys)
+                CHECK(has_error(errors, key) == (std::string(key) == rule.key));
+            CHECK_THAT(error_message(errors, rule.key), Catch::Matchers::ContainsSubstring("spiral vase mode is enabled"));
+
+            // Outside the CLI the settings are corrected by a dialog instead, so validate() stays silent.
+            for (const char *key : keys)
+                CHECK_FALSE(has_error(config.validate(false), key));
+
+            // Without spiral mode the same values are ordinary settings.
+            config.set("spiral_mode", false);
+            for (const char *key : keys)
+                CHECK_FALSE(has_error(config.validate(true), key));
         }
     }
 }
