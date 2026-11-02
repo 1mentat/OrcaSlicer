@@ -28,6 +28,7 @@
 
 #include <set>
 #include <sstream>
+#include <string>
 #include <vector>
 #include <utility>
 #include <catch2/matchers/catch_matchers_vector.hpp>
@@ -1713,40 +1714,52 @@ TEST_CASE("Static and dynamic print defaults retain named enum lists", "[Config]
 TEST_CASE("Core FFF numeric validation rejects values below their semantic floors", "[Config][Validation]")
 {
     struct Boundary {
-        const char *key;
-        const char *invalid;
-        const char *valid;
+        const char               *key;
+        std::vector<const char *> invalid;
+        std::vector<const char *> valid;
     };
-    // These floors are semantic constraints enforced by validate(), beyond the GUI
-    // metadata (which intentionally permits zero for several editable fields). Each
-    // valid value sits at or just above the floor and differs from the default.
+    // validate() enforces these floors on top of the option metadata, which allows
+    // the invalid values below (checked first, so the generic range check cannot be
+    // what reports them). wall_loops and the shell layer counts are not listed: their
+    // semantic floor is the same as their metadata minimum. Valid values sit at or just
+    // above the floor and differ from the defaults, so they are really applied.
+    // layer_height's "not a multiple of SCALING_FACTOR" branch is not covered: the
+    // remainder of fmod() by SCALING_FACTOR is always below its 1e-4 threshold.
     const Boundary boundaries[] = {
-        {"layer_height", "0", "0.05"},
-        {"filament_diameter", "0.9", "1.0"},
-        {"nozzle_diameter", "0.004", "0.005"},
-        {"wall_loops", "-1", "0"},
-        {"top_shell_layers", "-1", "0"},
-        {"bottom_shell_layers", "-1", "0"},
-        {"skirt_height", "-1", "0"},
-        {"bridge_flow", "0", "0.01"},
-        {"internal_bridge_flow", "0", "0.01"},
-        {"extruder_clearance_radius", "0", "0.1"},
-        {"nozzle_height", "0", "0.1"},
-        {"filament_flow_ratio", "0", "0.01"},
+        {"layer_height", {"0"}, {"0.05"}},
+        {"initial_layer_print_height", {"0"}, {"0.05"}},
+        {"filament_diameter", {"0.9", "0.999"}, {"1.0"}},
+        {"nozzle_diameter", {"0.004", "0.0049"}, {"0.005"}},
+        {"skirt_height", {"-1"}, {"0"}},
+        {"bridge_flow", {"0"}, {"0.01"}},
+        {"internal_bridge_flow", {"0"}, {"0.01"}},
+        {"extruder_clearance_radius", {"0"}, {"0.1"}},
+        {"extruder_clearance_height_to_rod", {"0"}, {"0.1"}},
+        {"extruder_clearance_height_to_lid", {"0"}, {"0.1"}},
+        {"nozzle_height", {"0"}, {"0.1"}},
+        {"filament_flow_ratio", {"0"}, {"0.01"}},
     };
 
     for (const Boundary &boundary : boundaries) {
         DYNAMIC_SECTION(boundary.key) {
-            DynamicPrintConfig invalid = DynamicPrintConfig::full_print_config();
-            invalid.set_deserialize_strict(boundary.key, boundary.invalid);
-            const auto invalid_errors = invalid.validate();
-            CHECK(invalid_errors.find(boundary.key) != invalid_errors.end());
-
-            DynamicPrintConfig valid = DynamicPrintConfig::full_print_config();
-            REQUIRE(valid.opt_serialize(boundary.key) != boundary.valid);
-            valid.set_deserialize_strict(boundary.key, boundary.valid);
-            const auto valid_errors = valid.validate();
-            CHECK(valid_errors.find(boundary.key) == valid_errors.end());
+            const ConfigOptionDef *def = print_config_def.get(boundary.key);
+            REQUIRE(def != nullptr);
+            for (const char *value : boundary.invalid) {
+                INFO("invalid " << value);
+                REQUIRE(def->is_value_valid(std::stod(value)));
+                DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+                config.set_deserialize_strict(boundary.key, value);
+                const auto errors = config.validate();
+                CHECK(errors.find(boundary.key) != errors.end());
+            }
+            for (const char *value : boundary.valid) {
+                INFO("valid " << value);
+                DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+                REQUIRE(config.opt_serialize(boundary.key) != value);
+                config.set_deserialize_strict(boundary.key, value);
+                const auto errors = config.validate();
+                CHECK(errors.find(boundary.key) == errors.end());
+            }
         }
     }
 }
