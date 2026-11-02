@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <set>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -17,6 +18,9 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
+#include "test_utils.hpp"
+
+#include <boost/nowide/fstream.hpp>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -275,3 +279,256 @@ TEST_CASE("cut2model follows a non-axis projection vector", "[CutSurface]")
     // A sheared prism over a 2 mm^2 triangle, 4 mm tall along Z.
     CHECK_THAT(std::abs(its_volume(result)), WithinAbs(2. * 4., 1e-4));
 }
+
+namespace cut_surface_topology_contracts {
+
+namespace {
+
+Polygon rectangle(coord_t x0, coord_t y0, coord_t x1, coord_t y1)
+{
+    return Polygon(Points{Point(x0, y0), Point(x1, y0), Point(x1, y1), Point(x0, y1)});
+}
+
+// Every face indexes valid, distinct vertices and has non-zero area.
+void check_mesh_indices(const indexed_triangle_set &mesh)
+{
+    size_t bad_faces = 0;
+    for (const auto &face : mesh.indices) {
+        REQUIRE(face[0] < int(mesh.vertices.size()));
+        REQUIRE(face[1] < int(mesh.vertices.size()));
+        REQUIRE(face[2] < int(mesh.vertices.size()));
+        const Vec3d edge_a = mesh.vertices[face[1]].cast<double>() - mesh.vertices[face[0]].cast<double>();
+        const Vec3d edge_b = mesh.vertices[face[2]].cast<double>() - mesh.vertices[face[0]].cast<double>();
+        bad_faces += !(edge_a.cross(edge_b).squaredNorm() > 0.);
+    }
+    CHECK(bad_faces == 0);
+}
+
+// The number of contours, each of at least three valid vertices.
+size_t contour_count(const SurfaceCut &cut)
+{
+    for (const SurfaceCut::Contour &contour : cut.contours) {
+        REQUIRE(contour.size() >= 3);
+        for (const SurfaceCut::Index index : contour)
+            REQUIRE(index < cut.vertices.size());
+    }
+    return cut.contours.size();
+}
+
+double projected_area(const indexed_triangle_set &mesh)
+{
+    double area = 0.;
+    for (const auto &face : mesh.indices) {
+        const Vec3d a = mesh.vertices[face[0]].cast<double>();
+        const Vec3d b = mesh.vertices[face[1]].cast<double>();
+        const Vec3d c = mesh.vertices[face[2]].cast<double>();
+        area += std::abs((b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x())) / 2.;
+    }
+    return area;
+}
+
+BoundingBoxf3 vertex_bounds(const SurfaceCut &cut)
+{
+    BoundingBoxf3 box;
+    for (const Vec3f &vertex : cut.vertices)
+        box.merge(vertex.cast<double>());
+    return box;
+}
+
+// Requires a flat patch lying on one of the two given Z planes.
+void check_on_face(const SurfaceCut &cut, double z_a, double z_b)
+{
+    const BoundingBoxf3 box = vertex_bounds(cut);
+    CHECK_THAT(box.max.z() - box.min.z(), WithinAbs(0., 1e-4));
+    const bool on_a = std::abs(box.min.z() - z_a) < 1e-4;
+    const bool on_b = std::abs(box.min.z() - z_b) < 1e-4;
+    CHECK(on_a != on_b);
+}
+
+indexed_triangle_set shifted(indexed_triangle_set mesh, const Vec3f &delta)
+{
+    for (Vec3f &vertex : mesh.vertices)
+        vertex += delta;
+    return mesh;
+}
+
+void write_cube_off(const std::string &path, float side)
+{
+    boost::nowide::ofstream out(path);
+    out << "OFF\n8 12 0\n"
+        << "0 0 0\n" << side << " 0 0\n" << side << " " << side << " 0\n" << "0 " << side << " 0\n"
+        << "0 0 " << side << "\n" << side << " 0 " << side << "\n" << side << " " << side << " " << side << "\n"
+        << "0 " << side << " " << side << "\n"
+        << "3 0 2 1\n3 0 3 2\n3 4 5 6\n3 4 6 7\n"
+        << "3 0 1 5\n3 0 5 4\n3 1 2 6\n3 1 6 5\n"
+        << "3 2 3 7\n3 2 7 6\n3 3 0 4\n3 3 4 7\n";
+}
+
+// Projects shape points (1 unit = 1 mm) along +Z from z = -10, `depth` mm deep.
+Emboss::OrthoProject cube_projection(float depth = 30.f)
+{
+    Transform3d matrix = Transform3d::Identity();
+    matrix.translate(Vec3d(0., 0., -10.));
+    return Emboss::OrthoProject(matrix, Vec3d(0., 0., depth));
+}
+
+// Two 10 mm cubes, at x = 0..10 and x = 20..30.
+indexed_triangle_set second_cube() { return shifted(its_make_cube(10., 10., 10.), Vec3f(20.f, 0.f, 0.f)); }
+
+// The cut of a 1..29 x 1..9 strip over both cubes: a 9 x 8 patch on the same face (bottom or top) of each cube.
+void check_two_cube_patches(const SurfaceCut &cut)
+{
+    check_mesh_indices(cut);
+    CHECK(contour_count(cut) == 2);
+    CHECK_THAT(projected_area(cut), WithinAbs(2. * 9. * 8., 1e-4));
+    check_on_face(cut, 0., 10.);
+    size_t left = 0, right = 0;
+    for (const Vec3f &vertex : cut.vertices) {
+        left += vertex.x() <= 10.f;
+        right += vertex.x() >= 20.f;
+    }
+    CHECK(left > 0);
+    CHECK(right > 0);
+    CHECK(left + right == cut.vertices.size());
+}
+
+} // namespace
+
+TEST_CASE("cut_surface keeps the part of the facing cube side inside the projected shape", "[CutSurface]")
+{
+    const SurfaceCut cut = cut_surface({ExPolygon(rectangle(1, 1, 9, 9))}, {its_make_cube(10., 10., 10.)}, cube_projection(), 0.f);
+    check_mesh_indices(cut);
+    CHECK(contour_count(cut) == 1);
+    CHECK_THAT(projected_area(cut), WithinAbs(64., 1e-4));
+    // The patch is flat on one cube face and spans exactly the shape.
+    check_on_face(cut, 0., 10.);
+    const BoundingBoxf3 box = vertex_bounds(cut);
+    CHECK_THAT(box.min.x(), WithinAbs(1., 1e-4));
+    CHECK_THAT(box.max.x(), WithinAbs(9., 1e-4));
+    CHECK_THAT(box.min.y(), WithinAbs(1., 1e-4));
+    CHECK_THAT(box.max.y(), WithinAbs(9., 1e-4));
+}
+
+TEST_CASE("cut_surface returns an empty result for an empty model or shape set", "[CutSurface]")
+{
+    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 9, 9))};
+    const indexed_triangle_set model = its_make_cube(10., 10., 10.);
+    CHECK(cut_surface({}, {model}, cube_projection(), .5f).empty());
+    CHECK(cut_surface(shapes, {}, cube_projection(), .5f).empty());
+}
+
+TEST_CASE("cut_surface returns no patch for a projected shape outside the model", "[CutSurface]")
+{
+    CHECK(cut_surface({ExPolygon(rectangle(20, 20, 30, 30))}, {its_make_cube(10., 10., 10.)}, cube_projection(), .5f).empty());
+}
+
+TEST_CASE("cut_surface keeps a shape hole as its own contour", "[CutSurface]")
+{
+    ExPolygon shape(rectangle(1, 1, 9, 9));
+    shape.holes.emplace_back(rectangle(4, 4, 6, 6));
+    shape.holes.back().reverse();
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(10., 10., 10.)}, cube_projection(), .5f);
+    check_mesh_indices(cut);
+    CHECK(contour_count(cut) == 2);
+    CHECK_THAT(projected_area(cut), WithinAbs(64. - 4., 1e-4));
+}
+
+TEST_CASE("cut_surface accepts multiple disjoint projected shapes", "[CutSurface]")
+{
+    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 3, 3)), ExPolygon(rectangle(6, 5, 9, 9))};
+    const SurfaceCut cut = cut_surface(shapes, {its_make_cube(10., 10., 10.)}, cube_projection(), .25f);
+    check_mesh_indices(cut);
+    CHECK(contour_count(cut) == 2);
+    CHECK_THAT(projected_area(cut), WithinAbs(2. * 2. + 3. * 4., 1e-4));
+}
+
+TEST_CASE("cut_surface handles two disjoint source meshes in one projection", "[CutSurface]")
+{
+    const SurfaceCut cut = cut_surface({ExPolygon(rectangle(1, 1, 29, 9))}, {its_make_cube(10., 10., 10.), second_cube()},
+                                       cube_projection(), .5f);
+    check_two_cube_patches(cut);
+}
+
+TEST_CASE("Surface cuts preserve disconnected components in one source mesh", "[CutSurface]")
+{
+    indexed_triangle_set combined = its_make_cube(10., 10., 10.);
+    const indexed_triangle_set second = second_cube();
+    const int offset = int(combined.vertices.size());
+    combined.vertices.insert(combined.vertices.end(), second.vertices.begin(), second.vertices.end());
+    for (const auto &face : second.indices)
+        combined.indices.emplace_back(face[0] + offset, face[1] + offset, face[2] + offset);
+
+    check_two_cube_patches(cut_surface({ExPolygon(rectangle(1, 1, 29, 9))}, {combined}, cube_projection(), .5f));
+}
+
+TEST_CASE("Surface cuts select the requested depth across stacked models", "[CutSurface]")
+{
+    // A near cube at z = 0..10 and a far one at z = 20..30 under the same shape: ratio 0 cuts a face of the near
+    // cube, ratio 1 a face of the far one.
+    const ExPolygons shapes{ExPolygon(rectangle(1, 1, 9, 9))};
+    const indexed_triangle_set near_model = its_make_cube(10., 10., 10.);
+    const indexed_triangle_set far_model = shifted(its_make_cube(10., 10., 10.), Vec3f(0.f, 0.f, 20.f));
+    const SurfaceCut front = cut_surface(shapes, {near_model, far_model}, cube_projection(50.f), 0.f);
+    const SurfaceCut back = cut_surface(shapes, {near_model, far_model}, cube_projection(50.f), 1.f);
+    check_mesh_indices(front);
+    check_mesh_indices(back);
+    CHECK(contour_count(front) == 1);
+    CHECK(contour_count(back) == 1);
+    CHECK_THAT(projected_area(front), WithinAbs(64., 1e-4));
+    CHECK_THAT(projected_area(back), WithinAbs(64., 1e-4));
+    check_on_face(front, 0., 10.);
+    check_on_face(back, 20., 30.);
+}
+
+TEST_CASE("Surface cuts preserve multiple projected holes inside the face", "[CutSurface]")
+{
+    // A 1 mm inset 8 x 8 shape with two 2 x 2 holes.
+    ExPolygon shape(rectangle(1, 1, 9, 9));
+    shape.holes.emplace_back(rectangle(2, 2, 4, 4));
+    shape.holes.back().reverse();
+    shape.holes.emplace_back(rectangle(6, 6, 8, 8));
+    shape.holes.back().reverse();
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(10., 10., 10.)}, cube_projection(), .5f);
+    check_mesh_indices(cut);
+    CHECK(contour_count(cut) == 3);
+    CHECK_THAT(projected_area(cut), WithinAbs(64. - 2. * 4., 1e-4));
+}
+
+// Known bug: when the projected shape's outline coincides with the edge of the cut face, cut_surface classifies
+// faces through an invalid face descriptor (out-of-range write; asserts in debug), so it crashes or corrupts the
+// result; fixed by the follow-up fix PR.
+TEST_CASE("Surface cuts preserve multiple holes when the shape outline matches the face edge", "[CutSurface][.]")
+{
+    ExPolygon shape(rectangle(0, 0, 10, 10));
+    shape.holes.emplace_back(rectangle(2, 2, 4, 4));
+    shape.holes.back().reverse();
+    shape.holes.emplace_back(rectangle(6, 6, 8, 8));
+    shape.holes.back().reverse();
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(10., 10., 10.)}, cube_projection(), .5f);
+    check_mesh_indices(cut);
+    CHECK(contour_count(cut) == 3);
+    CHECK_THAT(projected_area(cut), WithinAbs(100. - 2. * 4., 1e-4));
+}
+
+TEST_CASE("corefine_test accepts two valid OFF meshes", "[CutSurface]")
+{
+    ScopedTemporaryFile model(".off"), shape(".off");
+    write_cube_off(model.string(), 10.f);
+    write_cube_off(shape.string(), 4.f);
+    CHECK(corefine_test(model.string(), shape.string()));
+}
+
+TEST_CASE("corefine_test rejects missing or malformed OFF inputs", "[CutSurface]")
+{
+    ScopedTemporaryFile valid(".off"), malformed(".off");
+    write_cube_off(valid.string(), 10.f);
+    {
+        boost::nowide::ofstream out(malformed.string());
+        out << "not an OFF mesh\n";
+    }
+    CHECK_FALSE(corefine_test(malformed.string(), valid.string()));
+    CHECK_FALSE(corefine_test(valid.string(), malformed.string()));
+    CHECK_FALSE(corefine_test("/path/that/does/not/exist.off", valid.string()));
+}
+
+} // namespace cut_surface_topology_contracts
