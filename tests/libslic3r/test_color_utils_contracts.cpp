@@ -910,7 +910,7 @@ TEST_CASE("Mesh clustering weights an unresolved connected component by face are
 
 namespace {
 
-void require_finite_mesh(const TriMesh &mesh)
+void check_finite_mesh(const TriMesh &mesh)
 {
     for (const TriVertex &vertex : mesh.vertices) {
         CHECK(std::isfinite(vertex.x()));
@@ -934,7 +934,9 @@ double signed_volume(const TriMesh &mesh)
 }
 } // namespace
 
-TEST_CASE("Smoothing keeps the mesh shape and reduces the minority label as the weight grows", "[ColorUtils]")
+// The cube's 8 vertices are all feature vertices, so geometry/boundary smoothing is not exercised here:
+// the mesh must stay unchanged while only the label smoothing threshold varies.
+TEST_CASE("Label smoothing leaves labels unchanged below the threshold and removes minority faces at weight 0.3", "[ColorUtils]")
 {
     const TriMesh original = cube_mesh();
     std::vector<std::size_t> initial(original.indices.size(), 0);
@@ -952,10 +954,12 @@ TEST_CASE("Smoothing keeps the mesh shape and reduces the minority label as the 
         CHECK(is_closed(mesh));
         for (std::size_t label : labels)
             CHECK(label <= 1);
-        if (weight == 0.)
-            CHECK(labels == initial);        if (weight == 0.3) {
-            const std::size_t initial_ones  = static_cast<std::size_t>(std::count(initial.begin(), initial.end(), 1));
-            const std::size_t smoothed_ones = static_cast<std::size_t>(std::count(labels.begin(), labels.end(), 1));
+        const std::size_t initial_ones  = static_cast<std::size_t>(std::count(initial.begin(), initial.end(), 1));
+        const std::size_t smoothed_ones = static_cast<std::size_t>(std::count(labels.begin(), labels.end(), 1));
+        if (weight < 0.3) {
+            CHECK(labels == initial);
+            CHECK(smoothed_ones == initial_ones);
+        } else {
             CHECK(smoothed_ones < initial_ones);
         }
     }
@@ -984,7 +988,7 @@ TEST_CASE("Color smoothing preserves the supplied RGB palette while changing lab
     CHECK(is_closed(mesh));
     for (const Color& color : colors)
         CHECK(palette.count(color) == 1);
-    require_finite_mesh(mesh);
+    check_finite_mesh(mesh);
 }
 
 TEST_CASE("Smoothing rejects a label count that does not match the faces", "[ColorUtils]")
