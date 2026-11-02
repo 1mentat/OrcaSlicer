@@ -641,9 +641,7 @@ TEST_CASE("Edge and circle distances to a bounded plane use its boundary edges",
     CHECK_THAT(ring_floor.distance_infinite->dist, WithinAbs(5.0, 1e-7));
 }
 
-// Known bug: without boundary edges the circle-plane branch returns the circle center and its projection
-// as witnesses, so the first witness is not on the circle; needs a fix PR
-TEST_CASE("Circle distance to a boundary-less plane has a witness on the circle", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Circle distance to a boundary-less plane it does not lie in has a witness on the circle", "[Measure][MeasureContracts]")
 {
     const SurfaceFeature ring = circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0);
     const SurfaceFeature unbounded = plane(8, Vec3d::UnitZ(), Vec3d::Zero(), std::make_shared<std::vector<SurfaceFeature>>());
@@ -652,6 +650,54 @@ TEST_CASE("Circle distance to a boundary-less plane has a witness on the circle"
     check_on_circle(ring_floor.distance_infinite->from, ring);
     // The plane witness is the circle witness dropped onto z = 0.
     check_vec(ring_floor.distance_infinite->to, Vec3d(ring_floor.distance_infinite->from.x(), ring_floor.distance_infinite->from.y(), 0.0));
+
+    // Tilted 45 degrees about Y, the circle's lowest point (sqrt(2), 0, 5 - sqrt(2)) is nearest the plane.
+    const Vec3d tilt = Vec3d(1.0, 0.0, 1.0).normalized();
+    const SurfaceFeature tilted = circle(Vec3d(0.0, 0.0, 5.0), tilt, 2.0);
+    const MeasurementResult tilted_floor = get_measurement(tilted, unbounded);
+    check_witnessed_distance(tilted_floor.distance_infinite, 5.0 - std::sqrt(2.0));
+    check_vec(tilted_floor.distance_infinite->from, Vec3d(std::sqrt(2.0), 0.0, 5.0 - std::sqrt(2.0)));
+    // Center mode measures from the center instead.
+    const MeasurementResult tilted_center_mode = get_measurement(tilted, unbounded, true);
+    check_witnessed_distance(tilted_center_mode.distance_infinite, 5.0);
+    check_vec(tilted_center_mode.distance_infinite->from, Vec3d(0.0, 0.0, 5.0));
+    check_vec(tilted_center_mode.distance_infinite->to, Vec3d::Zero());
+
+    // Lowered to z = 1, the tilted circle cuts the plane: distance 0 at a circle point on z = 0.
+    const SurfaceFeature cutting = circle(Vec3d(0.0, 0.0, 1.0), tilt, 2.0);
+    const MeasurementResult cutting_floor = get_measurement(cutting, unbounded);
+    check_witnessed_distance(cutting_floor.distance_infinite, 0.0);
+    check_on_circle(cutting_floor.distance_infinite->from, cutting);
+    CHECK_THAT(cutting_floor.distance_infinite->from.z(), WithinAbs(0.0, 1e-7));
+
+    // Centered on the plane, the tilted circle crosses it 90 degrees from its lowest direction.
+    const SurfaceFeature centered = circle(Vec3d::Zero(), tilt, 2.0);
+    const MeasurementResult centered_floor = get_measurement(centered, unbounded);
+    check_witnessed_distance(centered_floor.distance_infinite, 0.0);
+    check_on_circle(centered_floor.distance_infinite->from, centered);
+    CHECK_THAT(centered_floor.distance_infinite->from.z(), WithinAbs(0.0, 1e-7));
+
+    // Raised to z = sqrt(2), the tilted circle touches the plane at its lowest point (sqrt(2), 0, 0).
+    const MeasurementResult tangent_floor = get_measurement(circle(Vec3d(0.0, 0.0, std::sqrt(2.0)), tilt, 2.0), unbounded);
+    check_witnessed_distance(tangent_floor.distance_infinite, 0.0);
+    check_vec(tangent_floor.distance_infinite->from, Vec3d(std::sqrt(2.0), 0.0, 0.0));
+
+    // Standing upright 5 above the plane, the circle's lowest point (0, 0, 3) is nearest.
+    const MeasurementResult upright_floor = get_measurement(circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitX(), 2.0), unbounded);
+    check_witnessed_distance(upright_floor.distance_infinite, 3.0);
+    check_vec(upright_floor.distance_infinite->from, Vec3d(0.0, 0.0, 3.0));
+}
+
+// Known bug: for a circle lying in the plane the circle-plane branch returns the circle center and the plane
+// origin as witnesses of distance 0, so the first is not on the circle and they can be far apart; needs a fix PR
+TEST_CASE("Circle lying in a plane has witnesses at a common circle point", "[Measure][MeasureContracts][!shouldfail]")
+{
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    // The plane's origin is away from the circle; it has no boundary edges.
+    const SurfaceFeature floor = plane(8, Vec3d::UnitZ(), Vec3d(5.0, 5.0, 0.0), std::make_shared<std::vector<SurfaceFeature>>());
+    const MeasurementResult result = get_measurement(ring, floor);
+    check_witnessed_distance(result.distance_strict, 0.0);
+    check_on_circle(result.distance_strict->from, ring);
 }
 
 // Known bug: the edge-plane and circle-plane branches measure only to the face's boundary edges, so a
