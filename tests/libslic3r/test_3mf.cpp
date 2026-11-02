@@ -3127,20 +3127,33 @@ std::string unicode_path_extra(const std::string& stored_name, const std::string
     return extra + decoded_name;
 }
 
+// Appends an entry carrying `extra` as both its local and central-directory extra data. Existing
+// entries are read back and the archive is rewritten through the repo's zip helpers, which open
+// paths the same way the importer does.
 void append_entry_with_extra(const std::string& archive_path, const std::string& stored_name,
                              const std::string& payload, const std::string& extra)
 {
     REQUIRE(extra.size() <= std::numeric_limits<uint16_t>::max());
-    mz_zip_archive zip{};
-    REQUIRE(mz_zip_reader_init_file(&zip, archive_path.c_str(), 0));
-    const ScopeGuard close_zip([&zip] { mz_zip_end(&zip); });
-    REQUIRE(mz_zip_writer_init_from_reader(&zip, archive_path.c_str()));
+    std::vector<std::pair<std::string, std::string>> entries;
+    rewrite_3mf_entries(archive_path, [&entries](std::string& name, std::string& data) {
+        entries.emplace_back(name, data);
+        return false;
+    });
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_writer(&zip, archive_path));
+    const ScopeGuard close_zip([&zip] { close_zip_writer(&zip); });
+    for (const auto& entry : entries)
+        REQUIRE(mz_zip_writer_add_mem(&zip, entry.first.c_str(), entry.second.data(), entry.second.size(), MZ_DEFAULT_LEVEL));
     REQUIRE(mz_zip_writer_add_mem_ex_v2(&zip, stored_name.c_str(), payload.data(), payload.size(),
         nullptr, 0, MZ_DEFAULT_LEVEL | MZ_ZIP_FLAG_ASCII_FILENAME, 0, 0, nullptr,
         extra.data(), static_cast<mz_uint>(extra.size()), extra.data(), static_cast<mz_uint>(extra.size())));
     REQUIRE(mz_zip_writer_finalize_archive(&zip));
 }
 
+// The decoder's `p + 4 + len < e` check also rejects a field that ends the extra data exactly, but
+// mz_zip_reader_get_extra appends a trailing NUL that hides this from every loader-level test, so it
+// has none.
 // Appends the ASCII-named entry "Auxiliaries/docs/ascii.txt" whose extra data carries a Unicode
 // path field for `decoded_name`: optionally behind `prefix_extra_bytes` of unrelated extra data,
 // and optionally followed by an empty field.
@@ -3273,7 +3286,7 @@ TEST_CASE("BBS 3MF ignores Unicode metadata with an invalid checksum", "[3MF][Bb
     CHECK_FALSE(boost::filesystem::exists(root / "docs" / "untrusted.txt"));
 }
 
-TEST_CASE("BBS 3MF reads complete final Unicode metadata beyond 1024 bytes", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra][!shouldfail]")
+TEST_CASE("BBS 3MF reads Unicode metadata located beyond 1024 bytes of extra data", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra][!shouldfail]")
 {
     // Known bug: only the first 1024 bytes of the extra data are read; fixed by the follow-up fix PR.
     // The 1100 byte filler field keeps its length byte below 128 and places the Unicode field past offset 1023,
