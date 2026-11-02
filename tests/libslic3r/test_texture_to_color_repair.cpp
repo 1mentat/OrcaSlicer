@@ -3,6 +3,7 @@
 #include "libslic3r/TextureToColor/Repair.hpp"
 #include "libslic3r/TextureToColor/TriMesh.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "texture_to_color_fixtures.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -18,35 +19,10 @@
 
 using namespace Slic3r;
 using namespace Slic3r::tex2color;
+using namespace Slic3r::tex2color::test;
 using Catch::Matchers::WithinAbs;
 
 namespace {
-
-// Unit right tetrahedron, outward-facing, volume 1/6.
-TriMesh closed_tetrahedron()
-{
-    return TriMesh(
-        {
-            stl_triangle_vertex_indices(0, 2, 1),
-            stl_triangle_vertex_indices(0, 1, 3),
-            stl_triangle_vertex_indices(1, 2, 3),
-            stl_triangle_vertex_indices(2, 0, 3),
-        },
-        {
-            stl_vertex(0.f, 0.f, 0.f),
-            stl_vertex(1.f, 0.f, 0.f),
-            stl_vertex(0.f, 1.f, 0.f),
-            stl_vertex(0.f, 0.f, 1.f),
-        });
-}
-
-// The tetrahedron without its last face: one three-edge hole.
-TriMesh open_tetrahedron()
-{
-    TriMesh mesh = closed_tetrahedron();
-    mesh.indices.pop_back();
-    return mesh;
-}
 
 // The tetrahedron with its base face flipped and an extra degenerate face.
 TriMesh reversed_tetrahedron_with_degenerate_face()
@@ -57,18 +33,29 @@ TriMesh reversed_tetrahedron_with_degenerate_face()
     return mesh;
 }
 
-void check_finite_and_valid(const TriMesh &mesh)
+// A 10 mm cube with two separate holes: one triangle missing from the top (a three-edge hole)
+// and the whole bottom square missing (a four-edge hole). The largest hole has 4 edges and the
+// boundary has 7 in total, so the per-hole and total limits can be told apart.
+TriMesh cube_with_two_holes()
 {
-    for (const stl_vertex &vertex : mesh.vertices) {
-        for (std::size_t component = 0; component < 3; ++component)
-            CHECK(std::isfinite(vertex[component]));
-    }
+    const TriangleMesh cube = make_cube(10., 10., 10.);
+    TriMesh mesh(cube.its);
+    bool top_removed = false;
+    std::vector<stl_triangle_vertex_indices> kept;
     for (const stl_triangle_vertex_indices &face : mesh.indices) {
-        for (std::size_t component = 0; component < 3; ++component) {
-            REQUIRE(face[component] >= 0);
-            REQUIRE(static_cast<std::size_t>(face[component]) < mesh.vertices.size());
+        const auto all_at = [&](float z) {
+            return mesh.vertices[face[0]].z() == z && mesh.vertices[face[1]].z() == z && mesh.vertices[face[2]].z() == z;
+        };
+        if (all_at(0.f))
+            continue;
+        if (!top_removed && all_at(10.f)) {
+            top_removed = true;
+            continue;
         }
+        kept.push_back(face);
     }
+    mesh.indices = kept;
+    return mesh;
 }
 
 } // namespace
@@ -154,3 +141,33 @@ TEST_CASE("RepairMesh cancellation stops at each published stage",
     CHECK(repaired->indices.size() == 4);
 }
 
+
+TEST_CASE("RepairMesh limits the largest hole and the total boundary separately", "[TextureToColor][repair]")
+{
+    const TriMesh input = cube_with_two_holes();
+    REQUIRE(input.indices.size() == 9);
+    // {max_hole_edges, max_boundary_edges, closes}: both limits must be met. The last row allows
+    // each hole on its own (4 <= 7 per hole) but not their 7-edge total.
+    const auto [max_hole_edges, max_boundary_edges, closes] = GENERATE(
+        table<std::size_t, std::size_t, bool>({
+            {4, 7, true},
+            {3, 7, false},
+            {4, 6, false},
+            {7, 4, false},
+        }));
+    RepairSetting settings;
+    settings.max_hole_edges = max_hole_edges;
+    settings.max_boundary_edges = max_boundary_edges;
+    std::shared_ptr<TriMesh> repaired;
+
+    REQUIRE(RepairMesh(input, repaired, nullptr, nullptr, settings));
+    REQUIRE(repaired);
+    check_finite_and_valid(*repaired);
+    if (closes) {
+        CHECK(color_utils::is_closed(*repaired));
+        CHECK_THAT(std::abs(its_volume(*repaired)), WithinAbs(1000.f, 1e-2f));
+    } else {
+        CHECK_FALSE(color_utils::is_closed(*repaired));
+        CHECK(repaired->indices.size() == 9);
+    }
+}
