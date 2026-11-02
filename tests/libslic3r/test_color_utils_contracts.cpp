@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -439,6 +440,59 @@ TriMesh two_cubes_mesh()
     return TriMesh(mesh.its);
 }
 
+// Re-split the first cube's top square along its other diagonal, so the fixture no longer matches
+// the default triangulation and a component that re-triangulated its faces would differ.
+void flip_first_top_diagonal(TriMesh &mesh)
+{
+    std::vector<std::size_t> top;
+    for (std::size_t i = 0; i < mesh.indices.size() && top.size() < 2; ++i) {
+        const TriFace &face = mesh.indices[i];
+        bool on_top = true;
+        for (int corner = 0; corner < 3; ++corner)
+            on_top = on_top && mesh.vertices[face[corner]].z() == 10.f && mesh.vertices[face[corner]].x() <= 10.f;
+        if (on_top)
+            top.push_back(i);
+    }
+    REQUIRE(top.size() == 2);
+    const TriFace a = mesh.indices[top[0]];
+    const TriFace b = mesh.indices[top[1]];
+    const auto in = [](const TriFace &face, int v) { return face[0] == v || face[1] == v || face[2] == v; };
+    // Rotate a so it starts with its vertex that b lacks: a = (u1, x, y) with x-y the shared diagonal.
+    int r = 0;
+    while (in(b, a[r]))
+        ++r;
+    const int u1 = a[r], x = a[(r + 1) % 3], y = a[(r + 2) % 3];
+    int u2 = -1;
+    for (int corner = 0; corner < 3; ++corner)
+        if (!in(a, b[corner]))
+            u2 = b[corner];
+    REQUIRE(u2 >= 0);
+    mesh.indices[top[0]] = TriFace(u1, x, u2);
+    mesh.indices[top[1]] = TriFace(u1, u2, y);
+}
+
+// A face as its three corner positions, order-insensitive.
+using FaceKey = std::array<std::array<float, 3>, 3>;
+
+FaceKey face_key(const TriMesh &mesh, const TriFace &face)
+{
+    FaceKey key;
+    for (int corner = 0; corner < 3; ++corner) {
+        const TriVertex &v = mesh.vertices[face[corner]];
+        key[std::size_t(corner)] = {v.x(), v.y(), v.z()};
+    }
+    std::sort(key.begin(), key.end());
+    return key;
+}
+
+std::multiset<FaceKey> face_keys(const TriMesh &mesh)
+{
+    std::multiset<FaceKey> keys;
+    for (const TriFace &face : mesh.indices)
+        keys.insert(face_key(mesh, face));
+    return keys;
+}
+
 TriMesh open_square_mesh()
 {
     TriVertices vertices{
@@ -475,7 +529,9 @@ TEST_CASE("Color mesh closure distinguishes watertight and open geometry", "[Col
 
 TEST_CASE("Connected color mesh components retain faces, vertices, and UVs", "[ColorUtils]")
 {
-    const TriMesh input = two_cubes_mesh();
+    TriMesh input = two_cubes_mesh();
+    flip_first_top_diagonal(input);
+    REQUIRE(face_keys(input) != face_keys(two_cubes_mesh()));   // the fixture really differs from the default split
     const std::vector<Vec2f> uvs = indexed_uvs(input);
     std::vector<TriMesh> components;
     std::vector<std::vector<Vec2f>> component_uvs;
@@ -499,6 +555,13 @@ TEST_CASE("Connected color mesh components retain faces, vertices, and UVs", "[C
         total_faces += components[i].indices.size();
     }
     CHECK(total_faces == input.indices.size());
+    // The components hold exactly the input triangles, compared by corner positions, so a component
+    // that re-split a square along the other diagonal would not match.
+    std::multiset<FaceKey> component_faces;
+    for (const TriMesh &component : components)
+        for (const TriFace &face : component.indices)
+            component_faces.insert(face_key(component, face));
+    CHECK(component_faces == face_keys(input));
 
     // One component is the cube at x = 0..10, the other the one moved to x = 30..40.
     std::vector<float> min_x;
