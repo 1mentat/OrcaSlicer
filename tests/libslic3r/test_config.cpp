@@ -4,6 +4,7 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
@@ -2194,6 +2195,75 @@ TEST_CASE("PrintConfig legacy handling leaves current keys and values unchanged"
             PrintConfigDef::handle_legacy(key, value);
             CHECK(key == current_key);
             CHECK(value == current_value);
+        }
+    }
+}
+
+namespace {
+
+bool has_error(const std::map<std::string, std::string> &errors, const char *key)
+{
+    return errors.find(key) != errors.end();
+}
+
+// The reported message for `key`, or an empty string when validation did not flag it.
+std::string error_message(const std::map<std::string, std::string> &errors, const char *key)
+{
+    const auto it = errors.find(key);
+    return it == errors.end() ? std::string() : it->second;
+}
+
+} // namespace
+
+TEST_CASE("Bridge line width is limited by the smallest nozzle while other widths use the largest", "[Config][Validation]")
+{
+    struct Row {
+        const char *nozzles;
+        const char *bridge_width;
+        bool        rejected;
+    };
+    const Row rows[] = {
+        {"0.4",     "0.41", true},
+        {"0.4",     "0.4",  false},  // exactly the nozzle diameter
+        {"0.4",     "0.39", false},
+        {"0.4,0.6", "0.41", true},   // below the largest nozzle but above the smallest
+        {"0.4,0.6", "0.4",  false},
+        {"0.4",     "100%", false},
+        {"0.4,0.6", "60%",  false},  // below 100% of every extruder's own nozzle
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION("nozzles " << row.nozzles << ", bridge " << row.bridge_width) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("nozzle_diameter", row.nozzles);
+            config.set_deserialize_strict("bridge_line_width", row.bridge_width);
+            const auto errors = config.validate();
+            CHECK(has_error(errors, "bridge_line_width") == row.rejected);
+            if (row.rejected)
+                CHECK_THAT(error_message(errors, "bridge_line_width"), Catch::Matchers::ContainsSubstring("must not exceed nozzle diameter"));
+        }
+    }
+
+    // Ordinary line widths are capped at MAX_LINE_WIDTH_MULTIPLIER times the largest nozzle (3.0 mm here).
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("nozzle_diameter", "0.4,0.6");
+    config.set_deserialize_strict("outer_wall_line_width", "2.9");
+    CHECK_FALSE(has_error(config.validate(), "outer_wall_line_width"));
+    config.set_deserialize_strict("outer_wall_line_width", "3.1");
+    CHECK_THAT(error_message(config.validate(), "outer_wall_line_width"), Catch::Matchers::ContainsSubstring("too large line width"));
+}
+
+// Known bug: validate() resolves a percent bridge_line_width against the LARGEST nozzle and compares it with the
+// SMALLEST, while printing (LayerRegion::bridging_flow, Print::validate) resolves it against the nozzle of the
+// extruder that prints the bridge, so a percentage of at most 100% never exceeds that extruder's own nozzle;
+// fixed by the follow-up fix PR.
+TEST_CASE("Percent bridge line width is accepted when it fits each extruder's own nozzle", "[Config][Validation][!shouldfail]")
+{
+    for (const char *width : {"70%", "100%"}) {
+        DYNAMIC_SECTION("bridge " << width << " with 0.4 and 0.6 mm nozzles") {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("nozzle_diameter", "0.4,0.6");
+            config.set_deserialize_strict("bridge_line_width", width);
+            CHECK_FALSE(has_error(config.validate(), "bridge_line_width"));
         }
     }
 }
