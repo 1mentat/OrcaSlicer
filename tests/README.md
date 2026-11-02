@@ -662,6 +662,10 @@ widths; the Perlin field is deterministic but sampling positions are stochastic.
 contour/hole and outer/inner perimeter points, then exercises the registered
 thickness and point-distance endpoints. Its source-local probes are in
 `fuzzy_skin_settings_pipeline.json`.
+`[GapFillFilterSettings]` slices the same thin square tube with zero and a
+high gap-length threshold, checking that short classic-wall gap paths disappear
+without changing contour, hole, or inner-wall classes. Its two source-local
+probes are in `gap_fill_filter_threshold.json`.
 `[SeamSlopeSettings]` compares full-loop scarf distance with a bounded scarf.
 Their mutations are in `fuzzy_displacement_scarf_loop.json`.
 `[SlicingModeHoleTopology]` checks a real cavity's hole count and filled area

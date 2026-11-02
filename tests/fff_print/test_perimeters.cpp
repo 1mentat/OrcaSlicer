@@ -1313,6 +1313,52 @@ TEST_CASE("Holes run against the wall direction", "[Perimeters]")
     }
 }
 
+TEST_CASE("Filter out gap fill threshold removes short classic wall gaps",
+          "[GapFillFilterSettings][Perimeters]")
+{
+    const ConfigOptionDef *option = print_config_def.get("filter_out_gap_fill");
+    REQUIRE(option != nullptr);
+    REQUIRE(option->type == coFloat);
+
+    DynamicPrintConfig keep_config = hole_direction_config(1, "ccw");
+    keep_config.set_deserialize_strict({
+        {"filter_out_gap_fill", 0.0},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    Print keep_print;
+    Model keep_model;
+    square_tube(keep_print, keep_model, keep_config, 1., 1.);
+    const StringObjectException keep_validation = keep_print.validate();
+    INFO(keep_validation.string);
+    REQUIRE(keep_validation.string.empty());
+    const std::vector<WallDirections> keep = wall_directions(keep_print);
+    REQUIRE(keep.size() == 25);
+    REQUIRE(keep[keep.size() / 2].gap_fills > 0);
+
+    // Every possible gap path in this 20 mm fixture is shorter than 100 mm.
+    // The option has no declared maximum, so this is a valid high threshold.
+    DynamicPrintConfig drop_config = hole_direction_config(1, "ccw");
+    drop_config.set_deserialize_strict({
+        {"filter_out_gap_fill", 100.0},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    Print drop_print;
+    Model drop_model;
+    square_tube(drop_print, drop_model, drop_config, 1., 1.);
+    const StringObjectException drop_validation = drop_print.validate();
+    INFO(drop_validation.string);
+    REQUIRE(drop_validation.string.empty());
+    const std::vector<WallDirections> drop = wall_directions(drop_print);
+    REQUIRE(drop.size() == keep.size());
+    CHECK(drop[drop.size() / 2].gap_fills == 0);
+    for (size_t i = 0; i < keep.size(); ++i) {
+        CAPTURE(i);
+        CHECK(drop[i].contours_ccw == keep[i].contours_ccw);
+        CHECK(drop[i].holes_ccw == keep[i].holes_ccw);
+        CHECK(drop[i].inner_walls == keep[i].inner_walls);
+    }
+}
+
 // A hole whose outer wall touches the contour's all around, with nothing between them, runs with the contour
 // on every layer, so the two walls of a thin tube are laid side by side in the same direction.
 TEST_CASE("A hole whose outer wall touches the contour's runs with it", "[Perimeters]")

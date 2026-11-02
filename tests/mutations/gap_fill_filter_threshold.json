@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Classic-wall Print gap-fill threshold contract with ordinary assertion failures for both filter directions.",
+  "mutants": [
+    {
+      "id": "gap-fill-ignore-threshold",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "return p.length() < scale_(config->filter_out_gap_fill.value);",
+      "new": "return p.length() < scale_(0.0);",
+      "test_filter": "GapFillFilterSettings",
+      "description": "Ignore the configured high threshold; the 100 mm Print output must retain short gap paths and fail the removal assertion."
+    },
+    {
+      "id": "gap-fill-always-drop",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "return p.length() < scale_(config->filter_out_gap_fill.value);",
+      "new": "return true;",
+      "test_filter": "GapFillFilterSettings",
+      "description": "Remove every classic-wall gap path; the zero-threshold Print control must lose its positive gap-fill witness."
+    }
+  ]
+}

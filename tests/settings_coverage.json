@@ -5948,6 +5948,15 @@
       ],
       "reason": "Writer-emitted G1 XYZ/E endpoints cover omitted and explicit 45-degree defaults, zero, -30/+30, and the registered -180/+180 limits on X/Y belt axes. Coupled frame tilt deliberately ignores an extreme decoupled-angle value. Independently rotated input and physical height/feed projections test real writer output; +/-180 degrees undo preslicing while the near-zero-sine frame gate stays inactive. Constant/default and 45-degree-clamped inverse rotations each fail ordinary assertions. This writer-level contract does not claim full mesh slicing or Print export for every angle."
     },
+    "filter_out_gap_fill": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[GapFillFilterSettings]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The classic-wall Print pipeline processes the same 20 mm square tube with a 1 mm wall at the default 0 mm no-filter threshold and at 100 mm, above every gap path in this bounded fixture. These are semantic extremes for this fixture, not registered numeric endpoints: the option declares neither a minimum nor a maximum. Zero emits gap fill on the middle layer; 100 mm removes it while contour, hole, and inner wall classes stay unchanged on all 25 layers. Other wall generators, infill gap paths, and intermediate thresholds remain unclaimed."
+    },
     "has_scarf_joint_seam": {
       "test": "tests/fff_print/test_gcode_processor.cpp",
       "tag": "[GCodeProcessorScarfSeam]",
