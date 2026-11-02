@@ -207,12 +207,7 @@ TEST_CASE("its_cut_AoI retains the complete mesh when the projected bounds conta
     CHECK(face_corners(selected) == face_corners(input));
 }
 
-// Known bug: set_skip_for_out_of_aoi sets skip flags in a std::vector<bool> from a tbb::parallel_for, so concurrent
-// writes to bits of the same word are lost and faces outside the bounds survive; fixed by the follow-up fix PR.
-// Hidden because it only fails with two or more TBB workers (it passes under `taskset -c 0`), so it cannot be
-// tagged [!shouldfail]. Reproduce with:
-//   libslic3r_tests "its_cut_AoI drops every face of a mesh outside the projected bounds"
-TEST_CASE("its_cut_AoI drops every face of a mesh outside the projected bounds", "[CutSurface][.]")
+TEST_CASE("its_cut_AoI drops every face of a mesh outside the projected bounds", "[CutSurface]")
 {
     // Faces are classified in a tbb::parallel_for. A flat 100 x 100 grid (20000 faces) all outside the bounds
     // makes every face write its skip flag, and is large enough for TBB to split the range across workers, so
