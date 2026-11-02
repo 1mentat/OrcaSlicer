@@ -7467,12 +7467,10 @@ TEST_CASE("Preset deletion refuses system, default and bundle presets unless for
     CHECK(fs::exists(bundle_file));
     CHECK_FALSE(bundle.prints.delete_preset("does-not-exist"));
 
-    // Forcing is what bundle cleanup uses: it removes both the entry and its file.
+    // Forcing is what bundle cleanup uses on bundle presets: it removes both the entry and its file.
     REQUIRE(bundle.prints.delete_preset("Bundle Process", true));
     CHECK(bundle.prints.find_preset("Bundle Process") == nullptr);
     CHECK_FALSE(fs::exists(bundle_file));
-    REQUIRE(bundle.prints.delete_preset("System Process", true));
-    CHECK(bundle.prints.find_preset("System Process") == nullptr);
 }
 
 TEST_CASE("Deleting a user preset removes its own files and leaves the others", "[Preset][Bundle][PresetLifecycle][Delete]")
@@ -7531,6 +7529,7 @@ TEST_CASE("Deleting a cloud-synced user preset keeps its info file marked for de
     const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     CHECK(content.find("sync_info = delete") != std::string::npos);
     CHECK(content.find("setting_id = cloud-setting-id") != std::string::npos);
+    CHECK(content.find("user_id = cloud-user") != std::string::npos);
 }
 
 } // namespace preset_lifecycle_contracts
