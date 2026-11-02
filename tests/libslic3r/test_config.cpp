@@ -33,6 +33,7 @@
 #include <string>
 #include <initializer_list>
 #include <memory>
+#include <ostream>
 #include <map>
 #include <iterator>
 #include <nlohmann/json.hpp>
@@ -2837,6 +2838,170 @@ std::string error_message(const std::map<std::string, std::string> &errors, cons
 }
 
 } // namespace
+
+namespace config_definition_contracts {
+
+struct HelpDefinition : ConfigDef {
+    using ConfigDef::add;
+};
+
+std::string help_text(const ConfigDef &definition, bool defaults = true)
+{
+    std::ostringstream out;
+    definition.print_cli_help(out, defaults);
+    return out.str();
+}
+
+TEST_CASE("CLI help expands aliases and explicit parameter labels", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    auto *option = definition.add("layer_height", coFloat);
+    option->cli = "h|layer-height";
+    option->cli_params = "HEIGHT";
+    option->tooltip = "Set the layer thickness.";
+    const std::string help = help_text(definition);
+    std::istringstream tokens(help);
+    std::string short_alias, short_parameter, long_alias, long_parameter;
+    REQUIRE(static_cast<bool>(tokens >> short_alias >> short_parameter >> long_alias >> long_parameter));
+    CHECK(short_alias == "-h");
+    CHECK(short_parameter == "HEIGHT,");
+    CHECK(long_alias == "--layer-height");
+    CHECK(long_parameter == "HEIGHT");
+    CHECK(help.find("Set the layer thickness.") != std::string::npos);
+}
+
+TEST_CASE("CLI help derives dashed option names when aliases are absent", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    definition.add("machine_start_gcode", coString)->tooltip = "Startup instructions";
+    const std::string help = help_text(definition);
+    CHECK(help.find("--machine-start-gcode") != std::string::npos);
+    CHECK(help.find("machine_start_gcode") == std::string::npos);
+}
+
+TEST_CASE("CLI help filters hidden options and entire excluded categories", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    auto *visible = definition.add("visible", coInt);
+    visible->category = "Visible category";
+    auto *hidden = definition.add("hidden", coInt);
+    hidden->category = visible->category;
+    hidden->cli = ConfigOptionDef::nocli;
+    auto *excluded = definition.add("excluded", coInt);
+    excluded->category = "Excluded category";
+    std::ostringstream out;
+    std::ostream &returned = definition.print_cli_help(out, true, [](const ConfigOptionDef &option) {
+        return option.opt_key != "excluded";
+    });
+    CHECK(&returned == &out);
+    const std::string help = out.str();
+    CHECK(help.find("Visible category:") != std::string::npos);
+    CHECK(help.find("--visible") != std::string::npos);
+    CHECK(help.find("--hidden") == std::string::npos);
+    CHECK(help.find("Excluded category") == std::string::npos);
+    CHECK(help.find("--excluded") == std::string::npos);
+}
+
+TEST_CASE("CLI help labels uncategorized options only among multiple categories", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    definition.add("uncategorized", coInt);
+    CHECK(help_text(definition).find("Misc options:") == std::string::npos);
+    definition.add("categorized", coInt)->category = "Printer";
+    const std::string help = help_text(definition);
+    CHECK(help.find("Misc options:") != std::string::npos);
+    CHECK(help.find("Printer:") != std::string::npos);
+    CHECK(help.find("--uncategorized") != std::string::npos);
+    CHECK(help.find("--categorized") != std::string::npos);
+}
+
+TEST_CASE("CLI help includes numeric defaults and their physical units on request", "[Config][ConfigDefinition][CLIHelp]")
+{
+    const bool defaults = GENERATE(false, true);
+    HelpDefinition definition;
+    auto *option = definition.add("height", coFloat);
+    option->tooltip = "Layer thickness";
+    option->sidetext = "mm";
+    option->set_default_value(new ConfigOptionFloat(.25));
+    const std::string help = help_text(definition, defaults);
+    CHECK((help.find("(mm, default: 0.25)") != std::string::npos) == defaults);
+    CHECK(help.find("Layer thickness") != std::string::npos);
+}
+
+TEST_CASE("CLI help lists enumerated choices before their default", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    auto *option = definition.add("strategy", coString);
+    option->enum_values = {"slow", "fast"};
+    option->set_default_value(new ConfigOptionString("fast"));
+    const std::string help = help_text(definition);
+    CHECK(help.find("(slow, fast; default: fast)") != std::string::npos);
+}
+
+TEST_CASE("CLI help omits boolean and empty string defaults", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    definition.add("enabled", coBool)->set_default_value(new ConfigOptionBool(true));
+    definition.add("empty", coString)->set_default_value(new ConfigOptionString());
+    definition.add("no_default", coInt);
+    const std::string help = help_text(definition);
+    CHECK(help.find("--enabled") != std::string::npos);
+    CHECK(help.find("--empty") != std::string::npos);
+    CHECK(help.find("--no-default") != std::string::npos);
+    CHECK(help.find("default:") == std::string::npos);
+}
+
+TEST_CASE("CLI help always exposes the configuration compatibility default", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    definition.add("config_compatibility", coString)->set_default_value(new ConfigOptionString("enable"));
+    definition.add("ordinary", coString)->set_default_value(new ConfigOptionString("ordinary-default"));
+    const std::string help = help_text(definition, false);
+    CHECK(help.find("default: enable") != std::string::npos);
+    CHECK(help.find("ordinary-default") == std::string::npos);
+}
+
+TEST_CASE("CLI help wraps long descriptions without dropping or reordering words", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    auto *option = definition.add("a_deliberately_long_command_line_option", coString);
+    std::vector<std::string> expected;
+    for (int i = 0; i < 35; ++i) {
+        expected.push_back("parameter" + std::to_string(i));
+        option->tooltip += expected.back() + " ";
+    }
+    std::istringstream lines(help_text(definition));
+    std::string line;
+    REQUIRE(static_cast<bool>(std::getline(lines, line)));
+    CHECK(line.find("--a-deliberately-long-command-line-option") != std::string::npos);
+    CHECK(line.find("parameter0") == std::string::npos);
+    std::vector<std::string> actual;
+    std::size_t wrapped_lines = 0;
+    while (std::getline(lines, line)) {
+        REQUIRE(line.size() >= 21);
+        CHECK(line.substr(0, 21) == std::string(21, ' '));
+        CHECK(line.size() <= 101);
+        std::istringstream words(line.substr(21));
+        std::string word;
+        while (words >> word)
+            actual.push_back(word);
+        ++wrapped_lines;
+    }
+    CHECK(wrapped_lines > 1);
+    CHECK(actual == expected);
+}
+
+TEST_CASE("CLI help leaves an empty or fully filtered definition blank", "[Config][ConfigDefinition][CLIHelp]")
+{
+    HelpDefinition definition;
+    CHECK(help_text(definition).empty());
+    definition.add("excluded", coInt)->category = "Excluded";
+    std::ostringstream out;
+    definition.print_cli_help(out, true, [](const ConfigOptionDef &) { return false; });
+    CHECK(out.str().empty());
+}
+
+} // namespace config_definition_contracts
 
 TEST_CASE("Bridge line width is limited by the smallest nozzle while other widths use the largest", "[Config][Validation]")
 {
