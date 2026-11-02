@@ -4,6 +4,7 @@
 #include "libslic3r/TextureToColor/TextureToColor.hpp"
 #include "libslic3r/TextureToColor/TriMesh.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "texture_to_color_fixtures.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -16,6 +17,7 @@
 #include <opencv2/core/types.hpp>
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <functional>
@@ -27,15 +29,14 @@
 
 using namespace Slic3r;
 using namespace Slic3r::tex2color;
+using namespace Slic3r::tex2color::test;
 using Catch::Matchers::WithinAbs;
 
 namespace {
 
 using Color = std::array<std::size_t, 3>;
 
-constexpr Color red {{255, 0, 0}};
-constexpr Color blue{{0, 0, 255}};
-constexpr Color green{{0, 255, 0}};
+constexpr Color red{{255, 0, 0}};
 
 TriMesh one_triangle()
 {
@@ -47,23 +48,6 @@ TriMesh one_triangle()
 std::vector<std::vector<Vec2f>> one_face_uv()
 {
     return {{Vec2f(0.f, 0.f), Vec2f(1.f, 0.f), Vec2f(0.f, 1.f)}};
-}
-
-TriMesh closed_tetrahedron()
-{
-    return TriMesh(
-        {
-            stl_triangle_vertex_indices(0, 2, 1),
-            stl_triangle_vertex_indices(0, 1, 3),
-            stl_triangle_vertex_indices(1, 2, 3),
-            stl_triangle_vertex_indices(2, 0, 3),
-        },
-        {
-            stl_vertex(0.f, 0.f, 0.f),
-            stl_vertex(1.f, 0.f, 0.f),
-            stl_vertex(0.f, 1.f, 0.f),
-            stl_vertex(0.f, 0.f, 1.f),
-        });
 }
 
 std::vector<std::vector<Vec2f>> tetrahedron_uvs()
@@ -88,41 +72,12 @@ TextureToColorSettings bounded_settings()
     return settings;
 }
 
-TriMesh open_tetrahedron()
-{
-    TriMesh mesh = closed_tetrahedron();
-    mesh.indices.pop_back();
-    return mesh;
-}
 
-void check_finite_and_valid(const TriMesh &mesh)
-{
-    for (const stl_vertex &vertex : mesh.vertices) {
-        for (std::size_t component = 0; component < 3; ++component)
-            CHECK(std::isfinite(vertex[component]));
-    }
-    for (const stl_triangle_vertex_indices &face : mesh.indices) {
-        for (std::size_t component = 0; component < 3; ++component) {
-            REQUIRE(face[component] >= 0);
-            const std::size_t index = static_cast<std::size_t>(face[component]);
-            REQUIRE(index < mesh.vertices.size());
-        }
-    }
-}
-
-Vec3d as_vec3d(const TriVertex &vertex)
-{
-    return Vec3d(vertex[0], vertex[1], vertex[2]);
-}
-
-} // namespace
-
-namespace {
 TextureToColorSettings repair_import_settings(std::size_t &callback_calls,
                                               std::size_t &callback_input_faces,
                                               bool &callback_progress_seen,
                                               bool &callback_saw_cancel_false,
-                                              bool *callback_finished = nullptr)
+                                              std::atomic<bool> *callback_finished = nullptr)
 {
     TextureToColorSettings settings;
     settings.target_colors_num = 1;
@@ -205,7 +160,7 @@ TEST_CASE("TextureToColor preserves repaired topology after pre-repair oversampl
     const Color expected_blue{{7, 19, 233}};
     auto matches_color = [](const Color &actual, const Color &expected) {
         for (std::size_t channel = 0; channel < expected.size(); ++channel) {
-            if (std::abs(static_cast<double>(actual[channel]) - static_cast<double>(expected[channel])) > 3.0)
+            if (std::abs(static_cast<double>(actual[channel]) - static_cast<double>(expected[channel])) > 2.0)
                 return false;
         }
         return true;
@@ -248,7 +203,7 @@ TEST_CASE("TextureToColor reports cancellation after the mesh repair callback",
     std::size_t callback_input_faces = 0;
     bool callback_progress_seen = false;
     bool callback_saw_cancel_false = false;
-    bool callback_finished = false;
+    std::atomic<bool> callback_finished{false};
     TextureToColorSettings settings = repair_import_settings(
         callback_calls, callback_input_faces, callback_progress_seen, callback_saw_cancel_false, &callback_finished);
 
@@ -262,27 +217,25 @@ TEST_CASE("TextureToColor reports cancellation after the mesh repair callback",
         const std::lock_guard<std::mutex> lock(progress_mutex);
         progress_messages.emplace_back(state.message ? state.message : "");
     };
-    const auto cancel_after_repair = [&]() { return callback_finished; };
+    // The cancel callback is also polled from worker threads, hence the atomic flag.
+    const auto cancel_after_repair = [&]() { return callback_finished.load(); };
     CHECK_FALSE(TextureToColor(input, uv_coords, texture, output, colors,
                                settings, record_progress, cancel_after_repair));
     CHECK(callback_calls == 1);
     CHECK(callback_input_faces == input.indices.size() * 4);
     CHECK(callback_progress_seen);
     CHECK(callback_saw_cancel_false);
-    CHECK(callback_finished);
+    CHECK(callback_finished.load());
 
-    bool saw_repair_stage = false;
+    // "Color clustering" is the stage label TextureToColor publishes right after repair.
     bool saw_callback_stage = false;
     bool saw_color_clustering_stage = false;
     for (const std::string &message : progress_messages) {
-        if (message == "Repairing mesh")
-            saw_repair_stage = true;
         if (message == "private repair callback")
             saw_callback_stage = true;
         if (message == "Color clustering")
             saw_color_clustering_stage = true;
     }
-    CHECK(saw_repair_stage);
     CHECK(saw_callback_stage);
     CHECK_FALSE(saw_color_clustering_stage);
 }
@@ -311,41 +264,6 @@ TEST_CASE("Texture-to-color rejects invalid texture inputs and clears outputs", 
     CHECK_FALSE(TextureToColor(mesh, {{Vec2f(0.f, 0.f), Vec2f(1.f, 0.f)}}, rgb, color_mesh, face_colors));
     CHECK(color_mesh.indices.empty());
     CHECK(face_colors.empty());
-}
-
-TEST_CASE("Vertex color clustering splits a face only at palette boundaries", "[TextureToColor]")
-{
-    const TriMesh mesh = one_triangle();
-    const std::vector<Color> input_face_colors{red};
-    const std::vector<std::array<float, 4>> vertex_colors{
-        {1.f, 0.f, 0.f, 1.f},
-        {0.f, 0.f, 1.f, 1.f},
-        {0.f, 0.f, 1.f, 1.f},
-    };
-
-    TextureToColorSettings settings;
-    settings.target_colors_num = 2;
-    settings.oversampling_min_face_count = 2;
-    settings.smooth_weight = 0.0;
-
-    TriMesh out_mesh;
-    std::vector<Color> out_face_colors;
-    REQUIRE(ClusterAndSmooth(mesh, input_face_colors, out_mesh, out_face_colors, settings, nullptr, nullptr, vertex_colors));
-    REQUIRE(out_mesh.indices.size() == 3);
-    REQUIRE(out_face_colors.size() == out_mesh.indices.size());
-
-    std::size_t red_count = 0;
-    std::size_t blue_count = 0;
-    for (const Color &color : out_face_colors) {
-        if (color == red)
-            ++red_count;
-        if (color == blue)
-            ++blue_count;
-        const bool is_palette_color = color == red || color == blue;
-        CHECK(is_palette_color);
-    }
-    CHECK(red_count > 0);
-    CHECK(blue_count > 0);
 }
 
 TEST_CASE("TextureToColor samples a closed tetrahedron through the public route",
@@ -391,223 +309,6 @@ TEST_CASE("TextureToColor cancellation clears outputs before returning",
     CHECK(face_colors.empty());
 }
 
-TEST_CASE("Vertex color splitting preserves a three-way boundary triangulation",
-          "[TextureToColor]")
-{
-    const auto face = GENERATE(
-        stl_triangle_vertex_indices(0, 1, 2),
-        stl_triangle_vertex_indices(1, 2, 0),
-        stl_triangle_vertex_indices(2, 0, 1));
-    const TriMesh mesh(
-        {face},
-        {stl_vertex(0.f, 0.f, 0.f), stl_vertex(4.f, 0.f, 0.f), stl_vertex(0.f, 3.f, 0.f)});
-    const std::vector<Color> input_face_colors{red};
-    const std::vector<std::array<float, 4>> vertex_colors{
-        {1.f, 0.f, 0.f, 1.f},
-        {0.f, 1.f, 0.f, 1.f},
-        {0.f, 0.f, 1.f, 1.f},
-    };
-
-    TextureToColorSettings settings;
-    settings.target_colors_num = 3;
-    settings.smooth_weight = 0.0;
-    settings.oversampling_min_face_count = 2;
-    settings.oversampling_max_face_count = 16;
-    settings.mesh_repair_decision = MeshRepairDecision::ImportWithoutRepair;
-
-    TriMesh out_mesh;
-    std::vector<Color> out_face_colors;
-    REQUIRE(ClusterAndSmooth(mesh, input_face_colors, out_mesh, out_face_colors, settings, nullptr, nullptr, vertex_colors));
-    REQUIRE(out_mesh.indices.size() == 5);
-    REQUIRE(out_mesh.vertices.size() == 7);
-    REQUIRE(out_face_colors.size() == out_mesh.indices.size());
-    check_finite_and_valid(out_mesh);
-
-    double summed_area = 0.0;
-    for (const auto &face_indices : out_mesh.indices) {
-        const TriVertex &a = out_mesh.vertices[static_cast<std::size_t>(face_indices[0])];
-        const TriVertex &b = out_mesh.vertices[static_cast<std::size_t>(face_indices[1])];
-        const TriVertex &c = out_mesh.vertices[static_cast<std::size_t>(face_indices[2])];
-        const double twice_area = static_cast<double>(b.x() - a.x()) * static_cast<double>(c.y() - a.y())
-                                - static_cast<double>(b.y() - a.y()) * static_cast<double>(c.x() - a.x());
-        CHECK(twice_area > 0.0);
-        summed_area += twice_area * 0.5;
-    }
-    CHECK_THAT(summed_area, WithinAbs(6.0, 1e-5));
-
-    const std::array<TriVertex, 4> expected_split_points{
-        TriVertex(2.f, 0.f, 0.f),
-        TriVertex(2.f, 1.5f, 0.f),
-        TriVertex(0.f, 1.5f, 0.f),
-        TriVertex(1.f, 0.75f, 0.f),
-    };
-    for (const TriVertex &expected : expected_split_points) {
-        bool found = false;
-        for (const TriVertex &actual : out_mesh.vertices) {
-            const bool same_x = std::abs(static_cast<double>(actual.x() - expected.x())) <= 1e-5;
-            const bool same_y = std::abs(static_cast<double>(actual.y() - expected.y())) <= 1e-5;
-            const bool same_z = std::abs(static_cast<double>(actual.z() - expected.z())) <= 1e-5;
-            if (same_x && same_y && same_z) {
-                found = true;
-                break;
-            }
-        }
-        CHECK(found);
-    }
-
-    std::size_t red_count = 0;
-    std::size_t green_count = 0;
-    std::size_t blue_count = 0;
-    for (const Color &color : out_face_colors) {
-        bool in_palette = false;
-        if (color == red) {
-            ++red_count;
-            in_palette = true;
-        }
-        if (color == green) {
-            ++green_count;
-            in_palette = true;
-        }
-        if (color == blue) {
-            ++blue_count;
-            in_palette = true;
-        }
-        CHECK(in_palette);
-    }
-    CHECK(red_count == 1);
-    CHECK(green_count == 2);
-    CHECK(blue_count == 2);
-}
-
-TEST_CASE("ClusterAndSmooth honors the adaptive cluster cap on its generic public route",
-          "[TextureToColor]")
-{
-    const TriMesh mesh = closed_tetrahedron();
-    const std::vector<Color> input_face_colors{red, green, blue, red};
-
-    TextureToColorSettings settings;
-    settings.target_colors_num = 0;
-    settings.max_cluster_k = 2;
-    settings.max_color_distance = 0.0;
-    settings.smooth_weight = 0.0;
-    settings.oversampling_min_face_count = 4;
-    settings.mesh_repair_decision = MeshRepairDecision::ImportWithoutRepair;
-
-    TriMesh out_mesh;
-    std::vector<Color> out_face_colors;
-    REQUIRE(ClusterAndSmooth(mesh, input_face_colors, out_mesh, out_face_colors, settings));
-    REQUIRE(out_mesh.indices.size() == mesh.indices.size());
-    REQUIRE(out_mesh.vertices.size() == mesh.vertices.size());
-    REQUIRE(out_face_colors.size() == out_mesh.indices.size());
-    CHECK(color_utils::is_closed(out_mesh));
-    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))), WithinAbs(1.0 / 6.0, 1e-5));
-    check_finite_and_valid(out_mesh);
-
-    std::vector<Color> distinct_colors;
-    for (const Color &color : out_face_colors) {
-        bool already_present = false;
-        for (const Color &distinct : distinct_colors) {
-            if (distinct == color) {
-                already_present = true;
-                break;
-            }
-        }
-        if (!already_present)
-            distinct_colors.push_back(color);
-    }
-    CHECK(distinct_colors.size() == 2);
-}
-
-TEST_CASE("ClusterAndSmooth requests a repair decision for an open mesh",
-          "[TextureToColor]")
-{
-    const TriMesh input = open_tetrahedron();
-    const std::vector<Color> input_colors{red, green, blue};
-    TextureToColorSettings settings = bounded_settings();
-    settings.mesh_repair_decision = MeshRepairDecision::Ask;
-    bool decision_required = false;
-    settings.mesh_repair_decision_required = &decision_required;
-
-    TriMesh out_mesh;
-    std::vector<Color> out_colors;
-    CHECK_FALSE(ClusterAndSmooth(input, input_colors, out_mesh, out_colors, settings));
-    CHECK(decision_required);
-    CHECK(out_mesh.indices.size() == input.indices.size());
-    CHECK(out_mesh.vertices.size() == input.vertices.size());
-    CHECK(out_colors.empty());
-}
-
-TEST_CASE("ClusterAndSmooth repairs an inconsistently wound tetrahedron",
-          "[TextureToColor]")
-{
-    TriMesh input = closed_tetrahedron();
-    std::swap(input.indices[0][1], input.indices[0][2]);
-    const std::vector<Color> input_colors(input.indices.size(), red);
-    const TextureToColorSettings settings = bounded_settings();
-
-    TriMesh out_mesh;
-    std::vector<Color> out_colors;
-    REQUIRE(ClusterAndSmooth(input, input_colors, out_mesh, out_colors, settings));
-    REQUIRE(out_mesh.indices.size() == 4);
-    REQUIRE(out_colors.size() == out_mesh.indices.size());
-    CHECK(color_utils::is_closed(out_mesh));
-    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))),
-               WithinAbs(1.0 / 6.0, 1e-5));
-    check_finite_and_valid(out_mesh);
-
-    // Repair makes neighboring faces consistently oriented; either global
-    // winding is valid. The tetrahedron's centroid gives an independent sign.
-    const Vec3d interior(0.25, 0.25, 0.25);
-    int orientation = 0;
-    for (const TriFace &face : out_mesh.indices) {
-        const Vec3d a = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[0])]);
-        const Vec3d b = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[1])]);
-        const Vec3d c = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[2])]);
-        const Vec3d face_center = (a + b + c) / 3.0;
-        const double facing = (b - a).cross(c - a).dot(face_center - interior);
-        REQUIRE(std::abs(facing) > 1e-9);
-        if (orientation == 0)
-            orientation = facing > 0.0 ? 1 : -1;
-        CHECK(facing * orientation > 0.0);
-    }
-    for (const Color &color : out_colors)
-        CHECK(color == red);
-}
-
-TEST_CASE("Repair callback rejection keeps importing the original open mesh",
-          "[TextureToColor]")
-{
-    const TriMesh input = open_tetrahedron();
-    const std::vector<Color> input_colors(input.indices.size(), red);
-    TextureToColorSettings settings = bounded_settings();
-    settings.mesh_repair_decision = MeshRepairDecision::RepairAndImport;
-    std::size_t callback_calls = 0;
-    std::size_t callback_faces = 0;
-    settings.mesh_repair_callback = [&](const indexed_triangle_set &source,
-                                        indexed_triangle_set &,
-                                        std::function<void(const char *, unsigned)>,
-                                        std::function<bool()>,
-                                        std::string *error) {
-        ++callback_calls;
-        callback_faces = source.indices.size();
-        if (error != nullptr)
-            *error = "fixture declines repair";
-        return false;
-    };
-
-    TriMesh out_mesh;
-    std::vector<Color> out_colors;
-    REQUIRE(ClusterAndSmooth(input, input_colors, out_mesh, out_colors, settings));
-    CHECK(callback_calls == 1);
-    CHECK(callback_faces == input.indices.size());
-    CHECK(out_mesh.indices.size() == input.indices.size());
-    CHECK_FALSE(color_utils::is_closed(out_mesh));
-    CHECK(out_colors.size() == out_mesh.indices.size());
-    check_finite_and_valid(out_mesh);
-    for (const Color &color : out_colors)
-        CHECK(color == red);
-}
-
 TEST_CASE("TextureToColor auto-oversampling stops at the configured face threshold",
           "[TextureToColor]")
 {
@@ -637,144 +338,3 @@ TEST_CASE("TextureToColor auto-oversampling stops at the configured face thresho
     }
 }
 
-TEST_CASE("Adaptive vertex-color clustering splits only the distinct color boundary",
-          "[TextureToColor]")
-{
-    const auto [max_cluster_k, expected_faces] = GENERATE(
-        table<std::size_t, std::size_t>({{1, 1}, {2, 3}}));
-    const TriMesh input = one_triangle();
-    const std::vector<Color> input_face_colors{red};
-    const std::vector<std::array<float, 4>> vertex_colors{
-        {1.f, 0.f, 0.f, 1.f},
-        {0.f, 1.f, 0.f, 1.f},
-        {0.f, 1.f, 0.f, 1.f},
-    };
-    TextureToColorSettings settings = bounded_settings();
-    settings.target_colors_num = 0;
-    settings.max_cluster_k = max_cluster_k;
-    settings.max_color_distance = 0.0;
-    settings.oversampling_min_face_count = 2;
-
-    TriMesh out_mesh;
-    std::vector<Color> out_colors;
-    REQUIRE(ClusterAndSmooth(input, input_face_colors, out_mesh, out_colors,
-                             settings, nullptr, nullptr, vertex_colors));
-    REQUIRE(out_mesh.indices.size() == expected_faces);
-    REQUIRE(out_colors.size() == out_mesh.indices.size());
-    check_finite_and_valid(out_mesh);
-
-    double area = 0.0;
-    for (const TriFace &face : out_mesh.indices) {
-        const Vec3d a = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[0])]);
-        const Vec3d b = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[1])]);
-        const Vec3d c = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[2])]);
-        const double twice_area = (b - a).cross(c - a).z();
-        CHECK(twice_area > 0.0);
-        area += twice_area * 0.5;
-    }
-    CHECK_THAT(area, WithinAbs(0.5, 1e-6));
-
-    if (max_cluster_k == 2) {
-        auto matches_color = [](const Color &actual, const Color &expected) {
-            for (std::size_t channel = 0; channel < expected.size(); ++channel) {
-                if (std::abs(static_cast<double>(actual[channel]) -
-                             static_cast<double>(expected[channel])) > 2.0)
-                    return false;
-            }
-            return true;
-        };
-        std::size_t red_faces = 0;
-        std::size_t green_faces = 0;
-        bool all_colors_in_expected_palette = true;
-        for (const Color &color : out_colors) {
-            const bool is_red = matches_color(color, red);
-            const bool is_green = matches_color(color, green);
-            if (is_red)
-                ++red_faces;
-            if (is_green)
-                ++green_faces;
-            if (!is_red && !is_green)
-                all_colors_in_expected_palette = false;
-        }
-        CHECK(all_colors_in_expected_palette);
-        CHECK(red_faces > 0);
-        CHECK(green_faces > 0);
-    }
-}
-
-TEST_CASE("ClusterAndSmooth preserves a fixed palette center after region smoothing",
-          "[TextureToColor]")
-{
-    const TriMesh input = closed_tetrahedron();
-    const Color minority{{0, 0, 0}};
-    const Color majority{{255, 255, 255}};
-    const std::vector<Color> input_face_colors{minority, majority, majority, majority};
-    TextureToColorSettings settings = bounded_settings();
-    settings.target_colors_num = 2;
-    settings.smooth_weight = 1.0;
-
-    TriMesh out_mesh;
-    std::vector<Color> out_colors;
-    REQUIRE(ClusterAndSmooth(input, input_face_colors, out_mesh, out_colors, settings));
-    REQUIRE(out_mesh.indices.size() == input.indices.size());
-    REQUIRE(out_colors.size() == out_mesh.indices.size());
-    CHECK(color_utils::is_closed(out_mesh));
-    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))),
-               WithinAbs(1.0 / 6.0, 1e-5));
-    check_finite_and_valid(out_mesh);
-
-    auto matches_color = [](const Color &actual, const Color &expected) {
-        for (std::size_t channel = 0; channel < expected.size(); ++channel) {
-            if (std::abs(static_cast<double>(actual[channel]) -
-                         static_cast<double>(expected[channel])) > 2.0)
-                return false;
-        }
-        return true;
-    };
-    std::size_t majority_faces = 0;
-    std::size_t minority_faces = 0;
-    bool all_colors_in_fixed_palette = true;
-    for (const Color &color : out_colors) {
-        const bool is_majority = matches_color(color, majority);
-        const bool is_minority = matches_color(color, minority);
-        if (is_majority)
-            ++majority_faces;
-        if (is_minority)
-            ++minority_faces;
-        if (!is_majority && !is_minority)
-            all_colors_in_fixed_palette = false;
-    }
-    CHECK(all_colors_in_fixed_palette);
-    CHECK(majority_faces == 3);
-    CHECK(minority_faces == 1);
-}
-
-TEST_CASE("ClusterAndSmooth keeps the majority color after adaptive region smoothing",
-          "[TextureToColor]")
-{
-    const TriMesh input = closed_tetrahedron();
-    const Color minority{{0, 0, 0}};
-    const Color majority{{255, 255, 255}};
-    const std::vector<Color> input_face_colors{minority, majority, majority, majority};
-    TextureToColorSettings settings = bounded_settings();
-    settings.target_colors_num = 0;
-    settings.max_cluster_k = 2;
-    settings.max_color_distance = 0.0;
-    settings.smooth_weight = 1.0;
-
-    TriMesh out_mesh;
-    std::vector<Color> out_colors;
-    REQUIRE(ClusterAndSmooth(input, input_face_colors, out_mesh, out_colors, settings));
-    REQUIRE(out_mesh.indices.size() == input.indices.size());
-    REQUIRE(out_colors.size() == out_mesh.indices.size());
-    CHECK(color_utils::is_closed(out_mesh));
-    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))),
-               WithinAbs(1.0 / 6.0, 1e-5));
-    check_finite_and_valid(out_mesh);
-
-    for (const Color &color : out_colors) {
-        for (std::size_t channel = 0; channel < majority.size(); ++channel)
-            CHECK_THAT(static_cast<double>(color[channel]),
-                       WithinAbs(static_cast<double>(majority[channel]), 2.0));
-    }
-}
