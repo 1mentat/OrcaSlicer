@@ -808,15 +808,25 @@ TEST_CASE("Registered scarf seam config selects layer-tag seam tracking", "[GCod
 
 TEST_CASE("Default color changes cycle and wrap public color metadata", "[GCodeProcessor][GCodeProcessorColorMetadata]")
 {
+    // process_buffer consumes the process-global parser dialect without inferring it.
+    // Keep the literal marker independent of parser tag lookup and restore the
+    // caller's mode so this case is stable in a batched Catch process.
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    const bool is_bbl_printer = GENERATE(true, false);
+    GCodeProcessor::s_IsBBLPrinter = is_bbl_printer;
+    CAPTURE(is_bbl_printer);
+    const std::string color_change = is_bbl_printer ? "; COLOR_CHANGE,T0\n" : ";COLOR_CHANGE,T0\n";
+
     const auto result = process_buffer(
-        "M83\nG90\nG1 X0 Y0 Z0.2 F600\n"
-        "; COLOR_CHANGE,T0\nG1 X1 Y0 E0.1 F600\n"
-        "; COLOR_CHANGE,T0\nG1 X2 Y0 E0.1 F600\n"
-        "; COLOR_CHANGE,T0\nG1 X3 Y0 E0.1 F600\n"
-        "; COLOR_CHANGE,T0\nG1 X4 Y0 E0.1 F600\n"
-        "; COLOR_CHANGE,T0\nG1 X5 Y0 E0.1 F600\n"
-        "; COLOR_CHANGE,T0\nG1 X6 Y0 E0.1 F600\n"
-        "; COLOR_CHANGE,T0\nG1 X7 Y0 E0.1 F600\n");
+        std::string("M83\nG90\nG1 X0 Y0 Z0.2 F600\n") +
+        color_change + "G1 X1 Y0 E0.1 F600\n" +
+        color_change + "G1 X2 Y0 E0.1 F600\n" +
+        color_change + "G1 X3 Y0 E0.1 F600\n" +
+        color_change + "G1 X4 Y0 E0.1 F600\n" +
+        color_change + "G1 X5 Y0 E0.1 F600\n" +
+        color_change + "G1 X6 Y0 E0.1 F600\n" +
+        color_change + "G1 X7 Y0 E0.1 F600\n");
 
     const auto valid_hex_color = [](const std::string &value) {
         if (value.size() != 7)
@@ -850,8 +860,16 @@ TEST_CASE("Default color changes cycle and wrap public color metadata", "[GCodeP
 TEST_CASE("Malformed color changes match an independent fallback and preserve valid colors", "[GCodeProcessor][GCodeProcessorColorMetadata]")
 {
     const std::string prefix = "M83\nG90\nG1 X0 Y0 Z0.2 F600\n";
-    const auto make_fixture = [&prefix](const std::string &suffix) {
-        return prefix + "; COLOR_CHANGE,T0" + suffix + "\nG1 X5 Y0 E0.4 F600\n";
+    // A printer's dialect is process-global and is not inferred by process_buffer.
+    // Exercise both exact parser spellings while restoring the caller's mode.
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    const bool is_bbl_printer = GENERATE(true, false);
+    GCodeProcessor::s_IsBBLPrinter = is_bbl_printer;
+    CAPTURE(is_bbl_printer);
+    const std::string color_change = is_bbl_printer ? "; COLOR_CHANGE,T0" : ";COLOR_CHANGE,T0";
+    const auto make_fixture = [&prefix, &color_change](const std::string &suffix) {
+        return prefix + color_change + suffix + "\nG1 X5 Y0 E0.4 F600\n";
     };
     const std::string malformed = GENERATE(std::string("#12GGZZ"), std::string("0x12ABCD"),
                                             std::string("#12345"), std::string("#1234567"));

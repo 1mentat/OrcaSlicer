@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Source-local color-tag dialect selection probes; fixtures explicitly select and restore both printer modes.",
+  "mutants": [
+    {
+      "id": "color-change-compatible-dialect-ignored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    if (boost::starts_with(comment, reserved_tag(ETags::Color_Change))) {",
+      "new": "    if (boost::starts_with(comment, Reserved_Tags[static_cast<unsigned char>(ETags::Color_Change)])) {",
+      "test_filter": "GCodeProcessorColorMetadata",
+      "description": "Accept only the BBL marker. The compatible-mode palette and malformed-color checks fail, while BBL controls pass."
+    },
+    {
+      "id": "color-change-bbl-dialect-ignored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    if (boost::starts_with(comment, reserved_tag(ETags::Color_Change))) {",
+      "new": "    if (boost::starts_with(comment, Reserved_Tags_compatible[static_cast<unsigned char>(ETags::Color_Change)])) {",
+      "test_filter": "GCodeProcessorColorMetadata",
+      "description": "Accept only the compatible marker. The BBL-mode palette and malformed-color checks fail, while compatible controls pass."
+    }
+  ]
+}
