@@ -688,9 +688,7 @@ TEST_CASE("Mesh clustering with a single centre recolours every face", "[ColorUt
         CHECK(color == Color{{9, 8, 7}});
 }
 
-// Known bug: mesh_cluster documents map_face_to_cluster_id as an [out] per-face centre ID, but with a
-// single centre it returns early and never fills it; a follow-up fix fills the IDs and removes this tag.
-TEST_CASE("Mesh clustering with a single centre reports centre 0 for every face", "[ColorUtils][!shouldfail]")
+TEST_CASE("Mesh clustering with a single centre reports centre 0 for every face", "[ColorUtils]")
 {
     const TriMesh mesh = cube_mesh();
     std::vector<Color> colors(mesh.indices.size(), Color{{12, 34, 56}});
