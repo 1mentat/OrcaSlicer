@@ -1,4 +1,7 @@
+#include "libslic3r/Point.hpp"
 #include "libslic3r/TextureToColor/ColorUtils.hpp"
+#include "libslic3r/TextureToColor/TriMesh.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -417,5 +420,96 @@ TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
                Catch::Matchers::WithinAbs(mean_hue_wrap_expected, 1e-6));
     CHECK_THAT(calc_rgb_color_difference_by_ciede2000(mean_hue_wrap_b, mean_hue_wrap_a),
                Catch::Matchers::WithinAbs(mean_hue_wrap_expected, 1e-6));
+}
+
+namespace {
+
+TriMesh cube_mesh(double side = 10.)
+{
+    const TriangleMesh mesh = make_cube(side, side, side);
+    return TriMesh(mesh.its);
+}
+
+TriMesh two_cubes_mesh()
+{
+    TriangleMesh mesh = make_cube(10., 10., 10.);
+    TriangleMesh second = make_cube(10., 10., 10.);
+    second.translate(Vec3f(30.f, 0.f, 0.f));
+    mesh.merge(second);
+    return TriMesh(mesh.its);
+}
+
+TriMesh open_square_mesh()
+{
+    TriVertices vertices{
+        TriVertex(0.f, 0.f, 0.f), TriVertex(10.f, 0.f, 0.f),
+        TriVertex(10.f, 10.f, 0.f), TriVertex(0.f, 10.f, 0.f)};
+    TriFaces faces{
+        TriFace(0, 1, 2), TriFace(0, 2, 3)};
+    return TriMesh(std::move(faces), std::move(vertices));
+}
+
+std::vector<Vec2f> indexed_uvs(const TriMesh &mesh)
+{
+    std::vector<Vec2f> uvs;
+    uvs.reserve(mesh.vertices.size());
+    for (const TriVertex &vertex : mesh.vertices)
+        uvs.emplace_back(vertex.x(), vertex.y() + vertex.z());
+    return uvs;
+}
+
+} // namespace
+
+TEST_CASE("Color mesh closure distinguishes watertight and open geometry", "[ColorUtils]")
+{
+    CHECK(is_closed(cube_mesh()));
+    CHECK_FALSE(is_closed(open_square_mesh()));
+}
+
+TEST_CASE("Connected color mesh components retain faces, vertices, and UVs", "[ColorUtils]")
+{
+    const TriMesh input = two_cubes_mesh();
+    const std::vector<Vec2f> uvs = indexed_uvs(input);
+    std::vector<TriMesh> components;
+    std::vector<std::vector<Vec2f>> component_uvs;
+
+    REQUIRE(get_components(input, uvs, components, component_uvs));
+    REQUIRE(components.size() == 2);
+    REQUIRE(component_uvs.size() == components.size());
+
+    std::size_t total_faces = 0;
+    for (std::size_t i = 0; i < components.size(); ++i) {
+        CHECK(components[i].indices.size() == 12);
+        CHECK(components[i].vertices.size() == 8);
+        CHECK(component_uvs[i].size() == components[i].vertices.size());
+        CHECK(is_closed(components[i]));
+        for (std::size_t vertex_id = 0; vertex_id < components[i].vertices.size(); ++vertex_id) {
+            const TriVertex &vertex = components[i].vertices[vertex_id];
+            const Vec2f &uv = component_uvs[i][vertex_id];
+            CHECK_THAT(uv.x(), Catch::Matchers::WithinAbs(vertex.x(), 1e-6));
+            CHECK_THAT(uv.y(), Catch::Matchers::WithinAbs(vertex.y() + vertex.z(), 1e-6));
+        }
+        total_faces += components[i].indices.size();
+    }
+    CHECK(total_faces == input.indices.size());
+
+    std::vector<TriMesh> rejected_components;
+    std::vector<std::vector<Vec2f>> rejected_uvs;
+    std::vector<Vec2f> incomplete_uvs = uvs;
+    incomplete_uvs.pop_back();
+    CHECK_FALSE(get_components(input, incomplete_uvs, rejected_components, rejected_uvs));
+    CHECK(rejected_components.empty());
+    CHECK(rejected_uvs.empty());
+}
+
+TEST_CASE("Component extraction clears stale outputs on a UV cardinality error", "[ColorUtils]")
+{
+    const TriMesh input = cube_mesh();
+    std::vector<TriMesh> components{cube_mesh()};
+    std::vector<std::vector<Vec2f>> component_uvs{{Vec2f(1.f, 2.f)}};
+    std::vector<Vec2f> malformed(input.vertices.size() - 1, Vec2f(0.f, 0.f));
+    CHECK_FALSE(get_components(input, malformed, components, component_uvs));
+    CHECK(components.empty());
+    CHECK(component_uvs.empty());
 }
 
