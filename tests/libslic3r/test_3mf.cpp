@@ -293,7 +293,8 @@ static bool read_3mf_entry(const std::string& path, std::string& out,
 // Rewrites the archive at `path`, letting `edit` change the name or data of each entry; returns
 // whether `edit` reported a change for any of them. miniz cannot edit in place and
 // open_zip_writer truncates, so the entries are held across the switch.
-static bool rewrite_3mf_entries(const std::string& path, const std::function<bool(std::string& name, std::string& data)>& edit)
+static bool rewrite_3mf_entries(const std::string& path, const std::function<bool(std::string& name, std::string& data)>& edit,
+                                const std::vector<std::pair<std::string, std::string>>& append = {})
 {
     std::vector<std::pair<std::string, std::string>> entries;
     bool changed = false;
@@ -301,6 +302,7 @@ static bool rewrite_3mf_entries(const std::string& path, const std::function<boo
         mz_zip_archive zip;
         mz_zip_zero_struct(&zip);
         REQUIRE(open_zip_reader(&zip, path));
+        const ScopeGuard close_zip([&zip] { close_zip_reader(&zip); });
         mz_uint n = mz_zip_reader_get_num_files(&zip);
         for (mz_uint i = 0; i < n; ++i) {
             mz_zip_archive_file_stat st;
@@ -314,14 +316,14 @@ static bool rewrite_3mf_entries(const std::string& path, const std::function<boo
             changed |= edit(name, data);
             entries.emplace_back(std::move(name), std::move(data));
         }
-        close_zip_reader(&zip);
     }
 
+    entries.insert(entries.end(), append.begin(), append.end());
     Zipper out(path);
     for (const auto& e : entries)
         out.add_entry(e.first, e.second.data(), e.second.size());
     out.finalize();
-    return changed;
+    return changed || !append.empty();
 }
 
 // Rewrites the archive at `path` with the recipe entry back under the name it had before the
@@ -2843,6 +2845,66 @@ TEST_CASE("BBS 3MF maps legacy custom-gcode records without a type attribute", "
         CHECK(info.gcodes[i].color == expected[i].color);
         CHECK(info.gcodes[i].extra == expected[i].extra);
     }
+}
+
+TEST_CASE("BBS 3MF rejects an invalid embedded preset without manufacturing a preset", "[3MF][Bbs3mfExtended][EmbeddedPreset]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_bad_preset_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+    // The name matches the embedded print preset entries, the content is not JSON.
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string&, std::string&) { return false; },
+        {{"Metadata/process_settings_1.config", "this is not a config"}}));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    CHECK(loaded.presets.empty());
+    CHECK(loaded_model.objects.size() == 1);
+}
+
+TEST_CASE("BBS 3MF loads a valid embedded print preset with its identity", "[3MF][Bbs3mfExtended][EmbeddedPreset]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_preset_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    DynamicPrintConfig embedded;
+    embedded.set_key_value("print_settings_id", new ConfigOptionString("Embedded print contract"));
+    embedded.set_key_value("layer_height", new ConfigOptionFloat(.31));
+    std::ostringstream embedded_json;
+    embedded.save_to_json(embedded_json, "Embedded print contract", "project", "1.2.3.4");
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string&, std::string&) { return false; },
+        {{"Metadata/process_settings_1.config", embedded_json.str()}}));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.presets.size() == 1);
+    const Preset *preset = loaded.presets.front();
+    REQUIRE(preset != nullptr);
+    CHECK(preset->type == Preset::TYPE_PRINT);
+    CHECK(preset->name == "Embedded print contract");
+    CHECK(preset->is_project_embedded);
+    const auto expected_version = Semver::parse("1.2.3.4");
+    REQUIRE(expected_version.has_value());
+    CHECK(preset->version == *expected_version);
+    REQUIRE(preset->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(.31, 1e-6));
 }
 
 } // namespace bbs_archive_contracts
