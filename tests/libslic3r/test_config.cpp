@@ -4,6 +4,7 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
@@ -2196,4 +2197,86 @@ TEST_CASE("PrintConfig legacy handling leaves current keys and values unchanged"
             CHECK(value == current_value);
         }
     }
+}
+
+namespace {
+
+bool has_error(const std::map<std::string, std::string> &errors, const char *key)
+{
+    return errors.find(key) != errors.end();
+}
+
+// The reported message for `key`, or an empty string when validation did not flag it.
+std::string error_message(const std::map<std::string, std::string> &errors, const char *key)
+{
+    const auto it = errors.find(key);
+    return it == errors.end() ? std::string() : it->second;
+}
+
+} // namespace
+
+TEST_CASE("Firmware retraction validation accepts only firmware flavors that implement it", "[Config][Validation]")
+{
+    // Every GCodeFlavor key. The unsupported ones are not among gcode_flavor's selectable enum
+    // values, so validate() reports "gcode_flavor" for them too; only use_firmware_retraction is checked here.
+    const std::pair<const char *, bool> flavors[] = {
+        {"marlin", true},         {"marlin2", true},    {"klipper", true},   {"reprap", true},
+        {"reprapfirmware", true}, {"repetier", true},   {"smoothie", true},  {"machinekit", true},
+        {"teacup", false},        {"makerware", false}, {"sailfish", false}, {"mach3", false},
+        {"no-extrusion", false},
+    };
+    for (const auto &[flavor, supported] : flavors) {
+        DYNAMIC_SECTION(flavor) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("gcode_flavor", flavor);
+            config.set_deserialize_strict("wipe", "0");
+
+            config.set("use_firmware_retraction", true);
+            const auto errors = config.validate();
+            CHECK(has_error(errors, "use_firmware_retraction") == !supported);
+            if (!supported)
+                CHECK_THAT(error_message(errors, "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
+
+            // The flavor restriction applies only while firmware retraction is requested.
+            config.set("use_firmware_retraction", false);
+            CHECK_FALSE(has_error(config.validate(), "use_firmware_retraction"));
+        }
+    }
+}
+
+TEST_CASE("Firmware retraction validation rejects wipe on any extruder", "[Config][Validation]")
+{
+    struct Row {
+        const char *wipe;
+        bool        firmware_retraction;
+        bool        rejected;
+    };
+    const Row rows[] = {
+        {"1",   true,  true},
+        {"0,1", true,  true},   // only the second extruder wipes
+        {"1,0", true,  true},
+        {"0,0", true,  false},
+        {"0",   true,  false},
+        {"1,1", false, false},  // wipe alone is fine without firmware retraction
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION("wipe " << row.wipe << (row.firmware_retraction ? " with" : " without") << " firmware retraction") {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("gcode_flavor", "klipper");
+            config.set_deserialize_strict("wipe", row.wipe);
+            config.set("use_firmware_retraction", row.firmware_retraction);
+            const auto errors = config.validate();
+            CHECK(has_error(errors, "use_firmware_retraction") == row.rejected);
+            if (row.rejected)
+                CHECK_THAT(error_message(errors, "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("not compatible with --wipe"));
+        }
+    }
+
+    // When both rules are violated the flavor message is the one reported (the wipe message
+    // does not replace it).
+    DynamicPrintConfig both = DynamicPrintConfig::full_print_config();
+    both.set_deserialize_strict("gcode_flavor", "teacup");
+    both.set_deserialize_strict("wipe", "1");
+    both.set("use_firmware_retraction", true);
+    CHECK_THAT(error_message(both.validate(), "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
 }
