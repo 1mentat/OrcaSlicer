@@ -7716,6 +7716,125 @@ TEST_CASE("External preset loading selects the named profile and keeps differing
     }
 }
 
+TEST_CASE("Differing a user preset against its parent emits only the changed values and sync identity", "[Preset][Bundle][PresetLifecycle][Diff]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    bundle.prints.load_preset("", "Diff Parent", print_config(bundle, 0.20), false);
+    DynamicPrintConfig child_config = bundle.prints.find_preset("Diff Parent")->config;
+    child_config.opt<ConfigOptionFloat>("layer_height")->value = 0.28;
+    child_config.opt<ConfigOptionInt>("wall_loops")->value = 5;
+    child_config.opt<ConfigOptionString>("inherits", true)->value = "Diff Parent";
+    Preset &child = bundle.prints.load_preset("", "Diff Child", child_config, false);
+    child.base_id = "parent-setting-id";
+    child.version = *Semver::parse("1.2.3.4");
+    child.updated_time = 1234;
+    REQUIRE(child.inherits() == "Diff Parent");
+
+    std::map<std::string, std::string> values;
+    // The legacy API returns zero on success; negative values are reserved for invalid presets.
+    CHECK(bundle.prints.get_differed_values_to_update(child, values) == 0);
+    CHECK(values == std::map<std::string, std::string>{
+        {"layer_height", "0.28"},
+        {"wall_loops", "5"},
+        {"inherits", "Diff Parent"},
+        {BBL_JSON_KEY_VERSION, "1.2.3.4"},
+        {BBL_JSON_KEY_BASE_ID, "parent-setting-id"},
+        {ORCA_JSON_KEY_UPDATE_TIME, "1234"},
+        {BBL_JSON_KEY_TYPE, PRESET_IOT_PRINT_TYPE},
+    });
+}
+
+TEST_CASE("Differing a preset without a parent emits its whole config", "[Preset][Bundle][PresetLifecycle][Diff]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    Preset &standalone = bundle.prints.load_preset("", "Standalone Process", print_config(bundle, 0.22), false);
+    standalone.filament_id = "standalone-family";
+
+    std::map<std::string, std::string> values;
+    CHECK(bundle.prints.get_differed_values_to_update(standalone, values) == 0);
+    CHECK(values.at("layer_height") == "0.22");
+    // An untouched default is included too, since there is no parent to diff against.
+    CHECK(values.count("wall_loops") == 1);
+    // Without a sync base id a root preset reports its own filament id instead.
+    CHECK(values.count(BBL_JSON_KEY_BASE_ID) == 0);
+    CHECK(values.at(BBL_JSON_KEY_FILAMENT_ID) == "standalone-family");
+
+    // Saving only a difference needs a parent, so a parentless preset has nothing to emit.
+    std::unique_ptr<Preset> differed(bundle.prints.get_preset_differed_for_save(standalone));
+    CHECK(differed == nullptr);
+}
+
+TEST_CASE("Differing is refused for system, default and project-embedded presets", "[Preset][Bundle][PresetLifecycle][Diff]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    Preset &system = bundle.prints.load_preset("", "System Process", print_config(bundle, 0.24), false);
+    system.is_system = true;
+    Preset &embedded = bundle.prints.load_preset("", "Embedded Process", print_config(bundle, 0.26), false);
+    embedded.is_project_embedded = true;
+    Preset &default_preset = bundle.prints.default_preset();
+
+    std::map<std::string, std::string> values;
+    for (Preset *preset : {bundle.prints.find_preset("System Process"), bundle.prints.find_preset("Embedded Process"),
+                           &default_preset}) {
+        REQUIRE(preset != nullptr);
+        CHECK(bundle.prints.get_differed_values_to_update(*preset, values) == -1);
+        CHECK(values.empty());
+    }
+    for (Preset *preset : {bundle.prints.find_preset("System Process"), &default_preset})
+        CHECK(bundle.prints.get_preset_differed_for_save(*preset) == nullptr);
+}
+
+TEST_CASE("The preset saved for a project is a child holding only its changed values", "[Preset][Bundle][PresetLifecycle][Diff]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    bundle.prints.load_preset("", "Diff Parent", print_config(bundle, 0.20), false);
+    DynamicPrintConfig child_config = bundle.prints.find_preset("Diff Parent")->config;
+    child_config.opt<ConfigOptionFloat>("layer_height")->value = 0.28;
+    child_config.opt<ConfigOptionString>("inherits", true)->value = "Diff Parent";
+    Preset &child = bundle.prints.load_preset("", "Diff Child", child_config, false);
+
+    std::unique_ptr<Preset> differed(bundle.prints.get_preset_differed_for_save(child));
+    REQUIRE(differed != nullptr);
+    CHECK(differed->name == "Diff Child");
+    CHECK(differed->inherits() == "Diff Parent");
+    CHECK_THAT(differed->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.28, 1e-9));
+    // Values equal to the parent's are left to inheritance.
+    CHECK_FALSE(differed->config.has("wall_loops"));
+    // The preset in the collection keeps its complete config.
+    const Preset *stored = bundle.prints.find_preset("Diff Child");
+    REQUIRE(stored != nullptr);
+    CHECK(stored->config.has("wall_loops"));
+}
+
+TEST_CASE("Differing a filament keeps a turned-off override that matches its parent", "[Preset][Bundle][PresetLifecycle][Diff]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    auto turn_off = [](DynamicPrintConfig &config) {
+        config.opt<ConfigOptionPercentsNullable>("filament_retract_before_wipe")->values = {ConfigOptionPercentsNullable::nil_value()};
+    };
+    DynamicPrintConfig parent_config = filament_config(bundle, "Vendor", "Printer");
+    turn_off(parent_config);
+    bundle.filaments.load_preset("", "Diff Filament Parent", parent_config, false);
+    DynamicPrintConfig child_config = parent_config;
+    child_config.opt<ConfigOptionStrings>("filament_vendor")->values = {"Other Vendor"};
+    child_config.opt<ConfigOptionString>("inherits", true)->value = "Diff Filament Parent";
+    Preset &child = bundle.filaments.load_preset("", "Diff Filament Child", child_config, false);
+
+    std::map<std::string, std::string> values;
+    CHECK(bundle.filaments.get_differed_values_to_update(child, values) == 0);
+    CHECK(values.count("filament_vendor") == 1);
+    // Equal to the parent so the plain diff drops it, but a missing key would be re-created as "on".
+    REQUIRE(values.count("filament_retract_before_wipe") == 1);
+    CHECK(values.at("filament_retract_before_wipe") == "nil");
+    // A value equal to the parent is left out.
+    CHECK(values.count("filament_type") == 0);
+}
+
 } // namespace preset_lifecycle_contracts
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
