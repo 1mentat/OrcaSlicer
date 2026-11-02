@@ -1423,6 +1423,46 @@ TEST_CASE("read_cli accepts nil entries for a nullable vector option", "[Config]
     REQUIRE_THAT(opt->values[1], Catch::Matchers::WithinAbs(2.5, 1e-9));
 }
 
+TEST_CASE("Legacy SLA vector corrections are expanded into axis options", "[Config][ConfigLegacy]")
+{
+    DynamicPrintConfig config;
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.1, 1.2}));
+    config.set_key_value("material_correction", new ConfigOptionFloats({0.9, 0.8}));
+    // An axis option that is already present is not overwritten from the legacy vector.
+    config.set_key_value("material_correction_y", new ConfigOptionFloat(0.7));
+    handle_legacy_sla(config);
+
+    CHECK_THAT(config.opt_float("relative_correction_x"), Catch::Matchers::WithinAbs(1.1, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_y"), Catch::Matchers::WithinAbs(1.1, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_z"), Catch::Matchers::WithinAbs(1.2, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_x"), Catch::Matchers::WithinAbs(0.9, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_y"), Catch::Matchers::WithinAbs(0.7, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_z"), Catch::Matchers::WithinAbs(0.8, 1e-9));
+}
+
+TEST_CASE("Legacy composite thumbnail values become canonical definitions", "[Config][ConfigLegacy]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // A size without a format takes the legacy thumbnails_format, which is not the default PNG here.
+    config.set_deserialize_strict("thumbnails_format", "JPG");
+    config.set("thumbnails", "16x16,32x32/PNG");
+    config.handle_legacy_composite();
+    CHECK(config.opt_string("thumbnails") == "16x16/JPG, 32x32/PNG");
+}
+
+TEST_CASE("Legacy composite wiping matrix detects whether custom entries exist", "[Config][ConfigLegacy]")
+{
+    DynamicPrintConfig defaults;
+    defaults.set_key_value("wiping_volumes_matrix", new ConfigOptionFloats({0., 140., 140., 0.}));
+    defaults.handle_legacy_composite();
+    CHECK_FALSE(defaults.opt_bool("wiping_volumes_use_custom_matrix"));
+
+    DynamicPrintConfig custom;
+    custom.set_key_value("wiping_volumes_matrix", new ConfigOptionFloats({0., 141., 140., 0.}));
+    custom.handle_legacy_composite();
+    CHECK(custom.opt_bool("wiping_volumes_use_custom_matrix"));
+}
+
 // get_at() returns values.front() for an out-of-range index, so calling it on an empty vector
 // option is UB. filament_id and filament_is_support are unpopulated on a CLI from-scratch slice.
 TEST_CASE("get_filament_type treats empty vector options as absent", "[Config][Filament]")
