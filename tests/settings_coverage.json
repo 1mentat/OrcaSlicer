@@ -1796,6 +1796,17 @@
       ],
       "reason": "An overhang mesh emits perimeter geometry with both values; overhang-role paths occur when detection is on and are absent when it is off."
     },
+    "bridge_angle": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[ExternalBridgeDirection]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The validated [ExternalBridgeDirection] Print cases compare bridge-surface angles and actual printed interior spans modulo pi for absolute 1, 30, 90, and 180 degree values; zero remains automatic. A rotated 37 degree model checks alignment off/on, and relative 30/120 degree offsets are compared with the separately observed automatic direction. Zero stays automatic under relative/alignment switches. Active absolute-angle and relative-offset source mutations fail ordinary direction assertions. These selected numeric points and interactions do not claim exhaustive behavior across the full range."
+    },
     "bridge_density": {
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[BridgeInfillBoundary]",

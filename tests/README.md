@@ -494,7 +494,11 @@ warnings with valid controls. Build `fff_print_workflow_tests` for focused
 feedback; its mutation probes are in `print_validation_public_boundary.json`.
 
 `[RelativeBridgeAngle]` compares automatic, absolute, and relative internal
-bridge directions. `[PaintedCutWidth]` checks bounded painted-region areas,
+bridge directions. `[ExternalBridgeDirection]` checks absolute and relative
+external bridge angles against emitted bridge spans, including the 180-degree
+endpoint, model alignment, and automatic-angle controls. Its active-branch
+mutations are in `tests/mutations/external_bridge_direction.json`.
+`[PaintedCutWidth]` checks bounded painted-region areas,
 alternating interlocking depth, and beam bypass. `[IroningAngleFixed]` uses an
 empty rotation template and the longest emitted ironing segment on each layer
 to distinguish absolute direction from inherited direction and alternation.

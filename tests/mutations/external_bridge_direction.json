@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Active external bridge absolute and relative direction branches, checked against public Print bridge surfaces and emitted spans.",
+  "mutants": [
+    {
+      "id": "external-bridge-absolute-angle-ignored",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "bridges.surfaces = (custom_angle_deg > 0.0 && !relative_angle) ?\n            expand_merge_surfaces(this->fill_surfaces.surfaces, stBottomBridge, expansion_zones, closing_radius, custom_angle_rad + align_offset_rad) :\n            expand_bridges_detect_orientations(this->fill_surfaces.surfaces, expansion_zones, closing_radius);",
+      "new": "bridges.surfaces = (false) ?\n            expand_merge_surfaces(this->fill_surfaces.surfaces, stBottomBridge, expansion_zones, closing_radius, custom_angle_rad + align_offset_rad) :\n            expand_bridges_detect_orientations(this->fill_surfaces.surfaces, expansion_zones, closing_radius);",
+      "expected_matches": 1,
+      "description": "Bypass the active absolute bridge-angle override; the 1/30/90/180-degree path-direction expectations and alignment assertion must fail.",
+      "test_filter": "ExternalBridgeDirection",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "external-bridge-relative-offset-ignored",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "if (custom_angle_deg > 0.0 && relative_angle) {\n            for (Surface &bridge_surface : bridges.surfaces) {",
+      "new": "if (false) {\n            for (Surface &bridge_surface : bridges.surfaces) {",
+      "expected_matches": 1,
+      "description": "Drop the active relative bridge-angle addition; the 30/120-degree offsets from observed automatic direction must fail.",
+      "test_filter": "ExternalBridgeDirection",
+      "ordinary_assertion_only": true
+    }
+  ]
+}
