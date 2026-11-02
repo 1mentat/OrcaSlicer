@@ -733,6 +733,12 @@ IDs must reach the correct objects. Its probes are in
 `bbs_layer_profile_validation.json`. Build `libslic3r_3mf_tests` for focused
 feedback without duplicate CTest registration.
 
+`[EmptyFilamentIdentity]` imports embedded filament and print configs with an
+empty or omitted identity, keeps the valid sibling preset and 12-facet model,
+and preserves the existing empty-string and multi-value identity behavior. Its
+source-local probes are in `bbs_3mf_metadata.json`; build and run
+`libslic3r_3mf_tests "[EmptyFilamentIdentity]"` for focused feedback.
+
 `[CutSurfaceTopology]` checks projected depth selection, disconnected components
 within one mesh, and multiple holes using contour validity and geometric area.
 `[TpmsAdaptiveNormalY]` checks density invariance along Y and compares shell and

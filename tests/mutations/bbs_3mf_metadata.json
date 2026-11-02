@@ -77,9 +77,25 @@
     {
       "id": "bbs-followup-filament-preset-identity-guard",
       "path": "src/libslic3r/Format/bbs_3mf.cpp",
-      "old": "if (!filament_names) {",
-      "new": "if (filament_names) {",
-      "description": "Reject an embedded filament preset that contains the required canonical identity field.",
+      "old": "if (!filament_names || filament_names->values.empty()) {",
+      "new": "if (!filament_names || filament_names->values.size() <= 1) {",
+      "description": "Reject every valid single-name embedded filament identity while still skipping missing or empty vectors; the single-name and empty-string controls require those entries to remain importable.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-empty-filament-id-unguarded",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!filament_names || filament_names->values.empty()) {",
+      "new": "if (!filament_names) {",
+      "description": "Allow an empty filament_settings_id vector to reach the importer identity read; the focused empty-array case requires skipping it while retaining the valid print sibling and model.",
+      "test_filter": "Bbs3mfMetadata"
+    },
+    {
+      "id": "bbs-followup-empty-filament-id-throws-instead-of-skipping",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (!filament_names || filament_names->values.empty()) {\n                    BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(\", can not found filament_settings_id from  %1%\\n\") % dest_file;\n                    //skip this file\n                    return;\n                }",
+      "new": "if (!filament_names || filament_names->values.empty()) {\n                    BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(\", can not found filament_settings_id from  %1%\\n\") % dest_file;\n                    //skip this file\n                    throw 1;\n                }",
+      "description": "Throw instead of safely skipping a missing or empty embedded filament identity; explicit REQUIRE_NOTHROW checks require the sibling preset and model import to complete.",
       "test_filter": "Bbs3mfMetadata"
     }
   ]

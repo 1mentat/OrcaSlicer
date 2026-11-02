@@ -4594,6 +4594,148 @@ TEST_CASE("BBS project loads embedded filament and printer presets", "[3mf][Bbs3
     CHECK((*printer_preset)->config.opt_string("printer_model") == "Contract Printer");
 }
 
+namespace {
+void store_embedded_identity_entries(const std::string &path, const std::vector<std::string> *filament_ids,
+                                    bool include_print_identity)
+{
+    ScopedTemporaryFile filament_file(".json");
+    DynamicPrintConfig filament;
+    filament.set_key_value("filament_type", new ConfigOptionStrings({"PLA"}));
+    filament.set_key_value("filament_diameter", new ConfigOptionFloats({1.75}));
+    if (filament_ids != nullptr)
+        filament.set_key_value("filament_settings_id", new ConfigOptionStrings(*filament_ids));
+    filament.save_to_json(filament_file.string(), "Embedded filament fixture", "filament", "0.0.0");
+
+    ScopedTemporaryFile print_file(".json");
+    DynamicPrintConfig print;
+    print.set_key_value("layer_height", new ConfigOptionFloat(.2));
+    if (include_print_identity)
+        print.set_key_value("print_settings_id", new ConfigOptionString("Valid print sibling"));
+    print.save_to_json(print_file.string(), "Embedded print fixture", "process", "0.0.0");
+
+    REQUIRE(rewrite_3mf_entries(path, [](std::string &, std::string &) { return false; }, {
+        {"Metadata/filament_settings_1.config", read_file(filament_file.string())},
+        {"Metadata/process_settings_probe.config", read_file(print_file.string())}}));
+}
+
+void check_identity_case_cube(const Model &model)
+{
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    CHECK(model.mesh().facets_count() == 12);
+    CHECK_THAT(its_volume(model.mesh().its), WithinAbs(1000., 1e-3));
+}
+
+} // namespace
+
+TEST_CASE("BBS skips an empty embedded filament identity array while retaining valid sibling and model",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    const std::vector<std::string> empty_ids;
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), &empty_ids, true);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    bool load_ok = false;
+    REQUIRE_NOTHROW(load_ok = load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(load_ok);
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 1);
+    CHECK(loaded.presets.front()->type == Preset::TYPE_PRINT);
+    CHECK(loaded.presets.front()->name == "Valid print sibling");
+}
+
+TEST_CASE("BBS skips an embedded filament config without identity while retaining valid sibling and model",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), nullptr, true);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    bool load_ok = false;
+    REQUIRE_NOTHROW(load_ok = load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(load_ok);
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 1);
+    CHECK(loaded.presets.front()->type == Preset::TYPE_PRINT);
+    CHECK(loaded.presets.front()->name == "Valid print sibling");
+}
+
+TEST_CASE("BBS skips an embedded print config without identity while retaining valid filament sibling and model",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    const std::vector<std::string> filament_ids{"Valid filament sibling"};
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), &filament_ids, false);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    bool load_ok = false;
+    REQUIRE_NOTHROW(load_ok = load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(load_ok);
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 1);
+    CHECK(loaded.presets.front()->type == Preset::TYPE_FILAMENT);
+    CHECK(loaded.presets.front()->name == "Valid filament sibling");
+    REQUIRE(loaded.presets.front()->config.option<ConfigOptionStrings>("filament_settings_id") != nullptr);
+    CHECK(loaded.presets.front()->config.opt<ConfigOptionStrings>("filament_settings_id")->values == filament_ids);
+}
+
+TEST_CASE("BBS preserves an existing empty-string filament identity value",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    const std::vector<std::string> empty_string_id{""};
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), &empty_string_id, true);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 2);
+    const auto filament = std::find_if(loaded.presets.begin(), loaded.presets.end(), [](const Preset *preset) {
+        return preset != nullptr && preset->type == Preset::TYPE_FILAMENT;
+    });
+    REQUIRE(filament != loaded.presets.end());
+    CHECK((*filament)->name.empty());
+    REQUIRE((*filament)->config.option<ConfigOptionStrings>("filament_settings_id") != nullptr);
+    CHECK((*filament)->config.opt<ConfigOptionStrings>("filament_settings_id")->values == empty_string_id);
+    CHECK(std::any_of(loaded.presets.begin(), loaded.presets.end(), [](const Preset *preset) {
+        return preset != nullptr && preset->type == Preset::TYPE_PRINT && preset->name == "Valid print sibling";
+    }));
+}
+
+TEST_CASE("BBS uses the first embedded filament identity name and retains its full identity vector",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    const std::vector<std::string> filament_ids{"First embedded filament", "Second embedded filament"};
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), &filament_ids, true);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 2);
+    const auto filament = std::find_if(loaded.presets.begin(), loaded.presets.end(), [](const Preset *preset) {
+        return preset != nullptr && preset->type == Preset::TYPE_FILAMENT;
+    });
+    REQUIRE(filament != loaded.presets.end());
+    CHECK((*filament)->name == "First embedded filament");
+    REQUIRE((*filament)->config.option<ConfigOptionStrings>("filament_settings_id") != nullptr);
+    CHECK((*filament)->config.opt<ConfigOptionStrings>("filament_settings_id")->values == filament_ids);
+    CHECK(std::any_of(loaded.presets.begin(), loaded.presets.end(), [](const Preset *preset) {
+        return preset != nullptr && preset->type == Preset::TYPE_PRINT && preset->name == "Valid print sibling";
+    }));
+}
+
 TEST_CASE("BBS project ignores malformed filament sequence JSON without losing the model", "[3mf][Bbs3mfMetadata][Errors][Sequence]")
 {
     ScopedTemporaryFile archive(".3mf");
