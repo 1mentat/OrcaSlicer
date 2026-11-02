@@ -3,12 +3,15 @@
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <boost/nowide/fstream.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <set>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -20,6 +23,8 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
+
+#include "test_utils.hpp"
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -527,3 +532,64 @@ TEST_CASE("Surface cuts preserve multiple holes when the shape outline matches t
 }
 
 } // namespace cut_surface_topology_contracts
+
+namespace cut_surface_corefine_contracts {
+
+namespace {
+
+// Writes an axis-aligned cube of the given side with its minimum corner at `origin` as an OFF file.
+void write_cube_off(const std::string &path, float side, const Vec3f &origin)
+{
+    const float x0 = origin.x(), y0 = origin.y(), z0 = origin.z();
+    const float x1 = x0 + side, y1 = y0 + side, z1 = z0 + side;
+    boost::nowide::ofstream out(path);
+    out << "OFF\n8 12 0\n"
+        << x0 << " " << y0 << " " << z0 << "\n" << x1 << " " << y0 << " " << z0 << "\n"
+        << x1 << " " << y1 << " " << z0 << "\n" << x0 << " " << y1 << " " << z0 << "\n"
+        << x0 << " " << y0 << " " << z1 << "\n" << x1 << " " << y0 << " " << z1 << "\n"
+        << x1 << " " << y1 << " " << z1 << "\n" << x0 << " " << y1 << " " << z1 << "\n"
+        << "3 0 2 1\n3 0 3 2\n3 4 5 6\n3 4 6 7\n"
+        << "3 0 1 5\n3 0 5 4\n3 1 2 6\n3 1 6 5\n"
+        << "3 2 3 7\n3 2 7 6\n3 3 0 4\n3 3 4 7\n";
+}
+
+void write_text(const std::string &path, const std::string &text)
+{
+    boost::nowide::ofstream out(path);
+    out << text;
+}
+
+} // namespace
+
+TEST_CASE("corefine_test accepts a shape that pierces a model face", "[CutSurface]")
+{
+    // The 4 mm cube straddles the +X face of the 10 mm cube, so the two surfaces really intersect.
+    ScopedTemporaryFile model(".off"), shape(".off");
+    write_cube_off(model.string(), 10.f, Vec3f(0.f, 0.f, 0.f));
+    write_cube_off(shape.string(), 4.f, Vec3f(8.f, 3.f, 2.f));
+    CHECK(corefine_test(model.string(), shape.string()));
+}
+
+TEST_CASE("corefine_test rejects a missing model or shape file", "[CutSurface]")
+{
+    ScopedTemporaryFile valid(".off"), missing(".off");
+    write_cube_off(valid.string(), 10.f, Vec3f(0.f, 0.f, 0.f));
+    // `missing` only reserves a unique name; nothing is ever written to it.
+    CHECK_FALSE(corefine_test(missing.string(), valid.string()));
+    CHECK_FALSE(corefine_test(valid.string(), missing.string()));
+}
+
+TEST_CASE("corefine_test rejects a malformed model or shape file", "[CutSurface]")
+{
+    ScopedTemporaryFile valid(".off"), garbage(".off"), truncated(".off");
+    write_cube_off(valid.string(), 10.f, Vec3f(0.f, 0.f, 0.f));
+    write_text(garbage.string(), "not an OFF mesh\n");
+    // The header promises 8 vertices and 12 faces but only one vertex follows.
+    write_text(truncated.string(), "OFF\n8 12 0\n0 0 0\n");
+    CHECK_FALSE(corefine_test(garbage.string(), valid.string()));
+    CHECK_FALSE(corefine_test(valid.string(), garbage.string()));
+    CHECK_FALSE(corefine_test(truncated.string(), valid.string()));
+    CHECK_FALSE(corefine_test(valid.string(), truncated.string()));
+}
+
+} // namespace cut_surface_corefine_contracts
