@@ -7589,6 +7589,9 @@ TEST_CASE("Exporting the selections skips the built-in placeholder printer", "[P
     PresetBundle &bundle = scoped.bundle;
     const std::string placeholder = bundle.printers.get_selected_preset_name();
     REQUIRE(placeholder == "Default Printer");
+    // export_selections expects an FFF printer to have a filament slot.
+    bundle.filament_presets = {bundle.filaments.get_selected_preset_name()};
+    REQUIRE_FALSE(bundle.filament_presets.front().empty());
 
     AppConfig config;
     config.set_printer_setting(placeholder, PRESET_PRINT_NAME, "stale process");
