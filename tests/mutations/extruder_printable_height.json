@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "test_filter": "PrintObjectGeometric",
+  "mutants": [
+    {
+      "id": "extruder-printable-height-inclusive-equality-boundary",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (layer->print_z <= printable_height)",
+      "new": "if (layer->print_z < printable_height)",
+      "expected_matches": 1,
+      "test_filter": "PrintObjectGeometric",
+      "ordinary_assertion_only": true,
+      "description": "Reject an exactly equal top layer; the inclusive printable-height boundary must fail."
+    },
+    {
+      "id": "extruder-printable-height-zero-height-skipped",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (layer->print_z <= printable_height)",
+      "new": "if (layer->print_z <= printable_height || printable_height == 0.)",
+      "expected_matches": 1,
+      "test_filter": "PrintObjectGeometric",
+      "ordinary_assertion_only": true,
+      "description": "Treat zero as unlimited; the independent per-nozzle minimum-boundary expectations must fail."
+    }
+  ]
+}

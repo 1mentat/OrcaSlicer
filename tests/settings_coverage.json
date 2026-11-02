@@ -4778,6 +4778,16 @@
       ],
       "reason": "The public TimelapsePosPicker consumer receives valid Print fixtures at rod heights 1 mm and 2 mm. A prior object exactly at current print Z plus rod height blocks the travel band, raising the rod clears it, and another starting band has a safe corridor. This checks the inclusive geometric threshold, not the registered numeric range or complete Print.process timelapse emission."
     },
+    "extruder_printable_height": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[PrintObjectGeometric]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Validated two-nozzle Print fixtures classify actual active filament roles against the registered zero and one-thousand mm limits, including swapped per-nozzle limits and a maximum-limit control. The exact top printed Z remains eligible at equality and becomes blocked at the next representable double below it; the existing 0.6/100 mm example remains. These are bounded four-mm-cube, two-nozzle geometry-classification oracles, not a claim about every geometry, tool assignment, or nozzle count. The native registry reports this option non-nullable."
+    },
     "extruder_printable_area": {
       "test": "tests/fff_print/test_timelapse_pos_picker.cpp",
       "tag": "[TimelapsePosPickerGap]",

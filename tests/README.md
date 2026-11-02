@@ -503,6 +503,14 @@ alternating interlocking depth, and beam bypass. `[IroningAngleFixed]` uses an
 empty rotation template and the longest emitted ironing segment on each layer
 to distinguish absolute direction from inherited direction and alternation.
 
+`[PrintObjectGeometric]` checks per-nozzle printable-height limits at 0 and
+1000 mm, swapped nozzle limits, and exact equality with the top printed layer
+versus the immediately lower double. All fixtures validate before slicing;
+the oracle is the public blocked-filament classification. Its source probes
+are in `tests/mutations/extruder_printable_height.json`. Target-mode mutation
+runs use `fff_print_tests` and the exact five-case control inventory and regex
+in `tests/controls/print_object_geometric.json`.
+
 `[PowerLossRecovery]` checks all three Marlin recovery modes, including the
 second-layer transition and disabling recovery after the last extrusion.
 `[BedTemperatureFormula]` uses two printed filaments with distinct bed

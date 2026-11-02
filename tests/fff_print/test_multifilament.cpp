@@ -25,6 +25,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
@@ -1890,6 +1891,9 @@ static void process_print_object_geometric_fixture(Print &print, Model &model,
     const auto bounds = model.objects.front()->instance_bounding_box(0);
     REQUIRE_THAT(bounds.min.x(), Catch::Matchers::WithinAbs(0., 1e-6));
     REQUIRE_THAT(bounds.max.x(), Catch::Matchers::WithinAbs(4., 1e-6));
+    const StringObjectException validation = print.validate();
+    INFO("validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
     REQUIRE_NOTHROW(print.process());
     REQUIRE_FALSE(print.objects().empty());
     REQUIRE_FALSE(print.objects().front()->layers().empty());
@@ -1963,4 +1967,74 @@ TEST_CASE("PrintObject marks filaments above each nozzle printable height",
     // The 4mm cube has layers above 0.6mm but none above 100mm. All active roles use filament 1.
     CHECK(blocked[0] == std::set<int>{ 0 });
     CHECK(blocked[1].empty());
+}
+
+TEST_CASE("PrintObject applies printable-height limits independently per nozzle",
+          "[PrintObjectGeometric][MultiFilament][SettingsBoundary]")
+{
+    struct Scenario {
+        const char *name;
+        std::vector<double> limits;
+        std::vector<std::set<int>> expected_blocked;
+    };
+    const std::vector<Scenario> scenarios = {
+        {"zero height blocks only its nozzle's filament", {0., 1000.}, {{0}, {}}},
+        {"swapped limits follow the second nozzle", {1000., 0.}, {{}, {0}}},
+        {"maximum height leaves both nozzles clear", {1000., 1000.}, {{}, {}}},
+    };
+
+    for (const Scenario &scenario : scenarios) {
+        DYNAMIC_SECTION(scenario.name) {
+            DynamicPrintConfig config = print_object_geometric_config(
+                print_object_full_bed_area, print_object_full_bed_area, true, 1, "100,100");
+            ConfigOptionFloats *height = config.option<ConfigOptionFloats>("extruder_printable_height", true);
+            REQUIRE(height != nullptr);
+            height->values = scenario.limits;
+
+            Print print;
+            Model model;
+            process_print_object_geometric_fixture(print, model, config);
+
+            const auto blocked = print.get_geometric_unprintable_filaments();
+            REQUIRE(blocked.size() == 2);
+            CHECK(blocked == scenario.expected_blocked);
+        }
+    }
+}
+
+TEST_CASE("PrintObject treats a layer at the printable-height limit as printable",
+          "[PrintObjectGeometric][MultiFilament][SettingsBoundary]")
+{
+    struct Result {
+        double top_z;
+        std::vector<std::set<int>> blocked;
+    };
+    auto run = [](double first_limit) {
+        DynamicPrintConfig config = print_object_geometric_config(
+            print_object_full_bed_area, print_object_full_bed_area, true, 1, "100,100");
+        ConfigOptionFloats *height = config.option<ConfigOptionFloats>("extruder_printable_height", true);
+        REQUIRE(height != nullptr);
+        height->values = {first_limit, 1000.};
+
+        Print print;
+        Model model;
+        process_print_object_geometric_fixture(print, model, config);
+        REQUIRE_FALSE(print.objects().front()->layers().empty());
+        const double top_z = print.objects().front()->layers().back()->print_z;
+        return Result{top_z, print.get_geometric_unprintable_filaments()};
+    };
+
+    const Result baseline = run(1000.);
+    REQUIRE(std::isfinite(baseline.top_z));
+    REQUIRE(baseline.blocked == std::vector<std::set<int>>{{}, {}});
+
+    const Result equal = run(baseline.top_z);
+    const double immediately_below = std::nextafter(baseline.top_z, -std::numeric_limits<double>::infinity());
+    const Result below = run(immediately_below);
+
+    // Identical fixture geometry is required for the exact-double threshold comparison.
+    REQUIRE(equal.top_z == baseline.top_z);
+    REQUIRE(below.top_z == baseline.top_z);
+    CHECK(equal.blocked == std::vector<std::set<int>>{{}, {}});
+    CHECK(below.blocked == std::vector<std::set<int>>{{0}, {}});
 }
