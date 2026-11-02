@@ -3374,10 +3374,7 @@ TEST_CASE("get_real_skirt_dist follows skirt, loop, line width and nozzle fallba
     }
 }
 
-// Known bug: get_real_skirt_dist() treats an enabled draft shield with zero skirt loops as one loop and reserves
-// distance + width, but Print::_make_skirt() loops over skirt_loops and emits no skirt for zero loops, so arrange
-// reserves clearance around nothing; owed a fix PR.
-TEST_CASE("get_real_skirt_dist reserves no clearance for a draft shield without skirt loops", "[Config][Skirt][!shouldfail]")
+TEST_CASE("get_real_skirt_dist reserves no clearance for a draft shield without skirt loops", "[Config][Skirt]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set("skirt_height", 0);
