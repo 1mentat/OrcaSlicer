@@ -3004,5 +3004,25 @@ TEST_CASE("Preheat time and steps control XL backtrace commands",
     }
 }
 
+TEST_CASE("Leading tool change leaves an empty XL backtrace cache untouched",
+          "[GCodeProcessor][GcpPreheat][GCodeProcessorBacktraceControls]")
+{
+    FullPrintConfig config = preheat_config();
+    config.ooze_prevention.value = true;
+    config.printer_notes.value = "PRINTER_VENDOR_PRUSA3D PRINTER_MODEL_XL";
+    config.enable_pre_heating.value = false;
+    config.preheat_time.value = 60.f;
+    config.preheat_steps.value = 1;
+
+    const Processed processed = process_post("T1\nG1 X10 Y0 Z0.2 E0.1 F60\n", config);
+    CHECK(processed.backtrace_enabled);
+    CHECK(processed.output.find("T1\n") == 0);
+    CHECK(xl_backtrace_commands(processed.output).empty());
+    const auto extrusions = rewritten_extrusions(processed.output);
+    REQUIRE(extrusions.size() == 1);
+    CHECK_THAT(extrusions.front().x, WithinAbs(10.f, 1e-4f));
+    CHECK_THAT(extrusions.front().delta_e, WithinAbs(0.1f, 1e-4f));
+}
+
 } // namespace preheat_variance_contracts
 } // namespace gcode_processor_reachable_contracts
