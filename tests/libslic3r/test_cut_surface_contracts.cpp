@@ -44,7 +44,7 @@ indexed_triangle_set aoi_fixture()
     return {
         {
             {0, 1, 2}, // Entirely inside the query box.
-            {3, 4, 5}, // Crosses its top and right boundaries.
+            {3, 4, 5}, // Partly inside: one corner in the box, the others beyond its top and right.
             {6, 7, 8}, // Entirely outside the query box.
         },
         {
@@ -160,7 +160,7 @@ TEST_CASE("its_mask compacts disjoint selected faces without retaining unreferen
     CHECK(selected.vertices.size() == 6);
 }
 
-TEST_CASE("its_cut_AoI keeps triangles that intersect the projected bounds", "[CutSurface]")
+TEST_CASE("its_cut_AoI keeps triangles inside or partly inside the projected bounds and drops one outside", "[CutSurface]")
 {
     const indexed_triangle_set input = aoi_fixture();
     const indexed_triangle_set clipped = its_cut_AoI(input, BoundingBox(Point{0, 0}, Point{5, 5}), Emboss::ProjectZ(5.0));
@@ -186,16 +186,7 @@ TEST_CASE("its_cut_AoI keeps triangles lying on the projected boundary", "[CutSu
     CHECK(face_corners(selected) == face_corners(input));
 }
 
-TEST_CASE("its_cut_AoI keeps a triangle crossing one side of the projected bounds", "[CutSurface]")
-{
-    const indexed_triangle_set input = {
-        {{0, 1, 2}},
-        {stl_vertex(-2.f, 1.f, 0.f), stl_vertex(2.f, 1.f, 0.f), stl_vertex(0.f, 4.f, 0.f)}};
-    const indexed_triangle_set selected = its_cut_AoI(input, BoundingBox(Point(0, 0), Point(3, 3)), Emboss::ProjectZ(5.));
-    CHECK(face_corners(selected) == face_corners(input));
-}
-
-TEST_CASE("its_cut_AoI keeps a triangle whose edge crosses the bounds with every vertex outside", "[CutSurface]")
+TEST_CASE("its_cut_AoI keeps a triangle crossing the projected bounds with every vertex outside", "[CutSurface]")
 {
     // Left of, right of and below the 3 x 3 box: no single side holds all three, and the edge at y = 1
     // passes through the box.
