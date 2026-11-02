@@ -3394,7 +3394,7 @@ TEST_CASE("get_real_skirt_dist reserves no clearance for a draft shield without 
 TEST_CASE("Variant vector replacement restores kept slots and takes the rest from the source", "[Config][ConfigVariantRestore]")
 {
     ConfigOptionInts destination({10, 20, 30, 40});
-    const ConfigOptionInts source({100, 200, 300});
+    ConfigOptionInts source({100, 200, 300});
     // Replace the two slots at 1..2. Each new slot restores the old destination value at its index, or takes
     // the source value when the index is -1 or past the old vector.
     std::vector<int> restore_index{3, -1, 99};
@@ -3471,7 +3471,7 @@ TEST_CASE("Variant vector replacement reports an invalid start, type or restore 
 TEST_CASE("Variant vector replacement leaves a short source unchanged when padding", "[Config][ConfigVariantRestore][!shouldfail]")
 {
     ConfigOptionInts destination({1, 2, 3, 4, 5});
-    const ConfigOptionInts source({8});
+    ConfigOptionInts source({8}); // not const: the library const_casts it when padding
     std::vector<int> restore_index{1, -1, -1};
 
     destination.set_with_restore_2(&source, restore_index, 1, 2, true);
