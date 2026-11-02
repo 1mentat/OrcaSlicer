@@ -2421,6 +2421,88 @@ TEST_CASE("Core FFF numeric validation rejects values below their semantic floor
     }
 }
 
+TEST_CASE("normalize_fdm applies spiral mode safety values and is idempotent", "[Config][NormalizeFdm]")
+{
+    const bool split_step = GENERATE(false, true);
+    CAPTURE(split_step);
+    const auto normalize = [split_step](DynamicPrintConfig &config) {
+        if (split_step)
+            config.normalize_fdm_1();
+        else
+            config.normalize_fdm(0);
+    };
+    const auto make_config = [](bool spiral) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set("spiral_mode", spiral);
+        config.set("alternate_extra_wall", true);
+        config.set("wall_loops", 4);
+        config.set("top_shell_layers", 3);
+        config.set("bottom_shell_layers", 5);
+        config.set_deserialize_strict("sparse_infill_density", "20");
+        config.set_deserialize_strict("retract_when_changing_layer", "1,1");
+        config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true)->values = {true, true};
+        return config;
+    };
+    const auto check_unchanged = [](const DynamicPrintConfig &config) {
+        CHECK(config.opt_bool("alternate_extra_wall"));
+        CHECK(config.opt_int("wall_loops") == 4);
+        CHECK(config.opt_int("top_shell_layers") == 3);
+        CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(20., 1e-12));
+        CHECK(config.opt<ConfigOptionBools>("retract_when_changing_layer")->values == std::vector<unsigned char>{1, 1});
+        CHECK(config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer")->values == std::vector<unsigned char>{1, 1});
+    };
+
+    SECTION("spiral mode forces a single hollow wall without retraction on layer change")
+    {
+        DynamicPrintConfig config = make_config(true);
+        for (int pass = 0; pass < 2; ++pass) {
+            CAPTURE(pass); // the second pass proves idempotence
+            normalize(config);
+            CHECK(config.opt_int("wall_loops") == 1);
+            CHECK_FALSE(config.opt_bool("alternate_extra_wall"));
+            CHECK(config.opt_int("top_shell_layers") == 0);
+            CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(0., 1e-12));
+            CHECK(config.opt<ConfigOptionBools>("retract_when_changing_layer")->values == std::vector<unsigned char>{0, 0});
+            CHECK(config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer")->values == std::vector<unsigned char>{0, 0});
+            // Unrelated shell settings are untouched.
+            CHECK(config.opt_int("bottom_shell_layers") == 5);
+        }
+    }
+
+    SECTION("the same values are left alone when spiral mode is off")
+    {
+        DynamicPrintConfig config = make_config(false);
+        normalize(config);
+        check_unchanged(config);
+        CHECK(config.opt_int("bottom_shell_layers") == 5);
+    }
+}
+
+TEST_CASE("normalize_fdm raises resolution to the 1 micron floor and keeps larger values", "[Config][NormalizeFdm]")
+{
+    const bool split_step = GENERATE(false, true);
+    CAPTURE(split_step);
+    const std::pair<const char *, double> rows[] = {
+        {"0.0001", 0.001},
+        {"0.0009", 0.001},
+        {"0.001",  0.001},
+        {"0.0011", 0.0011},
+        {"0.5",    0.5},
+    };
+    for (const auto &[input, expected] : rows) {
+        DYNAMIC_SECTION("resolution " << input) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("resolution", input);
+            REQUIRE(config.opt_serialize("resolution") == input);
+            if (split_step)
+                config.normalize_fdm_1();
+            else
+                config.normalize_fdm(0);
+            CHECK_THAT(config.opt_float("resolution"), Catch::Matchers::WithinAbs(expected, 1e-12));
+        }
+    }
+}
+
 TEST_CASE("Project JSON migration records support and wall-order differences", "[Config][ConfigJsonMigration]")
 {
     const auto [seed_existing, keep_wall_order] = GENERATE(
