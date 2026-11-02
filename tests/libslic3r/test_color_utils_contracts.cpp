@@ -907,3 +907,98 @@ TEST_CASE("Mesh clustering weights an unresolved connected component by face are
         CHECK(mesh.indices == original_mesh.indices);
     }
 }
+
+namespace {
+
+void check_finite_mesh(const TriMesh &mesh)
+{
+    for (const TriVertex &vertex : mesh.vertices) {
+        CHECK(std::isfinite(vertex.x()));
+        CHECK(std::isfinite(vertex.y()));
+        CHECK(std::isfinite(vertex.z()));
+    }
+}
+
+double signed_volume(const TriMesh &mesh)
+{
+    double sum = 0.;
+    for (const auto &face : mesh.indices) {
+        const auto &a = mesh.vertices[face[0]];
+        const auto &b = mesh.vertices[face[1]];
+        const auto &c = mesh.vertices[face[2]];
+        sum += static_cast<double>(a.x()) * (static_cast<double>(b.y()) * c.z() - static_cast<double>(b.z()) * c.y());
+        sum += static_cast<double>(a.y()) * (static_cast<double>(b.z()) * c.x() - static_cast<double>(b.x()) * c.z());
+        sum += static_cast<double>(a.z()) * (static_cast<double>(b.x()) * c.y() - static_cast<double>(b.y()) * c.x());
+    }
+    return sum / 6.;
+}
+} // namespace
+
+// The cube's 8 vertices are all feature vertices, so geometry/boundary smoothing is not exercised here:
+// the mesh must stay unchanged while only the label smoothing threshold varies.
+TEST_CASE("Label smoothing leaves labels unchanged below the threshold and removes minority faces at weight 0.3", "[ColorUtils]")
+{
+    const TriMesh original = cube_mesh();
+    std::vector<std::size_t> initial(original.indices.size(), 0);
+    for (std::size_t i = 0; i < initial.size(); i += 3)
+        initial[i] = 1;
+    for (const double weight : {0., 0.2, 0.3}) {
+        TriMesh mesh                    = original;
+        std::vector<std::size_t> labels = initial;
+        const double before             = std::abs(signed_volume(mesh));
+        SmoothParameters parameters;
+        parameters.smooth_weight = weight;
+        REQUIRE(smooth_region(mesh, labels, parameters));
+        CHECK(labels.size() == mesh.indices.size());
+        CHECK_THAT(std::abs(signed_volume(mesh)), Catch::Matchers::WithinRel(before, 1e-8));
+        CHECK(is_closed(mesh));
+        for (std::size_t label : labels)
+            CHECK(label <= 1);
+        const std::size_t initial_ones  = static_cast<std::size_t>(std::count(initial.begin(), initial.end(), 1));
+        const std::size_t smoothed_ones = static_cast<std::size_t>(std::count(labels.begin(), labels.end(), 1));
+        if (weight < 0.3) {
+            CHECK(labels == initial);
+            CHECK(smoothed_ones == initial_ones);
+        } else {
+            CHECK(smoothed_ones < initial_ones);
+        }
+    }
+}
+
+TEST_CASE("Color smoothing preserves the supplied RGB palette while changing labels only through it", "[ColorUtils]")
+{
+    TriMesh mesh = cube_mesh();
+    std::vector<Color> colors;
+    colors.reserve(mesh.indices.size());
+    for (std::size_t i = 0; i < mesh.indices.size(); ++i)
+        colors.push_back(i % 3 == 0 ? red : (i % 3 == 1 ? green : blue));
+    const std::set<Color> palette(colors.begin(), colors.end());
+    TriMesh unchanged_mesh                    = mesh;
+    const std::vector<Color> unchanged_colors = colors;
+    SmoothParameters no_smoothing;
+    no_smoothing.smooth_weight = 0.;
+    REQUIRE(smooth_region(unchanged_mesh, colors, no_smoothing));
+    CHECK(colors == unchanged_colors);
+
+    SmoothParameters parameters;
+    parameters.smooth_weight = 0.8;
+    REQUIRE(smooth_region(mesh, colors, parameters));
+    CHECK(colors != unchanged_colors);   // smoothing at 0.8 does relabel faces
+    REQUIRE(colors.size() == mesh.indices.size());
+    CHECK(is_closed(mesh));
+    for (const Color& color : colors)
+        CHECK(palette.count(color) == 1);
+    check_finite_mesh(mesh);
+}
+
+TEST_CASE("Smoothing rejects a label count that does not match the faces", "[ColorUtils]")
+{
+    TriMesh mesh = cube_mesh();
+    const TriMesh original = mesh;
+    std::vector<std::size_t> wrong_count(mesh.indices.size() - 1, 0);
+    SmoothParameters parameters;
+    parameters.smooth_weight = 0.8;
+    CHECK_FALSE(smooth_region(mesh, wrong_count, parameters));
+    CHECK(mesh.vertices == original.vertices);
+    CHECK(mesh.indices == original.indices);
+}

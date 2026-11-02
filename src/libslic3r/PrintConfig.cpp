@@ -13519,11 +13519,11 @@ float get_real_skirt_dist(const DynamicPrintConfig& cfg) {
 
     float dist = cfg.opt_float("skirt_distance");
 
-    int loops = cfg.opt_int("skirt_loops");
-    auto opt_draft_shield = cfg.option("draft_shield");
-    if (opt_draft_shield && opt_draft_shield->getInt() != dsDisabled && loops == 0) {
-        loops = 1;
-    }
+    // Print::_make_skirt() emits skirt_loops loops, none for zero loops (a draft shield does not add one),
+    // so there is nothing to keep clear of without loops.
+    const int loops = cfg.opt_int("skirt_loops");
+    if (loops <= 0)
+        return 0.f;
 
     float width = cfg.opt_float("initial_layer_line_width");
     if (width <= 0.f) {
