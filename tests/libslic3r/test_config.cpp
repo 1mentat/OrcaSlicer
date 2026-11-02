@@ -2852,6 +2852,28 @@ std::string help_text(const ConfigDef &definition, bool defaults = true)
     return out.str();
 }
 
+void check_schema(const ConfigDef &definition,
+                  std::initializer_list<std::pair<const std::string, ConfigOptionType>> expected,
+                  const std::set<std::string> &type_not_checked = {})
+{
+    const std::map<std::string, ConfigOptionType> types(expected);
+    REQUIRE(definition.options.size() == types.size());
+    REQUIRE(definition.by_serialization_key_ordinal.size() == types.size());
+    for (const auto &[key, type] : types) {
+        INFO(key);
+        const ConfigOptionDef *option = definition.get(key);
+        REQUIRE(option != nullptr);
+        CHECK(option->opt_key == key);
+        if (type_not_checked.count(key) == 0)
+            CHECK(option->type == type);
+        CHECK_FALSE(option->label.empty());
+        REQUIRE(option->serialization_key_ordinal > 0);
+        const auto entry = definition.by_serialization_key_ordinal.find(option->serialization_key_ordinal);
+        REQUIRE(entry != definition.by_serialization_key_ordinal.end());
+        CHECK(entry->second == option);
+    }
+}
+
 TEST_CASE("CLI help expands aliases and explicit parameter labels", "[Config][ConfigDefinition][CLIHelp]")
 {
     HelpDefinition definition;
@@ -2999,6 +3021,89 @@ TEST_CASE("CLI help leaves an empty or fully filtered definition blank", "[Confi
     std::ostringstream out;
     definition.print_cli_help(out, true, [](const ConfigOptionDef &) { return false; });
     CHECK(out.str().empty());
+}
+
+TEST_CASE("Read-only slicing placeholders expose the current numeric Z-hop", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(ReadOnlySlicingStatesConfigDef{}, {{"zhop", coFloat}});
+}
+
+TEST_CASE("Writable slicing placeholders retain vectors for per-axis and per-extruder state", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(ReadWriteSlicingStatesConfigDef{}, {
+        {"position", coFloats}, {"e_retracted", coFloats}, {"e_restart_extra", coFloats}, {"e_position", coFloats}});
+}
+
+TEST_CASE("Slicing context placeholders distinguish indexes flags and names", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(OtherSlicingStatesConfigDef{}, {
+        {"current_extruder", coInt}, {"current_object_idx", coInt}, {"has_wipe_tower", coBool},
+        {"initial_extruder", coInt}, {"initial_tool", coInt}, {"is_extruder_used", coBools},
+        {"num_extruders", coInt}, {"has_single_extruder_multi_material_priming", coBool},
+        {"initial_no_support_extruder", coInt}, {"in_head_wrap_detect_zone", coBool}, {"curr_bed_type", coString}});
+}
+
+TEST_CASE("Print statistics placeholders distinguish totals from per-extruder quantities", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(PrintStatisticsConfigDef{}, {
+        {"extruded_volume", coFloats}, {"total_toolchanges", coInt}, {"extruded_volume_total", coFloat},
+        {"extruded_weight", coFloats}, {"extruded_weight_total", coFloat}, {"total_layer_count", coInt},
+        {"normal_print_time", coString}, {"print_time", coString}, {"silent_print_time", coString},
+        {"total_cost", coFloat}, {"total_weight", coFloat}, {"total_wipe_tower_cost", coFloat},
+        {"total_wipe_tower_filament", coFloat}, {"used_filament", coFloat}, {"print_time_total_sec", coString},
+        {"print_time_day", coString}, {"print_time_hour", coString}, {"print_time_minute", coString},
+        {"print_time_sec", coString}, {"used_filament_length", coString}});
+}
+
+TEST_CASE("Object placeholders expose counts filenames and per-object scaling", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(ObjectsInfoConfigDef{}, {
+        {"num_objects", coInt}, {"num_instances", coInt}, {"scale", coStrings},
+        {"input_filename_base", coString}, {"input_filename", coString}, {"plate_name", coString}});
+}
+
+TEST_CASE("Dimension placeholders distinguish planar geometry from scalar height", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(DimensionsConfigDef{}, {
+        {"first_layer_print_convex_hull", coPoints}, {"first_layer_print_min", coFloats},
+        {"first_layer_print_max", coFloats}, {"first_layer_print_size", coFloats},
+        {"print_bed_min", coFloats}, {"print_bed_max", coFloats}, {"print_bed_size", coFloats},
+        {"first_layer_center_no_wipe_tower", coFloats}, {"first_layer_height", coFloat}});
+}
+
+TEST_CASE("Temperature placeholders distinguish per-filament values from aggregate values", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(TemperaturesConfigDef{}, {
+        {"bed_temperature", coInts}, {"bed_temperature_initial_layer", coInts},
+        {"bed_temperature_initial_layer_single", coInt}, {"chamber_temperature", coInts},
+        {"chamber_minimal_temperature", coInts}, {"overall_chamber_temperature", coInt},
+        {"first_layer_bed_temperature", coInts}, {"first_layer_temperature", coInts}});
+}
+
+TEST_CASE("Timestamp placeholders retain textual timestamps and numeric calendar fields", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    check_schema(TimestampsConfigDef{}, {
+        {"timestamp", coString}, {"year", coInt}, {"month", coInt}, {"day", coInt},
+        {"hour", coInt}, {"minute", coInt}, {"second", coInt}});
+}
+
+TEST_CASE("Preset placeholders retain the public textual name fields", "[Config][ConfigDefinition][PlaceholderSchema]")
+{
+    // The coString listed for filament_preset is not checked here (see the known-bug test below); the row only
+    // keeps the key in the expected option set.
+    check_schema(OtherPresetsConfigDef{}, {
+        {"print_preset", coString}, {"filament_preset", coString},
+        {"printer_preset", coString}, {"physical_printer_preset", coString}}, {"filament_preset"});
+}
+
+// Known bug: filament_preset is declared coString, but its tooltip describes one name per extruder and
+// PrintApply.cpp fills it from filament_settings_id (coStrings); fixed by the follow-up fix PR
+TEST_CASE("The filament preset placeholder is a vector of names", "[Config][ConfigDefinition][PlaceholderSchema][!shouldfail]")
+{
+    const OtherPresetsConfigDef definition;
+    const ConfigOptionDef *option = definition.get("filament_preset");
+    REQUIRE(option != nullptr);
+    CHECK(option->type == coStrings);
 }
 
 } // namespace config_definition_contracts
