@@ -204,6 +204,17 @@ TEST_CASE("its_cut_AoI retains the complete mesh when the projected bounds conta
     CHECK(face_corners(selected) == face_corners(input));
 }
 
+TEST_CASE("its_cut_AoI drops every face of a mesh outside the projected bounds", "[CutSurface]")
+{
+    // The faces are classified in parallel. Repeating the cut makes a lost skip flag (for example from
+    // concurrent writes to a packed bit vector) show up reliably.
+    const indexed_triangle_set input = its_make_cube(10., 20., 30.);
+    size_t non_empty = 0;
+    for (int run = 0; run < 200; ++run)
+        non_empty += !its_cut_AoI(input, BoundingBox(Point(20, 30), Point(30, 40)), Emboss::ProjectZ(40.)).indices.empty();
+    CHECK(non_empty == 0);
+}
+
 TEST_CASE("cut2model mirrors the front mesh and closes every contour edge", "[CutSurface]")
 {
     SurfaceCut cut;

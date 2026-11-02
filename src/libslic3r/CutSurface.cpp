@@ -843,13 +843,17 @@ void priv::set_skip_for_out_of_aoi(std::vector<bool>          &skip_indicies,
     }); // END parallel for
 
     // inspect all triangles, when it is out of bounding box
+    // std::vector<bool> packs flags into shared words, so concurrent writes to it can be lost;
+    // collect the results in bytes and merge them afterwards.
+    std::vector<unsigned char> out_of_aoi(its.indices.size(), 0);
     tbb::parallel_for(tbb::blocked_range<size_t>(0, its.indices.size()),
-    [&its, &is_on_sides, &skip_indicies](const tbb::blocked_range<size_t> &range) {
-        for (size_t i = range.begin(); i < range.end(); ++i) {
-            if (is_all_on_one_side(its.indices[i], is_on_sides)) 
-                skip_indicies[i] = true;
-        }
+    [&its, &is_on_sides, &out_of_aoi](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++i)
+            out_of_aoi[i] = is_all_on_one_side(its.indices[i], is_on_sides);
     }); // END parallel for
+    for (size_t i = 0; i < out_of_aoi.size(); ++i)
+        if (out_of_aoi[i])
+            skip_indicies[i] = true;
 }
 
 indexed_triangle_set Slic3r::its_mask(const indexed_triangle_set &its,
