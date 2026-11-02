@@ -8,6 +8,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <catch2/generators/catch_generators_range.hpp>
+#include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -131,7 +133,18 @@ TEST_CASE("RepairMesh cancellation stops at each published stage",
           "[TextureToColor][repair]")
 {
     const TriMesh input = open_tetrahedron();
-    const int stop_after = GENERATE(30, 50, 70, 80, 85);
+    // Record the stages RepairMesh publishes on an uncancelled run, then cancel right after each.
+    std::vector<int> stages;
+    {
+        std::shared_ptr<TriMesh> unused;
+        REQUIRE(RepairMesh(input, unused, [&](AlgoProgress state) { stages.push_back(state.percent); }, nullptr));
+    }
+    // The final 100% report announces completion; there is nothing left to cancel after it.
+    REQUIRE(stages.back() == 100);
+    stages.pop_back();
+    REQUIRE(stages.size() >= 2);
+    const int stop_after = GENERATE_COPY(from_range(stages));
+    CAPTURE(stop_after);
     std::vector<int> progress;
     auto sentinel = std::make_shared<TriMesh>(closed_tetrahedron());
     std::shared_ptr<TriMesh> repaired = sentinel;
@@ -157,12 +170,12 @@ TEST_CASE("RepairMesh limits the largest hole and the total boundary separately"
     REQUIRE(stats.cycle_count == 2);
     REQUIRE(stats.max_cycle_edges == 4);
     REQUIRE(stats.total_boundary_edges == 7);
-    // {max_hole_edges, max_boundary_edges, closes}: both limits must be met. The last row allows
-    // each hole on its own (4 <= 7 per hole) but not their 7-edge total.
+    // {max_hole_edges, max_boundary_edges, closes}. The last row allows each hole on its own
+    // (4 <= 7 per hole) but not their 7-edge total. The per-hole case {3, 7}, where only the
+    // 4-edge hole is over the limit, is covered by the tagged test below.
     const auto [max_hole_edges, max_boundary_edges, closes] = GENERATE(
         table<std::size_t, std::size_t, bool>({
             {4, 7, true},
-            {3, 7, false},
             {4, 6, false},
             {7, 4, false},
         }));
@@ -181,4 +194,23 @@ TEST_CASE("RepairMesh limits the largest hole and the total boundary separately"
         CHECK_FALSE(color_utils::is_closed(*repaired));
         CHECK(repaired->indices.size() == 9);
     }
+}
+
+// Known bug: RepairSetting::max_hole_edges is documented as "skip triangulating a boundary cycle whose
+// half-edge count exceeds this", but RepairMesh gates hole closing globally on the largest cycle, so
+// one over-limit hole stops every other hole from being filled. (The comment on
+// MAX_REPAIRABLE_MESH_HOLE_EDGES says the opposite: "skips triangulation entirely".) Needs a fix or a
+// documentation decision.
+TEST_CASE("RepairMesh fills holes within the per-hole limit when another hole exceeds it",
+          "[TextureToColor][repair][!shouldfail]")
+{
+    RepairSetting settings;
+    settings.max_hole_edges = 3;      // the three-edge hole qualifies, the four-edge one does not
+    settings.max_boundary_edges = 7;  // the total is within the aggregate limit
+    std::shared_ptr<TriMesh> repaired;
+    REQUIRE(RepairMesh(cube_with_two_holes(), repaired, nullptr, nullptr, settings));
+    REQUIRE(repaired);
+    // One triangle closes the three-edge hole; the four-edge hole stays open.
+    CHECK(repaired->indices.size() == 10);
+    CHECK_FALSE(color_utils::is_closed(*repaired));
 }
