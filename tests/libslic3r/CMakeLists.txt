@@ -23,6 +23,7 @@ add_executable(${_TEST_NAME}_tests
     test_clipper_offset.cpp
     test_clipper_utils.cpp
     test_color.cpp
+    test_color_decompose_recipe.cpp
     test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
@@ -49,6 +50,7 @@ add_executable(${_TEST_NAME}_tests
     test_fill_corner_smoothing.cpp
     test_aabb_mesh.cpp
     test_filament_mixer.cpp
+    test_flush_vol_predictor.cpp
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
     test_geometry.cpp

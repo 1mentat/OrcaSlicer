@@ -157,8 +157,9 @@ void MeasuringImpl::update_planes()
     m_face_to_plane.resize(num_of_facets, size_t(-1));
     const std::vector<Vec3f> face_normals = its_face_normals(m_its);
     const std::vector<Vec3i32> face_neighbors = its_face_neighbors(m_its);
-    std::vector<int>         facet_queue(num_of_facets, 0);
-    int                      facet_queue_cnt = 0;
+    // A facet can be queued by several neighbours before it is visited, so the queue grows as needed and
+    // a facet already assigned to a plane is skipped when popped.
+    std::vector<int>         facet_queue;
     const stl_normal*        normal_ptr      = nullptr;
     size_t seed_facet_idx = 0;
 
@@ -178,17 +179,19 @@ void MeasuringImpl::update_planes()
         // Find next unvisited triangle:
         for (; seed_facet_idx < num_of_facets; ++ seed_facet_idx)
             if (m_face_to_plane[seed_facet_idx] == size_t(-1)) {
-                facet_queue[facet_queue_cnt ++] = seed_facet_idx;
+                facet_queue.push_back(int(seed_facet_idx));
                 normal_ptr = &face_normals[seed_facet_idx];
-                m_face_to_plane[seed_facet_idx] = m_planes.size();
                 m_planes.emplace_back();
                 break;
             }
         if (seed_facet_idx == num_of_facets)
             break; // Everything was visited already
 
-        while (facet_queue_cnt > 0) {
-            int facet_idx = facet_queue[-- facet_queue_cnt];
+        while (! facet_queue.empty()) {
+            const int facet_idx = facet_queue.back();
+            facet_queue.pop_back();
+            if (m_face_to_plane[facet_idx] != size_t(-1))
+                continue;
             const stl_normal& this_normal = face_normals[facet_idx];
             if (is_same_normal(this_normal, *normal_ptr)) {
 //                const Vec3i32& face = m_its.indices[facet_idx];
@@ -197,7 +200,7 @@ void MeasuringImpl::update_planes()
                 m_planes.back().facets.emplace_back(facet_idx);
                 for (int j = 0; j < 3; ++ j)
                     if (int neighbor_idx = face_neighbors[facet_idx][j]; neighbor_idx >= 0 && m_face_to_plane[neighbor_idx] == size_t(-1))
-                        facet_queue[facet_queue_cnt ++] = neighbor_idx;
+                        facet_queue.push_back(neighbor_idx);
             }
         }
 
@@ -965,6 +968,25 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             add_point_edge_distance(e1.second, e2);
             add_point_edge_distance(e2.first, e1);
             add_point_edge_distance(e2.second, e1);
+            // The closest points of skew segments can lie inside both of them, away from every endpoint.
+            {
+                const Vec3d d1 = e1.second - e1.first;
+                const Vec3d d2 = e2.second - e2.first;
+                const Vec3d r = e1.first - e2.first;
+                const double d1d1 = d1.dot(d1), d1d2 = d1.dot(d2), d1r = d1.dot(r), d2d2 = d2.dot(d2), d2r = d2.dot(r);
+                // denom = |d1|^2 |d2|^2 sin^2(angle): skip only edges parallel to within roundoff, which the
+                // endpoint candidates handle.
+                const double denom = d1d1 * d2d2 - d1d2 * d1d2;
+                if (denom > 1e-12 * d1d1 * d2d2) {
+                    const double s = (d1d2 * d2r - d1r * d2d2) / denom;
+                    const double t = (d1d1 * d2r - d1d2 * d1r) / denom;
+                    if (s > 0.0 && s < 1.0 && t > 0.0 && t < 1.0) {
+                        const Vec3d p1 = e1.first + s * d1;
+                        const Vec3d p2 = e2.first + t * d2;
+                        distances.emplace_back((p2 - p1).norm(), p1, p2);
+                    }
+                }
+            }
             auto it = std::min_element(distances.begin(), distances.end(),
                 [](const DistAndPoints& item1, const DistAndPoints& item2) {
                     return item1.dist < item2.dist;
@@ -988,14 +1010,34 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
             const Vec3d                              inter   = line.intersectionPoint(plane);
             const Vec3d                              e1inter = inter - e.first;
             if (e1inter.dot(e1e2) >= 0.0 && e1inter.norm() < e1e2.norm()) distances.emplace_back(*get_measurement(SurfaceFeature(inter), f2).distance_strict);
+            // The edge can cross the circle away from those points: where its line pierces the circle's plane
+            // (any slope beyond roundoff), or, for an edge parallel to that plane, above where its projection
+            // cuts the circle (in the plane, that is where it crosses the circle).
+            const auto add_if_on_edge = [&](const Vec3d& p) {
+                const Vec3d e1p = p - e.first;
+                if (e1p.dot(e1e2) >= 0.0 && e1p.norm() < e1e2.norm())
+                    distances.emplace_back(*get_measurement(SurfaceFeature(p), f2).distance_strict);
+            };
+            const Eigen::Hyperplane<double, 3> circle_plane(normal.normalized(), center);
+            if (std::abs(e1e2_unit.dot(normal.normalized())) > 1e-12)
+                add_if_on_edge(line.intersectionPoint(circle_plane));
+            else if (const double foot_sq = (circle_plane.projection(inter) - center).squaredNorm(); foot_sq < sqr(radius)) {
+                const double half_chord = std::sqrt(sqr(radius) - foot_sq);
+                add_if_on_edge(inter - half_chord * e1e2_unit);
+                add_if_on_edge(inter + half_chord * e1e2_unit);
+            }
 
             auto it = std::min_element(distances.begin(), distances.end(), [](const DistAndPoints &item1, const DistAndPoints &item2) { return item1.dist < item2.dist; });
             if (deal_circle_result == false) {
                 result.distance_infinite = std::make_optional(DistAndPoints{it->dist, it->from, it->to});
             }
             else{
-                const double dist      = (it->from - center).norm();
-                result.distance_infinite = std::make_optional(DistAndPoints{dist, it->from, center});
+                // Center mode: measure from the edge point nearest the center, which need not be the point
+                // nearest the circle.
+                const double len_sq = e1e2.squaredNorm();
+                const double t = len_sq > 0.0 ? std::clamp((center - e.first).dot(e1e2) / len_sq, 0.0, 1.0) : 0.0;
+                const Vec3d nearest = e.first + t * e1e2;
+                result.distance_infinite = std::make_optional(DistAndPoints{(nearest - center).norm(), nearest, center});
             }
     ///////////////////////////////////////////////////////////////////////////
         } else if (f2.get_type() == SurfaceFeatureType::Plane) {
@@ -1305,8 +1347,28 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                     result.distance_infinite = std::make_optional(DistAndPoints{ it->dist, it->from, it->to });
                 }
                 else {
-                    const Eigen::Hyperplane<double, 3> plane(normal2, origin2);
-                    result.distance_infinite = std::make_optional(DistAndPoints{plane.absDistance(center), center, plane.projection(center)});
+                    // Measure from the circle point nearest the plane: from the center, step the radius
+                    // along the plane normal projected into the circle's plane, towards the plane. If that
+                    // point is on or across the plane (including a center on the plane), the circle meets it. Only a
+                    // circle parallel to the plane within roundoff, where every point is equally near, takes an
+                    // arbitrary direction.
+                    const Eigen::Hyperplane<double, 3> plane(normal2.normalized(), origin2);
+                    const Vec3d n1 = normal1.normalized();
+                    const double center_dist = plane.signedDistance(center);
+                    const Vec3d toward = plane.normal() - plane.normal().dot(n1) * n1;
+                    const Vec3d dir = toward.norm() > 1e-12 ? Vec3d((center_dist >= 0.0 ? -1.0 : 1.0) * toward.normalized()) :
+                                                                Vec3d(get_orthogonal(n1, true));
+                    Vec3d closest = center + radius * dir;
+                    const double dir_rate = radius * plane.normal().dot(dir);
+                    if (plane.signedDistance(closest) * center_dist <= 0.0 && std::abs(dir_rate) > 0.0) {
+                        // The circle crosses the plane at angle t from dir, where its distance is zero.
+                        const double cos_t = std::clamp(-center_dist / dir_rate, -1.0, 1.0);
+                        closest = center + radius * (cos_t * dir + std::sqrt(1.0 - sqr(cos_t)) * n1.cross(dir));
+                    }
+                    if (deal_circle_result)
+                        // Center mode measures from the circle center.
+                        closest = center;
+                    result.distance_infinite = std::make_optional(DistAndPoints{plane.absDistance(closest), closest, plane.projection(closest)});
                 }
             }
             else {

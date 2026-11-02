@@ -492,15 +492,47 @@ TEST_CASE("Pair matrix covers point, edge, circle, and plane branches", "[Measur
     check_witnessed_distance(coplanar_ring.distance_strict, 0.0);
 }
 
-// Known bug: edge-circle distance only measures from the edge endpoints and from the foot of the circle
-// center on the edge, so it misses where a secant crosses the circle away from those points; needs a fix PR
-TEST_CASE("Edge distance to a circle is zero where a secant crosses it", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Edge distance to a circle is zero where a secant crosses it", "[Measure][MeasureContracts]")
 {
     // y = 1 cuts the radius-2 circle at x = +-sqrt(3); the center's foot (0, 1, 0) is 1 inside the circle.
     const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
-    const MeasurementResult result = get_measurement(edge(Vec3d(-5.0, 1.0, 0.0), Vec3d(5.0, 1.0, 0.0)), ring);
+    const SurfaceFeature secant = edge(Vec3d(-5.0, 1.0, 0.0), Vec3d(5.0, 1.0, 0.0));
+    const MeasurementResult result = get_measurement(secant, ring);
     check_witnessed_distance(result.distance_infinite, 0.0);
     check_on_circle(result.distance_infinite->from, ring);
+    // Center mode still measures from the edge point nearest the center.
+    const MeasurementResult center_mode = get_measurement(secant, ring, true);
+    check_witnessed_distance(center_mode.distance_infinite, 1.0);
+    check_vec(center_mode.distance_infinite->from, Vec3d(0.0, 1.0, 0.0));
+    check_vec(center_mode.distance_infinite->to, Vec3d::Zero());
+
+    // A slanted edge pierces the circle at (2, 0, 0); its ends are sqrt(2) from the circle, and the center's
+    // foot on its line is an end.
+    const MeasurementResult piercing = get_measurement(edge(Vec3d(1.0, 0.0, -1.0), Vec3d(3.0, 0.0, 1.0)), ring);
+    check_witnessed_distance(piercing.distance_infinite, 0.0);
+    check_vec(piercing.distance_infinite->from, Vec3d(2.0, 0.0, 0.0));
+
+    // Moved out to x = 3 it pierces the plane 1 outside the circle. (A regression guard: the center's foot on
+    // this edge is the same point, so it does not depend on the pierce candidate.)
+    const MeasurementResult missing = get_measurement(edge(Vec3d(3.0, 0.0, -1.0), Vec3d(3.0, 0.0, 1.0)), ring);
+    check_witnessed_distance(missing.distance_infinite, 1.0);
+    check_vec(missing.distance_infinite->from, Vec3d(3.0, 0.0, 0.0));
+    check_vec(missing.distance_infinite->to, Vec3d(2.0, 0.0, 0.0));
+
+    // A very shallow secant (slope 5e-5) crosses the radius-5 circle at (3, 4, 0).
+    const SurfaceFeature ring5 = circle(Vec3d::Zero(), Vec3d::UnitZ(), 5.0);
+    const MeasurementResult shallow = get_measurement(edge(Vec3d(-10.0, 4.0, -0.00065), Vec3d(10.0, 4.0, 0.00035)), ring5);
+    check_witnessed_distance(shallow.distance_infinite, 0.0);
+    check_vec(shallow.distance_infinite->from, Vec3d(3.0, 4.0, 0.0), 1e-6);
+
+    // An edge parallel to the plane, 1 above the disc: the points above the circle are 1 away.
+    const MeasurementResult over_disc = get_measurement(edge(Vec3d(-5.0, 1.0, 1.0), Vec3d(5.0, 1.0, 1.0)), ring);
+    check_witnessed_distance(over_disc.distance_infinite, 1.0);
+    check_on_circle(over_disc.distance_infinite->to, ring);
+
+    // Center mode of a zero-length edge is the distance of its point from the center.
+    const MeasurementResult point_edge = get_measurement(edge(Vec3d(3.0, 0.0, 0.0), Vec3d(3.0, 0.0, 0.0)), ring, true);
+    check_witnessed_distance(point_edge.distance_infinite, 3.0);
 }
 
 TEST_CASE("Edge angles measure the rays pointing away from the intersection", "[Measure][MeasureContracts]")
@@ -524,14 +556,22 @@ TEST_CASE("Edge angles measure the rays pointing away from the intersection", "[
     }
 }
 
-// Known bug: edge-edge distance only tries endpoint pairs and endpoint-to-segment feet, so it misses
-// interior closest points of skew segments; needs a fix PR
-TEST_CASE("Edge distance finds interior closest points of skew segments", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Edge distance finds interior closest points of skew segments", "[Measure][MeasureContracts]")
 {
     // The segments cross over each other 2 apart at x = 2, away from all four endpoints.
     const MeasurementResult result = get_measurement(edge(Vec3d(4.0, 0.0, 0.0), Vec3d::Zero()),
                                                      edge(Vec3d(2.0, 3.0, 2.0), Vec3d(2.0, -1.0, 2.0)));
     check_witnessed_distance(result.distance_infinite, 2.0);
+}
+
+TEST_CASE("Edge distance finds the crossing of nearly parallel segments", "[Measure][MeasureContracts]")
+{
+    // About 0.01 rad apart, the segments cross at (100, 0, 0), far from all four endpoints.
+    const MeasurementResult result = get_measurement(edge(Vec3d::Zero(), Vec3d(200.0, 0.0, 0.0)),
+                                                     edge(Vec3d(0.0, -1.0, 0.0), Vec3d(200.0, 1.0, 0.0)));
+    check_witnessed_distance(result.distance_infinite, 0.0);
+    check_vec(result.distance_infinite->from, Vec3d(100.0, 0.0, 0.0), 1e-7);
+    check_vec(result.distance_infinite->to, Vec3d(100.0, 0.0, 0.0), 1e-7);
 }
 
 TEST_CASE("Measuring feature selection returns endpoint points and circular probes", "[Measure][MeasureContracts]")
@@ -601,9 +641,7 @@ TEST_CASE("Edge and circle distances to a bounded plane use its boundary edges",
     CHECK_THAT(ring_floor.distance_infinite->dist, WithinAbs(5.0, 1e-7));
 }
 
-// Known bug: without boundary edges the circle-plane branch returns the circle center and its projection
-// as witnesses, so the first witness is not on the circle; needs a fix PR
-TEST_CASE("Circle distance to a boundary-less plane has a witness on the circle", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Circle distance to a boundary-less plane it does not lie in has a witness on the circle", "[Measure][MeasureContracts]")
 {
     const SurfaceFeature ring = circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0);
     const SurfaceFeature unbounded = plane(8, Vec3d::UnitZ(), Vec3d::Zero(), std::make_shared<std::vector<SurfaceFeature>>());
@@ -612,6 +650,54 @@ TEST_CASE("Circle distance to a boundary-less plane has a witness on the circle"
     check_on_circle(ring_floor.distance_infinite->from, ring);
     // The plane witness is the circle witness dropped onto z = 0.
     check_vec(ring_floor.distance_infinite->to, Vec3d(ring_floor.distance_infinite->from.x(), ring_floor.distance_infinite->from.y(), 0.0));
+
+    // Tilted 45 degrees about Y, the circle's lowest point (sqrt(2), 0, 5 - sqrt(2)) is nearest the plane.
+    const Vec3d tilt = Vec3d(1.0, 0.0, 1.0).normalized();
+    const SurfaceFeature tilted = circle(Vec3d(0.0, 0.0, 5.0), tilt, 2.0);
+    const MeasurementResult tilted_floor = get_measurement(tilted, unbounded);
+    check_witnessed_distance(tilted_floor.distance_infinite, 5.0 - std::sqrt(2.0));
+    check_vec(tilted_floor.distance_infinite->from, Vec3d(std::sqrt(2.0), 0.0, 5.0 - std::sqrt(2.0)));
+    // Center mode measures from the center instead.
+    const MeasurementResult tilted_center_mode = get_measurement(tilted, unbounded, true);
+    check_witnessed_distance(tilted_center_mode.distance_infinite, 5.0);
+    check_vec(tilted_center_mode.distance_infinite->from, Vec3d(0.0, 0.0, 5.0));
+    check_vec(tilted_center_mode.distance_infinite->to, Vec3d::Zero());
+
+    // Lowered to z = 1, the tilted circle cuts the plane: distance 0 at a circle point on z = 0.
+    const SurfaceFeature cutting = circle(Vec3d(0.0, 0.0, 1.0), tilt, 2.0);
+    const MeasurementResult cutting_floor = get_measurement(cutting, unbounded);
+    check_witnessed_distance(cutting_floor.distance_infinite, 0.0);
+    check_on_circle(cutting_floor.distance_infinite->from, cutting);
+    CHECK_THAT(cutting_floor.distance_infinite->from.z(), WithinAbs(0.0, 1e-7));
+
+    // Centered on the plane, the tilted circle crosses it 90 degrees from its lowest direction.
+    const SurfaceFeature centered = circle(Vec3d::Zero(), tilt, 2.0);
+    const MeasurementResult centered_floor = get_measurement(centered, unbounded);
+    check_witnessed_distance(centered_floor.distance_infinite, 0.0);
+    check_on_circle(centered_floor.distance_infinite->from, centered);
+    CHECK_THAT(centered_floor.distance_infinite->from.z(), WithinAbs(0.0, 1e-7));
+
+    // Raised to z = sqrt(2), the tilted circle touches the plane at its lowest point (sqrt(2), 0, 0).
+    const MeasurementResult tangent_floor = get_measurement(circle(Vec3d(0.0, 0.0, std::sqrt(2.0)), tilt, 2.0), unbounded);
+    check_witnessed_distance(tangent_floor.distance_infinite, 0.0);
+    check_vec(tangent_floor.distance_infinite->from, Vec3d(std::sqrt(2.0), 0.0, 0.0));
+
+    // Standing upright 5 above the plane, the circle's lowest point (0, 0, 3) is nearest.
+    const MeasurementResult upright_floor = get_measurement(circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitX(), 2.0), unbounded);
+    check_witnessed_distance(upright_floor.distance_infinite, 3.0);
+    check_vec(upright_floor.distance_infinite->from, Vec3d(0.0, 0.0, 3.0));
+}
+
+// Known bug: for a circle lying in the plane the circle-plane branch returns the circle center and the plane
+// origin as witnesses of distance 0, so the first is not on the circle and they can be far apart; needs a fix PR
+TEST_CASE("Circle lying in a plane has witnesses at a common circle point", "[Measure][MeasureContracts][!shouldfail]")
+{
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    // The plane's origin is away from the circle; it has no boundary edges.
+    const SurfaceFeature floor = plane(8, Vec3d::UnitZ(), Vec3d(5.0, 5.0, 0.0), std::make_shared<std::vector<SurfaceFeature>>());
+    const MeasurementResult result = get_measurement(ring, floor);
+    check_witnessed_distance(result.distance_strict, 0.0);
+    check_on_circle(result.distance_strict->from, ring);
 }
 
 // Known bug: the edge-plane and circle-plane branches measure only to the face's boundary edges, so a
@@ -699,10 +785,7 @@ TEST_CASE("Cylinder feature selection honors world transforms", "[Measure][Measu
     check_vec(origin, world * local_origin);
 }
 
-// Known bug: MeasuringImpl::update_planes marks a facet as visited only when it is popped, so a facet
-// queued by two neighbours is appended to its plane twice (and the fixed-size queue can overflow);
-// needs a fix PR
-TEST_CASE("Measuring lists each facet of a plane once", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Measuring lists each facet of a plane once", "[Measure][MeasureContracts]")
 {
     // The cap fans of a cylinder put the seed's neighbours next to each other.
     const indexed_triangle_set cylinder_mesh = its_make_cylinder(5.0, 10.0, PI / 16.0);
