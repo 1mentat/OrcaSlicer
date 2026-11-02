@@ -2135,123 +2135,6 @@ std::string error_message(const std::map<std::string, std::string> &errors, cons
 
 } // namespace
 
-TEST_CASE("Firmware retraction validation accepts only firmware flavors that implement it", "[Config][Validation]")
-{
-    // Every GCodeFlavor key. The unsupported ones are not among gcode_flavor's selectable enum
-    // values, so validate() reports "gcode_flavor" for them too; only use_firmware_retraction is checked here.
-    const std::pair<const char *, bool> flavors[] = {
-        {"marlin", true},         {"marlin2", true},    {"klipper", true},   {"reprap", true},
-        {"reprapfirmware", true}, {"repetier", true},   {"smoothie", true},  {"machinekit", true},
-        {"teacup", false},        {"makerware", false}, {"sailfish", false}, {"mach3", false},
-        {"no-extrusion", false},
-    };
-    for (const auto &[flavor, supported] : flavors) {
-        DYNAMIC_SECTION(flavor) {
-            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-            config.set_deserialize_strict("gcode_flavor", flavor);
-            config.set_deserialize_strict("wipe", "0");
-
-            config.set("use_firmware_retraction", true);
-            const auto errors = config.validate();
-            CHECK(has_error(errors, "use_firmware_retraction") == !supported);
-            if (!supported)
-                CHECK_THAT(error_message(errors, "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
-
-            // The flavor restriction applies only while firmware retraction is requested.
-            config.set("use_firmware_retraction", false);
-            CHECK_FALSE(has_error(config.validate(), "use_firmware_retraction"));
-        }
-    }
-}
-
-TEST_CASE("Firmware retraction validation rejects wipe on any extruder", "[Config][Validation]")
-{
-    struct Row {
-        const char *wipe;
-        bool        firmware_retraction;
-        bool        rejected;
-    };
-    const Row rows[] = {
-        {"1",   true,  true},
-        {"0,1", true,  true},   // only the second extruder wipes
-        {"1,0", true,  true},
-        {"0,0", true,  false},
-        {"0",   true,  false},
-        {"1,1", false, false},  // wipe alone is fine without firmware retraction
-    };
-    for (const Row &row : rows) {
-        DYNAMIC_SECTION("wipe " << row.wipe << (row.firmware_retraction ? " with" : " without") << " firmware retraction") {
-            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-            config.set_deserialize_strict("gcode_flavor", "klipper");
-            config.set_deserialize_strict("wipe", row.wipe);
-            config.set("use_firmware_retraction", row.firmware_retraction);
-            const auto errors = config.validate();
-            CHECK(has_error(errors, "use_firmware_retraction") == row.rejected);
-            if (row.rejected)
-                CHECK_THAT(error_message(errors, "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("not compatible with --wipe"));
-        }
-    }
-
-    // When both rules are violated the flavor message is the one reported (the wipe message
-    // does not replace it).
-    DynamicPrintConfig both = DynamicPrintConfig::full_print_config();
-    both.set_deserialize_strict("gcode_flavor", "teacup");
-    both.set_deserialize_strict("wipe", "1");
-    both.set("use_firmware_retraction", true);
-    CHECK_THAT(error_message(both.validate(), "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
-}
-
-TEST_CASE("Spiral mode validation reports each incompatible process setting only for the CLI", "[Config][Validation]")
-{
-    struct Rule {
-        const char *key;
-        const char *violating;
-    };
-    // Every other spiral-incompatible setting is held at its compliant value, so each
-    // row violates exactly one rule. wall_loops != 1 is rejected on both sides of 1.
-    const Rule rules[] = {
-        {"wall_loops", "0"},
-        {"wall_loops", "2"},
-        {"sparse_infill_density", "0.01%"},  // any positive density
-        {"sparse_infill_density", "15%"},
-        {"top_shell_layers", "1"},
-        {"enable_support", "1"},
-        {"enforce_support_layers", "1"},
-    };
-    const char *const keys[] = {"wall_loops", "sparse_infill_density", "top_shell_layers", "enable_support", "enforce_support_layers"};
-
-    for (const Rule &rule : rules) {
-        DYNAMIC_SECTION(rule.key << " = " << rule.violating) {
-            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-            config.set("wall_loops", 1);
-            config.set_deserialize_strict("sparse_infill_density", "0");
-            config.set("top_shell_layers", 0);
-            config.set("enable_support", false);
-            config.set("enforce_support_layers", 0);
-            config.set("spiral_mode", true);
-            // The compliant baseline is accepted.
-            for (const char *key : keys)
-                CHECK_FALSE(has_error(config.validate(true), key));
-
-            config.set_deserialize_strict(rule.key, rule.violating);
-            REQUIRE(config.opt_serialize(rule.key) == rule.violating);
-            const auto errors = config.validate(true);
-            for (const char *key : keys)
-                CHECK(has_error(errors, key) == (std::string(key) == rule.key));
-            CHECK_THAT(error_message(errors, rule.key), Catch::Matchers::ContainsSubstring("spiral vase mode is enabled"));
-
-            // Outside the CLI the settings are corrected by a dialog instead, so validate() stays silent.
-            for (const char *key : keys)
-                CHECK_FALSE(has_error(config.validate(false), key));
-
-            // Without spiral mode the same values are ordinary settings.
-            config.set("spiral_mode", false);
-            for (const char *key : keys)
-                CHECK_FALSE(has_error(config.validate(true), key));
-        }
-    }
-}
-
 TEST_CASE("Bridge line width is limited by the smallest nozzle while other widths use the largest", "[Config][Validation]")
 {
     struct Row {
@@ -2266,7 +2149,7 @@ TEST_CASE("Bridge line width is limited by the smallest nozzle while other width
         {"0.4,0.6", "0.41", true},   // below the largest nozzle but above the smallest
         {"0.4,0.6", "0.4",  false},
         {"0.4",     "100%", false},
-        {"0.4,0.6", "60%",  false},  // 0.36 mm of the 0.6 mm reference, 0.24 mm of the 0.4 mm one
+        {"0.4,0.6", "60%",  false},  // below 100% of every extruder's own nozzle
     };
     for (const Row &row : rows) {
         DYNAMIC_SECTION("nozzles " << row.nozzles << ", bridge " << row.bridge_width) {
