@@ -6004,6 +6004,47 @@
         "interaction_matrix"
       ],
       "reason": "All four scarf-seam/spiral-mode Boolean pairs are applied through the public static processor configuration and through public G-code file import, whose CONFIG_BLOCK loader creates the dynamic configuration. False/false emits no seam; each other pair emits the seam at the expected rising outer-wall midpoint. Each row retains five finite positive-extrusion endpoints. Four source-local mutations challenge both scarf consumers and preservation of the spiral flag. This covers processor seam tracking, not scarf mesh generation or full Print export geometry."
+    },
+    "filament_wipe": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][FilamentWipeOverrides][Pipeline]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "A real Print export checks nil inheritance and explicit false/true overrides against opposing machine wipe states. Parsed wipe markers and path length distinguish enabled from disabled wiping while positive deposited material remains unchanged. This one-filament fixture does not claim other wipe interactions or multiple-tool mapping."
+    },
+    "filament_wipe_distance": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][FilamentWipeOverrides][Pipeline]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "A real Print export checks nil inheritance of a 2 mm machine path, an explicit 0.75 mm replacement, and explicit zero disabling emitted wiping while the machine wipe gate remains enabled. Parsed path, wipe-time retraction, and feedrate reach the requested positive distances; deposition is preserved. Other distances and multi-tool mapping are not claimed."
+    },
+    "filament_retract_before_wipe": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][FilamentWipeOverrides][Pipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "A real Print export checks nil inheritance at 0%, explicit 100% over machine 0%, and explicit 0% over machine 100%. Parsed pre-wipe and wipe-time E moves account for the configured 0.8 mm retraction, with the other percentage pinned to zero. Interior percentages and combined percentage interactions are not claimed."
+    },
+    "filament_retract_after_wipe": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][FilamentWipeOverrides][Pipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "A real Print export checks nil inheritance at 0%, explicit 100% over machine 0%, and explicit 0% over machine 100%. Parsed post-wipe and wipe-time E moves account for the configured 0.8 mm retraction, with the other percentage pinned to zero. Interior percentages and combined percentage interactions are not claimed."
     }
   }
 }

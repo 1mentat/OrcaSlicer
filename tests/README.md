@@ -928,6 +928,13 @@ and replacement filament values and checks its public applied retraction config.
 It complements exported-motion checks under `[FilamentRetractionOverrides]`;
 `filament_retraction_routing.json` tests the nullable override lookup itself.
 
+`[FilamentWipeOverrides]` checks nullable filament wipe gating, distance, and
+retract-before/after percentages through validated Print exports. Parsed wipe
+paths and retraction partitions distinguish nil inheritance, explicit values,
+zero-distance disablement, and opposing 0/100% machine controls while preserving
+deposited material. Its bounded source-local probes are in
+`tests/mutations/filament_wipe_overrides_pipeline.json`.
+
 `[FilamentCutRetractionOverride]` also checks exported cut and extruder-change
 placeholders on two tools with reversed machine-slot mapping. Four selected
 scenarios cover all three named cut gates, machine and filament cut-distance
