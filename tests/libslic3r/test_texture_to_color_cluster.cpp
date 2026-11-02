@@ -467,8 +467,7 @@ TEST_CASE("Adaptive smoothing absorbs a one-face colour that the unsmoothed resu
         CHECK(matches_color(unsmoothed[0], minority));
     }
 
-    // Full smoothing relabels the lone black face to its neighbours' colour, and the unused
-    // centre is discarded.
+    // Full smoothing relabels the lone black face to its neighbours' colour.
     settings.smooth_weight = 1.0;
 
     TriMesh out_mesh;
