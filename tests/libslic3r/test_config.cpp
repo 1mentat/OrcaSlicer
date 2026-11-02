@@ -1661,34 +1661,143 @@ std::string serialize_numeric_boundary(const ConfigOptionType type, const double
 // case explicit while exercising every other default below.
 const std::set<std::string> expected_empty_aggregate_defaults = {"extruder_printable_area"};
 
-std::string representative_serialization(const ConfigOptionDef &def, const ConfigOption &option)
-{
-    const std::string serialized = option.serialize();
-    if (!serialized.empty())
-        return serialized;
+// A value of the option's type that differs from its default, used to prove that
+// deserialization really replaces the stored value. For enums, the decoded values
+// it must produce.
+struct Representative {
+    std::string      text;
+    std::vector<int> enum_values;
+};
 
+Representative representative_value(const ConfigOptionDef &def, const ConfigOption &default_option)
+{
     switch (def.type) {
-    case coString:
-        return "schema-roundtrip";
-    case coStrings:
-        return "schema-roundtrip;second-value";
-    case coPoint:
-        return "1,2";
-    case coPoints:
-        return "1x2,3x4";
-    case coPointsGroups:
-        return "1x2,3x4#5x6";
-    case coIntsGroups:
-        return "1,2#3";
-    case coBools:
-        return "0,1";
+    case coFloat: return {"12.5", {}};
+    case coFloats: return {"12.5,7.25", {}};
+    case coInt: return {"7", {}};
+    case coInts: return {"7,3", {}};
+    case coPercent: return {"37%", {}};
+    case coPercents: return {"37%,12%", {}};
+    case coFloatOrPercent: return {"37%", {}};
+    case coFloatsOrPercents: return {"37%,1.5", {}};
+    case coString: return {"schema-roundtrip", {}};
+    case coStrings: return {"schema-roundtrip;second-value", {}};
+    case coPoint: return {"1,2", {}};
+    case coPoints: return {"1x2,3x4", {}};
+    case coPoint3: return {"1,2,3", {}};
+    case coPointsGroups: return {"1x2,3x4#5x6", {}};
+    case coIntsGroups: return {"1,2#3", {}};
+    case coBool: return {default_option.getBool() ? "0" : "1", {}};
+    case coBools: return {default_option.serialize() == "1,0" ? "0,1" : "1,0", {}};
+    case coEnum:
+    case coEnums: {
+        // Keys whose values differ from each other and from the first default value.
+        const auto *default_list = dynamic_cast<const ConfigOptionInts *>(&default_option);
+        const int   default_value = default_list == nullptr ? default_option.getInt() :
+                                    default_list->values.empty() ? -1 : default_list->values.front();
+        Representative out;
+        for (const auto &[key, value] : *def.enum_keys_map) {
+            if (value == default_value || (!out.enum_values.empty() && value == out.enum_values.front()))
+                continue;
+            if (!out.text.empty())
+                out.text += ',';
+            out.text += key;
+            out.enum_values.push_back(value);
+            if (def.type == coEnum || out.enum_values.size() == 2)
+                break;
+        }
+        return out;
+    }
+    default: return {};
+    }
+}
+
+template<class T> const T &option_as(const ConfigOption &option)
+{
+    const T *typed = dynamic_cast<const T *>(&option);
+    REQUIRE(typed != nullptr);
+    return *typed;
+}
+
+// Checks every decoded field of an option deserialized from representative_value().
+void check_representative_values(const ConfigOptionDef &def, const ConfigOption &option, const Representative &representative)
+{
+    using Catch::Matchers::WithinAbs;
+    switch (def.type) {
+    case coFloat: CHECK_THAT(option_as<ConfigOptionFloat>(option).value, WithinAbs(12.5, 1e-12)); break;
+    case coPercent: CHECK_THAT(option_as<ConfigOptionPercent>(option).value, WithinAbs(37., 1e-12)); break;
     case coFloats:
-    case coInts:
-    case coPercents:
-    case coFloatsOrPercents:
-        return is_percent_option_type(def.type) ? "0%" : "0";
-    default:
-        return serialized;
+    case coPercents: {
+        const auto &values = option_as<ConfigOptionVector<double>>(option).values;
+        REQUIRE(values.size() == 2);
+        CHECK_THAT(values[0], WithinAbs(def.type == coFloats ? 12.5 : 37., 1e-12));
+        CHECK_THAT(values[1], WithinAbs(def.type == coFloats ? 7.25 : 12., 1e-12));
+        break;
+    }
+    case coFloatOrPercent: {
+        const auto &value = option_as<ConfigOptionFloatOrPercent>(option);
+        CHECK_THAT(value.value, WithinAbs(37., 1e-12));
+        CHECK(value.percent);
+        break;
+    }
+    case coFloatsOrPercents: {
+        const auto &values = option_as<ConfigOptionVector<FloatOrPercent>>(option).values;
+        REQUIRE(values.size() == 2);
+        CHECK_THAT(values[0].value, WithinAbs(37., 1e-12));
+        CHECK(values[0].percent);
+        CHECK_THAT(values[1].value, WithinAbs(1.5, 1e-12));
+        CHECK_FALSE(values[1].percent);
+        break;
+    }
+    case coInt: CHECK(option_as<ConfigOptionInt>(option).value == 7); break;
+    case coInts: CHECK(option_as<ConfigOptionVector<int>>(option).values == std::vector<int>{7, 3}); break;
+    case coString: CHECK(option_as<ConfigOptionString>(option).value == "schema-roundtrip"); break;
+    case coStrings:
+        CHECK(option_as<ConfigOptionStrings>(option).values == std::vector<std::string>{"schema-roundtrip", "second-value"});
+        break;
+    case coPoint: CHECK(option_as<ConfigOptionPoint>(option).value == Vec2d(1., 2.)); break;
+    case coPoints: CHECK(option_as<ConfigOptionPoints>(option).values == std::vector<Vec2d>{Vec2d(1., 2.), Vec2d(3., 4.)}); break;
+    case coPoint3: CHECK(option_as<ConfigOptionPoint3>(option).value == Vec3d(1., 2., 3.)); break;
+    case coPointsGroups: {
+        const auto &groups = option_as<ConfigOptionPointsGroups>(option).values;
+        REQUIRE(groups.size() == 2);
+        CHECK(groups[0] == Vec2ds{Vec2d(1., 2.), Vec2d(3., 4.)});
+        CHECK(groups[1] == Vec2ds{Vec2d(5., 6.)});
+        break;
+    }
+    case coIntsGroups:
+        CHECK(option_as<ConfigOptionIntsGroups>(option).values == std::vector<std::vector<int>>{{1, 2}, {3}});
+        break;
+    case coBool: CHECK(option_as<ConfigOptionBool>(option).value == (representative.text == "1")); break;
+    case coBools:
+        CHECK(option_as<ConfigOptionVector<unsigned char>>(option).values ==
+              (representative.text == "1,0" ? std::vector<unsigned char>{1, 0} : std::vector<unsigned char>{0, 1}));
+        break;
+    case coEnum: CHECK(option.getInt() == representative.enum_values.front()); break;
+    case coEnums: CHECK(option_as<ConfigOptionInts>(option).values == representative.enum_values); break;
+    default: FAIL("unhandled option type " << int(def.type));
+    }
+}
+
+// The decoded value and percent flag of a numeric option's first element.
+std::pair<double, bool> first_numeric_value(const ConfigOption &option)
+{
+    switch (option.type()) {
+    case coFloat:
+    case coPercent: return {static_cast<const ConfigOptionFloat &>(option).value, option.type() == coPercent};
+    case coFloatOrPercent: {
+        const auto &value = static_cast<const ConfigOptionFloatOrPercent &>(option);
+        return {value.value, value.percent};
+    }
+    case coFloats:
+    case coPercents: return {static_cast<const ConfigOptionVector<double> &>(option).values.at(0), option.type() == coPercents};
+    case coFloatsOrPercents: {
+        const FloatOrPercent &value = static_cast<const ConfigOptionVector<FloatOrPercent> &>(option).values.at(0);
+        return {value.value, value.percent};
+    }
+    case coInt: return {double(static_cast<const ConfigOptionInt &>(option).value), false};
+    case coInts: return {double(static_cast<const ConfigOptionVector<int> &>(option).values.at(0)), false};
+    default: return {std::numeric_limits<double>::quiet_NaN(), false};
     }
 }
 
@@ -1817,6 +1926,7 @@ TEST_CASE("Every registered print option has a complete schema contract", "[Conf
     }
 
     CHECK(actual_defaultless == expected_defaultless);
+    CHECK(print_config_def.options.size() >= 750); // 861 today
 }
 
 TEST_CASE("Every registered option has a strict default serialization round-trip", "[Config][Schema][RoundTrip]")
@@ -1835,41 +1945,51 @@ TEST_CASE("Every registered option has a strict default serialization round-trip
             continue;
         }
 
+        // Start from a different value, so a deserializer that accepts the text without
+        // storing it cannot pass.
         const std::unique_ptr<ConfigOption> restored(def.create_default_option());
         REQUIRE(restored != nullptr);
+        REQUIRE(restored->deserialize(representative_value(def, *source).text));
+        REQUIRE(restored->serialize() != serialized);
         REQUIRE(restored->deserialize(serialized));
-        // A few legacy vector defaults originate from float literals (for
-        // example 0.01f) but are stored as doubles.  Their decimal wire form
-        // is intentionally shorter than the promoted binary value, so the
-        // object equality operator is too strict for this serialization
-        // contract.  Stable canonical serialization is the invariant here.
+        // A few legacy vector defaults originate from float literals (for example 0.01f)
+        // but are stored as doubles. Their decimal wire form is intentionally shorter than
+        // the promoted binary value, so object equality is too strict here; every field
+        // is compared through its canonical serialization instead.
         CHECK(restored->serialize() == serialized);
         ++roundtripped;
     }
 
     CHECK(empty_aggregate_defaults == expected_empty_aggregate_defaults);
     CHECK(roundtripped + empty_aggregate_defaults.size() == print_config_def.options.size());
+    CHECK(roundtripped >= 750); // 860 registered today; a floor so the sweep cannot silently shrink
 }
 
-TEST_CASE("Registered option representatives serialize and deserialize strictly", "[Config][Schema][RoundTrip]")
+TEST_CASE("Registered options decode a non-default value of their type", "[Config][Schema][RoundTrip]")
 {
-    size_t roundtripped = 0;
+    std::map<ConfigOptionType, size_t> decoded_by_type;
 
     for (const auto &[key, def] : print_config_def.options) {
         INFO(key);
         const std::unique_ptr<ConfigOption> source(def.create_default_option());
         REQUIRE(source != nullptr);
-        const std::string representative = representative_serialization(def, *source);
-        REQUIRE_FALSE(representative.empty());
+        const Representative representative = representative_value(def, *source);
+        REQUIRE_FALSE(representative.text.empty());
+        REQUIRE(representative.text != source->serialize());
 
         const std::unique_ptr<ConfigOption> restored(def.create_default_option());
         REQUIRE(restored != nullptr);
-        REQUIRE(restored->deserialize(representative));
-        CHECK(restored->serialize() == representative);
-        ++roundtripped;
+        REQUIRE(restored->deserialize(representative.text));
+        check_representative_values(def, *restored, representative);
+        CHECK(restored->serialize() == representative.text);
+        ++decoded_by_type[def.type];
     }
 
-    CHECK(roundtripped == print_config_def.options.size());
+    size_t decoded = 0;
+    for (const auto &[type, count] : decoded_by_type)
+        decoded += count;
+    CHECK(decoded == print_config_def.options.size());
+    CHECK(decoded_by_type.size() >= 15); // 17 option types are registered today
 }
 
 TEST_CASE("All registered enum values round-trip through their serialized form", "[Config][Schema][Enum]")
@@ -1893,7 +2013,7 @@ TEST_CASE("All registered enum values round-trip through their serialized form",
             CHECK(option->serialize() == value);
         }
     }
-    CHECK(enum_options > 0);
+    CHECK(enum_options >= 60); // 72 today
 }
 
 TEST_CASE("All registered boolean settings accept only the canonical serialized values", "[Config][Schema][Bool]")
@@ -1922,7 +2042,7 @@ TEST_CASE("All registered boolean settings accept only the canonical serialized 
             }
         }
     }
-    CHECK(bool_options > 0);
+    CHECK(bool_options >= 140); // 164 today
 }
 
 TEST_CASE("Numeric option definitions enforce their declared finite boundaries", "[Config][Schema][Numeric]")
@@ -1931,19 +2051,8 @@ TEST_CASE("Numeric option definitions enforce their declared finite boundaries",
     size_t       bounded_options = 0;
 
     for (const auto &[key, def] : print_config_def.options) {
-        switch (def.type) {
-        case coFloat:
-        case coFloats:
-        case coInt:
-        case coInts:
-        case coPercent:
-        case coPercents:
-        case coFloatOrPercent:
-        case coFloatsOrPercents:
-            break;
-        default:
+        if (!is_numeric_option_type(def.type))
             continue;
-        }
 
         const bool has_min = static_cast<double>(def.min) > -float_limit;
         const bool has_max = static_cast<double>(def.max) < float_limit;
@@ -1964,7 +2073,7 @@ TEST_CASE("Numeric option definitions enforce their declared finite boundaries",
         }
     }
 
-    CHECK(bounded_options > 0);
+    CHECK(bounded_options >= 380); // 447 today
 }
 
 TEST_CASE("Registered numeric boundaries round-trip through strict serialization", "[Config][Schema][Numeric][RoundTrip]")
@@ -1992,6 +2101,10 @@ TEST_CASE("Registered numeric boundaries round-trip through strict serialization
             const std::unique_ptr<ConfigOption> source(def.create_default_option());
             REQUIRE(source != nullptr);
             REQUIRE(source->deserialize(serialized_boundary));
+            const double expected = is_integer_option_type(def.type) ? double(std::llround(boundary)) : boundary;
+            const auto [decoded, percent] = first_numeric_value(*source);
+            CHECK_THAT(decoded, Catch::Matchers::WithinAbs(expected, 1e-9 * std::max(1., std::abs(expected))));
+            CHECK(percent == is_percent_option_type(def.type));
 
             const std::string canonical = source->serialize();
             const std::unique_ptr<ConfigOption> restored(def.create_default_option());
@@ -2002,7 +2115,7 @@ TEST_CASE("Registered numeric boundaries round-trip through strict serialization
         }
     }
 
-    CHECK(boundary_values > 0);
+    CHECK(boundary_values >= 550); // 654 today
 }
 
 TEST_CASE("Project JSON migration records support and wall-order differences", "[Config][ConfigJsonMigration]")
