@@ -3405,9 +3405,10 @@ double bed_area_mm2(const Points &points)
 
 TEST_CASE("get_bed_shape uses the intersection of the extruder areas only when sharing is requested", "[Config][BedShape]")
 {
-    const Vec2ds printable = {Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)};
+    const Vec2ds printable = {Vec2d(0., 0.), Vec2d(30., 0.), Vec2d(30., 16.), Vec2d(0., 16.)};
     // Two partially overlapping 20x20 extruder areas, (0,0)-(20,20) and (5,5)-(25,25), intersect in
-    // (5,5)-(20,20) = 225 mm2, which is neither input (400 mm2 each); the printable area is 400 mm2.
+    // (5,5)-(20,20) = 225 mm2, which is neither input (400 mm2 each). The printable area, (0,0)-(30,16) = 480 mm2, differs from both
+    // extruder areas so that each call is pinned to the source it should read.
     const Vec2ds extruder_areas[] = {
         {Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)},
         {Vec2d(5., 5.), Vec2d(25., 5.), Vec2d(25., 25.), Vec2d(5., 25.)},
@@ -3419,11 +3420,18 @@ TEST_CASE("get_bed_shape uses the intersection of the extruder areas only when s
         CHECK(box.max == Point(scaled(20.), scaled(20.)));
     };
 
+    const auto check_printable = [](const Points &shape) {
+        CHECK_THAT(bed_area_mm2(shape), Catch::Matchers::WithinAbs(480., 1e-6));
+        const BoundingBox box(shape);
+        CHECK(box.min == Point(0, 0));
+        CHECK(box.max == Point(scaled(30.), scaled(16.)));
+    };
+
     DynamicPrintConfig dynamic;
     dynamic.set_key_value("printable_area", new ConfigOptionPoints(printable));
     dynamic.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({extruder_areas[0], extruder_areas[1]}));
     check_shared(get_bed_shape(dynamic, true));
-    CHECK_THAT(bed_area_mm2(get_bed_shape(dynamic, false)), Catch::Matchers::WithinAbs(400., 1e-6));
+    check_printable(get_bed_shape(dynamic, false));
     // The dynamic-config overload shares by default.
     check_shared(get_bed_shape(dynamic));
 
@@ -3431,24 +3439,24 @@ TEST_CASE("get_bed_shape uses the intersection of the extruder areas only when s
     full.printable_area.values = printable;
     full.extruder_printable_area.values = {extruder_areas[0], extruder_areas[1]};
     check_shared(get_bed_shape(full, true));
-    CHECK_THAT(bed_area_mm2(get_bed_shape(full, false)), Catch::Matchers::WithinAbs(400., 1e-6));
+    check_printable(get_bed_shape(full, false));
     // The static-config overload does not share by default.
-    CHECK_THAT(bed_area_mm2(get_bed_shape(static_cast<const PrintConfig &>(full))), Catch::Matchers::WithinAbs(400., 1e-6));
+    check_printable(get_bed_shape(static_cast<const PrintConfig &>(full)));
 
     SECTION("a single extruder area replaces the printable area when sharing")
     {
         dynamic.set_key_value("extruder_printable_area",
                               new ConfigOptionPointsGroups({Vec2ds{Vec2d(0., 0.), Vec2d(10., 0.), Vec2d(10., 10.), Vec2d(0., 10.)}}));
         CHECK_THAT(bed_area_mm2(get_bed_shape(dynamic, true)), Catch::Matchers::WithinAbs(100., 1e-6));
-        CHECK_THAT(bed_area_mm2(get_bed_shape(dynamic, false)), Catch::Matchers::WithinAbs(400., 1e-6));
+        check_printable(get_bed_shape(dynamic, false));
     }
 
     SECTION("without extruder areas the printable area is used")
     {
         dynamic.erase("extruder_printable_area");
         full.extruder_printable_area.values.clear();
-        CHECK_THAT(bed_area_mm2(get_bed_shape(dynamic, true)), Catch::Matchers::WithinAbs(400., 1e-6));
-        CHECK_THAT(bed_area_mm2(get_bed_shape(full, true)), Catch::Matchers::WithinAbs(400., 1e-6));
+        check_printable(get_bed_shape(dynamic, true));
+        check_printable(get_bed_shape(full, true));
     }
 }
 
