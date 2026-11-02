@@ -13283,7 +13283,7 @@ OtherPresetsConfigDef::OtherPresetsConfigDef()
     def->label = L("Print preset name");
     def->tooltip = L("Name of the print preset used for slicing.");
 
-    def = this->add("filament_preset", coString);
+    def = this->add("filament_preset", coStrings);
     def->label = L("Filament preset name");
     def->tooltip = L("Names of the filament presets used for slicing. The variable is a vector "
                      "containing one name for each extruder.");
