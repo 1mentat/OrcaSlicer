@@ -4314,12 +4314,13 @@ struct LockedZagEvidence {
 DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, double lock_depth,
                                      double skeleton_density = 10.0,
                                      double skin_line_width = 0.4,
-                                     double skeleton_line_width = 0.4)
+                                     double skeleton_line_width = 0.4,
+                                     const std::string &nozzle_diameter = "0.4")
 {
     DynamicPrintConfig config = variance_config();
     config.set_deserialize_strict({
         {"wall_generator", "classic"},
-        {"nozzle_diameter", "0.4"},
+        {"nozzle_diameter", nozzle_diameter},
         {"resolution", 0.01},
         {"wall_loops", 2},
         {"top_shell_layers", 0},
@@ -4348,13 +4349,8 @@ DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, dou
     return config;
 }
 
-LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double lock_depth,
-                                  double skeleton_density = 10.0,
-                                  double skin_line_width = 0.4,
-                                  double skeleton_line_width = 0.4)
+LockedZagEvidence collect_locked_zag_evidence(const DynamicPrintConfig &config)
 {
-    const DynamicPrintConfig config = locked_zag_config(skin_density, skin_depth, lock_depth,
-                                                        skeleton_density, skin_line_width, skeleton_line_width);
     Print print;
     Model model;
     init_print({make_cube(20.0, 20.0, 1.6)}, print, model, config, nullptr, false);
@@ -4400,6 +4396,38 @@ LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double 
                        std::isfinite(evidence.length_weighted_width) &&
                        (evidence.paths == 0 || (std::isfinite(evidence.min_width) && std::isfinite(evidence.max_width)));
     return evidence;
+}
+
+LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double lock_depth,
+                                  double skeleton_density = 10.0,
+                                  double skin_line_width = 0.4,
+                                  double skeleton_line_width = 0.4,
+                                  const std::string &nozzle_diameter = "0.4")
+{
+    const DynamicPrintConfig config = locked_zag_config(skin_density, skin_depth, lock_depth,
+                                                        skeleton_density, skin_line_width, skeleton_line_width,
+                                                        nozzle_diameter);
+    return collect_locked_zag_evidence(config);
+}
+
+DynamicPrintConfig locked_zag_width_config(const std::string &width_key,
+                                           const std::string &nozzle_diameter,
+                                           double width_value, bool percent)
+{
+    const bool skin_zone = width_key == "skin_infill_line_width";
+    DynamicPrintConfig config = locked_zag_config(25.0, skin_zone ? 100.0 : 0.0, 0.0,
+                                                  25.0, 0.4, 0.4, nozzle_diameter);
+    config.set_key_value(width_key, new ConfigOptionFloatOrPercent(width_value, percent));
+    return config;
+}
+
+LockedZagEvidence run_locked_zag_width(const std::string &width_key,
+                                       const std::string &nozzle_diameter,
+                                       double width_value, bool percent)
+{
+    const DynamicPrintConfig config = locked_zag_width_config(width_key, nozzle_diameter,
+                                                              width_value, percent);
+    return collect_locked_zag_evidence(config);
 }
 
 struct SparseComponentEvidence {
@@ -4768,6 +4796,84 @@ TEST_CASE("Locked-zag skin and skeleton line width boundaries reach their isolat
 
     for (const auto &row : {skin_nominal, skin_wide, skeleton_auto, skeleton_nominal, skeleton_wide})
         CHECK_THAT(row.perimeter_length, Catch::Matchers::WithinAbs(skin_auto.perimeter_length, 0.01));
+}
+
+TEST_CASE("Locked-zag percent widths scale with the selected nozzle",
+          "[SettingsVariance][LockedZagLineWidthBoundary]")
+{
+    const std::array<std::pair<const char *, double>, 2> nozzles{{
+        {"0.4", 0.4}, {"0.6", 0.6}
+    }};
+    for (const auto &[nozzle_text, nozzle] : nozzles) {
+        for (const char *width_key : {"skin_infill_line_width", "skeleton_infill_line_width"}) {
+            CAPTURE(width_key, nozzle);
+            const auto row = infill_settings_contracts::run_locked_zag_width(width_key, nozzle_text, 125.0, true);
+            REQUIRE(row.finite);
+            REQUIRE(row.paths > 0);
+            REQUIRE(row.length > 0.0);
+            REQUIRE(row.flow_length > 0.0);
+            CHECK_THAT(row.min_width, Catch::Matchers::WithinAbs(1.25 * nozzle, 0.001));
+            CHECK_THAT(row.max_width, Catch::Matchers::WithinAbs(1.25 * nozzle, 0.001));
+            CHECK(row.perimeter_length > 0.0);
+        }
+    }
+
+    // Absolute zero is the auto sentinel. At the second nozzle size it still resolves
+    // through the infill-role auto width of 1.125 times that nozzle.
+    const auto skin_auto_06 = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0,
+                                                                        25.0, 0.0, 0.4, "0.6");
+    const auto skeleton_auto_06 = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0,
+                                                                            25.0, 0.4, 0.0, "0.6");
+    REQUIRE(skin_auto_06.paths > 0);
+    REQUIRE(skeleton_auto_06.paths > 0);
+    CHECK_THAT(skin_auto_06.min_width, Catch::Matchers::WithinAbs(0.675, 0.001));
+    CHECK_THAT(skeleton_auto_06.min_width, Catch::Matchers::WithinAbs(0.675, 0.001));
+}
+
+TEST_CASE("Locked-zag absolute and percent width caps are inclusive and reach paths",
+          "[SettingsVariance][LockedZagLineWidthBoundary]")
+{
+    const std::array<std::pair<const char *, double>, 2> nozzles{{
+        {"0.4", 0.4}, {"0.6", 0.6}
+    }};
+    for (const auto &[nozzle_text, nozzle] : nozzles) {
+        for (const char *width_key : {"skin_infill_line_width", "skeleton_infill_line_width"}) {
+            CAPTURE(width_key, nozzle);
+
+            // Print::validate permits exactly five times the nozzle diameter. Exercise both
+            // accepted representations through real selected-zone paths at this exact cap.
+            for (const auto &[width_value, percent] : {std::pair<double, bool>{500.0, true},
+                                                        std::pair<double, bool>{5.0 * nozzle, false}}) {
+                CAPTURE(width_value, percent);
+                const auto row = infill_settings_contracts::run_locked_zag_width(width_key, nozzle_text,
+                                                                                  width_value, percent);
+                REQUIRE(row.finite);
+                REQUIRE(row.paths > 0);
+                REQUIRE(row.length > 0.0);
+                REQUIRE(row.flow_length > 0.0);
+                CHECK_THAT(row.min_width, Catch::Matchers::WithinAbs(5.0 * nozzle, 0.001));
+                CHECK_THAT(row.max_width, Catch::Matchers::WithinAbs(5.0 * nozzle, 0.001));
+            }
+
+            // The first value beyond the cap is validation-only; never slice it. Check
+            // percent and absolute encodings independently for the selected setting key.
+            for (const auto &[width_value, percent] : {std::pair<double, bool>{501.0, true},
+                                                        std::pair<double, bool>{5.01 * nozzle, false}}) {
+                CAPTURE(width_value, percent);
+                const DynamicPrintConfig invalid_config =
+                    infill_settings_contracts::locked_zag_width_config(width_key, nozzle_text,
+                                                                        width_value, percent);
+                Print invalid_print;
+                Model model;
+                init_print({make_cube(20.0, 20.0, 1.6)}, invalid_print, model, invalid_config, nullptr, false);
+                const StringObjectException validation = invalid_print.validate();
+                INFO(validation.string);
+                CHECK_FALSE(validation.string.empty());
+                CHECK(validation.opt_key == width_key);
+                CHECK_FALSE(validation.is_warning);
+            }
+        }
+    }
 }
 
 TEST_CASE("Minimum sparse area promotes only the analytically small component",

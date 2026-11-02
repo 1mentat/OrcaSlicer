@@ -1620,10 +1620,14 @@ For bridge/infill boundaries, use `fff_print_settings_variance_tests`, the
 as `--expected-control-inventory`, and
 `tests/mutations/bridge_infill_boundaries.json`. Its fifteen controls preserve
 the existing geometry and G-code checks while testing registered endpoints.
-The LockedZag skin/skeleton cases also check density and selected width values
-through actual internal-infill paths. Their source-local density and flow-map
-probes are cataloged in `tests/mutations/lockedzag_density_width.json`; width
-coverage remains partial for percent-form inputs and the wider dynamic range.
+The LockedZag skin/skeleton cases check density and emitted path widths for
+absolute and percent inputs through actual internal-infill paths. They resolve
+125% against 0.4 and 0.6 mm nozzles, process the exact five-nozzle cap in both
+encodings at both nozzle sizes, and reject 501% and 5.01x absolute widths at
+validation. Their density, flow-map, percent-resolution, and inclusive-cap
+probes are cataloged in `tests/mutations/lockedzag_density_width.json`. These
+claims cover the tested fixtures and nozzle sizes; no maximum is registered,
+and other geometry, nozzle sizes, and arbitrary widths are not claimed.
 
 Pass `--cmake` and `--ctest` when the configured worker needs specific tools.
 Keep the worker's existing CPU, memory, swap, and locale limits.

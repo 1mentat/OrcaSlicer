@@ -1255,19 +1255,21 @@
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[LockedZagLineWidthBoundary]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Print::validate tests selected absolute boundary cases (0, 0.2 mm invalid, 0.45 mm valid, and 4 mm invalid) for this width option. The isolated LockedZag pipeline additionally checks 0/auto (0.45 mm at a 0.4 mm nozzle), 0.4 mm, and 0.6 mm absolute output widths. The option has no registered maximum; percent-form resolution and the broader dynamically valid width extent remain unclaimed, so this setting remains partial."
+      "reason": "Print::validate checks selected absolute boundary cases (0, 0.2 mm invalid, 0.45 mm valid, and 4 mm invalid) for this width option. The isolated LockedZag pipeline checks absolute 0/auto, 0.4/0.6 mm representatives, and 125% resolution at 0.4/0.6 mm nozzles. At both nozzle sizes it processes the exact five-nozzle dynamic cap in both encodings (500% and absolute 5x nozzle) and validates rejection just beyond it (501% and absolute 5.01x). This is finite fixture/nozzle coverage; no maximum is registered, and other geometry, nozzle sizes, and the broader valid width extent are not claimed."
     },
     "skeleton_infill_line_width": {
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[LockedZagLineWidthBoundary]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Print::validate tests selected absolute boundary cases (0, 0.2 mm invalid, 0.45 mm valid, and 4 mm invalid) for this width option. The isolated LockedZag pipeline additionally checks 0/auto (0.45 mm at a 0.4 mm nozzle), 0.4 mm, and 0.6 mm absolute output widths. The option has no registered maximum; percent-form resolution and the broader dynamically valid width extent remain unclaimed, so this setting remains partial."
+      "reason": "Print::validate checks selected absolute boundary cases (0, 0.2 mm invalid, 0.45 mm valid, and 4 mm invalid) for this width option. The isolated LockedZag pipeline checks absolute 0/auto, 0.4/0.6 mm representatives, and 125% resolution at 0.4/0.6 mm nozzles. At both nozzle sizes it processes the exact five-nozzle dynamic cap in both encodings (500% and absolute 5x nozzle) and validates rejection just beyond it (501% and absolute 5.01x). This is finite fixture/nozzle coverage; no maximum is registered, and other geometry, nozzle sizes, and the broader valid width extent are not claimed."
     },
     "bridge_line_width": {
       "test": "tests/fff_print/test_settings_variance.cpp",

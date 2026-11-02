@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Isolated public LockedZag probes for skeleton density and both selected zone-flow mappings.",
+  "description": "Isolated public LockedZag probes for density, zone-flow mapping, percent width resolution, and dynamic width caps.",
   "mutants": [
     {
       "id": "lockedzag-skeleton-density-fixed-at-25-percent",
@@ -31,6 +31,26 @@
       "test_filter": "LockedZagLineWidthBoundary",
       "ordinary_assertion_only": true,
       "description": "Route skeleton polylines through the skin flow map; auto and 0.6 mm skeleton width output checks must fail."
+    },
+    {
+      "id": "lockedzag-percent-width-uses-selected-nozzle",
+      "path": "src/libslic3r/Flow.cpp",
+      "old": "      w = float(width.get_abs_value(nozzle_diameter));",
+      "new": "      w = float(width.get_abs_value(0.4f)); // private mutant: ignore configured nozzle diameter",
+      "expected_matches": 1,
+      "test_filter": "LockedZagLineWidthBoundary",
+      "ordinary_assertion_only": true,
+      "description": "Resolve every percentage against 0.4 mm regardless of the selected nozzle; the independent 125% path-width expectations at 0.6 mm must fail."
+    },
+    {
+      "id": "lockedzag-five-nozzle-width-cap-becomes-exclusive",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "} else if (extrusion_width_max > max_nozzle_diameter * MAX_LINE_WIDTH_MULTIPLIER) {",
+      "new": "} else if (extrusion_width_max >= max_nozzle_diameter * MAX_LINE_WIDTH_MULTIPLIER) { // private mutant: reject the inclusive cap",
+      "expected_matches": 1,
+      "test_filter": "LockedZagLineWidthBoundary",
+      "ordinary_assertion_only": true,
+      "description": "Reject the exact five-nozzle dynamic cap in either accepted encoding. The 500% and absolute 5x-nozzle widths must validate and reach paths for both locked zones at 0.4 and 0.6 mm nozzles."
     }
   ]
 }
