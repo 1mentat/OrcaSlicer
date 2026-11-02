@@ -689,6 +689,14 @@ widths; the Perlin field is deterministic but sampling positions are stochastic.
 contour/hole and outer/inner perimeter points, then exercises the registered
 thickness and point-distance endpoints. Its source-local probes are in
 `fuzzy_skin_settings_pipeline.json`.
+`[FuzzySkinNoiseParametersPipeline]` independently varies the registered
+scale, octave-count, and persistence endpoints through a validated classic
+external-wall Perlin Print pipeline. Safe emitted perimeter-point offsets are
+compared with an independently configured Libnoise Perlin field. Overhang
+clipping is disabled to isolate displacement; other noise types and overhang
+interactions are not claimed. Ten consecutive triplet runs passed, and each
+ignored-parameter mutant is killed by ordinary residual assertions. Its probes
+are in `fuzzy_skin_noise_parameters_pipeline.json`.
 `[GapFillFilterSettings]` slices the same thin square tube with zero and a
 high gap-length threshold, checking that short classic-wall gap paths disappear
 without changing contour, hole, or inner-wall classes. Its two source-local

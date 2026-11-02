@@ -3244,6 +3244,33 @@
       ],
       "reason": "The real hollow-tube Print pipeline exercises the registered 0.01 mm and 5 mm endpoints plus 0.02 and 0.75 mm controls. Sampled external-perimeter point counts distinguish the endpoint pair and the wider spacing controls; the 0.01 mm output need not have more points than 0.02 mm. The exact registered limits are checked. Other noise types and the full interval are not claimed."
     },
+    "fuzzy_skin_octaves": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[FuzzySkinNoiseParametersPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A validated Print pipeline independently varies the registered 1, 4, and 10 octave values for classic external Perlin fuzzy skin. It compares emitted perimeter-point transverse offsets at safe reference projections with a separately configured Libnoise Perlin field, confirms the resolved region value, and checks the registered minimum/default/maximum. The octave-ignored source mutant fails ordinary residual assertions. Overhang clipping is disabled to isolate Perlin displacement; other noise types and overhang interactions are not claimed."
+    },
+    "fuzzy_skin_persistence": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[FuzzySkinNoiseParametersPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A validated Print pipeline independently varies the registered 0.01, 0.5, and 1.0 persistence values for classic external Perlin fuzzy skin. It compares emitted perimeter-point transverse offsets at safe reference projections with a separately configured Libnoise Perlin field, confirms the resolved region value, and checks the registered minimum/default/maximum. The persistence-ignored source mutant fails ordinary residual assertions. Overhang clipping is disabled to isolate Perlin displacement; other noise types and overhang interactions are not claimed."
+    },
+    "fuzzy_skin_scale": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[FuzzySkinNoiseParametersPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A validated Print pipeline independently varies the registered 0.1, 1.0, and 500 mm feature-size values for classic external Perlin fuzzy skin. It compares emitted perimeter-point transverse offsets at safe reference projections with a separately configured Libnoise Perlin field, confirms the resolved region value, and checks the registered minimum/default/maximum. The scale-ignored source mutant fails ordinary residual assertions. Ten consecutive three-case executions passed; this supports the stochastic observer quorum without claiming deterministic sample positions. Overhang clipping is disabled to isolate Perlin displacement; other noise types and overhang interactions are not claimed."
+    },
     "enable_tower_interface_features": {
       "test": "tests/fff_print/test_wipe_tower.cpp",
       "tag": "[WipeTowerContactPipeline]",

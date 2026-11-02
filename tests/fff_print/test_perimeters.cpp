@@ -5,6 +5,7 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <libnoise/module/perlin.h>
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
@@ -1769,6 +1770,215 @@ TEST_CASE("Disabled fuzzy skin is a no-op for the registered noise pipeline",
         CHECK(disabled.points[i] == none.points[i]);
     for (size_t i = 0; i < none.widths.size(); ++i)
         CHECK_THAT(disabled.widths[i], Catch::Matchers::WithinAbs(none.widths[i], 1e-6));
+}
+
+struct PerlinNoiseSettings {
+    double scale;
+    int octaves;
+    double persistence;
+};
+
+struct PerlinPerimeterSlice {
+    OuterPerimeterSnapshot perimeter;
+    double slice_z;
+};
+
+DynamicPrintConfig perlin_noise_settings_config(bool enable_fuzzy_skin, const PerlinNoiseSettings &settings)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "classic"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"outer_wall_line_width", 0.45},
+        {"line_width", 0.45},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"fuzzy_skin", enable_fuzzy_skin ? "external" : "none"},
+        {"fuzzy_skin_first_layer", false},
+        {"fuzzy_skin_mode", "displacement"},
+        {"fuzzy_skin_noise_type", "perlin"},
+        {"fuzzy_skin_thickness", 0.35},
+        {"fuzzy_skin_point_distance", 0.4},
+        {"fuzzy_skin_scale", settings.scale},
+        {"fuzzy_skin_octaves", settings.octaves},
+        {"fuzzy_skin_persistence", settings.persistence},
+        {"fuzzy_skin_ripples_per_layer", 8},
+        {"fuzzy_skin_ripple_offset", 0},
+        {"fuzzy_skin_layers_between_ripple_offset", 1},
+        {"enable_arc_fitting", false},
+        {"detect_overhang_wall", false},
+        {"use_relative_e_distances", false},
+        {"nozzle_diameter", "0.4"},
+    });
+    return config;
+}
+
+PerlinPerimeterSlice slice_perlin_noise_settings(bool enable_fuzzy_skin, const PerlinNoiseSettings &settings)
+{
+    // A long, narrow prism spans enough of the world-space field for the
+    // 500 mm feature-size endpoint to produce observable interior samples.
+    TriangleMesh shape = make_cube(300., 12., 0.8);
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(std::move(shape));
+    // Keep the same model-local outline in the control and active slices.
+    init_print(std::move(meshes), print, model, perlin_noise_settings_config(enable_fuzzy_skin, settings), nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO("Print validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE_FALSE(print.objects().empty());
+    REQUIRE(print.objects().front()->config().wall_generator.value == PerimeterGeneratorType::Classic);
+    const auto &layers = print.objects().front()->layers();
+    REQUIRE(layers.size() == 4);
+    const size_t layer_index = layers.size() / 2;
+    REQUIRE(layers[layer_index]->regions().size() == 1);
+    const PrintRegionConfig &region_config = layers[layer_index]->regions().front()->region().config();
+    REQUIRE_FALSE(region_config.detect_overhang_wall.value);
+    REQUIRE_THAT(region_config.fuzzy_skin_scale.value, Catch::Matchers::WithinAbs(settings.scale, 1e-9));
+    REQUIRE(region_config.fuzzy_skin_octaves.value == settings.octaves);
+    REQUIRE_THAT(region_config.fuzzy_skin_persistence.value, Catch::Matchers::WithinAbs(settings.persistence, 1e-9));
+    return {outer_perimeters_at(print, layer_index), layers[layer_index]->slice_z};
+}
+
+struct SafePerlinReference {
+    Vec2d projection_mm;
+    double distance_mm = std::numeric_limits<double>::max();
+    bool interior = false;
+    size_t segment_index = std::numeric_limits<size_t>::max();
+};
+
+SafePerlinReference nearest_safe_perlin_reference(const Point &point, const OuterPerimeterSnapshot &reference)
+{
+    SafePerlinReference result;
+    result.distance_mm = nearest_safe_reference_distance_mm(point, reference, result.interior);
+    if (!result.interior)
+        return result;
+
+    // Reuse the established corner/tie filter; select the nearest safe straight side
+    // only to recover the point where the independently configured field was sampled.
+    for (size_t i = 0; i < reference.segments.size(); ++i) {
+        const Segment &segment = reference.segments[i];
+        double t = 0., length = 0.;
+        const double distance = reference_segment_distance_mm(point, segment, t, length);
+        if (distance > result.distance_mm + kFuzzyDistanceTieMm)
+            continue;
+        const Vec2d a(unscale_(segment.a.x()), unscale_(segment.a.y()));
+        const Vec2d b(unscale_(segment.b.x()), unscale_(segment.b.y()));
+        result.projection_mm = a + t * (b - a);
+        result.segment_index = i;
+        return result;
+    }
+    result.interior = false;
+    return result;
+}
+
+void require_perlin_pipeline_matches_configured_field(const PerlinNoiseSettings &settings,
+                                                       const PerlinPerimeterSlice &actual,
+                                                       const PerlinPerimeterSlice &reference)
+{
+    REQUIRE_THAT(actual.slice_z, Catch::Matchers::WithinAbs(reference.slice_z, 1e-9));
+    REQUIRE(actual.perimeter.points.size() > reference.perimeter.points.size());
+
+    noise::module::Perlin expected_field;
+    expected_field.SetFrequency(1.0 / settings.scale);
+    expected_field.SetOctaveCount(settings.octaves);
+    expected_field.SetPersistence(settings.persistence);
+
+    size_t safe_samples = 0;
+    size_t nontrivial_expected_offsets = 0;
+    std::vector<size_t> witnesses_by_reference_side(reference.perimeter.segments.size(), 0);
+    double maximum_residual_mm = 0.;
+    constexpr double thickness_mm = 0.35;
+    for (const Point &point : actual.perimeter.points) {
+        const SafePerlinReference projected = nearest_safe_perlin_reference(point, reference.perimeter);
+        if (!projected.interior)
+            continue;
+        ++safe_samples;
+
+        const double expected_offset_mm = std::abs(expected_field.GetValue(projected.projection_mm.x(),
+                                                                           projected.projection_mm.y(),
+                                                                           actual.slice_z) * thickness_mm);
+        if (expected_offset_mm > 0.01) {
+            ++nontrivial_expected_offsets;
+            ++witnesses_by_reference_side[projected.segment_index];
+        }
+        const double residual_mm = std::abs(projected.distance_mm - expected_offset_mm);
+        maximum_residual_mm = std::max(maximum_residual_mm, residual_mm);
+    }
+
+    const size_t nontrivial_sides = std::count_if(witnesses_by_reference_side.begin(), witnesses_by_reference_side.end(),
+                                                  [](size_t count) { return count > 0; });
+    CAPTURE(settings.scale, settings.octaves, settings.persistence, safe_samples, nontrivial_expected_offsets,
+            nontrivial_sides, maximum_residual_mm);
+    REQUIRE(safe_samples >= 8);
+    REQUIRE(nontrivial_expected_offsets >= 3);
+    REQUIRE(nontrivial_sides >= 2);
+    CHECK_THAT(maximum_residual_mm, Catch::Matchers::WithinAbs(0., 0.002));
+}
+
+void require_fuzzy_noise_numeric_registration(const char *key, ConfigOptionType type,
+                                              double minimum, double nominal, double maximum)
+{
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    CHECK(definition->type == type);
+    CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(minimum, 1e-6));
+    CHECK_THAT(definition->max, Catch::Matchers::WithinAbs(maximum, 1e-6));
+    if (type == coInt)
+        CHECK(definition->get_default_value<ConfigOptionInt>()->value == int(nominal));
+    else
+        CHECK_THAT(definition->get_default_value<ConfigOptionFloat>()->value, Catch::Matchers::WithinAbs(nominal, 1e-9));
+}
+
+TEST_CASE("Perlin fuzzy skin scale controls emitted external-wall displacement",
+          "[FuzzySkinNoiseParametersPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_fuzzy_noise_numeric_registration("fuzzy_skin_scale", coFloat, 0.1, 1.0, 500.0);
+    const PerlinNoiseSettings nominal{1.0, 4, 0.5};
+    const PerlinPerimeterSlice reference = slice_perlin_noise_settings(false, nominal);
+    for (const double scale : {0.1, 1.0, 500.0}) {
+        CAPTURE(scale);
+        const PerlinNoiseSettings settings{scale, nominal.octaves, nominal.persistence};
+        const PerlinPerimeterSlice actual = slice_perlin_noise_settings(true, settings);
+        require_perlin_pipeline_matches_configured_field(settings, actual, reference);
+    }
+}
+
+TEST_CASE("Perlin fuzzy skin octaves control emitted external-wall displacement",
+          "[FuzzySkinNoiseParametersPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_fuzzy_noise_numeric_registration("fuzzy_skin_octaves", coInt, 1, 4, 10);
+    const PerlinNoiseSettings nominal{1.0, 4, 0.5};
+    const PerlinPerimeterSlice reference = slice_perlin_noise_settings(false, nominal);
+    for (const int octaves : {1, 4, 10}) {
+        CAPTURE(octaves);
+        const PerlinNoiseSettings settings{nominal.scale, octaves, nominal.persistence};
+        const PerlinPerimeterSlice actual = slice_perlin_noise_settings(true, settings);
+        require_perlin_pipeline_matches_configured_field(settings, actual, reference);
+    }
+}
+
+TEST_CASE("Perlin fuzzy skin persistence controls emitted external-wall displacement",
+          "[FuzzySkinNoiseParametersPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_fuzzy_noise_numeric_registration("fuzzy_skin_persistence", coFloat, 0.01, 0.5, 1.0);
+    const PerlinNoiseSettings nominal{1.0, 4, 0.5};
+    const PerlinPerimeterSlice reference = slice_perlin_noise_settings(false, nominal);
+    for (const double persistence : {0.01, 0.5, 1.0}) {
+        CAPTURE(persistence);
+        const PerlinNoiseSettings settings{nominal.scale, nominal.octaves, persistence};
+        const PerlinPerimeterSlice actual = slice_perlin_noise_settings(true, settings);
+        require_perlin_pipeline_matches_configured_field(settings, actual, reference);
+    }
 }
 
 } // namespace fuzzy_mode_pipeline_contracts

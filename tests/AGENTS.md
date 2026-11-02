@@ -81,6 +81,11 @@ Check these before writing your own setup or output-parsing code.
 - Prefer a flat `TEST_CASE` per behavior, with `GENERATE` for parameterized cases. Reserve `SCENARIO` / `GIVEN` / `WHEN` / `THEN` for genuine shared setup that branches into a few close variations.
 - Set the config keys your test depends on, and derive the expected values from what you set. A 20mm cube sliced at `layer_height` 2 is 10 layers, and the test should state both parts. If a number in your assertion comes from a key you never set, the test is also testing that default.
 - For numeric or Boolean `DynamicPrintConfig` values, use the initializer-list overload, such as `config.set_deserialize_strict({{"layer_height", 0.2}})`. The two-argument overload takes serialized text.
+- Before the first native run of a new valid `Print` fixture, require
+  `print.validate().string.empty()` before processing or export. Pin either a
+  `layer_change_gcode` reset (`G92 E0`) for relative extrusion or absolute
+  extrusion explicitly. Keep this guard in the normal control before mutation
+  probes; omit it only when invalid configuration is the behavior being tested.
 - Use at least two real motion blocks per flush interval in GCodeProcessor fixtures that compare motion estimates with configured feed floors or filament delays. Single-block zero-delay and positive-delay histories can take different buffering paths; test that short-stream behavior separately when it is the contract.
 - Use registered canonical setting keys in behavior fixtures. `set_deserialize_strict()` may discard obsolete or unknown names; use legacy names only when migration is the behavior being tested.
 - Confirm which static config class owns a setting before testing overrides. A key registered as nullable may belong to `GCodeConfig` or `PrintConfig` and have no object-level override. Trace nil resolution through the actual preset or variant merge, then pass that resolved config to the pipeline; nil does not always mean inheritance or restoration.
