@@ -3429,3 +3429,182 @@ TEST_CASE("Nozzle inventory parsing skips tokens it cannot interpret and keeps t
     CHECK(parsed[2].empty());
     CHECK(save_extruder_nozzle_stats_to_string(parsed) == std::vector<std::string>{"Standard#2|High Flow#1", "E3D High Flow#3", ""});
 }
+
+namespace {
+
+const std::set<std::string> variant_mapping_keys{
+    "print_extruder_id", "print_extruder_variant", "outer_wall_speed", "small_perimeter_speed", "enable_overhang_speed"};
+
+void set_variant_columns(DynamicPrintConfig &config, std::vector<int> ids, std::vector<std::string> variants)
+{
+    config.option<ConfigOptionInts>("print_extruder_id", true)->values = std::move(ids);
+    config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = std::move(variants);
+}
+
+void set_speeds(DynamicPrintConfig &config, std::vector<double> values)
+{
+    config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = std::move(values);
+}
+
+std::vector<double> speeds(const DynamicPrintConfig &config)
+{
+    const auto *option = config.option<ConfigOptionFloats>("outer_wall_speed");
+    REQUIRE(option != nullptr);
+    return option->values;
+}
+
+void set_percent_speeds(DynamicPrintConfig &config, const std::vector<double> &values)
+{
+    auto &target = config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed", true)->values;
+    target.clear();
+    for (const double value : values)
+        target.emplace_back(value, true);
+}
+
+std::vector<double> percent_speeds(const DynamicPrintConfig &config)
+{
+    const auto *option = config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed");
+    REQUIRE(option != nullptr);
+    std::vector<double> values;
+    for (const FloatOrPercent &value : option->values) {
+        CHECK(value.percent);
+        values.push_back(value.value);
+    }
+    return values;
+}
+
+} // namespace
+
+TEST_CASE("Single-to-multi copies the variant columns and caps each variant's value by the multi config", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_variant_columns(multi, {1, 1, 2}, {"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"});
+    set_variant_columns(single, {99}, {"old"});
+    set_speeds(single, {100.});
+    set_percent_speeds(single, {50.});
+    single.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {1};
+    set_speeds(multi, {80., 160., 240.});
+    set_percent_speeds(multi, {40., 60., 30.});
+    multi.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {0, 0, 0};
+
+    std::set<std::string> keys = variant_mapping_keys;
+    REQUIRE(single.update_values_from_single_to_multi(multi, keys, "print_extruder_id", "print_extruder_variant") == 0);
+    CHECK(single.option<ConfigOptionInts>("print_extruder_id")->values == std::vector<int>({1, 1, 2}));
+    CHECK(single.option<ConfigOptionStrings>("print_extruder_variant")->values ==
+          std::vector<std::string>({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"}));
+    // The single value is spread over the variants and capped by the multi config's value in each column.
+    CHECK(speeds(single) == std::vector<double>({80., 100., 100.}));
+    CHECK(percent_speeds(single) == std::vector<double>({40., 50., 30.}));
+    // Bools keep the single value for every variant; the multi config only supplies the width.
+    CHECK(single.option<ConfigOptionBools>("enable_overhang_speed")->values == std::vector<unsigned char>({1, 1, 1}));
+}
+
+TEST_CASE("Single-to-multi leaves settings it cannot map untouched", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_variant_columns(multi, {1, 2}, {"A", "B"});
+    set_speeds(single, {42.});
+    single.option<ConfigOptionInt>("wall_loops", true)->value = 7;
+    multi.option<ConfigOptionInt>("wall_loops", true)->value = 3;
+
+    SECTION("a key missing from the multi config, a scalar key and an unknown key")
+    {
+        std::set<std::string> keys{"outer_wall_speed", "wall_loops", "unknown_mapping_key"};
+        REQUIRE(single.update_values_from_single_to_multi(multi, keys, "print_extruder_id", "print_extruder_variant") == 0);
+        CHECK(speeds(single) == std::vector<double>({42.}));
+        CHECK(single.option<ConfigOptionInt>("wall_loops")->value == 7);
+    }
+
+    SECTION("an unknown key does not stop the known ones")
+    {
+        set_speeds(multi, {30., 40.});
+        std::set<std::string> keys{"unknown_mapping_key", "outer_wall_speed"};
+        REQUIRE(single.update_values_from_single_to_multi(multi, keys, "print_extruder_id", "print_extruder_variant") == 0);
+        CHECK(speeds(single) == std::vector<double>({30., 40.}));
+    }
+
+    SECTION("a multi config without the variant column is rejected")
+    {
+        std::set<std::string> keys{"outer_wall_speed"};
+        CHECK(single.update_values_from_single_to_multi(multi, keys, "print_extruder_id", "missing_variant") == -1);
+        CHECK(speeds(single) == std::vector<double>({42.}));
+    }
+}
+
+TEST_CASE("Multi-to-multi keeps the smallest old value for each new variant", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    // Old variants A,B,A (the second A belongs to the second extruder); new rows A,B for extruder 1 and 2.
+    set_variant_columns(old_config, {1, 1, 2}, {"A", "B", "A"});
+    set_variant_columns(new_config, {1, 1, 2, 2}, {"A", "B", "A", "B"});
+    set_speeds(old_config, {30., 20., 10.});
+    set_speeds(new_config, {100., 200., 300., 400.});
+    set_percent_speeds(old_config, {30., 20., 10.});
+    set_percent_speeds(new_config, {50., 60., 70., 80.});
+    old_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {0, 1, 0};
+    new_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {1, 0, 0, 0};
+    std::vector<std::string> new_extruder_variants{"A", "B"};
+
+    std::set<std::string> keys = variant_mapping_keys;
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys, "print_extruder_id", "print_extruder_variant",
+                                                         new_extruder_variants) == 0);
+    CHECK(old_config.option<ConfigOptionInts>("print_extruder_id")->values == std::vector<int>({1, 1, 2, 2}));
+    CHECK(old_config.option<ConfigOptionStrings>("print_extruder_variant")->values ==
+          std::vector<std::string>({"A", "B", "A", "B"}));
+    // New row 0 (extruder 1, A) takes the smaller of 100 and both old A values (30, 10); row 3 (extruder 2, B)
+    // the smaller of 400 and the old B value 20; rows 1 and 2 have no matching extruder and keep the new values.
+    CHECK(speeds(old_config) == std::vector<double>({10., 200., 300., 20.}));
+    CHECK(percent_speeds(old_config) == std::vector<double>({10., 60., 70., 20.}));
+    // An enabled old flag turns the matching new flag on; a disabled one leaves the new flag as it was.
+    CHECK(old_config.option<ConfigOptionBools>("enable_overhang_speed")->values == std::vector<unsigned char>({1, 0, 0, 1}));
+}
+
+TEST_CASE("Multi-to-multi takes the new values where no target extruder matches", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1, 2}, {"A", "B"});
+    set_variant_columns(new_config, {1, 2}, {"A", "B"});
+    set_speeds(old_config, {11., 22.});
+    set_speeds(new_config, {101., 202.});
+    old_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {1, 1};
+    new_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {0, 0};
+    std::set<std::string> keys{"outer_wall_speed", "enable_overhang_speed", "unknown_mapping_key"};
+
+    SECTION("the extruder's variant is not in the old config")
+    {
+        std::vector<std::string> variants{"C"};
+        REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys, "print_extruder_id", "print_extruder_variant", variants) == 0);
+    }
+
+    SECTION("no (extruder id, variant) pair exists in the new config")
+    {
+        std::vector<std::string> variants{"B", "A"};
+        REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys, "print_extruder_id", "print_extruder_variant", variants) == 0);
+    }
+
+    SECTION("there are no target extruders")
+    {
+        std::vector<std::string> variants;
+        REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys, "print_extruder_id", "print_extruder_variant", variants) == 0);
+    }
+
+    CHECK(speeds(old_config) == std::vector<double>({101., 202.}));
+    CHECK(old_config.option<ConfigOptionBools>("enable_overhang_speed")->values == std::vector<unsigned char>({0, 0}));
+}
+
+TEST_CASE("Multi-to-multi rejects a config without the identity columns", "[Config][ConfigMultiMapping]")
+{
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_speeds(old_config, {11.});
+    set_speeds(new_config, {101.});
+    std::vector<std::string> variants{"A"};
+    std::set<std::string> keys{"outer_wall_speed"};
+
+    CHECK(old_config.update_values_from_multi_to_multi(new_config, keys, "missing_id", "missing_variant", variants) == -1);
+    CHECK(speeds(old_config) == std::vector<double>({11.}));
+}
