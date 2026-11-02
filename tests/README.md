@@ -1618,8 +1618,8 @@ Use `fff_print_gcodeprocessor_tests`, `^FocusedGCodeProcessor::`,
 For bridge/infill boundaries, use `fff_print_settings_variance_tests`, the
 `control_regex` value from `tests/controls/settings_boundaries.json`, that file
 as `--expected-control-inventory`, and
-`tests/mutations/bridge_infill_boundaries.json`. Its fifteen controls preserve
-the existing geometry and G-code checks while testing registered endpoints.
+`tests/mutations/bridge_infill_boundaries.json`. Its controls preserve the
+existing geometry and G-code checks while testing registered endpoints.
 The LockedZag skin/skeleton cases check density and emitted path widths for
 absolute and percent inputs through actual internal-infill paths. They resolve
 125% against 0.4 and 0.6 mm nozzles, process the exact five-nozzle cap in both
