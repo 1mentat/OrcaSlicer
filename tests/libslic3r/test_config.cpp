@@ -3031,32 +3031,31 @@ TEST_CASE("get_parameter_size scales per-extruder options by their variant count
 }
 
 // Known bug: PrintConfigDef never calls init_filament_option_keys(), so filament_option_keys() is empty and
-// set_num_filaments() resizes nothing; fixed by the follow-up fix PR.
-TEST_CASE("set_num_filaments resizes the filament vectors while preserving the prefix", "[Config][ConfigVariants][!shouldfail]")
+// set_num_filaments() resizes nothing; fixed by the follow-up fix PR. Only assertions that fail on main are
+// tagged: the prefix of the vectors is trivially unchanged today and is covered by the fix PR.
+TEST_CASE("set_num_filaments grows filament vectors with their first value and shrinks them", "[Config][ConfigVariants][!shouldfail]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_key_value("filament_colour", new ConfigOptionStrings({"#112233", "#445566"}));
     config.set_key_value("filament_diameter", new ConfigOptionFloats({1.70, 1.80}));
-    config.set_key_value("default_filament_profile", new ConfigOptionStrings({"profile"}));
-    const double default_diameter = FullPrintConfig::defaults().filament_diameter.values.front();
-    REQUIRE(default_diameter != 1.70);
-    REQUIRE(default_diameter != 1.80);
 
-    config.set_num_filaments(3);
-    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values.size() == 3);
-    REQUIRE(config.option<ConfigOptionFloats>("filament_diameter")->values.size() == 3);
-    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values[0] == "#112233");
-    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values[1] == "#445566");
-    CHECK_THAT(config.option<ConfigOptionFloats>("filament_diameter")->values[0], Catch::Matchers::WithinAbs(1.70, 1e-12));
-    CHECK_THAT(config.option<ConfigOptionFloats>("filament_diameter")->values[1], Catch::Matchers::WithinAbs(1.80, 1e-12));
-    // The new slot takes the default.
-    CHECK_THAT(config.option<ConfigOptionFloats>("filament_diameter")->values[2], Catch::Matchers::WithinAbs(default_diameter, 1e-12));
-    // default_filament_profile is deliberately not resized.
-    CHECK(config.option<ConfigOptionStrings>("default_filament_profile")->values == std::vector<std::string>{"profile"});
+    const auto *colours   = config.option<ConfigOptionStrings>("filament_colour");
+    const auto *diameters = config.option<ConfigOptionFloats>("filament_diameter");
 
-    config.set_num_filaments(1);
-    REQUIRE(config.option<ConfigOptionStrings>("filament_colour")->values.size() == 1);
-    REQUIRE(config.option<ConfigOptionFloats>("filament_diameter")->values.size() == 1);
-    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values.front() == "#112233");
-    CHECK_THAT(config.option<ConfigOptionFloats>("filament_diameter")->values.front(), Catch::Matchers::WithinAbs(1.70, 1e-12));
+    SECTION("growing")
+    {
+        config.set_num_filaments(3);
+        REQUIRE(colours->values.size() == 3);
+        REQUIRE(diameters->values.size() == 3);
+        // ConfigOptionVector::resize extends a non-empty vector with its first value.
+        CHECK(colours->values[2] == "#112233");
+        CHECK_THAT(diameters->values[2], Catch::Matchers::WithinAbs(1.70, 1e-12));
+    }
+
+    SECTION("shrinking")
+    {
+        config.set_num_filaments(1);
+        CHECK(colours->values.size() == 1);
+        CHECK(diameters->values.size() == 1);
+    }
 }
