@@ -1019,9 +1019,11 @@ TEST_CASE("Remeshing rejects a label count that does not match the faces before 
 
 namespace {
 
-// Labels 7 for faces whose centroid lies above `height`, 3 otherwise. Edges between the two labels
-// (the side-face diagonals and the horizontal edges at the split) become constrained; the cube's
-// sharp top and bottom edges stay unconstrained, so the remesher may only approximate them.
+// Labels 7 for faces whose centroid lies above `height`, 3 otherwise. remesh_mesh constrains the edges
+// whose two faces carry different labels. On this cube those are the side-face diagonals and any
+// vertical edge whose adjacent side triangles differ in label; the cube has no vertices at mid-height, so
+// there are no edges at the split, and the top and bottom edges (same label on both sides) stay
+// unconstrained, so the remesher may only approximate them.
 std::vector<std::size_t> labels_split_at_height(const TriMesh &mesh, float height)
 {
     std::vector<std::size_t> labels(mesh.indices.size(), 3);
@@ -1046,8 +1048,8 @@ double mean_edge_length(const TriMesh &mesh)
 } // namespace
 
 // Isotropic remeshing only approximates the input surface, so the unconstrained sharp edges may be
-// rounded. A 10% volume tolerance allows that, while a cube with no constrained edges loses 50% or
-// more of its volume at these ratios.
+// rounded. A 10% volume tolerance allows that. Measured for reference: a single-label cube (no
+// constrained edges) loses 50% of its volume at ratio 0.6 and all of it at 1.4, this fixture loses ~0%.
 TEST_CASE("Remeshing a closed two-label cube approximately keeps its volume, closure, and both labels", "[ColorUtils]")
 {
     const double ratio    = GENERATE(0.6, 1.4);
