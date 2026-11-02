@@ -2642,8 +2642,9 @@ TEST_CASE("BBS 3MF export cancellation removes unfinished archives after the arc
 
 namespace {
 
-// Stores the two-instance fixture at `path` and checks that the unedited archive loads, so
-// a later load failure comes from the edit made to it.
+// Stores the fixture at `path` and checks that the untouched archive loads as a BBL
+// project with its object and plate, so a later load failure comes from the edit made to
+// it. The BBL flag matters: model-settings errors only fail the load of BBL projects.
 void store_loadable_project(const std::string& path, bool assembly)
 {
     Model source;
@@ -2659,29 +2660,17 @@ void store_loadable_project(const std::string& path, bool assembly)
     Model control_model;
     LoadedProject control;
     REQUIRE(load_model(path, control_model, control));
-    REQUIRE(control_model.objects.size() == 1);
+    CHECK(control.is_bbl);
+    CHECK(control_model.objects.size() == 1);
+    CHECK(control.plates.size() == 1);
 }
 
 } // namespace
 
 TEST_CASE("BBS 3MF rejects an assembly item that names a missing object", "[3MF][Bbs3mfExtended][Errors]")
 {
-    Model source;
-    make_model(source, false, true);
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    ScopedTemporaryDir backup("orca_bbs_ext_bad_assembly_store");
-    source.set_backup_path(backup.string());
-    PlateData plate;
-    make_plate(plate, 0, {{0, 0}, {0, 1}});
-    PlateDataPtrs plates{&plate};
     ScopedTemporaryFile archive(".3mf");
-    store_model(archive.string(), source, config, plates);
-    {
-        // The untouched archive loads, so the failure below comes from the edit.
-        Model control_model;
-        LoadedProject control;
-        REQUIRE(load_model(archive.string(), control_model, control));
-    }
+    store_loadable_project(archive.string(), true);
 
     // Point the first assembly item at an object id the archive does not define.
     std::string settings;
@@ -2697,27 +2686,15 @@ TEST_CASE("BBS 3MF rejects an assembly item that names a missing object", "[3MF]
     Model loaded_model;
     LoadedProject loaded;
     CHECK_FALSE(load_model(archive.string(), loaded_model, loaded));
+    // Plates are only handed back after the whole archive parses, so this holds for any
+    // failure; it shows the failed load leaves no plate output behind.
     CHECK(loaded.plates.empty());
 }
 
 TEST_CASE("BBS 3MF rejects missing package relationships and malformed model XML", "[3MF][Bbs3mfExtended][Errors]")
 {
-    Model source;
-    make_model(source);
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    ScopedTemporaryDir backup("orca_bbs_ext_error_store");
-    source.set_backup_path(backup.string());
-    PlateData plate;
-    make_plate(plate, 0, {{0, 0}});
-    PlateDataPtrs plates{&plate};
     ScopedTemporaryFile archive(".3mf");
-    store_model(archive.string(), source, config, plates);
-    {
-        // The untouched archive loads, so each failure below comes from its edit.
-        Model control_model;
-        LoadedProject control;
-        REQUIRE(load_model(archive.string(), control_model, control));
-    }
+    store_loadable_project(archive.string(), false);
 
     SECTION("missing root relationship")
     {
@@ -2742,6 +2719,7 @@ TEST_CASE("BBS 3MF rejects missing package relationships and malformed model XML
     Model loaded_model;
     LoadedProject loaded;
     CHECK_FALSE(load_model(archive.string(), loaded_model, loaded));
+    // As above: no plate output from a failed load, whatever the cause.
     CHECK(loaded.plates.empty());
 }
 
