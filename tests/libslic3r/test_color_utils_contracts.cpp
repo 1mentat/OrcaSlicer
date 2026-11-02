@@ -11,7 +11,6 @@
 #include <utility>
 #include <vector>
 
-
 using namespace Slic3r;
 using namespace Slic3r::tex2color;
 using namespace Slic3r::tex2color::color_utils;
@@ -242,7 +241,6 @@ TEST_CASE("K-means max-iteration zero returns the farthest-point seeds", "[Color
 {
     ClusterParameters parameters;
     parameters.color_difference_method = ColorDifferenceMethod::RGB;
-    parameters.cluster_k               = 3;
     parameters.max_iter                = 0;
     // Two seeds: the point nearest the centroid, then the farthest from it.
     parameters.cluster_k = 2;
@@ -290,7 +288,8 @@ TEST_CASE("Adaptive clustering changes cardinality at a strict distance bound", 
     parameters.max_color_distance     = 0.;
     const std::vector<Color> fallback = cluster_adaptive({red, blue}, parameters);
     REQUIRE(fallback.size() == 1);
-    CHECK(fallback[0][0] <= 255);
+    // The single centre is the farthest-point seed nearest the centroid of red and blue.
+    CHECK(fallback[0] == blue);
     // k = 1 already meets the 1.0 bound. The result is black rather than the (0.5, 0, 0) mean because a
     // single centre is the farthest-point seed, the point nearest the centroid (black wins the tie).
     parameters.max_cluster_k          = 2;
@@ -321,7 +320,6 @@ TEST_CASE("Adaptive clustering cancellation is fail-closed during binary search"
     CHECK(callbacks >= 2);
 }
 
-
 TEST_CASE("Nearest-color IDs preserve first occurrence on an exact tie", "[ColorUtils]")
 {
     std::size_t id = 999;
@@ -335,10 +333,8 @@ TEST_CASE("Nearest-color IDs preserve first occurrence on an exact tie", "[Color
     CHECK(id == 1);
 }
 
-
 // Known bug: ColorUtils ciede2000() uses 3*pi/6 (90 degrees) instead of 63 degrees in the T term and always adds
-// 2*pi to a wrapped mean hue, even when the hue sum is above 2*pi; fixed by the follow-up fix PR (manifest M147;
-// the older #51 targets upstream-main, not this main).
+// 2*pi to a wrapped mean hue, even when the hue sum is above 2*pi; a follow-up fix corrects both and removes this tag.
 TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
           "[ColorUtils][!shouldfail]")
 {
