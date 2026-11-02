@@ -1422,9 +1422,7 @@ TEST_CASE("read_cli accepts nil entries for a nullable vector option", "[Config]
     REQUIRE_THAT(opt->values[1], Catch::Matchers::WithinAbs(2.5, 1e-9));
 }
 
-// get_at() returns values.front() for an out-of-range index, so calling it on an empty vector
-// option is UB. filament_id and filament_is_support are unpopulated on a CLI from-scratch slice.
-TEST_CASE("Legacy SLA vector corrections are expanded into axis options", "[PrintConfigBehavior][Config]")
+TEST_CASE("Legacy SLA vector corrections are expanded into axis options", "[Config][ConfigLegacy]")
 {
     DynamicPrintConfig config;
     config.set_key_value("relative_correction", new ConfigOptionFloats({1.1, 1.2}));
@@ -1441,7 +1439,7 @@ TEST_CASE("Legacy SLA vector corrections are expanded into axis options", "[Prin
     CHECK_THAT(config.opt_float("material_correction_z"), Catch::Matchers::WithinAbs(0.8, 1e-9));
 }
 
-TEST_CASE("Legacy composite thumbnail values become canonical definitions", "[PrintConfigBehavior][Config]")
+TEST_CASE("Legacy composite thumbnail values become canonical definitions", "[Config][ConfigLegacy]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     // A size without a format takes the legacy thumbnails_format, which is not the default PNG here.
@@ -1451,7 +1449,7 @@ TEST_CASE("Legacy composite thumbnail values become canonical definitions", "[Pr
     CHECK(config.opt_string("thumbnails") == "16x16/JPG, 32x32/PNG");
 }
 
-TEST_CASE("Legacy composite wiping matrix detects whether custom entries exist", "[PrintConfigBehavior][Config]")
+TEST_CASE("Legacy composite wiping matrix detects whether custom entries exist", "[Config][ConfigLegacy]")
 {
     DynamicPrintConfig defaults;
     defaults.set_key_value("wiping_volumes_matrix", new ConfigOptionFloats({0., 140., 140., 0.}));
@@ -1464,7 +1462,8 @@ TEST_CASE("Legacy composite wiping matrix detects whether custom entries exist",
     CHECK(custom.opt_bool("wiping_volumes_use_custom_matrix"));
 }
 
-
+// get_at() returns values.front() for an out-of-range index, so calling it on an empty vector
+// option is UB. filament_id and filament_is_support are unpopulated on a CLI from-scratch slice.
 TEST_CASE("get_filament_type treats empty vector options as absent", "[Config][Filament]")
 {
     DynamicPrintConfig config;
