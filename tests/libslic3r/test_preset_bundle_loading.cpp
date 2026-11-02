@@ -41,6 +41,7 @@
 #include <set>
 #include "libslic3r/TriangleSelector.hpp"
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <miniz.h>
 
