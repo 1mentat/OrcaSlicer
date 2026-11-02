@@ -2980,4 +2980,78 @@ TEST_CASE("BBS 3MF rejects malformed project JSON without accepting a fake confi
     CHECK(loaded_model.objects.size() == 1);
 }
 
+TEST_CASE("BBS 3MF skips auxiliary extraction when the strategy omits LoadAuxiliary", "[3MF][Bbs3mfExtended][Auxiliary]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_aux_skip_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string&, std::string&) { return false; },
+        {{"Auxiliaries/docs/readme.txt", "strategy-gated"}}));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    CHECK_FALSE(boost::filesystem::exists(boost::filesystem::path(loaded_model.get_auxiliary_file_temp_path()) / "docs" / "readme.txt"));
+    CHECK(loaded_model.objects.size() == 1);
+}
+
+TEST_CASE("BBS 3MF extracts auxiliary files into the model-owned temporary root", "[3MF][Bbs3mfExtended][Auxiliary]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_aux_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string&, std::string&) { return false; },
+        {{"Auxiliaries/docs/readme.txt", "auxiliary-contract"}}));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded, nullptr,
+                       LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const boost::filesystem::path auxiliary_root = loaded_model.get_auxiliary_file_temp_path();
+    CHECK(auxiliary_root.parent_path() == loaded.backup->path());
+    std::string contents;
+    read_file(auxiliary_root / "docs" / "readme.txt", contents);
+    CHECK(contents == "auxiliary-contract");
+}
+
+TEST_CASE("BBS 3MF ignores auxiliary path traversal entries", "[3MF][Bbs3mfExtended][Auxiliary]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_aux_traversal_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+    // Next to the traversal entry, an ordinary one shows extraction did run.
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string&, std::string&) { return false; },
+        {{"Auxiliaries/../escaped.txt", "must-not-extract"}, {"Auxiliaries/kept.txt", "kept"}}));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded, nullptr,
+                       LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const boost::filesystem::path auxiliary_root = loaded_model.get_auxiliary_file_temp_path();
+    REQUIRE(auxiliary_root.parent_path() == loaded.backup->path());
+    CHECK(boost::filesystem::exists(auxiliary_root / "kept.txt"));
+    CHECK_FALSE(boost::filesystem::exists(auxiliary_root.parent_path() / "escaped.txt"));
+}
+
 } // namespace bbs_archive_contracts

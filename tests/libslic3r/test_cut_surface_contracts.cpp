@@ -1,3 +1,4 @@
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -202,6 +203,44 @@ TEST_CASE("its_cut_AoI retains the complete mesh when the projected bounds conta
     const indexed_triangle_set input = its_make_cube(10., 20., 30.);
     const indexed_triangle_set selected = its_cut_AoI(input, BoundingBox(Point(-1, -1), Point(11, 21)), Emboss::ProjectZ(40.));
     CHECK(face_corners(selected) == face_corners(input));
+}
+
+// Known bug: set_skip_for_out_of_aoi sets skip flags in a std::vector<bool> from a tbb::parallel_for, so concurrent
+// writes to bits of the same word are lost and faces outside the bounds survive; fixed by the follow-up fix PR.
+// Hidden because it only fails with two or more TBB workers (it passes under `taskset -c 0`), so it cannot be
+// tagged [!shouldfail]. Reproduce with:
+//   libslic3r_tests "its_cut_AoI drops every face of a mesh outside the projected bounds"
+TEST_CASE("its_cut_AoI drops every face of a mesh outside the projected bounds", "[CutSurface][.]")
+{
+    // Faces are classified in a tbb::parallel_for. A flat 100 x 100 grid (20000 faces) all outside the bounds
+    // makes every face write its skip flag, and is large enough for TBB to split the range across workers, so
+    // writes that share storage (such as bits of one word in a packed bit vector) really run concurrently.
+    // Repeating the cut turns an occasional lost flag into a reliable failure.
+    indexed_triangle_set grid;
+    const int cells = 100;
+    for (int y = 0; y <= cells; ++y)
+        for (int x = 0; x <= cells; ++x)
+            grid.vertices.emplace_back(float(x), float(y), 0.f);
+    for (int y = 0; y < cells; ++y)
+        for (int x = 0; x < cells; ++x) {
+            const int v = y * (cells + 1) + x;
+            grid.indices.emplace_back(v, v + 1, v + cells + 2);
+            grid.indices.emplace_back(v, v + cells + 2, v + cells + 1);
+        }
+    REQUIRE(grid.indices.size() == 20000);
+
+    int failed_runs = 0, first_failed_run = -1;
+    size_t first_failed_faces = 0;
+    for (int run = 0; run < 50; ++run) {
+        const size_t kept = its_cut_AoI(grid, BoundingBox(Point(200, 200), Point(210, 210)), Emboss::ProjectZ(40.)).indices.size();
+        if (kept > 0 && first_failed_run < 0) {
+            first_failed_run = run;
+            first_failed_faces = kept;
+        }
+        failed_runs += kept > 0;
+    }
+    INFO("first failed run " << first_failed_run << " kept " << first_failed_faces << " faces");
+    CHECK(failed_runs == 0);
 }
 
 TEST_CASE("cut2model mirrors the front mesh and closes every contour edge", "[CutSurface]")
