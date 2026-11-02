@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary path-angle assertion probes for sparse, solid, top, bottom, and ironing angle settings through public Print processing.",
+  "mutants": [
+    {
+      "id": "fill-sparse-direction-ignored",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.infill_direction.value,\n                                                                   region_config.sparse_infill_rotate_template.value);",
+      "new": "params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), 0.0,\n                                                                   region_config.sparse_infill_rotate_template.value);",
+      "expected_matches": 1,
+      "description": "Ignore the requested sparse angle; the non-axis 37-degree case must shift every emitted sparse fill layer from its zero-angle control.",
+      "test_filter": "FillAngleSettingsPipeline",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "fill-top-bottom-directions-ignored",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "params.angle = Geometry::deg2rad(top_layer_direction_set ? region_config.top_layer_direction.value : region_config.bottom_layer_direction.value);",
+      "new": "params.angle = Geometry::deg2rad(0.0);",
+      "expected_matches": 1,
+      "description": "Ignore explicit top and bottom direction values; distinct non-axis role-specific angles must fail against the zero controls.",
+      "test_filter": "FillAngleSettingsPipeline",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "fill-ironing-angle-offset-ignored",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "double ironing_angle = (config.ironing_angle_fixed ? 0. : top_layer_base_angle) + config.ironing_angle * M_PI / 180.;",
+      "new": "double ironing_angle = (config.ironing_angle_fixed ? 0. : top_layer_base_angle);",
+      "expected_matches": 1,
+      "description": "Drop the configured ironing offset; non-axis 71 degrees and the registered 359-degree endpoint must shift the topmost ironing path from its zero-offset control.",
+      "test_filter": "FillAngleSettingsPipeline",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

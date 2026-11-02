@@ -578,6 +578,8 @@ and equivalent physical duration units over two complete rotation cycles.
 The path-direction oracle accounts for whole-degree rounding and axial wrap;
 its mutations are in `fill_rotation_templates.json`.
 
+`[FillAngleSettingsPipeline]` checks sparse, internal-solid, top-surface, bottom-surface, and topmost ironing path directions through validated public Print processing. It exercises angle endpoints and non-axis values, plus the registered -1 automatic top/bottom controls following the solid direction. The probes are in `fill_angle_settings_pipeline.json`.
+
 `[CurledLineInfluence]` checks projected curled-edge coverage, height, and distance
 against disabled controls through the public extrusion-quality estimator. It
 asserts numeric speed and overlap changes while preserving the path. The fixture

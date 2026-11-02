@@ -858,6 +858,225 @@ TEST_CASE("Solid infill direction offsets every layer when no template is set", 
     }
 }
 
+namespace fill_angle_settings_pipeline {
+
+struct RoleAngles
+{
+    std::vector<int> sparse;
+    std::vector<int> solid;
+    std::vector<int> top;
+    std::vector<int> bottom;
+    std::vector<int> ironing;
+};
+
+DynamicPrintConfig base_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"wall_loops", 0}, {"wall_generator", "classic"},
+        {"top_shell_layers", 0}, {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0}, {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "30%"},
+        {"sparse_infill_pattern", "rectilinear"},
+        {"internal_solid_infill_pattern", "rectilinear"},
+        {"top_surface_pattern", "rectilinear"}, {"bottom_surface_pattern", "rectilinear"},
+        {"infill_direction", 0.0}, {"solid_infill_direction", 0.0},
+        {"top_layer_direction", -1.0}, {"bottom_layer_direction", -1.0},
+        {"sparse_infill_rotate_template", ""}, {"solid_infill_rotate_template", ""},
+        {"align_infill_direction_to_model", false}, {"infill_combination", false},
+        {"fill_multiline", 1}, {"enable_support", false},
+        {"skirt_loops", 0}, {"brim_type", "no_brim"},
+        {"ironing_type", "no ironing"}, {"ironing_pattern", "rectilinear"},
+        {"ironing_angle_fixed", false}, {"use_relative_e_distances", false},
+    });
+    return config;
+}
+
+RoleAngles process_and_observe(DynamicPrintConfig config)
+{
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({Slic3r::Test::cube(10)}, print, model, config, nullptr, false);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    return {
+        angles_per_layer(print, sparse_role),
+        angles_per_layer(print, solid_role),
+        angles_per_layer(print, [](ExtrusionRole role) { return role == erTopSolidInfill; }),
+        angles_per_layer(print, [](ExtrusionRole role) { return role == erBottomSurface; }),
+        angles_per_layer(print, ironing_role),
+    };
+}
+
+int axial_delta(int actual, int reference)
+{
+    int delta = (actual - reference) % 180;
+    return delta < 0 ? delta + 180 : delta;
+}
+
+void require_role_on_one_layer(const std::vector<int> &angles, size_t expected_layer)
+{
+    REQUIRE_FALSE(angles.empty());
+    REQUIRE(expected_layer < angles.size());
+    for (size_t i = 0; i < angles.size(); ++i) {
+        CAPTURE(i, expected_layer, angles[i]);
+        if (i == expected_layer)
+            CHECK(angles[i] >= 0);
+        else
+            CHECK(angles[i] == -1);
+    }
+}
+
+void require_role_on_every_layer(const std::vector<int> &angles)
+{
+    REQUIRE(angles.size() > 1);
+    for (size_t i = 0; i < angles.size(); ++i) {
+        CAPTURE(i, angles[i]);
+        CHECK(angles[i] >= 0);
+    }
+}
+
+void check_registered_angle(const char *key, double minimum, double maximum)
+{
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    CHECK(definition->type == coFloat);
+    CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(minimum, 1e-12));
+    CHECK_THAT(definition->max, Catch::Matchers::WithinAbs(maximum, 1e-12));
+    REQUIRE(definition->is_value_valid(minimum));
+    REQUIRE(definition->is_value_valid(maximum));
+}
+
+} // namespace fill_angle_settings_pipeline
+
+TEST_CASE("Fill angle settings orient their sparse, solid, top, bottom and ironing paths",
+          "[Fill][FillAngleSettingsPipeline]")
+{
+    using namespace fill_angle_settings_pipeline;
+
+    check_registered_angle("infill_direction", 0.0, 360.0);
+    check_registered_angle("solid_infill_direction", 0.0, 360.0);
+    check_registered_angle("top_layer_direction", -1.0, 360.0);
+    check_registered_angle("bottom_layer_direction", -1.0, 360.0);
+    check_registered_angle("ironing_angle", 0.0, 359.0);
+    const ConfigOptionDef *top_definition = print_config_def.get("top_layer_direction");
+    const ConfigOptionDef *bottom_definition = print_config_def.get("bottom_layer_direction");
+    REQUIRE(top_definition != nullptr);
+    REQUIRE(bottom_definition != nullptr);
+    CHECK(top_definition->is_value_valid(-1.0));
+    CHECK(bottom_definition->is_value_valid(-1.0));
+
+    DynamicPrintConfig sparse_config = base_config();
+    sparse_config.set_deserialize_strict({{"infill_direction", 0.0}, {"sparse_infill_density", "30%"}});
+    const std::vector<int> sparse_zero = process_and_observe(sparse_config).sparse;
+    require_role_on_every_layer(sparse_zero);
+    for (const double direction : {37.0, 360.0}) {
+        CAPTURE(direction);
+        DynamicPrintConfig config = sparse_config;
+        config.set_deserialize_strict({{"infill_direction", direction}});
+        const std::vector<int> observed = process_and_observe(config).sparse;
+        REQUIRE(observed.size() == sparse_zero.size());
+        const int expected_delta = int(direction) % 180;
+        for (size_t i = 0; i < observed.size(); ++i) {
+            CAPTURE(i, sparse_zero[i], observed[i]);
+            REQUIRE(sparse_zero[i] >= 0);
+            REQUIRE(observed[i] >= 0);
+            CHECK(axial_delta(observed[i], sparse_zero[i]) == expected_delta);
+        }
+    }
+
+    DynamicPrintConfig solid_config = base_config();
+    solid_config.set_deserialize_strict({{"solid_infill_direction", 0.0},
+                                         {"sparse_infill_density", "100%"},
+                                         {"internal_solid_infill_pattern", "rectilinear"}});
+    const std::vector<int> solid_zero = process_and_observe(solid_config).solid;
+    require_role_on_every_layer(solid_zero);
+    for (const double direction : {31.0, 360.0}) {
+        CAPTURE(direction);
+        DynamicPrintConfig config = solid_config;
+        config.set_deserialize_strict({{"solid_infill_direction", direction}});
+        const std::vector<int> observed = process_and_observe(config).solid;
+        REQUIRE(observed.size() == solid_zero.size());
+        const int expected_delta = int(direction) % 180;
+        for (size_t i = 0; i < observed.size(); ++i) {
+            CAPTURE(i, solid_zero[i], observed[i]);
+            REQUIRE(solid_zero[i] >= 0);
+            REQUIRE(observed[i] >= 0);
+            CHECK(axial_delta(observed[i], solid_zero[i]) == expected_delta);
+        }
+    }
+
+    const auto surface_config = [](double top_direction, double bottom_direction, double solid_direction) {
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({
+            {"sparse_infill_density", "0%"},
+            {"top_shell_layers", 1}, {"bottom_shell_layers", 1},
+            {"top_shell_thickness", 0.0}, {"bottom_shell_thickness", 0.0},
+            {"top_layer_direction", top_direction}, {"bottom_layer_direction", bottom_direction},
+            {"solid_infill_direction", solid_direction},
+        });
+        return config;
+    };
+
+    const RoleAngles surface_zero = process_and_observe(surface_config(0.0, 0.0, 19.0));
+    REQUIRE(surface_zero.top.size() == surface_zero.bottom.size());
+    require_role_on_one_layer(surface_zero.top, surface_zero.top.size() - 1);
+    require_role_on_one_layer(surface_zero.bottom, 0);
+    const std::array<double, 2> top_directions{53.0, 360.0};
+    const std::array<double, 2> bottom_directions{77.0, 360.0};
+    for (size_t i = 0; i < top_directions.size(); ++i) {
+        CAPTURE(i, top_directions[i], bottom_directions[i]);
+        const RoleAngles observed = process_and_observe(surface_config(top_directions[i], bottom_directions[i], 19.0));
+        REQUIRE(observed.top.size() == surface_zero.top.size());
+        REQUIRE(observed.bottom.size() == surface_zero.bottom.size());
+        require_role_on_one_layer(observed.top, observed.top.size() - 1);
+        require_role_on_one_layer(observed.bottom, 0);
+        CHECK(axial_delta(observed.top.back(), surface_zero.top.back()) == int(top_directions[i]) % 180);
+        CHECK(axial_delta(observed.bottom.front(), surface_zero.bottom.front()) == int(bottom_directions[i]) % 180);
+    }
+
+    const RoleAngles automatic_zero = process_and_observe(surface_config(-1.0, -1.0, 0.0));
+    const RoleAngles automatic_solid = process_and_observe(surface_config(-1.0, -1.0, 43.0));
+    require_role_on_one_layer(automatic_zero.top, automatic_zero.top.size() - 1);
+    require_role_on_one_layer(automatic_zero.bottom, 0);
+    require_role_on_one_layer(automatic_solid.top, automatic_solid.top.size() - 1);
+    require_role_on_one_layer(automatic_solid.bottom, 0);
+    CHECK(axial_delta(automatic_solid.top.back(), automatic_zero.top.back()) == 43);
+    CHECK(axial_delta(automatic_solid.bottom.front(), automatic_zero.bottom.front()) == 43);
+
+    const auto ironing_config = [](double angle) {
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({
+            {"sparse_infill_density", "0%"},
+            {"top_shell_layers", 1}, {"bottom_shell_layers", 1},
+            {"top_shell_thickness", 0.0}, {"bottom_shell_thickness", 0.0},
+            {"top_layer_direction", 23.0}, {"bottom_layer_direction", -1.0},
+            {"ironing_type", "topmost"}, {"ironing_pattern", "rectilinear"},
+            {"ironing_angle_fixed", false}, {"ironing_angle", angle},
+            {"ironing_spacing", 0.2}, {"ironing_inset", 0.0},
+        });
+        return config;
+    };
+    const RoleAngles ironing_zero = process_and_observe(ironing_config(0.0));
+    REQUIRE(ironing_zero.top.size() > 1);
+    require_role_on_one_layer(ironing_zero.top, ironing_zero.top.size() - 1);
+    require_role_on_one_layer(ironing_zero.ironing, ironing_zero.ironing.size() - 1);
+    for (const double angle : {71.0, 359.0}) {
+        CAPTURE(angle);
+        const RoleAngles observed = process_and_observe(ironing_config(angle));
+        REQUIRE(observed.top.size() == ironing_zero.top.size());
+        REQUIRE(observed.ironing.size() == ironing_zero.ironing.size());
+        require_role_on_one_layer(observed.top, observed.top.size() - 1);
+        require_role_on_one_layer(observed.ironing, observed.ironing.size() - 1);
+        CHECK(observed.top.back() == ironing_zero.top.back());
+        CHECK(axial_delta(observed.ironing.back(), ironing_zero.ironing.back()) == int(angle) % 180);
+    }
+}
+
 // Orca: the spiral inset pattern chains the concentric loops into a single continuous path per
 // island, so it has to cope with the degenerate loops offsetting leaves behind and it must not join
 // loops that only look adjacent.

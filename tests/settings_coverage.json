@@ -277,12 +277,13 @@
     },
     "solid_infill_direction": {
       "test": "tests/fff_print/test_fill.cpp",
-      "tag": "[Fill]",
+      "tag": "[FillAngleSettingsPipeline]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Solid-fill angles at directions zero and thirty degrees are compared layer by layer, establishing the configured offset without claiming angular boundary coverage."
+      "reason": "The FillAngleSettingsPipeline public Print fixture observes positive internal-solid rectilinear fill paths at 0, 31, and 360 degrees. Per-layer path directions shift by the configured axial angle from the zero control; rotation templates and other fill patterns are not claimed."
     },
     "sparse_infill_smooth_factor": {
       "test": "tests/fff_print/test_fill.cpp",
@@ -350,12 +351,33 @@
     },
     "infill_direction": {
       "test": "tests/fff_print/test_fill.cpp",
-      "tag": "[Fill]",
+      "tag": "[FillAngleSettingsPipeline]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The sparse anchor test sets a forty-five-degree direction and matches generated anchors against printed infill; angular boundaries are not claimed."
+      "reason": "The FillAngleSettingsPipeline public Print fixture observes positive sparse rectilinear fill paths at 0, 37, and 360 degrees. Per-layer path directions shift by the configured axial angle from the zero control; other patterns and model-alignment interactions are not claimed."
+    },
+    "top_layer_direction": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[FillAngleSettingsPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Top-surface extrusion paths are checked at 0, 53, and 360 degrees. The registered -1 minimum is exercised as the documented automatic mode: the top path follows solid_infill_direction when that base changes from 0 to 43 degrees. Other top patterns and alignment interactions are not claimed."
+    },
+    "bottom_layer_direction": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[FillAngleSettingsPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Bottom-surface extrusion paths are checked at 0, 77, and 360 degrees. The registered -1 minimum is exercised as the documented automatic mode: the bottom path follows solid_infill_direction when that base changes from 0 to 43 degrees. Other bottom patterns and alignment interactions are not claimed."
     },
     "align_infill_direction_to_model": {
       "test": "tests/fff_print/test_fill.cpp",
@@ -4932,13 +4954,14 @@
       "reason": "The accepted belt-tree public G-code case compares floor offsets 0, -5, and +5 mm while keeping support geometry fixed. It measures exported support extrusion landing against the independently specified machine-frame floor and checks valid positive material motion. The registered limits -500 and +500 are not exercised."
     },
     "ironing_angle": {
-      "test": "tests/fff_print/test_settings_variance.cpp",
-      "tag": "[IroningAngleFixed]",
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[FillAngleSettingsPipeline]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The accepted solid-ironing G-code case compares angle 0 in relative mode with angle 90 in fixed mode, and verifies emitted per-layer line directions from the exported motion. Because ironing_angle_fixed changes alongside the angle and the registered maximum 359 is not tested, this remains partial."
+      "reason": "With relative ironing pinned against a 23-degree top-layer base, the topmost ironing path direction shifts by the configured axial offset at 0, 71, and the registered 359-degree maximum. Fixed-angle mode, other ironing types, and spacing interactions are not claimed."
     },
     "filament_is_support": {
       "test": "tests/libslic3r/test_config_variant_expansion.cpp",

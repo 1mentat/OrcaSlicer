@@ -24,6 +24,8 @@ Tests are off by default, so the build has to be told to include them.
 
 Rebuild a single suite with `cmake --build build --config Release --target <suite>_tests`. Visual Studio, Xcode and the Ninja Multi-Config generator that `build_linux.sh` uses are all multi-configuration, so `ctest` needs `-C` on every platform; without it, tests registered with plain `add_test()` lose their labels and report "Not Run".
 
+Use that CMake command for warm-build checks too. A bare Ninja target can select Debug and appear to require a full rebuild; select `build-Release.ninja` explicitly when invoking Ninja directly.
+
 Before a full Linux confidence run, follow the worker prerequisites in [README.md](README.md). Run `[LocalesUtils]` in the actual service environment and require zero skips. When using `SLICER_TEST_PROCESSORS`, verify a running test's CPU mask with the selected CTest executable; the JSON properties alone do not prove affinity works. Reuse the verified locale environment and affinity-capable CTest runtime.
 
 Worker launchers should reuse `scripts/slicer_process.py`'s `run_captured()` with
@@ -107,6 +109,8 @@ configuration, source file, and scope of each inventory count; a multi-config
 production-row count is not a single-config total or coverage-row count. Reuse
 the accepted environment, including explicit empty cache overrides. Read hashes
 and argv from their manifest files instead of transcribing abbreviated values.
+
+Update only the intended entries in `settings_coverage.json`, preserving unchanged text and Unicode escaping. Check both the semantic key delta and the textual diff; a whole-file JSON rewrite can create unrelated changes.
 
 Before the first native attempt, review the actual consumer, the registered
 value domain, the expected boundary relation, and which output events the
