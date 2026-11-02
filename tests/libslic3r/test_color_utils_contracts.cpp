@@ -44,6 +44,22 @@ std::vector<Color> five_reds()
     return {Color{{0, 0, 0}}, Color{{10, 0, 0}}, Color{{20, 0, 0}}, Color{{200, 0, 0}}, Color{{210, 0, 0}}};
 }
 
+// Independent sRGB grey code -> CIE L* and back (D65, standard sRGB transfer).
+double grey_to_lightness(double code)
+{
+    const double v   = code / 255.0;
+    const double lin = v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+    return lin > 216.0 / 24389.0 ? 116.0 * std::cbrt(lin) - 16.0 : lin * 24389.0 / 27.0;
+}
+
+int lightness_to_grey(double lightness)
+{
+    const double fy  = (lightness + 16.0) / 116.0;
+    const double lin = fy * fy * fy > 216.0 / 24389.0 ? fy * fy * fy : lightness * 27.0 / 24389.0;
+    const double v   = lin <= 0.0031308 ? 12.92 * lin : 1.055 * std::pow(lin, 1.0 / 2.4) - 0.055;
+    return int(std::lround(v * 255.0));
+}
+
 } // namespace
 
 TEST_CASE("RGB color distances preserve their documented metrics", "[ColorUtils]")
@@ -164,6 +180,8 @@ TEST_CASE("CIEDE sRGB01 clamps channels and agrees with the byte boundary", "[Co
     const double expected = calc_rgb_color_difference_by_ciede2000_srgb01(byte_boundary, reference);
     const double actual   = calc_rgb_color_difference_by_ciede2000_srgb01(clamped, reference);
     CHECK_THAT(actual, Catch::Matchers::WithinAbs(expected, 1e-12));
+    // The same colours as bytes, (255, 128, 0) against (0, 0, 255), give the same distance.
+    CHECK_THAT(calc_rgb_color_difference_by_ciede2000(Color{{255, 128, 0}}, blue), Catch::Matchers::WithinAbs(expected, 1e-9));
     CHECK_THAT(calc_rgb_color_difference_by_ciede2000_srgb01(byte_boundary, byte_boundary), Catch::Matchers::WithinAbs(0., 1e-12));
 }
 
@@ -220,21 +238,45 @@ TEST_CASE("Specified-color clustering is a nearest-center projection with first-
     CHECK(cluster_to_specified_colors(tie_input, {near_black, black}) == std::vector<Color>{near_black});
 }
 
-TEST_CASE("K-means Lab mode returns distinct centres and collapses to the unique colours", "[ColorUtils]")
+TEST_CASE("K-means Lab mode averages clusters in Lab, unlike RGB mode", "[ColorUtils]")
+{
+    // Greys 0, 10, 20, 30 and 200 split into {0, 10, 20, 30} and {200} in either mode. Greys have no
+    // chroma, so the hue terms of the CIEDE2000 distance play no part. The modes differ in how they
+    // average: RGB mode takes the mean code (15), Lab mode the mean L* converted back, which is larger
+    // because L* is not linear in the sRGB code near black.
+    const std::vector<Color> greys{Color{{0, 0, 0}}, Color{{10, 10, 10}}, Color{{20, 20, 20}}, Color{{30, 30, 30}}, Color{{200, 200, 200}}};
+    const double mean_lightness = (grey_to_lightness(0) + grey_to_lightness(10) + grey_to_lightness(20) + grey_to_lightness(30)) / 4.0;
+    const int lab_mean = lightness_to_grey(mean_lightness);
+    REQUIRE(lab_mean >= 15 + 2);   // far enough from the RGB mean for the +-1 tolerance below
+
+    ClusterParameters parameters;
+    parameters.cluster_k = 2;
+    parameters.max_iter  = 20;
+
+    parameters.color_difference_method = ColorDifferenceMethod::RGB;
+    const std::vector<Color> rgb = sorted_colors(cluster_k_means(greys, parameters));
+    REQUIRE(rgb.size() == 2);
+    CHECK(rgb[0] == Color{{15, 15, 15}});
+    CHECK(rgb[1] == Color{{200, 200, 200}});
+
+    parameters.color_difference_method = ColorDifferenceMethod::Lab;
+    const std::vector<Color> lab = sorted_colors(cluster_k_means(greys, parameters));
+    REQUIRE(lab.size() == 2);
+    for (std::size_t channel = 0; channel < 3; ++channel) {
+        CHECK(std::abs(int(lab[0][channel]) - lab_mean) <= 1);
+        CHECK(std::abs(int(lab[1][channel]) - 200) <= 1);
+    }
+}
+
+TEST_CASE("K-means returns the unique colours when k exceeds them", "[ColorUtils]")
 {
     ClusterParameters parameters;
-    parameters.color_difference_method = ColorDifferenceMethod::Lab;
-    parameters.cluster_k               = 2;
-    parameters.max_iter                = 20;
-    const std::vector<Color> input{red, red, blue, blue, green};
-    const std::vector<Color> centers = cluster_k_means(input, parameters);
-    REQUIRE(centers.size() == 2);
-    CHECK(centers[0] != centers[1]);
-    parameters.cluster_k                  = 3;
-    const std::vector<Color> fewer_unique = cluster_k_means({red, blue, red}, parameters);
-    REQUIRE(fewer_unique.size() == 2);
-    CHECK(contains_color(fewer_unique, red));
-    CHECK(contains_color(fewer_unique, blue));
+    parameters.cluster_k = 3;
+    parameters.max_iter  = 20;
+    for (const auto method : {ColorDifferenceMethod::RGB, ColorDifferenceMethod::Lab}) {
+        parameters.color_difference_method = method;
+        CHECK(sorted_colors(cluster_k_means({red, blue, red}, parameters)) == sorted_colors({red, blue}));
+    }
 }
 
 TEST_CASE("K-means max-iteration zero returns the farthest-point seeds", "[ColorUtils]")
