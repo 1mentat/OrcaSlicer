@@ -20,25 +20,35 @@ namespace {
 
 using Color = std::array<std::size_t, 3>;
 
-constexpr Color red  {{255, 0, 0}};
+constexpr Color red{{255, 0, 0}};
 constexpr Color green{{0, 255, 0}};
-constexpr Color blue {{0, 0, 255}};
+constexpr Color blue{{0, 0, 255}};
+constexpr Color black{{0, 0, 0}};
+constexpr Color white{{255, 255, 255}};
 
 bool contains_color(const std::vector<Color> &colors, const Color &needle)
 {
-    for (const Color &color : colors) {
-        if (color == needle)
-            return true;
-    }
-    return false;
+    return std::find(colors.begin(), colors.end(), needle) != colors.end();
+}
+
+std::vector<Color> sorted_colors(std::vector<Color> colors)
+{
+    std::sort(colors.begin(), colors.end());
+    return colors;
+}
+
+// Five reds on one axis: r = 0, 10, 20, 200, 210 (g = b = 0). Their centroid is r = 88, so farthest-
+// point sampling seeds with the nearest point, r = 20, then takes the farthest from it, r = 210, then
+// the farthest from both, r = 0. Converged 2-means splits {0, 10, 20} | {200, 210} into r = 10 and 205.
+std::vector<Color> five_reds()
+{
+    return {Color{{0, 0, 0}}, Color{{10, 0, 0}}, Color{{20, 0, 0}}, Color{{200, 0, 0}}, Color{{210, 0, 0}}};
 }
 
 } // namespace
 
 TEST_CASE("RGB color distances preserve their documented metrics", "[ColorUtils]")
 {
-    const Color black{{0, 0, 0}};
-    const Color white{{255, 255, 255}};
     const ColorDouble half{{0.5, 0.25, 0.125}};
     const ColorDouble other{{0.25, 0.125, 0.0625}};
 
@@ -147,29 +157,6 @@ TEST_CASE("Nearest color ID reports an empty palette and selects exact colors", 
     CHECK(id == 0);
 }
 
-namespace extended_color_contracts {
-namespace {
-
-using Color = std::array<std::size_t, 3>;
-constexpr Color red{{255, 0, 0}};
-constexpr Color green{{0, 255, 0}};
-constexpr Color blue{{0, 0, 255}};
-constexpr Color black{{0, 0, 0}};
-constexpr Color white{{255, 255, 255}};
-
-std::vector<Color> sorted_colors(std::vector<Color> colors)
-{
-    std::sort(colors.begin(), colors.end());
-    return colors;
-}
-
-bool contains_color(const std::vector<Color>& colors, const Color& needle)
-{
-    return std::find(colors.begin(), colors.end(), needle) != colors.end();
-}
-
-} // namespace
-
 TEST_CASE("CIEDE sRGB01 clamps channels and agrees with the byte boundary", "[ColorUtils]")
 {
     const ColorDouble byte_boundary{{1., 128. / 255., 0.}};
@@ -234,7 +221,7 @@ TEST_CASE("Specified-color clustering is a nearest-center projection with first-
     CHECK(cluster_to_specified_colors(tie_input, {near_black, black}) == std::vector<Color>{near_black});
 }
 
-TEST_CASE("K-means Lab mode returns bounded centers and exposes cancellation as a partial result", "[ColorUtils]")
+TEST_CASE("K-means Lab mode returns distinct centres and collapses to the unique colours", "[ColorUtils]")
 {
     ClusterParameters parameters;
     parameters.color_difference_method = ColorDifferenceMethod::Lab;
@@ -243,37 +230,45 @@ TEST_CASE("K-means Lab mode returns bounded centers and exposes cancellation as 
     const std::vector<Color> input{red, red, blue, blue, green};
     const std::vector<Color> centers = cluster_k_means(input, parameters);
     REQUIRE(centers.size() == 2);
-    for (const Color& center : centers) {
-        CHECK(center[0] <= 255);
-        CHECK(center[1] <= 255);
-        CHECK(center[2] <= 255);
-    }
+    CHECK(centers[0] != centers[1]);
     parameters.cluster_k                  = 3;
     const std::vector<Color> fewer_unique = cluster_k_means({red, blue, red}, parameters);
     REQUIRE(fewer_unique.size() == 2);
     CHECK(contains_color(fewer_unique, red));
     CHECK(contains_color(fewer_unique, blue));
-    parameters.cluster_k               = 2;
-    parameters.cancel_callback         = [] { return true; };
-    const std::vector<Color> cancelled = cluster_k_means(input, parameters);
-    REQUIRE(cancelled.size() == parameters.cluster_k);
-    for (const Color& center : cancelled) {
-        CHECK(center[0] <= 255);
-        CHECK(center[1] <= 255);
-        CHECK(center[2] <= 255);
-    }
 }
 
-TEST_CASE("K-means max-iteration zero still returns FPS input representatives", "[ColorUtils]")
+TEST_CASE("K-means max-iteration zero returns the farthest-point seeds", "[ColorUtils]")
 {
     ClusterParameters parameters;
     parameters.color_difference_method = ColorDifferenceMethod::RGB;
     parameters.cluster_k               = 3;
     parameters.max_iter                = 0;
-    const std::vector<Color> input{Color{{0, 10, 20}}, Color{{90, 100, 110}}, Color{{240, 230, 220}}};
-    const std::vector<Color> centers = cluster_k_means(input, parameters);
-    REQUIRE(centers.size() == parameters.cluster_k);
-    CHECK(sorted_colors(centers) == sorted_colors(input));
+    // Two seeds: the point nearest the centroid, then the farthest from it.
+    parameters.cluster_k = 2;
+    CHECK(sorted_colors(cluster_k_means(five_reds(), parameters)) == std::vector<Color>{Color{{20, 0, 0}}, Color{{210, 0, 0}}});
+    // Three seeds add the point farthest from both.
+    parameters.cluster_k = 3;
+    CHECK(sorted_colors(cluster_k_means(five_reds(), parameters)) == std::vector<Color>{Color{{0, 0, 0}}, Color{{20, 0, 0}}, Color{{210, 0, 0}}});
+}
+
+TEST_CASE("Cancelled k-means returns its seeds instead of the converged centres", "[ColorUtils]")
+{
+    ClusterParameters parameters;
+    parameters.color_difference_method = ColorDifferenceMethod::RGB;
+    parameters.cluster_k               = 2;
+    parameters.max_iter                = 20;
+    const std::vector<Color> converged = cluster_k_means(five_reds(), parameters);
+    CHECK(sorted_colors(converged) == std::vector<Color>{Color{{10, 0, 0}}, Color{{205, 0, 0}}});
+
+    std::size_t cancel_queries = 0;
+    parameters.cancel_callback = [&cancel_queries] {
+        ++cancel_queries;
+        return true;
+    };
+    const std::vector<Color> cancelled = cluster_k_means(five_reds(), parameters);
+    CHECK(cancel_queries > 0);
+    CHECK(sorted_colors(cancelled) == std::vector<Color>{Color{{20, 0, 0}}, Color{{210, 0, 0}}});
 }
 
 TEST_CASE("Adaptive clustering changes cardinality at a strict distance bound", "[ColorUtils]")
@@ -296,6 +291,8 @@ TEST_CASE("Adaptive clustering changes cardinality at a strict distance bound", 
     const std::vector<Color> fallback = cluster_adaptive({red, blue}, parameters);
     REQUIRE(fallback.size() == 1);
     CHECK(fallback[0][0] <= 255);
+    // k = 1 already meets the 1.0 bound. The result is black rather than the (0.5, 0, 0) mean because a
+    // single centre is the farthest-point seed, the point nearest the centroid (black wins the tie).
     parameters.max_cluster_k          = 2;
     parameters.max_color_distance     = 1.;
     const std::vector<Color> boundary = cluster_adaptive({black, Color{{1, 0, 0}}}, parameters);
@@ -338,10 +335,10 @@ TEST_CASE("Nearest-color IDs preserve first occurrence on an exact tie", "[Color
     CHECK(id == 1);
 }
 
-} // namespace extended_color_contracts
 
 // Known bug: ColorUtils ciede2000() uses 3*pi/6 (90 degrees) instead of 63 degrees in the T term and always adds
-// 2*pi to a wrapped mean hue, even when the hue sum is above 2*pi; fixed by the follow-up fix PR.
+// 2*pi to a wrapped mean hue, even when the hue sum is above 2*pi; fixed by the follow-up fix PR (manifest M147;
+// the older #51 targets upstream-main, not this main).
 TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
           "[ColorUtils][!shouldfail]")
 {
@@ -351,7 +348,6 @@ TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
     // Cbar^7, and the 63-degree final T-term angle). The published Table I
     // pairs 1-34 reproduce within 5e-5 under the independent reference.
     const double green_magenta_expected = 111.41433059755204;
-    const Color green{{0, 255, 0}};
     const Color magenta{{255, 0, 255}};
     CHECK_THAT(calc_rgb_color_difference_by_ciede2000(green, magenta),
                Catch::Matchers::WithinAbs(green_magenta_expected, 1e-6));
@@ -368,8 +364,6 @@ TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
     // Black/white is a symmetric magnitude control independent of the
     // green/magenta hue-sector discriminator.
     const double black_white_expected = 100.00000386666865;
-    const Color black{{0, 0, 0}};
-    const Color white{{255, 255, 255}};
     CHECK_THAT(calc_rgb_color_difference_by_ciede2000(black, white),
                Catch::Matchers::WithinAbs(black_white_expected, 1e-6));
     CHECK_THAT(calc_rgb_color_difference_by_ciede2000(white, black),
