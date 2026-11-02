@@ -2640,4 +2640,87 @@ TEST_CASE("BBS 3MF export cancellation removes unfinished archives after the arc
     }
 }
 
+namespace {
+
+// Stores the fixture at `path` and checks that the untouched archive loads as a BBL
+// project with its object and plate, so a later load failure comes from the edit made to
+// it. The BBL flag matters: model-settings errors only fail the load of BBL projects.
+void store_loadable_project(const std::string& path, bool assembly)
+{
+    Model source;
+    make_model(source, false, assembly);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_error_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}, {0, 1}});
+    PlateDataPtrs plates{&plate};
+    store_model(path, source, config, plates);
+
+    Model control_model;
+    LoadedProject control;
+    REQUIRE(load_model(path, control_model, control));
+    CHECK(control.is_bbl);
+    CHECK(control_model.objects.size() == 1);
+    CHECK(control.plates.size() == 1);
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF rejects an assembly item that names a missing object", "[3MF][Bbs3mfExtended][Errors]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_loadable_project(archive.string(), true);
+
+    // Point the first assembly item at an object id the archive does not define.
+    std::string settings;
+    REQUIRE(read_3mf_entry(archive.string(), settings, "Metadata/model_settings.config"));
+    const std::string item_prefix = "<assemble_item object_id=\"";
+    const size_t item_start = settings.find(item_prefix);
+    REQUIRE(item_start != std::string::npos);
+    const size_t id_end = settings.find('"', item_start + item_prefix.size());
+    REQUIRE(id_end != std::string::npos);
+    REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+        settings.substr(item_start, id_end - item_start + 1), item_prefix + "999999\""));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    CHECK_FALSE(load_model(archive.string(), loaded_model, loaded));
+    // Plates are only handed back after the whole archive parses, so this holds for any
+    // failure; it shows the failed load leaves no plate output behind.
+    CHECK(loaded.plates.empty());
+}
+
+TEST_CASE("BBS 3MF rejects missing package relationships and malformed model XML", "[3MF][Bbs3mfExtended][Errors]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_loadable_project(archive.string(), false);
+
+    SECTION("missing root relationship")
+    {
+        REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string& name, std::string&) {
+            if (name != "_rels/.rels")
+                return false;
+            name = "_rels/missing.rels";
+            return true;
+        }));
+    }
+    SECTION("malformed model XML")
+    {
+        REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string& name, std::string& data) {
+            const size_t end = name == "3D/3dmodel.model" ? data.rfind("</model>") : std::string::npos;
+            if (end == std::string::npos)
+                return false;
+            data.replace(end, 8, "</broken>");
+            return true;
+        }));
+    }
+
+    Model loaded_model;
+    LoadedProject loaded;
+    CHECK_FALSE(load_model(archive.string(), loaded_model, loaded));
+    // As above: no plate output from a failed load, whatever the cause.
+    CHECK(loaded.plates.empty());
+}
+
 } // namespace bbs_archive_contracts

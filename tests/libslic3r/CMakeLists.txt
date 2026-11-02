@@ -22,6 +22,8 @@ add_executable(${_TEST_NAME}_tests
     test_circle.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
+    test_color.cpp
+    test_color_decompose_recipe.cpp
     test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
@@ -48,6 +50,7 @@ add_executable(${_TEST_NAME}_tests
     test_fill_corner_smoothing.cpp
     test_aabb_mesh.cpp
     test_filament_mixer.cpp
+    test_flush_vol_predictor.cpp
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
     test_geometry.cpp
@@ -80,6 +83,7 @@ add_executable(${_TEST_NAME}_tests
     test_trianglemesh.cpp
     test_trianglemesh_slicer.cpp
     test_marchingsquares.cpp
+    test_texture_to_color_contracts.cpp
     test_measure_contracts.cpp
     test_lay_on_face.cpp
     test_model.cpp
@@ -127,6 +131,9 @@ endif()
 # libslic3r links Draco privately; test_drc.cpp encodes its own fixtures.
 find_package(Draco REQUIRED)
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r draco::draco Catch2::Catch2WithMain)
+# The TextureToColor headers include "Point.hpp" without the libslic3r/ prefix.
+set_property(SOURCE test_texture_to_color_contracts.cpp APPEND PROPERTY
+    INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/src/libslic3r")
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
