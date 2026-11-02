@@ -101,6 +101,7 @@ add_executable(${_TEST_NAME}_tests
     test_indexed_triangle_set.cpp
     test_connected_bodies.cpp
     test_texture_displacement.cpp
+    test_texture_to_color_cluster.cpp
     test_instance_lock.cpp
     ../libnest2d/printer_parts.cpp
     )
@@ -116,6 +117,10 @@ if (SLIC3R_CAD)
         test_sketchinference.cpp
         test_slvs_constraints.cpp)
 endif ()
+
+# The TextureToColor headers include "Point.hpp" without the libslic3r/ prefix.
+set_property(SOURCE test_texture_to_color_cluster.cpp APPEND PROPERTY
+    INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/src/libslic3r")
 
 if (TARGET OpenVDB::openvdb)
     target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp)
