@@ -2789,4 +2789,60 @@ TEST_CASE("BBS 3MF restores filament, nozzle, and optimal-assignment sequences",
     }
 }
 
+TEST_CASE("BBS 3MF maps legacy custom-gcode records without a type attribute", "[3MF][Bbs3mfExtended][CustomGCode][Legacy]")
+{
+    Model source;
+    make_model(source);
+    // Any custom G-code makes the exporter write the per-layer file, which is then replaced
+    // with records in the old format (a gcode attribute instead of type and extra).
+    source.plates_custom_gcodes[0].gcodes = {{0.2, CustomGCode::ColorChange, 1, "#000", ""}};
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_legacy_gcode_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    const std::string legacy =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+        "<custom_gcodes_per_layer><plate><plate_info id=\"1\"/>"
+        "<layer top_z=\"0.4\" extruder=\"2\" color=\"#abc\" gcode=\"M600\"/>"
+        "<layer top_z=\"0.8\" extruder=\"1\" color=\"wait here\" gcode=\"M601\"/>"
+        "<layer top_z=\"1.2\" extruder=\"3\" color=\"\" gcode=\"tool_change\"/>"
+        "<layer top_z=\"1.6\" extruder=\"1\" color=\"\" gcode=\"M117 hello\"/>"
+        "<mode value=\"SingleExtruder\"/></plate></custom_gcodes_per_layer>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [&legacy](std::string& name, std::string& data) {
+        if (name != "Metadata/custom_gcode_per_layer.xml")
+            return false;
+        data = legacy;
+        return true;
+    }));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    const CustomGCode::Info& info = loaded_model.plates_custom_gcodes.at(0);
+    CHECK(info.mode == CustomGCode::Mode::SingleExtruder);
+    // M600 is a colour change, M601 a pause whose message was stored in the colour field,
+    // tool_change a tool change, and anything else custom G-code kept as the extra text.
+    const std::vector<CustomGCode::Item> expected{
+        {0.4, CustomGCode::ColorChange, 2, "#abc", ""},
+        {0.8, CustomGCode::PausePrint, 1, "wait here", "wait here"},
+        {1.2, CustomGCode::ToolChange, 3, "", ""},
+        {1.6, CustomGCode::Custom, 1, "", "M117 hello"},
+    };
+    REQUIRE(info.gcodes.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        INFO("record " << i);
+        CHECK_THAT(info.gcodes[i].print_z, Catch::Matchers::WithinAbs(expected[i].print_z, 1e-6));
+        CHECK(info.gcodes[i].type == expected[i].type);
+        CHECK(info.gcodes[i].extruder == expected[i].extruder);
+        CHECK(info.gcodes[i].color == expected[i].color);
+        CHECK(info.gcodes[i].extra == expected[i].extra);
+    }
+}
+
 } // namespace bbs_archive_contracts

@@ -375,10 +375,8 @@ TEST_CASE("Nearest-color IDs preserve first occurrence on an exact tie", "[Color
     CHECK(id == 1);
 }
 
-// Known bug: ColorUtils ciede2000() uses 3*pi/6 (90 degrees) instead of 63 degrees in the T term and always adds
-// 2*pi to a wrapped mean hue, even when the hue sum is above 2*pi; a follow-up fix corrects both and removes this tag.
 TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
-          "[ColorUtils][!shouldfail]")
+          "[ColorUtils]")
 {
     // Expected values follow Sharma, Wu, and Dalal (2005),
     // https://hajim.rochester.edu/ece/sites/gsharma/ciede2000/ciede2000noteCRNA.pdf
