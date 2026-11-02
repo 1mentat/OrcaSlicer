@@ -76,6 +76,15 @@
       ],
       "reason": "Every registered bottom pattern is deserialized and required to emit bottom-surface geometry, with monotonic and concentric output compared."
     },
+    "extra_solid_infills": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[ExtraSolidInfills]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "On a ten-layer cube, empty and malformed controls leave internal layers sparse; direct helper calls check one-based IDs 1 through 10 for an explicit list, finite-span list, and repeating span. Pipeline assertions cover internal IDs 2 through 9: selected singleton/span-start layers emit internal-bridge paths, their immediately lower support layers retain sparse paths and add internal-solid paths, later selected layers in a span emit regular internal-solid paths, and remaining layers stay sparse. The test compares surface classes, extrusion paths, and G-code roles. It does not claim every string pattern or shell interaction."
+    },
     "wall_generator": {
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SettingsVariance]",

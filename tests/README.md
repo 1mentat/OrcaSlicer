@@ -411,6 +411,17 @@ hit counts, so completely unexecuted functions remain in the denominator. The re
 An option serialization loop alone is schema evidence and does not establish
 pipeline behavior.
 
+`[ExtraSolidInfills]` applies an empty and malformed control, an explicit layer
+list, finite `N#K` spans in a list, and a repeating `N#K` span to a ten-layer
+cube. It checks the helper's one-based selection for IDs 1 through 10 and the
+pipeline's surface classes, extrusion paths, and G-code roles on internal IDs 2
+through 9. A selected singleton or span-start layer emits internal-bridge paths;
+its lower support layer retains sparse infill and gains internal-solid paths.
+Later selected layers within a span emit regular internal-solid paths. The test
+covers these representative patterns only. Its selector-bypass and index-shift
+mutants are listed in `tests/mutations/extra_solid_infills.json`; the manifest
+uses this exact Catch case name as its `test_filter`.
+
 `[MotionFlowVariance]` compares a fresh slice with a processed print after
 applying the same changed setting. It checks separate geometry and parsed
 G-code evidence, deposited material, feature feedrates, and acceleration

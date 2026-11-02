@@ -29,6 +29,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "test_helpers.hpp"
 
@@ -358,6 +359,207 @@ TEST_CASE("G-code contract rejects malformed motion words", "[SettingsVariance]"
     CHECK_FALSE(finite_bounded_gcode("G1 Xnan Y0 E1\n", config, motion_moves, extrusion_moves));
     CHECK_FALSE(finite_bounded_gcode("G1 X1e999 Y0 E1\n", config, motion_moves, extrusion_moves));
     CHECK_FALSE(finite_bounded_gcode("G1 Xoops Y0 E1\n", config, motion_moves, extrusion_moves));
+}
+
+TEST_CASE("Extra solid infill patterns select their requested internal layers",
+          "[SettingsVariance][ExtraSolidInfills]")
+{
+    struct PatternCase {
+        const char *name;
+        const char *pattern;
+        std::set<size_t> selected_layer_ids;
+        std::set<size_t> internal_bridge_layer_ids;
+        std::set<size_t> supporting_solid_layer_ids;
+    };
+    const std::array<PatternCase, 5> cases{{
+        { "empty", "", {}, {}, {} },
+        { "invalid", "not-a-pattern", {}, {}, {} },
+        { "explicit list", "3,5,7", { 3, 5, 7 }, { 3, 5, 7 }, { 2, 4, 6 } },
+        { "finite spans", "3#2,6#2", { 3, 4, 6, 7 }, { 3, 6 }, { 2, 5 } },
+        { "repeating span", "3#2", { 3, 4, 6, 7, 9, 10 }, { 3, 6, 9 }, { 2, 5, 8 } },
+    }};
+
+    for (const PatternCase &pattern_case : cases) {
+        CAPTURE(pattern_case.name, pattern_case.pattern);
+        for (size_t layer_idx = 0; layer_idx < 10; ++layer_idx) {
+            const size_t one_based_layer_id = layer_idx + 1;
+            CAPTURE(layer_idx, one_based_layer_id);
+            CHECK(check_layer_id_pattern(pattern_case.pattern, static_cast<int>(layer_idx)) ==
+                  (pattern_case.selected_layer_ids.count(one_based_layer_id) != 0));
+        }
+
+        DynamicPrintConfig config = variance_config();
+        config.set_deserialize_strict({
+            { "extra_solid_infills", pattern_case.pattern },
+            { "top_shell_layers", 0 },
+            { "bottom_shell_layers", 0 },
+            { "ensure_vertical_shell_thickness", "none" },
+            { "sparse_infill_density", "20%" },
+        });
+        REQUIRE(config.option("extra_solid_infills")->serialize() == pattern_case.pattern);
+
+        Print print;
+        Model model;
+        init_print({ make_cube(20.0, 20.0, 2.0) }, print, model, config);
+        REQUIRE(print.validate().string.empty());
+        const std::string output = gcode(print);
+        REQUIRE_FALSE(output.empty());
+        REQUIRE(print.objects().size() == 1);
+
+        const PrintObject &object = *print.objects().front();
+        const auto layers = object.layers();
+        REQUIRE(layers.size() == 10);
+        constexpr size_t sparse_role_index = 0;
+        constexpr size_t solid_role_index = 1;
+        constexpr size_t internal_bridge_role_index = 2;
+        constexpr size_t bridge_role_index = 3;
+        std::map<double, std::array<double, 4>> gcode_path_lengths_by_z;
+        GCodeReader reader;
+        reader.apply_config(print.config());
+        std::optional<size_t> active_role;
+        reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            const std::string_view comment = line.comment();
+            if (comment.find("Sparse infill") != std::string_view::npos)
+                active_role = sparse_role_index;
+            else if (comment.find("Internal solid infill") != std::string_view::npos)
+                active_role = solid_role_index;
+            else if (comment.find("Internal Bridge") != std::string_view::npos)
+                active_role = internal_bridge_role_index;
+            else if (comment.find("Bridge") != std::string_view::npos)
+                active_role = bridge_role_index;
+            else if (comment.find("FEATURE:") != std::string_view::npos ||
+                     comment.find("TYPE:") != std::string_view::npos)
+                active_role.reset();
+
+            if (!line.cmd_is("G0") && !line.cmd_is("G1") && !line.cmd_is("G2") && !line.cmd_is("G3"))
+                return;
+            const double xy = line.dist_XY(self);
+            if (active_role.has_value() && line.extruding(self) && xy > EPSILON)
+                gcode_path_lengths_by_z[self.z()][*active_role] += xy;
+        });
+        const auto gcode_path_on_layer = [&gcode_path_lengths_by_z](double layer_z, size_t role) {
+            const auto it = std::find_if(gcode_path_lengths_by_z.begin(), gcode_path_lengths_by_z.end(),
+                [layer_z](const auto &entry) { return std::abs(entry.first - layer_z) < 1e-4; });
+            return it == gcode_path_lengths_by_z.end() ? 0.0 : it->second[role];
+        };
+
+        for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+            const Layer *layer = layers[layer_idx];
+            REQUIRE(layer != nullptr);
+            size_t internal_surfaces = 0;
+            size_t internal_solid_surfaces = 0;
+            size_t internal_bridge_surfaces = 0;
+            size_t second_internal_bridge_surfaces = 0;
+            size_t internal_void_surfaces = 0;
+            double sparse_path_length = 0.0;
+            double solid_path_length = 0.0;
+            double internal_bridge_path_length = 0.0;
+            double bridge_path_length = 0.0;
+            for (const LayerRegion *region : layer->regions()) {
+                REQUIRE(region != nullptr);
+                for (const Surface &surface : region->fill_surfaces.surfaces) {
+                    internal_surfaces += surface.surface_type == stInternal ? 1 : 0;
+                    internal_solid_surfaces += surface.surface_type == stInternalSolid ? 1 : 0;
+                    internal_bridge_surfaces += surface.surface_type == stInternalBridge ? 1 : 0;
+                    second_internal_bridge_surfaces += surface.surface_type == stSecondInternalBridge ? 1 : 0;
+                    internal_void_surfaces += surface.surface_type == stInternalVoid ? 1 : 0;
+                }
+                for_each_extrusion_path(region->fills, [&](const ExtrusionPath &path) {
+                    if (path.role() == erInternalInfill)
+                        sparse_path_length += path.length();
+                    else if (path.role() == erSolidInfill)
+                        solid_path_length += path.length();
+                    else if (path.role() == erInternalBridgeInfill)
+                        internal_bridge_path_length += path.length();
+                    else if (path.role() == erBridgeInfill)
+                        bridge_path_length += path.length();
+                });
+            }
+
+            // The first and last geometric layers are excluded. This fixture
+            // checks interior IDs 2 through 9, where normal infill is generated.
+            if (layer_idx == 0 || layer_idx + 1 == layers.size())
+                continue;
+            const size_t one_based_layer_id = layer_idx + 1;
+            const bool expected_internal_bridge =
+                pattern_case.internal_bridge_layer_ids.count(one_based_layer_id) != 0;
+            const bool expected_supporting_solid =
+                pattern_case.supporting_solid_layer_ids.count(one_based_layer_id) != 0;
+            const bool expected_solid =
+                pattern_case.selected_layer_ids.count(one_based_layer_id) != 0 && !expected_internal_bridge;
+            CAPTURE(layer_idx, layer->id(), one_based_layer_id, layer->print_z,
+                    internal_surfaces, internal_solid_surfaces,
+                    internal_bridge_surfaces, second_internal_bridge_surfaces,
+                    internal_void_surfaces, sparse_path_length, solid_path_length,
+                    internal_bridge_path_length, bridge_path_length,
+                    gcode_path_on_layer(layer->print_z, sparse_role_index),
+                    gcode_path_on_layer(layer->print_z, solid_role_index),
+                    gcode_path_on_layer(layer->print_z, internal_bridge_role_index),
+                    gcode_path_on_layer(layer->print_z, bridge_role_index));
+            CHECK(second_internal_bridge_surfaces == 0);
+            CHECK(internal_void_surfaces == 0);
+            if (expected_internal_bridge) {
+                CHECK(internal_bridge_surfaces > 0);
+                CHECK(internal_solid_surfaces == 0);
+                CHECK(internal_surfaces == 0);
+                CHECK_THAT(sparse_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(solid_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK(internal_bridge_path_length > 0.0);
+                CHECK_THAT(bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK(gcode_path_on_layer(layer->print_z, internal_bridge_role_index) > 0.0);
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, sparse_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, solid_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+            } else if (expected_supporting_solid) {
+                CHECK(internal_surfaces > 0);
+                CHECK(internal_solid_surfaces > 0);
+                CHECK(internal_bridge_surfaces == 0);
+                CHECK(sparse_path_length > 0.0);
+                CHECK(solid_path_length > 0.0);
+                CHECK_THAT(internal_bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK(gcode_path_on_layer(layer->print_z, sparse_role_index) > 0.0);
+                CHECK(gcode_path_on_layer(layer->print_z, solid_role_index) > 0.0);
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, internal_bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+            } else if (expected_solid) {
+                CHECK(internal_solid_surfaces > 0);
+                CHECK(internal_surfaces == 0);
+                CHECK(internal_bridge_surfaces == 0);
+                CHECK(solid_path_length > 0.0);
+                CHECK_THAT(sparse_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(internal_bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK(gcode_path_on_layer(layer->print_z, solid_role_index) > 0.0);
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, sparse_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, internal_bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+            } else {
+                CHECK(internal_surfaces > 0);
+                CHECK(internal_solid_surfaces == 0);
+                CHECK(internal_bridge_surfaces == 0);
+                CHECK(sparse_path_length > 0.0);
+                CHECK_THAT(solid_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(internal_bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, solid_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, internal_bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK(gcode_path_on_layer(layer->print_z, sparse_role_index) > 0.0);
+            }
+        }
+    }
 }
 
 TEST_CASE("Every registered sparse infill pattern is accepted and emits sparse role geometry", "[SettingsVariance]")

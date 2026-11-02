@@ -4,6 +4,7 @@
     "FocusedSettingsVariance::Bridge density changes external bridge deposition",
     "FocusedSettingsVariance::Bridge flow changes external bridge deposition",
     "FocusedSettingsVariance::Bridge line width changes external bridge deposition",
+    "FocusedSettingsVariance::Extra solid infill patterns select their requested internal layers",
     "FocusedSettingsVariance::Infill combination height cap bounds and changes sparse path heights",
     "FocusedSettingsVariance::Internal bridge angle overrides automatic direction",
     "FocusedSettingsVariance::Internal bridge density changes deposited bridge volume",
@@ -12,5 +13,5 @@
     "FocusedSettingsVariance::Relative internal bridge angle adds to automatic direction",
     "FocusedSettingsVariance::Locked-zag skin density and depth exercise safe boundary points"
   ],
-  "control_regex": "^FocusedSettingsVariance::(Bridge density changes external bridge deposition|Bridge flow changes external bridge deposition|Bridge line width changes external bridge deposition|Infill combination height cap bounds and changes sparse path heights|Internal bridge angle overrides automatic direction|Internal bridge density changes deposited bridge volume|Internal bridge flow scales extrusion at fixed path length|Locked-zag skin controls change distinct public fill properties|Relative internal bridge angle adds to automatic direction|Locked-zag skin density and depth exercise safe boundary points)$"
+  "control_regex": "^FocusedSettingsVariance::(Bridge density changes external bridge deposition|Bridge flow changes external bridge deposition|Bridge line width changes external bridge deposition|Extra solid infill patterns select their requested internal layers|Infill combination height cap bounds and changes sparse path heights|Internal bridge angle overrides automatic direction|Internal bridge density changes deposited bridge volume|Internal bridge flow scales extrusion at fixed path length|Locked-zag skin controls change distinct public fill properties|Relative internal bridge angle adds to automatic direction|Locked-zag skin density and depth exercise safe boundary points)$"
 }
