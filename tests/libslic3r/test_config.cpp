@@ -2776,3 +2776,69 @@ TEST_CASE("Spiral mode validation reports each incompatible process setting only
         }
     }
 }
+
+TEST_CASE("Firmware retraction validation accepts only firmware flavors that implement it", "[Config][Validation]")
+{
+    // Every GCodeFlavor key. The unsupported ones are not among gcode_flavor's selectable enum
+    // values, so validate() reports "gcode_flavor" for them too; only use_firmware_retraction is checked here.
+    const std::pair<const char *, bool> flavors[] = {
+        {"marlin", true},         {"marlin2", true},    {"klipper", true},   {"reprap", true},
+        {"reprapfirmware", true}, {"repetier", true},   {"smoothie", true},  {"machinekit", true},
+        {"teacup", false},        {"makerware", false}, {"sailfish", false}, {"mach3", false},
+        {"no-extrusion", false},
+    };
+    for (const auto &[flavor, supported] : flavors) {
+        DYNAMIC_SECTION(flavor) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("gcode_flavor", flavor);
+            config.set_deserialize_strict("wipe", "0");
+
+            config.set("use_firmware_retraction", true);
+            const auto errors = config.validate();
+            CHECK(has_error(errors, "use_firmware_retraction") == !supported);
+            if (!supported)
+                CHECK_THAT(error_message(errors, "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
+
+            // The flavor restriction applies only while firmware retraction is requested.
+            config.set("use_firmware_retraction", false);
+            CHECK_FALSE(has_error(config.validate(), "use_firmware_retraction"));
+        }
+    }
+}
+
+TEST_CASE("Firmware retraction validation rejects wipe on any extruder", "[Config][Validation]")
+{
+    struct Row {
+        const char *wipe;
+        bool        firmware_retraction;
+        bool        rejected;
+    };
+    const Row rows[] = {
+        {"1",   true,  true},
+        {"0,1", true,  true},   // only the second extruder wipes
+        {"1,0", true,  true},
+        {"0,0", true,  false},
+        {"0",   true,  false},
+        {"1,1", false, false},  // wipe alone is fine without firmware retraction
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION("wipe " << row.wipe << (row.firmware_retraction ? " with" : " without") << " firmware retraction") {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("gcode_flavor", "klipper");
+            config.set_deserialize_strict("wipe", row.wipe);
+            config.set("use_firmware_retraction", row.firmware_retraction);
+            const auto errors = config.validate();
+            CHECK(has_error(errors, "use_firmware_retraction") == row.rejected);
+            if (row.rejected)
+                CHECK_THAT(error_message(errors, "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("not compatible with --wipe"));
+        }
+    }
+
+    // When both rules are violated the flavor message is the one reported (the wipe message
+    // does not replace it).
+    DynamicPrintConfig both = DynamicPrintConfig::full_print_config();
+    both.set_deserialize_strict("gcode_flavor", "teacup");
+    both.set_deserialize_strict("wipe", "1");
+    both.set("use_firmware_retraction", true);
+    CHECK_THAT(error_message(both.validate(), "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
+}
