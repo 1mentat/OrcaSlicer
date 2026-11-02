@@ -7630,6 +7630,92 @@ TEST_CASE("Loading the selections restores the exported printer, process, filame
           std::vector<std::string>{"2", "3"});
 }
 
+TEST_CASE("External preset loading installs an unmatched config as a new external preset", "[Preset][Bundle][PresetLifecycle][External]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    const size_t initial_count = bundle.prints.size();
+    const std::set<std::string> different{"layer_height"};
+    const std::string source = (scoped.directory.path() / "source.gcode").string();
+
+    auto loaded = bundle.prints.load_external_preset(
+        source, "Imported Process", "", print_config(bundle, 0.31), different, PresetCollection::LoadAndSelect::Always);
+    REQUIRE(loaded.first != nullptr);
+    CHECK_FALSE(loaded.second);
+    CHECK(loaded.first->is_external);
+    CHECK(loaded.first->name == "(Imported Process)");
+    CHECK_THAT(loaded.first->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+    CHECK(bundle.prints.get_selected_preset_name() == "(Imported Process)");
+    CHECK(bundle.prints.size() == initial_count + 1);
+
+    // The same config is recognised and reused rather than installed twice.
+    auto again = bundle.prints.load_external_preset(
+        source, "Imported Process", "", print_config(bundle, 0.31), different, PresetCollection::LoadAndSelect::Always);
+    REQUIRE(again.first != nullptr);
+    CHECK(again.first->name == "(Imported Process)");
+    CHECK(bundle.prints.size() == initial_count + 1);
+
+    // A different config under the same name gets a numbered name and stays alongside the first.
+    auto other = bundle.prints.load_external_preset(
+        source, "Imported Process", "", print_config(bundle, 0.33), different, PresetCollection::LoadAndSelect::Always);
+    REQUIRE(other.first != nullptr);
+    CHECK(other.first->name == "1(Imported Process)");
+    CHECK_THAT(other.first->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.33, 1e-9));
+    CHECK(bundle.prints.size() == initial_count + 2);
+    const Preset *first = bundle.prints.find_preset("(Imported Process)");
+    REQUIRE(first != nullptr);
+    CHECK_THAT(first->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+}
+
+TEST_CASE("External preset loading does not select the preset when asked never to", "[Preset][Bundle][PresetLifecycle][External]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    const std::string selected_before = bundle.prints.get_selected_preset_name();
+
+    auto loaded = bundle.prints.load_external_preset(
+        (scoped.directory.path() / "source.gcode").string(), "Imported Process", "", print_config(bundle, 0.31),
+        {"layer_height"}, PresetCollection::LoadAndSelect::Never);
+    REQUIRE(loaded.first != nullptr);
+    CHECK(loaded.first->name == "(Imported Process)");
+    CHECK(bundle.prints.get_selected_preset_name() == selected_before);
+}
+
+TEST_CASE("External preset loading selects the named profile and keeps differing values as edits", "[Preset][Bundle][PresetLifecycle][External]")
+{
+    ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    bundle.prints.load_preset("", "Base Process", print_config(bundle, 0.20), false);
+    const size_t count = bundle.prints.size();
+    const std::set<std::string> different{"layer_height"};
+    const std::string source = (scoped.directory.path() / "source.3mf").string();
+
+    SECTION("a config equal to the profile selects it unchanged") {
+        auto loaded = bundle.prints.load_external_preset(
+            source, "project", "Base Process", print_config(bundle, 0.20), different, PresetCollection::LoadAndSelect::Always);
+        REQUIRE(loaded.first != nullptr);
+        CHECK(loaded.first->name == "Base Process");
+        CHECK_FALSE(loaded.second);
+        CHECK(bundle.prints.get_selected_preset_name() == "Base Process");
+        CHECK_FALSE(bundle.prints.get_edited_preset().is_dirty);
+        CHECK(bundle.prints.size() == count);
+    }
+
+    SECTION("a config with other values selects the profile and keeps them as unsaved edits") {
+        auto loaded = bundle.prints.load_external_preset(
+            source, "project", "Base Process", print_config(bundle, 0.31), different, PresetCollection::LoadAndSelect::Always);
+        REQUIRE(loaded.first != nullptr);
+        CHECK(loaded.first->name == "Base Process");
+        CHECK(loaded.second);
+        CHECK(bundle.prints.get_selected_preset_name() == "Base Process");
+        CHECK(bundle.prints.get_edited_preset().is_dirty);
+        CHECK_THAT(bundle.prints.get_edited_preset().config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+        // The saved profile itself is not overwritten and no new preset appears.
+        CHECK_THAT(loaded.first->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.20, 1e-9));
+        CHECK(bundle.prints.size() == count);
+    }
+}
+
 } // namespace preset_lifecycle_contracts
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
