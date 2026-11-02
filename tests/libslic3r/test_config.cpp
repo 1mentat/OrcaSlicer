@@ -3089,7 +3089,8 @@ TEST_CASE("Timestamp placeholders retain textual timestamps and numeric calendar
 
 TEST_CASE("Preset placeholders retain the public textual name fields", "[Config][ConfigDefinition][PlaceholderSchema]")
 {
-    // The type of filament_preset is pinned separately below.
+    // The coString listed for filament_preset is not checked here (see the known-bug test below); the row only
+    // keeps the key in the expected option set.
     check_schema(OtherPresetsConfigDef{}, {
         {"print_preset", coString}, {"filament_preset", coString},
         {"printer_preset", coString}, {"physical_printer_preset", coString}}, {"filament_preset"});
@@ -3099,7 +3100,8 @@ TEST_CASE("Preset placeholders retain the public textual name fields", "[Config]
 // PrintApply.cpp fills it from filament_settings_id (coStrings); fixed by the follow-up fix PR
 TEST_CASE("The filament preset placeholder is a vector of names", "[Config][ConfigDefinition][PlaceholderSchema][!shouldfail]")
 {
-    const ConfigOptionDef *option = OtherPresetsConfigDef{}.get("filament_preset");
+    const OtherPresetsConfigDef definition;
+    const ConfigOptionDef *option = definition.get("filament_preset");
     REQUIRE(option != nullptr);
     CHECK(option->type == coStrings);
 }
