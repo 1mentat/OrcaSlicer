@@ -3050,3 +3050,59 @@ TEST_CASE("normalize_fdm backfills unset filament roles from the legacy extruder
         }
     }
 }
+
+TEST_CASE("get_parameter_size scales per-extruder options by their variant counts", "[Config][ConfigVariants]")
+{
+    // The three variant counts differ (and none is twice another) so each option group is told apart.
+    DynamicPrintConfig config;
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow"}));
+    config.set_key_value("filament_extruder_variant",
+                         new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"}));
+    config.set_key_value("print_extruder_variant",
+                         new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard", "Bowden High Flow", "Bowden Other"}));
+
+    CHECK(config.get_parameter_size("nozzle_volume", 9) == 2);                // one value per printer variant
+    CHECK(config.get_parameter_size("machine_max_acceleration_x", 9) == 4);   // two values (limit pair) per printer variant
+    CHECK(config.get_parameter_size("machine_max_speed_x", 9) == 4);
+    CHECK(config.get_parameter_size("filament_flow_ratio", 9) == 3);
+    CHECK(config.get_parameter_size("outer_wall_speed", 9) == 5);
+    CHECK(config.get_parameter_size("unknown_option", 9) == 9);               // everything else follows the extruder count
+
+    // Without the variant lists every variant group has a single entry.
+    DynamicPrintConfig bare;
+    CHECK(bare.get_parameter_size("nozzle_volume", 9) == 1);
+    CHECK(bare.get_parameter_size("machine_max_acceleration_x", 9) == 2);
+    CHECK(bare.get_parameter_size("filament_flow_ratio", 9) == 1);
+    CHECK(bare.get_parameter_size("outer_wall_speed", 9) == 1);
+    CHECK(bare.get_parameter_size("unknown_option", 9) == 9);
+}
+
+// Known bug: PrintConfigDef never calls init_filament_option_keys(), so filament_option_keys() is empty and
+// set_num_filaments() resizes nothing; fixed by the follow-up fix PR. Only assertions that fail on main are
+// tagged: the prefix of the vectors is trivially unchanged today and is covered by the fix PR.
+TEST_CASE("set_num_filaments grows filament vectors with their first value and shrinks them", "[Config][ConfigVariants][!shouldfail]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"#112233", "#445566"}));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.70, 1.80}));
+
+    const auto *colours   = config.option<ConfigOptionStrings>("filament_colour");
+    const auto *diameters = config.option<ConfigOptionFloats>("filament_diameter");
+
+    SECTION("growing")
+    {
+        config.set_num_filaments(3);
+        REQUIRE(colours->values.size() == 3);
+        REQUIRE(diameters->values.size() == 3);
+        // ConfigOptionVector::resize extends a non-empty vector with its first value.
+        CHECK(colours->values[2] == "#112233");
+        CHECK_THAT(diameters->values[2], Catch::Matchers::WithinAbs(1.70, 1e-12));
+    }
+
+    SECTION("shrinking")
+    {
+        config.set_num_filaments(1);
+        CHECK(colours->values.size() == 1);
+        CHECK(diameters->values.size() == 1);
+    }
+}
