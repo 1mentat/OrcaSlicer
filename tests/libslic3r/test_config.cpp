@@ -3333,3 +3333,91 @@ TEST_CASE("Mixed filament components, ratios and gradients validate their semant
         }
     }
 }
+
+TEST_CASE("Variant vector replacement restores kept slots and takes the rest from the source", "[Config][ConfigVariantRestore]")
+{
+    ConfigOptionInts destination({10, 20, 30, 40});
+    const ConfigOptionInts source({100, 200, 300});
+    // Replace the two slots at 1..2. Each new slot restores the old destination value at its index, or takes
+    // the source value when the index is -1 or past the old vector.
+    std::vector<int> restore_index{3, -1, 99};
+
+    destination.set_with_restore_2(&source, restore_index, 1, 2);
+
+    CHECK(destination.values == std::vector<int>{10, 40, 200, 300, 40});
+    CHECK(source.values == std::vector<int>{100, 200, 300});
+    CHECK(restore_index == std::vector<int>{3, -1, 99});
+}
+
+TEST_CASE("Variant vector replacement clamps its range and pads a short source on request", "[Config][ConfigVariantRestore]")
+{
+    SECTION("the requested removal is clamped at the vector end") {
+        ConfigOptionInts destination({1, 2, 3});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 2, 8);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 9});
+    }
+
+    SECTION("a start at the end of the vector appends") {
+        ConfigOptionInts destination({1, 2});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 2, 0);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 9});
+    }
+
+    SECTION("a zero-length replacement inserts without deleting the following slot") {
+        ConfigOptionInts destination({1, 2});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 1, 0);
+
+        CHECK(destination.values == std::vector<int>{1, 9, 2});
+    }
+
+    SECTION("a short source supplies its first value for unmatched slots when asked") {
+        ConfigOptionInts destination({1, 2, 3, 4, 5});
+        ConfigOptionInts source({8});
+        std::vector<int> restore_index{1, -1, -1};
+
+        destination.set_with_restore_2(&source, restore_index, 1, 2, true);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 8, 8, 4, 5});
+    }
+}
+
+TEST_CASE("Variant vector replacement reports an invalid start, type or restore map", "[Config][ConfigVariantRestore]")
+{
+    ConfigOptionInts destination({1, 2});
+    ConfigOptionInts integer_source({9});
+    ConfigOptionFloats float_source({9.0});
+    std::vector<int> one_slot{-1};
+
+    CHECK_THROWS_WITH(destination.set_with_restore_2(&integer_source, one_slot, 3, 0),
+                      Catch::Matchers::ContainsSubstring("invalid size found"));
+    CHECK_THROWS_WITH(destination.set_with_restore_2(&float_source, one_slot, 0, 0),
+                      Catch::Matchers::ContainsSubstring("incompatible type"));
+
+    std::vector<int> wrong_shape{-1, -1};
+    CHECK_THROWS_WITH(destination.set_with_restore_2(&integer_source, wrong_shape, 0, 1),
+                      Catch::Matchers::ContainsSubstring("invalid restore_index size"));
+}
+
+// Known bug: set_with_restore_2 takes its source as const but const_casts it and resizes it when padding a short
+// source, so the caller's vector grows; fixed by a follow-up fix PR.
+TEST_CASE("Variant vector replacement leaves a short source unchanged when padding", "[Config][ConfigVariantRestore][!shouldfail]")
+{
+    ConfigOptionInts destination({1, 2, 3, 4, 5});
+    const ConfigOptionInts source({8});
+    std::vector<int> restore_index{1, -1, -1};
+
+    destination.set_with_restore_2(&source, restore_index, 1, 2, true);
+
+    CHECK(source.values == std::vector<int>{8});
+}
