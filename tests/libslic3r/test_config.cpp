@@ -34,6 +34,7 @@
 
 #include <set>
 #include <sstream>
+#include <string>
 #include <vector>
 #include <utility>
 #include <catch2/matchers/catch_matchers_vector.hpp>
@@ -1406,6 +1407,86 @@ TEST_CASE("read_cli parses a points vector in the NxM coordinate form", "[Config
     REQUIRE_THAT(points[3].y(), Catch::Matchers::WithinAbs(200.0, 1e-9));
 }
 
+TEST_CASE("Forward-compatible settings import substitutes typed defaults and records changes",
+          "[Config][ConfigSubstitution]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const ConfigOption *flavor_before = config.option("gcode_flavor");
+    REQUIRE(flavor_before != nullptr);
+    const std::string default_flavor = flavor_before->serialize();
+    // Start each option away from its default so a substitution with the default is observable.
+    config.set_deserialize_strict("gcode_flavor", default_flavor == "klipper" ? "reprapfirmware" : "klipper");
+    REQUIRE(config.option("gcode_flavor")->serialize() != default_flavor);
+
+    ConfigSubstitutionContext enum_context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("gcode_flavor", "future_flavor", enum_context);
+    REQUIRE(enum_context.substitutions.size() == 1);
+    CHECK(enum_context.substitutions.front().old_value == "future_flavor");
+    REQUIRE(enum_context.substitutions.front().new_value != nullptr);
+    CHECK(enum_context.substitutions.front().new_value->serialize() == default_flavor);
+    CHECK(config.option("gcode_flavor")->serialize() == default_flavor);
+
+    config.set_deserialize_strict("gcode_comments", "0");
+    ConfigSubstitutionContext bool_context(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(config.set_deserialize_nothrow("gcode_comments", "on", bool_context));
+    CHECK(config.opt<ConfigOptionBool>("gcode_comments")->value);
+    CHECK(bool_context.substitutions.empty());
+
+    config.set_deserialize_strict("enable_overhang_bridge_fan", "0");
+    ConfigSubstitutionContext default_true_context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("enable_overhang_bridge_fan", "future_cooling_value", default_true_context);
+    CHECK(config.opt<ConfigOptionBools>("enable_overhang_bridge_fan")->values == std::vector<unsigned char>{1});
+    REQUIRE(default_true_context.substitutions.size() == 1);
+    CHECK(default_true_context.substitutions.front().new_value->serialize() == "1");
+
+    config.set_deserialize_strict("filament_soluble", "1");
+    ConfigSubstitutionContext default_false_context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("filament_soluble", "future_material_value", default_false_context);
+    CHECK(config.opt<ConfigOptionBools>("filament_soluble")->values == std::vector<unsigned char>{0});
+    REQUIRE(default_false_context.substitutions.size() == 1);
+    CHECK(default_false_context.substitutions.front().new_value->serialize() == "0");
+
+    ConfigSubstitutionContext numeric_context(ForwardCompatibilitySubstitutionRule::Enable);
+    CHECK_FALSE(config.set_deserialize_nothrow("layer_height", "not-a-number", numeric_context));
+    CHECK(numeric_context.substitutions.empty());
+
+    ConfigSubstitutionContext nil_context(ForwardCompatibilitySubstitutionRule::Enable);
+    CHECK_THROWS_AS(config.set_deserialize("filament_soluble", "nil", nil_context), ConfigurationError);
+
+    DynamicConfig no_definition;
+    ConfigSubstitutionContext no_definition_context(ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK_THROWS_AS(no_definition.set_deserialize("some_option", "1", no_definition_context), NoDefinitionException);
+}
+
+TEST_CASE("Config substitutions order by option key and old value", "[Config][ConfigSubstitution]")
+{
+    ConfigOptionDef first_definition;
+    first_definition.opt_key = "first_option";
+    ConfigOptionDef second_definition;
+    second_definition.opt_key = "second_option";
+
+    ConfigSubstitution first;
+    first.opt_def = &first_definition;
+    first.old_value = "old-a";
+    ConfigSubstitution same_value;
+    same_value.opt_def = &first_definition;
+    same_value.old_value = "old-a";
+    ConfigSubstitution later_value;
+    later_value.opt_def = &first_definition;
+    later_value.old_value = "old-b";
+    ConfigSubstitution later_option;
+    later_option.opt_def = &second_definition;
+    // An older value on a later key: the key orders first, then the old value.
+    later_option.old_value = "old-0";
+
+    CHECK(first == same_value);
+    CHECK_FALSE(first == later_value);
+    CHECK(first < later_value);
+    CHECK_FALSE(later_value < first);
+    CHECK(first < later_option);
+    CHECK_FALSE(later_option < first);
+}
+
 // logfile is a CLI-only option, so it needs the config type whose def pulls in cli_misc_config_def.
 TEST_CASE("read_cli stores the log file path as a string", "[Config]") {
     Slic3r::DynamicPrintAndCLIConfig config;
@@ -1426,6 +1507,46 @@ TEST_CASE("read_cli accepts nil entries for a nullable vector option", "[Config]
     REQUIRE(opt->is_nil(0));
     REQUIRE_FALSE(opt->is_nil(1));
     REQUIRE_THAT(opt->values[1], Catch::Matchers::WithinAbs(2.5, 1e-9));
+}
+
+TEST_CASE("Legacy SLA vector corrections are expanded into axis options", "[Config][ConfigLegacy]")
+{
+    DynamicPrintConfig config;
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.1, 1.2}));
+    config.set_key_value("material_correction", new ConfigOptionFloats({0.9, 0.8}));
+    // An axis option that is already present is not overwritten from the legacy vector.
+    config.set_key_value("material_correction_y", new ConfigOptionFloat(0.7));
+    handle_legacy_sla(config);
+
+    CHECK_THAT(config.opt_float("relative_correction_x"), Catch::Matchers::WithinAbs(1.1, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_y"), Catch::Matchers::WithinAbs(1.1, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_z"), Catch::Matchers::WithinAbs(1.2, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_x"), Catch::Matchers::WithinAbs(0.9, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_y"), Catch::Matchers::WithinAbs(0.7, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_z"), Catch::Matchers::WithinAbs(0.8, 1e-9));
+}
+
+TEST_CASE("Legacy composite thumbnail values become canonical definitions", "[Config][ConfigLegacy]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // A size without a format takes the legacy thumbnails_format, which is not the default PNG here.
+    config.set_deserialize_strict("thumbnails_format", "JPG");
+    config.set("thumbnails", "16x16,32x32/PNG");
+    config.handle_legacy_composite();
+    CHECK(config.opt_string("thumbnails") == "16x16/JPG, 32x32/PNG");
+}
+
+TEST_CASE("Legacy composite wiping matrix detects whether custom entries exist", "[Config][ConfigLegacy]")
+{
+    DynamicPrintConfig defaults;
+    defaults.set_key_value("wiping_volumes_matrix", new ConfigOptionFloats({0., 140., 140., 0.}));
+    defaults.handle_legacy_composite();
+    CHECK_FALSE(defaults.opt_bool("wiping_volumes_use_custom_matrix"));
+
+    DynamicPrintConfig custom;
+    custom.set_key_value("wiping_volumes_matrix", new ConfigOptionFloats({0., 141., 140., 0.}));
+    custom.handle_legacy_composite();
+    CHECK(custom.opt_bool("wiping_volumes_use_custom_matrix"));
 }
 
 // get_at() returns values.front() for an out-of-range index, so calling it on an empty vector
@@ -1536,6 +1657,84 @@ TEST_CASE("min_object_distance yields no floor when an FFF config lacks the opti
         c.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(12.));
         CHECK_THAT(min_object_distance(c), Catch::Matchers::WithinAbs(12., 1e-9));
     }
+}
+
+namespace {
+
+struct MigrationDefinition : ConfigDef {
+    MigrationDefinition()
+    {
+        add("new_int", coInt)->set_default_value(new ConfigOptionInt(0));
+    }
+};
+
+struct MigrationConfig : DynamicConfig {
+    MigrationDefinition definition;
+
+    const ConfigDef *def() const override { return &definition; }
+
+protected:
+    void handle_legacy(t_config_option_key &key, std::string &value) const override
+    {
+        if (key == "legacy_int") {
+            key = "new_int";
+            value = "42";
+        } else if (key == "removed_int") {
+            key.clear();
+        }
+    }
+};
+
+} // namespace
+
+TEST_CASE("ConfigBase migration rewrites and records removed keys, then rejects unknown keys", "[Config][ConfigMigration]")
+{
+    MigrationConfig config;
+    ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::Disable);
+
+    REQUIRE(config.set_deserialize_nothrow("legacy_int", "7", context));
+    REQUIRE(config.opt<ConfigOptionInt>("new_int") != nullptr);
+    CHECK(config.opt<ConfigOptionInt>("new_int")->value == 42);
+
+    REQUIRE(config.set_deserialize_nothrow("removed_int", "ignored", context));
+    REQUIRE(config.set_deserialize_nothrow("removed_int", "ignored-again", context));
+    CHECK(context.unrecogized_keys == std::vector<std::string>{"removed_int"});
+    CHECK(context.empty());
+    REQUIRE_THROWS_AS(config.set_deserialize_strict("future_int", "7"), UnknownOptionException);
+}
+
+namespace {
+
+struct AliasContractDefinition : ConfigDef {
+    AliasContractDefinition()
+    {
+        ConfigOptionDef *canonical = add("canonical_int", coInt);
+        canonical->set_default_value(new ConfigOptionInt(0));
+        canonical->aliases.emplace_back("legacy_int_alias");
+    }
+};
+
+struct AliasContractConfig : DynamicConfig {
+    AliasContractDefinition definition;
+
+    const ConfigDef *def() const override { return &definition; }
+};
+
+} // namespace
+
+TEST_CASE("Config aliases deserialize into their canonical setting",
+          "[Config][ConfigMigration]")
+{
+    AliasContractConfig config;
+    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+    config.set_deserialize("legacy_int_alias", "42", substitutions);
+
+    const ConfigOptionInt *canonical = config.opt<ConfigOptionInt>("canonical_int");
+    REQUIRE(canonical != nullptr);
+    CHECK(canonical->value == 42);
+    CHECK(config.opt<ConfigOptionInt>("legacy_int_alias") == nullptr);
+    CHECK_THROWS_AS(config.set_deserialize("unknown_config_contract_key", "1", substitutions), UnknownOptionException);
+    CHECK(canonical->value == 42);
 }
 
 TEST_CASE("Static print configs compare, order and hash by their option values", "[Config]")
@@ -2133,6 +2332,94 @@ TEST_CASE("Registered numeric boundaries round-trip through strict serialization
     CHECK(boundary_values >= 550); // 654 today
 }
 
+// Known bug: coEnums defaults such as z_hop_types are built without a keys map, and static configs copy that
+// null map, so their enum lists serialize as "" (a deserialize would dereference it); fixed by the follow-up fix PR.
+TEST_CASE("Static and dynamic print defaults retain named enum lists", "[Config][StaticEnumDefaults][!shouldfail]")
+{
+    const auto check_named_enums = [](ConfigBase &config) {
+        REQUIRE(config.opt_serialize("z_hop_types") == "Slope Lift");
+        REQUIRE(config.opt_serialize("retract_lift_enforce") == "All Surfaces");
+
+        config.set_deserialize_strict("z_hop_types", "Normal Lift,Spiral Lift");
+        config.set_deserialize_strict("retract_lift_enforce", "Top and Bottom");
+
+        const auto *z_hop = config.option<ConfigOptionEnumsGeneric>("z_hop_types");
+        const auto *surfaces = config.option<ConfigOptionEnumsGeneric>("retract_lift_enforce");
+        REQUIRE(z_hop != nullptr);
+        REQUIRE(surfaces != nullptr);
+        const std::vector<int> expected_hops{zhtNormal, zhtSpiral};
+        const std::vector<int> expected_surfaces{rletTopAndBottom};
+        CHECK(z_hop->values == expected_hops);
+        CHECK(surfaces->values == expected_surfaces);
+        CHECK(config.opt_serialize("z_hop_types") == "Normal Lift,Spiral Lift");
+        CHECK(config.opt_serialize("retract_lift_enforce") == "Top and Bottom");
+    };
+
+    SECTION("Static G-code defaults")
+    {
+        GCodeConfig config;
+        check_named_enums(config);
+    }
+    SECTION("Dynamic copy of full print defaults")
+    {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        check_named_enums(config);
+    }
+}
+
+TEST_CASE("Core FFF numeric validation rejects values below their semantic floors", "[Config][Validation]")
+{
+    struct Boundary {
+        const char               *key;
+        std::vector<const char *> invalid;
+        std::vector<const char *> valid;
+    };
+    // validate() enforces these floors on top of the option metadata, which allows
+    // the invalid values below (checked first, so the generic range check cannot be
+    // what reports them). wall_loops and the shell layer counts are not listed: their
+    // semantic floor is the same as their metadata minimum. Valid values sit at or just
+    // above the floor and differ from the defaults, so they are really applied.
+    // layer_height's "not a multiple of SCALING_FACTOR" branch is not covered: the
+    // remainder of fmod() by SCALING_FACTOR is always below its 1e-4 threshold.
+    const Boundary boundaries[] = {
+        {"layer_height", {"0"}, {"0.05"}},
+        {"initial_layer_print_height", {"0"}, {"0.05"}},
+        {"filament_diameter", {"0.9", "0.999"}, {"1.0"}},
+        {"nozzle_diameter", {"0.004", "0.0049"}, {"0.005"}},
+        {"skirt_height", {"-1"}, {"0"}},
+        {"bridge_flow", {"0"}, {"0.01"}},
+        {"internal_bridge_flow", {"0"}, {"0.01"}},
+        {"extruder_clearance_radius", {"0"}, {"0.1"}},
+        {"extruder_clearance_height_to_rod", {"0"}, {"0.1"}},
+        {"extruder_clearance_height_to_lid", {"0"}, {"0.1"}},
+        {"nozzle_height", {"0"}, {"0.1"}},
+        {"filament_flow_ratio", {"0"}, {"0.01"}},
+    };
+
+    for (const Boundary &boundary : boundaries) {
+        DYNAMIC_SECTION(boundary.key) {
+            const ConfigOptionDef *def = print_config_def.get(boundary.key);
+            REQUIRE(def != nullptr);
+            for (const char *value : boundary.invalid) {
+                INFO("invalid " << value);
+                REQUIRE(def->is_value_valid(std::stod(value)));
+                DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+                config.set_deserialize_strict(boundary.key, value);
+                const auto errors = config.validate();
+                CHECK(errors.find(boundary.key) != errors.end());
+            }
+            for (const char *value : boundary.valid) {
+                INFO("valid " << value);
+                DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+                REQUIRE(config.opt_serialize(boundary.key) != value);
+                config.set_deserialize_strict(boundary.key, value);
+                const auto errors = config.validate();
+                CHECK(errors.find(boundary.key) == errors.end());
+            }
+        }
+    }
+}
+
 TEST_CASE("Project JSON migration records support and wall-order differences", "[Config][ConfigJsonMigration]")
 {
     const auto [seed_existing, keep_wall_order] = GENERATE(
@@ -2197,4 +2484,174 @@ TEST_CASE("Project JSON migration records support and wall-order differences", "
     REQUIRE(different->values.size() == expected.size());
     for (size_t index = 0; index < expected.size(); ++index)
         CHECK(different->values[index] == expected[index]);
+}
+
+namespace {
+
+// The migrated key and value must be accepted by the current option definition.
+void check_migrated_value_deserializes(const std::string &key, const std::string &value)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK_NOTHROW(config.set_deserialize_strict(key, value));
+    CHECK(config.opt_serialize(key) == value);
+}
+
+} // namespace
+
+TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contract", "[Config][ConfigLegacy]")
+{
+    struct Migration {
+        const char *old_key;
+        const char *old_value;
+        const char *new_key;
+        const char *new_value;
+    };
+    const Migration migrations[] = {
+        {"enable_wipe_tower", "1", "enable_prime_tower", "1"},
+        {"wipe_tower_width", "42", "prime_tower_width", "42"},
+        {"bridge_fan_speed", "77", "overhang_fan_speed", "77"},
+        {"support_material_angle", "55", "support_angle", "55"},
+        {"support_material_enforce_layers", "3", "enforce_support_layers", "3"},
+        {"top_one_wall_type", "outer", "only_one_wall_top", "1"},
+        {"sparse_infill_anchor", "35", "infill_anchor", "35"},
+        {"chamber_temperatures", "60,65", "chamber_temperature", "60,65"},
+        {"thumbnail_size", "96x96", "thumbnails", "96x96"},
+        {"counterbole_hole_bridging", "partiallybridge", "counterbore_hole_bridging", "partiallybridge"},
+    };
+
+    for (const Migration &migration : migrations) {
+        DYNAMIC_SECTION(migration.old_key << " -> " << migration.new_key) {
+            t_config_option_key key = migration.old_key;
+            std::string value       = migration.old_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == migration.new_key);
+            CHECK(value == migration.new_value);
+            check_migrated_value_deserializes(key, value);
+        }
+    }
+}
+
+TEST_CASE("PrintConfig legacy enum spellings become current canonical values", "[Config][ConfigLegacy]")
+{
+    struct Conversion {
+        const char *key;
+        const char *old_value;
+        const char *new_value;
+    };
+    const Conversion conversions[] = {
+        {"support_type", "normal", "normal(manual)"},
+        {"support_type", "tree", "tree(manual)"},
+        {"support_type", "hybrid(auto)", "tree(auto)"},
+        {"support_base_pattern", "none", "hollow"},
+        {"sparse_infill_pattern", "zig-zag", "rectilinear"},
+        {"top_surface_pattern", "zig-zag", "rectilinear"},
+        {"filament_map_mode", "Auto", "Auto For Flush"},
+        {"extruder_type", "DirectDrive", "Direct Drive"},
+        {"enable_power_loss_recovery", "true", "enable"},
+        {"ensure_vertical_shell_thickness", "0", "ensure_moderate"},
+        {"wall_direction", "auto", "ccw"},
+    };
+
+    for (const Conversion &conversion : conversions) {
+        DYNAMIC_SECTION(conversion.key << " = " << conversion.old_value) {
+            t_config_option_key key = conversion.key;
+            std::string value       = conversion.old_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == conversion.key);
+            CHECK(value == conversion.new_value);
+            // Known bug (see "Static and dynamic print defaults retain named enum lists"): coEnums defaults such as
+            // extruder_type have no keys map, so deserializing into full_print_config() dereferences null.
+            if (key != "extruder_type")
+                check_migrated_value_deserializes(key, value);
+        }
+    }
+
+    SECTION("rotate_solid_infill_direction = 1 becomes a rotation template") {
+        t_config_option_key key = "rotate_solid_infill_direction";
+        std::string value       = "1";
+        PrintConfigDef::handle_legacy(key, value);
+        CHECK(key == "solid_infill_rotate_template");
+        CHECK(value == "0,90");
+        check_migrated_value_deserializes(key, value);
+    }
+}
+
+TEST_CASE("PrintConfig legacy values that cannot be represented are discarded", "[Config][ConfigLegacy]")
+{
+    // Percent speeds and distances are dropped by their own guard. "scale" and "bed_size" are on the
+    // obsolete list and the future key is unregistered; for those the final unknown-key check would
+    // also clear them, so these rows only pin the outcome.
+    const std::pair<const char *, const char *> obsolete[] = {
+        {"initial_layer_speed", "50%"},
+        {"outer_wall_speed", "80%"},
+        {"support_object_xy_distance", "25%"},
+        {"scale", "1.2"},
+        {"bed_size", "220,220"},
+        {"key_from_a_future_release", "1"},
+    };
+    for (const auto &[old_key, old_value] : obsolete) {
+        DYNAMIC_SECTION(old_key) {
+            t_config_option_key key = old_key;
+            std::string value       = old_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key.empty());
+        }
+    }
+}
+
+TEST_CASE("PrintConfig legacy migrations normalize bed and wall-order spellings", "[Config][ConfigLegacy]")
+{
+    struct Row {
+        const char *input_key;
+        const char *input_value;
+        const char *expected_key;
+        const char *expected_value;
+    };
+    const Row rows[] = {
+        {"curr_bed_type", "SuperTack Plate", "curr_bed_type", "Supertack Plate"},
+        {"wall_infill_order", "inner wall/outer wall/infill", "wall_sequence", "inner wall/outer wall"},
+        {"wall_infill_order", "infill/inner wall/outer wall", "wall_sequence", "inner wall/outer wall"},
+        {"wall_infill_order", "outer wall/inner wall/infill", "wall_sequence", "outer wall/inner wall"},
+        {"wall_infill_order", "infill/outer wall/inner wall", "wall_sequence", "outer wall/inner wall"},
+        {"wall_infill_order", "inner-outer-inner wall/infill", "wall_sequence", "inner-outer-inner wall"},
+        {"wall_infill_order", "legacy spelling", "wall_sequence", "legacy spelling"},
+    };
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.input_key << " = " << row.input_value) {
+            t_config_option_key key = row.input_key;
+            std::string value = row.input_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == row.expected_key);
+            CHECK(value == row.expected_value);
+            // An unknown wall_infill_order spelling is passed through for wall_sequence to reject.
+            if (std::string(row.input_value) != "legacy spelling")
+                check_migrated_value_deserializes(key, value);
+        }
+    }
+}
+
+TEST_CASE("PrintConfig legacy handling leaves current keys and values unchanged", "[Config][ConfigLegacy]")
+{
+    // Current spellings next to the legacy ones converted above.
+    const std::pair<const char *, const char *> current[] = {
+        {"layer_height", "0.2"},
+        {"support_type", "tree(auto)"},
+        {"timelapse_type", "0"},
+        {"overhang_fan_threshold", "25%"},
+        {"sparse_infill_pattern", "gyroid"},
+        {"curr_bed_type", "Supertack Plate"},
+        {"wall_sequence", "inner wall/outer wall"},
+        {"wall_direction", "cw"},
+        {"filament_map_mode", "Manual"},
+    };
+    for (const auto &[current_key, current_value] : current) {
+        DYNAMIC_SECTION(current_key << " = " << current_value) {
+            t_config_option_key key = current_key;
+            std::string value       = current_value;
+            PrintConfigDef::handle_legacy(key, value);
+            CHECK(key == current_key);
+            CHECK(value == current_value);
+        }
+    }
 }
