@@ -24,6 +24,7 @@ add_executable(${_TEST_NAME}_tests
     test_clipper_utils.cpp
     test_color.cpp
     test_color_decompose_recipe.cpp
+    test_color_utils_contracts.cpp
     test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
@@ -67,7 +68,6 @@ add_executable(${_TEST_NAME}_tests
     test_nozzle_volume_type.cpp
     test_obj.cpp
     test_obj_color_utils.cpp
-    test_color_utils_contracts.cpp
     test_orient.cpp
     test_sl1.cpp
     test_zipper_archive_import.cpp
