@@ -625,24 +625,6 @@ std::string join_int_list_comma(const std::vector<int>& values)
     return stream.str();
 }
 
-Slic3r::Vec3f get_vec3_from_string(const std::string &pos_str)
-{
-    Slic3r::Vec3f pos(0, 0, 0);
-    if (pos_str.empty())
-        return pos;
-
-    std::vector<std::string> values;
-    boost::split(values, pos_str, boost::is_any_of(" "), boost::token_compress_on);
-
-    if (values.size() != 3)
-        return pos;
-
-    for (int i = 0; i < 3; ++i)
-        pos(i) = ::atof(values[i].c_str());
-
-    return pos;
-}
-
 Slic3r::Transform3d bbs_get_transform_from_3mf_specs_string(const std::string& mat_str)
 {
     // check: https://3mf.io/3d-manufacturing-format/ or https://github.com/3MFConsortium/spec_core/blob/master/3MF%20Core%20Specification.md
