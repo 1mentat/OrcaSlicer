@@ -206,13 +206,35 @@ TEST_CASE("its_cut_AoI retains the complete mesh when the projected bounds conta
 
 TEST_CASE("its_cut_AoI drops every face of a mesh outside the projected bounds", "[CutSurface]")
 {
-    // The faces are classified in parallel. Repeating the cut makes a lost skip flag (for example from
-    // concurrent writes to a packed bit vector) show up reliably.
-    const indexed_triangle_set input = its_make_cube(10., 20., 30.);
-    size_t non_empty = 0;
-    for (int run = 0; run < 200; ++run)
-        non_empty += !its_cut_AoI(input, BoundingBox(Point(20, 30), Point(30, 40)), Emboss::ProjectZ(40.)).indices.empty();
-    CHECK(non_empty == 0);
+    // Faces are classified in a tbb::parallel_for. A flat 100 x 100 grid (20000 faces) all outside the bounds
+    // makes every face write its skip flag, and is large enough for TBB to split the range across workers, so
+    // writes that share storage (such as bits of one word in a packed bit vector) really run concurrently.
+    // Repeating the cut turns an occasional lost flag into a reliable failure.
+    indexed_triangle_set grid;
+    const int cells = 100;
+    for (int y = 0; y <= cells; ++y)
+        for (int x = 0; x <= cells; ++x)
+            grid.vertices.emplace_back(float(x), float(y), 0.f);
+    for (int y = 0; y < cells; ++y)
+        for (int x = 0; x < cells; ++x) {
+            const int v = y * (cells + 1) + x;
+            grid.indices.emplace_back(v, v + 1, v + cells + 2);
+            grid.indices.emplace_back(v, v + cells + 2, v + cells + 1);
+        }
+    REQUIRE(grid.indices.size() == 20000);
+
+    int failed_runs = 0, first_failed_run = -1;
+    size_t first_failed_faces = 0;
+    for (int run = 0; run < 50; ++run) {
+        const size_t kept = its_cut_AoI(grid, BoundingBox(Point(200, 200), Point(210, 210)), Emboss::ProjectZ(40.)).indices.size();
+        if (kept > 0 && first_failed_run < 0) {
+            first_failed_run = run;
+            first_failed_faces = kept;
+        }
+        failed_runs += kept > 0;
+    }
+    INFO("first failed run " << first_failed_run << " kept " << first_failed_faces << " faces");
+    CHECK(failed_runs == 0);
 }
 
 TEST_CASE("cut2model mirrors the front mesh and closes every contour edge", "[CutSurface]")
