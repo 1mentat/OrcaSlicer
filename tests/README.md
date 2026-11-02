@@ -658,6 +658,10 @@ and `tree_support_layer_height.json`.
 
 `[FuzzySkinModePipeline]` checks positive transverse displacement with unchanged
 widths; the Perlin field is deterministic but sampling positions are stochastic.
+`[FuzzySkinSettingsPipeline]` routes all six fuzzy-skin styles across emitted
+contour/hole and outer/inner perimeter points, then exercises the registered
+thickness and point-distance endpoints. Its source-local probes are in
+`fuzzy_skin_settings_pipeline.json`.
 `[SeamSlopeSettings]` compares full-loop scarf distance with a bounded scarf.
 Their mutations are in `fuzzy_displacement_scarf_loop.json`.
 `[SlicingModeHoleTopology]` checks a real cavity's hole count and filled area

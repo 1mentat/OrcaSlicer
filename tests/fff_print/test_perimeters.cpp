@@ -1787,3 +1787,190 @@ TEST_CASE("Arachne displacement fuzzy skin applies a positive transverse offset"
         CHECK(width <= control_max_width + 0.002);
     }
 }
+
+namespace fuzzy_skin_settings_pipeline {
+
+struct WallPoints {
+    Points contour_outer;
+    Points contour_inner;
+    Points hole_outer;
+    Points hole_inner;
+
+    bool operator==(const WallPoints &rhs) const
+    {
+        return contour_outer == rhs.contour_outer && contour_inner == rhs.contour_inner &&
+               hole_outer == rhs.hole_outer && hole_inner == rhs.hole_inner;
+    }
+};
+
+DynamicPrintConfig settings_config(const char *fuzzy_type, double thickness = 0.4, double point_distance = 0.75)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "classic"},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"wall_loops", 2},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"outer_wall_line_width", 0.45},
+        {"inner_wall_line_width", 0.45},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"fuzzy_skin", fuzzy_type},
+        {"fuzzy_skin_first_layer", true},
+        {"fuzzy_skin_noise_type", "ripple"},
+        {"fuzzy_skin_thickness", thickness},
+        {"fuzzy_skin_point_distance", point_distance},
+        {"fuzzy_skin_ripples_per_layer", 8},
+        {"fuzzy_skin_ripple_offset", 0},
+    });
+    return config;
+}
+
+WallPoints slice_tube(const DynamicPrintConfig &config)
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "fuzzy_skin_settings_tube.stl";
+    object->add_volume(make_cube(8., 8., 0.8), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh cavity = make_cube(4., 4., 0.8);
+    cavity.translate(2.f, 2.f, 0.f);
+    object->add_volume(std::move(cavity), ModelVolumeType::NEGATIVE_VOLUME, false);
+    object->add_instance();
+    object->ensure_on_bed();
+
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    REQUIRE(print.validate().string.empty());
+    print.set_status_silent();
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->layers().size() == 4);
+
+    const Layer *layer = print.objects().front()->layers()[1];
+    REQUIRE(layer != nullptr);
+    WallPoints result;
+    for (const LayerRegion *region : layer->regions()) {
+        for (const ExtrusionEntity *entity : region->perimeters.flatten().entities) {
+            const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity);
+            if (loop == nullptr || !is_perimeter(loop->role()))
+                continue;
+
+            const bool is_hole = (loop->loop_role() & elrHole) != 0;
+            const bool is_inner = loop->inset_idx > 0;
+            Points *bucket = is_hole ? (is_inner ? &result.hole_inner : &result.hole_outer)
+                                     : (is_inner ? &result.contour_inner : &result.contour_outer);
+            for (const ExtrusionPath &path : loop->paths)
+                for (const Point3 &point : path.polyline.points)
+                    bucket->push_back(point.to_point());
+        }
+    }
+    REQUIRE_FALSE(result.contour_outer.empty());
+    REQUIRE_FALSE(result.hole_outer.empty());
+    return result;
+}
+
+double longest_axis_span_mm(const Points &points)
+{
+    REQUIRE_FALSE(points.empty());
+    coord_t min_x = points.front().x(), max_x = min_x;
+    coord_t min_y = points.front().y(), max_y = min_y;
+    for (const Point &point : points) {
+        min_x = std::min(min_x, point.x());
+        max_x = std::max(max_x, point.x());
+        min_y = std::min(min_y, point.y());
+        max_y = std::max(max_y, point.y());
+    }
+    return unscale<double>(std::max(max_x - min_x, max_y - min_y));
+}
+
+void require_style_registry()
+{
+    const ConfigOptionDef *style = print_config_def.get("fuzzy_skin");
+    REQUIRE(style != nullptr);
+    REQUIRE(style->type == coEnum);
+    REQUIRE((style->enum_values ==
+             std::vector<std::string>{"none", "external", "hole", "all", "allwalls", "disabled_fuzzy"}));
+}
+
+void require_numeric_registry()
+{
+    const ConfigOptionDef *thickness = print_config_def.get("fuzzy_skin_thickness");
+    REQUIRE(thickness != nullptr);
+    REQUIRE(thickness->type == coFloat);
+    CHECK_THAT(thickness->min, Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK_THAT(thickness->max, Catch::Matchers::WithinAbs(2., 1e-12));
+
+    const ConfigOptionDef *point_distance = print_config_def.get("fuzzy_skin_point_distance");
+    REQUIRE(point_distance != nullptr);
+    REQUIRE(point_distance->type == coFloat);
+    CHECK_THAT(point_distance->min, Catch::Matchers::WithinAbs(0.01, 1e-6));
+    CHECK_THAT(point_distance->max, Catch::Matchers::WithinAbs(5., 1e-12));
+}
+
+} // namespace fuzzy_skin_settings_pipeline
+
+TEST_CASE("Registered fuzzy skin styles route to their public perimeter classes",
+          "[FuzzySkinSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_skin_settings_pipeline;
+    require_style_registry();
+
+    const WallPoints none = slice_tube(settings_config("none"));
+    const WallPoints disabled = slice_tube(settings_config("disabled_fuzzy"));
+    CHECK(disabled == none);
+
+    const WallPoints external = slice_tube(settings_config("external"));
+    CHECK(external.contour_outer.size() > none.contour_outer.size());
+    CHECK(external.contour_inner == none.contour_inner);
+    CHECK(external.hole_outer == none.hole_outer);
+    CHECK(external.hole_inner == none.hole_inner);
+
+    const WallPoints hole = slice_tube(settings_config("hole"));
+    CHECK(hole.contour_outer == none.contour_outer);
+    CHECK(hole.contour_inner == none.contour_inner);
+    CHECK(hole.hole_outer.size() > none.hole_outer.size());
+    CHECK(hole.hole_inner == none.hole_inner);
+
+    const WallPoints all = slice_tube(settings_config("all"));
+    CHECK(all.contour_outer.size() > none.contour_outer.size());
+    CHECK(all.contour_inner == none.contour_inner);
+    CHECK(all.hole_outer.size() > none.hole_outer.size());
+    CHECK(all.hole_inner == none.hole_inner);
+
+    const WallPoints all_walls = slice_tube(settings_config("allwalls"));
+    CHECK(all_walls.contour_outer.size() > none.contour_outer.size());
+    CHECK(all_walls.contour_inner.size() > none.contour_inner.size());
+    CHECK(all_walls.hole_outer.size() > none.hole_outer.size());
+    CHECK(all_walls.hole_inner.size() > none.hole_inner.size());
+}
+
+TEST_CASE("Fuzzy skin numeric endpoints reach sampled public perimeter geometry",
+          "[FuzzySkinSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_skin_settings_pipeline;
+    require_numeric_registry();
+
+    // The registered zero-thickness endpoint is accepted but the Print pipeline
+    // intentionally normalizes sub-0.001 mm fuzz to the no-fuzz path.
+    const WallPoints no_fuzzy_skin = slice_tube(settings_config("none"));
+    const WallPoints zero_thickness = slice_tube(settings_config("external", 0., 0.75));
+    CHECK(zero_thickness == no_fuzzy_skin);
+    const WallPoints maximum_thickness = slice_tube(settings_config("external", 2., 0.75));
+    CHECK(maximum_thickness.contour_outer.size() > no_fuzzy_skin.contour_outer.size());
+    CHECK(longest_axis_span_mm(maximum_thickness.contour_outer) >
+          longest_axis_span_mm(no_fuzzy_skin.contour_outer) + 0.5);
+    CHECK(maximum_thickness.hole_outer == no_fuzzy_skin.hole_outer);
+
+    const WallPoints minimum_spacing = slice_tube(settings_config("external", 0.4, 0.01));
+    const WallPoints near_minimum_spacing = slice_tube(settings_config("external", 0.4, 0.02));
+    const WallPoints nominal_spacing = slice_tube(settings_config("external", 0.4, 0.75));
+    const WallPoints maximum_spacing = slice_tube(settings_config("external", 0.4, 5.));
+    CHECK(minimum_spacing.contour_outer.size() != near_minimum_spacing.contour_outer.size());
+    CHECK(near_minimum_spacing.contour_outer.size() > nominal_spacing.contour_outer.size());
+    CHECK(nominal_spacing.contour_outer.size() > maximum_spacing.contour_outer.size());
+    CHECK(minimum_spacing.hole_outer == no_fuzzy_skin.hole_outer);
+    CHECK(maximum_spacing.hole_outer == no_fuzzy_skin.hole_outer);
+}
