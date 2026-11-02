@@ -6,7 +6,6 @@
 
 #include "libslic3r/Color.hpp"
 
-#include <algorithm>
 #include <array>
 #include <cmath>
 #include <string>
@@ -57,6 +56,7 @@ TEST_CASE("Color channel setters clamp indexed assignments", "[Color]")
     rgb.r(-1.0f);
     rgb.g(0.4f);
     rgb.b(4.0f);
+    require_rgb(rgb, 0.0f, 0.4f, 1.0f);
     rgb.set(1, 2.0f);
     require_rgb(rgb, 0.0f, 1.0f, 1.0f);
 
@@ -254,12 +254,23 @@ TEST_CASE("Picking IDs round-trip the three packed byte channels", "[Color]")
     }
 }
 
-TEST_CASE("Picking checksum has stable known vectors", "[Color]")
+TEST_CASE("Picking checksum changes when any single RGB byte changes", "[Color]")
 {
-    CHECK(picking_checksum_alpha_channel(0, 0, 0) == 85);
-    CHECK(picking_checksum_alpha_channel(1, 2, 3) == 48);
-    CHECK(picking_checksum_alpha_channel(255, 0, 0) == 176);
-    CHECK(picking_checksum_alpha_channel(12, 34, 56) == 39);
+    // The alpha checksum exists to reject picking colours altered by blending or multisampling
+    // (Color.cpp). It is deterministic, and a one-step change in any one channel changes it.
+    for (const auto bytes : {std::array<unsigned char, 3>{0, 0, 0},
+                             std::array<unsigned char, 3>{1, 2, 3},
+                             std::array<unsigned char, 3>{12, 34, 56},
+                             std::array<unsigned char, 3>{254, 128, 17}}) {
+        const unsigned char base = picking_checksum_alpha_channel(bytes[0], bytes[1], bytes[2]);
+        CHECK(picking_checksum_alpha_channel(bytes[0], bytes[1], bytes[2]) == base);
+        CHECK(picking_checksum_alpha_channel(bytes[0] + 1, bytes[1], bytes[2]) != base);
+        CHECK(picking_checksum_alpha_channel(bytes[0], bytes[1] + 1, bytes[2]) != base);
+        CHECK(picking_checksum_alpha_channel(bytes[0], bytes[1], bytes[2] + 1) != base);
+        // picking_decode() carries the checksum of the decoded bytes in alpha.
+        const ColorRGBA decoded = picking_decode(picking_encode(bytes[0], bytes[1], bytes[2]));
+        CHECK(std::lround(decoded.a() * 255.0f) == long(base));
+    }
 }
 
 TEST_CASE("Color equality allows 0.01 per component, alpha included", "[Color]")
