@@ -41,6 +41,7 @@
 #include <ios>
 #include <array>
 #include <iterator>
+#include <limits>
 #include <nlohmann/json.hpp>
 
 #include <boost/filesystem/operations.hpp>
@@ -3100,6 +3101,254 @@ TEST_CASE("BBS 3MF thumbnail accessor returns the stored plate PNG", "[3MF][Bbs3
             const std::array<unsigned char, 4> expected = expected_pixel(column);
             CHECK(std::equal(expected.begin(), expected.end(), decoded.buf.begin() + 4 * (row * size + column)));
         }
+}
+
+namespace {
+
+// The central-directory name and the Info-ZIP Unicode Path extra field are kept apart so that the
+// outer filename filter cannot stand in for the checks made on the decoded name.
+void append_extra_u16(std::string& extra, uint16_t value)
+{
+    extra.push_back(static_cast<char>(value & 0xff));
+    extra.push_back(static_cast<char>(value >> 8));
+}
+
+std::string unicode_path_extra(const std::string& stored_name, const std::string& decoded_name,
+                               bool valid_crc = true, unsigned char version = 1)
+{
+    REQUIRE(decoded_name.size() <= std::numeric_limits<uint16_t>::max() - 5);
+    std::string extra;
+    append_extra_u16(extra, 0x7075);
+    append_extra_u16(extra, static_cast<uint16_t>(5 + decoded_name.size()));
+    extra.push_back(static_cast<char>(version));
+    const mz_ulong crc = mz_crc32(0, reinterpret_cast<const unsigned char*>(stored_name.data()), stored_name.size()) ^ (valid_crc ? 0u : 1u);
+    for (unsigned int byte = 0; byte < 4; ++byte)
+        extra.push_back(static_cast<char>((crc >> (8 * byte)) & 0xff));
+    return extra + decoded_name;
+}
+
+// Appends an entry carrying `extra` as both its local and central-directory extra data. Existing
+// entries are read back and the archive is rewritten through the repo's zip helpers, which open
+// paths the same way the importer does.
+void append_entry_with_extra(const std::string& archive_path, const std::string& stored_name,
+                             const std::string& payload, const std::string& extra)
+{
+    REQUIRE(extra.size() <= std::numeric_limits<uint16_t>::max());
+    std::vector<std::pair<std::string, std::string>> entries;
+    rewrite_3mf_entries(archive_path, [&entries](std::string& name, std::string& data) {
+        entries.emplace_back(name, data);
+        return false;
+    });
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_writer(&zip, archive_path));
+    const ScopeGuard close_zip([&zip] { close_zip_writer(&zip); });
+    for (const auto& entry : entries)
+        REQUIRE(mz_zip_writer_add_mem(&zip, entry.first.c_str(), entry.second.data(), entry.second.size(), MZ_DEFAULT_LEVEL));
+    REQUIRE(mz_zip_writer_add_mem_ex_v2(&zip, stored_name.c_str(), payload.data(), payload.size(),
+        nullptr, 0, MZ_DEFAULT_LEVEL | MZ_ZIP_FLAG_ASCII_FILENAME, 0, 0, nullptr,
+        extra.data(), static_cast<mz_uint>(extra.size()), extra.data(), static_cast<mz_uint>(extra.size())));
+    REQUIRE(mz_zip_writer_finalize_archive(&zip));
+}
+
+// The decoder's `p + 4 + len < e` check also rejects a field that ends the extra data exactly, but
+// mz_zip_reader_get_extra appends a trailing NUL that hides this from every loader-level test, so it
+// has none.
+// Decoded names stay ASCII so the on-disk assertions do not depend on the platform's local path encoding.
+// Appends the ASCII-named entry "Auxiliaries/docs/ascii.txt" whose extra data carries a Unicode
+// path field for `decoded_name`: optionally behind `prefix_extra_bytes` of unrelated extra data,
+// and optionally followed by an empty field.
+constexpr const char* unicode_aux_payload = "unicode-auxiliary-contract";
+void append_unicode_auxiliary(const std::string& archive_path, const std::string& decoded_name,
+                              bool trailing_field = true, bool valid_crc = true, unsigned char version = 1,
+                              size_t prefix_extra_bytes = 0)
+{
+    const std::string stored_name = "Auxiliaries/docs/ascii.txt";
+    std::string extra;
+    REQUIRE(prefix_extra_bytes <= std::numeric_limits<uint16_t>::max());
+    if (prefix_extra_bytes != 0) {
+        append_extra_u16(extra, 0xcafe);
+        append_extra_u16(extra, static_cast<uint16_t>(prefix_extra_bytes));
+        extra.append(prefix_extra_bytes, 'x');
+    }
+    extra += unicode_path_extra(stored_name, decoded_name, valid_crc, version);
+    if (trailing_field) {
+        append_extra_u16(extra, 0xcafe);
+        append_extra_u16(extra, 0);
+    }
+    append_entry_with_extra(archive_path, stored_name, unicode_aux_payload, extra);
+}
+
+void store_unicode_fixture(const std::string& archive_path)
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_unicode_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    store_model(archive_path, source, config, plates);
+}
+
+// Loads the archive with auxiliary extraction and returns the model-owned auxiliary root.
+boost::filesystem::path load_auxiliary_root(const std::string& archive_path, Model& model, LoadedProject& loaded)
+{
+    REQUIRE(load_model(archive_path, model, loaded, nullptr,
+                       LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const boost::filesystem::path root = model.get_auxiliary_file_temp_path();
+    REQUIRE(root.parent_path() == loaded.backup->path());
+    return root;
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF validates auxiliary paths after decoding Unicode metadata", "[3MF][Bbs3mfExtended][Auxiliary][Security]")
+{
+    const bool traversal = GENERATE(false, true);
+    CAPTURE(traversal);
+    const std::string decoded_name = traversal ? "Auxiliaries/../escaped-unicode.txt" : "Auxiliaries/docs/renamed.txt";
+    ScopedTemporaryFile archive(".3mf");
+    store_unicode_fixture(archive.string());
+    append_unicode_auxiliary(archive.string(), decoded_name);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    const boost::filesystem::path root = load_auxiliary_root(archive.string(), loaded_model, loaded);
+    CHECK_FALSE(boost::filesystem::exists(root / "docs" / "ascii.txt"));
+    if (traversal) {
+        CHECK_FALSE(boost::filesystem::exists(root.parent_path() / "escaped-unicode.txt"));
+    } else {
+        std::string contents;
+        REQUIRE(boost::filesystem::exists(root / "docs" / "renamed.txt"));
+        read_file(root / "docs" / "renamed.txt", contents);
+        CHECK(contents == unicode_aux_payload);
+    }
+}
+
+TEST_CASE("BBS 3MF decodes long Unicode path metadata", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra][!shouldfail]")
+{
+    // Known bug: the decoder reads the field length through signed char, so a length byte of 128 or more
+    // gives a wrong length; fixed by the follow-up fix PR.
+    const bool trailing_field = GENERATE(false, true);
+    CAPTURE(trailing_field);
+    // A 130 character leaf makes the low byte of the field length exceed 127.
+    const std::string leaf = std::string(130, 'a') + "-long.txt";
+    ScopedTemporaryFile archive(".3mf");
+    store_unicode_fixture(archive.string());
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/" + leaf, trailing_field);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    const boost::filesystem::path root = load_auxiliary_root(archive.string(), loaded_model, loaded);
+    REQUIRE(boost::filesystem::exists(root / "docs" / leaf));
+    std::string contents;
+    read_file(root / "docs" / leaf, contents);
+    CHECK(contents == unicode_aux_payload);
+    CHECK_FALSE(boost::filesystem::exists(root / "docs" / "ascii.txt"));
+}
+TEST_CASE("BBS 3MF ignores Unicode metadata with an unsupported version", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_unicode_fixture(archive.string());
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/untrusted.txt", true, true, 2);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    const boost::filesystem::path root = load_auxiliary_root(archive.string(), loaded_model, loaded);
+    std::string contents;
+    REQUIRE(boost::filesystem::exists(root / "docs" / "ascii.txt"));
+    read_file(root / "docs" / "ascii.txt", contents);
+    CHECK(contents == unicode_aux_payload);
+    CHECK_FALSE(boost::filesystem::exists(root / "docs" / "untrusted.txt"));
+}
+
+TEST_CASE("BBS 3MF ignores Unicode metadata with an invalid checksum", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra][!shouldfail]")
+{
+    // Known bug: the decoder never compares the field checksum with the stored name; fixed by the follow-up fix PR.
+    ScopedTemporaryFile archive(".3mf");
+    store_unicode_fixture(archive.string());
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/untrusted.txt", true, false);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    const boost::filesystem::path root = load_auxiliary_root(archive.string(), loaded_model, loaded);
+    std::string contents;
+    REQUIRE(boost::filesystem::exists(root / "docs" / "ascii.txt"));
+    read_file(root / "docs" / "ascii.txt", contents);
+    CHECK(contents == unicode_aux_payload);
+    CHECK_FALSE(boost::filesystem::exists(root / "docs" / "untrusted.txt"));
+}
+
+TEST_CASE("BBS 3MF reads Unicode metadata located beyond 1024 bytes of extra data", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra][!shouldfail]")
+{
+    // Known bug: only the first 1024 bytes of the extra data are read; fixed by the follow-up fix PR.
+    // The 1100 byte filler field keeps its length byte below 128 and places the Unicode field past offset 1023,
+    // so the 1024 byte limit is the only reason this fails.
+    const bool trailing_field = GENERATE(false, true);
+    CAPTURE(trailing_field);
+    ScopedTemporaryFile archive(".3mf");
+    store_unicode_fixture(archive.string());
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/renamed.txt", trailing_field, true, 1, 1100);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    const boost::filesystem::path root = load_auxiliary_root(archive.string(), loaded_model, loaded);
+    REQUIRE(boost::filesystem::exists(root / "docs" / "renamed.txt"));
+    std::string contents;
+    read_file(root / "docs" / "renamed.txt", contents);
+    CHECK(contents == unicode_aux_payload);
+    CHECK_FALSE(boost::filesystem::exists(root / "docs" / "ascii.txt"));
+}
+
+TEST_CASE("BBS 3MF resolves the model part through Unicode metadata", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_unicode_fixture(archive.string());
+    const std::string stored_name = "3D/model-payload.bin";
+    const std::string decoded_name = "3D/3dmodel.model";
+    std::string model_data;
+    REQUIRE(rewrite_3mf_entries(archive.string(), [&](std::string& name, std::string& data) {
+        if (name != decoded_name)
+            return false;
+        model_data = data;
+        name = "3D/original-payload.bin";
+        return true;
+    }));
+    REQUIRE_FALSE(model_data.empty());
+    // Name lookup misses the model part; only the Unicode metadata on this distinct entry resolves it.
+    append_entry_with_extra(archive.string(), stored_name, model_data, unicode_path_extra(stored_name, decoded_name));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    CHECK(loaded_model.objects.front()->name == "base-object");
+    CHECK(loaded_model.objects.front()->instances.size() == 2);
+    TriangleMesh mesh = loaded_model.objects.front()->volumes.front()->mesh();
+    CHECK(mesh.facets_count() == 12);
+    CHECK_THAT(mesh.volume(), Catch::Matchers::WithinAbs(1000., 1e-4));
+}
+
+TEST_CASE("BBS 3MF falls back on a truncated Unicode metadata field", "[3MF][Bbs3mfExtended][Auxiliary][UnicodeExtra]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_unicode_fixture(archive.string());
+    const std::string stored_name = "Auxiliaries/docs/ascii.txt";
+    std::string extra = unicode_path_extra(stored_name, "short");
+    extra[2] = 32; // Declare more bytes than follow the four-byte field header.
+    append_entry_with_extra(archive.string(), stored_name, "truncated-unicode-contract", extra);
+
+    Model loaded_model;
+    LoadedProject loaded;
+    const boost::filesystem::path root = load_auxiliary_root(archive.string(), loaded_model, loaded);
+    std::string contents;
+    REQUIRE(boost::filesystem::exists(root / "docs" / "ascii.txt"));
+    read_file(root / "docs" / "ascii.txt", contents);
+    CHECK(contents == "truncated-unicode-contract");
+    CHECK_FALSE(boost::filesystem::exists(root / "docs" / "short"));
 }
 
 } // namespace bbs_archive_contracts
