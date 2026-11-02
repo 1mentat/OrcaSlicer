@@ -193,12 +193,15 @@ TEST_CASE("Groove width for flat flaps adds a full-depth mouth on each side", "[
     CHECK_THAT(Cut::calculate_groove_width(flat_groove(), 10.f), WithinAbs(7.5, 1e-5));
 }
 
-TEST_CASE("Groove width uses the flap angle to reduce the projected mouth width", "[CutUtils][CutUtilsGroove]")
+TEST_CASE("Groove width adds the horizontal run of each angled flap", "[CutUtils][CutUtilsGroove]")
 {
+    // A flap of depth 3 at angle a runs 3 / tan(a) horizontally, so steeper flaps give a narrower mouth.
+    // (A zero angle is special-cased as a flap one depth wide; see the flat-flap test.)
     Cut::Groove groove = flat_groove();
     groove.flaps_angle = float(PI / 6.);
-    // Each 30 degree flap of depth 3 spans 3 / tan(30) horizontally.
-    CHECK_THAT(Cut::calculate_groove_width(groove, 10.f), WithinAbs(1.5 + 2. * 3. / std::tan(PI / 6.), 1e-4));
+    CHECK_THAT(Cut::calculate_groove_width(groove, 10.f), WithinAbs(1.5 + 2. * 3. / std::tan(PI / 6.), 1e-4)); // 11.89
+    groove.flaps_angle = float(PI / 3.);
+    CHECK_THAT(Cut::calculate_groove_width(groove, 10.f), WithinAbs(1.5 + 2. * 3. / std::tan(PI / 3.), 1e-4)); // 4.96
 }
 
 TEST_CASE("Groove width grows with the taper angle in proportion to the radius", "[CutUtils][CutUtilsGroove]")
