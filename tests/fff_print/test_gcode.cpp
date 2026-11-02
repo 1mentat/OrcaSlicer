@@ -717,6 +717,7 @@ struct ZHopMotionEvidence
     size_t same_layer_diagonal_lift_moves = 0;
     size_t same_layer_maximum_diagonal_run = 0;
     size_t same_layer_overhang_spiral_excursions = 0;
+    std::vector<double> same_layer_lift_deltas;
     bool   finite = true;
 };
 
@@ -757,12 +758,14 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
     size_t excursion_diagonal = 0;
     size_t excursion_max_diagonal_run = 0;
     size_t diagonal_run = 0;
+    std::vector<double> excursion_lift_deltas;
     std::string active_role;
     GCodeReader reader;
     reader.apply_config(config);
     reader.parse_buffer(text, [&evidence, &retracted, &crossed_layer, &overhang_role_before_retraction,
                                &start_plane, &excursion_z_only, &excursion_diagonal,
-                               &excursion_max_diagonal_run, &diagonal_run, &active_role](GCodeReader &self,
+                               &excursion_max_diagonal_run, &diagonal_run, &excursion_lift_deltas,
+                               &active_role](GCodeReader &self,
                                    const GCodeReader::GCodeLine &line) {
         const std::string_view comment = zhop_trim_comment(line.comment());
         if (zhop_is_layer_marker(comment)) {
@@ -803,6 +806,7 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
                     excursion_diagonal = 0;
                     excursion_max_diagonal_run = 0;
                     diagonal_run = 0;
+                    excursion_lift_deltas.clear();
                 }
                 return;
             }
@@ -814,6 +818,9 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
                                             std::isfinite(end_plane) &&
                                             std::abs(end_plane - start_plane) <= plane_tolerance;
                     if (same_layer) {
+                        evidence.same_layer_lift_deltas.insert(evidence.same_layer_lift_deltas.end(),
+                                                               excursion_lift_deltas.begin(),
+                                                               excursion_lift_deltas.end());
                         ++evidence.same_layer_excursions;
                         evidence.same_layer_z_only_lift_moves += excursion_z_only;
                         evidence.same_layer_diagonal_lift_moves += excursion_diagonal;
@@ -844,6 +851,7 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
             diagonal_run = 0;
             return;
         }
+        excursion_lift_deltas.push_back(dz);
         if (xy <= EPSILON) {
             ++excursion_z_only;
             diagonal_run = 0;
@@ -855,6 +863,35 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
     });
     REQUIRE(evidence.finite);
     return evidence;
+}
+
+struct DepositionEndpoint
+{
+    int    layer = -1;
+    double x = 0.;
+    double y = 0.;
+    double z = 0.;
+    double e = 0.;
+};
+
+std::vector<DepositionEndpoint> deposition_endpoints(const std::string &text,
+                                                      const DynamicPrintConfig &config)
+{
+    std::vector<DepositionEndpoint> endpoints;
+    int current_layer = -1;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&endpoints, &current_layer](GCodeReader &self,
+                                                           const GCodeReader::GCodeLine &line) {
+        if (zhop_is_layer_marker(line.comment()))
+            ++current_layer;
+        const bool motion = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+        if (!motion || !line.extruding(self) || line.dist_XY(self) <= EPSILON || line.dist_E(self) <= EPSILON)
+            return;
+        endpoints.push_back({current_layer, line.new_X(self), line.new_Y(self),
+                             line.new_Z(self), line.dist_E(self)});
+    });
+    return endpoints;
 }
 
 DynamicPrintConfig zhop_type_config(const ZHopType type)
@@ -876,6 +913,114 @@ DynamicPrintConfig zhop_type_config(const ZHopType type)
     });
     config.set_key_value("z_hop_types", new ConfigOptionEnumsGeneric{type});
     return config;
+}
+
+TEST_CASE("Signed Z offset shifts deposited machine coordinates without changing paths",
+          "[GCode][ZOffsetPipeline][ZCoordinateSettingsPipeline]")
+{
+    const auto configured = [](double offset) {
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({
+            {"gcode_flavor", "marlin2"},
+            {"machine_start_gcode", ""},
+            {"machine_end_gcode", ""},
+            {"file_start_gcode", ""},
+            {"layer_change_gcode", "G92 E0\n"},
+            {"use_relative_e_distances", true},
+            {"z_offset", offset},
+            {"z_hop", 0.0},
+            {"retract_lift_above", 0.0},
+            {"retract_lift_below", 0.0},
+            {"retract_when_changing_layer", false},
+        });
+        return config;
+    };
+
+    const DynamicPrintConfig reference_config = configured(0.0);
+    const ExportedPrint reference_output = fresh_export(reference_config);
+    const MotionEvidence reference_motion = motion_evidence(reference_output.text, reference_config);
+    const std::vector<DepositionEndpoint> reference =
+        deposition_endpoints(reference_output.text, reference_config);
+    REQUIRE(reference_motion.extrusion_moves > 0);
+    REQUIRE(reference.size() == reference_motion.extrusion_moves);
+    REQUIRE(reference.size() > 1);
+    const int first_layer = reference.front().layer;
+    REQUIRE(first_layer >= 0);
+    const auto later_layer_point = std::find_if(reference.begin(), reference.end(), [first_layer](const auto &point) {
+        return point.layer > first_layer;
+    });
+    REQUIRE(later_layer_point != reference.end());
+    const size_t later_layer_index = static_cast<size_t>(std::distance(reference.begin(), later_layer_point));
+    CHECK_THAT(reference.front().z, Catch::Matchers::WithinAbs(0.2, 0.0011));
+    CHECK(later_layer_point->z > reference.front().z);
+
+    for (const double offset : {0.1, -0.1}) {
+        CAPTURE(offset);
+        const DynamicPrintConfig config = configured(offset);
+        const ExportedPrint output = fresh_export(config);
+        const MotionEvidence observed_motion = motion_evidence(output.text, config);
+        const std::vector<DepositionEndpoint> observed = deposition_endpoints(output.text, config);
+        require_same_material(reference_motion, observed_motion);
+        REQUIRE(observed.size() == reference.size());
+        for (size_t i = 0; i < reference.size(); ++i) {
+            CAPTURE(i, reference[i].layer);
+            CHECK(observed[i].layer == reference[i].layer);
+            CHECK_THAT(observed[i].x, Catch::Matchers::WithinAbs(reference[i].x, 0.0011));
+            CHECK_THAT(observed[i].y, Catch::Matchers::WithinAbs(reference[i].y, 0.0011));
+            CHECK_THAT(observed[i].z, Catch::Matchers::WithinAbs(reference[i].z + offset, 0.0011));
+            CHECK_THAT(observed[i].e, Catch::Matchers::WithinAbs(reference[i].e, 0.0011));
+        }
+        CHECK_THAT(observed.front().z, Catch::Matchers::WithinAbs(reference.front().z + offset, 0.0011));
+        CHECK_THAT(observed[later_layer_index].z,
+                   Catch::Matchers::WithinAbs(reference[later_layer_index].z + offset, 0.0011));
+    }
+}
+
+TEST_CASE("Normal Z-hop emits its configured zero, nominal, and maximum lift heights",
+          "[GCode][ZHopType][ZCoordinateSettingsPipeline]")
+{
+    MotionEvidence reference_motion;
+    bool have_reference = false;
+    for (const double height : {0.0, 0.4, 5.0}) {
+        CAPTURE(height);
+        DynamicPrintConfig config = zhop_type_config(ZHopType::zhtNormal);
+        config.set_deserialize_strict({
+            {"gcode_flavor", "marlin2"},
+            {"machine_start_gcode", ""},
+            {"machine_end_gcode", ""},
+            {"file_start_gcode", ""},
+            {"layer_change_gcode", "G92 E0\n"},
+            {"use_relative_e_distances", true},
+            {"z_offset", 0.0},
+            {"z_hop", height},
+            {"retraction_minimum_travel", 0.0},
+            {"retract_when_changing_layer", false},
+            {"retract_lift_above", 0.0},
+            {"retract_lift_below", 0.0},
+            {"wipe", false},
+        });
+        const ExportedPrint output = fresh_export(config);
+        const MotionEvidence material = motion_evidence(output.text, config);
+        REQUIRE(material.extrusion_moves > 0);
+        if (!have_reference) {
+            reference_motion = material;
+            have_reference = true;
+        } else {
+            require_same_material(reference_motion, material);
+        }
+
+        const ZHopMotionEvidence lift = zhop_motion_evidence(output.text, config);
+        REQUIRE(lift.retractions > 0);
+        if (height == 0.0) {
+            CHECK(lift.same_layer_lift_deltas.empty());
+            CHECK(lift.same_layer_z_only_lift_moves == 0);
+        } else {
+            REQUIRE_FALSE(lift.same_layer_lift_deltas.empty());
+            REQUIRE(lift.same_layer_z_only_lift_moves > 0);
+            for (const double delta : lift.same_layer_lift_deltas)
+                CHECK_THAT(delta, Catch::Matchers::WithinAbs(height, 0.0011));
+        }
+    }
 }
 
 TEST_CASE("Public Z-hop modes preserve deposition while changing lift motion",

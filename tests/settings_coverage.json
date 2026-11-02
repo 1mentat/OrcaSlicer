@@ -1153,12 +1153,22 @@
     },
     "z_hop": {
       "test": "tests/fff_print/test_gcode.cpp",
-      "tag": "[GCodePrintVariance]",
+      "tag": "[ZCoordinateSettingsPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The ZCoordinateSettingsPipeline public Print export pins normal lift and checks the registered 0 and 5 mm endpoints plus the 0.4 mm default against emitted positive same-layer lift deltas. All rows preserve positive-XY deposition. Other lift modes and offset interactions are not claimed."
+    },
+    "z_offset": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ZCoordinateSettingsPipeline]",
       "dimensions": [
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Zero and a 1 mm Z-hop are sliced with retraction enabled; hopping adds vertical travel moves while preserving deposited material. The full numeric domain and disabled-retraction interaction are not claimed."
+      "reason": "The ZCoordinateSettingsPipeline public Print export compares zero with signed +0.1 and -0.1 mm offsets. For every positive-XY deposition endpoint, raw machine Z shifts by the requested signed offset while layer identity, XY endpoints, extrusion deltas, path count, and total deposited material remain equal; first-layer and later-layer witnesses are required. z_offset has no registered numeric bounds, so no boundary or full-domain claim is made."
     },
     "line_width": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
