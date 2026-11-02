@@ -20,7 +20,13 @@
 
 #include <boost/nowide/fstream.hpp>
 #include "libslic3r/Config.hpp"
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
+#include <iomanip>
+#include <limits>
+#include <string>
 #include <initializer_list>
 #include <memory>
 #include <map>
@@ -1811,6 +1817,191 @@ template<class Source> void check_member_apply_matches_key_apply(const Source &s
     CHECK_FALSE(differing_keys(by_member, FullPrintConfig()).empty());
 }
 
+bool is_numeric_option_type(const ConfigOptionType type)
+{
+    switch (type) {
+    case coFloat:
+    case coFloats:
+    case coInt:
+    case coInts:
+    case coPercent:
+    case coPercents:
+    case coFloatOrPercent:
+    case coFloatsOrPercents:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_integer_option_type(const ConfigOptionType type)
+{
+    return type == coInt || type == coInts;
+}
+
+bool is_percent_option_type(const ConfigOptionType type)
+{
+    return type == coPercent || type == coPercents;
+}
+
+std::string serialize_numeric_boundary(const ConfigOptionType type, const double value)
+{
+    std::ostringstream stream;
+    if (is_integer_option_type(type))
+        stream << static_cast<long long>(std::llround(value));
+    else
+        stream << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    if (is_percent_option_type(type))
+        stream << '%';
+    return stream.str();
+}
+
+// An empty aggregate has no unambiguous serialized representation: its
+// deserializer treats empty input as one empty group. Keep the one registered
+// case explicit while exercising every other default below.
+const std::set<std::string> expected_empty_aggregate_defaults = {"extruder_printable_area"};
+
+// A value of the option's type that differs from its default, used to prove that
+// deserialization really replaces the stored value. For enums, the decoded values
+// it must produce.
+struct Representative {
+    std::string      text;
+    std::vector<int> enum_values;
+};
+
+Representative representative_value(const ConfigOptionDef &def, const ConfigOption &default_option)
+{
+    switch (def.type) {
+    case coFloat: return {"12.5", {}};
+    case coFloats: return {"12.5,7.25", {}};
+    case coInt: return {"7", {}};
+    case coInts: return {"7,3", {}};
+    case coPercent: return {"37%", {}};
+    case coPercents: return {"37%,12%", {}};
+    case coFloatOrPercent: return {"37%", {}};
+    case coFloatsOrPercents: return {"37%,1.5", {}};
+    case coString: return {"schema-roundtrip", {}};
+    case coStrings: return {"schema-roundtrip;second-value", {}};
+    case coPoint: return {"1,2", {}};
+    case coPoints: return {"1x2,3x4", {}};
+    case coPoint3: return {"1,2,3", {}};
+    case coPointsGroups: return {"1x2,3x4#5x6", {}};
+    case coIntsGroups: return {"1,2#3", {}};
+    case coBool: return {default_option.getBool() ? "0" : "1", {}};
+    case coBools: return {default_option.serialize() == "1,0" ? "0,1" : "1,0", {}};
+    case coEnum:
+    case coEnums: {
+        // Keys whose values differ from each other and from the first default value.
+        const auto *default_list = dynamic_cast<const ConfigOptionInts *>(&default_option);
+        const int   default_value = default_list == nullptr ? default_option.getInt() :
+                                    default_list->values.empty() ? -1 : default_list->values.front();
+        Representative out;
+        for (const auto &[key, value] : *def.enum_keys_map) {
+            if (value == default_value || (!out.enum_values.empty() && value == out.enum_values.front()))
+                continue;
+            if (!out.text.empty())
+                out.text += ',';
+            out.text += key;
+            out.enum_values.push_back(value);
+            if (def.type == coEnum || out.enum_values.size() == 2)
+                break;
+        }
+        return out;
+    }
+    default: return {};
+    }
+}
+
+template<class T> const T &option_as(const ConfigOption &option)
+{
+    const T *typed = dynamic_cast<const T *>(&option);
+    REQUIRE(typed != nullptr);
+    return *typed;
+}
+
+// Checks every decoded field of an option deserialized from representative_value().
+void check_representative_values(const ConfigOptionDef &def, const ConfigOption &option, const Representative &representative)
+{
+    using Catch::Matchers::WithinAbs;
+    switch (def.type) {
+    case coFloat: CHECK_THAT(option_as<ConfigOptionFloat>(option).value, WithinAbs(12.5, 1e-12)); break;
+    case coPercent: CHECK_THAT(option_as<ConfigOptionPercent>(option).value, WithinAbs(37., 1e-12)); break;
+    case coFloats:
+    case coPercents: {
+        const auto &values = option_as<ConfigOptionVector<double>>(option).values;
+        REQUIRE(values.size() == 2);
+        CHECK_THAT(values[0], WithinAbs(def.type == coFloats ? 12.5 : 37., 1e-12));
+        CHECK_THAT(values[1], WithinAbs(def.type == coFloats ? 7.25 : 12., 1e-12));
+        break;
+    }
+    case coFloatOrPercent: {
+        const auto &value = option_as<ConfigOptionFloatOrPercent>(option);
+        CHECK_THAT(value.value, WithinAbs(37., 1e-12));
+        CHECK(value.percent);
+        break;
+    }
+    case coFloatsOrPercents: {
+        const auto &values = option_as<ConfigOptionVector<FloatOrPercent>>(option).values;
+        REQUIRE(values.size() == 2);
+        CHECK_THAT(values[0].value, WithinAbs(37., 1e-12));
+        CHECK(values[0].percent);
+        CHECK_THAT(values[1].value, WithinAbs(1.5, 1e-12));
+        CHECK_FALSE(values[1].percent);
+        break;
+    }
+    case coInt: CHECK(option_as<ConfigOptionInt>(option).value == 7); break;
+    case coInts: CHECK(option_as<ConfigOptionVector<int>>(option).values == std::vector<int>{7, 3}); break;
+    case coString: CHECK(option_as<ConfigOptionString>(option).value == "schema-roundtrip"); break;
+    case coStrings:
+        CHECK(option_as<ConfigOptionStrings>(option).values == std::vector<std::string>{"schema-roundtrip", "second-value"});
+        break;
+    case coPoint: CHECK(option_as<ConfigOptionPoint>(option).value == Vec2d(1., 2.)); break;
+    case coPoints: CHECK(option_as<ConfigOptionPoints>(option).values == std::vector<Vec2d>{Vec2d(1., 2.), Vec2d(3., 4.)}); break;
+    case coPoint3: CHECK(option_as<ConfigOptionPoint3>(option).value == Vec3d(1., 2., 3.)); break;
+    case coPointsGroups: {
+        const auto &groups = option_as<ConfigOptionPointsGroups>(option).values;
+        REQUIRE(groups.size() == 2);
+        CHECK(groups[0] == Vec2ds{Vec2d(1., 2.), Vec2d(3., 4.)});
+        CHECK(groups[1] == Vec2ds{Vec2d(5., 6.)});
+        break;
+    }
+    case coIntsGroups:
+        CHECK(option_as<ConfigOptionIntsGroups>(option).values == std::vector<std::vector<int>>{{1, 2}, {3}});
+        break;
+    case coBool: CHECK(option_as<ConfigOptionBool>(option).value == (representative.text == "1")); break;
+    case coBools:
+        CHECK(option_as<ConfigOptionVector<unsigned char>>(option).values ==
+              (representative.text == "1,0" ? std::vector<unsigned char>{1, 0} : std::vector<unsigned char>{0, 1}));
+        break;
+    case coEnum: CHECK(option.getInt() == representative.enum_values.front()); break;
+    case coEnums: CHECK(option_as<ConfigOptionInts>(option).values == representative.enum_values); break;
+    default: FAIL("unhandled option type " << int(def.type));
+    }
+}
+
+// The decoded value and percent flag of a numeric option's first element.
+std::pair<double, bool> first_numeric_value(const ConfigOption &option)
+{
+    switch (option.type()) {
+    case coFloat:
+    case coPercent: return {static_cast<const ConfigOptionFloat &>(option).value, option.type() == coPercent};
+    case coFloatOrPercent: {
+        const auto &value = static_cast<const ConfigOptionFloatOrPercent &>(option);
+        return {value.value, value.percent};
+    }
+    case coFloats:
+    case coPercents: return {static_cast<const ConfigOptionVector<double> &>(option).values.at(0), option.type() == coPercents};
+    case coFloatsOrPercents: {
+        const FloatOrPercent &value = static_cast<const ConfigOptionVector<FloatOrPercent> &>(option).values.at(0);
+        return {value.value, value.percent};
+    }
+    case coInt: return {double(static_cast<const ConfigOptionInt &>(option).value), false};
+    case coInts: return {double(static_cast<const ConfigOptionVector<int> &>(option).values.at(0)), false};
+    default: return {std::numeric_limits<double>::quiet_NaN(), false};
+    }
+}
+
+
 } // namespace
 
 TEST_CASE("A static config applies itself onto a config of its type as a lookup by name would", "[Config]")
@@ -1873,6 +2064,273 @@ TEST_CASE("Default options of enum lists get their definition's keys map", "[Con
         ++enum_lists;
     }
     CHECK(enum_lists > 0);
+}
+
+TEST_CASE("Every registered print option has a complete schema contract", "[Config][Schema]")
+{
+    // `extruder` is an object-level override whose zero value means "inherit". It is
+    // intentionally represented by an empty option rather than a preset default. Any
+    // newly registered option without a default should make this allowlist fail loudly.
+    const std::set<std::string> expected_defaultless = {"extruder"};
+    std::set<std::string>       actual_defaultless;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        INFO(key);
+        CHECK(def.opt_key == key);
+        CHECK(def.serialization_key_ordinal > 0);
+
+        if (def.default_value.get() == nullptr)
+            actual_defaultless.insert(key);
+        else
+            CHECK(def.default_value->type() == def.type);
+
+        // Every definition must be able to materialize its normal dynamic value. The
+        // two grouped point/int types are static-only containers and are deliberately
+        // excluded from create_empty_option()'s scalar/vector factory.
+        const std::unique_ptr<ConfigOption> default_option(def.create_default_option());
+        REQUIRE(default_option != nullptr);
+        CHECK(default_option->type() == def.type);
+
+        // Nullable enum lists carry their meaningful empty state in the default
+        // clone (create_empty_option() intentionally has no nullable coEnums
+        // branch). Keep this exception explicit so a new unsupported nullable
+        // type cannot silently bypass the factory contract.
+        const bool empty_factory_supported = !(def.nullable && def.type == coEnums);
+        if (def.type != coPointsGroups && def.type != coIntsGroups && empty_factory_supported) {
+            const std::unique_ptr<ConfigOption> empty_option(def.create_empty_option());
+            REQUIRE(empty_option != nullptr);
+            CHECK(empty_option->type() == def.type);
+            CHECK(empty_option->nullable() == def.nullable);
+        }
+
+        if (def.type == coEnum || def.type == coEnums) {
+            REQUIRE(def.enum_keys_map != nullptr);
+            REQUIRE_FALSE(def.enum_values.empty());
+            const std::set<std::string> unique_values(def.enum_values.begin(), def.enum_values.end());
+            CHECK(unique_values.size() == def.enum_values.size());
+            for (const std::string &value : def.enum_values) {
+                const bool canonical = def.enum_keys_map->find(value) != def.enum_keys_map->end();
+                if (!canonical) {
+                    // filament_map_mode keeps the UI-only "Default" menu
+                    // sentinel in enum_values even though it is not a
+                    // serialized enum key. Any other missing map key is a
+                    // schema drift that this inventory must report.
+                    CHECK(key == "filament_map_mode");
+                    CHECK(value == "Default");
+                }
+            }
+            // enum_values is the UI-facing menu. It may intentionally omit
+            // canonical aliases or firmware tokens that remain valid through
+            // enum_keys_map; the round-trip test below exercises every map key.
+        }
+    }
+
+    CHECK(actual_defaultless == expected_defaultless);
+    CHECK(print_config_def.options.size() >= 750); // 861 today
+}
+
+TEST_CASE("Every registered option has a strict default serialization round-trip", "[Config][Schema][RoundTrip]")
+{
+    std::set<std::string> empty_aggregate_defaults;
+    size_t                roundtripped = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        INFO(key);
+        const std::unique_ptr<ConfigOption> source(def.create_default_option());
+        REQUIRE(source != nullptr);
+        const std::string serialized = source->serialize();
+
+        if (serialized.empty() && (def.type == coPointsGroups || def.type == coIntsGroups)) {
+            empty_aggregate_defaults.insert(key);
+            continue;
+        }
+
+        // Start from a different value, so a deserializer that accepts the text without
+        // storing it cannot pass.
+        const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+        REQUIRE(restored != nullptr);
+        REQUIRE(restored->deserialize(representative_value(def, *source).text));
+        REQUIRE(restored->serialize() != serialized);
+        REQUIRE(restored->deserialize(serialized));
+        // A few legacy vector defaults originate from float literals (for example 0.01f)
+        // but are stored as doubles. Their decimal wire form is intentionally shorter than
+        // the promoted binary value, so object equality is too strict here; every field
+        // is compared through its canonical serialization instead.
+        CHECK(restored->serialize() == serialized);
+        ++roundtripped;
+    }
+
+    CHECK(empty_aggregate_defaults == expected_empty_aggregate_defaults);
+    CHECK(roundtripped + empty_aggregate_defaults.size() == print_config_def.options.size());
+    CHECK(roundtripped >= 750); // 860 registered today; a floor so the sweep cannot silently shrink
+}
+
+TEST_CASE("Registered options decode a non-default value of their type", "[Config][Schema][RoundTrip]")
+{
+    std::map<ConfigOptionType, size_t> decoded_by_type;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        INFO(key);
+        const std::unique_ptr<ConfigOption> source(def.create_default_option());
+        REQUIRE(source != nullptr);
+        const Representative representative = representative_value(def, *source);
+        REQUIRE_FALSE(representative.text.empty());
+        REQUIRE(representative.text != source->serialize());
+
+        const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+        REQUIRE(restored != nullptr);
+        REQUIRE(restored->deserialize(representative.text));
+        check_representative_values(def, *restored, representative);
+        CHECK(restored->serialize() == representative.text);
+        ++decoded_by_type[def.type];
+    }
+
+    size_t decoded = 0;
+    for (const auto &[type, count] : decoded_by_type)
+        decoded += count;
+    CHECK(decoded == print_config_def.options.size());
+    CHECK(decoded_by_type.size() >= 15); // 17 option types are registered today
+}
+
+TEST_CASE("All registered enum values round-trip through their serialized form", "[Config][Schema][Enum]")
+{
+    size_t enum_options = 0;
+    for (const auto &[key, def] : print_config_def.options) {
+        if (def.type != coEnum && def.type != coEnums)
+            continue;
+        ++enum_options;
+        REQUIRE(def.enum_keys_map != nullptr);
+        // Iterate the enum key map, because enum_values can also contain a
+        // UI-only menu sentinel (filament_map_mode/Default).
+        for (const auto &[value, enum_value] : *def.enum_keys_map) {
+            (void)enum_value;
+            INFO(key << " = " << value);
+            const bool empty_factory_supported = !(def.nullable && def.type == coEnums);
+            const std::unique_ptr<ConfigOption> option(empty_factory_supported ?
+                def.create_empty_option() : def.create_default_option());
+            REQUIRE(option != nullptr);
+            REQUIRE(option->deserialize(value));
+            CHECK(option->serialize() == value);
+        }
+    }
+    CHECK(enum_options >= 60); // 72 today
+}
+
+TEST_CASE("All registered boolean settings accept 0 and 1 and reject other values", "[Config][Schema][Bool]")
+{
+    size_t bool_options = 0;
+    for (const auto &[key, def] : print_config_def.options) {
+        if (def.type != coBool && def.type != coBools)
+            continue;
+        ++bool_options;
+
+        INFO(key);
+        const std::unique_ptr<ConfigOption> option(def.create_empty_option());
+        REQUIRE(option != nullptr);
+        REQUIRE(option->deserialize("0"));
+        CHECK(option->serialize() == "0");
+        REQUIRE(option->deserialize("1"));
+        CHECK(option->serialize() == "1");
+        CHECK_FALSE(option->deserialize("2"));
+        CHECK_FALSE(option->deserialize("true"));
+
+        if (def.type == coBool) {
+            // A scalar boolean takes the first element of comma-separated input.
+            REQUIRE(option->deserialize("1,0"));
+            CHECK(option->serialize() == "1");
+            REQUIRE(option->deserialize("0,1"));
+            CHECK(option->serialize() == "0");
+        }
+
+        if (def.type == coBools) {
+            REQUIRE(option->deserialize("0,1"));
+            CHECK(option->serialize() == "0,1");
+            if (def.nullable) {
+                REQUIRE(option->deserialize("nil"));
+                CHECK(option->serialize() == "nil");
+            }
+        }
+    }
+    CHECK(bool_options >= 140); // 164 today
+}
+
+TEST_CASE("Numeric option definitions enforce their declared finite boundaries", "[Config][Schema][Numeric]")
+{
+    const double float_limit = static_cast<double>(std::numeric_limits<float>::max()) / 2.;
+    size_t       bounded_options = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        if (!is_numeric_option_type(def.type))
+            continue;
+
+        const bool has_min = static_cast<double>(def.min) > -float_limit;
+        const bool has_max = static_cast<double>(def.max) < float_limit;
+        if (!has_min && !has_max)
+            continue;
+        ++bounded_options;
+
+        INFO(key);
+        if (has_min) {
+            CHECK(def.is_value_valid(def.min));
+            const double delta = std::max(1., std::abs(static_cast<double>(def.min)) * 0.01);
+            CHECK_FALSE(def.is_value_valid(static_cast<double>(def.min) - delta));
+        }
+        if (has_max) {
+            CHECK(def.is_value_valid(def.max));
+            const double delta = std::max(1., std::abs(static_cast<double>(def.max)) * 0.01);
+            CHECK_FALSE(def.is_value_valid(static_cast<double>(def.max) + delta));
+        }
+    }
+
+    CHECK(bounded_options >= 380); // 447 today
+}
+
+TEST_CASE("Registered numeric boundaries round-trip through strict serialization", "[Config][Schema][Numeric][RoundTrip]")
+{
+    const double float_limit = static_cast<double>(std::numeric_limits<float>::max()) / 2.;
+    size_t       boundary_values = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        if (!is_numeric_option_type(def.type))
+            continue;
+
+        const bool has_min = static_cast<double>(def.min) > -float_limit;
+        const bool has_max = static_cast<double>(def.max) < float_limit;
+        const std::array<double, 2> boundaries = {
+            has_min ? static_cast<double>(def.min) : std::numeric_limits<double>::quiet_NaN(),
+            has_max ? static_cast<double>(def.max) : std::numeric_limits<double>::quiet_NaN(),
+        };
+        for (const double boundary : boundaries) {
+            if (!std::isfinite(boundary))
+                continue;
+
+            INFO(key << " boundary=" << boundary);
+            CHECK(def.is_value_valid(boundary));
+            const std::string serialized_boundary = serialize_numeric_boundary(def.type, boundary);
+            const std::unique_ptr<ConfigOption> source(def.create_default_option());
+            REQUIRE(source != nullptr);
+            REQUIRE(source->deserialize(serialized_boundary));
+            const double expected = is_integer_option_type(def.type) ? double(std::llround(boundary)) : boundary;
+            const auto [decoded, percent] = first_numeric_value(*source);
+            CHECK_THAT(decoded, Catch::Matchers::WithinAbs(expected, 1e-9 * std::max(1., std::abs(expected))));
+            CHECK(percent == is_percent_option_type(def.type));
+
+            const std::string canonical = source->serialize();
+            const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+            REQUIRE(restored != nullptr);
+            REQUIRE(restored->deserialize(canonical));
+            CHECK(restored->serialize() == canonical);
+            // Round trip is decode -> serialize -> decode: the restored option must hold the same boundary.
+            // The canonical text drops digits beyond float precision (def.min/max are floats, so
+            // e.g. 0.1f widens to 0.10000000149), hence the looser relative tolerance.
+            const auto [restored_value, restored_percent] = first_numeric_value(*restored);
+            CHECK_THAT(restored_value, Catch::Matchers::WithinAbs(expected, 1e-6 * std::max(1., std::abs(expected))));
+            CHECK(restored_percent == percent);
+            ++boundary_values;
+        }
+    }
+
+    CHECK(boundary_values >= 550); // 654 today
 }
 
 // Known bug: coEnums defaults such as z_hop_types are built without a keys map, and static configs copy that
@@ -2214,6 +2672,59 @@ std::string error_message(const std::map<std::string, std::string> &errors, cons
 }
 
 } // namespace
+
+TEST_CASE("Bridge line width is limited by the smallest nozzle while other widths use the largest", "[Config][Validation]")
+{
+    struct Row {
+        const char *nozzles;
+        const char *bridge_width;
+        bool        rejected;
+    };
+    const Row rows[] = {
+        {"0.4",     "0.41", true},
+        {"0.4",     "0.4",  false},  // exactly the nozzle diameter
+        {"0.4",     "0.39", false},
+        {"0.4,0.6", "0.41", true},   // below the largest nozzle but above the smallest
+        {"0.4,0.6", "0.4",  false},
+        {"0.4",     "100%", false},
+        {"0.4,0.6", "60%",  false},  // below 100% of every extruder's own nozzle
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION("nozzles " << row.nozzles << ", bridge " << row.bridge_width) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("nozzle_diameter", row.nozzles);
+            config.set_deserialize_strict("bridge_line_width", row.bridge_width);
+            const auto errors = config.validate();
+            CHECK(has_error(errors, "bridge_line_width") == row.rejected);
+            if (row.rejected)
+                CHECK_THAT(error_message(errors, "bridge_line_width"), Catch::Matchers::ContainsSubstring("must not exceed nozzle diameter"));
+        }
+    }
+
+    // Ordinary line widths are capped at MAX_LINE_WIDTH_MULTIPLIER times the largest nozzle (3.0 mm here).
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("nozzle_diameter", "0.4,0.6");
+    config.set_deserialize_strict("outer_wall_line_width", "2.9");
+    CHECK_FALSE(has_error(config.validate(), "outer_wall_line_width"));
+    config.set_deserialize_strict("outer_wall_line_width", "3.1");
+    CHECK_THAT(error_message(config.validate(), "outer_wall_line_width"), Catch::Matchers::ContainsSubstring("too large line width"));
+}
+
+// Known bug: validate() resolves a percent bridge_line_width against the LARGEST nozzle and compares it with the
+// SMALLEST, while printing (LayerRegion::bridging_flow, Print::validate) resolves it against the nozzle of the
+// extruder that prints the bridge, so a percentage of at most 100% never exceeds that extruder's own nozzle;
+// fixed by the follow-up fix PR.
+TEST_CASE("Percent bridge line width is accepted when it fits each extruder's own nozzle", "[Config][Validation][!shouldfail]")
+{
+    for (const char *width : {"70%", "100%"}) {
+        DYNAMIC_SECTION("bridge " << width << " with 0.4 and 0.6 mm nozzles") {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("nozzle_diameter", "0.4,0.6");
+            config.set_deserialize_strict("bridge_line_width", width);
+            CHECK_FALSE(has_error(config.validate(), "bridge_line_width"));
+        }
+    }
+}
 
 TEST_CASE("Firmware retraction validation accepts only firmware flavors that implement it", "[Config][Validation]")
 {
