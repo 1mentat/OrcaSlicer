@@ -4,6 +4,7 @@
 #include "libslic3r/TextureToColor/Repair.hpp"
 #include "libslic3r/TextureToColor/TriMesh.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "texture_to_color_fixtures.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -21,50 +22,10 @@
 
 using namespace Slic3r;
 using namespace Slic3r::tex2color;
+using namespace Slic3r::tex2color::test;
 using Catch::Matchers::WithinAbs;
 
 namespace {
-
-// Unit right tetrahedron, outward-facing, volume 1/6.
-TriMesh closed_tetrahedron()
-{
-    return TriMesh(
-        {
-            stl_triangle_vertex_indices(0, 2, 1),
-            stl_triangle_vertex_indices(0, 1, 3),
-            stl_triangle_vertex_indices(1, 2, 3),
-            stl_triangle_vertex_indices(2, 0, 3),
-        },
-        {
-            stl_vertex(0.f, 0.f, 0.f),
-            stl_vertex(1.f, 0.f, 0.f),
-            stl_vertex(0.f, 1.f, 0.f),
-            stl_vertex(0.f, 0.f, 1.f),
-        });
-}
-
-// The tetrahedron without its last face: one three-edge hole.
-TriMesh open_tetrahedron()
-{
-    TriMesh mesh = closed_tetrahedron();
-    mesh.indices.pop_back();
-    return mesh;
-}
-
-// Every vertex is finite and every face index refers to an existing vertex.
-void check_finite_and_valid(const TriMesh &mesh)
-{
-    for (const stl_vertex &vertex : mesh.vertices) {
-        for (std::size_t component = 0; component < 3; ++component)
-            CHECK(std::isfinite(vertex[component]));
-    }
-    for (const stl_triangle_vertex_indices &face : mesh.indices) {
-        for (std::size_t component = 0; component < 3; ++component) {
-            REQUIRE(face[component] >= 0);
-            REQUIRE(static_cast<std::size_t>(face[component]) < mesh.vertices.size());
-        }
-    }
-}
 
 // The tetrahedron with its base face flipped and an extra degenerate face.
 TriMesh reversed_tetrahedron_with_degenerate_face()
