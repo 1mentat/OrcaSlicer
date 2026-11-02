@@ -64,6 +64,7 @@ add_executable(${_TEST_NAME}_tests
     test_nozzle_volume_type.cpp
     test_obj.cpp
     test_obj_color_utils.cpp
+    test_color_utils_contracts.cpp
     test_orient.cpp
     test_sl1.cpp
     test_zipper_archive_import.cpp
@@ -114,6 +115,10 @@ if (SLIC3R_CAD)
         test_sketchinference.cpp
         test_slvs_constraints.cpp)
 endif ()
+
+# The TextureToColor headers include "Point.hpp" without the libslic3r/ prefix.
+set_property(SOURCE test_color_utils_contracts.cpp APPEND PROPERTY
+    INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/src/libslic3r")
 
 if (TARGET OpenVDB::openvdb)
     target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp)
