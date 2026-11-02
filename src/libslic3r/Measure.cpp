@@ -1372,7 +1372,9 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
                 }
             }
             else {
-                result.distance_strict = std::make_optional(DistAndPoints{0, center, origin2});
+                // The circle lies in the plane: any circle point is on the plane, so use one as both witnesses.
+                const Vec3d on_circle = center + radius * get_orthogonal(normal1, true);
+                result.distance_strict = std::make_optional(DistAndPoints{0, on_circle, on_circle});
             }
         }
     ///////////////////////////////////////////////////////////////////////////

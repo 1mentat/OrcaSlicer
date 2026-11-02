@@ -2421,6 +2421,88 @@ TEST_CASE("Core FFF numeric validation rejects values below their semantic floor
     }
 }
 
+TEST_CASE("normalize_fdm applies spiral mode safety values and is idempotent", "[Config][NormalizeFdm]")
+{
+    const bool split_step = GENERATE(false, true);
+    CAPTURE(split_step);
+    const auto normalize = [split_step](DynamicPrintConfig &config) {
+        if (split_step)
+            config.normalize_fdm_1();
+        else
+            config.normalize_fdm(0);
+    };
+    const auto make_config = [](bool spiral) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set("spiral_mode", spiral);
+        config.set("alternate_extra_wall", true);
+        config.set("wall_loops", 4);
+        config.set("top_shell_layers", 3);
+        config.set("bottom_shell_layers", 5);
+        config.set_deserialize_strict("sparse_infill_density", "20");
+        config.set_deserialize_strict("retract_when_changing_layer", "1,1");
+        config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true)->values = {true, true};
+        return config;
+    };
+    const auto check_unchanged = [](const DynamicPrintConfig &config) {
+        CHECK(config.opt_bool("alternate_extra_wall"));
+        CHECK(config.opt_int("wall_loops") == 4);
+        CHECK(config.opt_int("top_shell_layers") == 3);
+        CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(20., 1e-12));
+        CHECK(config.opt<ConfigOptionBools>("retract_when_changing_layer")->values == std::vector<unsigned char>{1, 1});
+        CHECK(config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer")->values == std::vector<unsigned char>{1, 1});
+    };
+
+    SECTION("spiral mode forces a single hollow wall without retraction on layer change")
+    {
+        DynamicPrintConfig config = make_config(true);
+        for (int pass = 0; pass < 2; ++pass) {
+            CAPTURE(pass); // the second pass proves idempotence
+            normalize(config);
+            CHECK(config.opt_int("wall_loops") == 1);
+            CHECK_FALSE(config.opt_bool("alternate_extra_wall"));
+            CHECK(config.opt_int("top_shell_layers") == 0);
+            CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(0., 1e-12));
+            CHECK(config.opt<ConfigOptionBools>("retract_when_changing_layer")->values == std::vector<unsigned char>{0, 0});
+            CHECK(config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer")->values == std::vector<unsigned char>{0, 0});
+            // Unrelated shell settings are untouched.
+            CHECK(config.opt_int("bottom_shell_layers") == 5);
+        }
+    }
+
+    SECTION("the same values are left alone when spiral mode is off")
+    {
+        DynamicPrintConfig config = make_config(false);
+        normalize(config);
+        check_unchanged(config);
+        CHECK(config.opt_int("bottom_shell_layers") == 5);
+    }
+}
+
+TEST_CASE("normalize_fdm raises resolution to the 1 micron floor and keeps larger values", "[Config][NormalizeFdm]")
+{
+    const bool split_step = GENERATE(false, true);
+    CAPTURE(split_step);
+    const std::pair<const char *, double> rows[] = {
+        {"0.0001", 0.001},
+        {"0.0009", 0.001},
+        {"0.001",  0.001},
+        {"0.0011", 0.0011},
+        {"0.5",    0.5},
+    };
+    for (const auto &[input, expected] : rows) {
+        DYNAMIC_SECTION("resolution " << input) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict("resolution", input);
+            REQUIRE(config.opt_serialize("resolution") == input);
+            if (split_step)
+                config.normalize_fdm_1();
+            else
+                config.normalize_fdm(0);
+            CHECK_THAT(config.opt_float("resolution"), Catch::Matchers::WithinAbs(expected, 1e-12));
+        }
+    }
+}
+
 TEST_CASE("Project JSON migration records support and wall-order differences", "[Config][ConfigJsonMigration]")
 {
     const auto [seed_existing, keep_wall_order] = GENERATE(
@@ -2498,6 +2580,85 @@ void check_migrated_value_deserializes(const std::string &key, const std::string
 }
 
 } // namespace
+
+TEST_CASE("normalize_fdm_2 disables the prime tower or independent support layers and reports what it changed", "[Config][NormalizeFdm]")
+{
+    struct Row {
+        const char *name;
+        int         num_objects;
+        int         used_filaments;
+        const char *print_sequence;
+        const char *timelapse_type; // "1" is smooth
+        bool        wrapping_detection;
+        bool        mixed_filament;
+        bool        start_tower;
+        bool        tower;
+        bool        independent_layers;
+        t_config_option_keys changed;
+    };
+    const t_config_option_keys tower_changed = {"enable_prime_tower"};
+    const t_config_option_keys layers_changed = {"independent_support_layer_height"};
+    const Row rows[] = {
+        {"single filament drops the tower", 1, 1, "by layer", "0", false, false, true, false, true, tower_changed},
+        {"several filaments keep the tower and drop independent layers", 1, 2, "by layer", "0", false, false, true, true, false, layers_changed},
+        {"a mixed filament counts as several", 1, 1, "by layer", "0", false, true, true, true, false, layers_changed},
+        {"wrapping detection keeps the tower", 1, 1, "by layer", "0", true, false, true, true, false, layers_changed},
+        {"smooth timelapse keeps the tower", 1, 1, "by layer", "1", false, false, true, true, false, layers_changed},
+        {"several by-object objects drop the tower", 2, 2, "by object", "0", false, false, true, false, true, tower_changed},
+        {"a single by-object object keeps the tower", 1, 2, "by object", "0", false, false, true, true, false, layers_changed},
+        {"no tower leaves independent layers alone", 1, 2, "by layer", "0", false, false, false, false, true, {}},
+        {"no used filaments changes nothing", 1, 0, "by layer", "0", false, false, true, true, true, {}},
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.name) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("enable_prime_tower", row.start_tower);
+            config.set("independent_support_layer_height", true);
+            config.set("enable_wrapping_detection", row.wrapping_detection);
+            config.set_deserialize_strict("timelapse_type", row.timelapse_type);
+            config.set_deserialize_strict("print_sequence", row.print_sequence);
+            config.set_key_value("filament_is_mixed", new ConfigOptionBools({row.mixed_filament}));
+
+            CHECK(config.normalize_fdm_2(row.num_objects, row.used_filaments) == row.changed);
+            CHECK(config.opt_bool("enable_prime_tower") == row.tower);
+            CHECK(config.opt_bool("independent_support_layer_height") == row.independent_layers);
+            // Normalizing again has nothing left to change.
+            CHECK(config.normalize_fdm_2(row.num_objects, row.used_filaments).empty());
+        }
+    }
+}
+
+TEST_CASE("normalize_fdm applies the used-filament prime tower policy", "[Config][NormalizeFdm]")
+{
+    struct Row {
+        int         used_filaments;
+        const char *print_sequence;
+        const char *timelapse_type;
+        bool        tower;
+        bool        independent_layers;
+    };
+    const Row rows[] = {
+        {1, "by layer",  "0", false, true},
+        {2, "by layer",  "0", true,  false},
+        {2, "by object", "0", false, true},
+        {1, "by layer",  "1", true,  false},
+        {0, "by layer",  "0", true,  true}, // no used filaments: the policy is skipped
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.used_filaments << " filaments, " << row.print_sequence << ", timelapse " << row.timelapse_type) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("enable_prime_tower", true);
+            config.set("independent_support_layer_height", true);
+            config.set_deserialize_strict("print_sequence", row.print_sequence);
+            config.set_deserialize_strict("timelapse_type", row.timelapse_type);
+
+            config.normalize_fdm(row.used_filaments);
+
+            CHECK(config.opt_bool("enable_prime_tower") == row.tower);
+            CHECK(config.opt_bool("independent_support_layer_height") == row.independent_layers);
+        }
+    }
+}
 
 TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contract", "[Config][ConfigLegacy]")
 {
@@ -2841,4 +3002,52 @@ TEST_CASE("Firmware retraction validation rejects wipe on any extruder", "[Confi
     both.set_deserialize_strict("wipe", "1");
     both.set("use_firmware_retraction", true);
     CHECK_THAT(error_message(both.validate(), "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
+}
+
+TEST_CASE("normalize_fdm backfills unset filament roles from the legacy extruder and from related roles", "[Config][NormalizeFdm]")
+{
+    // normalize_fdm(0) and normalize_fdm_1() share the role logic; with 0 used filaments
+    // normalize_fdm skips the prime tower step.
+    const bool split_step = GENERATE(false, true);
+    CAPTURE(split_step);
+
+    constexpr int no_legacy_extruder = -1;
+    // Role order: sparse infill, internal solid, top surface, bottom surface, outer wall, inner wall.
+    struct Row {
+        const char *name;
+        int         legacy_extruder;
+        int         roles[6];
+        int         expected[6];
+    };
+    const Row rows[] = {
+        {"legacy extruder fills every unset role but keeps an explicit one", 2, {0, 0, 0, 0, 3, 0}, {2, 2, 2, 2, 3, 2}},
+        {"legacy extruder never overrides explicit roles",                   9, {2, 3, 4, 5, 6, 7}, {2, 3, 4, 5, 6, 7}},
+        {"sparse infill role fills the unset solid roles",                   no_legacy_extruder, {4, 0, 0, 0, 0, 0}, {4, 4, 4, 4, 0, 0}},
+        {"explicit solid role is not replaced by the sparse infill role",    no_legacy_extruder, {4, 3, 0, 0, 0, 0}, {4, 3, 3, 3, 0, 0}},
+        {"solid role fills the unset top and bottom roles",                  no_legacy_extruder, {0, 7, 0, 0, 0, 0}, {0, 7, 7, 7, 0, 0}},
+        {"explicit roles are left alone without a legacy extruder",          no_legacy_extruder, {2, 3, 4, 5, 6, 7}, {2, 3, 4, 5, 6, 7}},
+    };
+    const char *const role_keys[6] = {"sparse_infill_filament_id", "internal_solid_filament_id", "top_surface_filament_id",
+                                      "bottom_surface_filament_id", "outer_wall_filament_id", "inner_wall_filament_id"};
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.name) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            if (row.legacy_extruder != no_legacy_extruder)
+                config.option<ConfigOptionInt>("extruder", true)->value = row.legacy_extruder;
+            for (size_t i = 0; i < 6; ++i)
+                config.set(role_keys[i], row.roles[i]);
+
+            if (split_step)
+                config.normalize_fdm_1();
+            else
+                config.normalize_fdm(0);
+
+            CHECK_FALSE(config.has("extruder"));
+            for (size_t i = 0; i < 6; ++i) {
+                INFO(role_keys[i]);
+                CHECK(config.opt_int(role_keys[i]) == row.expected[i]);
+            }
+        }
+    }
 }

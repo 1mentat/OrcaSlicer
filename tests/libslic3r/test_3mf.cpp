@@ -2723,4 +2723,36 @@ TEST_CASE("BBS 3MF rejects missing package relationships and malformed model XML
     CHECK(loaded.plates.empty());
 }
 
+TEST_CASE("Published probe distinguishes published archives from ordinary and missing files", "[3MF][Bbs3mfExtended][Probe]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_probe_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+
+    SECTION("ordinary project")
+    {
+        ScopedTemporaryFile archive(".3mf");
+        store_model(archive.string(), source, config, plates);
+        CHECK_FALSE(bbs_3mf_is_published(archive.string()));
+    }
+    SECTION("published project")
+    {
+        source.model_info = std::make_shared<ModelInfo>();
+        source.model_info->metadata_items[ORCA_PUBLISHED_TAG] = "1";
+        ScopedTemporaryFile archive(".3mf");
+        store_model(archive.string(), source, config, plates);
+        CHECK(bbs_3mf_is_published(archive.string()));
+    }
+    SECTION("missing file")
+    {
+        ScopedTemporaryDir dir("orca_bbs_ext_probe_missing");
+        CHECK_FALSE(bbs_3mf_is_published((dir.path() / "missing.3mf").string()));
+    }
+}
+
 } // namespace bbs_archive_contracts
