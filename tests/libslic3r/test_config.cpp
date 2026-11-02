@@ -1223,6 +1223,49 @@ TEST_CASE("read_cli applies valid values and collects non-option arguments", "[C
     REQUIRE(keys == t_config_option_keys{"nozzle_temperature", "reduce_crossing_wall"});
 }
 
+TEST_CASE("read_cli stops option parsing after the positional delimiter", "[Config][ConfigCLI]")
+{
+    Slic3r::DynamicPrintConfig config;
+    t_config_option_keys extra, keys;
+    const char* argv[] = {
+        "orca-slicer", "--nozzle-temperature", "210", "--", "--top-shell-layers", "model.3mf"
+    };
+
+    REQUIRE(config.read_cli(6, argv, &extra, &keys));
+    const auto* temperature = config.opt<Slic3r::ConfigOptionInts>("nozzle_temperature");
+    REQUIRE(temperature != nullptr);
+    CHECK(temperature->values == std::vector<int>{210});
+    CHECK(extra == t_config_option_keys{"--top-shell-layers", "model.3mf"});
+    CHECK(keys == t_config_option_keys{"nozzle_temperature"});
+}
+
+TEST_CASE("read_cli rejects unknown options and missing scalar values", "[Config][ConfigCLI]")
+{
+    SECTION("unknown option")
+    {
+        Slic3r::DynamicPrintConfig config;
+        t_config_option_keys extra, keys;
+        const char* argv[] = {"orca-slicer", "--not-an-orca-setting"};
+
+        CHECK_FALSE(config.read_cli(2, argv, &extra, &keys));
+        CHECK(extra.empty());
+        CHECK(keys.empty());
+        CHECK(config.keys().empty());
+    }
+
+    SECTION("missing scalar value")
+    {
+        Slic3r::DynamicPrintConfig config;
+        t_config_option_keys extra, keys;
+        const char* argv[] = {"orca-slicer", "--top-shell-layers"};
+
+        CHECK_FALSE(config.read_cli(2, argv, &extra, &keys));
+        CHECK(extra.empty());
+        CHECK(keys.empty());
+        CHECK(config.keys().empty());
+    }
+}
+
 TEST_CASE("read_cli rejects nil for a non-nullable vector option", "[Config]") {
     Slic3r::DynamicPrintConfig config;
     t_config_option_keys extra, keys;
