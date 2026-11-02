@@ -2581,6 +2581,85 @@ void check_migrated_value_deserializes(const std::string &key, const std::string
 
 } // namespace
 
+TEST_CASE("normalize_fdm_2 disables the prime tower or independent support layers and reports what it changed", "[Config][NormalizeFdm]")
+{
+    struct Row {
+        const char *name;
+        int         num_objects;
+        int         used_filaments;
+        const char *print_sequence;
+        const char *timelapse_type; // "1" is smooth
+        bool        wrapping_detection;
+        bool        mixed_filament;
+        bool        start_tower;
+        bool        tower;
+        bool        independent_layers;
+        t_config_option_keys changed;
+    };
+    const t_config_option_keys tower_changed = {"enable_prime_tower"};
+    const t_config_option_keys layers_changed = {"independent_support_layer_height"};
+    const Row rows[] = {
+        {"single filament drops the tower", 1, 1, "by layer", "0", false, false, true, false, true, tower_changed},
+        {"several filaments keep the tower and drop independent layers", 1, 2, "by layer", "0", false, false, true, true, false, layers_changed},
+        {"a mixed filament counts as several", 1, 1, "by layer", "0", false, true, true, true, false, layers_changed},
+        {"wrapping detection keeps the tower", 1, 1, "by layer", "0", true, false, true, true, false, layers_changed},
+        {"smooth timelapse keeps the tower", 1, 1, "by layer", "1", false, false, true, true, false, layers_changed},
+        {"several by-object objects drop the tower", 2, 2, "by object", "0", false, false, true, false, true, tower_changed},
+        {"a single by-object object keeps the tower", 1, 2, "by object", "0", false, false, true, true, false, layers_changed},
+        {"no tower leaves independent layers alone", 1, 2, "by layer", "0", false, false, false, false, true, {}},
+        {"no used filaments changes nothing", 1, 0, "by layer", "0", false, false, true, true, true, {}},
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.name) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("enable_prime_tower", row.start_tower);
+            config.set("independent_support_layer_height", true);
+            config.set("enable_wrapping_detection", row.wrapping_detection);
+            config.set_deserialize_strict("timelapse_type", row.timelapse_type);
+            config.set_deserialize_strict("print_sequence", row.print_sequence);
+            config.set_key_value("filament_is_mixed", new ConfigOptionBools({row.mixed_filament}));
+
+            CHECK(config.normalize_fdm_2(row.num_objects, row.used_filaments) == row.changed);
+            CHECK(config.opt_bool("enable_prime_tower") == row.tower);
+            CHECK(config.opt_bool("independent_support_layer_height") == row.independent_layers);
+            // Normalizing again has nothing left to change.
+            CHECK(config.normalize_fdm_2(row.num_objects, row.used_filaments).empty());
+        }
+    }
+}
+
+TEST_CASE("normalize_fdm applies the used-filament prime tower policy", "[Config][NormalizeFdm]")
+{
+    struct Row {
+        int         used_filaments;
+        const char *print_sequence;
+        const char *timelapse_type;
+        bool        tower;
+        bool        independent_layers;
+    };
+    const Row rows[] = {
+        {1, "by layer",  "0", false, true},
+        {2, "by layer",  "0", true,  false},
+        {2, "by object", "0", false, true},
+        {1, "by layer",  "1", true,  false},
+        {0, "by layer",  "0", true,  true}, // no used filaments: the policy is skipped
+    };
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.used_filaments << " filaments, " << row.print_sequence << ", timelapse " << row.timelapse_type) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("enable_prime_tower", true);
+            config.set("independent_support_layer_height", true);
+            config.set_deserialize_strict("print_sequence", row.print_sequence);
+            config.set_deserialize_strict("timelapse_type", row.timelapse_type);
+
+            config.normalize_fdm(row.used_filaments);
+
+            CHECK(config.opt_bool("enable_prime_tower") == row.tower);
+            CHECK(config.opt_bool("independent_support_layer_height") == row.independent_layers);
+        }
+    }
+}
+
 TEST_CASE("PrintConfig legacy aliases preserve their exact key and value contract", "[Config][ConfigLegacy]")
 {
     struct Migration {
