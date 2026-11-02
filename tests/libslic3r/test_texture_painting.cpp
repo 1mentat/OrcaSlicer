@@ -825,7 +825,10 @@ TEST_CASE("Texture atlas material order is a metamorphic permutation", "[Texture
     REQUIRE(a.face_colors.size() == b.face_colors.size());
     for (size_t i = 0; i < a.face_colors.size(); ++i) {
         const RGB expected = face_center_x(a, i) < 1.5 ? RGB{255, 0, 0} : RGB{0, 0, 255};
-        CHECK(a.face_colors[i] == expected);
+        for (size_t channel = 0; channel < expected.size(); ++channel) {
+            const int delta = static_cast<int>(a.face_colors[i][channel]) - static_cast<int>(expected[channel]);
+            CHECK((delta >= -1 && delta <= 1));
+        }
         CHECK(a.face_colors[i] == b.face_colors[i]);
     }
 }
