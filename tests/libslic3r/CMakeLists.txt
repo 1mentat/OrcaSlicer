@@ -20,9 +20,9 @@ add_executable(${_TEST_NAME}_tests
     test_buildvolume.cpp
     test_calib.cpp
     test_circle.cpp
-    test_color_decompose_recipe.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
+    test_color_decompose_recipe.cpp
     test_normal_utils_contracts.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
