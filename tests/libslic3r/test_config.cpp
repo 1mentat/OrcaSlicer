@@ -2849,6 +2849,7 @@ TEST_CASE("Bridge line width is limited by the smallest nozzle while other width
         {"0.4,0.6", "0.4",  false},
         {"0.4",     "100%", false},
         {"0.4,0.6", "60%",  false},  // below 100% of every extruder's own nozzle
+        {"0.4,0.6", "101%", true},   // above 100% of the 0.4 mm nozzle
     };
     for (const Row &row : rows) {
         DYNAMIC_SECTION("nozzles " << row.nozzles << ", bridge " << row.bridge_width) {
@@ -2871,11 +2872,9 @@ TEST_CASE("Bridge line width is limited by the smallest nozzle while other width
     CHECK_THAT(error_message(config.validate(), "outer_wall_line_width"), Catch::Matchers::ContainsSubstring("too large line width"));
 }
 
-// Known bug: validate() resolves a percent bridge_line_width against the LARGEST nozzle and compares it with the
-// SMALLEST, while printing (LayerRegion::bridging_flow, Print::validate) resolves it against the nozzle of the
-// extruder that prints the bridge, so a percentage of at most 100% never exceeds that extruder's own nozzle;
-// fixed by the follow-up fix PR.
-TEST_CASE("Percent bridge line width is accepted when it fits each extruder's own nozzle", "[Config][Validation][!shouldfail]")
+// Printing resolves a percentage against the nozzle of the extruder that prints the bridge, so a percentage of at
+// most 100% never exceeds that extruder's own nozzle.
+TEST_CASE("Percent bridge line width is accepted when it fits each extruder's own nozzle", "[Config][Validation]")
 {
     for (const char *width : {"70%", "100%"}) {
         DYNAMIC_SECTION("bridge " << width << " with 0.4 and 0.6 mm nozzles") {
@@ -3002,4 +3001,108 @@ TEST_CASE("Firmware retraction validation rejects wipe on any extruder", "[Confi
     both.set_deserialize_strict("wipe", "1");
     both.set("use_firmware_retraction", true);
     CHECK_THAT(error_message(both.validate(), "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
+}
+
+TEST_CASE("normalize_fdm backfills unset filament roles from the legacy extruder and from related roles", "[Config][NormalizeFdm]")
+{
+    // normalize_fdm(0) and normalize_fdm_1() share the role logic; with 0 used filaments
+    // normalize_fdm skips the prime tower step.
+    const bool split_step = GENERATE(false, true);
+    CAPTURE(split_step);
+
+    constexpr int no_legacy_extruder = -1;
+    // Role order: sparse infill, internal solid, top surface, bottom surface, outer wall, inner wall.
+    struct Row {
+        const char *name;
+        int         legacy_extruder;
+        int         roles[6];
+        int         expected[6];
+    };
+    const Row rows[] = {
+        {"legacy extruder fills every unset role but keeps an explicit one", 2, {0, 0, 0, 0, 3, 0}, {2, 2, 2, 2, 3, 2}},
+        {"legacy extruder never overrides explicit roles",                   9, {2, 3, 4, 5, 6, 7}, {2, 3, 4, 5, 6, 7}},
+        {"sparse infill role fills the unset solid roles",                   no_legacy_extruder, {4, 0, 0, 0, 0, 0}, {4, 4, 4, 4, 0, 0}},
+        {"explicit solid role is not replaced by the sparse infill role",    no_legacy_extruder, {4, 3, 0, 0, 0, 0}, {4, 3, 3, 3, 0, 0}},
+        {"solid role fills the unset top and bottom roles",                  no_legacy_extruder, {0, 7, 0, 0, 0, 0}, {0, 7, 7, 7, 0, 0}},
+        {"explicit roles are left alone without a legacy extruder",          no_legacy_extruder, {2, 3, 4, 5, 6, 7}, {2, 3, 4, 5, 6, 7}},
+    };
+    const char *const role_keys[6] = {"sparse_infill_filament_id", "internal_solid_filament_id", "top_surface_filament_id",
+                                      "bottom_surface_filament_id", "outer_wall_filament_id", "inner_wall_filament_id"};
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.name) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            if (row.legacy_extruder != no_legacy_extruder)
+                config.option<ConfigOptionInt>("extruder", true)->value = row.legacy_extruder;
+            for (size_t i = 0; i < 6; ++i)
+                config.set(role_keys[i], row.roles[i]);
+
+            if (split_step)
+                config.normalize_fdm_1();
+            else
+                config.normalize_fdm(0);
+
+            CHECK_FALSE(config.has("extruder"));
+            for (size_t i = 0; i < 6; ++i) {
+                INFO(role_keys[i]);
+                CHECK(config.opt_int(role_keys[i]) == row.expected[i]);
+            }
+        }
+    }
+}
+
+TEST_CASE("get_parameter_size scales per-extruder options by their variant counts", "[Config][ConfigVariants]")
+{
+    // The three variant counts differ (and none is twice another) so each option group is told apart.
+    DynamicPrintConfig config;
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow"}));
+    config.set_key_value("filament_extruder_variant",
+                         new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"}));
+    config.set_key_value("print_extruder_variant",
+                         new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard", "Bowden High Flow", "Bowden Other"}));
+
+    CHECK(config.get_parameter_size("nozzle_volume", 9) == 2);                // one value per printer variant
+    CHECK(config.get_parameter_size("machine_max_acceleration_x", 9) == 4);   // two values (limit pair) per printer variant
+    CHECK(config.get_parameter_size("machine_max_speed_x", 9) == 4);
+    CHECK(config.get_parameter_size("filament_flow_ratio", 9) == 3);
+    CHECK(config.get_parameter_size("outer_wall_speed", 9) == 5);
+    CHECK(config.get_parameter_size("unknown_option", 9) == 9);               // everything else follows the extruder count
+
+    // Without the variant lists every variant group has a single entry.
+    DynamicPrintConfig bare;
+    CHECK(bare.get_parameter_size("nozzle_volume", 9) == 1);
+    CHECK(bare.get_parameter_size("machine_max_acceleration_x", 9) == 2);
+    CHECK(bare.get_parameter_size("filament_flow_ratio", 9) == 1);
+    CHECK(bare.get_parameter_size("outer_wall_speed", 9) == 1);
+    CHECK(bare.get_parameter_size("unknown_option", 9) == 9);
+}
+
+// Known bug: PrintConfigDef never calls init_filament_option_keys(), so filament_option_keys() is empty and
+// set_num_filaments() resizes nothing; fixed by the follow-up fix PR. Only assertions that fail on main are
+// tagged: the prefix of the vectors is trivially unchanged today and is covered by the fix PR.
+TEST_CASE("set_num_filaments grows filament vectors with their first value and shrinks them", "[Config][ConfigVariants][!shouldfail]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"#112233", "#445566"}));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.70, 1.80}));
+
+    const auto *colours   = config.option<ConfigOptionStrings>("filament_colour");
+    const auto *diameters = config.option<ConfigOptionFloats>("filament_diameter");
+
+    SECTION("growing")
+    {
+        config.set_num_filaments(3);
+        REQUIRE(colours->values.size() == 3);
+        REQUIRE(diameters->values.size() == 3);
+        // ConfigOptionVector::resize extends a non-empty vector with its first value.
+        CHECK(colours->values[2] == "#112233");
+        CHECK_THAT(diameters->values[2], Catch::Matchers::WithinAbs(1.70, 1e-12));
+    }
+
+    SECTION("shrinking")
+    {
+        config.set_num_filaments(1);
+        CHECK(colours->values.size() == 1);
+        CHECK(diameters->values.size() == 1);
+    }
 }
