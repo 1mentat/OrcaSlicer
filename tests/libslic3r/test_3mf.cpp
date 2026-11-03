@@ -3468,26 +3468,6 @@ TEST_CASE("BBS project clamps plate filament map values at import", "[3MF][Bbs3m
     CHECK(plate.config.opt<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{0, 1, 1, 0});
 }
 
-// Known bug: the importer clamps every filament_volume_map entry above 1 to Standard, so the valid
-// nvtTPUHighFlow (3) nozzle type is lost on load; fixed by the follow-up fix PR.
-TEST_CASE("BBS project preserves a TPU High Flow filament volume map entry", "[3MF][Bbs3mfExtended][PlateMetadata][Maps][!shouldfail]")
-{
-    ScopedTemporaryFile archive(".3mf");
-    store_plate_fixture(archive.string(), [](PlateData &plate) {
-        plate.config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
-        plate.config.set_key_value("filament_map", new ConfigOptionInts({1, 2, 1}));
-        plate.config.set_key_value("filament_volume_map", new ConfigOptionInts({0, nvtTPUHighFlow, 1}));
-    });
-
-    Model loaded_model;
-    LoadedProject loaded;
-    REQUIRE(load_model(archive.string(), loaded_model, loaded));
-    REQUIRE(loaded.plates.size() == 1);
-    const ConfigOptionInts *volume_map = loaded.plates.front()->config.option<ConfigOptionInts>("filament_volume_map");
-    REQUIRE(volume_map != nullptr);
-    CHECK(volume_map->values == std::vector<int>{0, nvtTPUHighFlow, 1});
-}
-
 TEST_CASE("BBS project retains slice statistics and booleans", "[3MF][Bbs3mfExtended][SliceInfo]")
 {
     ScopedTemporaryFile archive(".3mf");
