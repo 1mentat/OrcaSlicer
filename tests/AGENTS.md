@@ -28,6 +28,14 @@ Use that CMake command for warm-build checks too. A bare Ninja target can select
 
 Before a full Linux confidence run, follow the worker prerequisites in [README.md](README.md). Run `[LocalesUtils]` in the actual service environment and require zero skips. When using `SLICER_TEST_PROCESSORS`, verify a running test's CPU mask with the selected CTest executable; the JSON properties alone do not prove affinity works. Reuse the verified locale environment and affinity-capable CTest runtime.
 
+Preserve the accepted worker's `LANG`, `LC_ALL`, and `LOCPATH` when reusing
+compiler caches; changing locale settings can invalidate otherwise warm entries.
+Check filters with that worker's `ctest --show-only=json-v1`, including exact
+selected identities and stderr, before an expensive build. Python regex syntax
+validation does not establish compatibility with CTest's regex engine.
+Before rebuilding an existing target in mutation target mode, verify its File
+API artifact lies inside the build directory and can execute on that filesystem.
+
 Worker launchers should reuse `scripts/slicer_process.py`'s `run_captured()` with
 an explicit environment copied from the parent, then apply private temp/profile
 paths. Preserve inherited executable, loader, and locale settings; do not clear
