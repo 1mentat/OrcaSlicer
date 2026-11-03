@@ -3944,6 +3944,48 @@ TEST_CASE("BBS project SkipStatic omits static payloads while retaining model ge
     CHECK(loaded_model.objects.front()->volumes.front()->mesh().facets_count() == 12);
 }
 
+TEST_CASE("BBS exporter recursively archives model auxiliary files", "[3MF][Bbs3mfExtended][Auxiliary]")
+{
+    // Binary payload (NUL, 0x89, 0xff, CR/LF) must survive the archive round trip byte for byte.
+    const std::string image_bytes("\x89PNG\0\xff\r\n", 8);
+    const bool skip_auxiliary = GENERATE(false, true);
+    CAPTURE(skip_auxiliary);
+
+    ScopedTemporaryFile archive(".3mf");
+    SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    if (skip_auxiliary)
+        strategy = strategy | SaveStrategy::SkipAuxiliary;
+    store_with_strategy(archive.string(), strategy, [&](Model &model, PlateData &, StoreParams &) {
+        const boost::filesystem::path auxiliary_root = model.get_auxiliary_file_temp_path();
+        const boost::filesystem::path nested = auxiliary_root / "docs" / "nested";
+        REQUIRE(boost::filesystem::create_directories(nested));
+        write_text((auxiliary_root / "root.txt").string(), "aux-root");
+        write_text((nested / "leaf.txt").string(), "aux-nested");
+        write_text((nested / "image.png").string(), image_bytes);
+        // A sibling of the auxiliary root is a negative control for what gets walked.
+        write_text((auxiliary_root.parent_path() / "outside.txt").string(), "must-not-archive");
+    });
+
+    // The rest of the project is archived either way.
+    std::string payload;
+    REQUIRE(read_3mf_entry(archive.string(), payload, "3D/3dmodel.model"));
+    CHECK_FALSE(payload.empty());
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Auxiliaries/outside.txt"));
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "outside.txt"));
+
+    const std::vector<std::pair<std::string, std::string>> expected = {
+        {"Auxiliaries/root.txt", "aux-root"},
+        {"Auxiliaries/docs/nested/leaf.txt", "aux-nested"},
+        {"Auxiliaries/docs/nested/image.png", image_bytes}};
+    for (const auto &[entry, bytes] : expected) {
+        INFO("entry " << entry);
+        const bool found = read_3mf_entry(archive.string(), payload, entry);
+        CHECK(found == !skip_auxiliary);
+        if (found)
+            CHECK(payload == bytes);
+    }
+}
+
 TEST_CASE("BBS project persists plate bounding-box JSON", "[3MF][Bbs3mfExtended][BBox]")
 {
     // The JSON file is named after the position in the bounding-box list, and entries without
