@@ -656,6 +656,17 @@ generation directly. Their probes are in `arachne_wall_transition.json` and
 full settings coverage. The separate `[ArachneWallTransitionKnownDefect]` case
 marks a baseline negative-width defect and provides no positive coverage credit.
 
+`[ArachneThresholds]` checks the registered zero and representative values for
+minimum feature size, regular and first-layer bead width, and both minimum wall
+length endpoints. Analytic taper witnesses observe generated widths and the feature
+cutoff; a thin rectangle observes short open odd paths and the top/bottom exemption.
+The zero minimum-length option is passed through as a value, not treated as absence.
+These are direct `WallToolPaths` contracts, not full Print exports; the probes are in
+`tests/mutations/arachne_thresholds.json`. Enable focused CTest discovery and use
+`libslic3r_arachne_tests` with `tests/controls/arachne_thresholds.json` as the
+expected inventory. Its 22 controls exclude the marked baseline-defect case;
+the four new cases remain in the canonical core suite.
+
 `[PrintExtents]` checks planned extrusion bounds across layer cutoffs, two
 instances, unequal path widths, and nested infill collections without slicing.
 Its mutations are in `print_extents.json`.

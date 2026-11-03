@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "description": "Bounded Arachne threshold-consumer probes for thin-feature admission, output bead width, first-layer width selection, and short open odd-path filtering.",
+  "test_source": "tests/libslic3r/test_arachne_walls.cpp",
+  "mutants": [
+    {
+      "id": "arachne-min-feature-threshold-bypassed",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "            min_bead_width,\n            min_feature_size,\n",
+      "new": "            min_bead_width,\n            coord_t(0),\n",
+      "test_filter": "ArachneThresholds",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Ignore the configured minimum input width in the widening strategy. The below-threshold analytic taper band must then appear in the pipeline output."
+    },
+    {
+      "id": "arachne-min-bead-output-floor-bypassed",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "            print_thin_walls,\n            min_bead_width,\n            min_feature_size,\n",
+      "new": "            print_thin_walls,\n            coord_t(0),\n            min_feature_size,\n",
+      "test_filter": "ArachneThresholds",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Discard both regular and initial-layer minimum output widths when constructing the widening strategy. The thin-taper width oracle must fail while mapping controls remain unchanged."
+    },
+    {
+      "id": "arachne-min-length-factor-ignored",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "m_params.is_top_or_bottom_layer ? (min_width / 2) : (min_width * m_params.min_length_factor)",
+      "new": "m_params.is_top_or_bottom_layer ? (min_width / 2) : (min_width * 0.)",
+      "test_filter": "ArachneThresholds",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Ignore minimum wall length on ordinary layers. The maximum configured length factor must remove more short open odd paths than the zero boundary."
+    },
+    {
+      "id": "arachne-zero-min-length-factor-fallback-regression",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "input_params.min_length_factor = print_object_config.min_length_factor.value;",
+      "new": "input_params.min_length_factor = print_object_config.min_length_factor.value != 0.0 ? print_object_config.min_length_factor.value : 0.5f;",
+      "test_filter": "ArachneThresholds",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Reintroduce the numeric-zero fallback for minimum wall length. The registered zero endpoint must map to zero and preserve the short open odd paths that the larger factor removes."
+    }
+  ]
+}

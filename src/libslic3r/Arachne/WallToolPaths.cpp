@@ -52,10 +52,9 @@ WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfi
         if (const auto &min_feature_size_opt = print_object_config.min_feature_size)
             input_params.min_feature_size = min_feature_size_opt.value * 0.01 * min_nozzle_diameter;
 
-        if (const auto &min_wall_length_factor_opt = print_object_config.min_length_factor)
-            input_params.min_length_factor = min_wall_length_factor_opt.value;
-        else
-            input_params.min_length_factor = 0.5f;
+        // This is a non-nullable option. Do not use its numeric value as a
+        // presence test: zero is the valid setting that disables length filtering.
+        input_params.min_length_factor = print_object_config.min_length_factor.value;
 
         if (layer_id == 0) {
             if (const auto &initial_layer_min_bead_width_opt = print_object_config.initial_layer_min_bead_width)

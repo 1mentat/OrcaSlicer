@@ -408,14 +408,19 @@ ConfiguredWall wall_config(double transition_length_percent,
                            double transition_angle,
                            int    distribution_count,
                            double maximum_resolution_mm,
-                           double maximum_deviation_mm)
+                           double maximum_deviation_mm,
+                           double min_feature_size_percent = 25.,
+                           double min_bead_width_percent = 50.,
+                           double initial_layer_min_bead_width_percent = 85.,
+                           double min_length_factor = 0.5)
 {
     ConfiguredWall config;
     config.print.nozzle_diameter.values = {0.4};
     config.object.layer_height.value = 0.2;
-    config.object.min_feature_size.value = 25.;
-    config.object.min_bead_width.value = 50.;
-    config.object.min_length_factor.value = 0.5;
+    config.object.min_feature_size.value = min_feature_size_percent;
+    config.object.min_bead_width.value = min_bead_width_percent;
+    config.object.initial_layer_min_bead_width.value = initial_layer_min_bead_width_percent;
+    config.object.min_length_factor.value = min_length_factor;
     config.object.wall_transition_length.value = transition_length_percent;
     config.object.wall_transition_filter_deviation.value = filter_deviation_percent;
     config.object.wall_transition_angle.value = transition_angle;
@@ -425,9 +430,9 @@ ConfiguredWall wall_config(double transition_length_percent,
     return config;
 }
 
-WallToolPathsParams params_for(const ConfiguredWall &config)
+WallToolPathsParams params_for(const ConfiguredWall &config, int layer_id = 1)
 {
-    return make_paths_params(1, config.object, config.print);
+    return make_paths_params(layer_id, config.object, config.print);
 }
 
 Polygon plus_outline()
@@ -485,9 +490,22 @@ Polygon transition_wedge_outline()
     return wedge;
 }
 
+Polygon thin_taper_outline()
+{
+    // The total cross-section thickness grows by 0.2 mm per millimeter of x.
+    Polygon taper;
+    taper.points.emplace_back(Point::new_scale(0., 0.));
+    taper.points.emplace_back(Point::new_scale(30., -3.));
+    taper.points.emplace_back(Point::new_scale(30., 3.));
+    return taper;
+}
+
 struct WallSummary {
     size_t lines = 0;
     size_t junctions = 0;
+    size_t open_odd_lines = 0;
+    double witness_length_mm = 0.;
+    double witness_width_area_mm2 = 0.;
     double length_mm = 0.;
     double width_area_mm2 = 0.;
     double width_squared_length_mm3 = 0.;
@@ -500,7 +518,8 @@ struct WallSummary {
 };
 
 WallSummary summarize(const std::vector<VariableWidthLines> &toolpaths,
-                      const BoundingBox &fixture_bounds)
+                      const BoundingBox &fixture_bounds,
+                      const BoundingBox *witness_bounds = nullptr)
 {
     const double fixture_min_x = unscaled<double>(fixture_bounds.min.x()) - 0.05;
     const double fixture_max_x = unscaled<double>(fixture_bounds.max.x()) + 0.05;
@@ -513,6 +532,8 @@ WallSummary summarize(const std::vector<VariableWidthLines> &toolpaths,
                 continue;
             ++summary.lines;
             summary.junctions += line.junctions.size();
+            if (line.is_odd && !line.is_closed)
+                ++summary.open_odd_lines;
             for (const ExtrusionJunction &junction : line.junctions) {
                 const double x = unscaled<double>(junction.p.x());
                 const double y = unscaled<double>(junction.p.y());
@@ -525,11 +546,56 @@ WallSummary summarize(const std::vector<VariableWidthLines> &toolpaths,
                                            y >= fixture_min_y && y <= fixture_max_y;
             }
             for (size_t i = 1; i < line.junctions.size(); ++i) {
-                const double segment_mm = unscaled<double>((line.junctions[i].p - line.junctions[i - 1].p).cast<double>().norm());
+                const ExtrusionJunction &previous = line.junctions[i - 1];
+                const ExtrusionJunction &current = line.junctions[i];
+                const double segment_dx = unscaled<double>(current.p.x() - previous.p.x());
+                const double segment_dy = unscaled<double>(current.p.y() - previous.p.y());
+                const double segment_mm = std::hypot(segment_dx, segment_dy);
                 const double mean_width_mm = 0.5 * (unscaled<double>(line.junctions[i].w) +
                                                      unscaled<double>(line.junctions[i - 1].w));
                 summary.length_mm += segment_mm;
                 summary.width_area_mm2 += segment_mm * mean_width_mm;
+                if (witness_bounds != nullptr && segment_mm > 0.) {
+                    // Clip each emitted centerline segment to the analytic witness box. This
+                    // observes the interval between junctions, so a long straight taper is
+                    // still witnessed when Arachne emits only its endpoints.
+                    const double x0 = unscaled<double>(previous.p.x());
+                    const double y0 = unscaled<double>(previous.p.y());
+                    const double xmin = unscaled<double>(witness_bounds->min.x());
+                    const double ymin = unscaled<double>(witness_bounds->min.y());
+                    const double xmax = unscaled<double>(witness_bounds->max.x());
+                    const double ymax = unscaled<double>(witness_bounds->max.y());
+                    double t_enter = 0.;
+                    double t_exit = 1.;
+                    const double p[4] = {-segment_dx, segment_dx, -segment_dy, segment_dy};
+                    const double q[4] = {x0 - xmin, xmax - x0, y0 - ymin, ymax - y0};
+                    bool intersects = true;
+                    for (size_t edge = 0; edge < 4; ++edge) {
+                        if (p[edge] == 0.) {
+                            if (q[edge] < 0.)
+                                intersects = false;
+                        } else {
+                            const double t = q[edge] / p[edge];
+                            if (p[edge] < 0.)
+                                t_enter = std::max(t_enter, t);
+                            else
+                                t_exit = std::min(t_exit, t);
+                            if (t_enter > t_exit)
+                                intersects = false;
+                        }
+                        if (!intersects)
+                            break;
+                    }
+                    if (intersects && t_exit > t_enter) {
+                        const double clipped_length = segment_mm * (t_exit - t_enter);
+                        const double width0 = unscaled<double>(previous.w);
+                        const double width1 = unscaled<double>(current.w);
+                        const double clipped_width0 = width0 + (width1 - width0) * t_enter;
+                        const double clipped_width1 = width0 + (width1 - width0) * t_exit;
+                        summary.witness_length_mm += clipped_length;
+                        summary.witness_width_area_mm2 += clipped_length * 0.5 * (clipped_width0 + clipped_width1);
+                    }
+                }
                 const double w0 = unscaled<double>(line.junctions[i - 1].w);
                 const double w1 = unscaled<double>(line.junctions[i].w);
                 // Integral of the squared, linearly interpolated width along the segment.
@@ -542,14 +608,15 @@ WallSummary summarize(const std::vector<VariableWidthLines> &toolpaths,
     return summary;
 }
 
-WallSummary generate(const Polygon &outline, const WallToolPathsParams &params)
+WallSummary generate(const Polygon &outline, const WallToolPathsParams &params,
+                     const BoundingBox *witness_bounds = nullptr)
 {
     const double spacing_factor = 1. - 0.25 * M_PI;
     const coord_t bead_width_0 = scaled<coord_t>(0.42 - 0.2 * spacing_factor);
     const coord_t bead_width_x = scaled<coord_t>(0.45 - 0.2 * spacing_factor);
     const Polygons outlines{outline};
     WallToolPaths walls(outlines, bead_width_0, bead_width_x, 4, 0, 0.2, params);
-    return summarize(walls.getToolPaths(), outline.bounding_box());
+    return summarize(walls.getToolPaths(), outline.bounding_box(), witness_bounds);
 }
 
 } // namespace arachne_wall_transition_contracts
@@ -566,6 +633,159 @@ TEST_CASE("Arachne wall settings map to the active wall-path controls", "[Arachn
     CHECK(params.wall_distribution_count == 3);
     CHECK(params.wall_maximum_resolution == scaled<coord_t>(0.06));
     CHECK(params.wall_maximum_deviation == scaled<coord_t>(0.012));
+}
+
+
+TEST_CASE("Arachne minimum feature threshold clips only the analytic taper tip",
+          "[Arachne][ArachneThresholds]")
+{
+    using namespace arachne_wall_transition_contracts;
+    // This symmetric taper grows by 0.2 mm in total thickness per millimeter.
+    // The witness x=[0.25,0.40] is below the 25% feature threshold (0.10 mm)
+    // but above the 5% minimum-bead threshold (0.02 mm).
+    const BoundingBox tip_witness(Point::new_scale(0.25, -0.04), Point::new_scale(0.40, 0.04));
+    const auto no_feature_cut = wall_config(100., 25., 59., 1, 0.5, 0.025,
+                                            0., 5., 85., 0.5);
+    const auto registered_representative = wall_config(100., 25., 59., 1, 0.5, 0.025,
+                                                       25., 5., 85., 0.5);
+    const WallToolPathsParams no_cut_params = params_for(no_feature_cut);
+    const WallToolPathsParams threshold_params = params_for(registered_representative);
+    CHECK_THAT(no_cut_params.min_feature_size, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(threshold_params.min_feature_size, Catch::Matchers::WithinAbs(0.1, 1e-6));
+    CHECK_THAT(threshold_params.min_bead_width, Catch::Matchers::WithinAbs(0.02, 1e-6));
+
+    const Polygon taper = thin_taper_outline();
+    const WallSummary no_cut = generate(taper, no_cut_params, &tip_witness);
+    const WallSummary thresholded = generate(taper, threshold_params, &tip_witness);
+    for (const WallSummary &row : {no_cut, thresholded}) {
+        REQUIRE(row.lines > 0);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.length_mm > 0.5);
+        CHECK(row.width_area_mm2 > 0.);
+    }
+    REQUIRE(no_cut.witness_length_mm > 0.05);
+    CHECK(no_cut.witness_width_area_mm2 > 0.);
+    CHECK_THAT(no_cut.witness_width_area_mm2 / no_cut.witness_length_mm,
+               Catch::Matchers::WithinAbs(0.065, 0.012));
+    CHECK_THAT(thresholded.witness_length_mm, Catch::Matchers::WithinAbs(0., 1e-9));
+}
+
+TEST_CASE("Arachne minimum bead percentage widens a thin output path",
+          "[Arachne][ArachneThresholds]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const BoundingBox thin_taper_witness(Point::new_scale(0.25, -0.04), Point::new_scale(0.40, 0.04));
+    const auto zero_bead_floor = wall_config(100., 25., 59., 1, 0.5, 0.025,
+                                             0., 0., 85., 0.5);
+    const auto representative = wall_config(100., 25., 59., 1, 0.5, 0.025,
+                                            0., 85., 85., 0.5);
+    const WallToolPathsParams zero_params = params_for(zero_bead_floor);
+    const WallToolPathsParams representative_params = params_for(representative);
+    CHECK_THAT(zero_params.min_bead_width, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(representative_params.min_bead_width, Catch::Matchers::WithinAbs(0.34, 1e-6));
+
+    const Polygon taper = thin_taper_outline();
+    const WallSummary zero = generate(taper, zero_params, &thin_taper_witness);
+    const WallSummary wider = generate(taper, representative_params, &thin_taper_witness);
+    for (const WallSummary &row : {zero, wider}) {
+        REQUIRE(row.lines > 0);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.length_mm > 0.5);
+        CHECK(row.width_area_mm2 > 0.);
+        CHECK(row.minimum_width_mm > 0.);
+    }
+    REQUIRE(zero.witness_length_mm > 0.05);
+    REQUIRE(wider.witness_length_mm > 0.05);
+    CHECK(zero.witness_width_area_mm2 / zero.witness_length_mm < 0.10);
+    CHECK(wider.witness_width_area_mm2 / wider.witness_length_mm >= 0.34 - 0.002);
+}
+
+TEST_CASE("Arachne uses the initial-layer bead threshold only on layer zero",
+          "[Arachne][ArachneThresholds]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const auto split = wall_config(100., 25., 59., 1, 0.5, 0.025,
+                                   0., 50., 0., 0.5);
+    const auto equal = wall_config(100., 25., 59., 1, 0.5, 0.025,
+                                   0., 50., 50., 0.5);
+    const WallToolPathsParams first_layer_params = params_for(split, 0);
+    const WallToolPathsParams later_layer_params = params_for(split, 1);
+    CHECK_THAT(first_layer_params.min_bead_width, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(later_layer_params.min_bead_width, Catch::Matchers::WithinAbs(0.2, 1e-6));
+
+    const BoundingBox thin_taper_witness(Point::new_scale(0.25, -0.04), Point::new_scale(0.40, 0.04));
+    const Polygon taper = thin_taper_outline();
+    const WallSummary first_layer = generate(taper, first_layer_params, &thin_taper_witness);
+    const WallSummary later_layer = generate(taper, later_layer_params, &thin_taper_witness);
+    const WallSummary equal_first = generate(taper, params_for(equal, 0), &thin_taper_witness);
+    const WallSummary equal_later = generate(taper, params_for(equal, 1), &thin_taper_witness);
+    for (const WallSummary &row : {first_layer, later_layer, equal_first, equal_later}) {
+        REQUIRE(row.lines > 0);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.length_mm > 0.5);
+        CHECK(row.width_area_mm2 > 0.);
+    }
+    REQUIRE(first_layer.witness_length_mm > 0.05);
+    REQUIRE(later_layer.witness_length_mm > 0.05);
+    REQUIRE(equal_first.witness_length_mm > 0.05);
+    REQUIRE(equal_later.witness_length_mm > 0.05);
+    CHECK(first_layer.witness_width_area_mm2 / first_layer.witness_length_mm < 0.10);
+    CHECK(later_layer.witness_width_area_mm2 / later_layer.witness_length_mm >= 0.2 - 0.002);
+    CHECK_THAT(equal_first.witness_width_area_mm2 / equal_first.witness_length_mm,
+               Catch::Matchers::WithinAbs(equal_later.witness_width_area_mm2 / equal_later.witness_length_mm, 0.002));
+}
+
+TEST_CASE("Arachne minimum wall length factor removes short open odd paths",
+          "[Arachne][ArachneThresholds]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const auto no_length_filter = wall_config(100., 25., 10., 1, 0.5, 0.025,
+                                               0., 50., 85., 0.);
+    const auto maximum_length_filter = wall_config(100., 25., 10., 1, 0.5, 0.025,
+                                                   0., 50., 85., 25.);
+    const WallToolPathsParams no_filter_params = params_for(no_length_filter);
+    const WallToolPathsParams max_filter_params = params_for(maximum_length_filter);
+    CHECK_THAT(no_filter_params.min_length_factor, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(max_filter_params.min_length_factor, Catch::Matchers::WithinAbs(25., 1e-6));
+
+    Polygon outline;
+    outline.points.emplace_back(Point::new_scale(0., 0.));
+    outline.points.emplace_back(Point::new_scale(2., 0.));
+    outline.points.emplace_back(Point::new_scale(2., 0.1));
+    outline.points.emplace_back(Point::new_scale(0., 0.1));
+    const WallSummary unfiltered = generate(outline, no_filter_params);
+    const WallSummary filtered = generate(outline, max_filter_params);
+    WallToolPathsParams top_zero_params = no_filter_params;
+    WallToolPathsParams top_max_params = max_filter_params;
+    top_zero_params.is_top_or_bottom_layer = true;
+    top_max_params.is_top_or_bottom_layer = true;
+    const WallSummary top_zero = generate(outline, top_zero_params);
+    const WallSummary top_max = generate(outline, top_max_params);
+    for (const WallSummary &row : {unfiltered, top_zero, top_max}) {
+        REQUIRE(row.lines > 0);
+        CHECK(row.finite);
+        CHECK(row.inside_fixture);
+        CHECK(row.length_mm > 0.);
+        CHECK(row.width_area_mm2 > 0.);
+    }
+    REQUIRE(unfiltered.lines == 1);
+    REQUIRE(unfiltered.open_odd_lines == 1);
+    CHECK(unfiltered.minimum_width_mm >= 0.2 - 0.001);
+    CHECK(filtered.lines == 0);
+    CHECK(filtered.open_odd_lines == 0);
+    CHECK(top_zero.lines == 1);
+    CHECK(top_max.lines == 1);
+    CHECK(top_zero.open_odd_lines == 1);
+    CHECK(top_max.open_odd_lines == 1);
+    CHECK(top_zero.lines == top_max.lines);
+    CHECK(top_zero.junctions == top_max.junctions);
+    CHECK(top_zero.open_odd_lines == top_max.open_odd_lines);
+    CHECK_THAT(top_zero.length_mm, Catch::Matchers::WithinAbs(top_max.length_mm, 1e-9));
+    CHECK_THAT(top_zero.width_area_mm2, Catch::Matchers::WithinAbs(top_max.width_area_mm2, 1e-9));
+    CHECK_THAT(top_zero.minimum_width_mm, Catch::Matchers::WithinAbs(top_max.minimum_width_mm, 1e-9));
 }
 
 TEST_CASE("Arachne wall transitions preserve the scaled plus outline while changing wall geometry", "[ArachneWallTransition]")

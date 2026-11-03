@@ -6160,6 +6160,45 @@
         "pipeline_oracle"
       ],
       "reason": "Validated Print exports check that positive ratios 2,3 normalize to input component weights 0.4,0.6, while an empty string falls back to equal 0.5,0.5 weights. Parsed deposited material IDs, sublayer Z positions and positive XY/E fractions supply independent oracles; the existing 60/40 and whole-layer controls remain. Source mutations for normalization, paired-height sorting and equal fallback each fail their targeted output assertion. Other ratio strings, counts, rejected inputs and geometry interactions are unclaimed."
+    },
+    "min_feature_size": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneThresholds]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct WallToolPaths taper fixture pins a 0.4 mm nozzle and compares min_feature_size 0% with 25% (0.1 mm). In the independently defined x=0.25–0.40 mm band the taper is 0.05–0.08 mm thick: the zero setting emits positive finite in-bounds path length and width area, while the 25% threshold removes the band. This covers the registered minimum and this representative threshold on one fixture; other nozzle sizes and full Print export are not claimed."
+    },
+    "min_bead_width": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneThresholds]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct WallToolPaths taper fixture pins a 0.4 mm nozzle and compares the registered 0% minimum with 85% (0.34 mm). The independently clipped taper witness averages below 0.10 mm at zero and stays at least 0.338 mm at the configured floor; emitted centerlines remain finite, positive, and within the fixture bounding box with 0.05 mm tolerance. No maximum is registered, and other nozzle sizes or full Print export are not claimed."
+    },
+    "initial_layer_min_bead_width": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneThresholds]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct WallToolPaths fixture compares initial-layer 0% with regular-layer 50% (0.20 mm) on a pinned 0.4 mm nozzle and checks layer 0 against layer 1. The thin taper witness remains below 0.10 mm on layer 0 and reaches at least 0.198 mm on layer 1; equal initial/regular settings produce matching first/later witness widths. This covers the registered minimum and selected 50% control; no maximum is registered and full Print export is not claimed."
+    },
+    "min_length_factor": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneThresholds]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct WallToolPaths fixture checks registered 0 and 25 endpoints on a 2.0 by 0.1 mm rectangle. At 0 the output contains one finite open odd path with positive length and width at least 0.199 mm; at 25 it removes the path, while top/bottom mode retains identical positive path output for both values. The zero endpoint is passed unconditionally through the non-nullable setting to avoid treating numeric zero as absence. Other geometries and full Print export are not claimed."
     }
   }
 }
