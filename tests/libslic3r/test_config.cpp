@@ -3777,6 +3777,11 @@ TEST_CASE("ConfigOption vector override detection respects nil and regular slots
     CHECK_FALSE(base.overriden_by(&all_nil));
     CHECK(base.overriden_by(&partial));
     CHECK(base.overriden_by(&extended));
+
+    // A nullable source with concrete values overrides an empty target.
+    const ConfigOptionInts empty_target;
+    const ConfigOptionIntsNullable concrete({7, 8});
+    CHECK(empty_target.overriden_by(&concrete));
 }
 
 TEST_CASE("ConfigOption vector overrides copy regular sources and preserve nullable defaults", "[Config][ConfigVectorOverride]")
@@ -3801,9 +3806,6 @@ TEST_CASE("Vector override into an empty target takes the nullable source values
 {
     ConfigOptionInts empty_target;
     const ConfigOptionIntsNullable incoming({7, 8});
-    // overriden_by already reports that the source overrides an empty target.
-    CHECK(empty_target.overriden_by(&incoming));
-
     std::vector<int> indices{0, 1};
     // Known bug: apply_override returns early when the target is empty, leaving it empty and
     // disagreeing with overriden_by; fixed by the follow-up fix PR
