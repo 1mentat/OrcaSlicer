@@ -4049,6 +4049,114 @@ TEST_CASE("BBS project persists plate bounding-box JSON", "[3MF][Bbs3mfExtended]
     }
 }
 
+TEST_CASE("BBS 3MF loads embedded filament and printer presets with their identity", "[3MF][Bbs3mfExtended][EmbeddedPreset]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_preset_types_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    // Two filament entries with different content, so a preset cannot be matched to the wrong entry;
+    // the importer takes the preset name from the identity key of each embedded config.
+    const auto embedded_json = [](const DynamicPrintConfig &embedded, const char *name, const char *type) {
+        std::ostringstream json;
+        embedded.save_to_json(json, name, type, "2.5.1.0");
+        return json.str();
+    };
+    DynamicPrintConfig petg;
+    petg.set_key_value("filament_settings_id", new ConfigOptionStrings({"Embedded petg"}));
+    petg.set_key_value("filament_type", new ConfigOptionStrings({"PETG"}));
+    petg.set_key_value("filament_diameter", new ConfigOptionFloats({2.85}));
+    DynamicPrintConfig abs;
+    abs.set_key_value("filament_settings_id", new ConfigOptionStrings({"Embedded abs"}));
+    abs.set_key_value("filament_type", new ConfigOptionStrings({"ABS"}));
+    abs.set_key_value("filament_diameter", new ConfigOptionFloats({1.6}));
+    DynamicPrintConfig printer;
+    printer.set_key_value("printer_settings_id", new ConfigOptionString("Embedded printer"));
+    printer.set_key_value("printer_model", new ConfigOptionString("Contract Printer"));
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; },
+        {{"Metadata/filament_settings_1.config", embedded_json(petg, "Embedded petg", "filament")},
+         {"Metadata/filament_settings_2.config", embedded_json(abs, "Embedded abs", "filament")},
+         {"Metadata/machine_settings_1.config", embedded_json(printer, "Embedded printer", "printer")}}));
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.presets.size() == 3);
+    const auto find_preset = [&](const std::string &name) -> const Preset * {
+        for (const Preset *preset : loaded.presets)
+            if (preset != nullptr && preset->name == name)
+                return preset;
+        return nullptr;
+    };
+    const auto expected_version = Semver::parse("2.5.1.0");
+    REQUIRE(expected_version.has_value());
+
+    const Preset *petg_preset = find_preset("Embedded petg");
+    const Preset *abs_preset = find_preset("Embedded abs");
+    const Preset *printer_preset = find_preset("Embedded printer");
+    REQUIRE(petg_preset != nullptr);
+    REQUIRE(abs_preset != nullptr);
+    REQUIRE(printer_preset != nullptr);
+    CHECK(petg_preset->type == Preset::TYPE_FILAMENT);
+    CHECK(abs_preset->type == Preset::TYPE_FILAMENT);
+    CHECK(printer_preset->type == Preset::TYPE_PRINTER);
+    for (const Preset *preset : {petg_preset, abs_preset, printer_preset}) {
+        CHECK(preset->is_project_embedded);
+        CHECK(preset->version == *expected_version);
+    }
+    CHECK(petg_preset->config.opt<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{"PETG"});
+    CHECK_THAT(petg_preset->config.opt<ConfigOptionFloats>("filament_diameter")->values.front(), Catch::Matchers::WithinAbs(2.85, 1e-6));
+    CHECK(abs_preset->config.opt<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{"ABS"});
+    CHECK_THAT(abs_preset->config.opt<ConfigOptionFloats>("filament_diameter")->values.front(), Catch::Matchers::WithinAbs(1.6, 1e-6));
+    CHECK(printer_preset->config.opt_string("printer_model") == "Contract Printer");
+}
+
+TEST_CASE("BBS 3MF without project settings keeps the model and loads no configuration", "[3MF][Bbs3mfExtended][ProjectConfig]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_height", new ConfigOptionFloat(.27));
+    ScopedTemporaryDir backup("orca_bbs_ext_no_project_config_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    // Control: the unmodified archive does carry a configuration.
+    {
+        Model control_model;
+        LoadedProject control;
+        REQUIRE(load_model(archive.string(), control_model, control));
+        REQUIRE(control.config.option<ConfigOptionFloat>("layer_height") != nullptr);
+        CHECK_THAT(control.config.opt_float("layer_height"), Catch::Matchers::WithinAbs(.27, 1e-6));
+    }
+
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &name, std::string &) {
+        if (name != "Metadata/project_settings.config")
+            return false;
+        name = "Metadata/project_settings.removed";
+        return true;
+    }));
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.objects.front()->instances.size() == 2);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    CHECK(loaded_model.objects.front()->volumes.front()->mesh().facets_count() == 12);
+    CHECK(loaded.config.empty());
+}
+
 } // namespace bbs_archive_contracts
 
 namespace legacy_3mf_contracts {
