@@ -3946,7 +3946,7 @@ TEST_CASE("BBS project SkipStatic omits static payloads while retaining model ge
 
 TEST_CASE("BBS exporter recursively archives model auxiliary files", "[3MF][Bbs3mfExtended][Auxiliary]")
 {
-    // A PNG gets the stored (uncompressed) path; its bytes include NUL and high bytes.
+    // Binary payload (NUL, 0x89, 0xff, CR/LF) must survive the archive round trip byte for byte.
     const std::string image_bytes("\x89PNG\0\xff\r\n", 8);
     const bool skip_auxiliary = GENERATE(false, true);
     CAPTURE(skip_auxiliary);
