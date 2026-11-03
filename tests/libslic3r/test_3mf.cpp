@@ -3390,7 +3390,7 @@ void store_plate_fixture(const std::string &path, const std::function<void(Plate
 
 } // namespace
 
-TEST_CASE("BBS slice metadata preserves multiple layer filament ranges", "[3MF][Bbs3mfExtended][LayerFilaments]")
+TEST_CASE("BBS slice metadata writes multiple layer filament ranges", "[3MF][Bbs3mfExtended][LayerFilaments]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_plate_fixture(archive.string(), [](PlateData &plate) {
@@ -3447,13 +3447,13 @@ TEST_CASE("BBS project preserves plate scheduling metadata", "[3MF][Bbs3mfExtend
     CHECK(plate.config.opt_bool("spiral_mode"));
 }
 
-TEST_CASE("BBS project clamps plate map values at import", "[3MF][Bbs3mfExtended][PlateMetadata][Maps]")
+TEST_CASE("BBS project clamps plate filament map values at import", "[3MF][Bbs3mfExtended][PlateMetadata][Maps]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_plate_fixture(archive.string(), [](PlateData &plate) {
         plate.config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
         plate.config.set_key_value("filament_map", new ConfigOptionInts({0, -4, 2, 1}));
-        plate.config.set_key_value("filament_volume_map", new ConfigOptionInts({0, 1, 2, 3}));
+        plate.config.set_key_value("filament_volume_map", new ConfigOptionInts({0, 1, 1, 0}));
     });
 
     Model loaded_model;
@@ -3465,7 +3465,27 @@ TEST_CASE("BBS project clamps plate map values at import", "[3MF][Bbs3mfExtended
     REQUIRE(plate.config.option<ConfigOptionInts>("filament_volume_map") != nullptr);
     CHECK(plate.filament_maps == std::vector<int>{1, 1, 2, 1});
     CHECK(plate.config.opt<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1, 2, 1});
-    CHECK(plate.config.opt<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{0, 1, 0, 0});
+    CHECK(plate.config.opt<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{0, 1, 1, 0});
+}
+
+// Known bug: the importer clamps every filament_volume_map entry above 1 to Standard, so the valid
+// nvtTPUHighFlow (3) nozzle type is lost on load; fixed by the follow-up fix PR.
+TEST_CASE("BBS project preserves a TPU High Flow filament volume map entry", "[3MF][Bbs3mfExtended][PlateMetadata][Maps][!shouldfail]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+        plate.config.set_key_value("filament_map", new ConfigOptionInts({1, 2, 1}));
+        plate.config.set_key_value("filament_volume_map", new ConfigOptionInts({0, nvtTPUHighFlow, 1}));
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const ConfigOptionInts *volume_map = loaded.plates.front()->config.option<ConfigOptionInts>("filament_volume_map");
+    REQUIRE(volume_map != nullptr);
+    CHECK(volume_map->values == std::vector<int>{0, nvtTPUHighFlow, 1});
 }
 
 TEST_CASE("BBS project retains slice statistics and booleans", "[3MF][Bbs3mfExtended][SliceInfo]")
@@ -3476,9 +3496,9 @@ TEST_CASE("BBS project retains slice statistics and booleans", "[3MF][Bbs3mfExte
         plate.printer_model_id = "slice-info-printer";
         plate.gcode_prediction = "123.4";
         plate.gcode_weight = "45.6";
-        // A mix of true and false, so a flag that is forced either way is caught.
+        // Every flag differs from the PlateData default, so dropping a read is caught.
         plate.toolpath_outside = true;
-        plate.is_support_used = false;
+        plate.is_support_used = true;
         plate.is_label_object_enabled = true;
     });
 
@@ -3491,7 +3511,7 @@ TEST_CASE("BBS project retains slice statistics and booleans", "[3MF][Bbs3mfExte
     CHECK(plate.gcode_prediction == "123.4");
     CHECK(plate.gcode_weight == "45.6");
     CHECK(plate.toolpath_outside);
-    CHECK_FALSE(plate.is_support_used);
+    CHECK(plate.is_support_used);
     CHECK(plate.is_label_object_enabled);
 }
 
