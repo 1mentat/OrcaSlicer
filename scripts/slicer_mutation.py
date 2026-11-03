@@ -1744,10 +1744,20 @@ def run_mutation(args: argparse.Namespace) -> int:
             "log_evidence": asdict(log_evidence) if log_evidence is not None else None,
         }
 
+    mutation_attempted = False
+
     def restore_normal_target(worktree: Path) -> None:
         if not target_mode:
             return
         assert target_spec is not None and expected_control is not None
+        if not mutation_attempted:
+            report["normal_restore"] = {
+                "status": "skipped",
+                "reason": ("no mutant source application was attempted; finalizer did not "
+                           "rebuild or certify target artifacts"),
+            }
+            _checkpoint(report_path, report, "normal_restore_skipped")
+            return
         build_dir = (worktree / args.build_dir).resolve()
         restore: dict[str, Any] = {"status": "in_progress"}
         report["normal_restore"] = restore
@@ -1953,6 +1963,9 @@ def run_mutation(args: argparse.Namespace) -> int:
             path: Path | None = None
             original: bytes | None = None
             try:
+                # Set this before applying: if interrupted during the write,
+                # conservatively keep the normal-target restore path enabled.
+                mutation_attempted = True
                 path, original = _apply(mutant, worktree)
                 entry["source_match"] = "exactly_one"
                 mutant_build = execute(build, cwd=worktree, phase="mutant-build",

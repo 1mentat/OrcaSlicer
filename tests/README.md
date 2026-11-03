@@ -1633,6 +1633,10 @@ does not prove binary restoration.
 
 For an already configured worker build, target mode derives its executable
 from CMake File API and its test commands from post-build CTest discovery.
+If configuration, the baseline build, or controls fail before a mutation is
+attempted, the report records normal restoration as skipped and preserves the
+original failure. It does not rebuild or certify target artifacts. Once a
+mutation is attempted, the runner rebuilds and checks the normal target.
 Enable `SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY` when configuring the focused
 targets. From a clean detached checkout, a Wipe Tower run is:
 

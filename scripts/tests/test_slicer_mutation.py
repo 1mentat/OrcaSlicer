@@ -1811,7 +1811,8 @@ class MutationTargetModeTests(unittest.TestCase):
                 slicer_mutation._verify_ctest_executables(
                     tests, {"other_NOT_BUILT"}, build, other)
 
-    def _fixture(self, root, *, first_control_fails=False, failed_restore_build=False):
+    def _fixture(self, root, *, first_control_fails=False, failed_baseline_build=False,
+                 failed_restore_build=False):
         repo = root / "repo"
         repo.mkdir()
         build = repo / "build"
@@ -1839,6 +1840,7 @@ class MutationTargetModeTests(unittest.TestCase):
             "args=sys.argv[1:]; repo=pathlib.Path(os.environ['TARGET_REPO']); build=pathlib.Path(args[args.index('-B')+1]) if '-B' in args else pathlib.Path(args[args.index('--build')+1])\n"
             "if '--build' in args:\n"
             " c=build/'build-count'; n=int(c.read_text())+1 if c.exists() else 1; c.write_text(str(n))\n"
+            " if os.environ.get('FAIL_BASELINE_BUILD')=='1' and n==1: print('baseline build failed'); sys.exit(16)\n"
             " if os.environ.get('FAIL_RESTORE_BUILD')=='1' and n==4: print('restore build failed'); sys.exit(17)\n"
             " artifact=build/'Release'/'fake_tests'; artifact.parent.mkdir(parents=True,exist_ok=True); artifact.write_text('mutant' if (repo/'source.cpp').read_text()=='after\\n' else 'normal'); artifact.chmod(0o755)\n"
             " reply=build/'.cmake/api/v1/reply'; reply.mkdir(parents=True,exist_ok=True)\n"
@@ -1875,6 +1877,8 @@ class MutationTargetModeTests(unittest.TestCase):
                "TARGET_ENV_LOG": str(root / "child-env.jsonl")}
         if first_control_fails:
             env["FAIL_FIRST_CONTROL"] = "1"
+        if failed_baseline_build:
+            env["FAIL_BASELINE_BUILD"] = "1"
         if failed_restore_build:
             env["FAIL_RESTORE_BUILD"] = "1"
         return repo, source, output, args, env
@@ -1895,6 +1899,8 @@ class MutationTargetModeTests(unittest.TestCase):
                      "TMP": str(root), "TEMP": str(root), "TEMPDIR": str(root)}
         if "FAIL_FIRST_CONTROL" in child_env:
             inherited["FAIL_FIRST_CONTROL"] = child_env["FAIL_FIRST_CONTROL"]
+        if "FAIL_BASELINE_BUILD" in child_env:
+            inherited["FAIL_BASELINE_BUILD"] = child_env["FAIL_BASELINE_BUILD"]
         if "FAIL_RESTORE_BUILD" in child_env:
             inherited["FAIL_RESTORE_BUILD"] = child_env["FAIL_RESTORE_BUILD"]
         inherited["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH", "/usr/lib")
@@ -1942,10 +1948,10 @@ class MutationTargetModeTests(unittest.TestCase):
                                 for row in child_rows))
             self.assertGreater(len({row["TMPDIR"] for row in child_rows}), 1)
 
-    def test_failed_focused_control_stops_before_any_mutant_and_runs_restore_control(self):
+    def test_failed_focused_control_stops_before_mutation_and_skips_restore_build(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            code, _repo, source, output, _env_log = self._run_fake_target(
+            code, repo, source, output, _env_log = self._run_fake_target(
                 root, first_control_fails=True)
             self.assertEqual(code, 2)
             self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
@@ -1953,7 +1959,28 @@ class MutationTargetModeTests(unittest.TestCase):
             self.assertEqual(report["status"], "focused_control_failed")
             self.assertEqual(report["focused_control"]["classification"], "killed")
             self.assertEqual(report["mutants"], [])
-            self.assertEqual(report["normal_restore"]["status"], "passed")
+            self.assertEqual(report["normal_restore"]["status"], "skipped")
+            self.assertEqual((repo / "build" / "build-count").read_text(), "1")
+            self.assertIn("artifacts", report["normal_restore"]["reason"])
+
+    def test_baseline_build_failure_preserves_diagnostics_without_rebuilding_untouched_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            code, repo, source, output, _env_log = self._run_fake_target(
+                root, failed_baseline_build=True)
+            self.assertEqual(code, 2)
+            self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "build_error")
+            self.assertEqual(report["baseline_build"]["returncode"], 16)
+            baseline_log = Path(report["baseline_build"]["log"]["path"])
+            self.assertIn("baseline build failed", baseline_log.read_text(encoding="utf-8"))
+            self.assertEqual(report["mutants"], [])
+            self.assertEqual(report["normal_restore"]["status"], "skipped")
+            self.assertIn("no mutant source application was attempted",
+                          report["normal_restore"]["reason"])
+            self.assertIn("artifacts", report["normal_restore"]["reason"])
+            self.assertEqual((repo / "build" / "build-count").read_text(), "1")
 
     def test_normal_restore_build_failure_is_recorded_and_fails_the_run(self):
         with tempfile.TemporaryDirectory() as temp:
