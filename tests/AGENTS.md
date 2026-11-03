@@ -140,6 +140,7 @@ error once without rerunning unchanged valid source or resending the packet.
 - Compare floats with `WithinAbs` or `WithinRel`, never `==`. Prefer these over `Approx` in new tests.
 - Keep tests self-contained: no shared state, green under `--order rand`.
 - Stage editable private candidates and inventory fixtures with independent file copies. Never hardlink them to tracked source files; a write through either path changes the checkout.
+- Copy only the required tracked files, or use `git archive`, when staging a private candidate. Never recursively copy a checkout containing ignored build outputs or dependency builds; those can exhaust the host disk before native validation starts.
 - Count Catch2 JUnit `<testcase>` nodes and check their exact names. The bundled JUnit reporter's `tests` attribute counts assertions.
 - Derive runtime inventories from the built executable and CTest, not a source regex: declarations inside `#if 0` are not registered. Focused targets that link `test_helpers.cpp` also include `Scenario: init_print functionality`.
 - BDD scenarios and `DYNAMIC_SECTION` can emit additional JUnit entries for section paths. Declare the expected root and section names explicitly when validating a focused run.
