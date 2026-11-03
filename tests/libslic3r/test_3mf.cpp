@@ -4160,6 +4160,102 @@ TEST_CASE("BBS 3MF without project settings keeps the model and loads no configu
     CHECK(loaded.config.empty());
 }
 
+TEST_CASE("BBS 3MF ignores unusable filament sequence data and keeps the model and other plates", "[3MF][Bbs3mfExtended][Plates][Sequences][Errors]")
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_bad_sequence_store");
+    source.set_backup_path(backup.string());
+    PlateData plate0;
+    PlateData plate1;
+    make_plate(plate0, 0, {{0, 0}});
+    make_plate(plate1, 1, {{0, 1}});
+    plate0.filament_change_sequence = {1, 3, 0};
+    plate0.nozzle_change_sequence = {2, 1};
+    plate0.optimal_assignment = {1, 0, 2};
+    plate1.filament_change_sequence = {2};
+    plate1.nozzle_change_sequence = {0, 1, 0};
+    plate1.optimal_assignment = {2, 1};
+    PlateDataPtrs plates{&plate0, &plate1};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    // Control: the unmodified archive restores both plates' sequences, so an empty result below
+    // comes from the edit and not from the importer ignoring the file.
+    {
+        Model control_model;
+        LoadedProject control;
+        REQUIRE(load_model(archive.string(), control_model, control));
+        REQUIRE(control.plates.size() == 2);
+        CHECK(control.plates[0]->filament_change_sequence == plate0.filament_change_sequence);
+        CHECK(control.plates[1]->filament_change_sequence == plate1.filament_change_sequence);
+    }
+
+    // Rewrites the archived sequence file: as text, or through its parsed JSON.
+    const auto rewrite_sequence_file = [&](const std::function<void(std::string &)> &edit_text) {
+        REQUIRE(rewrite_3mf_entries(archive.string(), [&](std::string &name, std::string &data) {
+            if (name != "Metadata/filament_sequence.json")
+                return false;
+            edit_text(data);
+            return true;
+        }));
+    };
+    const auto edit_json = [&](const std::function<void(nlohmann::json &)> &edit) {
+        rewrite_sequence_file([&](std::string &data) {
+            nlohmann::json json = nlohmann::json::parse(data);
+            edit(json);
+            data = json.dump();
+        });
+    };
+
+    enum class Damage { NotJson, Truncated, MissingNozzleArray, MissingFilamentArray, FilamentNotArray };
+    const Damage damage = GENERATE(Damage::NotJson, Damage::Truncated, Damage::MissingNozzleArray,
+                                   Damage::MissingFilamentArray, Damage::FilamentNotArray);
+    CAPTURE(int(damage));
+    // Whether the second plate's own record is still intact after the edit.
+    bool plate1_intact = false;
+    switch (damage) {
+    case Damage::NotJson:
+        rewrite_sequence_file([](std::string &data) { data = "not-json"; });
+        break;
+    case Damage::Truncated:
+        rewrite_sequence_file([](std::string &data) { data.resize(data.size() / 2); });
+        break;
+    case Damage::MissingNozzleArray:
+        edit_json([](nlohmann::json &json) { json["plate_1"].erase("nozzle_sequence"); });
+        plate1_intact = true;
+        break;
+    case Damage::MissingFilamentArray:
+        edit_json([](nlohmann::json &json) { json["plate_1"].erase("sequence"); });
+        plate1_intact = true;
+        break;
+    case Damage::FilamentNotArray:
+        edit_json([](nlohmann::json &json) { json["plate_1"]["sequence"] = "1 3 0"; });
+        plate1_intact = true;
+        break;
+    }
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.objects.front()->instances.size() == 2);
+    REQUIRE(loaded.plates.size() == 2);
+    CHECK(loaded.plates[0]->filament_change_sequence.empty());
+    CHECK(loaded.plates[0]->nozzle_change_sequence.empty());
+    CHECK(loaded.plates[0]->optimal_assignment.empty());
+    if (plate1_intact) {
+        CHECK(loaded.plates[1]->filament_change_sequence == plate1.filament_change_sequence);
+        CHECK(loaded.plates[1]->nozzle_change_sequence == plate1.nozzle_change_sequence);
+        CHECK(loaded.plates[1]->optimal_assignment == plate1.optimal_assignment);
+    } else {
+        CHECK(loaded.plates[1]->filament_change_sequence.empty());
+        CHECK(loaded.plates[1]->nozzle_change_sequence.empty());
+        CHECK(loaded.plates[1]->optimal_assignment.empty());
+    }
+}
+
 } // namespace bbs_archive_contracts
 
 namespace legacy_3mf_contracts {
