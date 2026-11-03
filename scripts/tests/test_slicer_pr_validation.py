@@ -4303,7 +4303,7 @@ class OverlayResolutionTests(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=repo, check=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    def _fixture(self, root):
+    def _fixture(self, root, *, add_add=False):
         repo = root / "repo"
         repo.mkdir()
         self._git(repo, "init", "-q")
@@ -4311,7 +4311,10 @@ class OverlayResolutionTests(unittest.TestCase):
         self._git(repo, "config", "user.name", "Test")
         (repo / "tests").mkdir()
         path = repo / "tests/overlay.txt"
-        path.write_text("value=base\n", encoding="utf-8")
+        if add_add:
+            (repo / "README.txt").write_text("base without overlay file\n", encoding="utf-8")
+        else:
+            path.write_text("value=base\n", encoding="utf-8")
         self._git(repo, "add", ".")
         self._git(repo, "commit", "-qm", "base")
         base = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
@@ -4320,6 +4323,7 @@ class OverlayResolutionTests(unittest.TestCase):
         self._git(repo, "commit", "-qm", "harness")
         harness = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
         self._git(repo, "checkout", "-qb", "pr", base)
+        path.parent.mkdir(exist_ok=True)
         path.write_text("value=pr\n", encoding="utf-8")
         self._git(repo, "add", ".")
         self._git(repo, "commit", "-qm", "pr")
@@ -4340,7 +4344,9 @@ class OverlayResolutionTests(unittest.TestCase):
             mode, blob, stage = left.split()
             self.assertEqual(listed, "tests/overlay.txt")
             stages[stage] = blob
-        self.assertEqual(set(stages), {"1", "2", "3"})
+        self.assertEqual(set(stages), {"2", "3"} if add_add else {"1", "2", "3"})
+        if add_add:
+            stages["1"] = None
         self._git(repo, "reset", "--hard", head)
         manifest_dir = root / "manifest"
         manifest_dir.mkdir()
@@ -4375,6 +4381,51 @@ class OverlayResolutionTests(unittest.TestCase):
             self.assertEqual(result["status"], "resolved")
             self.assertEqual((repo / "tests/overlay.txt").read_bytes(), b"value=resolved\n")
             self.assertEqual(self._git(repo, "diff", "--name-only", "--diff-filter=U").stdout, b"")
+
+    def test_add_add_resolution_pins_absent_base_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(
+                Path(temp), add_add=True)
+            manifest, _ = slicer_pr_validation._load_overlay_resolution_manifest(
+                manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+            result = slicer_pr_validation._apply_overlay_patch(
+                repo, patch, patch_sha256=patch_sha, base_sha=base, head_sha=head,
+                resolution_manifest=manifest)
+            self.assertTrue(result["applied"])
+            self.assertEqual(result["status"], "resolved")
+            self.assertEqual((repo / "tests/overlay.txt").read_bytes(), b"value=resolved\n")
+            self.assertEqual(self._git(repo, "diff", "--name-only", "--diff-filter=U").stdout, b"")
+
+    def test_null_stage_cannot_hide_a_present_merge_base(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(Path(temp))
+            raw = json.loads(manifest_path.read_text())
+            raw["resolutions"][0]["paths"][0]["stage_blobs"]["1"] = None
+            manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+            manifest, _ = slicer_pr_validation._load_overlay_resolution_manifest(
+                manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+            result = slicer_pr_validation._apply_overlay_patch(
+                repo, patch, patch_sha256=patch_sha, base_sha=base, head_sha=head,
+                resolution_manifest=manifest)
+            self.assertFalse(result["applied"])
+            self.assertEqual(result["status"], "overlay_resolution_invalid")
+            self.assertIn("stages mismatch", result["resolution_error"])
+            self.assertIn(b"<<<<<<< ours", (repo / "tests/overlay.txt").read_bytes())
+
+    def test_resolution_requires_both_added_file_stages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(
+                Path(temp), add_add=True)
+            original = manifest_path.read_text()
+            for stage in ("2", "3"):
+                with self.subTest(stage=stage):
+                    raw = json.loads(original)
+                    raw["resolutions"][0]["paths"][0]["stage_blobs"][stage] = None
+                    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+                    with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                                "invalid Git blob ID"):
+                        slicer_pr_validation._load_overlay_resolution_manifest(
+                            manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
 
     def test_matching_overlay_with_wrong_head_fails_closed_and_leaves_conflict(self):
         with tempfile.TemporaryDirectory() as temp:

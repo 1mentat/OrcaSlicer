@@ -1773,6 +1773,11 @@ automatically. The runner does not write the original checkout; if its observed
 state changes during a run, the report records that fact without attributing
 who changed it and exits nonzero.
 
+Reviewed `--overlay-resolution-manifest` rows bind each resolved file to its exact
+base, head, overlay patch and conflict-stage blobs. For an add/add conflict, use
+JSON `null` for stage `1` to bind its absence; stages `2` and `3` still require
+full blob IDs. A null base is rejected if Git reports an existing base stage.
+
 Use repeated `--target` options to choose build targets. `--test-regex` selects
 CTest names and `--exclude-test-regex` excludes names; both filters are recorded
 in the report. When building only some suites, exclude only the exact unbuilt

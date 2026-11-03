@@ -1324,7 +1324,7 @@ def _load_overlay_resolution_manifest(path: Path, *, patch_sha256: str,
     """Load exact-head/base conflict resolutions for one harness overlay.
 
     A resolution is data, not an instruction: every row pins the overlay patch
-    digest, both commit OIDs, conflict paths, all three Git index stage blobs,
+    digest, both commit OIDs, conflict paths, all present Git index stage blobs,
     and the SHA-256/Git blob ID of the supplied resolved bytes.
     """
     try:
@@ -1378,8 +1378,10 @@ def _load_overlay_resolution_manifest(path: Path, *, patch_sha256: str,
             stages = item.get("stage_blobs")
             if not isinstance(stages, dict) or set(stages) != {"1", "2", "3"}:
                 raise ValidationError(f"{item_label}.stage_blobs must contain exactly stages 1,2,3")
+            # Add/add conflicts have no merge-base blob. Null explicitly pins
+            # that absence; both conflicting file versions must still be bound.
             if any(not isinstance(value, str) or not _HEX40.fullmatch(value)
-                   for value in stages.values()):
+                   for stage, value in stages.items() if not (stage == "1" and value is None)):
                 raise ValidationError(f"{item_label}.stage_blobs contains an invalid Git blob ID")
             resolved_rel = item.get("resolved_path")
             resolved_sha = item.get("resolved_sha256")
@@ -1465,7 +1467,9 @@ def _apply_exact_overlay_resolution(worktree: Path, row: dict[str, Any]) -> dict
         if target.is_symlink() or not target.is_file():
             raise ValidationError(f"conflict target is not a regular file: {source_path}")
         stages = _index_unmerged_stages(worktree, source_path)
-        if stages != item["stage_blobs"]:
+        expected_stages = {stage: blob for stage, blob in item["stage_blobs"].items()
+                           if blob is not None}
+        if stages != expected_stages:
             raise ValidationError(
                 f"overlay resolution stages mismatch for {source_path}: expected={item['stage_blobs']}, actual={stages}")
         payload = Path(item["resolved_file"]).read_bytes()
