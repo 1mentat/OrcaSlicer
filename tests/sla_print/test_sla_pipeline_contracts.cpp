@@ -15,6 +15,7 @@
 #include "libslic3r/BoundingBox.hpp"
 #include <string>
 #include <algorithm>
+#include <optional>
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -173,10 +174,12 @@ DynamicPrintConfig sla_statistics_config(double initial_exposure,
                                          double regular_exposure,
                                          double area_fill,
                                          double fast_tilt,
-                                         double slow_tilt)
+                                         double slow_tilt,
+                                         std::optional<int> faded_layers = 3)
 {
     DynamicPrintConfig config = sla_config(0.5);
-    config.set_key_value("faded_layers", new ConfigOptionInt(3));
+    if (faded_layers.has_value())
+        config.set_key_value("faded_layers", new ConfigOptionInt(*faded_layers));
     config.set_key_value("initial_exposure_time", new ConfigOptionFloat(initial_exposure));
     config.set_key_value("exposure_time", new ConfigOptionFloat(regular_exposure));
     config.set_key_value("area_fill", new ConfigOptionFloat(area_fill));
@@ -189,7 +192,9 @@ SlaStatisticsRun run_sla_statistics(DynamicPrintConfig config)
 {
     SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 3.0));
     REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
-    REQUIRE(fixture.print.validate().string.empty());
+    const std::string validation_message = fixture.print.validate().string;
+    INFO("SLAPrint validation: " << validation_message);
+    REQUIRE(validation_message.empty());
     fixture.print.process();
     REQUIRE(fixture.print.finished());
     REQUIRE(fixture.print.objects().size() == 1);
@@ -450,6 +455,40 @@ TEST_CASE("SLA exposure durations determine fade-weighted layer statistics",
     CHECK(zero.slow_layers == 0);
     CHECK_THAT(zero.estimated_time, Catch::Matchers::WithinAbs(0.0, 1e-8));
     check_sla_layer_times(zero, { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 });
+}
+
+TEST_CASE("SLA faded layer counts span registered endpoints in physical layer timings",
+          "[SLAPrint][SLAPipeline][SLAExposureStatistics][SLAFadedLayersBoundary]")
+{
+    // Omitted from this config, faded_layers retains its registered default of 10.
+    const SlaStatisticsRun default_count =
+        run_sla_statistics(sla_statistics_config(4.0, 2.0, 100.0, 0.0, 0.0, std::nullopt));
+
+    DynamicPrintConfig minimum_config = sla_statistics_config(4.0, 2.0, 100.0, 0.0, 0.0);
+    minimum_config.set_key_value("faded_layers", new ConfigOptionInt(3));
+    const SlaStatisticsRun minimum_count = run_sla_statistics(std::move(minimum_config));
+
+    DynamicPrintConfig maximum_config = sla_statistics_config(4.0, 2.0, 100.0, 0.0, 0.0);
+    maximum_config.set_key_value("faded_layers", new ConfigOptionInt(20));
+    const SlaStatisticsRun maximum_count = run_sla_statistics(std::move(maximum_config));
+
+    check_same_sla_geometry(default_count, minimum_count);
+    check_same_sla_geometry(default_count, maximum_count);
+    CHECK(default_count.fast_layers == 6);
+    CHECK(default_count.slow_layers == 0);
+    CHECK(minimum_count.fast_layers == 6);
+    CHECK(minimum_count.slow_layers == 0);
+    CHECK(maximum_count.fast_layers == 6);
+    CHECK(maximum_count.slow_layers == 0);
+
+    // The first three layers use 4 s; each later layer subtracts
+    // (4 - 2) / (faded_layers + 1) from the preceding exposure.
+    check_sla_layer_times(default_count, { 38.0 / 11.0, 40.0 / 11.0, 42.0 / 11.0, 4.0, 4.0, 4.0 });
+    check_sla_layer_times(minimum_count, { 2.5, 3.0, 3.5, 4.0, 4.0, 4.0 });
+    check_sla_layer_times(maximum_count, { 78.0 / 21.0, 80.0 / 21.0, 82.0 / 21.0, 4.0, 4.0, 4.0 });
+    CHECK_THAT(default_count.estimated_time, Catch::Matchers::WithinAbs(252.0 / 11.0, 1e-8));
+    CHECK_THAT(minimum_count.estimated_time, Catch::Matchers::WithinAbs(21.0, 1e-8));
+    CHECK_THAT(maximum_count.estimated_time, Catch::Matchers::WithinAbs(164.0 / 7.0, 1e-8));
 }
 
 TEST_CASE("SLA fast and slow tilt durations affect only their classified layers",

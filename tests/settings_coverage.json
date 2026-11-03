@@ -4860,12 +4860,13 @@
     },
     "faded_layers": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
-      "tag": "[SLAPrint][SLAElephantFootFade]",
+      "tag": "[SLAFadedLayersBoundary]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The public SLA elephant-foot case runs faded_layers=3, 4, and the registered maximum 20 on a four-printable-layer cube. It requires four model areas for every row, strict fade ordering for the four-layer row, an earlier unchanged section for the three-layer row, and equivalence of the 20-layer row to the four-layer row because production clamps the configured count to printable layers. These representative layer counts do not claim the full integer domain or minimum boundary."
+      "reason": "The public [SLAExposureStatistics] case runs a six-layer cube with the registered default faded_layers=10, minimum 3, and maximum 20. It requires unchanged 100 mm2 slices and 300 mm3 model material across rows, then checks each sorted layer-time multiset and total against independently calculated exposure weights using (initial_exposure - exposure) / (faded_layers + 1). This exercises both inclusive registered endpoints and the default through SLAPrint output. The separate [SLAElephantFootFade] case still checks values 3, 4, and 20 against four-layer physical geometry and confirms the printer correction clamps to available layers."
     },
     "seam_slope_entire_loop": {
       "test": "tests/fff_print/test_precise_seam.cpp",

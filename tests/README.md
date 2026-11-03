@@ -704,6 +704,10 @@ durations, and layer classification against physical time totals and layer-time
 multisets. Setting-only pairs preserve slice areas and object material; zero
 exposure and tilt minima retain positive geometry and material. Timing-source
 and area-fill classification probes are in `sla_exposure_statistics.json`.
+`[SLAFadedLayersBoundary]` checks the registered fade-count minimum 3,
+default 10, and maximum 20 against independent timing multisets. The catalog
+also probes ignored fade counts, an incorrect interpolation denominator, and
+reversed fade direction.
 
 `[PresetPersistence]` checks inherited JSON imports, unresolved-parent rejection,
 subscription refreshes with newer preset timestamps, complete root-filament

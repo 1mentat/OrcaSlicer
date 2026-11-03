@@ -24,6 +24,7 @@
     "SLA exposure durations determine fade-weighted layer statistics",
     "SLA exposure limits accept inclusive endpoints and reject either side",
     "SLA exposure validation rejects values outside printer bounds",
+    "SLA faded layer counts span registered endpoints in physical layer timings",
     "SLA fast and slow tilt durations affect only their classified layers",
     "SLA hollowing creates a smaller interior volume",
     "SLA hollowing settings span registered endpoints in public geometry",

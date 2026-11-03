@@ -7,7 +7,7 @@
       "old": "        const double tilt_time = is_fast_layer ? fast_tilt : slow_tilt;",
       "new": "        const double tilt_time = is_fast_layer ? slow_tilt : fast_tilt;",
       "expected_matches": 1,
-      "test_filter": "SLA fast and slow tilt durations affect only their classified layers",
+      "test_filter": "^SLATiltStatistics$",
       "expected_test_count": 1,
       "ordinary_assertion_only": true,
       "description": "Swap the fast/slow timing sources; the case independently varies each duration on its classified layers and checks exact six-layer timing deltas."
@@ -18,11 +18,41 @@
       "old": "        const bool is_fast_layer = (layer_model_area + layer_support_area) <= display_area*area_fill;",
       "new": "        const bool is_fast_layer = (layer_model_area + layer_support_area) <= display_area;",
       "expected_matches": 1,
-      "test_filter": "SLA area fill selects fast versus slow layer timing",
+      "test_filter": "^SLAAreaFillStatistics$",
       "expected_test_count": 1,
       "ordinary_assertion_only": true,
       "description": "Ignore area_fill in the classifier; the 0% fixture becomes fast and fails its slow/fast counts and timing assertions."
+    },
+    {
+      "id": "sla-fade-count-ignores-registered-setting",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "    const int fade_layers_cnt = m_print->m_default_object_config.faded_layers.getInt();// 10 // [3;20]",
+      "new": "    const int fade_layers_cnt = 3;// 10 // [3;20]",
+      "expected_matches": 1,
+      "test_filter": "^SLAFadedLayersBoundary$",
+      "ordinary_assertion_only": true,
+      "description": "Hardcode the minimum fade count; the default and registered-maximum timing multisets must diverge from their independent expected weights."
+    },
+    {
+      "id": "sla-fade-interval-uses-wrong-denominator",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "    const double delta_fade_time = (init_exp_time - exp_time) / (fade_layers_cnt + 1);",
+      "new": "    const double delta_fade_time = (init_exp_time - exp_time) / fade_layers_cnt;",
+      "expected_matches": 1,
+      "test_filter": "^SLAFadedLayersBoundary$",
+      "ordinary_assertion_only": true,
+      "description": "Remove the extra fade interval from the denominator; independently expected per-layer times and totals must fail."
+    },
+    {
+      "id": "sla-fade-exposure-increases-instead-of-decreases",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "                fade_layer_time -= delta_fade_time;",
+      "new": "                fade_layer_time += delta_fade_time;",
+      "expected_matches": 1,
+      "test_filter": "^SLAFadedLayersBoundary$",
+      "ordinary_assertion_only": true,
+      "description": "Reverse the exposure fade direction; the six physical layer timings must rise after the initial layers instead of following the expected decay."
     }
   ],
-  "description": "SLA layer statistics select the configured tilt duration and area-fill threshold."
+  "description": "SLA layer statistics honor exposure fade counts, select configured tilt durations, and classify layers with the area-fill threshold."
 }
