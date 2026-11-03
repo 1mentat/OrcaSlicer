@@ -53,7 +53,6 @@ add_executable(${_TEST_NAME}_tests
     test_preset_options.cpp
     test_elephant_foot_compensation.cpp
     test_emboss_contracts.cpp
-    test_text_shape.cpp
     test_expolygon_contracts.cpp
     test_expolygons_index_contracts.cpp
     test_extrusion_simulator.cpp
@@ -148,6 +147,30 @@ endif()
 find_package(Draco REQUIRED)
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r draco::draco Catch2::Catch2WithMain)
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# TextShape tests require the matching public production API.
+if (EXISTS "${CMAKE_SOURCE_DIR}/src/libslic3r/Shape/TextShape.hpp")
+    target_sources(${_TEST_NAME}_tests PRIVATE test_text_shape.cpp)
+endif ()
+
+# Keep feature-dependent test identities tied to declarations in the exact
+# source revision under test. Definitions apply only to the relevant TU.
+file(READ "${CMAKE_SOURCE_DIR}/src/libslic3r/MeshBoolean.hpp" _meshboolean_header)
+string(FIND "${_meshboolean_header}" "bool repair(TriangleMesh &mesh" _meshboolean_repair_api)
+if (_meshboolean_repair_api GREATER -1)
+    set_property(SOURCE test_meshboolean.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+        ORCASLICER_TEST_HAS_MESHBOOLEAN_CGAL_REPAIR)
+endif ()
+unset(_meshboolean_header)
+
+file(READ "${CMAKE_SOURCE_DIR}/src/libslic3r/TriangleMesh.hpp" _trianglemesh_header)
+string(FIND "${_trianglemesh_header}" "its_make_torus(double r, double h, double fa_major, double fa_minor)" _torus_split_steps_api)
+if (_torus_split_steps_api GREATER -1)
+    set_property(SOURCE test_trianglemesh.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+        ORCASLICER_TEST_TORUS_HAS_SPLIT_STEPS)
+endif ()
+unset(_trianglemesh_header)
+
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 orcaslicer_copy_test_dlls()
