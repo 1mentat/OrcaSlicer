@@ -336,6 +336,13 @@ registers its cases with the distinct `FocusedMotionSettings::` prefix.
 Splitting the files adds
 work to a clean full build and reduces the scope of focused rebuilds.
 
+Object-sharing and painted-hole feedback can build the existing
+`fff_print_workflow_tests` and `fff_print_painted_segmentation_tests` targets.
+With `SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=ON`, their CTest names use
+`FocusedPrintWorkflow::` and `FocusedPaintedSegmentation::` prefixes. Anchor
+selections to those prefixes when a retained build also contains canonical
+executables, so the same case is not selected from a stale binary.
+
 For faster Release iteration, enable `SLICER_FAST_FOCUSED_TEST_COMPILE` in a
 configured test build and build one focused target:
 

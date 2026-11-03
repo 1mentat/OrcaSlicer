@@ -300,7 +300,7 @@ TEST_CASE("Orca file import preserves filament count and trailing density fallba
     CHECK_THAT(result.filament_diameters[0], WithinAbs(1.70, 1e-5));
     CHECK_THAT(result.filament_diameters[1], WithinAbs(1.75, 1e-5));
     CHECK_THAT(result.filament_diameters[2], WithinAbs(2.85, 1e-5));
-    CHECK_THAT(result.filament_densities[2], WithinAbs(DEFAULT_FILAMENT_DENSITY, 1e-5));
+    CHECK_THAT(result.filament_densities[2], WithinAbs(1.245f, 1e-5));
 }
 
 TEST_CASE("Applied config exports independent render settings copies", "[GCodeProcessor][GCodeProcessorPublic]")
@@ -1345,7 +1345,7 @@ TEST_CASE("Unregistered Simplify3D headers do not import legacy filament or bed 
     REQUIRE(!result.filament_diameters.empty());
     REQUIRE(!result.filament_densities.empty());
     CHECK_THAT(result.filament_diameters.front(), WithinAbs(defaults.filament_diameter.values.front(), 1e-5));
-    CHECK_THAT(result.filament_densities.front(), WithinAbs(DEFAULT_FILAMENT_DENSITY, 1e-5));
+    CHECK_THAT(result.filament_densities.front(), WithinAbs(1.245f, 1e-5));
     for (size_t i = 0; i < baseline.filament_diameters.size(); ++i)
         CHECK_THAT(result.filament_diameters[i], WithinAbs(baseline.filament_diameters[i], 1e-5));
     for (size_t i = 0; i < baseline.filament_densities.size(); ++i)

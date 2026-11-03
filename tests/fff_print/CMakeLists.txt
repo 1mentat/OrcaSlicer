@@ -91,6 +91,9 @@ target_link_libraries(fff_print_painted_segmentation_tests test_common libslic3r
 set_property(TARGET fff_print_painted_segmentation_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_painted_segmentation_tests)
 slicer_enable_llvm_source_coverage(fff_print_painted_segmentation_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_painted_segmentation_tests TEST_PREFIX "FocusedPaintedSegmentation::")
+endif()
 
 # Explicitly built Print workflow tests, including object-sharing contracts; no duplicate CTest registration.
 add_executable(fff_print_workflow_tests EXCLUDE_FROM_ALL
@@ -101,6 +104,9 @@ target_link_libraries(fff_print_workflow_tests test_common libslic3r Catch2::Cat
 set_property(TARGET fff_print_workflow_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_workflow_tests)
 slicer_enable_llvm_source_coverage(fff_print_workflow_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(fff_print_workflow_tests TEST_PREFIX "FocusedPrintWorkflow::")
+endif()
 
 # Explicit G-code export contracts, without duplicate CTest registration.
 add_executable(fff_print_gcode_tests EXCLUDE_FROM_ALL
