@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
+#include <optional>
 #include <cctype>
 #include <cstddef>
 #include <iterator>
@@ -25,6 +27,12 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/ModelArrange.hpp"
+#include "libslic3r/Preset.hpp"
+#include "nlohmann/json.hpp"
+#include <boost/filesystem/operations.hpp>
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include <sstream>
@@ -1518,4 +1526,440 @@ TEST_CASE("Cooling layer settings honor their upper registered endpoints in the 
     CHECK(full.part_fan_states.front() == 0);
     CHECK(full.part_fan_states[499] == 127);
     CHECK(full.part_fan_states.back() == 255);
+}
+
+
+namespace auxiliary_fan_template_contracts {
+
+enum class TemplateKind { None, Layer, Change };
+
+struct Context {
+    TemplateKind kind = TemplateKind::None;
+    int filament = -1;
+    int layer_num = -1;
+};
+
+struct FanCommand {
+    Context context;
+    int fan = -1;
+    double pwm = 0.0;
+    size_t ordinal = 0;
+};
+
+struct TerminalCommand {
+    Context context;
+    size_t ordinal = 0;
+};
+
+struct Deposition {
+    size_t outer_wall_moves = 0;
+    double outer_wall_path_mm = 0.0;
+    double outer_wall_e_mm = 0.0;
+    std::vector<size_t> outer_wall_ordinals;
+};
+
+struct Evidence {
+    std::vector<Context> layer_contexts;
+    std::vector<Context> change_contexts;
+    std::vector<FanCommand> fans;
+    std::vector<TerminalCommand> terminal_commands;
+    Deposition deposition;
+};
+
+std::optional<int> marker_value(const std::string &raw, const std::string &field)
+{
+    const std::string key = field + "=";
+    const size_t       pos = raw.find(key);
+    if (pos == std::string::npos)
+        return std::nullopt;
+
+    const size_t begin = pos + key.size();
+    const size_t end   = raw.find(' ', begin);
+    const std::string value = raw.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+    if (value.empty() || value.find_first_not_of("-0123456789") != std::string::npos)
+        return std::nullopt;
+    std::istringstream input(value);
+    int parsed = 0;
+    char trailing = 0;
+    if (!(input >> parsed) || (input >> trailing))
+        return std::nullopt;
+    return parsed;
+}
+
+std::string shipped_x2d_template(const std::string &suffix, const std::string &option_key)
+{
+    const std::string machine_dir   = std::string(PROFILES_DIR) + "/BBL/machine/";
+    const std::string machine_path  = machine_dir + "Bambu Lab X2D 0.4 nozzle.json";
+    const std::string template_name = "Bambu Lab X2D 0.4 nozzle template " + suffix;
+    if (!boost::filesystem::exists(machine_path))
+        SKIP("shipped X2D profile not present in this checkout: " << machine_path);
+
+    auto load = [](const std::string &file, std::map<std::string, std::string> &key_values) {
+        DynamicPrintConfig        config;
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+        std::string               reason;
+        config.load_from_json(file, substitutions, false, key_values, reason);
+        INFO("profile: " << file << (reason.empty() ? "" : ("  load reason: " + reason)));
+        return config;
+    };
+
+    std::map<std::string, std::string> machine_values;
+    load(machine_path, machine_values);
+    REQUIRE(machine_values.count("include") == 1);
+    const nlohmann::json includes = nlohmann::json::parse(machine_values.at("include"));
+    REQUIRE(std::find(includes.begin(), includes.end(), nlohmann::json(template_name)) != includes.end());
+
+    std::map<std::string, std::string> template_values;
+    const DynamicPrintConfig config = load(machine_dir + template_name + ".json", template_values);
+    REQUIRE(config.has(option_key));
+    return config.opt_string(option_key);
+}
+
+DynamicPrintConfig x2d_config()
+{
+    DynamicPrintConfig config = multifilament_config(2, {});
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        // Match the shipped X2D machine profile's printable_height and per-extruder heights.
+        {"printable_height", 261.0},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+        {"gcode_comments", true},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"before_layer_change_gcode", ""},
+        {"use_relative_e_distances", true},
+        {"gcode_flavor", "marlin"},
+    });
+    config.set_key_value("emit_machine_limits_to_gcode", new ConfigOptionBool(false));
+    config.set_key_value("auxiliary_fan", new ConfigOptionBool(true));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.4, 0.4}));
+    config.set_key_value("extruder_printable_height", new ConfigOptionFloatsNullable({261.0, 256.0}));
+    config.set_key_value("printer_extruder_id", new ConfigOptionInts({1, 2}));
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive Standard"}));
+    config.set_key_value("extruder_variant_list", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive Standard"}));
+    config.set_key_value("print_extruder_id", new ConfigOptionInts({1, 2}));
+    config.set_key_value("print_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive Standard"}));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive Standard"}));
+    config.set_key_value("filament_self_index", new ConfigOptionInts({1, 2}));
+    config.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({etDirectDrive, etDirectDrive}));
+    config.set_key_value("nozzle_volume_type", new ConfigOptionEnumsGeneric({nvtStandard, nvtStandard}));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.75, 1.75}));
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"#FF0000", "#00FF00"}));
+    config.set_key_value("default_filament_colour", new ConfigOptionStrings({"#FF0000", "#00FF00"}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PLA", "PLA"}));
+    config.set_key_value("filament_vendor", new ConfigOptionStrings({"Bambu Lab", "Bambu Lab"}));
+    config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+    config.set_key_value("filament_map", new ConfigOptionInts({1, 2}));
+    config.set_key_value("nozzle_temperature", new ConfigOptionInts({210, 210}));
+    config.set_key_value("nozzle_temperature_range_low", new ConfigOptionInts({190, 190}));
+    config.set_key_value("nozzle_temperature_range_high", new ConfigOptionInts({240, 240}));
+    config.set_key_value("chamber_temperature", new ConfigOptionInts({0, 0}));
+    config.set_key_value("chamber_minimal_temperature", new ConfigOptionInts({0, 0}));
+    config.set_key_value("flush_multiplier", new ConfigOptionFloats({1.0}));
+    config.set_key_value("flush_volumes_matrix", new ConfigOptionFloats({0.0, 140.0, 140.0, 0.0}));
+    config.set_key_value("wipe_tower_x", new ConfigOptionFloats({50.0}));
+    config.set_key_value("wipe_tower_y", new ConfigOptionFloats({50.0}));
+    config.set_key_value("hotend_cooling_rate", new ConfigOptionFloatsNullable({2.0, 2.0}));
+    config.set_key_value("hotend_heating_rate", new ConfigOptionFloatsNullable({2.0, 2.0}));
+    return config;
+}
+
+void set_auxiliary_settings(DynamicPrintConfig &config,
+                            const std::vector<int> &close_layers,
+                            const std::vector<int> &full_speed_layers,
+                            const std::vector<double> &first_layer_speeds,
+                            const std::vector<int> &additional_speeds)
+{
+    config.set_key_value("close_additional_fan_first_x_layers", new ConfigOptionInts(close_layers));
+    config.set_key_value("additional_fan_full_speed_layer", new ConfigOptionInts(full_speed_layers));
+    config.set_key_value("first_x_layer_fan_speed", new ConfigOptionFloats(first_layer_speeds));
+    config.set_key_value("additional_cooling_fan_speed", new ConfigOptionInts(additional_speeds));
+}
+
+void use_marked_x2d_templates(DynamicPrintConfig &config,
+                              const std::string &layer_template,
+                              const std::string &change_template)
+{
+    config.set_key_value("layer_change_gcode", new ConfigOptionString(
+        "G92 E0\n; AUX_LAYER_BEGIN current={current_filament_id} layer={layer_num}\n" +
+        layer_template + "\n; AUX_LAYER_END\n"));
+    config.set_key_value("change_filament_gcode", new ConfigOptionString(
+        "; AUX_CHANGE_BEGIN next={next_filament_id} layer={layer_num}\n" +
+        change_template + "\n; AUX_CHANGE_END\n"));
+}
+
+void use_marked_x2d_layer_template(DynamicPrintConfig &config, const std::string &layer_template)
+{
+    config.set_key_value("layer_change_gcode", new ConfigOptionString(
+        "G92 E0\n; AUX_LAYER_BEGIN current={current_filament_id} layer={layer_num}\n" +
+        layer_template + "\n; AUX_LAYER_END\n"));
+    config.set_key_value("change_filament_gcode", new ConfigOptionString(""));
+}
+
+TriangleMesh cube_with_height(double height_mm)
+{
+    TriangleMesh mesh = cube(20.0);
+    mesh.scale(Vec3f(1.0f, 1.0f, static_cast<float>(height_mm / 20.0)));
+    return mesh;
+}
+
+std::string slice_x2d_pair(DynamicPrintConfig config, double height_mm)
+{
+    // By-layer printing avoids sequential-object clearance validation while
+    // retaining a real tool change between distinct filament assignments.
+    config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
+    Model model;
+    for (int index = 0; index < 2; ++index) {
+        ModelObject *object = model.add_object();
+        object->add_volume(cube_with_height(height_mm));
+        object->add_instance();
+        if (index == 1)
+            object->config.set_key_value("extruder", new ConfigOptionInt(2));
+    }
+
+    Print print;
+    print.is_BBL_printer() = true;
+    const BoundingBox bed{Point::new_scale(0.0, 0.0), Point::new_scale(500.0, 500.0)};
+    arrange_objects(model, bed, ArrangeParams{scaled(min_object_distance(config))});
+    for (ModelObject *object : model.objects) {
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+    }
+    print.apply(model, config);
+    const auto validation = print.validate();
+    INFO("X2D paired-print validation: " << validation.string);
+    REQUIRE(validation.string.empty());
+    return Slic3r::Test::gcode(print);
+}
+
+std::string slice_x2d_single(DynamicPrintConfig config, double height_mm)
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube_with_height(height_mm));
+    object->add_instance();
+
+    Print print;
+    print.is_BBL_printer() = true;
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    const auto validation = print.validate();
+    INFO("X2D single-print validation: " << validation.string);
+    REQUIRE(validation.string.empty());
+    return Slic3r::Test::gcode(print);
+}
+
+Evidence inspect(const std::string &text, const DynamicPrintConfig &config)
+{
+    Evidence evidence;
+    Context active;
+    bool outer_wall = false;
+    GCodeReader reader;
+    reader.apply_config(config);
+    size_t ordinal = 0;
+    reader.parse_buffer(text, [&evidence, &active, &outer_wall, &ordinal](GCodeReader &self,
+                                                                          const GCodeReader::GCodeLine &line) {
+        const size_t event = ordinal++;
+        const std::string &raw = line.raw();
+        if (raw.rfind("; AUX_LAYER_BEGIN", 0) == 0 || raw.rfind("; AUX_CHANGE_BEGIN", 0) == 0) {
+            Context next;
+            next.kind = raw.rfind("; AUX_LAYER_BEGIN", 0) == 0 ? TemplateKind::Layer : TemplateKind::Change;
+            const std::optional<int> filament = marker_value(raw, next.kind == TemplateKind::Layer ? "current" : "next");
+            const std::optional<int> layer = marker_value(raw, "layer");
+            if (filament && layer) {
+                next.filament = *filament;
+                next.layer_num = *layer;
+                active = next;
+                if (next.kind == TemplateKind::Layer)
+                    evidence.layer_contexts.push_back(next);
+                else
+                    evidence.change_contexts.push_back(next);
+            } else {
+                active = Context{};
+            }
+        } else if (raw.rfind("; AUX_LAYER_END", 0) == 0 || raw.rfind("; AUX_CHANGE_END", 0) == 0) {
+            active = Context{};
+        }
+
+        if (active.kind != TemplateKind::None && line.cmd_is("M106")) {
+            float fan = 0.0f;
+            float pwm = 0.0f;
+            if (line.has_value('P', fan) && (std::fabs(fan - 2.0f) < 1e-5f || std::fabs(fan - 10.0f) < 1e-5f)) {
+                REQUIRE(line.has_value('S', pwm));
+                REQUIRE(std::isfinite(pwm));
+                REQUIRE(pwm >= 0.0f);
+                REQUIRE(pwm <= 255.0f);
+                evidence.fans.push_back({active, static_cast<int>(std::lround(fan)), pwm, event});
+            }
+        }
+        if (active.kind != TemplateKind::None && line.cmd_is("M142"))
+            evidence.terminal_commands.push_back({active, event});
+
+        const std::string comment(line.comment());
+        if (comment.find("TYPE:") != std::string::npos || comment.find("FEATURE:") != std::string::npos)
+            outer_wall = comment.find("Outer wall") != std::string::npos;
+        if (active.kind == TemplateKind::None && outer_wall && line.extruding(self) && line.dist_XY(self) > EPSILON) {
+            ++evidence.deposition.outer_wall_moves;
+            evidence.deposition.outer_wall_path_mm += line.dist_XY(self);
+            evidence.deposition.outer_wall_e_mm += line.dist_E(self);
+            evidence.deposition.outer_wall_ordinals.push_back(event);
+        }
+    });
+    return evidence;
+}
+
+std::vector<FanCommand> commands(const Evidence &evidence, TemplateKind kind, int filament, int layer_num)
+{
+    std::vector<FanCommand> result;
+    for (const FanCommand &command : evidence.fans)
+        if (command.context.kind == kind && command.context.filament == filament && command.context.layer_num == layer_num)
+            result.push_back(command);
+    return result;
+}
+
+bool has_context(const std::vector<Context> &contexts, TemplateKind kind, int filament, int layer_num)
+{
+    return std::any_of(contexts.begin(), contexts.end(), [=](const Context &context) {
+        return context.kind == kind && context.filament == filament && context.layer_num == layer_num;
+    });
+}
+
+bool has_terminal(const Evidence &evidence, TemplateKind kind, int filament, int layer_num)
+{
+    return std::any_of(evidence.terminal_commands.begin(), evidence.terminal_commands.end(), [=](const TerminalCommand &event) {
+        return event.context.kind == kind && event.context.filament == filament && event.context.layer_num == layer_num;
+    });
+}
+
+void require_fan_pair(const Evidence &evidence, TemplateKind kind, int filament, int layer_num, double expected_pwm)
+{
+    const std::vector<FanCommand> observed = commands(evidence, kind, filament, layer_num);
+    REQUIRE(observed.size() == 2);
+    CHECK(observed[0].fan == 2);
+    CHECK(observed[1].fan == 10);
+    CHECK(observed[0].ordinal < observed[1].ordinal);
+    CHECK_THAT(observed[0].pwm, Catch::Matchers::WithinAbs(expected_pwm, 0.02));
+    CHECK_THAT(observed[1].pwm, Catch::Matchers::WithinAbs(expected_pwm, 0.02));
+}
+
+bool has_deposition_after(const Evidence &evidence, size_t ordinal)
+{
+    return std::any_of(evidence.deposition.outer_wall_ordinals.begin(), evidence.deposition.outer_wall_ordinals.end(),
+                       [ordinal](size_t deposition_ordinal) { return deposition_ordinal > ordinal; });
+}
+
+} // namespace auxiliary_fan_template_contracts
+
+TEST_CASE("X2D auxiliary fan templates expand the selected filament settings",
+          "[Cooling][AuxiliaryFanTemplates][Profiles]")
+{
+    using namespace auxiliary_fan_template_contracts;
+    const std::string layer_template = shipped_x2d_template("layer_change_gcode", "layer_change_gcode");
+    const std::string change_template = shipped_x2d_template("change_filament_gcode", "change_filament_gcode");
+
+    DynamicPrintConfig baseline = x2d_config();
+    set_auxiliary_settings(baseline, {2, 2}, {5, 5}, {25.0, 40.0}, {80, 80});
+    use_marked_x2d_templates(baseline, layer_template, change_template);
+    const Evidence baseline_evidence = inspect(slice_x2d_pair(baseline, 0.8), baseline);
+
+    DynamicPrintConfig varied = x2d_config();
+    set_auxiliary_settings(varied, {2, 1}, {5, 5}, {0.0, 100.0}, {80, 20});
+    use_marked_x2d_templates(varied, layer_template, change_template);
+    const Evidence evidence = inspect(slice_x2d_pair(varied, 0.8), varied);
+
+    REQUIRE(baseline_evidence.deposition.outer_wall_moves > 0);
+    REQUIRE(evidence.deposition.outer_wall_moves > 0);
+    CHECK(evidence.deposition.outer_wall_moves == baseline_evidence.deposition.outer_wall_moves);
+    CHECK_THAT(evidence.deposition.outer_wall_path_mm,
+               Catch::Matchers::WithinAbs(baseline_evidence.deposition.outer_wall_path_mm, 1e-5));
+    CHECK_THAT(evidence.deposition.outer_wall_e_mm,
+               Catch::Matchers::WithinAbs(baseline_evidence.deposition.outer_wall_e_mm, 1e-5));
+
+    const std::array<std::array<double, 4>, 2> expected_pwm = {{{0.0, 0.0, 68.0, 136.0},
+                                                                 {255.0, 204.0, 153.0, 102.0}}};
+    std::array<bool, 4> observed_layers{};
+    std::array<bool, 2> observed_filaments{};
+    for (const Context &context : evidence.layer_contexts) {
+        if (context.layer_num < 0 || context.layer_num >= 4 || context.filament < 0 || context.filament >= 2)
+            continue;
+        INFO("X2D layer template selected filament " << context.filament << " at layer_num " << context.layer_num);
+        require_fan_pair(evidence, TemplateKind::Layer, context.filament, context.layer_num,
+                         expected_pwm[static_cast<size_t>(context.filament)][static_cast<size_t>(context.layer_num)]);
+        observed_layers[static_cast<size_t>(context.layer_num)] = true;
+        observed_filaments[static_cast<size_t>(context.filament)] = true;
+    }
+    for (size_t layer_num = 0; layer_num < observed_layers.size(); ++layer_num) {
+        INFO("X2D layer_num " << layer_num);
+        REQUIRE(observed_layers[layer_num]);
+    }
+    for (size_t filament = 0; filament < observed_filaments.size(); ++filament) {
+        INFO("X2D filament slot " << filament);
+        REQUIRE(observed_filaments[filament]);
+    }
+
+    const auto next_index_context = std::find_if(evidence.change_contexts.begin(), evidence.change_contexts.end(),
+        [](const Context &context) { return context.kind == TemplateKind::Change && context.filament == 1; });
+    REQUIRE(next_index_context != evidence.change_contexts.end());
+    REQUIRE(next_index_context->layer_num == 0);
+    const std::vector<FanCommand> next_commands = commands(evidence, TemplateKind::Change, 1, next_index_context->layer_num);
+    REQUIRE(next_commands.size() == 2);
+    CHECK(next_commands[0].fan == 2);
+    CHECK(next_commands[1].fan == 10);
+    CHECK_THAT(next_commands[0].pwm, Catch::Matchers::WithinAbs(255.0, 0.02)); // configured 100% endpoint at next_filament_id 1
+    CHECK_THAT(next_commands[1].pwm, Catch::Matchers::WithinAbs(255.0, 0.02));
+    CHECK(has_deposition_after(evidence, next_commands[0].ordinal));
+}
+
+TEST_CASE("X2D auxiliary fan template reaches the layer 1000 boundaries",
+          "[Cooling][AuxiliaryFanTemplateBoundaries][Profiles]")
+{
+    using namespace auxiliary_fan_template_contracts;
+    const std::string layer_template = shipped_x2d_template("layer_change_gcode", "layer_change_gcode");
+
+    DynamicPrintConfig close_endpoint = x2d_config();
+    set_auxiliary_settings(close_endpoint, {1000, 1000}, {0, 0}, {60.0, 60.0}, {40, 40});
+    use_marked_x2d_layer_template(close_endpoint, layer_template);
+    const Evidence close_evidence = inspect(slice_x2d_single(close_endpoint, 200.4), close_endpoint);
+    REQUIRE(close_evidence.deposition.outer_wall_moves > 0);
+    REQUIRE(has_context(close_evidence.layer_contexts, TemplateKind::Layer, 0, 999)); // physical layer 1000
+    require_fan_pair(close_evidence, TemplateKind::Layer, 0, 999, 153.0);
+    REQUIRE(has_context(close_evidence.layer_contexts, TemplateKind::Layer, 0, 1000)); // physical layer 1001
+    REQUIRE(has_terminal(close_evidence, TemplateKind::Layer, 0, 1000));
+    CHECK(commands(close_evidence, TemplateKind::Layer, 0, 1000).empty());
+
+    DynamicPrintConfig full_endpoint = x2d_config();
+    set_auxiliary_settings(full_endpoint, {0, 0}, {1000, 1000}, {20.0, 20.0}, {80, 80});
+    use_marked_x2d_layer_template(full_endpoint, layer_template);
+    const Evidence full_evidence = inspect(slice_x2d_single(full_endpoint, 200.4), full_endpoint);
+    REQUIRE(full_evidence.deposition.outer_wall_moves > 0);
+    REQUIRE(has_context(full_evidence.layer_contexts, TemplateKind::Layer, 0, 998)); // physical layer 999
+    require_fan_pair(full_evidence, TemplateKind::Layer, 0, 998, 203.847); // 79.94% * 255
+    REQUIRE(has_context(full_evidence.layer_contexts, TemplateKind::Layer, 0, 999)); // physical layer 1000
+    REQUIRE(has_terminal(full_evidence, TemplateKind::Layer, 0, 999));
+    CHECK(commands(full_evidence, TemplateKind::Layer, 0, 999).empty());
+    CHECK(full_evidence.deposition.outer_wall_moves == close_evidence.deposition.outer_wall_moves);
+    CHECK_THAT(full_evidence.deposition.outer_wall_path_mm,
+               Catch::Matchers::WithinAbs(close_evidence.deposition.outer_wall_path_mm, 1e-5));
+    CHECK_THAT(full_evidence.deposition.outer_wall_e_mm,
+               Catch::Matchers::WithinAbs(close_evidence.deposition.outer_wall_e_mm, 1e-5));
+
+    DynamicPrintConfig zero_endpoints = x2d_config();
+    set_auxiliary_settings(zero_endpoints, {0, 0}, {0, 0}, {100.0, 100.0}, {80, 80});
+    use_marked_x2d_layer_template(zero_endpoints, layer_template);
+    const Evidence zero_evidence = inspect(slice_x2d_single(zero_endpoints, 0.2), zero_endpoints);
+    REQUIRE(has_context(zero_evidence.layer_contexts, TemplateKind::Layer, 0, 0));
+    REQUIRE(has_terminal(zero_evidence, TemplateKind::Layer, 0, 0)); // max(close + 1, full) == 1
+    CHECK(commands(zero_evidence, TemplateKind::Layer, 0, 0).empty());
+    REQUIRE(zero_evidence.deposition.outer_wall_moves > 0);
 }

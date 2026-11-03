@@ -427,6 +427,22 @@ hit counts, so completely unexecuted functions remain in the denominator. The re
 An option serialization loop alone is schema evidence and does not establish
 pipeline behavior.
 
+`[AuxiliaryFanTemplates]` and `[AuxiliaryFanTemplateBoundaries]` exercise real `Print`
+exports through the shipped Bambu Lab X2D 0.4 nozzle `layer_change_gcode` and
+`change_filament_gcode` templates with the cold-chamber branch enabled by a sub-40 C
+chamber setting. Marked template contexts require the selected filament's ordered P2/P10
+events and exact PWM values; two distinct filament slots exercise current and next
+indices. Boundary exports reach physical layers 999 through 1001 across the registered
+1000-layer settings. Positive, unchanged outer-wall XY/E paths control for object
+deposition. Source-local mutations of all three GCode placeholder bindings and the
+template's inclusive first-X-layer comparison fail their relevant cases. This evidence
+is scoped to the shipped template consumers and two-slot fixture, not complete dual-
+nozzle machine behavior or generic CoolingBuffer policy. The four bounded mutations are
+listed in `tests/mutations/auxiliary_fan_templates.json`.
+For a bounded target-mode run, use `fff_print_tests`, the `control_regex` from
+`tests/controls/auxiliary_fan_templates.json`, and that file as the expected
+control inventory. Catalog filters select the two cases by their CTest labels.
+
 `[ExtraSolidInfills]` applies an empty and malformed control, an explicit layer
 list, finite `N#K` spans in a list, and a repeating `N#K` span to a ten-layer
 cube. It checks the helper's one-based selection for IDs 1 through 10 and the

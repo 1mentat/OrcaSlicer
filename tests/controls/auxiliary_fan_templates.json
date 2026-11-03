@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "names": [
+    "X2D auxiliary fan template reaches the layer 1000 boundaries",
+    "X2D auxiliary fan templates expand the selected filament settings"
+  ],
+  "control_regex": "^X2D auxiliary fan template"
+}

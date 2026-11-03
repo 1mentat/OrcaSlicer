@@ -2077,6 +2077,33 @@
       ],
       "reason": "Independent rows use 0%, 40% and 100% auxiliary speed and require parsed physical P2 PWM on every deposition move with positive XY distance. Both exhaust settings remain fixed, and deposited material and every deposition feed match the representative export. Existing multifilament tests also retain variant values of 10%, 20% and 40%."
     },
+    "close_additional_fan_first_x_layers": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With the cold-chamber branch pinned below 40 C, real Print exports through the shipped Bambu Lab X2D 0.4 nozzle layer-change template exercise the registered 0 and 1000 layer endpoints plus representative values in two distinct filament slots. Marked template contexts require P2/P10 output to follow the selected current_filament_id; the 1000-layer transition requires the first-X-layer pair at physical layer 1000 and no pair at physical layer 1001. Positive invariant outer-wall XY/E paths guard object deposition. The template comparison mutant is killed by the physical layer-1000 assertion. Scope is this shipped template fixture with two filament slots, not complete dual-nozzle machine behavior or generic printer fan policy."
+    },
+    "additional_fan_full_speed_layer": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With the cold-chamber branch pinned below 40 C, real Print exports through the shipped Bambu Lab X2D 0.4 nozzle layer-change template exercise the registered 0 and 1000 layer endpoints plus representative ramp values in two distinct filament slots. Marked template contexts require the expected P2/P10 PWM ramp for each observed selected filament and layer; the full-speed endpoint ramps at physical layer 999 and enters the terminal M142 branch at physical layer 1000. Positive invariant outer-wall XY/E paths guard object deposition. The source-local placeholder-binding mutant is killed by the selected-slot ramp assertions. Scope is this shipped template fixture with two filament slots, not complete dual-nozzle machine behavior or generic printer fan policy."
+    },
+    "first_x_layer_fan_speed": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With the cold-chamber branch pinned below 40 C, real Print exports through the shipped Bambu Lab X2D 0.4 nozzle layer-change and change-filament templates exercise the registered 0% and 100% first-layer fan-speed endpoints in two distinct filament slots. Marked contexts require the exact ordered P2/P10 PWM pair for the selected current_filament_id and next_filament_id at a filament change. Positive invariant outer-wall XY/E paths guard object deposition. The source-local placeholder-binding mutant is killed by the endpoint and next-filament assertions. Scope is these shipped template consumers with two filament slots, not complete dual-nozzle machine behavior or generic printer fan policy."
+    },
     "nozzle_temperature_range_high": {
       "test": "tests/fff_print/test_multifilament.cpp",
       "tag": "[MultiFilament]",
