@@ -1791,6 +1791,11 @@ that would overwrite the build. It preserves build outputs through every tree
 change, including changes to ignore rules. Baseline, reference, and head tests
 run again; previous JUnit results do not satisfy the new run.
 
+Tracked diff hashes use full blob IDs so fetching additional Git objects cannot
+invalidate an unchanged checkout by increasing Git's automatic abbreviation.
+Older abbreviated hashes are accepted only when every other recorded state field
+matches and the same diff reproduces the prior hash at a legacy abbreviation.
+
 After a successful configure and build, locked reuse also preserves timestamps
 for tracked overlay files whose bytes, size, and permissions still match after
 reapplication. Changed files retain their new timestamps. The report records

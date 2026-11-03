@@ -2567,6 +2567,46 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         (build / "cache.marker").write_text("retained build cache\n", encoding="utf-8")
         return worktree.resolve()
 
+    def test_tracked_state_is_independent_of_git_object_abbreviation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _, _, _ = self._fixture(Path(temp))
+            path = repo / "tests/harness.txt"
+            path.write_text("changed harness\n", encoding="utf-8")
+            self._git(repo, "config", "core.abbrev", "8")
+            before = slicer_pr_validation._tracked_worktree_state(repo)
+            self._git(repo, "config", "core.abbrev", "10")
+            self.assertEqual(before, slicer_pr_validation._tracked_worktree_state(repo))
+            path.write_text("different harness\n", encoding="utf-8")
+            after = slicer_pr_validation._tracked_worktree_state(repo)
+            self.assertEqual(before["status"], after["status"])
+            self.assertNotEqual(before["tracked_diff_sha256"], after["tracked_diff_sha256"])
+
+    def test_reuse_accepts_legacy_abbreviated_diff_without_accepting_content_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, _, harness_ref, _ = self._fixture(root)
+            worktree = self._make_seed_worktree(root, repo, harness_ref)
+            path = worktree / "tests/harness.txt"
+            path.write_text("changed harness\n", encoding="utf-8")
+            self._git(repo, "config", "core.abbrev", "8")
+            expected = slicer_pr_validation._tracked_worktree_state(worktree, build_dir="build")
+            legacy_diff = subprocess.run(
+                ["git", "diff", "--binary", "--abbrev=8", "HEAD", "--"],
+                cwd=worktree, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            expected["tracked_diff_sha256"] = hashlib.sha256(legacy_diff.stdout).hexdigest()
+            previous = {"worktree": {"final_state": expected}}
+            self._git(repo, "config", "core.abbrev", "10")
+            current = slicer_pr_validation._validate_reusable_worktree(
+                repo, worktree, previous, "build", root / "new-output")
+            self.assertEqual(current["index_tree_sha"], expected["index_tree_sha"])
+            path.write_text("different harness\n", encoding="utf-8")
+            changed = slicer_pr_validation._tracked_worktree_state(worktree, build_dir="build")
+            self.assertEqual(changed["status"], expected["status"])
+            with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                        "tracked tree/status differs"):
+                slicer_pr_validation._validate_reusable_worktree(
+                    repo, worktree, previous, "build", root / "other-output")
+
     @staticmethod
     def _fake_native_phases():
         calls = []

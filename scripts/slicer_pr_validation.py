@@ -1572,7 +1572,7 @@ def _tracked_worktree_state(worktree: Path, *, build_dir: str | None = None) -> 
         cwd=str(worktree), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=120, check=False)
     tracked_diff = subprocess.run(
-        ["git", "diff", "--binary", "HEAD", "--"],
+        ["git", "diff", "--binary", "--full-index", "HEAD", "--"],
         cwd=str(worktree), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=120, check=False)
     if (head is None or head_tree.returncode != 0 or index_tree is None or
@@ -2410,7 +2410,24 @@ def _validate_reusable_worktree(repo: Path, worktree: Path, previous: dict[str, 
     expected_state = previous["worktree"]["final_state"]
     current_state = _tracked_worktree_state(worktree, build_dir=build_dir)
     if current_state != expected_state:
-        raise ValidationError("reusable worktree tracked tree/status differs from the prior report")
+        # Older reports hashed abbreviated blob IDs. Git increases the default
+        # abbreviation as fetched objects accumulate, without changing any files.
+        # Require every other binding to match before checking those legacy formats.
+        comparable = dict(current_state)
+        comparable["tracked_diff_sha256"] = expected_state.get("tracked_diff_sha256")
+        if comparable != expected_state:
+            raise ValidationError("reusable worktree tracked tree/status differs from the prior report")
+        for width in range(4, 41):
+            legacy_diff = subprocess.run(
+                ["git", "diff", "--binary", f"--abbrev={width}", "HEAD", "--"],
+                cwd=str(worktree), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=120, check=False)
+            if legacy_diff.returncode != 0:
+                raise ValidationError("cannot verify legacy reusable worktree diff")
+            if hashlib.sha256(legacy_diff.stdout).hexdigest() == expected_state["tracked_diff_sha256"]:
+                break
+        else:
+            raise ValidationError("reusable worktree tracked tree/status differs from the prior report")
     if current_state["untracked_count"] != 0:
         raise ValidationError("reusable worktree has unexpected untracked files")
     _validate_reusable_worktree_registration(repo, worktree, current_state["head_sha"])
