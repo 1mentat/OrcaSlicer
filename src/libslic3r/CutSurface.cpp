@@ -1,5 +1,6 @@
 #include "CutSurface.hpp"
 #include "libslic3r/Emboss.hpp"
+#include <numeric>
 #include <vector>
 #include <CGAL/Polygon_2_algorithms.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
@@ -3679,6 +3680,57 @@ SurfaceCut priv::patch2cut(SurfacePatch &patch)
         sc.vertices.emplace_back(p.x(), p.y(), p.z());
     }
 
+    // Contour points that collapse onto one float point are merged. Faces must use the surviving index too,
+    // otherwise a contour wall and a face edge at the same position would not share vertices.
+    auto same_output_point = [&sc](SurfaceCut::Index lhs, SurfaceCut::Index rhs) {
+        const Vec3f &a = sc.vertices[lhs];
+        const Vec3f &b = sc.vertices[rhs];
+        return a.x() == b.x() && a.y() == b.y() && a.z() == b.z();
+    };
+    std::vector<SurfaceCut::Index> merged(sc.vertices.size());
+    std::iota(merged.begin(), merged.end(), SurfaceCut::Index(0));
+    sc.contours.reserve(patch.loops.size());
+    for (const Loop &loop : patch.loops) {
+        // Clean the loop as a cyclic sequence of float points: remove consecutive equal points and "spikes"
+        // (a point between two equal neighbours, i.e. a protrusion that collapsed onto a line) until stable.
+        // A stack handles the linear part (including nested spikes); the seam is then fixed up pairwise.
+        // A removed duplicate is merged into its survivor for the faces. A spike tip is not: it is a distinct
+        // float point, and the faces of the collapsed protrusion are dropped as zero-area.
+        SurfaceCut::Contour contour;
+        contour.reserve(loop.size());
+        for (VI vi : loop) {
+            const SurfaceCut::Index index = convert_map[vi];
+            if (!contour.empty() && same_output_point(contour.back(), index))
+                merged[index] = contour.back();
+            else if (contour.size() > 1 && same_output_point(contour[contour.size() - 2], index)) {
+                contour.pop_back();
+                merged[index] = contour.back();
+            } else
+                contour.push_back(index);
+        }
+        for (;;) {
+            const size_t n = contour.size();
+            if (n > 1 && same_output_point(contour.back(), contour.front())) {
+                merged[contour.back()] = contour.front();
+                contour.pop_back();
+            } else if (n > 2 && same_output_point(contour[n - 2], contour.front()))
+                contour.pop_back(); // the last point is a spike tip
+            else if (n > 2 && same_output_point(contour.back(), contour[1]))
+                contour.erase(contour.begin()); // the first point is a spike tip
+            else
+                break;
+        }
+        if (contour.size() >= 3)
+            sc.contours.push_back(std::move(contour));
+    }
+    // Resolve merge chains to their surviving index. Chains are acyclic by construction; the cap is a guard.
+    for (size_t i = 0; i < merged.size(); ++i) {
+        SurfaceCut::Index root = merged[i];
+        for (size_t hops = 0; merged[root] != root && hops < merged.size(); ++hops)
+            root = merged[root];
+        merged[i] = root;
+    }
+
     for (FI fi : mesh.faces()) {
         HI hi = mesh.halfedge(fi);
         assert(mesh.next(hi).is_valid());
@@ -3692,16 +3744,17 @@ SurfaceCut priv::patch2cut(SurfacePatch &patch)
         for (VI vi : { mesh.source(hi), 
                        mesh.target(hi), 
                        mesh.target(mesh.next(hi))})
-            ti[i++] = convert_map[vi];
-        sc.indices.push_back(ti);
-    }
+            ti[i++] = merged[convert_map[vi]];
 
-    sc.contours.reserve(patch.loops.size());
-    for (const Loop &loop : patch.loops) { 
-        sc.contours.push_back({});
-        std::vector<SurfaceCut::Index> &contour = sc.contours.back();
-        contour.reserve(loop.size());
-        for (VI vi : loop) contour.push_back(convert_map[vi]);
+        // Conversion from CGAL doubles can collapse a triangle in SurfaceCut's
+        // float vertices. Check the converted geometry in double so the area
+        // calculation does not underflow for small, valid output triangles.
+        const Vec3d a = sc.vertices[ti[0]].cast<double>();
+        const Vec3d b = sc.vertices[ti[1]].cast<double>();
+        const Vec3d c = sc.vertices[ti[2]].cast<double>();
+        if ((b - a).cross(c - a).squaredNorm() == 0.0)
+            continue;
+        sc.indices.push_back(ti);
     }
 
     // Not neccessary, clean and free memory

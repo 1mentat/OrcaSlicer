@@ -714,10 +714,7 @@ TEST_CASE("Surface cuts keep positive faces whose squared area is below 1e-10", 
     CHECK_THAT(projected_area(cut), WithinAbs(width * width, width * 1e-6));
 }
 
-// Known bug: where float vertices cannot resolve the shape (here 1e-6 mm at ~200 mm), the converted triangles
-// collapse to zero area and the contours repeat points, so cut2model emits zero-area side walls; fixed by the
-// follow-up fix PR.
-TEST_CASE("Surface cuts drop faces and contour points that collapse in float output", "[CutSurface][!shouldfail]")
+TEST_CASE("Surface cuts drop faces and contour points that collapse in float output", "[CutSurface]")
 {
     // Float spacing near 200 mm is about 1.5e-5 mm, so a 1e-6 mm wide shape collapses to a single float point
     // across its width. Both rows span one cube corner: a point-sized square and a 3 mm long sliver.
@@ -757,6 +754,81 @@ TEST_CASE("Surface cuts keep float-resolvable shapes at the far corner of a larg
 
     CHECK_FALSE(cut.indices.empty());
     CHECK_FALSE(cut.contours.empty());
+}
+
+TEST_CASE("Surface cuts keep faces and contours on one vertex when only part of a loop collapses", "[CutSurface]")
+{
+    // A trapezoid whose narrow edge (1e-6 mm) collapses to one float point while the rest of the shape survives.
+    // The merged contour point and the surviving face must reference the same vertex, or cut2model leaves open edges.
+    const Point corner = Point::new_scale(199.9, 199.9);
+    const coord_t length = scale_(3.), width = scale_(1.);
+    Points points{corner, Point(corner.x() + 1, corner.y()), Point(corner.x() + length, corner.y() + width), Point(corner.x(), corner.y() + width)};
+    ExPolygon shape{Polygon(points)};
+    shape.contour.make_counter_clockwise();
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(200., 200., 200.)}, scaled_cube_projection(600.f), .5f);
+
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(contour_count(cut) == 1);
+    const indexed_triangle_set model = cut2model(cut, Emboss::OrthoProject3d(Vec3d(0., 0., 600.)));
+    check_mesh_indices(model);
+    CHECK(its_num_open_edges(model) == 0);
+}
+
+TEST_CASE("Surface cuts leave no contour wall for a protrusion whose width collapses", "[CutSurface]")
+{
+    // A 10 mm square with a 3 mm tail that is 1e-6 mm wide. The tail has no float area, so none of its faces survive
+    // and its contour edges must be dropped as well, or cut2model builds walls with no front face.
+    const bool tail_on_left = GENERATE(true, false);
+    CAPTURE(tail_on_left);
+    const int rotation = GENERATE(0, 1, 2, 3, 4, 5, 6, 7);
+    CAPTURE(rotation);
+    // With a middle vertex on each side of the tail the loop collapses to A,B,C,B,A on one float line.
+    const bool with_station = GENERATE(false, true);
+    CAPTURE(with_station);
+    const coord_t side = scale_(10.), tail = scale_(3.), x0 = scale_(189.9), y0 = scale_(189.9), mid = y0 + side / 2;
+    Points points;
+    if (tail_on_left) {
+        points = {Point(x0, y0), Point(x0 + side, y0), Point(x0 + side, y0 + side), Point(x0, y0 + side), Point(x0, mid + 1)};
+        if (with_station)
+            points.emplace_back(x0 - tail / 2, mid + 1);
+        points.emplace_back(x0 - tail, mid + 1);
+        points.emplace_back(x0 - tail, mid);
+        if (with_station)
+            points.emplace_back(x0 - tail / 2, mid);
+        points.emplace_back(x0, mid);
+    } else {
+        points = {Point(x0, y0), Point(x0 + side / 2, y0)};
+        if (with_station)
+            points.emplace_back(x0 + side / 2, y0 - tail / 2);
+        points.emplace_back(x0 + side / 2, y0 - tail);
+        points.emplace_back(x0 + side / 2 + 1, y0 - tail);
+        if (with_station)
+            points.emplace_back(x0 + side / 2 + 1, y0 - tail / 2);
+        points.insert(points.end(), {Point(x0 + side / 2 + 1, y0), Point(x0 + side, y0), Point(x0 + side, y0 + side), Point(x0, y0 + side)});
+    }
+    // Rotating the input changes where the cut's loops start, so the seam handling sees different spike positions.
+    std::rotate(points.begin(), points.begin() + rotation, points.end());
+    ExPolygon shape{Polygon(points)};
+    shape.contour.make_counter_clockwise();
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(200., 200., 200.)}, scaled_cube_projection(600.f), .5f);
+
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(contour_count(cut) == 1);
+    // Every contour edge is the edge of a surviving face.
+    for (const SurfaceCut::Contour &contour : cut.contours)
+        for (size_t i = 0; i < contour.size(); ++i) {
+            const int a = int(contour[i]), b = int(contour[(i + 1) % contour.size()]);
+            const bool has_face = std::any_of(cut.indices.begin(), cut.indices.end(), [a, b](const stl_triangle_vertex_indices &face) {
+                for (int k = 0; k < 3; ++k)
+                    if (face[k] == a && face[(k + 1) % 3] == b)
+                        return true;
+                return false;
+            });
+            CHECK(has_face);
+        }
+    const indexed_triangle_set model = cut2model(cut, Emboss::OrthoProject3d(Vec3d(0., 0., 600.)));
+    check_mesh_indices(model);
+    CHECK(its_num_open_edges(model) == 0);
 }
 
 } // namespace cut_surface_topology_contracts
