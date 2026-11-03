@@ -714,10 +714,7 @@ TEST_CASE("Surface cuts keep positive faces whose squared area is below 1e-10", 
     CHECK_THAT(projected_area(cut), WithinAbs(width * width, width * 1e-6));
 }
 
-// Known bug: where float vertices cannot resolve the shape (here 1e-6 mm at ~200 mm), the converted triangles
-// collapse to zero area and the contours repeat points, so cut2model emits zero-area side walls; fixed by the
-// follow-up fix PR.
-TEST_CASE("Surface cuts drop faces and contour points that collapse in float output", "[CutSurface][!shouldfail]")
+TEST_CASE("Surface cuts drop faces and contour points that collapse in float output", "[CutSurface]")
 {
     // Float spacing near 200 mm is about 1.5e-5 mm, so a 1e-6 mm wide shape collapses to a single float point
     // across its width. Both rows span one cube corner: a point-sized square and a 3 mm long sliver.
