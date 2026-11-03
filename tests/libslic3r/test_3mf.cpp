@@ -4294,7 +4294,7 @@ void replace_archive_entry(const std::string &path, const std::string &entry, co
 
 } // namespace
 
-TEST_CASE("BBS 3MF skips layer range records with an invalid or repeated object id", "[3MF][Bbs3mfExtended][Errors][LayerRanges]")
+TEST_CASE("BBS 3MF tolerates layer range records with invalid or repeated object ids and keeps the first per object", "[3MF][Bbs3mfExtended][Errors][LayerRanges]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_object_record_fixture(archive.string());
@@ -4314,7 +4314,8 @@ TEST_CASE("BBS 3MF skips layer range records with an invalid or repeated object 
         return std::string("<object id=\"") + id + "\"><range min_z=\"" + min_z + "\" max_z=\"" + max_z +
                "\"><option opt_key=\"layer_height\">" + layer_height + "</option></range></object>";
     };
-    // Ids 0 and "abc" are invalid, the second record for id 1 repeats it, id 3 names no object.
+    // Ids 0 and "abc" are invalid (they match no object, so those rows only show the import copes),
+    // the second record for id 1 repeats it (the first record must win), and id 3 names no object.
     replace_archive_entry(archive.string(), "Metadata/layer_config_ranges.xml",
                           "<?xml version=\"1.0\"?><objects>" + range("0", "0", "1", "0.45") + range("abc", "0", "1", "0.46") +
                               range("1", "0", "1", "0.25") + range("1", "1", "2", "0.35") + range("2", "0", "2", "0.15") +
@@ -4340,13 +4341,15 @@ TEST_CASE("BBS 3MF skips layer range records with an invalid or repeated object 
     CHECK_THAT(second.second.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.15, 1e-6));
 }
 
-TEST_CASE("BBS 3MF skips malformed brim point records and keeps the valid ones", "[3MF][Bbs3mfExtended][Errors][Brim]")
+TEST_CASE("BBS 3MF tolerates malformed brim point records and keeps the valid ones", "[3MF][Bbs3mfExtended][Errors][Brim]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_object_record_fixture(archive.string());
 
-    // Each bad record comes before the valid ones: a line without '|', an id line without points,
-    // object ids 0 / non-numeric / with two '=', and a second record for id 1.
+    // Malformed lines come first and a repeat of id 1 follows the valid record, so a parser that stops at
+    // the first bad line or lets a later record win fails. "not-a-coordinate" and "object_id=1" both have no
+    // '|' (one parse branch); ids 0 and "x" both parse to 0 (one branch); "a=b=c" has two '='. The version
+    // header only keeps the file well-formed: it is skipped as a malformed record even without header handling.
     replace_archive_entry(archive.string(), "Metadata/brim_ear_points.txt",
                           "brim_points_format_version=0\n"
                           "not-a-coordinate\n"
