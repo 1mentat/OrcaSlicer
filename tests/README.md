@@ -1739,8 +1739,11 @@ Each option is reported as `declared_covered`, `declared_partial`, or
 `uncovered` with required dimensions and a reason. These are declared claims;
 the report does not assert that the native tests passed. `declared_covered`
 requires a setting-type-specific value
-dimension (all enum values, boolean values, numeric boundaries, or
-representative values) plus a pipeline oracle. Nullable settings also require
+dimension (all enum values, boolean values, registered numeric boundaries, or
+representative values) plus a pipeline oracle. Numeric scalars without registered
+min/max bounds require representative consumer values; unknown range metadata
+remains conservative. Numeric vectors retain their boundary requirement,
+including their shape and element behavior. Nullable settings also require
 `nullable_behavior`: setting-specific evidence for nil and explicit values
 through the resolved pipeline. Nil does not necessarily mean inheritance;
 the oracle must establish that setting's behavior. A source mention,

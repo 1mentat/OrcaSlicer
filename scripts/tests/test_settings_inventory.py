@@ -198,6 +198,8 @@ class SettingsInventoryTests(unittest.TestCase):
         self.assertEqual(options["filament_retract_when_changing_layer"]["status"], "declared_covered")
         numeric = options["filament_retraction_length"]
         self.assertEqual(numeric["status"], "declared_partial")
+        self.assertEqual(numeric["required_dimensions"], [
+            "boundary_values", "pipeline_oracle", "nullable_behavior"])
         self.assertIn("Missing required dimensions: boundary_values.", numeric["reason"])
         self.assertEqual(report["counts"]["declared_covered"], 1)
         self.assertEqual(report["counts"]["declared_partial"], 2)
@@ -235,6 +237,155 @@ void PrintConfigDef::handle_legacy(
         self.assertEqual(options["localized"]["enum_values"], ["Standard"])
         self.assertEqual(options["bottom"]["enum_values"], ["-1", "0"])
         self.assertTrue(options["bottom"]["nullable"])
+
+    def test_range_parser_tracks_expression_bounds_and_stops_before_generated_overrides(self):
+        source = """
+const std::vector<std::string> filament_extruder_override_keys = {
+    "filament_bounded", "filament_unbounded"
+};
+void PrintConfigDef::init_common_params() {
+    auto def = this->add("bounded", coFloats);
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloats{1});
+    def = this->add("expression_bounded", coFloat);
+    def->max = configured_limit;
+    def->set_default_value(new ConfigOptionFloat(1));
+    def = this->add("unbounded", coFloats);
+    def->set_default_value(new ConfigOptionFloats{1});
+    for (auto& opt_key : filament_extruder_override_keys) {
+        def = this->add_nullable(opt_key, coFloats);
+        def->min = it_opt->second.min;
+        def->max = it_opt->second.max;
+    }
+    def = this->add("nullable_unbounded", coFloats);
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{1});
+}
+void PrintConfigDef::handle_legacy(
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "PrintConfig.cpp"
+            source_path.write_text(source, encoding="utf-8")
+            options = {
+                item["key"]: item
+                for item in settings_inventory.parse_print_config(source_path)["options"]
+            }
+        self.assertEqual(options["bounded"]["range_declared"], ["min"])
+        self.assertEqual(options["expression_bounded"]["range_declared"], ["max"])
+        self.assertEqual(options["unbounded"]["range_declared"], [])
+        self.assertEqual(options["filament_bounded"]["range_declared"], ["min"])
+        self.assertTrue(options["filament_bounded"]["nullable"])
+        self.assertEqual(options["filament_unbounded"]["range_declared"], [])
+        self.assertTrue(options["filament_unbounded"]["nullable"])
+        self.assertEqual(options["nullable_unbounded"]["range_declared"], [])
+
+    def test_unbounded_scalar_numeric_evidence_uses_representatives(self):
+        for option_type in ("coInt", "coFloat", "coPercent", "coFloatOrPercent"):
+            with self.subTest(option_type=option_type):
+                self.assertEqual(settings_inventory._required_dimensions(
+                    option_type, range_declared=[]),
+                    ["representative_values", "pipeline_oracle"])
+                self.assertEqual(settings_inventory._required_dimensions(
+                    option_type, nullable=True, range_declared=[]),
+                    ["representative_values", "pipeline_oracle", "nullable_behavior"])
+                # Absent range metadata is unknown, not evidence of no bounds.
+                self.assertEqual(settings_inventory._required_dimensions(
+                    option_type, range_declared=None), ["boundary_values", "pipeline_oracle"])
+
+    def test_numeric_vectors_keep_boundaries_required_without_registered_bounds(self):
+        for option_type in ("coInts", "coFloats", "coPercents", "coFloatsOrPercents"):
+            with self.subTest(option_type=option_type):
+                self.assertEqual(settings_inventory._required_dimensions(
+                    option_type, range_declared=[]), ["boundary_values", "pipeline_oracle"])
+                self.assertEqual(settings_inventory._required_dimensions(
+                    option_type, nullable=True, range_declared=[]),
+                    ["boundary_values", "pipeline_oracle", "nullable_behavior"])
+                self.assertEqual(settings_inventory._required_dimensions(
+                    option_type, range_declared=None), ["boundary_values", "pipeline_oracle"])
+
+    def test_range_aware_report_keeps_bounds_nullable_and_pipeline_gaps_distinct(self):
+        source = """
+const std::vector<std::string> filament_extruder_override_keys = {
+    "filament_bounded", "filament_unbounded"
+};
+void PrintConfigDef::init_common_params() {
+    auto def = this->add("bounded", coFloats);
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloats{1});
+    def = this->add("expression_bounded", coFloat);
+    def->max = configured_limit;
+    def->set_default_value(new ConfigOptionFloat(1));
+    def = this->add("unbounded", coFloats);
+    def->set_default_value(new ConfigOptionFloats{1});
+    for (auto& opt_key : filament_extruder_override_keys) {
+        def = this->add_nullable(opt_key, coFloats);
+        def->min = it_opt->second.min;
+        def->max = it_opt->second.max;
+    }
+    def = this->add("nullable_unbounded", coFloats);
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{1});
+}
+void PrintConfigDef::handle_legacy(
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests").mkdir()
+            (root / "tests" / "fixture.cpp").write_text("[RangeAudit]", encoding="utf-8")
+            source_path = root / "PrintConfig.cpp"
+            source_path.write_text(source, encoding="utf-8")
+            evidence_path = root / "evidence.json"
+            evidence_path.write_text(json.dumps({"entries": {
+                key: {"test": "tests/fixture.cpp", "tag": "[RangeAudit]",
+                      "dimensions": dimensions, "reason": "Synthetic range audit evidence."}
+                for key, dimensions in {
+                    "bounded": ["representative_values", "pipeline_oracle"],
+                    "expression_bounded": ["representative_values", "pipeline_oracle"],
+                    "unbounded": ["representative_values", "pipeline_oracle"],
+                    "filament_bounded": ["boundary_values", "representative_values",
+                                         "pipeline_oracle", "nullable_behavior"],
+                    "filament_unbounded": ["representative_values", "pipeline_oracle"],
+                    "nullable_unbounded": ["representative_values", "pipeline_oracle"],
+                }.items()
+            }}), encoding="utf-8")
+            report = settings_inventory.build_report(
+                root=root, source_path=source_path, evidence_path=evidence_path)
+        options = {item["key"]: item for item in report["options"]}
+        self.assertEqual(options["bounded"]["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: boundary_values.",
+                      options["bounded"]["reason"])
+        self.assertEqual(options["expression_bounded"]["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: boundary_values.",
+                      options["expression_bounded"]["reason"])
+        self.assertEqual(options["unbounded"]["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: boundary_values.",
+                      options["unbounded"]["reason"])
+        self.assertEqual(options["filament_bounded"]["status"], "declared_covered")
+        self.assertEqual(options["filament_unbounded"]["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: boundary_values, nullable_behavior.",
+                      options["filament_unbounded"]["reason"])
+        self.assertEqual(options["nullable_unbounded"]["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: boundary_values, nullable_behavior.",
+                      options["nullable_unbounded"]["reason"])
+
+    def test_real_source_range_metadata_does_not_inherit_or_miss_bounds(self):
+        options = {
+            item["key"]: item
+            for item in settings_inventory.parse_print_config(
+                ROOT / "src/libslic3r/PrintConfig.cpp")["options"]
+        }
+        self.assertEqual(options["absolute_correction"]["range_declared"], [])
+        self.assertEqual(options["z_offset"]["range_declared"], [])
+        self.assertEqual(options["standby_temperature_delta"]["range_declared"],
+                         ["max", "min"])
+        self.assertEqual(options["nozzle_temperature_initial_layer"]["range_declared"],
+                         ["max", "min"])
+        # The following direct numeric option precedes a generated nullable
+        # override loop. That loop's inherited bounds must not leak backward.
+        self.assertEqual(options["filament_dev_drying_cooling_temperature"]["range_declared"], [])
+        self.assertEqual(options["filament_retraction_length"]["range_declared"],
+                         options["retraction_length"]["range_declared"])
 
     def test_real_source_captures_literal_metadata_and_direct_nullable(self):
         source = ROOT / "src/libslic3r/PrintConfig.cpp"

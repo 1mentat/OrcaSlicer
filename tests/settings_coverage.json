@@ -5108,7 +5108,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The accepted public infill-anchor cases exercise the documented 0 no-anchor behavior and positive absolute values, compare requested 1.2 mm against the 0.6 mm clamp, and compare absolute values with equivalent percentages. Independent sparse-path length and endpoint-contact measurements distinguish the outputs. Zero is a documented semantic boundary; no numeric min/max range is registered, so this remains partial rather than claiming a complete numeric boundary matrix."
+      "reason": "The accepted public infill-anchor cases exercise the documented 0 no-anchor behavior and positive absolute values, compare requested 1.2 mm against the 0.6 mm clamp, and compare absolute values with equivalent percentages. Independent sparse-path length and endpoint-contact measurements distinguish the outputs. Zero is a documented semantic boundary; no numeric min/max range is registered. These representative fixtures do not exhaust the unbounded numeric domain or arbitrary geometries."
     },
     "min_skirt_length": {
       "test": "tests/fff_print/test_skirt_brim.cpp",
@@ -6171,6 +6171,7 @@
       "tag": "[WipeTowerFilamentDistanceBoundaries]",
       "dimensions": [
         "boundary_values",
+        "representative_values",
         "pipeline_oracle"
       ],
       "reason": "The full SEMM Print export checks the tooltip-defined negative, zero, and positive sign partition at -5, 0, and +5 mm with parking fixed at 40 mm, keeping every effective loading distance positive. Parsed loading E phases total 35, 40, and 45 mm in the emitted 20/70/10 split; the unload-plus-park return remains 40 mm. Each export requires positive object-model deposition with conserved summed model-feature E length and XY path, and planned wipe toolchange spans retain matching layer/tool associations and Y span. Zero is a semantic sign boundary, not a registered minimum; no numeric extremes are claimed."
@@ -6218,6 +6219,7 @@
       "tag": "[GapFillFilterSettings]",
       "dimensions": [
         "boundary_values",
+        "representative_values",
         "pipeline_oracle"
       ],
       "reason": "The classic-wall Print pipeline processes the same 20 mm square tube with a 1 mm wall at the default 0 mm no-filter threshold and at 100 mm, above every gap path in this bounded fixture. These are semantic extremes for this fixture, not registered numeric endpoints: the option declares neither a minimum nor a maximum. Zero emits gap fill on the middle layer; 100 mm removes it while contour, hole, and inner wall classes stay unchanged on all 25 layers. Other wall generators, infill gap paths, and intermediate thresholds remain unclaimed."
