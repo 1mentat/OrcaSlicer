@@ -3349,7 +3349,6 @@ TEST_CASE("BBS 3MF falls back on a truncated Unicode metadata field", "[3MF][Bbs
     CHECK_FALSE(boost::filesystem::exists(root / "docs" / "short"));
 }
 
-
 namespace {
 
 std::vector<std::pair<std::string, std::string>> read_layer_filament_lists(const std::string &xml)
@@ -3391,7 +3390,7 @@ void store_plate_fixture(const std::string &path, const std::function<void(Plate
 
 } // namespace
 
-TEST_CASE("BBS slice metadata preserves multiple layer filament ranges", "[3MF][Bbs3mfExportGaps][LayerFilaments]")
+TEST_CASE("BBS slice metadata preserves multiple layer filament ranges", "[3MF][Bbs3mfExtended][LayerFilaments]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_plate_fixture(archive.string(), [](PlateData &plate) {
@@ -3416,8 +3415,7 @@ TEST_CASE("BBS slice metadata preserves multiple layer filament ranges", "[3MF][
     CHECK(read_layer_filament_lists(empty_slice_info).empty());
 }
 
-
-TEST_CASE("BBS project preserves plate scheduling metadata", "[3mf][Bbs3mfMetadata][PlateMetadata]")
+TEST_CASE("BBS project preserves plate scheduling metadata", "[3MF][Bbs3mfExtended][PlateMetadata]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_plate_fixture(archive.string(), [](PlateData &plate) {
@@ -3449,7 +3447,7 @@ TEST_CASE("BBS project preserves plate scheduling metadata", "[3mf][Bbs3mfMetada
     CHECK(plate.config.opt_bool("spiral_mode"));
 }
 
-TEST_CASE("BBS project clamps plate map values at import", "[3mf][Bbs3mfMetadata][PlateMetadata][Maps]")
+TEST_CASE("BBS project clamps plate map values at import", "[3MF][Bbs3mfExtended][PlateMetadata][Maps]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_plate_fixture(archive.string(), [](PlateData &plate) {
@@ -3470,7 +3468,7 @@ TEST_CASE("BBS project clamps plate map values at import", "[3mf][Bbs3mfMetadata
     CHECK(plate.config.opt<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{0, 1, 0, 0});
 }
 
-TEST_CASE("BBS project retains slice statistics and booleans", "[3mf][Bbs3mfMetadata][SliceInfo]")
+TEST_CASE("BBS project retains slice statistics and booleans", "[3MF][Bbs3mfExtended][SliceInfo]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_plate_fixture(archive.string(), [](PlateData &plate) {
@@ -3478,8 +3476,9 @@ TEST_CASE("BBS project retains slice statistics and booleans", "[3mf][Bbs3mfMeta
         plate.printer_model_id = "slice-info-printer";
         plate.gcode_prediction = "123.4";
         plate.gcode_weight = "45.6";
+        // A mix of true and false, so a flag that is forced either way is caught.
         plate.toolpath_outside = true;
-        plate.is_support_used = true;
+        plate.is_support_used = false;
         plate.is_label_object_enabled = true;
     });
 
@@ -3492,29 +3491,37 @@ TEST_CASE("BBS project retains slice statistics and booleans", "[3mf][Bbs3mfMeta
     CHECK(plate.gcode_prediction == "123.4");
     CHECK(plate.gcode_weight == "45.6");
     CHECK(plate.toolpath_outside);
-    CHECK(plate.is_support_used);
+    CHECK_FALSE(plate.is_support_used);
     CHECK(plate.is_label_object_enabled);
 }
 
-TEST_CASE("BBS project writes physical and mixed filament records", "[3mf][Bbs3mfMetadata][SliceInfo][Filament]")
+TEST_CASE("BBS project round-trips physical filament records and writes mixed filament records", "[3MF][Bbs3mfExtended][SliceInfo][Filament]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_plate_fixture(archive.string(), [](PlateData &plate) {
         plate.is_sliced_valid = true;
-        FilamentInfo physical;
-        physical.id = 1;
-        physical.type = "PLA";
-        physical.color = "#123456";
-        physical.filament_id = "tray-7";
-        physical.used_m = 2.5f;
-        physical.used_g = 6.25f;
-        physical.used_for_object = true;
-        physical.used_for_support = true;
-        physical.group_id = {1, 2};
-        physical.nozzle_diameter = .6;
-        physical.nozzle_volume_type = "High Flow";
-        plate.slice_filaments_info.push_back(physical);
-        plate.mixed_filaments_info.push_back({9, "Mix", "#aabbcc", "2,3"});
+        FilamentInfo first;
+        first.id = 1;
+        first.type = "PLA";
+        first.color = "#123456";
+        first.filament_id = "tray-7";
+        first.used_m = 2.5f;
+        first.used_g = 6.25f;
+        first.used_for_object = true;
+        first.used_for_support = false;
+        first.group_id = {1, 2};
+        FilamentInfo second;
+        second.id = 3;
+        second.type = "PETG";
+        second.color = "#654321";
+        second.filament_id = "tray-2";
+        second.used_m = 1.5f;
+        second.used_g = 4.75f;
+        second.used_for_object = false;
+        second.used_for_support = true;
+        second.group_id = {3};
+        plate.slice_filaments_info = {first, second};
+        plate.mixed_filaments_info = {{9, "Mix", "#aabbcc", "2,3"}, {12, "Blend", "#445566", "1,4"}};
     });
 
     Model loaded_model;
@@ -3522,8 +3529,9 @@ TEST_CASE("BBS project writes physical and mixed filament records", "[3mf][Bbs3m
     REQUIRE(load_model(archive.string(), loaded_model, loaded));
     REQUIRE(loaded.plates.size() == 1);
     const PlateData &plate = *loaded.plates.front();
-    REQUIRE(plate.slice_filaments_info.size() == 1);
-    const FilamentInfo &physical = plate.slice_filaments_info.front();
+
+    REQUIRE(plate.slice_filaments_info.size() == 2);
+    const FilamentInfo &physical = plate.slice_filaments_info[0];
     CHECK(physical.id == 1);
     CHECK(physical.type == "PLA");
     CHECK(physical.color == "#123456");
@@ -3531,37 +3539,63 @@ TEST_CASE("BBS project writes physical and mixed filament records", "[3mf][Bbs3m
     CHECK_THAT(double(physical.used_m), Catch::Matchers::WithinAbs(2.5, 1e-5));
     CHECK_THAT(double(physical.used_g), Catch::Matchers::WithinAbs(6.25, 1e-5));
     CHECK(physical.used_for_object);
-    CHECK(physical.used_for_support);
+    CHECK_FALSE(physical.used_for_support);
     CHECK(physical.group_id == std::vector<int>{1, 2});
+    const FilamentInfo &other = plate.slice_filaments_info[1];
+    CHECK(other.id == 3);
+    CHECK(other.type == "PETG");
+    CHECK(other.color == "#654321");
+    CHECK(other.filament_id == "tray-2");
+    CHECK_THAT(double(other.used_m), Catch::Matchers::WithinAbs(1.5, 1e-5));
+    CHECK_THAT(double(other.used_g), Catch::Matchers::WithinAbs(4.75, 1e-5));
+    CHECK_FALSE(other.used_for_object);
+    CHECK(other.used_for_support);
+    CHECK(other.group_id == std::vector<int>{3});
+
+    // The importer does not restore mixed-filament records onto the plate, so check what the
+    // exporter wrote to slice_info.config.
     std::string slice_info;
     REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
-    CHECK(slice_info.find("<mixed_filament") != std::string::npos);
-    CHECK(slice_info.find("id=\"9\"") != std::string::npos);
-    CHECK(slice_info.find("type=\"Mix\"") != std::string::npos);
-    CHECK(slice_info.find("color=\"#aabbcc\"") != std::string::npos);
-    CHECK(slice_info.find("components=\"2,3\"") != std::string::npos);
+    std::stringstream input(slice_info);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::vector<std::array<std::string, 4>> mixed;
+    for (const auto &node : tree.get_child("config.plate")) {
+        if (node.first != "mixed_filament")
+            continue;
+        const auto &attributes = node.second.get_child("<xmlattr>");
+        mixed.push_back({attributes.get<std::string>("id"), attributes.get<std::string>("type"),
+                         attributes.get<std::string>("color"), attributes.get<std::string>("components")});
+    }
+    REQUIRE(mixed.size() == 2);
+    CHECK(mixed[0] == std::array<std::string, 4>{"9", "Mix", "#aabbcc", "2,3"});
+    CHECK(mixed[1] == std::array<std::string, 4>{"12", "Blend", "#445566", "1,4"});
 }
 
-TEST_CASE("BBS project restores warning messages without treating them as config", "[3mf][Bbs3mfMetadata][SliceInfo][Warnings]")
+TEST_CASE("BBS project restores slice warning messages and levels", "[3MF][Bbs3mfExtended][SliceInfo][Warnings]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_plate_fixture(archive.string(), [](PlateData &plate) {
         plate.is_sliced_valid = true;
-        GCodeProcessorResult::SliceWarning warning;
-        warning.msg = "slice warning";
-        warning.level = 3;
-        plate.warnings.push_back(warning);
+        GCodeProcessorResult::SliceWarning first;
+        first.msg = "first slice warning";
+        first.level = 3;
+        GCodeProcessorResult::SliceWarning second;
+        second.msg = "second slice warning";
+        second.level = 1;
+        plate.warnings = {first, second};
     });
 
     Model loaded_model;
     LoadedProject loaded;
     REQUIRE(load_model(archive.string(), loaded_model, loaded));
     REQUIRE(loaded.plates.size() == 1);
-    REQUIRE(loaded.plates.front()->warnings.size() == 1);
-    CHECK(loaded.plates.front()->warnings.front().msg == "slice warning");
-    CHECK(loaded.plates.front()->warnings.front().level == 3);
+    REQUIRE(loaded.plates.front()->warnings.size() == 2);
+    CHECK(loaded.plates.front()->warnings[0].msg == "first slice warning");
+    CHECK(loaded.plates.front()->warnings[0].level == 3);
+    CHECK(loaded.plates.front()->warnings[1].msg == "second slice warning");
+    CHECK(loaded.plates.front()->warnings[1].level == 1);
 }
-
 
 } // namespace bbs_archive_contracts
 
