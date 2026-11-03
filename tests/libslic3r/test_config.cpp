@@ -3359,7 +3359,7 @@ TEST_CASE("Delimited G-code config reports missing headers and block delimiters"
 
 } // namespace config_footer_contracts
 
-namespace config_residual_contracts {
+namespace config_option_value_contracts {
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 
@@ -3422,10 +3422,11 @@ TEST_CASE("ConfigOptionPoint3 round trips comma and x separators", "[Config][Con
     CHECK_THAT(decoded.value.x(), WithinAbs(1.25, 1e-9));
     CHECK_THAT(decoded.value.y(), WithinAbs(-2.5, 1e-9));
     CHECK_THAT(decoded.value.z(), WithinAbs(9.75, 1e-9));
-    REQUIRE(decoded.deserialize("1.25x-2.5x9.75"));
-    CHECK_THAT(decoded.value.x(), WithinAbs(1.25, 1e-9));
-    CHECK_THAT(decoded.value.y(), WithinAbs(-2.5, 1e-9));
-    CHECK_THAT(decoded.value.z(), WithinAbs(9.75, 1e-9));
+    ConfigOptionPoint3 x_decoded(Vec3d(7., 8., 9.));
+    REQUIRE(x_decoded.deserialize("1.25x-2.5x9.75"));
+    CHECK_THAT(x_decoded.value.x(), WithinAbs(1.25, 1e-9));
+    CHECK_THAT(x_decoded.value.y(), WithinAbs(-2.5, 1e-9));
+    CHECK_THAT(x_decoded.value.z(), WithinAbs(9.75, 1e-9));
     CHECK_FALSE(decoded.deserialize("1.25x-2.5"));
 }
 
@@ -3451,7 +3452,7 @@ TEST_CASE("ConfigOptionPointsGroups preserves group and point boundaries", "[Con
     CHECK(decoded.vserialize_single(0) == std::vector<std::string>{"1x2", "3x4"});
 }
 
-TEST_CASE("ConfigOptionIntsGroups preserves append and per-group serialization", "[Config][ConfigContracts]")
+TEST_CASE("ConfigOptionIntsGroups deserialize appends or replaces groups and serializes per group", "[Config][ConfigContracts]")
 {
     ConfigOptionIntsGroups groups({std::vector<int>{1, 2}, std::vector<int>{7}});
     CHECK(groups.serialize() == "1,2#7");
@@ -3486,11 +3487,21 @@ TEST_CASE("ConfigOptionPointsGroups append and clone preserve nested values", "[
     ConfigOptionPointsGroups extra({Vec2ds{Vec2d(2., 2.), Vec2d(3., 3.)}});
     source.append(&extra);
     REQUIRE(source.values.size() == 2);
-    CHECK(source.values[1].size() == 2);
+    REQUIRE(source.values[0].size() == 1);
+    check_point_components(source.values[0][0], 1., 1.);
+    REQUIRE(source.values[1].size() == 2);
+    check_point_components(source.values[1][0], 2., 2.);
+    check_point_components(source.values[1][1], 3., 3.);
     std::unique_ptr<ConfigOption> clone(source.clone());
     auto *typed = dynamic_cast<ConfigOptionPointsGroups *>(clone.get());
     REQUIRE(typed != nullptr);
-    CHECK(*typed == source);
+    CHECK(typed != &source);
+    REQUIRE(typed->values.size() == 2);
+    REQUIRE(typed->values[0].size() == 1);
+    check_point_components(typed->values[0][0], 1., 1.);
+    REQUIRE(typed->values[1].size() == 2);
+    check_point_components(typed->values[1][0], 2., 2.);
+    check_point_components(typed->values[1][1], 3., 3.);
 }
 
 TEST_CASE("ConfigOptionPoint preserves scalar geometry through parsing and ownership", "[Config][ConfigContracts][ConfigPoint]")
@@ -3498,8 +3509,9 @@ TEST_CASE("ConfigOptionPoint preserves scalar geometry through parsing and owner
     ConfigOptionPoint source(Vec2d(1.25, -2.5));
     CHECK(source.serialize() == "1.25,-2.5");
 
-    REQUIRE(source.deserialize("1.25x-2.5"));
-    check_point_components(source.value, 1.25, -2.5);
+    ConfigOptionPoint x_decoded(Vec2d(7., 8.));
+    REQUIRE(x_decoded.deserialize("1.25x-2.5"));
+    check_point_components(x_decoded.value, 1.25, -2.5);
     REQUIRE(source.deserialize(" 3.5 , 4.25 "));
     CHECK(source.serialize() == "3.5,4.25");
     CHECK_FALSE(source.deserialize("3.5x4.25x9"));
@@ -3534,6 +3546,13 @@ TEST_CASE("ConfigOptionPoints bounds vector parsing, order, and append semantics
     check_point_components(decoded.values[2], 5., 6.);
     CHECK(source < decoded);
     CHECK_FALSE(decoded < source);
+    // Ordering is element-wise before length: the first differing element decides.
+    const ConfigOptionPoints differs({Vec2d(1., 2.), Vec2d(-3., 5.)});
+    CHECK(source < differs);
+    CHECK_FALSE(differs < source);
+    const ConfigOptionPoints shorter_but_greater({Vec2d(2., 0.)});
+    CHECK(source < shorter_but_greater);
+    CHECK_FALSE(shorter_but_greater < source);
 
     ConfigOptionPoints assigned(3, Vec2d(9., 9.));
     assigned = &source;
@@ -3565,7 +3584,19 @@ TEST_CASE("Grouped point options preserve empty group boundaries", "[Config][Con
     check_point_components(decoded.values[1][0], 1., 2.);
 }
 
-TEST_CASE("Declared point and grouped integer option types round-trip through binary archives", "[Config][ConfigArchive]")
+TEST_CASE("Grouped point options keep a trailing empty group when parsing", "[Config][ConfigContracts][ConfigGrouped][!shouldfail]")
+{
+    const ConfigOptionPointsGroups source({Vec2ds{Vec2d(1., 2.)}, Vec2ds{}});
+    CHECK(source.serialize() == "1x2#");
+
+    ConfigOptionPointsGroups decoded;
+    REQUIRE(decoded.deserialize(source.serialize()));
+    // Known bug: a trailing empty group is dropped by deserialize (std::getline ends before it); fixed by the follow-up fix PR
+    REQUIRE(decoded.values.size() == 2);
+    CHECK(decoded.values[1].empty());
+}
+
+TEST_CASE("Declared point and grouped integer option types round-trip through binary archives", "[Config][ConfigContracts][ConfigArchive]")
 {
     // These are valid declared ConfigOptionDef types, not registered print settings.
     ConfigOptionDef point3_definition;
@@ -3611,7 +3642,7 @@ TEST_CASE("Declared point and grouped integer option types round-trip through bi
     CHECK(*groups_restored == groups_source);
 }
 
-} // namespace config_residual_contracts
+} // namespace config_option_value_contracts
 
 TEST_CASE("Bridge line width is limited by the smallest nozzle while other widths use the largest", "[Config][Validation]")
 {
