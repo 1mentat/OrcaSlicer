@@ -3695,21 +3695,36 @@ SurfaceCut priv::patch2cut(SurfacePatch &patch)
         contour.reserve(loop.size());
         for (VI vi : loop) {
             const SurfaceCut::Index index = convert_map[vi];
-            if (contour.empty() || !same_output_point(contour.back(), index))
-                contour.push_back(index);
-            else
+            if (!contour.empty() && same_output_point(contour.back(), index))
                 merged[index] = contour.back();
+            else if (contour.size() > 1 && same_output_point(contour[contour.size() - 2], index)) {
+                // A thin protrusion collapsed to a line: drop its tip, it bounds no face.
+                contour.pop_back();
+                merged[index] = contour.back();
+            } else
+                contour.push_back(index);
         }
-        if (contour.size() > 1 && same_output_point(contour.front(), contour.back())) {
-            merged[contour.back()] = contour.front();
-            contour.pop_back();
+        // Apply the same rules across the loop's start.
+        for (;;) {
+            const size_t n = contour.size();
+            if (n > 1 && same_output_point(contour.front(), contour.back())) {
+                merged[contour.back()] = contour.front();
+                contour.pop_back();
+            } else if (n > 2 && same_output_point(contour.back(), contour[1]))
+                contour.erase(contour.begin());
+            else
+                break;
         }
         if (contour.size() >= 3)
             sc.contours.push_back(std::move(contour));
     }
-    // The wrap-around merge can add a second hop to a chain.
-    for (SurfaceCut::Index &index : merged)
-        index = merged[index];
+    // Resolve merge chains to their surviving index.
+    for (size_t i = 0; i < merged.size(); ++i) {
+        SurfaceCut::Index root = merged[i];
+        while (merged[root] != root)
+            root = merged[root];
+        merged[i] = root;
+    }
 
     for (FI fi : mesh.faces()) {
         HI hi = mesh.halfedge(fi);

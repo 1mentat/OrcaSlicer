@@ -778,6 +778,48 @@ TEST_CASE("Surface cuts keep faces and contours on one vertex when only part of 
     CHECK(its_num_open_edges(model) == 0);
 }
 
+TEST_CASE("Surface cuts leave no contour wall for a protrusion whose width collapses", "[CutSurface]")
+{
+    // A 10 mm square with a 3 mm tail that is 1e-6 mm wide. The tail has no float area, so none of its faces survive
+    // and its contour edges must be dropped as well, or cut2model builds walls with no front face.
+    const bool tail_on_left = GENERATE(true, false);
+    CAPTURE(tail_on_left);
+    const int rotation = GENERATE(0, 1, 2, 3, 4, 5, 6, 7);
+    CAPTURE(rotation);
+    const bool reversed = GENERATE(false, true);
+    CAPTURE(reversed);
+    const coord_t side = scale_(10.), tail = scale_(3.), x0 = scale_(189.9), y0 = scale_(189.9), mid = y0 + side / 2;
+    Points points = tail_on_left ?
+        Points{Point(x0, y0), Point(x0 + side, y0), Point(x0 + side, y0 + side), Point(x0, y0 + side), Point(x0, mid + 1),
+               Point(x0 - tail, mid + 1), Point(x0 - tail, mid), Point(x0, mid)} :
+        Points{Point(x0, y0), Point(x0 + side / 2, y0), Point(x0 + side / 2, y0 - tail), Point(x0 + side / 2 + 1, y0 - tail),
+               Point(x0 + side / 2 + 1, y0), Point(x0 + side, y0), Point(x0 + side, y0 + side), Point(x0, y0 + side)};
+    std::rotate(points.begin(), points.begin() + rotation, points.end());
+    if (reversed)
+        std::reverse(points.begin(), points.end());
+    ExPolygon shape{Polygon(points)};
+    shape.contour.make_counter_clockwise();
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(200., 200., 200.)}, scaled_cube_projection(600.f), .5f);
+
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(contour_count(cut) == 1);
+    // Every contour edge is the edge of a surviving face.
+    for (const SurfaceCut::Contour &contour : cut.contours)
+        for (size_t i = 0; i < contour.size(); ++i) {
+            const int a = int(contour[i]), b = int(contour[(i + 1) % contour.size()]);
+            const bool has_face = std::any_of(cut.indices.begin(), cut.indices.end(), [a, b](const stl_triangle_vertex_indices &face) {
+                for (int k = 0; k < 3; ++k)
+                    if (face[k] == a && face[(k + 1) % 3] == b)
+                        return true;
+                return false;
+            });
+            CHECK(has_face);
+        }
+    const indexed_triangle_set model = cut2model(cut, Emboss::OrthoProject3d(Vec3d(0., 0., 600.)));
+    check_mesh_indices(model);
+    CHECK(its_num_open_edges(model) == 0);
+}
+
 } // namespace cut_surface_topology_contracts
 
 namespace cut_surface_corefine_contracts {
