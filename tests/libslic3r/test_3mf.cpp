@@ -57,6 +57,7 @@
 #include <catch2/catch_tostring.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
+#include <map>
 #include <string>
 #include <sstream>
 #include <locale>
@@ -3595,6 +3596,208 @@ TEST_CASE("BBS project restores slice warning messages and levels", "[3MF][Bbs3m
     CHECK(loaded.plates.front()->warnings[0].level == 3);
     CHECK(loaded.plates.front()->warnings[1].msg == "second slice warning");
     CHECK(loaded.plates.front()->warnings[1].level == 1);
+}
+
+namespace {
+
+// Names of the four per-plate thumbnail entries, in the order of the exporter's channels:
+// plate, no-light, top, pick.
+const std::array<const char *, 4> thumbnail_entries = {
+    "Metadata/plate_1.png", "Metadata/plate_no_light_1.png", "Metadata/top_1.png", "Metadata/pick_1.png"};
+
+// Stores the shared model with one plate; `counts` is how many thumbnails each channel is given
+// (one plate, so more than one is more than the plate count). `customize` may edit the plate
+// and the backup directory first.
+bool store_with_thumbnails(const std::string &path, const std::array<ThumbnailData *, 4> &images,
+                           const std::array<size_t, 4> &counts,
+                           const std::function<void(PlateData &, const std::string &)> &customize = {})
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_thumbnail_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    plate.config = config;
+    if (customize)
+        customize(plate, backup.string());
+
+    StoreParams params;
+    params.path = path;
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.thumbnail_data.assign(counts[0], images[0]);
+    params.no_light_thumbnail_data.assign(counts[1], images[1]);
+    params.top_thumbnail_data.assign(counts[2], images[2]);
+    params.pick_thumbnail_data.assign(counts[3], images[3]);
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    return store_bbs_3mf(params);
+}
+
+// The key/value metadata the project settings file declares for its first plate.
+std::map<std::string, std::string> read_plate_metadata(const std::string &path)
+{
+    std::string xml;
+    REQUIRE(read_3mf_entry(path, xml, "Metadata/model_settings.config"));
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    const auto plate = tree.get_child_optional("config.plate");
+    REQUIRE(plate.is_initialized());
+    std::map<std::string, std::string> metadata;
+    for (const auto &node : *plate) {
+        if (node.first == "metadata")
+            metadata[node.second.get<std::string>("<xmlattr>.key")] = node.second.get<std::string>("<xmlattr>.value");
+    }
+    return metadata;
+}
+
+// A 2x2 image whose four pixels all differ, so a flipped or mirrored decode cannot match.
+ThumbnailData make_thumbnail(const std::array<unsigned char, 16> &rgba)
+{
+    ThumbnailData image;
+    image.set(2, 2);
+    std::copy(rgba.begin(), rgba.end(), image.pixels.begin());
+    return image;
+}
+
+// Decodes a stored 2x2 RGBA PNG entry and checks it against `expected`.
+void check_png_entry(const std::string &path, const char *entry, const std::array<unsigned char, 16> &expected)
+{
+    INFO("entry " << entry);
+    std::string encoded;
+    REQUIRE(read_3mf_entry(path, encoded, entry));
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{encoded.data(), encoded.size()}, decoded));
+    REQUIRE(decoded.cols == 2);
+    REQUIRE(decoded.rows == 2);
+    REQUIRE(decoded.bytes_per_pixel == 4);
+    REQUIRE(decoded.buf.size() == expected.size());
+    CHECK(std::equal(expected.begin(), expected.end(), decoded.buf.begin()));
+}
+
+const std::array<unsigned char, 16> plate_pixels = {0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0xff,
+                                                    0x70, 0x80, 0x90, 0xff, 0xa0, 0xb0, 0xc0, 0xff};
+const std::array<unsigned char, 16> no_light_pixels = {0x01, 0x12, 0x23, 0xff, 0x34, 0x45, 0x56, 0xff,
+                                                       0x67, 0x78, 0x89, 0xff, 0x9a, 0xab, 0xbc, 0xff};
+const std::array<unsigned char, 16> top_pixels = {0xd0, 0xc0, 0xb0, 0xff, 0xa0, 0x90, 0x80, 0xff,
+                                                  0x70, 0x60, 0x50, 0xff, 0x40, 0x30, 0x20, 0xff};
+const std::array<unsigned char, 16> pick_pixels = {0x0a, 0x1b, 0x2c, 0xff, 0x3d, 0x4e, 0x5f, 0xff,
+                                                   0x6a, 0x7b, 0x8c, 0xff, 0x9d, 0xae, 0xbf, 0xff};
+
+} // namespace
+
+TEST_CASE("BBS thumbnail lists obey per-channel plate cardinality", "[3MF][Bbs3mfExtended][Thumbnail]")
+{
+    ThumbnailData plate_image = make_thumbnail(plate_pixels);
+    ThumbnailData no_light = make_thumbnail(no_light_pixels);
+    ThumbnailData top = make_thumbnail(top_pixels);
+    ThumbnailData pick = make_thumbnail(pick_pixels);
+    const std::array<ThumbnailData *, 4> images = {&plate_image, &no_light, &top, &pick};
+    const std::array<const std::array<unsigned char, 16> *, 4> expected = {&plate_pixels, &no_light_pixels, &top_pixels, &pick_pixels};
+
+    SECTION("Counts that fit the single plate are archived channel by channel")
+    {
+        // Top and pick come as a pair; the other two channels are independent.
+        const std::array<size_t, 4> counts = GENERATE(std::array<size_t, 4>{1, 1, 1, 1}, std::array<size_t, 4>{1, 0, 0, 0},
+                                                      std::array<size_t, 4>{0, 1, 0, 0}, std::array<size_t, 4>{0, 0, 1, 1},
+                                                      std::array<size_t, 4>{0, 0, 0, 0});
+        CAPTURE(counts);
+        ScopedTemporaryFile archive(".3mf");
+        REQUIRE(store_with_thumbnails(archive.string(), images, counts));
+        for (size_t channel = 0; channel < 4; ++channel) {
+            if (counts[channel] == 1) {
+                check_png_entry(archive.string(), thumbnail_entries[channel], *expected[channel]);
+            } else {
+                std::string payload;
+                INFO("entry " << thumbnail_entries[channel]);
+                CHECK_FALSE(read_3mf_entry(archive.string(), payload, thumbnail_entries[channel]));
+            }
+        }
+    }
+
+    SECTION("A channel with more thumbnails than plates, or top and pick of different length, is rejected")
+    {
+        // {0,0,2,2}, {0,0,2,1} and {0,0,1,2} are also rejected by the pick-count and top/pick mismatch
+        // checks, so the top-count check cannot be told apart from them.
+        const std::array<size_t, 4> counts = GENERATE(std::array<size_t, 4>{2, 0, 0, 0}, std::array<size_t, 4>{0, 2, 0, 0},
+                                                      std::array<size_t, 4>{0, 0, 2, 2}, std::array<size_t, 4>{0, 0, 1, 2},
+                                                      std::array<size_t, 4>{0, 0, 2, 1}, std::array<size_t, 4>{0, 0, 1, 0},
+                                                      std::array<size_t, 4>{0, 0, 0, 1});
+        CAPTURE(counts);
+        ScopedTemporaryFile archive(".3mf");
+        CHECK_FALSE(store_with_thumbnails(archive.string(), images, counts));
+    }
+}
+
+TEST_CASE("BBS project exports and decodes all four plate thumbnail channels", "[3MF][Bbs3mfExtended][Thumbnail]")
+{
+    ThumbnailData plate_image = make_thumbnail(plate_pixels);
+    ThumbnailData no_light = make_thumbnail(no_light_pixels);
+    ThumbnailData top = make_thumbnail(top_pixels);
+    ThumbnailData pick = make_thumbnail(pick_pixels);
+
+    ScopedTemporaryFile archive(".3mf");
+    // The sidecar names point at files that do not exist, so only the in-memory images can supply the entries.
+    REQUIRE(store_with_thumbnails(archive.string(), {&plate_image, &no_light, &top, &pick}, {1, 1, 1, 1},
+                                  [](PlateData &plate, const std::string &) {
+                                      plate.thumbnail_file = "unused-plate.png";
+                                      plate.no_light_thumbnail_file = "unused-no-light.png";
+                                      plate.top_file = "unused-top.png";
+                                      plate.pick_file = "unused-pick.png";
+                                  }));
+    check_png_entry(archive.string(), "Metadata/plate_1.png", plate_pixels);
+    check_png_entry(archive.string(), "Metadata/plate_no_light_1.png", no_light_pixels);
+    check_png_entry(archive.string(), "Metadata/top_1.png", top_pixels);
+    check_png_entry(archive.string(), "Metadata/pick_1.png", pick_pixels);
+}
+
+TEST_CASE("BBS project archives sidecar thumbnail files under declared names", "[3MF][Bbs3mfExtended][Thumbnail][Sidecar]")
+{
+    const std::array<std::string, 4> names = {"plate.png", "no-light.png", "top.png", "pick.png"};
+    const std::array<std::string, 4> bytes = {"sidecar-plate", "sidecar-no-light", "sidecar-top", "sidecar-pick"};
+    // -1 stores every sidecar; otherwise that channel's file is declared but never written.
+    const int missing = GENERATE(-1, 0, 1, 2, 3);
+    CAPTURE(missing);
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_with_thumbnails(archive.string(), {nullptr, nullptr, nullptr, nullptr}, {0, 0, 0, 0},
+                                  [&](PlateData &plate, const std::string &backup) {
+                                      std::array<std::string, 4> paths;
+                                      for (size_t i = 0; i < names.size(); ++i) {
+                                          paths[i] = (boost::filesystem::path(backup) / names[i]).string();
+                                          if (int(i) != missing) {
+                                              boost::nowide::ofstream output(paths[i], std::ios::binary);
+                                              output << bytes[i];
+                                              REQUIRE(output.good());
+                                          }
+                                      }
+                                      plate.thumbnail_file = paths[0];
+                                      plate.no_light_thumbnail_file = paths[1];
+                                      plate.top_file = paths[2];
+                                      plate.pick_file = paths[3];
+                                  }));
+    // The metadata an importer reads declares each archived entry under its own key.
+    const std::array<const char *, 4> metadata_keys = {"thumbnail_file", "thumbnail_no_light_file", "top_file", "pick_file"};
+    const std::map<std::string, std::string> metadata = read_plate_metadata(archive.string());
+    for (size_t i = 0; i < names.size(); ++i) {
+        INFO("entry " << thumbnail_entries[i]);
+        std::string payload;
+        if (int(i) != missing) {
+            INFO("metadata key " << metadata_keys[i]);
+            const auto declared = metadata.find(metadata_keys[i]);
+            REQUIRE(declared != metadata.end());
+            CHECK(declared->second == thumbnail_entries[i]);
+        }
+        if (int(i) == missing) {
+            CHECK_FALSE(read_3mf_entry(archive.string(), payload, thumbnail_entries[i]));
+        } else {
+            REQUIRE(read_3mf_entry(archive.string(), payload, thumbnail_entries[i]));
+            CHECK(payload == bytes[i]);
+        }
+    }
 }
 
 } // namespace bbs_archive_contracts
