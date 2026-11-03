@@ -84,7 +84,9 @@ Check these before writing your own setup or output-parsing code.
 - Set the config keys your test depends on, and derive the expected values from what you set. A 20mm cube sliced at `layer_height` 2 is 10 layers, and the test should state both parts. If a number in your assertion comes from a key you never set, the test is also testing that default.
 - For numeric or Boolean `DynamicPrintConfig` values, use the initializer-list overload, such as `config.set_deserialize_strict({{"layer_height", 0.2}})`. The two-argument overload takes serialized text.
 - Before the first native run of a new valid `Print` fixture, require
-  `print.validate().string.empty()` before processing or export. Pin either a
+  `print.validate().string.empty()` before processing or export. Capture the
+  validation string with `INFO` before the assertion so an invalid fixture
+  explains its failure without another compile. Pin either a
   `layer_change_gcode` reset (`G92 E0`) for relative extrusion or absolute
   extrusion explicitly. Keep this guard in the normal control before mutation
   probes; omit it only when invalid configuration is the behavior being tested.
