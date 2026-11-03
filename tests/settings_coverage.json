@@ -3,6 +3,36 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
+    "hollowing_min_thickness": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAHollowingVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 1..10 mm with default 3 mm. Public SLAPrint hollowing checks the 1 mm lower endpoint and 10 mm upper endpoint on a 20x20x10 mm box; the upper endpoint has no closed interior because the inward offset exceeds the box 5 mm inradius. The existing 1-vs-3 mm contract remains, and a default-config sphere run checks the 3 mm default. Other shapes and the full numeric interval are unclaimed."
+    },
+    "hollowing_quality": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAHollowingVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers quality 0..1 with default 0.5, and Hollowing.cpp maps it to voxel scales 3.5..8. A spherical public SLAPrint fixture checks endpoint mesh sampling through vertex count and checks radial RMS error against the 1 mm inward-offset surface with voxel-derived bounds; the default-config sphere also exercises 0.5. Claims are limited to this sphere and do not assert general monotonic geometric error."
+    },
+    "hollowing_closing_distance": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAHollowingVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..10 mm with default 2 mm. Public SLAPrint hollowing checks closing 0 and 10 mm at thickness 1 mm on a 20x20x10 mm box: 0 retains the interior, while 10 places the requested thickness-plus-closing level set beyond the 5 mm inradius and leaves no interior. The default-config sphere exercises 2 mm. Drain-hole-specific closing-distance behavior remains unclaimed because SLAPrint::Steps::drill_holes() is disabled."
+    },
     "hole_to_polyhole_max_edges": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsVariance]",

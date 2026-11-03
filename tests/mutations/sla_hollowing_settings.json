@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "description": "SLA hollowing settings producer mutants validated by ordinary geometry assertions.",
+  "mutants": [
+    {
+      "id": "sla-hollowing-min-thickness-read-ignored",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "    double thickness = po.m_config.hollowing_min_thickness.getFloat();",
+      "new": "    double thickness = 3.0;",
+      "description": "Replace the registered minimum wall-thickness input with its default. At thickness 10 mm on the 20x20x10 mm box, the expected absent interior distinguishes the producer read from the 3 mm fallback.",
+      "test_filter": "^SLAHollowingVariance$",
+      "expected_oracle": "The upper thickness endpoint yields an empty public interior while the 1 mm endpoint yields a positive interior.",
+      "old_sha256": "7e9900061dd72a2f59e77cc149e57a2d9a87d061f38d7b8bfe55919e4ca139d7",
+      "new_sha256": "c6b0083593fafe89bd2a630e41670df805a1a48e63ebdf535965f992261e4675",
+      "unique_old_anchor_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "sla-hollowing-quality-read-ignored",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "    double quality  = po.m_config.hollowing_quality.getFloat();",
+      "new": "    double quality  = 0.5;",
+      "description": "Replace the registered quality input with its default. The smooth-sphere endpoint rows compare public interior mesh sampling density and radial approximation.",
+      "test_filter": "^SLAHollowingVariance$",
+      "expected_oracle": "Quality 1 produces more public interior vertices than quality 0, with each endpoint inside its voxel-derived radial RMS error bound.",
+      "old_sha256": "602c72718267671c6742114af72adce960346b51137ea56259573af0778ae398",
+      "new_sha256": "ebaf6d7a7a30a0527a76ad4f9ea24c8eebcbe27509d5d2034a2db31de3aed2a3",
+      "unique_old_anchor_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "sla-hollowing-closing-distance-read-ignored",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "    double closing_d = po.m_config.hollowing_closing_distance.getFloat();",
+      "new": "    double closing_d = 0.0;",
+      "description": "Replace the registered closing-distance input with zero. On the 20x20x10 mm box, thickness 1 mm plus closing distance 10 mm requests an inward level-set surface beyond the 5 mm inradius.",
+      "test_filter": "^SLAHollowingVariance$",
+      "expected_oracle": "Closing distance 0 retains the positive public interior; closing distance 10 leaves no interior shell.",
+      "old_sha256": "8cd06d85eba1fb4a97b8cec65efa2986f7ba1f4d51afce364ae229917c358cbe",
+      "new_sha256": "cd1bc0ec6188df64c305c9f98653193b6f1744181d447fe0ae2e148944bb6d1f",
+      "unique_old_anchor_matches": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

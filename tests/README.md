@@ -1691,6 +1691,17 @@ the canonical `fff_print_tests` target and exact control inventory
 that source file; select their exact names, including the two cases carrying
 tags other than `BooleanSettings`. The new mutation label is `PolyholeSettings`.
 
+SLA hollowing settings in `test_sla_pipeline_contracts.cpp` exercise thickness,
+quality, and closing-distance endpoints through the public interior mesh. Box
+cases check retained/absent interiors; sphere cases check sampling and radial
+error. Use `tests/mutations/sla_hollowing_settings.json` with `sla_print_tests`
+and exact control inventory `tests/controls/sla_hollowing_settings.json`.
+Pass `--control-regex "$(cat tests/controls/sla_hollowing_settings.regex)"`
+and `--expected-control-inventory tests/controls/sla_hollowing_settings.json`
+to retain all 59 source-file controls. The mutation label is
+`SLAHollowingVariance`. These are bounded box/sphere contracts; drain-hole
+behavior is outside scope because that step is disabled.
+
 Pass `--cmake` and `--ctest` when the configured worker needs specific tools.
 Keep the worker's existing CPU, memory, swap, and locale limits.
 

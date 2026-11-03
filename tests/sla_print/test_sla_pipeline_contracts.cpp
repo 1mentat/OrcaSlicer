@@ -509,10 +509,14 @@ TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures][SLAH
     // must remain absent when hollowing_enable is false.
     DynamicPrintConfig disabled_config = sla_config(1.0);
     disabled_config.set_key_value("hollowing_enable", new ConfigOptionBool(false));
-    disabled_config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(1.0));
-    disabled_config.set_key_value("hollowing_quality", new ConfigOptionFloat(0.2));
-    disabled_config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(0.25));
+    // All three settings remain inert while the feature is disabled, even at
+    // their registered upper bounds.
+    disabled_config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(10.0));
+    disabled_config.set_key_value("hollowing_quality", new ConfigOptionFloat(1.0));
+    disabled_config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(10.0));
     SlaCubeFixture disabled(std::move(disabled_config), make_cube(20.0, 20.0, 10.0));
+    INFO("disabled SLA hollowing validation: " << disabled.print.validate().string);
+    REQUIRE(disabled.print.validate().string.empty());
     PrintBase::TaskParams disabled_task;
     disabled_task.to_object_step = slaposHollowing;
     disabled.print.set_task(disabled_task);
@@ -530,6 +534,8 @@ TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures][SLAH
 
     SlaCubeFixture fixture(std::move(config), make_cube(20.0, 20.0, 10.0));
     const double solid_volume = fixture.model.objects.front()->raw_mesh().volume();
+    INFO("enabled SLA hollowing validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
 
     // The production drill_holes step is currently disabled, so stop after
     // hollowing rather than asserting on the empty downstream hollow mesh.
@@ -1866,20 +1872,21 @@ TEST_CASE("SLA overlapping objects are unioned before material statistics",
 namespace sla_hollowing_thickness_followup_contracts {
 
 struct HollowRun {
+    bool empty = true;
     double volume = 0.;
     double width = 0.;
     double depth = 0.;
+    std::size_t vertex_count = 0;
+    double radial_rms_error = 0.;
 };
 
-HollowRun run_hollowing(double min_thickness)
+HollowRun run_hollowing_config(DynamicPrintConfig config,
+                               TriangleMesh mesh,
+                               double expected_sphere_radius = 0.)
 {
-    DynamicPrintConfig config = sla_config(1.0);
     config.set_key_value("hollowing_enable", new ConfigOptionBool(true));
-    config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(min_thickness));
-    config.set_key_value("hollowing_quality", new ConfigOptionFloat(0.2));
-    config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(0.25));
 
-    SlaCubeFixture fixture(std::move(config), make_cube(20.0, 20.0, 10.0));
+    SlaCubeFixture fixture(std::move(config), std::move(mesh));
     REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
     REQUIRE(fixture.model.objects.size() == 1);
     const ModelObject *source = fixture.model.objects.front();
@@ -1901,7 +1908,11 @@ HollowRun run_hollowing(double min_thickness)
     const auto source_bbox = object->transformed_mesh().bounding_box();
     REQUIRE(source_bbox.defined);
     const indexed_triangle_set &interior = object->hollowed_interior_mesh();
-    REQUIRE_FALSE(interior.empty());
+    HollowRun result;
+    result.empty = interior.empty();
+    if (result.empty)
+        return result;
+    REQUIRE_FALSE(interior.vertices.empty());
 
     TriangleMesh interior_mesh(interior);
     const auto bbox = interior_mesh.bounding_box();
@@ -1912,7 +1923,7 @@ HollowRun run_hollowing(double min_thickness)
     CHECK(bbox.max.y() <= source_bbox.max.y() + bounds_tolerance);
     CHECK(bbox.min.z() >= source_bbox.min.z() - bounds_tolerance);
     CHECK(bbox.max.z() <= source_bbox.max.z() + bounds_tolerance);
-    HollowRun result;
+    result.vertex_count = interior.vertices.size();
     result.volume = std::abs(static_cast<double>(interior_mesh.volume()));
     result.width = bbox.max.x() - bbox.min.x();
     result.depth = bbox.max.y() - bbox.min.y();
@@ -1922,7 +1933,39 @@ HollowRun run_hollowing(double min_thickness)
     REQUIRE(result.volume > 0.);
     REQUIRE(result.width > 0.);
     REQUIRE(result.depth > 0.);
+    if (expected_sphere_radius > 0.) {
+        const Vec3d source_center = (source_bbox.min + source_bbox.max) * 0.5;
+        double squared_error_sum = 0.;
+        for (const Vec3f &vertex : interior.vertices) {
+            const double radial_error =
+                std::abs((vertex.cast<double>() - source_center).norm() - expected_sphere_radius);
+            squared_error_sum += radial_error * radial_error;
+        }
+        result.radial_rms_error = std::sqrt(squared_error_sum / interior.vertices.size());
+    }
     return result;
+}
+
+HollowRun run_hollowing(double min_thickness,
+                        double quality = 0.2,
+                        double closing_distance = 0.25,
+                        TriangleMesh mesh = {},
+                        double expected_sphere_radius = 0.)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(min_thickness));
+    config.set_key_value("hollowing_quality", new ConfigOptionFloat(quality));
+    config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(closing_distance));
+    if (mesh.empty())
+        mesh = make_cube(20.0, 20.0, 10.0);
+    return run_hollowing_config(std::move(config), std::move(mesh), expected_sphere_radius);
+}
+
+HollowRun run_hollowing_with_defaults(TriangleMesh mesh, double expected_sphere_radius)
+{
+    // Keep the three registered SLA defaults intact: thickness 3 mm,
+    // quality 0.5, and closing distance 2 mm.
+    return run_hollowing_config(sla_config(1.0), std::move(mesh), expected_sphere_radius);
 }
 
 } // namespace sla_hollowing_thickness_followup_contracts
@@ -1933,11 +1976,57 @@ TEST_CASE("SLA hollowing wall thickness contracts the public interior",
     const auto thin = sla_hollowing_thickness_followup_contracts::run_hollowing(1.0);
     const auto thick = sla_hollowing_thickness_followup_contracts::run_hollowing(3.0);
 
+    REQUIRE_FALSE(thin.empty);
+    REQUIRE_FALSE(thick.empty);
     REQUIRE(thin.volume > 0.);
     REQUIRE(thick.volume > 0.);
     CHECK(thick.volume < thin.volume);
     CHECK(thick.width < thin.width);
     CHECK(thick.depth < thin.depth);
+}
+
+TEST_CASE("SLA hollowing settings span registered endpoints in public geometry",
+          "[SLAPrint][SLAHollowing][SettingsVariance][SLAHollowingVariance]")
+{
+    using namespace sla_hollowing_thickness_followup_contracts;
+
+    // The 20x20x10 mm box has a 5 mm inradius. A wall offset of 1 mm leaves
+    // an interior shell, while either endpoint pair below asks for an inward
+    // offset beyond the box's inradius, where no closed interior surface can
+    // remain.
+    const auto minimum_thickness = run_hollowing(1.0, 0.0, 0.0);
+    const auto maximum_thickness = run_hollowing(10.0, 0.0, 0.0);
+    REQUIRE_FALSE(minimum_thickness.empty);
+    CHECK(minimum_thickness.volume > 0.);
+    CHECK(maximum_thickness.empty);
+
+    const auto minimum_closing = run_hollowing(1.0, 0.0, 0.0);
+    const auto maximum_closing = run_hollowing(1.0, 0.0, 10.0);
+    REQUIRE_FALSE(minimum_closing.empty);
+    CHECK(minimum_closing.volume > 0.);
+    CHECK(maximum_closing.empty);
+
+    // A smooth sphere makes the sampling-quality contract observable in the
+    // emitted mesh. The analytic radius after the configured 1 mm inward
+    // offset is 9 mm; the higher voxel scale must retain more sampled surface
+    // vertices and both meshes must stay within two voxel widths plus a
+    // faceting allowance of that offset surface.
+    const TriangleMesh sphere = make_sphere(10.0, 2.0 * PI / 72.0);
+    const auto coarse = run_hollowing(1.0, 0.0, 0.0, sphere, 9.0);
+    const auto fine = run_hollowing(1.0, 1.0, 0.0, sphere, 9.0);
+    REQUIRE_FALSE(coarse.empty);
+    REQUIRE_FALSE(fine.empty);
+    CHECK(fine.vertex_count > coarse.vertex_count);
+    const double source_faceting_allowance = 0.08;
+    CHECK(coarse.radial_rms_error < 2.0 / 3.5 + source_faceting_allowance);
+    CHECK(fine.radial_rms_error < 2.0 / 8.0 + source_faceting_allowance);
+
+    // This sphere also exercises the registered defaults through SLAPrint:
+    // the default 3 mm thickness leaves a 7 mm radius interior.
+    const auto defaults = run_hollowing_with_defaults(sphere, 7.0);
+    REQUIRE_FALSE(defaults.empty);
+    const double default_voxel_scale = 3.5 + (8.0 - 3.5) * 0.5;
+    CHECK(defaults.radial_rms_error < 2.0 / default_voxel_scale + source_faceting_allowance);
 }
 
 namespace sla_support_pad_followup_v4 {
