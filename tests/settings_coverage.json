@@ -3,6 +3,26 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
+    "hole_to_polyhole_max_edges": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The validated Print pipeline slices a circular through-hole at 3 mm radius with a 0.4 mm nozzle and compares per-layer hole vertex counts under edge caps 3, 6, and 50; the minimum cap yields exactly 3 vertices per layer, cap 6 exactly 6, and the uncapped-by-this-limit run is strictly between 6 and 50. Disabled controls at caps 3 and 50 keep equal geometry. Claims only these values, this fixture, and this nozzle; no upper registered bound or broader radius/nozzle behavior is claimed. The exact 21-case normal and restored controls passed, and all three source-local mutations were killed by ordinary assertions."
+    },
+    "hole_to_polyhole_threshold": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The validated Print pipeline slices an elliptical through-hole with 3.0/3.3 mm radii and checks actual per-layer slice-surface hole counts. Zero and 1% reject conversion against disabled geometry; 0.5 mm, 20%, and literal 10 mm convert to six edges, exercising radius-relative percent resolution and the literal cap. Claims only these encodings and this fixture; no continuous range or percent maximum is claimed. The exact 21-case normal and restored controls passed, and all three source-local mutations were killed by ordinary assertions."
+    },
     "lightning_overhang_angle": {
       "test": "tests/fff_print/test_fill.cpp",
       "tag": "[LightningSettings]",

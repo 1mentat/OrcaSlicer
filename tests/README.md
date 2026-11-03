@@ -1683,6 +1683,14 @@ domain. Use `tests/mutations/lightning_settings.json` with target
 `tests/controls/lightning_settings.json`. Geometric comparisons are scoped to
 the stepped fixture; arbitrary branching geometry is not claimed.
 
+Polyhole cases in `test_boolean_settings.cpp` check the edge-count minimum,
+a loose edge limit, disabled controls, and absolute/percentage detection margins
+through actual sliced holes. Use `tests/mutations/polyhole_settings.json` with
+the canonical `fff_print_tests` target and exact control inventory
+`tests/controls/polyhole_settings.json`. The 21 controls retain all cases from
+that source file; select their exact names, including the two cases carrying
+tags other than `BooleanSettings`. The new mutation label is `PolyholeSettings`.
+
 Pass `--cmake` and `--ctest` when the configured worker needs specific tools.
 Keep the worker's existing CPU, memory, swap, and locale limits.
 

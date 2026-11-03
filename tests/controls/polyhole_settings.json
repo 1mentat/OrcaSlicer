@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "names": [
+    "Elephant foot settings fade contour correction and infill density by layer",
+    "Internal-only reversal preserves exterior winding on alternating layers",
+    "Polyhole detection margins resolve absolute and percentage radius tolerances",
+    "Polyhole edge limits cap circular holes and are inert when conversion is disabled",
+    "brim_use_efc_outline changes the generated brim outline",
+    "detect_thin_wall emits an external perimeter into a narrow fin",
+    "enable_arc_fitting emits arcs for curved geometry",
+    "enable_support creates support geometry when required",
+    "extra_perimeters_on_overhangs adds overhang perimeter geometry",
+    "fuzzy_skin_first_layer changes first layer perimeter length",
+    "hole_to_polyhole changes circular hole vertex count",
+    "hole_to_polyhole_twisted rotates polygon hole geometry",
+    "ironing_type creates topmost ironing paths",
+    "is_infill_first changes role ordering",
+    "only_one_wall_first_layer limits first layer perimeter count",
+    "only_one_wall_top limits top layer perimeter count",
+    "overhang_reverse changes overhang path orientation",
+    "spiral_mode creates continuous extruding Z motion",
+    "support_ironing creates ironing paths on support",
+    "support_on_build_plate_only changes elevated support allocation",
+    "thick_bridges changes bridge extrusion geometry"
+  ]
+}

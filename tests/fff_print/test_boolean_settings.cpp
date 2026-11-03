@@ -69,13 +69,14 @@ TriangleMesh two_tier_fixture()
     return lower;
 }
 
-TriangleMesh circular_hole_fixture()
+TriangleMesh circular_hole_fixture(double drill_y_scale = 1.0)
 {
     // TestMesh::cube_with_hole is a square cutout. Build a real circular
     // through-hole so polyhole conversion and layer rotation have an
     // observable geometric input.
     TriangleMesh body = make_cube(20., 20., 6.);
     TriangleMesh drill = make_cylinder(3., 8., PI / 90.);
+    drill.scale(Vec3f(1.f, static_cast<float>(drill_y_scale), 1.f));
     drill.translate(Vec3f(10.f, 10.f, -1.f));
     MeshBoolean::minus(body, drill);
     return body;
@@ -98,6 +99,7 @@ struct BooleanEvidence {
     double perimeter_length = 0.0;
     double overhang_winding = 0.0;
     size_t hole_vertices = 0;
+    std::vector<std::vector<size_t>> layer_hole_vertices;
     double hole_checksum = 0.0;
     size_t arc_moves = 0;
     size_t extruding_z_moves = 0;
@@ -169,7 +171,9 @@ BooleanEvidence process_fixture(DynamicPrintConfig config, TriangleMesh shape = 
     Print print;
     Model model;
     init_print({ shape }, print, model, config);
-    REQUIRE(print.validate().string.empty());
+    const auto validation = print.validate();
+    INFO("Boolean fixture validation: " << validation.string);
+    REQUIRE(validation.string.empty());
     REQUIRE_NOTHROW(print.process());
     REQUIRE_FALSE(print.objects().empty());
 
@@ -177,6 +181,7 @@ BooleanEvidence process_fixture(DynamicPrintConfig config, TriangleMesh shape = 
     evidence.layers = object.layers().size();
     for (size_t layer_idx = 0; layer_idx < object.layers().size(); ++layer_idx) {
         const Layer *layer = object.layers()[layer_idx];
+        evidence.layer_hole_vertices.emplace_back();
         for (const LayerRegion *region : layer->regions()) {
             if (layer_idx == 0)
                 evidence.first_layer_perimeter_paths += region->perimeters.items_count();
@@ -187,6 +192,7 @@ BooleanEvidence process_fixture(DynamicPrintConfig config, TriangleMesh shape = 
             for (const Surface &surface : region->slices.surfaces) {
                 for (const Polygon &hole : surface.expolygon.holes) {
                     evidence.hole_vertices += hole.points.size();
+                    evidence.layer_hole_vertices.back().push_back(hole.points.size());
                     if (!hole.points.empty())
                         evidence.hole_checksum += static_cast<double>(hole.points.front().x()) * 0.37 +
                                                   static_cast<double>(hole.points.front().y()) * 0.61;
@@ -833,4 +839,104 @@ TEST_CASE("Elephant foot settings fade contour correction and infill density by 
     CHECK(fill_ratio(1) < fill_ratio(2));
     CHECK(fill_ratio(2) < fill_ratio(3));
     CHECK(fill_ratio(3) < fill_ratio(4));
+}
+
+namespace {
+void require_single_hole_per_layer(const BooleanEvidence &evidence)
+{
+    REQUIRE(evidence.layers >= 2);
+    REQUIRE(evidence.layer_hole_vertices.size() == evidence.layers);
+    for (const auto &holes : evidence.layer_hole_vertices) {
+        REQUIRE(holes.size() == 1);
+        REQUIRE(holes.front() >= 3);
+    }
+}
+} // namespace
+
+TEST_CASE("Polyhole edge limits cap circular holes and are inert when conversion is disabled",
+          "[BooleanSettings][SettingsVariance][PolyholeSettings]")
+{
+    const auto export_case = [](bool enabled, int max_edges) {
+        DynamicPrintConfig config = boolean_config();
+        config.set_deserialize_strict({
+            {"hole_to_polyhole", enabled},
+            {"hole_to_polyhole_twisted", false},
+            {"hole_to_polyhole_max_edges", max_edges},
+            {"hole_to_polyhole_threshold", 0.5},
+            {"nozzle_diameter", "0.4"},
+            {"xy_hole_compensation", 0.0},
+            {"xy_contour_compensation", 0.0},
+            {"elefant_foot_compensation", 0.0},
+        });
+        return process_fixture(config, circular_hole_fixture());
+    };
+    const BooleanEvidence triangle = export_case(true, 3);
+    const BooleanEvidence hexagon = export_case(true, 6);
+    const BooleanEvidence uncapped = export_case(true, 50);
+    for (const BooleanEvidence *evidence : {&triangle, &hexagon, &uncapped})
+        require_single_hole_per_layer(*evidence);
+    REQUIRE(hexagon.layers == triangle.layers);
+    REQUIRE(uncapped.layers == triangle.layers);
+    CHECK(triangle.hole_vertices == 3 * triangle.layers);
+    CHECK(hexagon.hole_vertices == 6 * hexagon.layers);
+    // A 3 mm radius hole on a 0.4 mm nozzle naturally needs more than six
+    // edges. A loose limit must preserve that result rather than force 50.
+    CHECK(uncapped.hole_vertices > 6 * uncapped.layers);
+    CHECK(uncapped.hole_vertices < 50 * uncapped.layers);
+    REQUIRE(triangle.perimeter_paths > 0);
+    REQUIRE(hexagon.perimeter_paths > 0);
+    REQUIRE(uncapped.perimeter_paths > 0);
+
+    const BooleanEvidence disabled_min = export_case(false, 3);
+    const BooleanEvidence disabled_loose = export_case(false, 50);
+    require_single_hole_per_layer(disabled_min);
+    require_single_hole_per_layer(disabled_loose);
+    CHECK(disabled_min.hole_vertices == disabled_loose.hole_vertices);
+    CHECK(disabled_min.hole_vertices > hexagon.hole_vertices);
+    CHECK_THAT(disabled_min.perimeter_length,
+               Catch::Matchers::WithinAbs(disabled_loose.perimeter_length, 1e-5));
+}
+
+TEST_CASE("Polyhole detection margins resolve absolute and percentage radius tolerances",
+          "[BooleanSettings][SettingsVariance][PolyholeSettings]")
+{
+    const auto export_case = [](const std::string &margin, bool enabled = true) {
+        DynamicPrintConfig config = boolean_config();
+        config.set_deserialize_strict({
+            {"hole_to_polyhole", enabled},
+            {"hole_to_polyhole_twisted", false},
+            {"hole_to_polyhole_max_edges", 6},
+            {"hole_to_polyhole_threshold", margin},
+            {"nozzle_diameter", "0.4"},
+            {"xy_hole_compensation", 0.0},
+            {"xy_contour_compensation", 0.0},
+            {"elefant_foot_compensation", 0.0},
+        });
+        // Elliptical radii 3.0/3.3 mm differ by 0.3 mm. The consumer compares
+        // that spread with twice the margin: 0 and 1% reject, 0.5 mm and 20%
+        // accept. Treating 1% as a raw millimeter value incorrectly accepts.
+        return process_fixture(config, circular_hole_fixture(1.1));
+    };
+    const BooleanEvidence disabled = export_case("0.5", false);
+    const BooleanEvidence zero = export_case("0");
+    const BooleanEvidence narrow_percent = export_case("1%");
+    const BooleanEvidence absolute = export_case("0.5");
+    const BooleanEvidence broad_percent = export_case("20%");
+    const BooleanEvidence literal_limit = export_case("10");
+    for (const BooleanEvidence *evidence : {&disabled, &zero, &narrow_percent, &absolute, &broad_percent, &literal_limit})
+        require_single_hole_per_layer(*evidence);
+    REQUIRE(disabled.hole_vertices > 6 * disabled.layers);
+    for (const BooleanEvidence *rejected : {&zero, &narrow_percent}) {
+        CHECK(rejected->layers == disabled.layers);
+        CHECK(rejected->hole_vertices == disabled.hole_vertices);
+        CHECK_THAT(rejected->perimeter_length,
+                   Catch::Matchers::WithinAbs(disabled.perimeter_length, 1e-5));
+    }
+    for (const BooleanEvidence *converted : {&absolute, &broad_percent, &literal_limit}) {
+        CHECK(converted->layers == disabled.layers);
+        CHECK(converted->hole_vertices == 6 * converted->layers);
+        CHECK(converted->perimeter_paths > 0);
+        CHECK_THAT(converted->perimeter_length,
+                   Catch::Matchers::WithinAbs(absolute.perimeter_length, 1e-5));
+    }
 }
