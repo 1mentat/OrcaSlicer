@@ -3800,6 +3800,150 @@ TEST_CASE("BBS project archives sidecar thumbnail files under declared names", "
     }
 }
 
+namespace {
+
+// Stores the shared model with one plate under `strategy`. `customize` runs before the export and
+// may edit the model (including its auxiliary root), the plate and the store parameters.
+void store_with_strategy(const std::string &path, SaveStrategy strategy,
+                         const std::function<void(Model &, PlateData &, StoreParams &)> &customize)
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_strategy_store");
+    source.set_backup_path(backup.string());
+    ScopeGuard detach_backup([&source] { source.set_backup_path("detach"); });
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    plate.config = config;
+    StoreParams params;
+    params.path = path;
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.strategy = strategy;
+    customize(source, plate, params);
+    REQUIRE(store_bbs_3mf(params));
+}
+
+const SaveStrategy gcode_strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithGcode | SaveStrategy::WithSliceInfo;
+// Binary payload: an embedded NUL, bytes >= 0x80 and CR LF pairs, so truncation or newline conversion changes it.
+constexpr char sliced_gcode_bytes[] = "; payload\0gcode\r\nG1 X1.25 Y2.5\n\x80\xff\r\n";
+const std::string sliced_gcode(sliced_gcode_bytes, sizeof(sliced_gcode_bytes) - 1);
+
+void write_text(const std::string &path, const std::string &text)
+{
+    boost::nowide::ofstream output(path, std::ios::binary);
+    output << text;
+    REQUIRE(output.good());
+}
+
+} // namespace
+
+TEST_CASE("BBS project stores and extracts a sliced G-code payload", "[3MF][Bbs3mfExtended][Gcode]")
+{
+    ScopedTemporaryFile gcode(".gcode");
+    write_text(gcode.string(), sliced_gcode);
+    ScopedTemporaryFile archive(".3mf");
+    store_with_strategy(archive.string(), gcode_strategy, [&](Model &, PlateData &plate, StoreParams &) {
+        plate.gcode_file = gcode.string();
+        plate.is_sliced_valid = true;
+    });
+
+    std::string archived;
+    REQUIRE(read_3mf_entry(archive.string(), archived, "Metadata/plate_1.gcode"));
+    CHECK(archived == sliced_gcode);
+    // MD5 of the payload bytes above (computed with md5sum), upper-case hex.
+    std::string digest;
+    REQUIRE(read_3mf_entry(archive.string(), digest, "Metadata/plate_1.gcode.md5"));
+    CHECK(digest == "0D5E1F8FAC59066BA7AF819F5887C27C");
+    // The plate declares the archived name, not the path of the source file.
+    CHECK(read_plate_metadata(archive.string())["gcode_file"] == "Metadata/plate_1.gcode");
+
+    // The importer extracts into the caller-owned backup root and does not create Metadata/ itself.
+    Model loaded_model;
+    LoadedProject loaded;
+    loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_gcode_load");
+    boost::filesystem::create_directories(boost::filesystem::path(loaded.backup->string()) / "Metadata");
+    loaded_model.set_backup_path(loaded.backup->string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    REQUIRE(load_bbs_3mf(archive.string().c_str(), &loaded.config, &substitutions, &loaded_model, &loaded.plates, &loaded.presets,
+                         &loaded.is_bbl, &loaded.is_orca, &loaded.version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    REQUIRE(loaded.plates.size() == 1);
+    const boost::filesystem::path extracted = boost::filesystem::path(loaded.backup->string()) / "Metadata/plate_1.gcode";
+    // The importer joins the backup root and the archived name with a literal '/'.
+    CHECK(loaded.plates.front()->gcode_file == loaded.backup->string() + "/Metadata/plate_1.gcode");
+    REQUIRE(boost::filesystem::exists(extracted));
+    std::string restored;
+    read_file(extracted, restored);
+    CHECK(restored == sliced_gcode);
+}
+
+TEST_CASE("BBS project omits G-code that is unavailable or not marked as sliced", "[3MF][Bbs3mfExtended][Gcode]")
+{
+    // Only a plate with a present, valid slice has its G-code archived; every other row still exports.
+    enum class Case { MissingSource, NotSliced, GcodeNotRequested };
+    const Case which = GENERATE(Case::MissingSource, Case::NotSliced, Case::GcodeNotRequested);
+    CAPTURE(int(which));
+
+    ScopedTemporaryDir sources("orca_gcode_sources");
+    const std::string gcode_path = (boost::filesystem::path(sources.string()) / "plate.gcode").string();
+    if (which != Case::MissingSource)
+        write_text(gcode_path, sliced_gcode);
+    REQUIRE(boost::filesystem::exists(gcode_path) == (which != Case::MissingSource));
+
+    ScopedTemporaryFile archive(".3mf");
+    const SaveStrategy strategy = which == Case::GcodeNotRequested ? SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithSliceInfo : gcode_strategy;
+    store_with_strategy(archive.string(), strategy, [&](Model &, PlateData &plate, StoreParams &) {
+        plate.gcode_file = gcode_path;
+        plate.is_sliced_valid = which != Case::NotSliced;
+    });
+
+    std::string payload;
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/plate_1.gcode"));
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/plate_1.gcode.md5"));
+}
+
+TEST_CASE("BBS project SkipStatic omits static payloads while retaining model geometry", "[3MF][Bbs3mfExtended][Strategy]")
+{
+    ThumbnailData image;
+    image.set(3, 2);
+    std::fill(image.pixels.begin(), image.pixels.end(), 0x22);
+    ScopedTemporaryFile gcode(".gcode");
+    write_text(gcode.string(), sliced_gcode);
+
+    const std::array<const char *, 4> static_entries = {"Metadata/plate_1.png", "Metadata/plate_1.gcode",
+                                                         "Metadata/plate_1.gcode.md5", "Auxiliaries/static.txt"};
+    const bool skip_static = GENERATE(false, true);
+    CAPTURE(skip_static);
+    SaveStrategy strategy = gcode_strategy;
+    if (skip_static)
+        strategy = strategy | SaveStrategy::SkipStatic;
+
+    ScopedTemporaryFile archive(".3mf");
+    store_with_strategy(archive.string(), strategy, [&](Model &source, PlateData &plate, StoreParams &params) {
+        plate.gcode_file = gcode.string();
+        plate.is_sliced_valid = true;
+        write_text((boost::filesystem::path(source.get_auxiliary_file_temp_path()) / "static.txt").string(), "static aux");
+        params.thumbnail_data = {&image};
+    });
+
+    for (const char *entry : static_entries) {
+        INFO("entry " << entry);
+        std::string payload;
+        CHECK(read_3mf_entry(archive.string(), payload, entry) == !skip_static);
+    }
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.objects.front()->instances.size() == 2);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    CHECK(loaded_model.objects.front()->volumes.front()->mesh().facets_count() == 12);
+}
+
 } // namespace bbs_archive_contracts
 
 namespace legacy_3mf_contracts {
