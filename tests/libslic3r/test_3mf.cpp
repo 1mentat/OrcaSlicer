@@ -25,6 +25,7 @@
 #include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/CustomGCode.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 
 #include "test_utils.hpp"
 
@@ -48,6 +49,8 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/xml_parser.hpp>
 #include <algorithm>
 #include <functional>
 
@@ -3344,6 +3347,254 @@ TEST_CASE("BBS 3MF falls back on a truncated Unicode metadata field", "[3MF][Bbs
     read_file(root / "docs" / "ascii.txt", contents);
     CHECK(contents == "truncated-unicode-contract");
     CHECK_FALSE(boost::filesystem::exists(root / "docs" / "short"));
+}
+
+namespace {
+
+std::vector<std::pair<std::string, std::string>> read_layer_filament_lists(const std::string &xml)
+{
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::vector<std::pair<std::string, std::string>> records;
+    const auto lists = tree.get_child_optional("config.plate.layer_filament_lists");
+    if (!lists)
+        return records;
+    for (const auto &node : *lists) {
+        if (node.first != "layer_filament_list")
+            continue;
+        const auto &attributes = node.second.get_child("<xmlattr>");
+        records.emplace_back(attributes.get<std::string>("filament_list"),
+                             attributes.get<std::string>("layer_ranges"));
+    }
+    return records;
+}
+
+// Stores the shared two-instance model with one plate whose config is a complete print config
+// (the exporter reads plate-local options and does not synthesize missing ones); `setup` fills
+// in the plate under test.
+void store_plate_fixture(const std::string &path, const std::function<void(PlateData &)> &setup)
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_slice_info_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    plate.config = config;
+    setup(plate);
+    PlateDataPtrs plates{&plate};
+    store_model(path, source, config, plates);
+}
+
+} // namespace
+
+TEST_CASE("BBS slice metadata writes multiple layer filament ranges", "[3MF][Bbs3mfExtended][LayerFilaments]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+        plate.layer_filaments[std::vector<unsigned int>{1, 3}] = {{0, 5}, {10, 20}};
+        plate.layer_filaments[std::vector<unsigned int>{2}] = {{5, 10}, {20, 30}};
+    });
+
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
+    const auto records = read_layer_filament_lists(slice_info);
+    REQUIRE(records.size() == 2);
+    CHECK(std::find(records.begin(), records.end(), std::make_pair(std::string("1 3"), std::string("0 5,10 20"))) != records.end());
+    CHECK(std::find(records.begin(), records.end(), std::make_pair(std::string("2"), std::string("5 10,20 30"))) != records.end());
+
+    ScopedTemporaryFile empty_archive(".3mf");
+    store_plate_fixture(empty_archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+    });
+    std::string empty_slice_info;
+    REQUIRE(read_3mf_entry(empty_archive.string(), empty_slice_info, "Metadata/slice_info.config"));
+    CHECK(read_layer_filament_lists(empty_slice_info).empty());
+}
+
+TEST_CASE("BBS project preserves plate scheduling metadata", "[3MF][Bbs3mfExtended][PlateMetadata]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.plate_name = "schedule metadata";
+        plate.locked = true;
+        plate.config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(btPEI));
+        plate.config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByObject));
+        plate.config.set_key_value("first_layer_print_sequence", new ConfigOptionInts({2, 1}));
+        plate.config.set_key_value("other_layers_print_sequence", new ConfigOptionInts({1, 2}));
+        plate.config.set_key_value("other_layers_print_sequence_nums", new ConfigOptionInt(3));
+        plate.config.set_key_value("spiral_mode", new ConfigOptionBool(true));
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    CHECK(plate.plate_name == "schedule metadata");
+    CHECK(plate.locked);
+    REQUIRE(plate.config.option<ConfigOptionEnum<BedType>>("curr_bed_type") != nullptr);
+    CHECK(plate.config.opt_enum<BedType>("curr_bed_type") == btPEI);
+    CHECK(plate.config.opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject);
+    REQUIRE(plate.config.option<ConfigOptionInts>("first_layer_print_sequence") != nullptr);
+    REQUIRE(plate.config.option<ConfigOptionInts>("other_layers_print_sequence") != nullptr);
+    CHECK(plate.config.opt<ConfigOptionInts>("first_layer_print_sequence")->values == std::vector<int>{2, 1});
+    CHECK(plate.config.opt<ConfigOptionInts>("other_layers_print_sequence")->values == std::vector<int>{1, 2});
+    CHECK(plate.config.opt_int("other_layers_print_sequence_nums") == 3);
+    CHECK(plate.config.opt_bool("spiral_mode"));
+}
+
+TEST_CASE("BBS project clamps plate filament map values at import", "[3MF][Bbs3mfExtended][PlateMetadata][Maps]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+        plate.config.set_key_value("filament_map", new ConfigOptionInts({0, -4, 2, 1}));
+        plate.config.set_key_value("filament_volume_map", new ConfigOptionInts({0, 1, 1, 0}));
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    REQUIRE(plate.config.option<ConfigOptionInts>("filament_map") != nullptr);
+    REQUIRE(plate.config.option<ConfigOptionInts>("filament_volume_map") != nullptr);
+    CHECK(plate.filament_maps == std::vector<int>{1, 1, 2, 1});
+    CHECK(plate.config.opt<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1, 2, 1});
+    CHECK(plate.config.opt<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{0, 1, 1, 0});
+}
+
+TEST_CASE("BBS project retains slice statistics and booleans", "[3MF][Bbs3mfExtended][SliceInfo]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+        plate.printer_model_id = "slice-info-printer";
+        plate.gcode_prediction = "123.4";
+        plate.gcode_weight = "45.6";
+        // Every flag differs from the PlateData default, so dropping a read is caught.
+        plate.toolpath_outside = true;
+        plate.is_support_used = true;
+        plate.is_label_object_enabled = true;
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    CHECK(plate.printer_model_id == "slice-info-printer");
+    CHECK(plate.gcode_prediction == "123.4");
+    CHECK(plate.gcode_weight == "45.6");
+    CHECK(plate.toolpath_outside);
+    CHECK(plate.is_support_used);
+    CHECK(plate.is_label_object_enabled);
+}
+
+TEST_CASE("BBS project round-trips physical filament records and writes mixed filament records", "[3MF][Bbs3mfExtended][SliceInfo][Filament]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+        FilamentInfo first;
+        first.id = 1;
+        first.type = "PLA";
+        first.color = "#123456";
+        first.filament_id = "tray-7";
+        first.used_m = 2.5f;
+        first.used_g = 6.25f;
+        first.used_for_object = true;
+        first.used_for_support = false;
+        first.group_id = {1, 2};
+        FilamentInfo second;
+        second.id = 3;
+        second.type = "PETG";
+        second.color = "#654321";
+        second.filament_id = "tray-2";
+        second.used_m = 1.5f;
+        second.used_g = 4.75f;
+        second.used_for_object = false;
+        second.used_for_support = true;
+        second.group_id = {3};
+        plate.slice_filaments_info = {first, second};
+        plate.mixed_filaments_info = {{9, "Mix", "#aabbcc", "2,3"}, {12, "Blend", "#445566", "1,4"}};
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+
+    REQUIRE(plate.slice_filaments_info.size() == 2);
+    const FilamentInfo &physical = plate.slice_filaments_info[0];
+    CHECK(physical.id == 1);
+    CHECK(physical.type == "PLA");
+    CHECK(physical.color == "#123456");
+    CHECK(physical.filament_id == "tray-7");
+    CHECK_THAT(double(physical.used_m), Catch::Matchers::WithinAbs(2.5, 1e-5));
+    CHECK_THAT(double(physical.used_g), Catch::Matchers::WithinAbs(6.25, 1e-5));
+    CHECK(physical.used_for_object);
+    CHECK_FALSE(physical.used_for_support);
+    CHECK(physical.group_id == std::vector<int>{1, 2});
+    const FilamentInfo &other = plate.slice_filaments_info[1];
+    CHECK(other.id == 3);
+    CHECK(other.type == "PETG");
+    CHECK(other.color == "#654321");
+    CHECK(other.filament_id == "tray-2");
+    CHECK_THAT(double(other.used_m), Catch::Matchers::WithinAbs(1.5, 1e-5));
+    CHECK_THAT(double(other.used_g), Catch::Matchers::WithinAbs(4.75, 1e-5));
+    CHECK_FALSE(other.used_for_object);
+    CHECK(other.used_for_support);
+    CHECK(other.group_id == std::vector<int>{3});
+
+    // The importer does not restore mixed-filament records onto the plate, so check what the
+    // exporter wrote to slice_info.config.
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
+    std::stringstream input(slice_info);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::vector<std::array<std::string, 4>> mixed;
+    for (const auto &node : tree.get_child("config.plate")) {
+        if (node.first != "mixed_filament")
+            continue;
+        const auto &attributes = node.second.get_child("<xmlattr>");
+        mixed.push_back({attributes.get<std::string>("id"), attributes.get<std::string>("type"),
+                         attributes.get<std::string>("color"), attributes.get<std::string>("components")});
+    }
+    REQUIRE(mixed.size() == 2);
+    CHECK(mixed[0] == std::array<std::string, 4>{"9", "Mix", "#aabbcc", "2,3"});
+    CHECK(mixed[1] == std::array<std::string, 4>{"12", "Blend", "#445566", "1,4"});
+}
+
+TEST_CASE("BBS project restores slice warning messages and levels", "[3MF][Bbs3mfExtended][SliceInfo][Warnings]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+        GCodeProcessorResult::SliceWarning first;
+        first.msg = "first slice warning";
+        first.level = 3;
+        GCodeProcessorResult::SliceWarning second;
+        second.msg = "second slice warning";
+        second.level = 1;
+        plate.warnings = {first, second};
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    REQUIRE(loaded.plates.front()->warnings.size() == 2);
+    CHECK(loaded.plates.front()->warnings[0].msg == "first slice warning");
+    CHECK(loaded.plates.front()->warnings[0].level == 3);
+    CHECK(loaded.plates.front()->warnings[1].msg == "second slice warning");
+    CHECK(loaded.plates.front()->warnings[1].level == 1);
 }
 
 } // namespace bbs_archive_contracts
