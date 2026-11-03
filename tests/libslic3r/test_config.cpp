@@ -3371,6 +3371,13 @@ void check_point_components(const Vec2d &actual, double expected_x, double expec
     CHECK_THAT(actual.y(), WithinAbs(expected_y, 1e-9));
 }
 
+void check_values(const std::vector<double> &actual, const std::vector<double> &expected)
+{
+    REQUIRE(actual.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+        CHECK_THAT(actual[i], WithinAbs(expected[i], 1e-9));
+}
+
 } // namespace
 
 TEST_CASE("FloatOrPercent keeps absolute and percentage semantics distinct", "[Config][ConfigContracts]")
@@ -3640,6 +3647,177 @@ TEST_CASE("Declared point and grouped integer option types round-trip through bi
     REQUIRE(restored_groups != nullptr);
     CHECK_FALSE(restored_groups->is_nil(0));
     CHECK(*groups_restored == groups_source);
+}
+
+TEST_CASE("ConfigOptionFloats appends and resizes values with explicit defaults", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloats storage({1., 2.});
+    ConfigOptionFloats *values = &storage;
+    const ConfigOptionFloat appended(3.);
+    values->append(&appended);
+    check_values(values->values, {1., 2., 3.});
+    values->resize(5);
+    check_values(values->values, {1., 2., 3., 1., 1.});
+    values->clear();
+    ConfigOptionFloat default_value(8.);
+    values->resize(2, &default_value);
+    check_values(values->values, {8., 8.});
+}
+
+TEST_CASE("ConfigOptionFloats vector set_at and set range preserve defaults", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloats destination({10., 10., 10.});
+    ConfigOptionFloats source({1., 2., 3., 4.});
+    destination.set_at(&source, 1, 1);
+    check_values(destination.values, {10., 2., 10.});
+    destination.set(&source, 2, 2);
+    check_values(destination.values, {3., 4.});
+}
+
+TEST_CASE("ConfigOptionFloats nullable index assignment retains nil state", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloatsNullable option({1., 2., 3.});
+    option.set_at_to_nil(1);
+    REQUIRE(option.is_nil(1));
+    CHECK_FALSE(option.is_nil(0));
+    CHECK(std::isnan(option.get_at(1)));
+    CHECK(option.serialize() == "1,nil,3");
+}
+
+TEST_CASE("ConfigOptionString empty distinguishes empty and nonempty values", "[Config][ConfigContracts]")
+{
+    ConfigOptionString empty;
+    ConfigOptionString populated("config");
+    CHECK(empty.empty());
+    CHECK_FALSE(populated.empty());
+    CHECK(populated.serialize() == "config");
+    REQUIRE(populated.deserialize(""));
+    CHECK(populated.empty());
+}
+
+TEST_CASE("Nullable integer vectors retain nil positions and canonical serialization", "[Config][ConfigContracts][ConfigNullable]")
+{
+    ConfigOptionIntsNullable option({1, ConfigOptionIntsNullable::nil_value(), -2});
+    CHECK(option.nullable());
+    CHECK_FALSE(option.is_nil());
+    CHECK_FALSE(option.is_nil(0));
+    CHECK(option.is_nil(1));
+    CHECK(option.serialize() == "1,nil,-2");
+    CHECK(option.vserialize() == std::vector<std::string>{"1", "nil", "-2"});
+    const ConfigOptionIntsNullable identical(option);
+    CHECK(option == identical);
+    const ConfigOptionIntsNullable higher({2, ConfigOptionIntsNullable::nil_value(), -2});
+    CHECK(option < higher);
+
+    ConfigOptionIntsNullable nilled({4, 5});
+    nilled.set_at_to_nil(1);
+    CHECK(nilled.is_nil(1));
+
+    ConfigOptionIntsNullable decoded;
+    REQUIRE(decoded.deserialize("nil,4"));
+    REQUIRE(decoded.values.size() == 2);
+    CHECK(decoded.is_nil(0));
+    CHECK(decoded.values[1] == 4);
+    REQUIRE(decoded.deserialize("8", true));
+    CHECK(decoded.values == std::vector<int>{ConfigOptionIntsNullable::nil_value(), 4, 8});
+
+    ConfigOptionInts non_nullable({1});
+    REQUIRE_THROWS_AS(non_nullable.deserialize("nil"), ConfigurationError);
+}
+
+TEST_CASE("String settings preserve escaped scalar and delimited vector content",
+          "[Config][ConfigSerialization]")
+{
+    const std::string scalar_value = "quote\" slash\\ carriage\r newline\n";
+    ConfigOptionString scalar(scalar_value);
+    const std::string scalar_serialized = scalar.serialize();
+    ConfigOptionString scalar_decoded;
+    REQUIRE(scalar_decoded.deserialize(scalar_serialized));
+    CHECK(scalar_decoded.value == scalar_value);
+
+    const std::vector<std::string> source_values{
+        "plain", "", "semi;colon", "quote\" and slash\\", "tab\t line\n carriage\r"
+    };
+    ConfigOptionStrings source(source_values);
+    const std::string serialized = source.serialize();
+    ConfigOptionStrings decoded;
+    REQUIRE(decoded.deserialize(serialized));
+    CHECK(decoded.values == source_values);
+
+    std::vector<std::string> trailing_empty;
+    REQUIRE(unescape_strings_cstyle("last;", trailing_empty));
+    CHECK(trailing_empty == std::vector<std::string>{"last", ""});
+
+    std::vector<std::string> whitespace_only;
+    REQUIRE(unescape_strings_cstyle(" \t", whitespace_only));
+    CHECK(whitespace_only.empty());
+    std::vector<std::string> quoted_then_spaces;
+    REQUIRE(unescape_strings_cstyle("\"value\" \t", quoted_then_spaces));
+    CHECK(quoted_then_spaces == std::vector<std::string>{"value"});
+
+    std::vector<std::string> unterminated_quote;
+    CHECK_FALSE(unescape_strings_cstyle("\"unfinished", unterminated_quote));
+    std::vector<std::string> trailing_escape;
+    CHECK_FALSE(unescape_strings_cstyle("\"unfinished\\", trailing_escape));
+    std::vector<std::string> malformed_quoted_tail;
+    CHECK_FALSE(unescape_strings_cstyle("\"value\"unexpected", malformed_quoted_tail));
+    CHECK_FALSE(scalar_decoded.deserialize("dangling\\"));
+}
+
+TEST_CASE("ConfigOption vector override detection respects nil and regular slots", "[Config][ConfigVectorOverride]")
+{
+    ConfigOptionInts base({10, 20});
+    ConfigOptionInts equal({10, 20});
+    ConfigOptionInts changed({10, 21});
+    ConfigOptionIntsNullable all_nil({ConfigOptionIntsNullable::nil_value(), ConfigOptionIntsNullable::nil_value()});
+    ConfigOptionIntsNullable partial({ConfigOptionIntsNullable::nil_value(), 21});
+    ConfigOptionIntsNullable extended({ConfigOptionIntsNullable::nil_value(), ConfigOptionIntsNullable::nil_value(), 30});
+
+    CHECK_FALSE(base.overriden_by(&equal));
+    CHECK(base.overriden_by(&changed));
+    CHECK_FALSE(base.overriden_by(&all_nil));
+    CHECK(base.overriden_by(&partial));
+    CHECK(base.overriden_by(&extended));
+}
+
+TEST_CASE("ConfigOption vector overrides copy regular sources and preserve nullable defaults", "[Config][ConfigVectorOverride]")
+{
+    ConfigOptionInts regular_target({5, 10});
+    ConfigOptionInts regular_source({6, 12});
+    std::vector<int> regular_indices{0, 1};
+    REQUIRE(regular_target.apply_override(&regular_source, regular_indices));
+    const std::vector<int> expected_regular{6, 12};
+    CHECK(regular_target.values == expected_regular);
+    CHECK_FALSE(regular_target.apply_override(&regular_source, regular_indices));
+
+    ConfigOptionInts empty_target;
+    ConfigOptionIntsNullable incoming({7, 8});
+    std::vector<int> empty_target_indices{0, 1};
+    CHECK_FALSE(empty_target.apply_override(&incoming, empty_target_indices));
+    const std::vector<int> expected_empty;
+    CHECK(empty_target.values == expected_empty);
+
+    ConfigOptionInts target({10, 20, 30});
+    ConfigOptionIntsNullable replacement({11, ConfigOptionIntsNullable::nil_value(), 33});
+    std::vector<int> default_index{0, 2, 1};
+    REQUIRE(target.apply_override(&replacement, default_index));
+    const std::vector<int> expected_nullable{11, 30, 33};
+    CHECK(target.values == expected_nullable);
+}
+
+TEST_CASE("Config option vectors collect scalar values and first vector values", "[Config][ConfigContracts]")
+{
+    ConfigOptionFloat scalar(2.5);
+    ConfigOptionFloats vector({3.5, 4.5});
+    ConfigOptionFloats collected;
+    const std::vector<const ConfigOption *> sources{&scalar, &vector};
+    collected.set(sources);
+    check_values(collected.values, {2.5, 3.5});
+
+    ConfigOptionFloats slots({10., 20.});
+    ConfigOptionFloat replacement(7.);
+    slots.set_at(&replacement, 3, 0);
+    check_values(slots.values, {10., 20., 10., 7.});
 }
 
 } // namespace config_option_value_contracts
