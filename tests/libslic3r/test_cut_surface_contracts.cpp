@@ -740,7 +740,23 @@ TEST_CASE("Surface cuts drop faces and contour points that collapse in float out
         for (size_t i = 0; i < contour.size(); ++i)
             CHECK(cut.vertices[contour[i]] != cut.vertices[contour[(i + 1) % contour.size()]]);
     }
-    check_mesh_indices(cut2model(cut, Emboss::OrthoProject3d(Vec3d(0., 0., 600.))));
+    // cut2model rejects an empty cut, which is the intended result once the collapsed geometry is dropped.
+    if (!cut.indices.empty())
+        check_mesh_indices(cut2model(cut, Emboss::OrthoProject3d(Vec3d(0., 0., 600.))));
+}
+
+// Control for the test above: the same placement with a shape wide enough to survive float conversion cuts a
+// non-empty surface, so an empty result there comes from dropping collapsed geometry, not from an early return.
+TEST_CASE("Surface cuts keep float-resolvable shapes at the far corner of a large cube", "[CutSurface]")
+{
+    const coord_t length_scaled = GENERATE(scale_(1.), scale_(3.));
+    CAPTURE(length_scaled);
+    const Point corner = Point::new_scale(199.9, 199.9);
+    const ExPolygon shape(rectangle(corner.x(), corner.y(), corner.x() + length_scaled, corner.y() + scale_(1.)));
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(200., 200., 200.)}, scaled_cube_projection(600.f), .5f);
+
+    CHECK_FALSE(cut.indices.empty());
+    CHECK_FALSE(cut.contours.empty());
 }
 
 } // namespace cut_surface_topology_contracts
