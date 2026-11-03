@@ -43,6 +43,7 @@
 #include "libslic3r/Fill/FillAdaptive.hpp"
 #include "libslic3r/Fill/FillGyroid.hpp"
 #include "libslic3r/Fill/FillTpmsAdaptive.hpp"
+#include "libslic3r/Fill/Lightning/Generator.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include <string_view>
@@ -1340,26 +1341,55 @@ struct SparseInfillShape {
     size_t sharp_turns { 0 };
     size_t path_count { 0 };
     double length { 0. };
+    double extrusion_volume_mm3 { 0. };
+    std::vector<double> layer_print_z_mm;
+    std::vector<double> layer_internal_area_mm2;
+    std::vector<double> layer_sparse_length_mm;
+    std::vector<double> layer_sparse_detour_mm;
+    std::vector<double> overhang_area_by_layer_mm2;
+    bool internal_segments_contained { true };
     // Digest of every point in the order it is printed. The counts above all survive the same
     // extrusions being joined into different polylines, so only this tells two such fills apart.
     uint64_t sequence { 14695981039346656037ull };
 };
 
-static SparseInfillShape sparse_infill_shape(const Print &print)
+static SparseInfillShape sparse_infill_shape(const Print &print, bool capture_layer_evidence = false)
 {
     SparseInfillShape shape;
 
-    auto account = [&shape](const ExtrusionPath &path) {
+    auto account = [&shape, capture_layer_evidence](const ExtrusionPath &path,
+                                                    size_t layer_idx,
+                                                    const ExPolygons &internal_domain) {
         if (!sparse_role(path.role()))
             return;
         const Points3 &pts = path.polyline.points;
         ++shape.path_count;
         shape.point_count += pts.size();
+        double path_length_mm = 0.;
+        if (capture_layer_evidence)
+            shape.extrusion_volume_mm3 += path.mm3_per_mm * unscale<double>(path.length());
         for (const auto &pt : pts)
             for (const coord_t coordinate : {pt.x(), pt.y(), pt.z()})
                 shape.sequence = (shape.sequence ^ uint64_t(coordinate)) * 1099511628211ull;
-        for (size_t i = 1; i < pts.size(); ++i)
-            shape.length += (pts[i] - pts[i - 1]).head<2>().cast<double>().norm();
+        for (size_t i = 1; i < pts.size(); ++i) {
+            const double segment_length_scaled = (pts[i] - pts[i - 1]).head<2>().cast<double>().norm();
+            shape.length += segment_length_scaled;
+            if (capture_layer_evidence) {
+                const double segment_length_mm = unscale<double>(segment_length_scaled);
+                path_length_mm += segment_length_mm;
+                const Line segment(Point(pts[i - 1].x(), pts[i - 1].y()), Point(pts[i].x(), pts[i].y()));
+                if (segment.a != segment.b &&
+                    std::none_of(internal_domain.begin(), internal_domain.end(),
+                                 [&segment](const ExPolygon &expolygon) { return expolygon.contains(segment); }))
+                    shape.internal_segments_contained = false;
+            }
+        }
+        if (capture_layer_evidence) {
+            shape.layer_sparse_length_mm[layer_idx] += path_length_mm;
+            const double direct_length_mm = pts.empty() ? 0. :
+                unscale<double>((pts.back() - pts.front()).head<2>().cast<double>().norm());
+            shape.layer_sparse_detour_mm[layer_idx] += std::max(0., path_length_mm - direct_length_mm);
+        }
         for (size_t i = 1; i + 1 < pts.size(); ++i) {
             const Vec2d incoming = (pts[i] - pts[i - 1]).head<2>().cast<double>();
             const Vec2d outgoing = (pts[i + 1] - pts[i]).head<2>().cast<double>();
@@ -1369,19 +1399,134 @@ static SparseInfillShape sparse_infill_shape(const Print &print)
         }
     };
 
-    for (const Layer *layer : print.objects().front()->layers())
+    const auto layers = print.objects().front()->layers();
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        const Layer *layer = layers[layer_idx];
+        if (capture_layer_evidence) {
+            shape.layer_print_z_mm.push_back(layer->print_z);
+            shape.layer_internal_area_mm2.push_back(0.);
+            shape.layer_sparse_length_mm.push_back(0.);
+            shape.layer_sparse_detour_mm.push_back(0.);
+        }
         for (const LayerRegion *region : layer->regions())
+        {
+            ExPolygons internal_surfaces;
+            if (capture_layer_evidence)
+                for (const Surface &surface : region->fill_surfaces.surfaces)
+                    if (surface.surface_type == stInternal || surface.surface_type == stInternalVoid) {
+                        shape.layer_internal_area_mm2[layer_idx] +=
+                            unscale<double>(unscale<double>(surface.expolygon.area()));
+                        internal_surfaces.push_back(surface.expolygon);
+                    }
+            const ExPolygons internal_domain = capture_layer_evidence ? union_ex(internal_surfaces) : ExPolygons{};
             for (const ExtrusionEntity *entity : region->fills.flatten().entities) {
                 if (auto *path = dynamic_cast<const ExtrusionPath *>(entity))
-                    account(*path);
+                    account(*path, layer_idx, internal_domain);
                 else if (auto *multi = dynamic_cast<const ExtrusionMultiPath *>(entity))
                     for (const ExtrusionPath &p : multi->paths)
-                        account(p);
+                        account(p, layer_idx, internal_domain);
                 else if (auto *loop = dynamic_cast<const ExtrusionLoop *>(entity))
                     for (const ExtrusionPath &p : loop->paths)
-                        account(p);
+                        account(p, layer_idx, internal_domain);
             }
+        }
+    }
     return shape;
+}
+
+struct LightningStepSettings {
+    double overhang_angle;
+    double prune_angle;
+    double straightening_angle;
+};
+
+static SparseInfillShape slice_lightning_step(const LightningStepSettings &settings, bool capture_overhangs = false)
+{
+    TriangleMesh geometry = Slic3r::Test::mesh(Slic3r::Test::TestMesh::step);
+    // Retain the mesh's 20 mm footprint and 1 mm step edge, scaling its 10 mm height to 5 mm.
+    geometry.scale(Vec3f(1.f, 1.f, 0.5f));
+
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", "lightning"},
+                                   {"sparse_infill_density", "15%"},
+                                   {"sparse_infill_smooth_factor", "0%"},
+                                   {"lightning_overhang_angle", settings.overhang_angle},
+                                   {"lightning_prune_angle", settings.prune_angle},
+                                   {"lightning_straightening_angle", settings.straightening_angle},
+                                   {"sparse_infill_line_width", 0.45},
+                                   {"line_width", 0.45},
+                                   {"inner_wall_line_width", 0.45},
+                                   {"outer_wall_line_width", 0.45},
+                                   {"wall_loops", 2},
+                                   {"fill_multiline", 1},
+                                   {"infill_anchor", 0.0},
+                                   {"infill_anchor_max", 0.0},
+                                   {"infill_wall_overlap", "0%"},
+                                   {"top_bottom_infill_wall_overlap", "0%"},
+                                   {"top_shell_layers", 2},
+                                   {"bottom_shell_layers", 2},
+                                   {"top_shell_thickness", 0.0},
+                                   {"bottom_shell_thickness", 0.0},
+                                   {"layer_height", 0.2},
+                                   {"initial_layer_print_height", 0.2},
+                                   {"use_relative_e_distances", true},
+                                   {"layer_change_gcode", "G92 E0\n"}});
+    Slic3r::Test::init_print({geometry}, print, model, config);
+
+    const auto validation = print.validate();
+    INFO("Lightning settings: overhang=" << settings.overhang_angle
+         << ", prune=" << settings.prune_angle
+         << ", straightening=" << settings.straightening_angle
+         << "; validation=" << validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE_NOTHROW(print.process());
+
+    SparseInfillShape shape = sparse_infill_shape(print, true);
+    if (capture_overhangs) {
+        FillLightning::Generator generator(*print.objects().front(), []() {});
+        for (const Polygons &overhang : generator.Overhangs())
+            shape.overhang_area_by_layer_mm2.push_back(unscale<double>(unscale<double>(area(overhang))));
+    }
+    REQUIRE(shape.path_count > 0);
+    REQUIRE(shape.point_count > shape.path_count);
+    REQUIRE(shape.length > 0.);
+    REQUIRE(std::isfinite(shape.length));
+    REQUIRE(shape.extrusion_volume_mm3 > 0.);
+    REQUIRE(std::isfinite(shape.extrusion_volume_mm3));
+    REQUIRE(shape.internal_segments_contained);
+    REQUIRE(shape.layer_print_z_mm.size() > 2);
+    REQUIRE(shape.layer_print_z_mm.size() == shape.layer_internal_area_mm2.size());
+    REQUIRE(shape.layer_print_z_mm.size() == shape.layer_sparse_length_mm.size());
+    REQUIRE(shape.layer_print_z_mm.size() == shape.layer_sparse_detour_mm.size());
+    return shape;
+}
+
+// The scaled step fixture has a 2.5 mm lower base. With two 0.2 mm top and bottom shells,
+// layers from 0.6 through 2.0 mm form a flat internal-fill propagation zone.
+static double step_base_measure(const SparseInfillShape &shape, const std::vector<double> &measure_by_layer)
+{
+    double result = 0.;
+    for (size_t layer_idx = 0; layer_idx < shape.layer_print_z_mm.size(); ++layer_idx)
+        if (shape.layer_print_z_mm[layer_idx] >= 0.6 && shape.layer_print_z_mm[layer_idx] < 2.0)
+            result += measure_by_layer[layer_idx];
+    return result;
+}
+
+static double step_base_sparse_length(const SparseInfillShape &shape)
+{
+    return step_base_measure(shape, shape.layer_sparse_length_mm);
+}
+
+static double step_base_sparse_detour(const SparseInfillShape &shape)
+{
+    return step_base_measure(shape, shape.layer_sparse_detour_mm);
+}
+
+static double step_base_internal_area(const SparseInfillShape &shape)
+{
+    return step_base_measure(shape, shape.layer_internal_area_mm2);
 }
 
 TEST_CASE("Z contouring gates fill-direction alternation", "[Fill][ZContouringSettings]")
@@ -1641,6 +1786,107 @@ TEST_CASE("Lightning infill rounds the turns of its branches with the smooth fac
     REQUIRE(smooth.point_count > sharp.point_count);
     REQUIRE(smooth.sharp_turns < sharp.sharp_turns);
     REQUIRE(smooth.length < sharp.length);
+}
+
+TEST_CASE("Lightning overhang angle shrinks unsupported internal area at a stepped roof", "[Fill][LightningSettings]")
+{
+    const SparseInfillShape minimum = slice_lightning_step({5., 45., 45.}, true);
+    const SparseInfillShape maximum = slice_lightning_step({85., 45., 45.}, true);
+
+    REQUIRE(minimum.overhang_area_by_layer_mm2.size() == minimum.layer_print_z_mm.size());
+    REQUIRE(maximum.overhang_area_by_layer_mm2.size() == maximum.layer_print_z_mm.size());
+    REQUIRE(minimum.overhang_area_by_layer_mm2.size() == maximum.overhang_area_by_layer_mm2.size());
+    REQUIRE(minimum.layer_sparse_length_mm.size() == maximum.layer_sparse_length_mm.size());
+
+    const double minimum_total_overhang = std::accumulate(minimum.overhang_area_by_layer_mm2.begin(),
+                                                          minimum.overhang_area_by_layer_mm2.end(), 0.);
+    const double maximum_total_overhang = std::accumulate(maximum.overhang_area_by_layer_mm2.begin(),
+                                                          maximum.overhang_area_by_layer_mm2.end(), 0.);
+    double deposited_path_change_mm = 0.;
+    for (size_t layer_idx = 0; layer_idx < minimum.layer_sparse_length_mm.size(); ++layer_idx)
+        deposited_path_change_mm += std::abs(minimum.layer_sparse_length_mm[layer_idx] - maximum.layer_sparse_length_mm[layer_idx]);
+    CAPTURE(minimum_total_overhang, maximum_total_overhang, deposited_path_change_mm);
+    REQUIRE(step_base_internal_area(minimum) > 0.);
+    REQUIRE(step_base_internal_area(maximum) > 0.);
+    REQUIRE(minimum_total_overhang > 0.);
+    // Require the real Print pipeline's sparse-infill paths to change too; the separate
+    // Generator area query below is an independent geometric check, not the sole oracle.
+    // One micrometre of accumulated per-layer sparse path length distinguishes actual fill
+    // deposition from a separately reconstructed Generator's unsupported-area result.
+    constexpr double minimum_deposited_path_change_mm = 0.001;
+    REQUIRE(deposited_path_change_mm > minimum_deposited_path_change_mm);
+    for (size_t layer_idx = 0; layer_idx < minimum.overhang_area_by_layer_mm2.size(); ++layer_idx) {
+        REQUIRE(std::isfinite(minimum.overhang_area_by_layer_mm2[layer_idx]));
+        REQUIRE(std::isfinite(maximum.overhang_area_by_layer_mm2[layer_idx]));
+        REQUIRE(minimum.overhang_area_by_layer_mm2[layer_idx] >= 0.);
+        REQUIRE(maximum.overhang_area_by_layer_mm2[layer_idx] >= 0.);
+    }
+
+    // The consumer erodes each current internal-fill area by the wall-support radius, then
+    // subtracts the unchanged area above. A larger radius therefore produces nested unsupported
+    // regions; compare the geometry itself rather than downstream branch counts or hashes.
+    for (size_t layer_idx = 0; layer_idx < minimum.overhang_area_by_layer_mm2.size(); ++layer_idx) {
+        CHECK(minimum.overhang_area_by_layer_mm2[layer_idx] >= maximum.overhang_area_by_layer_mm2[layer_idx]);
+    }
+    CHECK(minimum_total_overhang > maximum_total_overhang);
+}
+
+TEST_CASE("Lightning prune angle trims branches across the flat step base", "[Fill][LightningSettings]")
+{
+    const SparseInfillShape low_prune_low_straightening = slice_lightning_step({45., 5., 5.});
+    const SparseInfillShape low_prune_high_straightening = slice_lightning_step({45., 5., 85.});
+    const SparseInfillShape high_prune_low_straightening = slice_lightning_step({45., 85., 5.});
+    const SparseInfillShape high_prune_high_straightening = slice_lightning_step({45., 85., 85.});
+
+    const double low_prune_low_base_length = step_base_sparse_length(low_prune_low_straightening);
+    const double low_prune_high_base_length = step_base_sparse_length(low_prune_high_straightening);
+    const double high_prune_low_base_length = step_base_sparse_length(high_prune_low_straightening);
+    const double high_prune_high_base_length = step_base_sparse_length(high_prune_high_straightening);
+    const double low_prune_low_base_detour = step_base_sparse_detour(low_prune_low_straightening);
+    const double low_prune_high_base_detour = step_base_sparse_detour(low_prune_high_straightening);
+    CAPTURE(low_prune_low_base_length, low_prune_high_base_length,
+            high_prune_low_base_length, high_prune_high_base_length,
+            low_prune_low_base_detour, low_prune_high_base_detour);
+    REQUIRE(step_base_internal_area(low_prune_low_straightening) > 0.);
+    REQUIRE(step_base_internal_area(low_prune_high_straightening) > 0.);
+    REQUIRE(step_base_internal_area(high_prune_low_straightening) > 0.);
+    REQUIRE(step_base_internal_area(high_prune_high_straightening) > 0.);
+
+    // Both straightening rows at the low prune endpoint retain measured base paths. On those
+    // real paths, increasing prune angle removes terminal branch length before propagation.
+    REQUIRE(low_prune_low_base_length > 0.);
+    REQUIRE(low_prune_high_base_length > 0.);
+    CHECK(low_prune_low_base_length > high_prune_low_base_length);
+    CHECK(low_prune_high_base_length > high_prune_high_base_length);
+
+    // Straightening shortens endpoint-chord detour when the low-prune row retains active paths.
+    REQUIRE(std::isfinite(low_prune_low_base_detour));
+    REQUIRE(low_prune_low_base_detour > 0.);
+    REQUIRE(std::isfinite(low_prune_high_base_detour));
+    CHECK(low_prune_high_base_detour >= 0.);
+    CHECK(low_prune_low_base_detour > low_prune_high_base_detour);
+
+    // Pruning precedes straightening; the high-prune row may already have no base paths, so
+    // straightening cannot restore more path length than the low-straightening high-prune row.
+    CHECK(high_prune_high_base_length <= high_prune_low_base_length);
+}
+
+TEST_CASE("Lightning straightening angle reduces branch detours across the flat step base", "[Fill][LightningSettings]")
+{
+    const SparseInfillShape minimum = slice_lightning_step({45., 45., 5.});
+    const SparseInfillShape maximum = slice_lightning_step({45., 45., 85.});
+
+    const double minimum_base_detour = step_base_sparse_detour(minimum);
+    const double maximum_base_detour = step_base_sparse_detour(maximum);
+    CAPTURE(minimum_base_detour, maximum_base_detour);
+    REQUIRE(step_base_internal_area(minimum) > 0.);
+    REQUIRE(step_base_internal_area(maximum) > 0.);
+
+    // Disable post-fill corner rounding in the fixture. TreeNode straightening moves single-child
+    // runs toward the chord between junctions; measure only the endpoint-chord detour in this
+    // lower flat zone. This relation is specific to the stepped fixture, not a general claim about
+    // arbitrary branching trees whose junctions may move in different directions.
+    CHECK(minimum_base_detour > maximum_base_detour);
 }
 
 TEST_CASE("Concentric infill rounds its loops with the smooth factor", "[Fill]")

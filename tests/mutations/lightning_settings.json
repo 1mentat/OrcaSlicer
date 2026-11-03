@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "lightning-overhang-angle-ignored",
+      "path": "src/libslic3r/Fill/Lightning/Generator.cpp",
+      "old": "    const double lightning_infill_overhang_angle      = region_config.lightning_overhang_angle.value * M_PI / 180.0;",
+      "new": "    const double lightning_infill_overhang_angle      = M_PI / 4;",
+      "description": "Ignore the sparse Lightning overhang-angle setting and keep the production default of 45 degrees.",
+      "test_filter": "^LightningSettings$"
+    },
+    {
+      "id": "lightning-prune-angle-ignored",
+      "path": "src/libslic3r/Fill/Lightning/Generator.cpp",
+      "old": "    const double lightning_infill_prune_angle         = region_config.lightning_prune_angle.value * M_PI / 180.0;",
+      "new": "    const double lightning_infill_prune_angle         = M_PI / 4;",
+      "description": "Ignore the sparse Lightning prune-angle setting and keep the production default of 45 degrees.",
+      "test_filter": "^LightningSettings$"
+    },
+    {
+      "id": "lightning-straightening-angle-ignored",
+      "path": "src/libslic3r/Fill/Lightning/Generator.cpp",
+      "old": "    const double lightning_infill_straightening_angle = region_config.lightning_straightening_angle.value * M_PI / 180.0;",
+      "new": "    const double lightning_infill_straightening_angle = M_PI / 4;",
+      "description": "Ignore the sparse Lightning straightening-angle setting and keep the production default of 45 degrees.",
+      "test_filter": "^LightningSettings$"
+    }
+  ]
+}

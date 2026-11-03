@@ -1674,6 +1674,15 @@ Fast-temperature nil handling and Saving mode remain outside this packet's
 claims. Cooling and retract claims cover representative values and the tested
 two-filament mapping.
 
+Lightning angle cases in `test_fill.cpp` exercise the registered 5° and 85°
+endpoints through real Print infill. They check unsupported area and deposited
+paths, pruning, and path detour, including a bounded prune/straightening matrix.
+The observer checks positive extrusion and containment in the internal fill
+domain. Use `tests/mutations/lightning_settings.json` with target
+`fff_print_fill_tests`, control regex `^FocusedFill::`, and expected inventory
+`tests/controls/lightning_settings.json`. Geometric comparisons are scoped to
+the stepped fixture; arbitrary branching geometry is not claimed.
+
 Pass `--cmake` and `--ctest` when the configured worker needs specific tools.
 Keep the worker's existing CPU, memory, swap, and locale limits.
 

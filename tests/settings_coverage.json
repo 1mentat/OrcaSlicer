@@ -3,6 +3,35 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
+    "lightning_overhang_angle": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[LightningSettings]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The sparse Lightning Print pipeline is exercised on the same stepped mesh at the registered 5 and 85 degree endpoints while the other two Lightning angles stay at 45 degrees. The test checks finite nonnegative unsupported-overhang areas, a per-layer nested-area relation, a strict total-area reduction, and a nontrivial change in measured sparse extrusion path length. The claim is scoped to this step fixture and sparse-infill consumer; support-Lightning and other interactions are not covered."
+    },
+    "lightning_prune_angle": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[LightningSettings]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The sparse Lightning Print pipeline exercises the registered 5 and 85 degree endpoints in a 2 by 2 prune/straightening matrix on the stepped mesh. Measured sparse path length across the flat internal-fill base decreases at both straightening endpoints when prune moves from 5 to 85 degrees; active-path guards establish the low-prune comparisons. The high-prune rows check that later straightening does not resurrect pruned path length. The claim is scoped to this geometry and pairwise matrix, not arbitrary branching trees or support-Lightning."
+    },
+    "lightning_straightening_angle": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[LightningSettings]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The sparse Lightning Print pipeline exercises the registered 5 and 85 degree endpoints on the stepped mesh. Endpoint-chord detour in measured sparse paths over the flat internal-fill base decreases at 85 degrees, both with the other angles at 45 degrees and in the 2 by 2 prune/straightening matrix. This is a fixture-specific geometric relation; arbitrary branching trees and support-Lightning are not covered."
+    },
     "filament_flush_temp": {
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsVariance]",
