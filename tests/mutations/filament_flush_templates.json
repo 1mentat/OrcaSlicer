@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Six source-reviewed X2D flush-setting mutations for the new GCode export contract; uses the existing slicer_mutation.py manifest schema.",
+  "mutants": [
+    {
+      "id": "x2d-fast-flush-temperature-uses-normal-value",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                        flush_temps[idx] = use_fast_flush ? m_print_config->filament_flush_temp_fast.get_at(fi)\n                                                          : m_print_config->filament_flush_temp.get_at(fi);",
+      "new": "                        flush_temps[idx] = use_fast_flush ? m_print_config->filament_flush_temp.get_at(fi)\n                                                          : m_print_config->filament_flush_temp.get_at(fi);",
+      "description": "Select the normal flush-temperature vector in both Default and Fast branches; the Fast control should emit the configured fast temperatures.",
+      "test_filter": "^FilamentFlushSettings$"
+    },
+    {
+      "id": "x2d-flush-speed-zero-fallback-is-skipped",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                        if (flush_v_speed[idx] == 0)\n                            flush_v_speed[idx] = m_print_config->filament_max_volumetric_speed.get_at(fi);",
+      "new": "                        if (flush_v_speed[idx] == 0)\n                            flush_v_speed[idx] = 0.0;",
+      "description": "Replace only the active X2D zero flush-speed fallback with zero; the independent max-volumetric feed oracle should fail.",
+      "test_filter": "^FilamentFlushSettings$"
+    },
+    {
+      "id": "x2d-flush-temperature-zero-fallback-is-skipped",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                        if (flush_temps[idx] == 0)\n                            flush_temps[idx] = m_print_config->nozzle_temperature_range_high.get_at(fi);",
+      "new": "                        if (flush_temps[idx] == 0)\n                            flush_temps[idx] = 0;",
+      "description": "Replace only the active X2D zero flush-temperature fallback with zero; the registered range-high command oracle should fail.",
+      "test_filter": "^FilamentFlushSettings$"
+    },
+    {
+      "id": "x2d-cooling-is-not-suppressed-by-either-gate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                    if (tcr.is_contact || gcodegen.m_layer_index == 0)",
+      "new": "                    if (tcr.is_contact && gcodegen.m_layer_index == 0)",
+      "description": "Require contact and first layer simultaneously before zeroing toolchange cooling; first-layer-only and later-contact rows retain cooling.",
+      "test_filter": "^FilamentFlushSettings$"
+    },
+    {
+      "id": "filament-child-nil-replaces-parent-vector",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                    opt_vec_src->set_only_diff(opt_vec_dest, variant_index, stride);",
+      "new": "                    opt_src->set(opt_target);",
+      "description": "Replace per-variant child merge with whole-option assignment so nil child slots overwrite parent values; explicit resolved-vector REQUIRE guards should fail.",
+      "test_filter": "^FilamentFlushNilResolution$"
+    },
+    {
+      "id": "x2d-template-retract-uses-logical-index",
+      "path": "resources/profiles/BBL/machine/Bambu Lab X2D 0.4 nozzle template change_filament_gcode.json",
+      "old": "M620.10 R{retract_length_toolchange[filament_map[next_filament_id]-1]}\\nM628 S0",
+      "new": "M620.10 R{retract_length_toolchange[next_filament_id]}\\nM628 S0",
+      "description": "Index the X2D mapped toolchange retract by logical filament id instead of the reversed physical filament map.",
+      "test_filter": "^FilamentFlushSettings$"
+    }
+  ]
+}

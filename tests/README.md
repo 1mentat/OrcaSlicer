@@ -1663,6 +1663,17 @@ probes are cataloged in `tests/mutations/lockedzag_density_width.json`. These
 claims cover the tested fixtures and nozzle sizes; no maximum is registered,
 and other geometry, nozzle sizes, and arbitrary widths are not claimed.
 
+The X2D flush-template cases in `test_gcode.cpp` check Default and Fast
+temperatures, zero-value fallbacks, volumetric-to-filament feed conversion,
+first-layer/contact cooling, physical-extruder retract mapping, and nullable
+child-preset resolution through the shipped template. Their six mutation probes
+are in `tests/mutations/filament_flush_templates.json`; use target
+`fff_print_gcode_tests`, control regex `^FocusedGCode::`, and expected inventory
+`tests/controls/filament_flush_templates.json` with target-mode validation.
+Fast-temperature nil handling and Saving mode remain outside this packet's
+claims. Cooling and retract claims cover representative values and the tested
+two-filament mapping.
+
 Pass `--cmake` and `--ctest` when the configured worker needs specific tools.
 Keep the worker's existing CPU, memory, swap, and locale limits.
 

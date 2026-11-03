@@ -12,6 +12,7 @@
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/calib.hpp"
 #include <catch2/catch_all.hpp>
+#include "nlohmann/json.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCodeWriter.hpp"
@@ -6553,6 +6554,579 @@ TEST_CASE("Filament change route responds to endpoint configuration",
     REQUIRE(route.has_value());
     require_finite(*route);
     CHECK_THAT(route->p3_y, Catch::Matchers::WithinAbs(160., 1e-6));
+}
+
+namespace x2d_filament_flush_contracts {
+
+struct ChangeRow {
+    int current = -1;
+    int next = -1;
+    int layer = -1;
+    int contact = -1;
+    int physical_next = -1;
+    std::array<std::optional<double>, 2> flush_f;
+    std::array<std::optional<double>, 2> flush_t;
+    std::optional<double> cooling_c;
+    std::optional<double> mapped_retract;
+    std::vector<double> pressure_retracts;
+};
+
+struct ObjectDeposition {
+    size_t moves = 0;
+    double xy_mm = 0.0;
+    double filament_mm = 0.0;
+};
+
+std::optional<int> marker_integer(std::string_view marker, std::string_view field)
+{
+    const std::string key = std::string(field) + "=";
+    const size_t key_pos = marker.find(key);
+    if (key_pos == std::string_view::npos)
+        return std::nullopt;
+    const size_t begin = key_pos + key.size();
+    size_t end = begin;
+    while (end < marker.size() && !std::isspace(static_cast<unsigned char>(marker[end])))
+        ++end;
+    if (begin == end)
+        return std::nullopt;
+    std::istringstream input(std::string(marker.substr(begin, end - begin)));
+    int value = 0;
+    char trailing = 0;
+    if (!(input >> value) || (input >> trailing))
+        return std::nullopt;
+    return value;
+}
+
+std::string read_shipped_x2d_change_template()
+{
+    const std::string machine_dir = std::string(PROFILES_DIR) + "/BBL/machine/";
+    const std::string template_name = "Bambu Lab X2D 0.4 nozzle template change_filament_gcode";
+    const std::string machine_path = machine_dir + "Bambu Lab X2D 0.4 nozzle.json";
+    const std::string template_path = machine_dir + template_name + ".json";
+    REQUIRE(boost::filesystem::exists(machine_path));
+    REQUIRE(boost::filesystem::exists(template_path));
+
+    std::ifstream machine_input(machine_path);
+    REQUIRE(machine_input.good());
+    const nlohmann::json machine = nlohmann::json::parse(machine_input);
+    REQUIRE(machine.contains("include"));
+    REQUIRE(machine.at("include").is_array());
+    CHECK(std::find(machine.at("include").begin(), machine.at("include").end(), template_name) !=
+          machine.at("include").end());
+
+    std::ifstream template_input(template_path);
+    REQUIRE(template_input.good());
+    const nlohmann::json template_json = nlohmann::json::parse(template_input);
+    REQUIRE(template_json.contains("change_filament_gcode"));
+    return template_json.at("change_filament_gcode").get<std::string>();
+}
+
+DynamicPrintConfig x2d_flush_config(PrimeVolumeMode mode, const std::vector<int> &fast_temperatures,
+                                    const std::string &shipped_template, bool contact_case)
+{
+    DynamicPrintConfig config = route_config(30., 180.);
+    config.set_key_value("change_filament_gcode", new ConfigOptionString(
+        "; ORCA_TOOLCHANGE_BEGIN current={current_filament_id} next={next_filament_id} "
+        "layer={layer_num} physical={filament_map[next_filament_id]} "
+        "contact={if is_prime_tower_interface}1{else}0{endif}\n" +
+        shipped_template +
+        "\n; ORCA_TOOLCHANGE_END current={current_filament_id} next={next_filament_id} "
+        "layer={layer_num} physical={filament_map[next_filament_id]} "
+        "contact={if is_prime_tower_interface}1{else}0{endif}\n"));
+    config.set_key_value("prime_volume_mode", new ConfigOptionEnum<PrimeVolumeMode>(mode));
+
+    // Keep the two logical filaments on distinct variant columns and map them to
+    // opposite physical extruders so the profile's [filament_map[next]-1] is observable.
+    config.set_key_value("filament_self_index", new ConfigOptionInts({1, 2}));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({
+        "Direct Drive High Flow", "Direct Drive Standard"
+    }));
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({
+        "Direct Drive Standard", "Direct Drive High Flow"
+    }));
+    config.set_key_value("extruder_variant_list", new ConfigOptionStrings({
+        "Direct Drive Standard", "Direct Drive High Flow"
+    }));
+    config.set_key_value("print_extruder_variant", new ConfigOptionStrings({
+        "Direct Drive Standard", "Direct Drive High Flow"
+    }));
+    config.set_key_value("print_extruder_id", new ConfigOptionInts({1, 2}));
+    config.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({etDirectDrive, etDirectDrive}));
+    config.set_key_value("nozzle_volume_type", new ConfigOptionEnumsGeneric({nvtStandard, nvtHighFlow}));
+    config.set_key_value("filament_map", new ConfigOptionInts({2, 1}));
+
+    config.set_key_value("filament_flush_temp", new ConfigOptionIntsNullable({0, 1500}));
+    config.set_key_value("filament_flush_temp_fast", new ConfigOptionIntsNullable(fast_temperatures));
+    config.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloatsNullable({0.0, 200.0}));
+    config.set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats({32.0, 45.0}));
+    config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable({10.0, 25.0}));
+    config.set_key_value("retract_length_toolchange", new ConfigOptionFloats({0.0, 12.5}));
+    config.set_key_value("nozzle_temperature_range_high", new ConfigOptionInts({245, 255}));
+    config.set_key_value("nozzle_temperature_initial_layer", new ConfigOptionInts({200, 205}));
+    config.set_key_value("nozzle_temperature", new ConfigOptionInts({215, 220}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PLA", "PLA"}));
+    config.set_key_value("filament_tower_interface_purge_volume", new ConfigOptionFloats({20.0, 20.0}));
+    config.set_key_value("filament_tower_interface_print_temp", new ConfigOptionInts({212, 223}));
+    config.set_key_value("filament_tower_interface_pre_extrusion_dist", new ConfigOptionFloats({2.0, 2.0}));
+    config.set_key_value("filament_tower_interface_pre_extrusion_length", new ConfigOptionFloats({3.0, 3.0}));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.75, 1.75}));
+    config.set_deserialize_strict({
+        {"enable_prime_tower", contact_case},
+        {"prime_tower_width", 35.0},
+        {"wipe_tower_type", contact_case ? "type1" : "type2"},
+        {"enable_tower_interface_features", contact_case},
+        {"enable_arc_fitting", false},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"use_relative_e_distances", true},
+    });
+    if (contact_case) {
+        config.set_deserialize_strict({
+            {"prime_volume", 80.0},
+            {"wipe_tower_x", 50.0},
+            {"wipe_tower_y", 50.0},
+            {"wipe_tower_no_sparse_layers", false},
+            {"wipe_tower_sparse_layers_combination", false},
+            {"filament_adhesiveness_category", "0,1"},
+            {"physical_extruder_map", "0,1"},
+            {"enable_filament_ramming", false},
+            {"enable_tower_interface_cooldown_during_tower", false},
+            {"single_extruder_multi_material_priming", false},
+            {"wait_for_temp_on_wipe_tower", false},
+            {"preheat_time", 0.0},
+            {"skirt_loops", 0},
+            {"brim_type", "no_brim"},
+            {"extruder_printable_height", "0,0"},
+        });
+        // route_config() carries a cutter-path exclusion polygon unrelated to
+        // this tower fixture; it overlaps the pinned Type1 tower footprint.
+        config.set_key_value("bed_exclude_area", new ConfigOptionPoints{});
+    }
+    return config;
+}
+
+std::string export_x2d_tower_rows(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    auto add_slab = [object](double z, int extruder, double x, double width) {
+        TriangleMesh mesh = make_cube(width, 8., 0.4);
+        mesh.translate(x, 0., z);
+        ModelVolume *volume = object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
+        volume->config.set("extruder", extruder);
+    };
+    // Both categories occupy the first 0.4 mm, yielding real first-layer and
+    // later noncontact changes. Subsequent full slabs transition categories,
+    // producing contact changes for the same Type1 consumer.
+    add_slab(0.0, 1, 0., 4.);
+    add_slab(0.0, 2, 4., 4.);
+    add_slab(0.4, 1, 0., 8.);
+    add_slab(0.8, 2, 0., 8.);
+    add_slab(1.2, 1, 0., 8.);
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    const auto validation = print.validate();
+    INFO("X2D Type1 tower validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    REQUIRE(print.has_wipe_tower());
+    const std::string output = Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    bool saw_contact = false;
+    bool saw_noncontact = false;
+    for (const auto &layer : print.wipe_tower_data().tool_changes) {
+        for (const WipeTower::ToolChangeResult &change : layer) {
+            if (change.is_contact)
+                saw_contact = true;
+            else
+                saw_noncontact = true;
+        }
+    }
+    REQUIRE(saw_contact);
+    REQUIRE(saw_noncontact);
+    return output;
+}
+
+bool comment_starts_with_marker(std::string_view comment, std::string_view marker)
+{
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.front())))
+        comment.remove_prefix(1);
+    return comment.size() >= marker.size() && comment.substr(0, marker.size()) == marker;
+}
+
+std::vector<ChangeRow> inspect_change_rows(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    std::vector<ChangeRow> rows;
+    std::optional<size_t> active;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&rows, &active](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment_starts_with_marker(comment, "ORCA_TOOLCHANGE_BEGIN")) {
+            const auto current = marker_integer(comment, "current");
+            const auto next = marker_integer(comment, "next");
+            const auto layer = marker_integer(comment, "layer");
+            const auto contact = marker_integer(comment, "contact");
+            const auto physical = marker_integer(comment, "physical");
+            REQUIRE(current.has_value());
+            REQUIRE(next.has_value());
+            REQUIRE(layer.has_value());
+            REQUIRE(contact.has_value());
+            REQUIRE(physical.has_value());
+            rows.push_back({});
+            active = rows.size() - 1;
+            rows[*active].current = *current;
+            rows[*active].next = *next;
+            rows[*active].layer = *layer;
+            rows[*active].contact = *contact;
+            rows[*active].physical_next = *physical;
+            return;
+        }
+        if (comment_starts_with_marker(comment, "ORCA_TOOLCHANGE_END")) {
+            active.reset();
+            return;
+        }
+        if (!active.has_value())
+            return;
+
+        ChangeRow &row = rows[*active];
+        float selector = 0.0f;
+        float value = 0.0f;
+        if (line.cmd_is("M620.10") && line.has_value('A', selector)) {
+            const int slot = static_cast<int>(std::lround(selector));
+            if (slot >= 0 && slot < 2) {
+                if (line.has_value('F', value))
+                    row.flush_f[static_cast<size_t>(slot)] = value;
+                if (line.has_value('T', value))
+                    row.flush_t[static_cast<size_t>(slot)] = value;
+            }
+        } else if (line.cmd_is("M620.10") && line.has_value('R', value)) {
+            row.mapped_retract = value;
+        } else if (line.cmd_is("M620.15") && line.has_value('C', value)) {
+            row.cooling_c = value;
+        } else if (line.cmd_is("M983.3") && line.has_value('R', value)) {
+            row.pressure_retracts.push_back(value);
+        }
+    });
+    return rows;
+}
+
+std::string trim_role(std::string value)
+{
+    const auto whitespace = [](unsigned char ch) { return std::isspace(ch) != 0; };
+    const auto first = std::find_if_not(value.begin(), value.end(), whitespace);
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), whitespace).base();
+    if (first >= last)
+        return {};
+    value = std::string(first, last);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+ObjectDeposition inspect_object_deposition(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    ObjectDeposition result;
+    bool in_custom_script = false;
+    std::string role;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&result, &in_custom_script, &role](GCodeReader &state,
+                                                                   const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("ORCA_TOOLCHANGE_BEGIN") != std::string_view::npos) {
+            in_custom_script = true;
+            return;
+        }
+        if (comment.find("ORCA_TOOLCHANGE_END") != std::string_view::npos) {
+            in_custom_script = false;
+            return;
+        }
+        if (in_custom_script)
+            return;
+        const size_t type_pos = comment.find("TYPE:");
+        const size_t feature_pos = comment.find("FEATURE:");
+        if (type_pos != std::string_view::npos || feature_pos != std::string_view::npos) {
+            const bool use_type = type_pos != std::string_view::npos &&
+                                  (feature_pos == std::string_view::npos || type_pos < feature_pos);
+            const size_t value_pos = use_type ? type_pos + 5 : feature_pos + 8;
+            role = trim_role(std::string(comment.substr(value_pos)));
+        }
+        if (in_custom_script || role != "outer wall" ||
+            !line.extruding(state) || line.dist_XY(state) <= EPSILON)
+            return;
+        const double filament = line.dist_E(state);
+        if (!std::isfinite(filament) || filament <= 0.0)
+            return;
+        ++result.moves;
+        result.xy_mm += line.dist_XY(state);
+        result.filament_mm += filament;
+    });
+    return result;
+}
+
+double independent_filament_feed(double volumetric_mm3_s)
+{
+    constexpr double filament_diameter_mm = 1.75;
+    constexpr double pi = 3.14159265358979323846;
+    const double filament_area_mm2 = pi * filament_diameter_mm * filament_diameter_mm / 4.0;
+    return volumetric_mm3_s * 60.0 / filament_area_mm2;
+}
+
+void check_flush_rows(const std::vector<ChangeRow> &rows,
+                      const std::array<double, 2> &flush_temperatures,
+                      const std::array<double, 2> &flush_speeds,
+                      const std::array<double, 2> &nozzle_temps_initial,
+                      const std::array<double, 2> &nozzle_temps,
+                      const std::array<double, 2> &cooling,
+                      const std::array<double, 2> &physical_retract,
+                      const std::array<double, 2> &interface_temps,
+                      bool require_later_noncontact, bool require_later_contact)
+{
+    bool saw_first_layer = false;
+    bool saw_later_noncontact = false;
+    bool saw_later_contact = false;
+    for (const ChangeRow &row : rows) {
+        REQUIRE(row.current >= 0);
+        REQUIRE(row.current < 2);
+        REQUIRE(row.next >= 0);
+        REQUIRE(row.next < 2);
+        REQUIRE(row.layer >= 0);
+        REQUIRE(row.physical_next >= 1);
+        REQUIRE(row.physical_next <= 2);
+        const int expected_physical = row.next == 0 ? 2 : 1;
+        CHECK(row.physical_next == expected_physical);
+        INFO("toolchange current=" << row.current << " next=" << row.next
+             << " physical=" << row.physical_next << " layer=" << row.layer
+             << " contact=" << row.contact);
+        for (int side = 0; side < 2; ++side) {
+            const int filament = side == 0 ? row.current : row.next;
+            REQUIRE(row.flush_f[static_cast<size_t>(side)].has_value());
+            REQUIRE(row.flush_t[static_cast<size_t>(side)].has_value());
+            CHECK_THAT(*row.flush_f[static_cast<size_t>(side)],
+                       Catch::Matchers::WithinAbs(independent_filament_feed(flush_speeds[static_cast<size_t>(filament)]), 0.1));
+            CHECK_THAT(*row.flush_t[static_cast<size_t>(side)],
+                       Catch::Matchers::WithinAbs(flush_temperatures[static_cast<size_t>(filament)], 0.1));
+        }
+        REQUIRE(row.cooling_c.has_value());
+        const double incoming_temp = row.layer == 0 ? nozzle_temps_initial[static_cast<size_t>(row.next)]
+            : (row.contact != 0 ? interface_temps[static_cast<size_t>(row.next)]
+                                : nozzle_temps[static_cast<size_t>(row.next)]);
+        const bool cooling_suppressed = row.layer == 0 || row.contact != 0;
+        const double expected_c = incoming_temp - (cooling_suppressed ? 0.0 : cooling[static_cast<size_t>(row.next)]);
+        CHECK_THAT(*row.cooling_c, Catch::Matchers::WithinAbs(expected_c, 0.1));
+        if (row.layer == 0)
+            saw_first_layer = true;
+        if (row.layer > 0 && row.contact == 0)
+            saw_later_noncontact = true;
+        if (row.layer > 0 && row.contact != 0)
+            saw_later_contact = true;
+
+        const double expected_retract = physical_retract[static_cast<size_t>(row.physical_next - 1)];
+        REQUIRE(row.mapped_retract.has_value());
+        CHECK_THAT(*row.mapped_retract, Catch::Matchers::WithinAbs(expected_retract, 0.1));
+        REQUIRE(row.pressure_retracts.size() == 2);
+        for (double retract : row.pressure_retracts)
+            CHECK_THAT(retract, Catch::Matchers::WithinAbs(expected_retract, 0.1));
+    }
+    CHECK(saw_first_layer);
+    if (require_later_noncontact)
+        CHECK(saw_later_noncontact);
+    if (require_later_contact)
+        CHECK(saw_later_contact);
+}
+
+void check_same_object_deposition(const ObjectDeposition &reference, const ObjectDeposition &observed)
+{
+    REQUIRE(reference.moves > 0);
+    REQUIRE(observed.moves > 0);
+    CHECK(observed.moves == reference.moves);
+    CHECK_THAT(observed.xy_mm, Catch::Matchers::WithinAbs(reference.xy_mm, 1e-5));
+    CHECK_THAT(observed.filament_mm, Catch::Matchers::WithinAbs(reference.filament_mm, 1e-4));
+}
+
+} // namespace x2d_filament_flush_contracts
+
+TEST_CASE("X2D tool-change flush settings reach the shipped template by filament and mode",
+          "[GCode][GCodeExportWorkflows][SettingsVariance][FilamentFlushSettings]")
+{
+    using namespace x2d_filament_flush_contracts;
+    const std::string shipped_template = read_shipped_x2d_change_template();
+    REQUIRE(shipped_template.find("M620.10 A0") != std::string::npos);
+    REQUIRE(shipped_template.find("M620.15 C") != std::string::npos);
+
+    const auto export_tower_case = [&shipped_template](PrimeVolumeMode mode,
+                                                        const std::vector<int> &fast_temperatures) {
+        DynamicPrintConfig config = x2d_flush_config(mode, fast_temperatures, shipped_template, true);
+        const auto *filament_map = config.option<ConfigOptionInts>("filament_map");
+        REQUIRE(filament_map != nullptr);
+        REQUIRE((filament_map->values == std::vector<int>{2, 1}));
+        return std::make_pair(config, export_x2d_tower_rows(config));
+    };
+
+    auto default_case = export_tower_case(pvmDefault, {1500, 0});
+    auto fast_case = export_tower_case(pvmFast, {1500, 0});
+    auto default_fast_changed = export_tower_case(pvmDefault, {1300, 1300});
+    DynamicPrintConfig direct_config = x2d_flush_config(pvmDefault, {1500, 0}, shipped_template, false);
+    const std::string direct_output = export_with_object_rows(10., 30., 180., nullptr, false, nullptr,
+                                                               &direct_config, 0.8);
+
+    const std::array<double, 2> speeds{{32.0, 200.0}};
+    const std::array<double, 2> initial_temps{{200.0, 205.0}};
+    const std::array<double, 2> nozzle_temps{{215.0, 220.0}};
+    const std::array<double, 2> cooling{{10.0, 25.0}};
+    const std::array<double, 2> retract{{0.0, 12.5}};
+    const std::array<double, 2> interface_temps{{212.0, 223.0}};
+    const ObjectDeposition reference_deposition = inspect_object_deposition(default_case.second, default_case.first);
+    REQUIRE(reference_deposition.moves > 0);
+
+    const std::vector<ChangeRow> default_rows = inspect_change_rows(default_case.second, default_case.first);
+    REQUIRE(default_rows.size() >= 2);
+    check_flush_rows(default_rows, {245.0, 1500.0}, speeds, initial_temps, nozzle_temps, cooling, retract,
+                     interface_temps, true, true);
+
+    const std::vector<ChangeRow> fast_rows = inspect_change_rows(fast_case.second, fast_case.first);
+    REQUIRE(fast_rows.size() >= 2);
+    check_flush_rows(fast_rows, {1500.0, 255.0}, speeds, initial_temps, nozzle_temps, cooling, retract,
+                     interface_temps, true, true);
+    check_same_object_deposition(reference_deposition,
+        inspect_object_deposition(fast_case.second, fast_case.first));
+
+    const std::vector<ChangeRow> inert_fast_rows = inspect_change_rows(default_fast_changed.second,
+                                                                       default_fast_changed.first);
+    REQUIRE(inert_fast_rows.size() == default_rows.size());
+    check_flush_rows(inert_fast_rows, {245.0, 1500.0}, speeds, initial_temps, nozzle_temps, cooling, retract,
+                     interface_temps, true, true);
+    check_same_object_deposition(reference_deposition,
+        inspect_object_deposition(default_fast_changed.second, default_fast_changed.first));
+
+    const std::array<double, 2> no_tower_cooling{{0.0, 0.0}};
+    const std::vector<ChangeRow> direct_rows = inspect_change_rows(direct_output, direct_config);
+    REQUIRE(direct_rows.size() >= 2);
+    check_flush_rows(direct_rows, {245.0, 1500.0}, speeds, initial_temps, nozzle_temps,
+                     no_tower_cooling, retract, interface_temps, true, false);
+}
+
+TEST_CASE("Nullable filament flush values resolve through child presets during G-code export",
+          "[GCode][GCodeExportWorkflows][SettingsVariance][FilamentFlushNilResolution]")
+{
+    using namespace x2d_filament_flush_contracts;
+    const std::string shipped_template = read_shipped_x2d_change_template();
+    struct ResolvedValues {
+        int flush_temp = 0;
+        double flush_speed = 0.0;
+        double cooling = 0.0;
+    };
+
+    const auto resolve_material = [](int parent_temp, double parent_speed, double parent_cooling,
+                                     int child_temp, double child_speed, double child_cooling) {
+        // Model one filament preset at a time: TYPE_FILAMENT has one selected variant
+        // column per child, so identical variant names from two materials must not share
+        // one two-row merge index.
+        DynamicPrintConfig parent = DynamicPrintConfig::full_print_config();
+        parent.set_key_value("filament_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard"}));
+        parent.set_key_value("filament_flush_temp", new ConfigOptionIntsNullable({parent_temp}));
+        parent.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloatsNullable({parent_speed}));
+        parent.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable({parent_cooling}));
+
+        DynamicPrintConfig child = parent;
+        child.set_key_value("filament_flush_temp", new ConfigOptionIntsNullable({child_temp}));
+        child.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloatsNullable({child_speed}));
+        child.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable({child_cooling}));
+
+        std::string extruder_id_name;
+        std::string extruder_variant_name;
+        std::set<std::string> *key_set1 = nullptr;
+        std::set<std::string> *key_set2 = nullptr;
+        Preset::get_extruder_names_and_keysets(Preset::TYPE_FILAMENT, extruder_id_name, extruder_variant_name,
+                                               &key_set1, &key_set2);
+        REQUIRE(key_set1 != nullptr);
+        REQUIRE(key_set2 != nullptr);
+        parent.update_diff_values_to_child_config(child, extruder_id_name, extruder_variant_name,
+                                                  *key_set1, *key_set2);
+
+        const auto *flush_temp = parent.option<ConfigOptionIntsNullable>("filament_flush_temp");
+        const auto *flush_speed = parent.option<ConfigOptionFloatsNullable>("filament_flush_volumetric_speed");
+        const auto *cooling = parent.option<ConfigOptionFloatsNullable>("filament_cooling_before_tower");
+        REQUIRE(flush_temp != nullptr);
+        REQUIRE(flush_speed != nullptr);
+        REQUIRE(cooling != nullptr);
+        INFO("one-variant resolved values: temp=" << flush_temp->serialize()
+             << " speed=" << flush_speed->serialize()
+             << " cooling=" << cooling->serialize());
+        REQUIRE(flush_temp->values.size() == 1);
+        REQUIRE(flush_speed->values.size() == 1);
+        REQUIRE(cooling->values.size() == 1);
+        REQUIRE_FALSE(flush_temp->is_nil(0));
+        REQUIRE_FALSE(flush_speed->is_nil(0));
+        REQUIRE_FALSE(cooling->is_nil(0));
+        REQUIRE(std::isfinite(flush_speed->values.at(0)));
+        REQUIRE(std::isfinite(cooling->values.at(0)));
+        return ResolvedValues{flush_temp->values.at(0), flush_speed->values.at(0), cooling->values.at(0)};
+    };
+
+    const auto export_resolved_child = [&shipped_template, &resolve_material](bool mixed_child) {
+        const int nil_temp = ConfigOptionIntsNullable::nil_value();
+        const double nil_float = ConfigOptionFloatsNullable::nil_value();
+        const ResolvedValues material0 = resolve_material(
+            230, 12.0, 10.0,
+            nil_temp, mixed_child ? 16.0 : nil_float, nil_float);
+        const ResolvedValues material1 = resolve_material(
+            240, 18.0, 15.0,
+            mixed_child ? 1500 : nil_temp, nil_float, mixed_child ? 25.0 : nil_float);
+
+        // Feed the two separately resolved filament presets into the real two-filament
+        // Print/template fixture. The fast-temperature option remains the finite fixture
+        // value installed by x2d_flush_config and is not part of this nullable merge.
+        DynamicPrintConfig config = x2d_flush_config(pvmDefault, {1500, 0}, shipped_template, true);
+        config.set_key_value("filament_flush_temp", new ConfigOptionIntsNullable({
+            material0.flush_temp, material1.flush_temp
+        }));
+        config.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloatsNullable({
+            material0.flush_speed, material1.flush_speed
+        }));
+        config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable({
+            material0.cooling, material1.cooling
+        }));
+
+        const auto *filament_map = config.option<ConfigOptionInts>("filament_map");
+        REQUIRE(filament_map != nullptr);
+        REQUIRE((filament_map->values == std::vector<int>{2, 1}));
+        const std::string output = export_x2d_tower_rows(config);
+        return std::make_pair(config, output);
+    };
+
+    auto all_nil = export_resolved_child(false);
+    auto mixed_nil_explicit = export_resolved_child(true);
+    const std::array<double, 2> speeds_all_nil{{12.0, 18.0}};
+    const std::array<double, 2> temps_all_nil{{230.0, 240.0}};
+    const std::array<double, 2> cooling_all_nil{{10.0, 15.0}};
+    const std::array<double, 2> speeds_mixed{{16.0, 18.0}};
+    const std::array<double, 2> temps_mixed{{230.0, 1500.0}};
+    const std::array<double, 2> cooling_mixed{{10.0, 25.0}};
+    const std::array<double, 2> initial_temps{{200.0, 205.0}};
+    const std::array<double, 2> nozzle_temps{{215.0, 220.0}};
+    const std::array<double, 2> interface_temps{{212.0, 223.0}};
+    const std::array<double, 2> physical_retract{{0.0, 12.5}};
+
+    const ObjectDeposition reference = inspect_object_deposition(all_nil.second, all_nil.first);
+    REQUIRE(reference.moves > 0);
+    const std::vector<ChangeRow> all_nil_rows = inspect_change_rows(all_nil.second, all_nil.first);
+    REQUIRE(all_nil_rows.size() >= 2);
+    check_flush_rows(all_nil_rows, temps_all_nil, speeds_all_nil, initial_temps, nozzle_temps,
+                     cooling_all_nil, physical_retract, interface_temps, true, true);
+
+    const std::vector<ChangeRow> mixed_rows = inspect_change_rows(mixed_nil_explicit.second,
+                                                                   mixed_nil_explicit.first);
+    REQUIRE(mixed_rows.size() == all_nil_rows.size());
+    check_flush_rows(mixed_rows, temps_mixed, speeds_mixed, initial_temps, nozzle_temps,
+                     cooling_mixed, physical_retract, interface_temps, true, true);
+    check_same_object_deposition(reference,
+        inspect_object_deposition(mixed_nil_explicit.second, mixed_nil_explicit.first));
 }
 
 } // namespace gcode_travel_point_reachable_contracts

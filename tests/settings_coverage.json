@@ -3,6 +3,57 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
+    "filament_flush_temp": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "The shipped X2D change-filament template is rendered through tower and direct-route G-code. Regular flush temperature checks the registered 0 and 1500 endpoints: zero resolves to the filament's recommended nozzle-range upper temperature (245/255 in the two-filament fixture), while explicit 1500 remains 1500. Child-preset nil inheritance and an explicit 1500 child value are also checked in emitted rows. The fixture uses one two-filament reversed physical map; other templates, tool counts, and temperature interactions are unclaimed."
+    },
+    "filament_flush_temp_fast": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The Fast prime-volume path emits the configured fast temperatures, including the registered 0 and 1500 endpoints; zero resolves to the incoming filament's recommended nozzle-range upper temperature. Changing the fast vector while using Default leaves the checked flush parameters and object deposition unchanged, establishing that Fast-only routing. The fast vector is explicit, so nil handling for this option is untested; Saving mode and other templates/tool counts are not claimed."
+    },
+    "filament_flush_volumetric_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Exported M620.10 flush-feed parameters check the registered 0 and 200 mm³/s endpoints: zero falls back to each filament's configured maximum volumetric speed, while 200 is converted independently to filament feed using 1.75 mm diameter. Child-preset nil inheritance and an explicit 16 mm³/s child value are checked in the emitted rows. The result is scoped to the two-filament fixture and does not claim all feed caps or templates."
+    },
+    "filament_cooling_before_tower": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Configured 10/25 °C drops and child-preset nil/explicit resolution are checked against incoming nozzle temperature in exported tool-change rows. The oracle also verifies zero cooling for first-layer and contact rows, and a direct-route control with no tower interface has no tower-cooling drop. This option has no registered numeric bounds; the fixture does not claim its broader numeric range, arbitrary tower layouts, or all mode interactions."
+    },
+    "retract_length_toolchange": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The shipped X2D template's mapped tool-change retract is checked for configured values 0 and 12.5 mm with filament_map={2,1}; each emitted row must select the expected physical-filament value, including through the template's pressure-retract placeholders. These are representative fixture values, not a claimed registered range; other mappings and templates remain unclaimed."
+    },
     "silent_mode": {
       "test": "tests/fff_print/test_gcode_processor.cpp",
       "tag": "[SilentModeVariance]",
