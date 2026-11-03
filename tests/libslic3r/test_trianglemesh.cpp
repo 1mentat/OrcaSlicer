@@ -377,7 +377,11 @@ TEST_CASE("Primitive generators preserve analytic bounds and positive solids", "
     const BoundingBoxf3 frustum_box    = bounding_box(frustum);
     CHECK_THAT(frustum_box.size().z(), WithinAbs(8., 1e-5));
     CHECK_THAT(its_volume(frustum), WithinAbs(float((7. / 12.) * PI * 36. * 8.), 15.f));
+#ifdef ORCASLICER_TEST_TORUS_HAS_SPLIT_STEPS
+    const indexed_triangle_set torus = its_make_torus(8., 2., PI / 8., PI / 8.);
+#else
     const indexed_triangle_set torus = its_make_torus(8., 2., PI / 8.);
+#endif
     const BoundingBoxf3 torus_box    = bounding_box(torus);
     CHECK_THAT(torus_box.size().x(), WithinAbs(20., 0.2));
     CHECK_THAT(torus_box.size().y(), WithinAbs(20., 0.2));

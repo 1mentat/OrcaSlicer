@@ -265,6 +265,7 @@ TEST_CASE("CGAL segmentation returns valid component meshes with conserved volum
     CHECK_THAT(total_volume, WithinRel(mesh_volume(sphere), 5e-2f));
 }
 
+#ifdef ORCASLICER_TEST_HAS_MESHBOOLEAN_CGAL_REPAIR
 TEST_CASE("CGAL repair closes a single missing cuboid face", "[MeshBoolean][MeshBooleanContracts]")
 {
     TriangleMesh open = shifted_cube(0.f);
@@ -281,6 +282,7 @@ TEST_CASE("CGAL repair closes a single missing cuboid face", "[MeshBoolean][Mesh
     REQUIRE(repaired_cgal != nullptr);
     CHECK(MeshBoolean::cgal::does_bound_a_volume(*repaired_cgal));
 }
+#endif
 
 TEST_CASE("MCUT conversion round trips cuboid topology and empty state", "[MeshBoolean][MeshBooleanContracts]")
 {
