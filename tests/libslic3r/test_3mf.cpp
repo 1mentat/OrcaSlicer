@@ -25,6 +25,7 @@
 #include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/CustomGCode.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 
 #include "test_utils.hpp"
 
@@ -48,14 +49,18 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/xml_parser.hpp>
 #include <algorithm>
 #include <functional>
 
 #include <catch2/catch_tostring.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
+#include <map>
 #include <string>
 #include <sstream>
+#include <locale>
 #include <type_traits> // for std::enable_if_t
 #include <typeinfo>    // for typeid
 #include <regex>
@@ -3345,4 +3350,1112 @@ TEST_CASE("BBS 3MF falls back on a truncated Unicode metadata field", "[3MF][Bbs
     CHECK_FALSE(boost::filesystem::exists(root / "docs" / "short"));
 }
 
+namespace {
+
+std::vector<std::pair<std::string, std::string>> read_layer_filament_lists(const std::string &xml)
+{
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::vector<std::pair<std::string, std::string>> records;
+    const auto lists = tree.get_child_optional("config.plate.layer_filament_lists");
+    if (!lists)
+        return records;
+    for (const auto &node : *lists) {
+        if (node.first != "layer_filament_list")
+            continue;
+        const auto &attributes = node.second.get_child("<xmlattr>");
+        records.emplace_back(attributes.get<std::string>("filament_list"),
+                             attributes.get<std::string>("layer_ranges"));
+    }
+    return records;
+}
+
+// Stores the shared two-instance model with one plate whose config is a complete print config
+// (the exporter reads plate-local options and does not synthesize missing ones); `setup` fills
+// in the plate under test.
+void store_plate_fixture(const std::string &path, const std::function<void(PlateData &)> &setup)
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_slice_info_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    plate.config = config;
+    setup(plate);
+    PlateDataPtrs plates{&plate};
+    store_model(path, source, config, plates);
+}
+
+} // namespace
+
+TEST_CASE("BBS slice metadata writes multiple layer filament ranges", "[3MF][Bbs3mfExtended][LayerFilaments]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+        plate.layer_filaments[std::vector<unsigned int>{1, 3}] = {{0, 5}, {10, 20}};
+        plate.layer_filaments[std::vector<unsigned int>{2}] = {{5, 10}, {20, 30}};
+    });
+
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
+    const auto records = read_layer_filament_lists(slice_info);
+    REQUIRE(records.size() == 2);
+    CHECK(std::find(records.begin(), records.end(), std::make_pair(std::string("1 3"), std::string("0 5,10 20"))) != records.end());
+    CHECK(std::find(records.begin(), records.end(), std::make_pair(std::string("2"), std::string("5 10,20 30"))) != records.end());
+
+    ScopedTemporaryFile empty_archive(".3mf");
+    store_plate_fixture(empty_archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+    });
+    std::string empty_slice_info;
+    REQUIRE(read_3mf_entry(empty_archive.string(), empty_slice_info, "Metadata/slice_info.config"));
+    CHECK(read_layer_filament_lists(empty_slice_info).empty());
+}
+
+TEST_CASE("BBS project preserves plate scheduling metadata", "[3MF][Bbs3mfExtended][PlateMetadata]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.plate_name = "schedule metadata";
+        plate.locked = true;
+        plate.config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(btPEI));
+        plate.config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByObject));
+        plate.config.set_key_value("first_layer_print_sequence", new ConfigOptionInts({2, 1}));
+        plate.config.set_key_value("other_layers_print_sequence", new ConfigOptionInts({1, 2}));
+        plate.config.set_key_value("other_layers_print_sequence_nums", new ConfigOptionInt(3));
+        plate.config.set_key_value("spiral_mode", new ConfigOptionBool(true));
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    CHECK(plate.plate_name == "schedule metadata");
+    CHECK(plate.locked);
+    REQUIRE(plate.config.option<ConfigOptionEnum<BedType>>("curr_bed_type") != nullptr);
+    CHECK(plate.config.opt_enum<BedType>("curr_bed_type") == btPEI);
+    CHECK(plate.config.opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject);
+    REQUIRE(plate.config.option<ConfigOptionInts>("first_layer_print_sequence") != nullptr);
+    REQUIRE(plate.config.option<ConfigOptionInts>("other_layers_print_sequence") != nullptr);
+    CHECK(plate.config.opt<ConfigOptionInts>("first_layer_print_sequence")->values == std::vector<int>{2, 1});
+    CHECK(plate.config.opt<ConfigOptionInts>("other_layers_print_sequence")->values == std::vector<int>{1, 2});
+    CHECK(plate.config.opt_int("other_layers_print_sequence_nums") == 3);
+    CHECK(plate.config.opt_bool("spiral_mode"));
+}
+
+TEST_CASE("BBS project clamps plate filament map values at import", "[3MF][Bbs3mfExtended][PlateMetadata][Maps]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+        plate.config.set_key_value("filament_map", new ConfigOptionInts({0, -4, 2, 1}));
+        plate.config.set_key_value("filament_volume_map", new ConfigOptionInts({0, 1, 1, 0}));
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    REQUIRE(plate.config.option<ConfigOptionInts>("filament_map") != nullptr);
+    REQUIRE(plate.config.option<ConfigOptionInts>("filament_volume_map") != nullptr);
+    CHECK(plate.filament_maps == std::vector<int>{1, 1, 2, 1});
+    CHECK(plate.config.opt<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1, 2, 1});
+    CHECK(plate.config.opt<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{0, 1, 1, 0});
+}
+
+TEST_CASE("BBS project retains slice statistics and booleans", "[3MF][Bbs3mfExtended][SliceInfo]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+        plate.printer_model_id = "slice-info-printer";
+        plate.gcode_prediction = "123.4";
+        plate.gcode_weight = "45.6";
+        // Every flag differs from the PlateData default, so dropping a read is caught.
+        plate.toolpath_outside = true;
+        plate.is_support_used = true;
+        plate.is_label_object_enabled = true;
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    CHECK(plate.printer_model_id == "slice-info-printer");
+    CHECK(plate.gcode_prediction == "123.4");
+    CHECK(plate.gcode_weight == "45.6");
+    CHECK(plate.toolpath_outside);
+    CHECK(plate.is_support_used);
+    CHECK(plate.is_label_object_enabled);
+}
+
+TEST_CASE("BBS project round-trips physical filament records and writes mixed filament records", "[3MF][Bbs3mfExtended][SliceInfo][Filament]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+        FilamentInfo first;
+        first.id = 1;
+        first.type = "PLA";
+        first.color = "#123456";
+        first.filament_id = "tray-7";
+        first.used_m = 2.5f;
+        first.used_g = 6.25f;
+        first.used_for_object = true;
+        first.used_for_support = false;
+        first.group_id = {1, 2};
+        FilamentInfo second;
+        second.id = 3;
+        second.type = "PETG";
+        second.color = "#654321";
+        second.filament_id = "tray-2";
+        second.used_m = 1.5f;
+        second.used_g = 4.75f;
+        second.used_for_object = false;
+        second.used_for_support = true;
+        second.group_id = {3};
+        plate.slice_filaments_info = {first, second};
+        plate.mixed_filaments_info = {{9, "Mix", "#aabbcc", "2,3"}, {12, "Blend", "#445566", "1,4"}};
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+
+    REQUIRE(plate.slice_filaments_info.size() == 2);
+    const FilamentInfo &physical = plate.slice_filaments_info[0];
+    CHECK(physical.id == 1);
+    CHECK(physical.type == "PLA");
+    CHECK(physical.color == "#123456");
+    CHECK(physical.filament_id == "tray-7");
+    CHECK_THAT(double(physical.used_m), Catch::Matchers::WithinAbs(2.5, 1e-5));
+    CHECK_THAT(double(physical.used_g), Catch::Matchers::WithinAbs(6.25, 1e-5));
+    CHECK(physical.used_for_object);
+    CHECK_FALSE(physical.used_for_support);
+    CHECK(physical.group_id == std::vector<int>{1, 2});
+    const FilamentInfo &other = plate.slice_filaments_info[1];
+    CHECK(other.id == 3);
+    CHECK(other.type == "PETG");
+    CHECK(other.color == "#654321");
+    CHECK(other.filament_id == "tray-2");
+    CHECK_THAT(double(other.used_m), Catch::Matchers::WithinAbs(1.5, 1e-5));
+    CHECK_THAT(double(other.used_g), Catch::Matchers::WithinAbs(4.75, 1e-5));
+    CHECK_FALSE(other.used_for_object);
+    CHECK(other.used_for_support);
+    CHECK(other.group_id == std::vector<int>{3});
+
+    // The importer does not restore mixed-filament records onto the plate, so check what the
+    // exporter wrote to slice_info.config.
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
+    std::stringstream input(slice_info);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::vector<std::array<std::string, 4>> mixed;
+    for (const auto &node : tree.get_child("config.plate")) {
+        if (node.first != "mixed_filament")
+            continue;
+        const auto &attributes = node.second.get_child("<xmlattr>");
+        mixed.push_back({attributes.get<std::string>("id"), attributes.get<std::string>("type"),
+                         attributes.get<std::string>("color"), attributes.get<std::string>("components")});
+    }
+    REQUIRE(mixed.size() == 2);
+    CHECK(mixed[0] == std::array<std::string, 4>{"9", "Mix", "#aabbcc", "2,3"});
+    CHECK(mixed[1] == std::array<std::string, 4>{"12", "Blend", "#445566", "1,4"});
+}
+
+TEST_CASE("BBS project restores slice warning messages and levels", "[3MF][Bbs3mfExtended][SliceInfo][Warnings]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_plate_fixture(archive.string(), [](PlateData &plate) {
+        plate.is_sliced_valid = true;
+        GCodeProcessorResult::SliceWarning first;
+        first.msg = "first slice warning";
+        first.level = 3;
+        GCodeProcessorResult::SliceWarning second;
+        second.msg = "second slice warning";
+        second.level = 1;
+        plate.warnings = {first, second};
+    });
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    REQUIRE(loaded.plates.front()->warnings.size() == 2);
+    CHECK(loaded.plates.front()->warnings[0].msg == "first slice warning");
+    CHECK(loaded.plates.front()->warnings[0].level == 3);
+    CHECK(loaded.plates.front()->warnings[1].msg == "second slice warning");
+    CHECK(loaded.plates.front()->warnings[1].level == 1);
+}
+
+namespace {
+
+// Names of the four per-plate thumbnail entries, in the order of the exporter's channels:
+// plate, no-light, top, pick.
+const std::array<const char *, 4> thumbnail_entries = {
+    "Metadata/plate_1.png", "Metadata/plate_no_light_1.png", "Metadata/top_1.png", "Metadata/pick_1.png"};
+
+// Stores the shared model with one plate; `counts` is how many thumbnails each channel is given
+// (one plate, so more than one is more than the plate count). `customize` may edit the plate
+// and the backup directory first.
+bool store_with_thumbnails(const std::string &path, const std::array<ThumbnailData *, 4> &images,
+                           const std::array<size_t, 4> &counts,
+                           const std::function<void(PlateData &, const std::string &)> &customize = {})
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_thumbnail_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    plate.config = config;
+    if (customize)
+        customize(plate, backup.string());
+
+    StoreParams params;
+    params.path = path;
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.thumbnail_data.assign(counts[0], images[0]);
+    params.no_light_thumbnail_data.assign(counts[1], images[1]);
+    params.top_thumbnail_data.assign(counts[2], images[2]);
+    params.pick_thumbnail_data.assign(counts[3], images[3]);
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    return store_bbs_3mf(params);
+}
+
+// The key/value metadata the project settings file declares for its first plate.
+std::map<std::string, std::string> read_plate_metadata(const std::string &path)
+{
+    std::string xml;
+    REQUIRE(read_3mf_entry(path, xml, "Metadata/model_settings.config"));
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    const auto plate = tree.get_child_optional("config.plate");
+    REQUIRE(plate.is_initialized());
+    std::map<std::string, std::string> metadata;
+    for (const auto &node : *plate) {
+        if (node.first == "metadata")
+            metadata[node.second.get<std::string>("<xmlattr>.key")] = node.second.get<std::string>("<xmlattr>.value");
+    }
+    return metadata;
+}
+
+// A 2x2 image whose four pixels all differ, so a flipped or mirrored decode cannot match.
+ThumbnailData make_thumbnail(const std::array<unsigned char, 16> &rgba)
+{
+    ThumbnailData image;
+    image.set(2, 2);
+    std::copy(rgba.begin(), rgba.end(), image.pixels.begin());
+    return image;
+}
+
+// Decodes a stored 2x2 RGBA PNG entry and checks it against `expected`.
+void check_png_entry(const std::string &path, const char *entry, const std::array<unsigned char, 16> &expected)
+{
+    INFO("entry " << entry);
+    std::string encoded;
+    REQUIRE(read_3mf_entry(path, encoded, entry));
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{encoded.data(), encoded.size()}, decoded));
+    REQUIRE(decoded.cols == 2);
+    REQUIRE(decoded.rows == 2);
+    REQUIRE(decoded.bytes_per_pixel == 4);
+    REQUIRE(decoded.buf.size() == expected.size());
+    CHECK(std::equal(expected.begin(), expected.end(), decoded.buf.begin()));
+}
+
+const std::array<unsigned char, 16> plate_pixels = {0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0xff,
+                                                    0x70, 0x80, 0x90, 0xff, 0xa0, 0xb0, 0xc0, 0xff};
+const std::array<unsigned char, 16> no_light_pixels = {0x01, 0x12, 0x23, 0xff, 0x34, 0x45, 0x56, 0xff,
+                                                       0x67, 0x78, 0x89, 0xff, 0x9a, 0xab, 0xbc, 0xff};
+const std::array<unsigned char, 16> top_pixels = {0xd0, 0xc0, 0xb0, 0xff, 0xa0, 0x90, 0x80, 0xff,
+                                                  0x70, 0x60, 0x50, 0xff, 0x40, 0x30, 0x20, 0xff};
+const std::array<unsigned char, 16> pick_pixels = {0x0a, 0x1b, 0x2c, 0xff, 0x3d, 0x4e, 0x5f, 0xff,
+                                                   0x6a, 0x7b, 0x8c, 0xff, 0x9d, 0xae, 0xbf, 0xff};
+
+} // namespace
+
+TEST_CASE("BBS thumbnail lists obey per-channel plate cardinality", "[3MF][Bbs3mfExtended][Thumbnail]")
+{
+    ThumbnailData plate_image = make_thumbnail(plate_pixels);
+    ThumbnailData no_light = make_thumbnail(no_light_pixels);
+    ThumbnailData top = make_thumbnail(top_pixels);
+    ThumbnailData pick = make_thumbnail(pick_pixels);
+    const std::array<ThumbnailData *, 4> images = {&plate_image, &no_light, &top, &pick};
+    const std::array<const std::array<unsigned char, 16> *, 4> expected = {&plate_pixels, &no_light_pixels, &top_pixels, &pick_pixels};
+
+    SECTION("Counts that fit the single plate are archived channel by channel")
+    {
+        // Top and pick come as a pair; the other two channels are independent.
+        const std::array<size_t, 4> counts = GENERATE(std::array<size_t, 4>{1, 1, 1, 1}, std::array<size_t, 4>{1, 0, 0, 0},
+                                                      std::array<size_t, 4>{0, 1, 0, 0}, std::array<size_t, 4>{0, 0, 1, 1},
+                                                      std::array<size_t, 4>{0, 0, 0, 0});
+        CAPTURE(counts);
+        ScopedTemporaryFile archive(".3mf");
+        REQUIRE(store_with_thumbnails(archive.string(), images, counts));
+        for (size_t channel = 0; channel < 4; ++channel) {
+            if (counts[channel] == 1) {
+                check_png_entry(archive.string(), thumbnail_entries[channel], *expected[channel]);
+            } else {
+                std::string payload;
+                INFO("entry " << thumbnail_entries[channel]);
+                CHECK_FALSE(read_3mf_entry(archive.string(), payload, thumbnail_entries[channel]));
+            }
+        }
+    }
+
+    SECTION("A channel with more thumbnails than plates, or top and pick of different length, is rejected")
+    {
+        // {0,0,2,2}, {0,0,2,1} and {0,0,1,2} are also rejected by the pick-count and top/pick mismatch
+        // checks, so the top-count check cannot be told apart from them.
+        const std::array<size_t, 4> counts = GENERATE(std::array<size_t, 4>{2, 0, 0, 0}, std::array<size_t, 4>{0, 2, 0, 0},
+                                                      std::array<size_t, 4>{0, 0, 2, 2}, std::array<size_t, 4>{0, 0, 1, 2},
+                                                      std::array<size_t, 4>{0, 0, 2, 1}, std::array<size_t, 4>{0, 0, 1, 0},
+                                                      std::array<size_t, 4>{0, 0, 0, 1});
+        CAPTURE(counts);
+        ScopedTemporaryFile archive(".3mf");
+        CHECK_FALSE(store_with_thumbnails(archive.string(), images, counts));
+    }
+}
+
+TEST_CASE("BBS project exports and decodes all four plate thumbnail channels", "[3MF][Bbs3mfExtended][Thumbnail]")
+{
+    ThumbnailData plate_image = make_thumbnail(plate_pixels);
+    ThumbnailData no_light = make_thumbnail(no_light_pixels);
+    ThumbnailData top = make_thumbnail(top_pixels);
+    ThumbnailData pick = make_thumbnail(pick_pixels);
+
+    ScopedTemporaryFile archive(".3mf");
+    // The sidecar names point at files that do not exist, so only the in-memory images can supply the entries.
+    REQUIRE(store_with_thumbnails(archive.string(), {&plate_image, &no_light, &top, &pick}, {1, 1, 1, 1},
+                                  [](PlateData &plate, const std::string &) {
+                                      plate.thumbnail_file = "unused-plate.png";
+                                      plate.no_light_thumbnail_file = "unused-no-light.png";
+                                      plate.top_file = "unused-top.png";
+                                      plate.pick_file = "unused-pick.png";
+                                  }));
+    check_png_entry(archive.string(), "Metadata/plate_1.png", plate_pixels);
+    check_png_entry(archive.string(), "Metadata/plate_no_light_1.png", no_light_pixels);
+    check_png_entry(archive.string(), "Metadata/top_1.png", top_pixels);
+    check_png_entry(archive.string(), "Metadata/pick_1.png", pick_pixels);
+}
+
+TEST_CASE("BBS project archives sidecar thumbnail files under declared names", "[3MF][Bbs3mfExtended][Thumbnail][Sidecar]")
+{
+    const std::array<std::string, 4> names = {"plate.png", "no-light.png", "top.png", "pick.png"};
+    const std::array<std::string, 4> bytes = {"sidecar-plate", "sidecar-no-light", "sidecar-top", "sidecar-pick"};
+    // -1 stores every sidecar; otherwise that channel's file is declared but never written.
+    const int missing = GENERATE(-1, 0, 1, 2, 3);
+    CAPTURE(missing);
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_with_thumbnails(archive.string(), {nullptr, nullptr, nullptr, nullptr}, {0, 0, 0, 0},
+                                  [&](PlateData &plate, const std::string &backup) {
+                                      std::array<std::string, 4> paths;
+                                      for (size_t i = 0; i < names.size(); ++i) {
+                                          paths[i] = (boost::filesystem::path(backup) / names[i]).string();
+                                          if (int(i) != missing) {
+                                              boost::nowide::ofstream output(paths[i], std::ios::binary);
+                                              output << bytes[i];
+                                              REQUIRE(output.good());
+                                          }
+                                      }
+                                      plate.thumbnail_file = paths[0];
+                                      plate.no_light_thumbnail_file = paths[1];
+                                      plate.top_file = paths[2];
+                                      plate.pick_file = paths[3];
+                                  }));
+    // The metadata an importer reads declares each archived entry under its own key.
+    const std::array<const char *, 4> metadata_keys = {"thumbnail_file", "thumbnail_no_light_file", "top_file", "pick_file"};
+    const std::map<std::string, std::string> metadata = read_plate_metadata(archive.string());
+    for (size_t i = 0; i < names.size(); ++i) {
+        INFO("entry " << thumbnail_entries[i]);
+        std::string payload;
+        if (int(i) != missing) {
+            INFO("metadata key " << metadata_keys[i]);
+            const auto declared = metadata.find(metadata_keys[i]);
+            REQUIRE(declared != metadata.end());
+            CHECK(declared->second == thumbnail_entries[i]);
+        }
+        if (int(i) == missing) {
+            CHECK_FALSE(read_3mf_entry(archive.string(), payload, thumbnail_entries[i]));
+        } else {
+            REQUIRE(read_3mf_entry(archive.string(), payload, thumbnail_entries[i]));
+            CHECK(payload == bytes[i]);
+        }
+    }
+}
+
+namespace {
+
+// Stores the shared model with one plate under `strategy`. `customize` runs before the export and
+// may edit the model (including its auxiliary root), the plate and the store parameters.
+void store_with_strategy(const std::string &path, SaveStrategy strategy,
+                         const std::function<void(Model &, PlateData &, StoreParams &)> &customize)
+{
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_strategy_store");
+    source.set_backup_path(backup.string());
+    ScopeGuard detach_backup([&source] { source.set_backup_path("detach"); });
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    plate.config = config;
+    StoreParams params;
+    params.path = path;
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.strategy = strategy;
+    customize(source, plate, params);
+    REQUIRE(store_bbs_3mf(params));
+}
+
+const SaveStrategy gcode_strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithGcode | SaveStrategy::WithSliceInfo;
+// Binary payload: an embedded NUL, bytes >= 0x80 and CR LF pairs, so truncation or newline conversion changes it.
+constexpr char sliced_gcode_bytes[] = "; payload\0gcode\r\nG1 X1.25 Y2.5\n\x80\xff\r\n";
+const std::string sliced_gcode(sliced_gcode_bytes, sizeof(sliced_gcode_bytes) - 1);
+
+void write_text(const std::string &path, const std::string &text)
+{
+    boost::nowide::ofstream output(path, std::ios::binary);
+    output << text;
+    REQUIRE(output.good());
+}
+
+} // namespace
+
+TEST_CASE("BBS project stores and extracts a sliced G-code payload", "[3MF][Bbs3mfExtended][Gcode]")
+{
+    ScopedTemporaryFile gcode(".gcode");
+    write_text(gcode.string(), sliced_gcode);
+    ScopedTemporaryFile archive(".3mf");
+    store_with_strategy(archive.string(), gcode_strategy, [&](Model &, PlateData &plate, StoreParams &) {
+        plate.gcode_file = gcode.string();
+        plate.is_sliced_valid = true;
+    });
+
+    std::string archived;
+    REQUIRE(read_3mf_entry(archive.string(), archived, "Metadata/plate_1.gcode"));
+    CHECK(archived == sliced_gcode);
+    // MD5 of the payload bytes above (computed with md5sum), upper-case hex.
+    std::string digest;
+    REQUIRE(read_3mf_entry(archive.string(), digest, "Metadata/plate_1.gcode.md5"));
+    CHECK(digest == "0D5E1F8FAC59066BA7AF819F5887C27C");
+    // The plate declares the archived name, not the path of the source file.
+    CHECK(read_plate_metadata(archive.string())["gcode_file"] == "Metadata/plate_1.gcode");
+
+    // The importer extracts into the caller-owned backup root and does not create Metadata/ itself.
+    Model loaded_model;
+    LoadedProject loaded;
+    loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_gcode_load");
+    boost::filesystem::create_directories(boost::filesystem::path(loaded.backup->string()) / "Metadata");
+    loaded_model.set_backup_path(loaded.backup->string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    REQUIRE(load_bbs_3mf(archive.string().c_str(), &loaded.config, &substitutions, &loaded_model, &loaded.plates, &loaded.presets,
+                         &loaded.is_bbl, &loaded.is_orca, &loaded.version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    REQUIRE(loaded.plates.size() == 1);
+    const boost::filesystem::path extracted = boost::filesystem::path(loaded.backup->string()) / "Metadata/plate_1.gcode";
+    // The importer joins the backup root and the archived name with a literal '/'.
+    CHECK(loaded.plates.front()->gcode_file == loaded.backup->string() + "/Metadata/plate_1.gcode");
+    REQUIRE(boost::filesystem::exists(extracted));
+    std::string restored;
+    read_file(extracted, restored);
+    CHECK(restored == sliced_gcode);
+}
+
+TEST_CASE("BBS project omits G-code that is unavailable or not marked as sliced", "[3MF][Bbs3mfExtended][Gcode]")
+{
+    // Only a plate with a present, valid slice has its G-code archived; every other row still exports.
+    enum class Case { MissingSource, NotSliced, GcodeNotRequested };
+    const Case which = GENERATE(Case::MissingSource, Case::NotSliced, Case::GcodeNotRequested);
+    CAPTURE(int(which));
+
+    ScopedTemporaryDir sources("orca_gcode_sources");
+    const std::string gcode_path = (boost::filesystem::path(sources.string()) / "plate.gcode").string();
+    if (which != Case::MissingSource)
+        write_text(gcode_path, sliced_gcode);
+    REQUIRE(boost::filesystem::exists(gcode_path) == (which != Case::MissingSource));
+
+    ScopedTemporaryFile archive(".3mf");
+    const SaveStrategy strategy = which == Case::GcodeNotRequested ? SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithSliceInfo : gcode_strategy;
+    store_with_strategy(archive.string(), strategy, [&](Model &, PlateData &plate, StoreParams &) {
+        plate.gcode_file = gcode_path;
+        plate.is_sliced_valid = which != Case::NotSliced;
+    });
+
+    std::string payload;
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/plate_1.gcode"));
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/plate_1.gcode.md5"));
+}
+
+TEST_CASE("BBS project SkipStatic omits static payloads while retaining model geometry", "[3MF][Bbs3mfExtended][Strategy]")
+{
+    ThumbnailData image;
+    image.set(3, 2);
+    std::fill(image.pixels.begin(), image.pixels.end(), 0x22);
+    ScopedTemporaryFile gcode(".gcode");
+    write_text(gcode.string(), sliced_gcode);
+
+    const std::array<const char *, 4> static_entries = {"Metadata/plate_1.png", "Metadata/plate_1.gcode",
+                                                         "Metadata/plate_1.gcode.md5", "Auxiliaries/static.txt"};
+    const bool skip_static = GENERATE(false, true);
+    CAPTURE(skip_static);
+    SaveStrategy strategy = gcode_strategy;
+    if (skip_static)
+        strategy = strategy | SaveStrategy::SkipStatic;
+
+    ScopedTemporaryFile archive(".3mf");
+    store_with_strategy(archive.string(), strategy, [&](Model &source, PlateData &plate, StoreParams &params) {
+        plate.gcode_file = gcode.string();
+        plate.is_sliced_valid = true;
+        write_text((boost::filesystem::path(source.get_auxiliary_file_temp_path()) / "static.txt").string(), "static aux");
+        params.thumbnail_data = {&image};
+    });
+
+    for (const char *entry : static_entries) {
+        INFO("entry " << entry);
+        std::string payload;
+        CHECK(read_3mf_entry(archive.string(), payload, entry) == !skip_static);
+    }
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.objects.front()->instances.size() == 2);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    CHECK(loaded_model.objects.front()->volumes.front()->mesh().facets_count() == 12);
+}
+
+TEST_CASE("BBS exporter recursively archives model auxiliary files", "[3MF][Bbs3mfExtended][Auxiliary]")
+{
+    // Binary payload (NUL, 0x89, 0xff, CR/LF) must survive the archive round trip byte for byte.
+    const std::string image_bytes("\x89PNG\0\xff\r\n", 8);
+    const bool skip_auxiliary = GENERATE(false, true);
+    CAPTURE(skip_auxiliary);
+
+    ScopedTemporaryFile archive(".3mf");
+    SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    if (skip_auxiliary)
+        strategy = strategy | SaveStrategy::SkipAuxiliary;
+    store_with_strategy(archive.string(), strategy, [&](Model &model, PlateData &, StoreParams &) {
+        const boost::filesystem::path auxiliary_root = model.get_auxiliary_file_temp_path();
+        const boost::filesystem::path nested = auxiliary_root / "docs" / "nested";
+        REQUIRE(boost::filesystem::create_directories(nested));
+        write_text((auxiliary_root / "root.txt").string(), "aux-root");
+        write_text((nested / "leaf.txt").string(), "aux-nested");
+        write_text((nested / "image.png").string(), image_bytes);
+        // A sibling of the auxiliary root is a negative control for what gets walked.
+        write_text((auxiliary_root.parent_path() / "outside.txt").string(), "must-not-archive");
+    });
+
+    // The rest of the project is archived either way.
+    std::string payload;
+    REQUIRE(read_3mf_entry(archive.string(), payload, "3D/3dmodel.model"));
+    CHECK_FALSE(payload.empty());
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Auxiliaries/outside.txt"));
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "outside.txt"));
+
+    const std::vector<std::pair<std::string, std::string>> expected = {
+        {"Auxiliaries/root.txt", "aux-root"},
+        {"Auxiliaries/docs/nested/leaf.txt", "aux-nested"},
+        {"Auxiliaries/docs/nested/image.png", image_bytes}};
+    for (const auto &[entry, bytes] : expected) {
+        INFO("entry " << entry);
+        const bool found = read_3mf_entry(archive.string(), payload, entry);
+        CHECK(found == !skip_auxiliary);
+        if (found)
+            CHECK(payload == bytes);
+    }
+}
+
+TEST_CASE("BBS project persists plate bounding-box JSON", "[3MF][Bbs3mfExtended][BBox]")
+{
+    // The JSON file is named after the position in the bounding-box list, and entries without
+    // objects are not written. Every field differs from its default and between the two entries.
+    PlateBBoxData first;
+    first.bbox_all = {1, 2, 31, 42};
+    first.filament_ids = {0, 2};
+    first.filament_colors = {"#111111", "#222222"};
+    first.bed_type = "Textured PEI Plate";
+    first.first_layer_time = 8.5f;
+    first.is_seq_print = true;
+    first.first_extruder = 2;
+    first.nozzle_diameter = 0.6f;
+    first.version = 1;
+    first.bbox_objs.push_back({7, {1, 2, 11, 12}, 120.f, .25f, "bbox-cube"});
+    first.bbox_objs.push_back({9, {21, 22, 31, 42}, 64.5f, .5f, "bbox-second"});
+
+    PlateBBoxData empty;
+    empty.bbox_all = {0, 0, 1, 1};
+
+    PlateBBoxData third;
+    third.bbox_all = {-5, -6, 15, 16};
+    third.filament_ids = {1};
+    third.filament_colors = {"#abcdef"};
+    third.bed_type = "Cool Plate";
+    third.first_layer_time = 3.25f;
+    third.first_extruder = 1;
+    third.nozzle_diameter = 0.8f;
+    third.bbox_objs.push_back({4, {-5, -6, 15, 16}, 440.f, .125f, "bbox-third"});
+
+    ScopedTemporaryFile archive(".3mf");
+    store_with_strategy(archive.string(), SaveStrategy::Zip64 | SaveStrategy::Silence,
+                        [&](Model &, PlateData &, StoreParams &params) { params.id_bboxes = {&first, &empty, &third}; });
+
+    std::string payload;
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/plate_2.json"));
+    for (const auto &[entry, expected] : {std::make_pair("Metadata/plate_1.json", &first), std::make_pair("Metadata/plate_3.json", &third)}) {
+        INFO("entry " << entry);
+        std::string json_text;
+        REQUIRE(read_3mf_entry(archive.string(), json_text, entry));
+        const nlohmann::json json = nlohmann::json::parse(json_text);
+        CHECK(json.at("bbox_all").get<std::vector<coordf_t>>() == expected->bbox_all);
+        CHECK(json.at("filament_ids").get<std::vector<int>>() == expected->filament_ids);
+        CHECK(json.at("filament_colors").get<std::vector<std::string>>() == expected->filament_colors);
+        CHECK(json.at("bed_type").get<std::string>() == expected->bed_type);
+        CHECK_THAT(json.at("first_layer_time").get<float>(), Catch::Matchers::WithinAbs(expected->first_layer_time, 1e-5));
+        CHECK(json.at("is_seq_print").get<bool>() == expected->is_seq_print);
+        CHECK(json.at("first_extruder").get<int>() == expected->first_extruder);
+        CHECK_THAT(json.at("nozzle_diameter").get<float>(), Catch::Matchers::WithinAbs(expected->nozzle_diameter, 1e-5));
+        CHECK(json.at("version").get<int>() == expected->version);
+        REQUIRE(json.at("bbox_objects").size() == expected->bbox_objs.size());
+        for (size_t i = 0; i < expected->bbox_objs.size(); ++i) {
+            const nlohmann::json &object = json.at("bbox_objects").at(i);
+            const BBoxData &want = expected->bbox_objs[i];
+            CHECK(object.at("id").get<int>() == want.id);
+            CHECK(object.at("bbox").get<std::vector<coordf_t>>() == want.bbox);
+            CHECK_THAT(object.at("area").get<float>(), Catch::Matchers::WithinAbs(want.area, 1e-5));
+            CHECK_THAT(object.at("layer_height").get<float>(), Catch::Matchers::WithinAbs(want.layer_height, 1e-5));
+            CHECK(object.at("name").get<std::string>() == want.name);
+        }
+    }
+}
+
 } // namespace bbs_archive_contracts
+
+namespace legacy_3mf_contracts {
+
+using namespace Slic3r;
+
+namespace {
+
+// 3MF stores a 4x3 matrix row by row for row vectors (v' = v * M + t).  Format with the classic
+// locale so the decimal separator does not depend on the process locale.
+std::string transform_string(const std::array<double, 9> &linear, double tx, double ty, double tz)
+{
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    for (double value : linear)
+        out << value << ' ';
+    out << tx << ' ' << ty << ' ' << tz;
+    return out.str();
+}
+
+// v' = (-y, 2x, 3z): a rotation combined with unequal axis scales, so a transposed or
+// axis-swapped matrix cannot produce the same box.
+const std::array<double, 9> asymmetric_linear{0., 2., 0., -1., 0., 0., 0., 0., 3.};
+const std::array<double, 9> identity_linear{1., 0., 0., 0., 1., 0., 0., 0., 1.};
+
+void check_box(const BoundingBoxf3 &box, const Vec3d &min, const Vec3d &max)
+{
+    for (int axis = 0; axis < 3; ++axis) {
+        CAPTURE(axis);
+        CHECK_THAT(box.min[axis], Catch::Matchers::WithinAbs(min[axis], 1e-5));
+        CHECK_THAT(box.max[axis], Catch::Matchers::WithinAbs(max[axis], 1e-5));
+    }
+}
+
+std::string cube_model_xml(const std::string &application = "ThirdParty",
+                           const std::string &build = "  <item objectid=\"1\" printable=\"1\"/>\n",
+                           bool reverse_winding = false,
+                           const std::string &object_name = "Cube")
+{
+    static const int vertices[][3] = {
+        {0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0},
+        {0, 0, 10}, {10, 0, 10}, {10, 10, 10}, {0, 10, 10}
+    };
+    static const int triangles[][3] = {
+        {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+        {0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5},
+        {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}
+    };
+
+    std::string xml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n";
+    if (!application.empty())
+        xml += " <metadata name=\"Application\">" + application + "</metadata>\n";
+    xml += " <resources>\n  <object id=\"1\" type=\"model\" name=\"" + object_name + "\">\n"
+           "   <mesh>\n    <vertices>\n";
+    for (const auto &vertex : vertices)
+        xml += "     <vertex x=\"" + std::to_string(vertex[0]) + "\" y=\"" + std::to_string(vertex[1]) + "\" z=\"" + std::to_string(vertex[2]) + "\"/>\n";
+    xml += "    </vertices>\n    <triangles>\n";
+    for (const auto &triangle : triangles) {
+        const int v1 = triangle[0];
+        const int v2 = reverse_winding ? triangle[2] : triangle[1];
+        const int v3 = reverse_winding ? triangle[1] : triangle[2];
+        xml += "     <triangle v1=\"" + std::to_string(v1) + "\" v2=\"" + std::to_string(v2) + "\" v3=\"" + std::to_string(v3) + "\"/>\n";
+    }
+    xml += "    </triangles>\n   </mesh>\n  </object>\n </resources>\n <build>\n";
+    xml += build;
+    xml += " </build>\n</model>\n";
+    return xml;
+}
+
+bool write_archive(const std::string &path, const std::string &model_xml,
+                   const std::string &model_config = "")
+{
+    try {
+        Zipper archive(path);
+        archive.add_entry("3D/3dmodel.model", model_xml.data(), model_xml.size());
+        if (!model_config.empty())
+            archive.add_entry("Metadata/Slic3r_PE_model.config", model_config.data(), model_config.size());
+        archive.finalize();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool load_generic(const std::string &path, Model &model, DynamicPrintConfig &config,
+                  bool check_version = false)
+{
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_3mf(path.c_str(), config, substitutions, &model, check_version);
+}
+
+Model make_cube_model()
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "round-trip cube";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_instance();
+    return model;
+}
+
+} // namespace
+
+TEST_CASE("Legacy 3MF public entry points reject null and missing paths", "[Legacy3MF][Errors]")
+{
+    Model model;
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    CHECK_FALSE(load_3mf(nullptr, config, substitutions, &model, false));
+    ScopedTemporaryDir directory;
+    const std::string missing = (directory.path() / "missing" / "model.3mf").string();
+    CHECK_FALSE(load_3mf(missing.c_str(), config, substitutions, &model, false));
+    CHECK_FALSE(store_3mf(nullptr, &model, nullptr, false));
+    CHECK_FALSE(store_3mf(missing.c_str(), &model, nullptr, false));
+}
+
+TEST_CASE("Legacy Prusa file parser identifies the generator metadata", "[Legacy3MF][Metadata]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("PrusaSlicer-2.7.0")));
+    PrusaFileParser parser;
+    CHECK(parser.check_3mf_from_prusa(archive.string()));
+
+    ScopedTemporaryFile third_party(".3mf");
+    REQUIRE(write_archive(third_party.string(), cube_model_xml("OtherSlicer-1.0")));
+    PrusaFileParser other_parser;
+    CHECK_FALSE(other_parser.check_3mf_from_prusa(third_party.string()));
+}
+
+TEST_CASE("Legacy Prusa file parser rejects a non-archive and an archive without a model part", "[Legacy3MF][Errors]")
+{
+    // Positive control: the same generator metadata in a valid archive is detected, so the
+    // negative results below come from the structural checks and not from a constant false.
+    ScopedTemporaryFile valid(".3mf");
+    REQUIRE(write_archive(valid.string(), cube_model_xml("PrusaSlicer-2.7.0")));
+    PrusaFileParser control;
+    REQUIRE(control.check_3mf_from_prusa(valid.string()));
+
+    ScopedTemporaryFile plain(".3mf");
+    {
+        boost::nowide::ofstream output(plain.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << cube_model_xml("PrusaSlicer-2.7.0");
+        output.flush();
+        REQUIRE(output.good());
+    }
+    PrusaFileParser parser;
+    CHECK_FALSE(parser.check_3mf_from_prusa(plain.string()));
+
+    // A decoy entry carries the Prusa generator marker, but there is no 3D/3dmodel.model part.
+    // It is added first, so a parser that scanned the first or any other entry would report Prusa.
+    const std::string decoy = cube_model_xml("PrusaSlicer-2.7.0");
+    ScopedTemporaryFile no_model(".3mf");
+    {
+        Zipper archive(no_model.string());
+        archive.add_entry("3D/other.model", decoy.data(), decoy.size());
+        archive.add_entry("README.txt", "no model", 8);
+        archive.finalize();
+    }
+    PrusaFileParser no_model_parser;
+    CHECK_FALSE(no_model_parser.check_3mf_from_prusa(no_model.string()));
+}
+
+TEST_CASE("Legacy importer scales coordinates and defaults absent vertex attributes", "[Legacy3MF][Geometry]")
+{
+    const auto [unit, scale] = GENERATE(
+        std::pair<const char *, double>{"micron", 0.001},
+        std::pair<const char *, double>{"millimeter", 1.},
+        std::pair<const char *, double>{"centimeter", 10.},
+        std::pair<const char *, double>{"inch", 25.4},
+        std::pair<const char *, double>{"foot", 304.8},
+        std::pair<const char *, double>{"meter", 1000.});
+    CAPTURE(unit);
+    // Triangle (0,0,0) (2,0,0) (0,3,0): the first vertex omits z and the extents differ per axis.
+    const std::string xml =
+        "<model unit=\"" + std::string(unit) + "\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
+        "<resources><object id=\"1\" type=\"model\"><mesh><vertices>"
+        "<vertex x=\"0\" y=\"0\"/><vertex x=\"2\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"3\" z=\"0\"/>"
+        "</vertices><triangles><triangle v1=\"0\" v2=\"1\" v3=\"2\"/></triangles></mesh></object></resources>"
+        "<build><item objectid=\"1\"/></build></model>";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    const BoundingBoxf3 bbox = model.objects.front()->volumes.front()->mesh().bounding_box();
+    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(2. * scale, std::max(1e-7, scale * 1e-6)));
+    CHECK_THAT(double(bbox.max.y() - bbox.min.y()), Catch::Matchers::WithinAbs(3. * scale, std::max(1e-7, scale * 1e-6)));
+    CHECK_THAT(double(bbox.max.z() - bbox.min.z()), Catch::Matchers::WithinAbs(0., 1e-5));
+}
+
+TEST_CASE("Legacy importer expands a component alias with its transform", "[Legacy3MF][Geometry][Components]")
+{
+    // Part triangle (0,0,0) (2,0,0) (0,3,1) under v' = (-y, 2x, 3z) + (10, 20, 30) becomes
+    // (10,20,30) (10,24,30) (7,20,33).
+    const std::string model_xml =
+        "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
+        "<resources><object id=\"1\" type=\"model\" name=\"part\"><mesh><vertices>"
+        "<vertex x=\"0\" y=\"0\" z=\"0\"/><vertex x=\"2\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"3\" z=\"1\"/>"
+        "</vertices><triangles><triangle v1=\"0\" v2=\"1\" v3=\"2\"/></triangles></mesh></object>"
+        "<object id=\"2\" type=\"model\"><components><component objectid=\"1\" transform=\"" +
+        transform_string(asymmetric_linear, 10., 20., 30.) + "\"/></components></object></resources>"
+        "<build><item objectid=\"2\" printable=\"1\"/></build></model>";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), model_xml));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    check_box(model.mesh().bounding_box(), Vec3d(7., 20., 30.), Vec3d(10., 24., 33.));
+}
+
+TEST_CASE("Legacy importer splits a multi-instance object into independent model objects", "[Legacy3MF][Components]")
+{
+    const std::string items =
+        "  <item objectid=\"1\" transform=\"" + transform_string(identity_linear, 0., 0., 0.) + "\"/>\n"
+        "  <item objectid=\"1\" transform=\"" + transform_string(identity_linear, 20., 5., 7.) + "\"/>\n";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("", items)));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 2);
+
+    // A non-Prusa file with a single instance per object has that instance's transform baked
+    // into the volume (which is re-centred on its own origin) and the instance reset.
+    const Vec3d offsets[2] = {Vec3d(0., 0., 0.), Vec3d(20., 5., 7.)};
+    for (size_t i = 0; i < 2; ++i) {
+        CAPTURE(i);
+        REQUIRE(model.objects[i]->instances.size() == 1);
+        REQUIRE(model.objects[i]->volumes.size() == 1);
+        CHECK_THAT(model.objects[i]->instances.front()->get_offset().norm(), Catch::Matchers::WithinAbs(0., 1e-9));
+        const Vec3d volume_center = model.objects[i]->volumes.front()->get_offset();
+        const Vec3d expected = offsets[i] + Vec3d(5., 5., 5.);
+        check_box(BoundingBoxf3(volume_center, volume_center), expected, expected);
+    }
+}
+
+TEST_CASE("Legacy importer preserves non-printable and transformed build items", "[Legacy3MF][Geometry]")
+{
+    // Cube under v' = (-y, 2x, 3z) + (7, 8, 9): x in [-3, 7], y in [8, 28], z in [9, 39].
+    const std::string items =
+        "  <item objectid=\"1\" printable=\"0\" transform=\"" + transform_string(asymmetric_linear, 7., 8., 9.) + "\"/>\n";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("ThirdParty", items)));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    CHECK_FALSE(model.objects.front()->instances.front()->printable);
+    check_box(model.mesh().bounding_box(), Vec3d(-3., 8., 9.), Vec3d(7., 28., 39.));
+}
+
+TEST_CASE("Legacy model configuration restores volume identity, type, and source fields", "[Legacy3MF][Metadata]")
+{
+    Model source = make_cube_model();
+    ModelVolume *volume = source.objects.front()->volumes.front();
+    source.objects.front()->name = "Configured object";
+    volume->name = "Configured volume";
+    volume->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    volume->source.input_file = "/tmp/original/source.stl";
+    volume->source.object_idx = 4;
+    volume->source.volume_idx = 2;
+    volume->source.mesh_offset = Vec3d(1.25, -2.5, 3.75);
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), loaded, config));
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.objects.front()->volumes.size() == 1);
+    const ModelObject *object = loaded.objects.front();
+    const ModelVolume *loaded_volume = object->volumes.front();
+    CHECK(object->name == "Configured object");
+    CHECK(loaded_volume->name == "Configured volume");
+    CHECK(loaded_volume->is_modifier());
+    CHECK(loaded_volume->source.input_file == "source.stl");
+    CHECK(loaded_volume->source.object_idx == 4);
+    CHECK(loaded_volume->source.volume_idx == 2);
+    CHECK_THAT(loaded_volume->source.mesh_offset.x(), Catch::Matchers::WithinAbs(1.25, 1e-6));
+    CHECK_THAT(loaded_volume->source.mesh_offset.y(), Catch::Matchers::WithinAbs(-2.5, 1e-6));
+    CHECK_THAT(loaded_volume->source.mesh_offset.z(), Catch::Matchers::WithinAbs(3.75, 1e-6));
+}
+
+TEST_CASE("Legacy generic export and import preserve painted facet annotations", "[Legacy3MF][Painting]")
+{
+    Model source = make_cube_model();
+    ModelVolume *volume = source.objects.front()->volumes.front();
+    TriangleSelector selector(volume->mesh());
+    selector.set_facet(0, EnforcerBlockerType::Extruder2);
+    REQUIRE(volume->mmu_segmentation_facets.set(selector));
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), loaded, config));
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.objects.front()->volumes.size() == 1);
+    const ModelVolume *loaded_volume = loaded.objects.front()->volumes.front();
+    CHECK(loaded_volume->mmu_segmentation_facets.has_facets(*loaded_volume, EnforcerBlockerType::Extruder2));
+    CHECK_FALSE(loaded_volume->mmu_segmentation_facets.has_facets(*loaded_volume, EnforcerBlockerType::Extruder3));
+}
+
+TEST_CASE("Legacy importer repairs a negatively wound volume", "[Legacy3MF][Geometry]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("ThirdParty", "  <item objectid=\"1\"/>\n", true)));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    TriangleMesh repaired = model.objects.front()->volumes.front()->mesh();
+    CHECK_THAT(double(repaired.volume()), Catch::Matchers::WithinAbs(1000., 1e-3));
+}
+
+TEST_CASE("Legacy importer rejects out-of-range triangle vertex references", "[Legacy3MF][Errors]")
+{
+    const int invalid_vertex = GENERATE(-1, 8, 99);
+    CAPTURE(invalid_vertex);
+    std::string xml = cube_model_xml();
+    const size_t attribute = xml.rfind("v3=\"2\"");
+    REQUIRE(attribute != std::string::npos);
+    xml.replace(attribute, 6, "v3=\"" + std::to_string(invalid_vertex) + "\"");
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    CHECK_FALSE(load_generic(archive.string(), model, config));
+}
+
+TEST_CASE("Legacy importer rejects duplicate object identifiers", "[Legacy3MF][Errors]")
+{
+    std::string xml = cube_model_xml();
+    const std::string duplicate =
+        "<object id=\"1\" type=\"model\"><mesh><vertices><vertex x=\"0\" y=\"0\" z=\"0\"/>"
+        "<vertex x=\"1\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"1\" z=\"0\"/></vertices>"
+        "<triangles><triangle v1=\"0\" v2=\"1\" v3=\"2\"/></triangles></mesh></object>";
+    const size_t at = xml.find(" </resources>");
+    REQUIRE(at != std::string::npos);
+    xml.insert(at, duplicate);
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    CHECK_FALSE(load_generic(archive.string(), model, config));
+}
+
+TEST_CASE("Legacy importer rejects an invalid component reference", "[Legacy3MF][Errors]")
+{
+    // Object 2 is a component container that is not part of the build, so only the check on
+    // the component's own reference can make the load fail.  Object 1 stays the build item.
+    const int referenced = GENERATE(1, 999);
+    CAPTURE(referenced);
+    std::string xml = cube_model_xml();
+    const size_t resources = xml.find(" </resources>");
+    REQUIRE(resources != std::string::npos);
+    xml.insert(resources,
+        " <object id=\"2\" type=\"model\"><components><component objectid=\"" + std::to_string(referenced) +
+        "\"/></components></object>\n");
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    CHECK(load_generic(archive.string(), model, config) == (referenced == 1));
+}
+
+TEST_CASE("Legacy importer ignores a singular build transform", "[Legacy3MF][Geometry][Errors]")
+{
+    const std::string items = "  <item objectid=\"1\" transform=\"0 0 0 0 0 0 0 0 0 0 0 0\"/>\n";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("ThirdParty", items)));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    const BoundingBoxf3 bbox = model.mesh().bounding_box();
+    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(bbox.max.y() - bbox.min.y()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(bbox.max.z() - bbox.min.z()), Catch::Matchers::WithinAbs(10., 1e-5));
+}
+
+TEST_CASE("Legacy importer rejects malformed model configuration XML", "[Legacy3MF][Errors]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml(), "<config><object id=\"1\">") );
+    Model model;
+    DynamicPrintConfig config;
+    CHECK_FALSE(load_generic(archive.string(), model, config));
+}
+
+TEST_CASE("Legacy exporter rejects an object with an empty volume mesh", "[Legacy3MF][Errors]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(TriangleMesh{});
+    object->add_instance();
+    ScopedTemporaryFile archive(".3mf");
+    CHECK_FALSE(store_3mf(archive.string().c_str(), &model, nullptr, false));
+}
+
+} // namespace legacy_3mf_contracts
