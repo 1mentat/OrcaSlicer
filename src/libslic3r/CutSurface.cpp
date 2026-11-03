@@ -3691,6 +3691,11 @@ SurfaceCut priv::patch2cut(SurfacePatch &patch)
     std::iota(merged.begin(), merged.end(), SurfaceCut::Index(0));
     sc.contours.reserve(patch.loops.size());
     for (const Loop &loop : patch.loops) {
+        // Clean the loop as a cyclic sequence of float points: remove consecutive equal points and "spikes"
+        // (a point between two equal neighbours, i.e. a protrusion that collapsed onto a line) until stable.
+        // A stack handles the linear part (including nested spikes); the seam is then fixed up pairwise.
+        // A removed duplicate is merged into its survivor for the faces. A spike tip is not: it is a distinct
+        // float point, and the faces of the collapsed protrusion are dropped as zero-area.
         SurfaceCut::Contour contour;
         contour.reserve(loop.size());
         for (VI vi : loop) {
@@ -3698,30 +3703,30 @@ SurfaceCut priv::patch2cut(SurfacePatch &patch)
             if (!contour.empty() && same_output_point(contour.back(), index))
                 merged[index] = contour.back();
             else if (contour.size() > 1 && same_output_point(contour[contour.size() - 2], index)) {
-                // A thin protrusion collapsed to a line: drop its tip, it bounds no face.
                 contour.pop_back();
                 merged[index] = contour.back();
             } else
                 contour.push_back(index);
         }
-        // Apply the same rules across the loop's start.
         for (;;) {
             const size_t n = contour.size();
-            if (n > 1 && same_output_point(contour.front(), contour.back())) {
+            if (n > 1 && same_output_point(contour.back(), contour.front())) {
                 merged[contour.back()] = contour.front();
                 contour.pop_back();
-            } else if (n > 2 && same_output_point(contour.back(), contour[1]))
-                contour.erase(contour.begin());
+            } else if (n > 2 && same_output_point(contour[n - 2], contour.front()))
+                contour.pop_back(); // the last point is a spike tip
+            else if (n > 2 && same_output_point(contour.back(), contour[1]))
+                contour.erase(contour.begin()); // the first point is a spike tip
             else
                 break;
         }
         if (contour.size() >= 3)
             sc.contours.push_back(std::move(contour));
     }
-    // Resolve merge chains to their surviving index.
+    // Resolve merge chains to their surviving index. Chains are acyclic by construction; the cap is a guard.
     for (size_t i = 0; i < merged.size(); ++i) {
         SurfaceCut::Index root = merged[i];
-        while (merged[root] != root)
+        for (size_t hops = 0; merged[root] != root && hops < merged.size(); ++hops)
             root = merged[root];
         merged[i] = root;
     }

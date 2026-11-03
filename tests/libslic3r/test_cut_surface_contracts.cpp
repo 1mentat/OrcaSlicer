@@ -760,13 +760,9 @@ TEST_CASE("Surface cuts keep faces and contours on one vertex when only part of 
 {
     // A trapezoid whose narrow edge (1e-6 mm) collapses to one float point while the rest of the shape survives.
     // The merged contour point and the surviving face must reference the same vertex, or cut2model leaves open edges.
-    const bool reversed = GENERATE(false, true);
-    CAPTURE(reversed);
     const Point corner = Point::new_scale(199.9, 199.9);
     const coord_t length = scale_(3.), width = scale_(1.);
     Points points{corner, Point(corner.x() + 1, corner.y()), Point(corner.x() + length, corner.y() + width), Point(corner.x(), corner.y() + width)};
-    if (reversed)
-        std::reverse(points.begin(), points.end());
     ExPolygon shape{Polygon(points)};
     shape.contour.make_counter_clockwise();
     const SurfaceCut cut = cut_surface({shape}, {its_make_cube(200., 200., 200.)}, scaled_cube_projection(600.f), .5f);
@@ -786,17 +782,32 @@ TEST_CASE("Surface cuts leave no contour wall for a protrusion whose width colla
     CAPTURE(tail_on_left);
     const int rotation = GENERATE(0, 1, 2, 3, 4, 5, 6, 7);
     CAPTURE(rotation);
-    const bool reversed = GENERATE(false, true);
-    CAPTURE(reversed);
+    // With a middle vertex on each side of the tail the loop collapses to A,B,C,B,A on one float line.
+    const bool with_station = GENERATE(false, true);
+    CAPTURE(with_station);
     const coord_t side = scale_(10.), tail = scale_(3.), x0 = scale_(189.9), y0 = scale_(189.9), mid = y0 + side / 2;
-    Points points = tail_on_left ?
-        Points{Point(x0, y0), Point(x0 + side, y0), Point(x0 + side, y0 + side), Point(x0, y0 + side), Point(x0, mid + 1),
-               Point(x0 - tail, mid + 1), Point(x0 - tail, mid), Point(x0, mid)} :
-        Points{Point(x0, y0), Point(x0 + side / 2, y0), Point(x0 + side / 2, y0 - tail), Point(x0 + side / 2 + 1, y0 - tail),
-               Point(x0 + side / 2 + 1, y0), Point(x0 + side, y0), Point(x0 + side, y0 + side), Point(x0, y0 + side)};
+    Points points;
+    if (tail_on_left) {
+        points = {Point(x0, y0), Point(x0 + side, y0), Point(x0 + side, y0 + side), Point(x0, y0 + side), Point(x0, mid + 1)};
+        if (with_station)
+            points.emplace_back(x0 - tail / 2, mid + 1);
+        points.emplace_back(x0 - tail, mid + 1);
+        points.emplace_back(x0 - tail, mid);
+        if (with_station)
+            points.emplace_back(x0 - tail / 2, mid);
+        points.emplace_back(x0, mid);
+    } else {
+        points = {Point(x0, y0), Point(x0 + side / 2, y0)};
+        if (with_station)
+            points.emplace_back(x0 + side / 2, y0 - tail / 2);
+        points.emplace_back(x0 + side / 2, y0 - tail);
+        points.emplace_back(x0 + side / 2 + 1, y0 - tail);
+        if (with_station)
+            points.emplace_back(x0 + side / 2 + 1, y0 - tail / 2);
+        points.insert(points.end(), {Point(x0 + side / 2 + 1, y0), Point(x0 + side, y0), Point(x0 + side, y0 + side), Point(x0, y0 + side)});
+    }
+    // Rotating the input changes where the cut's loops start, so the seam handling sees different spike positions.
     std::rotate(points.begin(), points.begin() + rotation, points.end());
-    if (reversed)
-        std::reverse(points.begin(), points.end());
     ExPolygon shape{Polygon(points)};
     shape.contour.make_counter_clockwise();
     const SurfaceCut cut = cut_surface({shape}, {its_make_cube(200., 200., 200.)}, scaled_cube_projection(600.f), .5f);
