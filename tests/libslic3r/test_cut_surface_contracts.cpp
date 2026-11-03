@@ -756,6 +756,28 @@ TEST_CASE("Surface cuts keep float-resolvable shapes at the far corner of a larg
     CHECK_FALSE(cut.contours.empty());
 }
 
+TEST_CASE("Surface cuts keep faces and contours on one vertex when only part of a loop collapses", "[CutSurface]")
+{
+    // A trapezoid whose narrow edge (1e-6 mm) collapses to one float point while the rest of the shape survives.
+    // The merged contour point and the surviving face must reference the same vertex, or cut2model leaves open edges.
+    const bool reversed = GENERATE(false, true);
+    CAPTURE(reversed);
+    const Point corner = Point::new_scale(199.9, 199.9);
+    const coord_t length = scale_(3.), width = scale_(1.);
+    Points points{corner, Point(corner.x() + 1, corner.y()), Point(corner.x() + length, corner.y() + width), Point(corner.x(), corner.y() + width)};
+    if (reversed)
+        std::reverse(points.begin(), points.end());
+    ExPolygon shape{Polygon(points)};
+    shape.contour.make_counter_clockwise();
+    const SurfaceCut cut = cut_surface({shape}, {its_make_cube(200., 200., 200.)}, scaled_cube_projection(600.f), .5f);
+
+    REQUIRE_FALSE(cut.indices.empty());
+    REQUIRE(contour_count(cut) == 1);
+    const indexed_triangle_set model = cut2model(cut, Emboss::OrthoProject3d(Vec3d(0., 0., 600.)));
+    check_mesh_indices(model);
+    CHECK(its_num_open_edges(model) == 0);
+}
+
 } // namespace cut_surface_topology_contracts
 
 namespace cut_surface_corefine_contracts {

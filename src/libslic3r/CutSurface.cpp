@@ -1,5 +1,6 @@
 #include "CutSurface.hpp"
 #include "libslic3r/Emboss.hpp"
+#include <numeric>
 #include <vector>
 #include <CGAL/Polygon_2_algorithms.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
@@ -3679,38 +3680,15 @@ SurfaceCut priv::patch2cut(SurfacePatch &patch)
         sc.vertices.emplace_back(p.x(), p.y(), p.z());
     }
 
-    for (FI fi : mesh.faces()) {
-        HI hi = mesh.halfedge(fi);
-        assert(mesh.next(hi).is_valid());
-        assert(mesh.next(mesh.next(hi)).is_valid());
-        // Is fi triangle?
-        assert(mesh.next(mesh.next(mesh.next(hi))) == hi);
-
-        // Conversion from CGAL doubles can collapse a triangle in SurfaceCut's
-        // float vertices. Check the converted geometry in double so the area
-        // calculation does not underflow for small, valid output triangles.
-        const Vec3d a = sc.vertices[convert_map[mesh.source(hi)]].cast<double>();
-        const Vec3d b = sc.vertices[convert_map[mesh.target(hi)]].cast<double>();
-        const Vec3d c = sc.vertices[convert_map[mesh.target(mesh.next(hi))]].cast<double>();
-        const Vec3d cross = (b - a).cross(c - a);
-        if (cross.squaredNorm() == 0.0)
-            continue;
-
-        // triangle indicies
-        Vec3i32 ti;
-        size_t i = 0;
-        for (VI vi : { mesh.source(hi), 
-                       mesh.target(hi), 
-                       mesh.target(mesh.next(hi))})
-            ti[i++] = convert_map[vi];
-        sc.indices.push_back(ti);
-    }
-
+    // Contour points that collapse onto one float point are merged. Faces must use the surviving index too,
+    // otherwise a contour wall and a face edge at the same position would not share vertices.
     auto same_output_point = [&sc](SurfaceCut::Index lhs, SurfaceCut::Index rhs) {
         const Vec3f &a = sc.vertices[lhs];
         const Vec3f &b = sc.vertices[rhs];
         return a.x() == b.x() && a.y() == b.y() && a.z() == b.z();
     };
+    std::vector<SurfaceCut::Index> merged(sc.vertices.size());
+    std::iota(merged.begin(), merged.end(), SurfaceCut::Index(0));
     sc.contours.reserve(patch.loops.size());
     for (const Loop &loop : patch.loops) {
         SurfaceCut::Contour contour;
@@ -3719,11 +3697,44 @@ SurfaceCut priv::patch2cut(SurfacePatch &patch)
             const SurfaceCut::Index index = convert_map[vi];
             if (contour.empty() || !same_output_point(contour.back(), index))
                 contour.push_back(index);
+            else
+                merged[index] = contour.back();
         }
-        if (contour.size() > 1 && same_output_point(contour.front(), contour.back()))
+        if (contour.size() > 1 && same_output_point(contour.front(), contour.back())) {
+            merged[contour.back()] = contour.front();
             contour.pop_back();
+        }
         if (contour.size() >= 3)
             sc.contours.push_back(std::move(contour));
+    }
+    // The wrap-around merge can add a second hop to a chain.
+    for (SurfaceCut::Index &index : merged)
+        index = merged[index];
+
+    for (FI fi : mesh.faces()) {
+        HI hi = mesh.halfedge(fi);
+        assert(mesh.next(hi).is_valid());
+        assert(mesh.next(mesh.next(hi)).is_valid());
+        // Is fi triangle?
+        assert(mesh.next(mesh.next(mesh.next(hi))) == hi);
+
+        // triangle indicies
+        Vec3i32 ti;
+        size_t i = 0;
+        for (VI vi : { mesh.source(hi), 
+                       mesh.target(hi), 
+                       mesh.target(mesh.next(hi))})
+            ti[i++] = merged[convert_map[vi]];
+
+        // Conversion from CGAL doubles can collapse a triangle in SurfaceCut's
+        // float vertices. Check the converted geometry in double so the area
+        // calculation does not underflow for small, valid output triangles.
+        const Vec3d a = sc.vertices[ti[0]].cast<double>();
+        const Vec3d b = sc.vertices[ti[1]].cast<double>();
+        const Vec3d c = sc.vertices[ti[2]].cast<double>();
+        if ((b - a).cross(c - a).squaredNorm() == 0.0)
+            continue;
+        sc.indices.push_back(ti);
     }
 
     // Not neccessary, clean and free memory
