@@ -3651,20 +3651,19 @@ TEST_CASE("Declared point and grouped integer option types round-trip through bi
 
 TEST_CASE("ConfigOptionFloats appends and resizes values with explicit defaults", "[Config][ConfigContracts]")
 {
-    ConfigOptionFloats storage({1., 2.});
-    ConfigOptionFloats *values = &storage;
+    ConfigOptionFloats values({1., 2.});
     const ConfigOptionFloat appended(3.);
-    values->append(&appended);
-    check_values(values->values, {1., 2., 3.});
-    values->resize(5);
-    check_values(values->values, {1., 2., 3., 1., 1.});
-    values->clear();
+    values.append(&appended);
+    check_values(values.values, {1., 2., 3.});
+    values.resize(5);
+    check_values(values.values, {1., 2., 3., 1., 1.});
+    values.clear();
     ConfigOptionFloat default_value(8.);
-    values->resize(2, &default_value);
-    check_values(values->values, {8., 8.});
+    values.resize(2, &default_value);
+    check_values(values.values, {8., 8.});
 }
 
-TEST_CASE("ConfigOptionFloats vector set_at and set range preserve defaults", "[Config][ConfigContracts]")
+TEST_CASE("ConfigOptionFloats set_at overwrites one slot and set replaces the vector with a source range", "[Config][ConfigContracts]")
 {
     ConfigOptionFloats destination({10., 10., 10.});
     ConfigOptionFloats source({1., 2., 3., 4.});
@@ -3790,13 +3789,6 @@ TEST_CASE("ConfigOption vector overrides copy regular sources and preserve nulla
     CHECK(regular_target.values == expected_regular);
     CHECK_FALSE(regular_target.apply_override(&regular_source, regular_indices));
 
-    ConfigOptionInts empty_target;
-    ConfigOptionIntsNullable incoming({7, 8});
-    std::vector<int> empty_target_indices{0, 1};
-    CHECK_FALSE(empty_target.apply_override(&incoming, empty_target_indices));
-    const std::vector<int> expected_empty;
-    CHECK(empty_target.values == expected_empty);
-
     ConfigOptionInts target({10, 20, 30});
     ConfigOptionIntsNullable replacement({11, ConfigOptionIntsNullable::nil_value(), 33});
     std::vector<int> default_index{0, 2, 1};
@@ -3805,7 +3797,21 @@ TEST_CASE("ConfigOption vector overrides copy regular sources and preserve nulla
     CHECK(target.values == expected_nullable);
 }
 
-TEST_CASE("Config option vectors collect scalar values and first vector values", "[Config][ConfigContracts]")
+TEST_CASE("Vector override into an empty target takes the nullable source values", "[Config][ConfigVectorOverride][!shouldfail]")
+{
+    ConfigOptionInts empty_target;
+    const ConfigOptionIntsNullable incoming({7, 8});
+    // overriden_by already reports that the source overrides an empty target.
+    CHECK(empty_target.overriden_by(&incoming));
+
+    std::vector<int> indices{0, 1};
+    // Known bug: apply_override returns early when the target is empty, leaving it empty and
+    // disagreeing with overriden_by; fixed by the follow-up fix PR
+    CHECK(empty_target.apply_override(&incoming, indices));
+    CHECK(empty_target.values == std::vector<int>{7, 8});
+}
+
+TEST_CASE("Config option vectors collect scalar values and first vector values, and set_at grows with the first value", "[Config][ConfigContracts]")
 {
     ConfigOptionFloat scalar(2.5);
     ConfigOptionFloats vector({3.5, 4.5});
