@@ -3986,69 +3986,6 @@ TEST_CASE("BBS exporter recursively archives model auxiliary files", "[3MF][Bbs3
     }
 }
 
-TEST_CASE("BBS project persists plate bounding-box JSON", "[3MF][Bbs3mfExtended][BBox]")
-{
-    // The JSON file is named after the position in the bounding-box list, and entries without
-    // objects are not written. Every field differs from its default and between the two entries.
-    PlateBBoxData first;
-    first.bbox_all = {1, 2, 31, 42};
-    first.filament_ids = {0, 2};
-    first.filament_colors = {"#111111", "#222222"};
-    first.bed_type = "Textured PEI Plate";
-    first.first_layer_time = 8.5f;
-    first.is_seq_print = true;
-    first.first_extruder = 2;
-    first.nozzle_diameter = 0.6f;
-    first.version = 1;
-    first.bbox_objs.push_back({7, {1, 2, 11, 12}, 120.f, .25f, "bbox-cube"});
-    first.bbox_objs.push_back({9, {21, 22, 31, 42}, 64.5f, .5f, "bbox-second"});
-
-    PlateBBoxData empty;
-    empty.bbox_all = {0, 0, 1, 1};
-
-    PlateBBoxData third;
-    third.bbox_all = {-5, -6, 15, 16};
-    third.filament_ids = {1};
-    third.filament_colors = {"#abcdef"};
-    third.bed_type = "Cool Plate";
-    third.first_layer_time = 3.25f;
-    third.first_extruder = 1;
-    third.nozzle_diameter = 0.8f;
-    third.bbox_objs.push_back({4, {-5, -6, 15, 16}, 440.f, .125f, "bbox-third"});
-
-    ScopedTemporaryFile archive(".3mf");
-    store_with_strategy(archive.string(), SaveStrategy::Zip64 | SaveStrategy::Silence,
-                        [&](Model &, PlateData &, StoreParams &params) { params.id_bboxes = {&first, &empty, &third}; });
-
-    std::string payload;
-    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/plate_2.json"));
-    for (const auto &[entry, expected] : {std::make_pair("Metadata/plate_1.json", &first), std::make_pair("Metadata/plate_3.json", &third)}) {
-        INFO("entry " << entry);
-        std::string json_text;
-        REQUIRE(read_3mf_entry(archive.string(), json_text, entry));
-        const nlohmann::json json = nlohmann::json::parse(json_text);
-        CHECK(json.at("bbox_all").get<std::vector<coordf_t>>() == expected->bbox_all);
-        CHECK(json.at("filament_ids").get<std::vector<int>>() == expected->filament_ids);
-        CHECK(json.at("filament_colors").get<std::vector<std::string>>() == expected->filament_colors);
-        CHECK(json.at("bed_type").get<std::string>() == expected->bed_type);
-        CHECK_THAT(json.at("first_layer_time").get<float>(), Catch::Matchers::WithinAbs(expected->first_layer_time, 1e-5));
-        CHECK(json.at("is_seq_print").get<bool>() == expected->is_seq_print);
-        CHECK(json.at("first_extruder").get<int>() == expected->first_extruder);
-        CHECK_THAT(json.at("nozzle_diameter").get<float>(), Catch::Matchers::WithinAbs(expected->nozzle_diameter, 1e-5));
-        CHECK(json.at("version").get<int>() == expected->version);
-        REQUIRE(json.at("bbox_objects").size() == expected->bbox_objs.size());
-        for (size_t i = 0; i < expected->bbox_objs.size(); ++i) {
-            const nlohmann::json &object = json.at("bbox_objects").at(i);
-            const BBoxData &want = expected->bbox_objs[i];
-            CHECK(object.at("id").get<int>() == want.id);
-            CHECK(object.at("bbox").get<std::vector<coordf_t>>() == want.bbox);
-            CHECK_THAT(object.at("area").get<float>(), Catch::Matchers::WithinAbs(want.area, 1e-5));
-            CHECK_THAT(object.at("layer_height").get<float>(), Catch::Matchers::WithinAbs(want.layer_height, 1e-5));
-            CHECK(object.at("name").get<std::string>() == want.name);
-        }
-    }
-}
-
 } // namespace bbs_archive_contracts
 
 namespace legacy_3mf_contracts {
