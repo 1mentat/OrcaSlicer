@@ -57,6 +57,7 @@
 #include <catch2/catch_tostring.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
+#include <map>
 #include <string>
 #include <sstream>
 #include <locale>
@@ -3635,6 +3636,24 @@ bool store_with_thumbnails(const std::string &path, const std::array<ThumbnailDa
     return store_bbs_3mf(params);
 }
 
+// The key/value metadata the project settings file declares for its first plate.
+std::map<std::string, std::string> read_plate_metadata(const std::string &path)
+{
+    std::string xml;
+    REQUIRE(read_3mf_entry(path, xml, "Metadata/model_settings.config"));
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    const auto plate = tree.get_child_optional("config.plate");
+    REQUIRE(plate.is_initialized());
+    std::map<std::string, std::string> metadata;
+    for (const auto &node : *plate) {
+        if (node.first == "metadata")
+            metadata[node.second.get<std::string>("<xmlattr>.key")] = node.second.get<std::string>("<xmlattr>.value");
+    }
+    return metadata;
+}
+
 // A 2x2 image whose four pixels all differ, so a flipped or mirrored decode cannot match.
 ThumbnailData make_thumbnail(const std::array<unsigned char, 16> &rgba)
 {
@@ -3701,6 +3720,8 @@ TEST_CASE("BBS thumbnail lists obey per-channel plate cardinality", "[3MF][Bbs3m
 
     SECTION("A channel with more thumbnails than plates, or top and pick of different length, is rejected")
     {
+        // {0,0,2,2}, {0,0,2,1} and {0,0,1,2} are also rejected by the pick-count and top/pick mismatch
+        // checks, so the top-count check cannot be told apart from them.
         const std::array<size_t, 4> counts = GENERATE(std::array<size_t, 4>{2, 0, 0, 0}, std::array<size_t, 4>{0, 2, 0, 0},
                                                       std::array<size_t, 4>{0, 0, 2, 2}, std::array<size_t, 4>{0, 0, 1, 2},
                                                       std::array<size_t, 4>{0, 0, 2, 1}, std::array<size_t, 4>{0, 0, 1, 0},
@@ -3758,9 +3779,18 @@ TEST_CASE("BBS project archives sidecar thumbnail files under declared names", "
                                       plate.top_file = paths[2];
                                       plate.pick_file = paths[3];
                                   }));
+    // The metadata an importer reads declares each archived entry under its own key.
+    const std::array<const char *, 4> metadata_keys = {"thumbnail_file", "thumbnail_no_light_file", "top_file", "pick_file"};
+    const std::map<std::string, std::string> metadata = read_plate_metadata(archive.string());
     for (size_t i = 0; i < names.size(); ++i) {
         INFO("entry " << thumbnail_entries[i]);
         std::string payload;
+        if (int(i) != missing) {
+            INFO("metadata key " << metadata_keys[i]);
+            const auto declared = metadata.find(metadata_keys[i]);
+            REQUIRE(declared != metadata.end());
+            CHECK(declared->second == thumbnail_entries[i]);
+        }
         if (int(i) == missing) {
             CHECK_FALSE(read_3mf_entry(archive.string(), payload, thumbnail_entries[i]));
         } else {
