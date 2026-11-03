@@ -86,19 +86,37 @@ function(catch_discover_tests_impl)
     set(ENV{DYLD_FRAMEWORK_PATH} "${paths}")
   endif()
 
+  # Discovery runs the test binary only to inspect its test and reporter lists.
+  # Instrumented binaries still emit profiles during these commands, so give
+  # each discovery invocation its own namespace. Give GCOV_PREFIX a concrete
+  # directory; use LLVM_PROFILE_FILE's %p and %m tokens for LLVM profiles.
+  string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef discovery_profile_id)
+  get_filename_component(discovery_profile_ctest_file "${_CTEST_FILE}" ABSOLUTE)
+  get_filename_component(discovery_profile_parent "${discovery_profile_ctest_file}" DIRECTORY)
+  set(discovery_profile_dir "${discovery_profile_parent}/.catch-discovery/${discovery_profile_id}")
+  file(MAKE_DIRECTORY "${discovery_profile_dir}/gcov" "${discovery_profile_dir}/llvm")
+
+  foreach(profile_variable IN ITEMS GCOV_PREFIX GCOV_PREFIX_STRIP LLVM_PROFILE_FILE)
+    if(DEFINED ENV{${profile_variable}})
+      set(discovery_saved_${profile_variable}_defined TRUE)
+      set(discovery_saved_${profile_variable} "$ENV{${profile_variable}}")
+    else()
+      set(discovery_saved_${profile_variable}_defined FALSE)
+    endif()
+  endforeach()
+
+  set(ENV{GCOV_PREFIX} "${discovery_profile_dir}/gcov")
+  # Keep the complete object path below the private prefix; GCC's default of
+  # zero is explicit here so no part of the path is mapped back into the build.
+  set(ENV{GCOV_PREFIX_STRIP} "0")
+  set(ENV{LLVM_PROFILE_FILE} "${discovery_profile_dir}/llvm/%p-%m.profraw")
+
   execute_process(
     COMMAND ${_TEST_EXECUTOR} "${_TEST_EXECUTABLE}" ${spec} --list-tests --reporter json
     OUTPUT_VARIABLE listing_output
     RESULT_VARIABLE result
     WORKING_DIRECTORY "${_TEST_WORKING_DIR}"
   )
-  if(NOT ${result} EQUAL 0)
-    message(FATAL_ERROR
-      "Error listing tests from executable '${_TEST_EXECUTABLE}':\n"
-      "  Result: ${result}\n"
-      "  Output: ${listing_output}\n"
-    )
-  endif()
 
   # Prepare reporter
   if(reporter)
@@ -107,12 +125,38 @@ function(catch_discover_tests_impl)
     # Run test executable to check whether reporter is available
     # note that the use of --list-reporters is not the important part,
     # we only want to check whether the execution succeeds with ${reporter_arg}
-    execute_process(
-      COMMAND ${_TEST_EXECUTOR} "${_TEST_EXECUTABLE}" ${spec} ${reporter_arg} --list-reporters
-      OUTPUT_VARIABLE reporter_check_output
-      RESULT_VARIABLE reporter_check_result
-      WORKING_DIRECTORY "${_TEST_WORKING_DIR}"
+    if(result EQUAL 0)
+      execute_process(
+        COMMAND ${_TEST_EXECUTOR} "${_TEST_EXECUTABLE}" ${spec} ${reporter_arg} --list-reporters
+        OUTPUT_VARIABLE reporter_check_output
+        RESULT_VARIABLE reporter_check_result
+        WORKING_DIRECTORY "${_TEST_WORKING_DIR}"
+      )
+    endif()
+  endif()
+
+  # Restore the caller's profile environment before checking results or
+  # generating tests. The temporary variables apply only to discovery children.
+  foreach(profile_variable IN ITEMS GCOV_PREFIX GCOV_PREFIX_STRIP LLVM_PROFILE_FILE)
+    if(discovery_saved_${profile_variable}_defined)
+      set(ENV{${profile_variable}} "${discovery_saved_${profile_variable}}")
+    else()
+      unset(ENV{${profile_variable}})
+    endif()
+  endforeach()
+  # Discovery profiles have no coverage consumer. Remove them so they neither
+  # accumulate nor enter a later coverage run's build-tree inputs.
+  file(REMOVE_RECURSE "${discovery_profile_dir}")
+
+  if(NOT ${result} EQUAL 0)
+    message(FATAL_ERROR
+      "Error listing tests from executable '${_TEST_EXECUTABLE}':\n"
+      "  Result: ${result}\n"
+      "  Output: ${listing_output}\n"
     )
+  endif()
+
+  if(reporter)
     if(${reporter_check_result} EQUAL 255)
       message(FATAL_ERROR
         "\"${reporter}\" is not a valid reporter!\n"

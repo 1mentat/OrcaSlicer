@@ -1079,7 +1079,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--llvm-profdata")
     run.add_argument("--gcov", help="matching GCC gcov executable for --backend gcov")
     run.add_argument("--gcov-data-dir",
-                     help="new directory for GCC runtime profiles (default: OUT/gcov-data); relative to root")
+                     help="GCC profile path created by the runner; must not already exist (default: OUT/gcov-data); relative to root")
     run.add_argument("--gcov-jobs", type=int, default=1,
                      help="maximum concurrent gcov processes for --backend gcov (default: 1)")
     run.add_argument("--gcov-catch-batch", action="store_true",

@@ -2186,6 +2186,10 @@ units. The report records source hashes and the matching GCC/gcov versions.
 Threshold status applies only to the gcov physical-line metric; a valid result
 below threshold is still a measurement, not an LLVM result.
 
+Catch test and reporter discovery uses temporary profile directories and
+removes those counters afterward. Registered test commands retain the caller's
+runtime profile environment.
+
 Use `--gcov-data-dir /path/on/local-disk/unique-epoch` to place runtime counters
 on a separate filesystem while keeping reports, staged compiler notes, and gcov
 JSON under `--out`. Relative paths resolve from `--root`; parent directories
