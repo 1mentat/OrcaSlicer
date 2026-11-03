@@ -56,6 +56,7 @@
 #include <Eigen/Geometry>
 #include <string>
 #include <sstream>
+#include <locale>
 #include <type_traits> // for std::enable_if_t
 #include <typeinfo>    // for typeid
 #include <regex>
@@ -3353,9 +3354,30 @@ using namespace Slic3r;
 
 namespace {
 
-std::string transform_string(double tx = 0., double ty = 0., double tz = 0.)
+// 3MF stores a 4x3 matrix row by row for row vectors (v' = v * M + t).  Format with the classic
+// locale so the decimal separator does not depend on the process locale.
+std::string transform_string(const std::array<double, 9> &linear, double tx, double ty, double tz)
 {
-    return "1 0 0 0 1 0 0 0 1 " + std::to_string(tx) + " " + std::to_string(ty) + " " + std::to_string(tz);
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    for (double value : linear)
+        out << value << ' ';
+    out << tx << ' ' << ty << ' ' << tz;
+    return out.str();
+}
+
+// v' = (-y, 2x, 3z): a rotation combined with unequal axis scales, so a transposed or
+// axis-swapped matrix cannot produce the same box.
+const std::array<double, 9> asymmetric_linear{0., 2., 0., -1., 0., 0., 0., 0., 3.};
+const std::array<double, 9> identity_linear{1., 0., 0., 0., 1., 0., 0., 0., 1.};
+
+void check_box(const BoundingBoxf3 &box, const Vec3d &min, const Vec3d &max)
+{
+    for (int axis = 0; axis < 3; ++axis) {
+        CAPTURE(axis);
+        CHECK_THAT(box.min[axis], Catch::Matchers::WithinAbs(min[axis], 1e-5));
+        CHECK_THAT(box.max[axis], Catch::Matchers::WithinAbs(max[axis], 1e-5));
+    }
 }
 
 std::string cube_model_xml(const std::string &application = "ThirdParty",
@@ -3457,25 +3479,36 @@ TEST_CASE("Legacy Prusa file parser identifies the generator metadata", "[Legacy
 
 TEST_CASE("Legacy Prusa file parser rejects a non-archive and an archive without a model part", "[Legacy3MF][Errors]")
 {
+    // Positive control: the same generator metadata in a valid archive is detected, so the
+    // negative results below come from the structural checks and not from a constant false.
+    ScopedTemporaryFile valid(".3mf");
+    REQUIRE(write_archive(valid.string(), cube_model_xml("PrusaSlicer-2.7.0")));
+    PrusaFileParser control;
+    REQUIRE(control.check_3mf_from_prusa(valid.string()));
+
     ScopedTemporaryFile plain(".3mf");
     {
         boost::nowide::ofstream output(plain.string(), std::ios::binary | std::ios::trunc);
         REQUIRE(output.good());
-        output << "not a zip archive";
+        output << cube_model_xml("PrusaSlicer-2.7.0");
         output.flush();
         REQUIRE(output.good());
     }
     PrusaFileParser parser;
     CHECK_FALSE(parser.check_3mf_from_prusa(plain.string()));
 
-    ScopedTemporaryFile empty_zip(".3mf");
+    // A decoy entry carries the Prusa generator marker, but there is no 3D/3dmodel.model part.
+    // It is added first, so a parser that scanned the first or any other entry would report Prusa.
+    const std::string decoy = cube_model_xml("PrusaSlicer-2.7.0");
+    ScopedTemporaryFile no_model(".3mf");
     {
-        Zipper archive(empty_zip.string());
+        Zipper archive(no_model.string());
+        archive.add_entry("3D/other.model", decoy.data(), decoy.size());
         archive.add_entry("README.txt", "no model", 8);
         archive.finalize();
     }
-    PrusaFileParser empty_parser;
-    CHECK_FALSE(empty_parser.check_3mf_from_prusa(empty_zip.string()));
+    PrusaFileParser no_model_parser;
+    CHECK_FALSE(no_model_parser.check_3mf_from_prusa(no_model.string()));
 }
 
 TEST_CASE("Legacy importer scales coordinates and defaults absent vertex attributes", "[Legacy3MF][Geometry]")
@@ -3488,10 +3521,11 @@ TEST_CASE("Legacy importer scales coordinates and defaults absent vertex attribu
         std::pair<const char *, double>{"foot", 304.8},
         std::pair<const char *, double>{"meter", 1000.});
     CAPTURE(unit);
+    // Triangle (0,0,0) (2,0,0) (0,3,0): the first vertex omits z and the extents differ per axis.
     const std::string xml =
         "<model unit=\"" + std::string(unit) + "\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
         "<resources><object id=\"1\" type=\"model\"><mesh><vertices>"
-        "<vertex x=\"0\" y=\"0\"/><vertex x=\"1\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"1\" z=\"0\"/>"
+        "<vertex x=\"0\" y=\"0\"/><vertex x=\"2\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"3\" z=\"0\"/>"
         "</vertices><triangles><triangle v1=\"0\" v2=\"1\" v3=\"2\"/></triangles></mesh></object></resources>"
         "<build><item objectid=\"1\"/></build></model>";
     ScopedTemporaryFile archive(".3mf");
@@ -3502,19 +3536,22 @@ TEST_CASE("Legacy importer scales coordinates and defaults absent vertex attribu
     REQUIRE(model.objects.size() == 1);
     REQUIRE(model.objects.front()->volumes.size() == 1);
     const BoundingBoxf3 bbox = model.objects.front()->volumes.front()->mesh().bounding_box();
-    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(scale, std::max(1e-7, scale * 1e-6)));
-    CHECK_THAT(double(bbox.max.y() - bbox.min.y()), Catch::Matchers::WithinAbs(scale, std::max(1e-7, scale * 1e-6)));
+    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(2. * scale, std::max(1e-7, scale * 1e-6)));
+    CHECK_THAT(double(bbox.max.y() - bbox.min.y()), Catch::Matchers::WithinAbs(3. * scale, std::max(1e-7, scale * 1e-6)));
     CHECK_THAT(double(bbox.max.z() - bbox.min.z()), Catch::Matchers::WithinAbs(0., 1e-5));
 }
 
 TEST_CASE("Legacy importer expands a component alias with its transform", "[Legacy3MF][Geometry][Components]")
 {
+    // Part triangle (0,0,0) (2,0,0) (0,3,1) under v' = (-y, 2x, 3z) + (10, 20, 30) becomes
+    // (10,20,30) (10,24,30) (7,20,33).
     const std::string model_xml =
         "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
         "<resources><object id=\"1\" type=\"model\" name=\"part\"><mesh><vertices>"
-        "<vertex x=\"0\" y=\"0\" z=\"0\"/><vertex x=\"2\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"2\" z=\"0\"/>"
+        "<vertex x=\"0\" y=\"0\" z=\"0\"/><vertex x=\"2\" y=\"0\" z=\"0\"/><vertex x=\"0\" y=\"3\" z=\"1\"/>"
         "</vertices><triangles><triangle v1=\"0\" v2=\"1\" v3=\"2\"/></triangles></mesh></object>"
-        "<object id=\"2\" type=\"model\"><components><component objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 10 20 30\"/></components></object></resources>"
+        "<object id=\"2\" type=\"model\"><components><component objectid=\"1\" transform=\"" +
+        transform_string(asymmetric_linear, 10., 20., 30.) + "\"/></components></object></resources>"
         "<build><item objectid=\"2\" printable=\"1\"/></build></model>";
     ScopedTemporaryFile archive(".3mf");
     REQUIRE(write_archive(archive.string(), model_xml));
@@ -3523,34 +3560,40 @@ TEST_CASE("Legacy importer expands a component alias with its transform", "[Lega
     REQUIRE(load_generic(archive.string(), model, config));
     REQUIRE(model.objects.size() == 1);
     REQUIRE(model.objects.front()->instances.size() == 1);
-    const BoundingBoxf3 bbox = model.mesh().bounding_box();
-    CHECK_THAT(double(bbox.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
-    CHECK_THAT(double(bbox.min.y()), Catch::Matchers::WithinAbs(20., 1e-5));
-    CHECK_THAT(double(bbox.min.z()), Catch::Matchers::WithinAbs(30., 1e-5));
+    check_box(model.mesh().bounding_box(), Vec3d(7., 20., 30.), Vec3d(10., 24., 33.));
 }
 
 TEST_CASE("Legacy importer splits a multi-instance object into independent model objects", "[Legacy3MF][Components]")
 {
     const std::string items =
-        "  <item objectid=\"1\" transform=\"" + transform_string(0., 0., 0.) + "\"/>\n"
-        "  <item objectid=\"1\" transform=\"" + transform_string(20., 0., 0.) + "\"/>\n";
-    const std::string xml = cube_model_xml("", items);
+        "  <item objectid=\"1\" transform=\"" + transform_string(identity_linear, 0., 0., 0.) + "\"/>\n"
+        "  <item objectid=\"1\" transform=\"" + transform_string(identity_linear, 20., 5., 7.) + "\"/>\n";
     ScopedTemporaryFile archive(".3mf");
-    REQUIRE(write_archive(archive.string(), xml));
+    REQUIRE(write_archive(archive.string(), cube_model_xml("", items)));
     Model model;
     DynamicPrintConfig config;
     REQUIRE(load_generic(archive.string(), model, config));
     REQUIRE(model.objects.size() == 2);
-    CHECK(model.objects[0]->instances.size() == 1);
-    CHECK(model.objects[1]->instances.size() == 1);
-    const BoundingBoxf3 bbox = model.mesh().bounding_box();
-    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+
+    // A non-Prusa file with a single instance per object has that instance's transform baked
+    // into the volume (which is re-centred on its own origin) and the instance reset.
+    const Vec3d offsets[2] = {Vec3d(0., 0., 0.), Vec3d(20., 5., 7.)};
+    for (size_t i = 0; i < 2; ++i) {
+        CAPTURE(i);
+        REQUIRE(model.objects[i]->instances.size() == 1);
+        REQUIRE(model.objects[i]->volumes.size() == 1);
+        CHECK_THAT(model.objects[i]->instances.front()->get_offset().norm(), Catch::Matchers::WithinAbs(0., 1e-9));
+        const Vec3d volume_center = model.objects[i]->volumes.front()->get_offset();
+        const Vec3d expected = offsets[i] + Vec3d(5., 5., 5.);
+        check_box(BoundingBoxf3(volume_center, volume_center), expected, expected);
+    }
 }
 
 TEST_CASE("Legacy importer preserves non-printable and transformed build items", "[Legacy3MF][Geometry]")
 {
+    // Cube under v' = (-y, 2x, 3z) + (7, 8, 9): x in [-3, 7], y in [8, 28], z in [9, 39].
     const std::string items =
-        "  <item objectid=\"1\" printable=\"0\" transform=\"" + transform_string(7., 8., 9.) + "\"/>\n";
+        "  <item objectid=\"1\" printable=\"0\" transform=\"" + transform_string(asymmetric_linear, 7., 8., 9.) + "\"/>\n";
     ScopedTemporaryFile archive(".3mf");
     REQUIRE(write_archive(archive.string(), cube_model_xml("ThirdParty", items)));
     Model model;
@@ -3559,9 +3602,7 @@ TEST_CASE("Legacy importer preserves non-printable and transformed build items",
     REQUIRE(model.objects.size() == 1);
     REQUIRE(model.objects.front()->instances.size() == 1);
     CHECK_FALSE(model.objects.front()->instances.front()->printable);
-    const BoundingBoxf3 bbox = model.mesh().bounding_box();
-    CHECK_THAT(double(bbox.min.x()), Catch::Matchers::WithinAbs(7., 1e-5));
-    CHECK_THAT(double(bbox.max.z()), Catch::Matchers::WithinAbs(19., 1e-5));
+    check_box(model.mesh().bounding_box(), Vec3d(-3., 8., 9.), Vec3d(7., 28., 39.));
 }
 
 TEST_CASE("Legacy model configuration restores volume identity, type, and source fields", "[Legacy3MF][Metadata]")
@@ -3663,17 +3704,21 @@ TEST_CASE("Legacy importer rejects duplicate object identifiers", "[Legacy3MF][E
 
 TEST_CASE("Legacy importer rejects an invalid component reference", "[Legacy3MF][Errors]")
 {
+    // Object 2 is a component container that is not part of the build, so only the check on
+    // the component's own reference can make the load fail.  Object 1 stays the build item.
+    const int referenced = GENERATE(1, 999);
+    CAPTURE(referenced);
     std::string xml = cube_model_xml();
     const size_t resources = xml.find(" </resources>");
     REQUIRE(resources != std::string::npos);
     xml.insert(resources,
-        " <object id=\"2\" type=\"model\"><components><component objectid=\"999\"/></components></object>\n");
-    xml.replace(xml.find("objectid=\"1\""), 12, "objectid=\"2\"");
+        " <object id=\"2\" type=\"model\"><components><component objectid=\"" + std::to_string(referenced) +
+        "\"/></components></object>\n");
     ScopedTemporaryFile archive(".3mf");
     REQUIRE(write_archive(archive.string(), xml));
     Model model;
     DynamicPrintConfig config;
-    CHECK_FALSE(load_generic(archive.string(), model, config));
+    CHECK(load_generic(archive.string(), model, config) == (referenced == 1));
 }
 
 TEST_CASE("Legacy importer ignores a singular build transform", "[Legacy3MF][Geometry][Errors]")
