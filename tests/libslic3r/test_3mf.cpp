@@ -6040,14 +6040,16 @@ TEST_CASE("BBS project lifecycle preserves model identity, metadata, and two pla
     ModelObject* first = source.add_object("first-part", "first.stl", make_cube(10., 11., 12.));
     first->add_instance();
     first->add_instance();
+    first->add_instance();
     ModelObject* second = source.add_object("second-part", "second.stl", make_cube(6., 7., 8.));
+    second->add_instance();
     second->add_instance();
 
     PlateData plate0;
     plate0.plate_index           = 0;
     plate0.plate_name            = "first plate";
-    plate0.objects_and_instances = {{0, 0}, {1, 0}};
-    plate0.locked                = false;
+    plate0.objects_and_instances = {{0, 0}, {1, 1}};
+    plate0.locked                = false; // the default; plate 1 is the lock discriminator
     PlateData plate1;
     plate1.plate_index           = 1;
     plate1.plate_name            = "second plate";
@@ -6080,8 +6082,8 @@ TEST_CASE("BBS project lifecycle preserves model identity, metadata, and two pla
     CHECK(loaded.model.profile_info->ProfileDescription == "Profile description");
     CHECK(loaded.model.objects[0]->name == "first-part");
     CHECK(loaded.model.objects[1]->name == "second-part");
-    CHECK(loaded.model.objects[0]->instances.size() == 2);
-    CHECK(loaded.model.objects[1]->instances.size() == 1);
+    CHECK(loaded.model.objects[0]->instances.size() == 3);
+    CHECK(loaded.model.objects[1]->instances.size() == 2);
 
     CHECK(loaded_project.project_model_id == "model-42");
     CHECK(loaded_project.project_country_code == "US");
@@ -6089,22 +6091,21 @@ TEST_CASE("BBS project lifecycle preserves model identity, metadata, and two pla
     CHECK(loaded.plates[1]->plate_name == "second plate");
     CHECK_FALSE(loaded.plates[0]->locked);
     CHECK(loaded.plates[1]->locked);
+    // Each plate row is {object key -> {instance index, instance id}}; the importer keeps the
+    // source instance id, which ties every row to one specific source instance.
+    const auto check_row = [&](const PlateData& plate, const ModelObject& object, size_t instance, size_t index) {
+        const int instance_id = static_cast<int>(object.instances[instance]->id().id);
+        const auto row = std::find_if(plate.obj_inst_map.begin(), plate.obj_inst_map.end(),
+                                      [&](const auto& entry) { return entry.second.second == instance_id; });
+        REQUIRE(row != plate.obj_inst_map.end());
+        CHECK(row->second.first == static_cast<int>(index));
+    };
     REQUIRE(loaded.plates[0]->obj_inst_map.size() == 2);
     REQUIRE(loaded.plates[1]->obj_inst_map.size() == 2);
-    // The importer keeps plate rows as {object key -> {instance index, instance id}}. Identify the
-    // first object by the row that selects its second instance on the second plate.
-    const auto first_on_plate1 = std::find_if(loaded.plates[1]->obj_inst_map.begin(), loaded.plates[1]->obj_inst_map.end(),
-                                              [](const auto& entry) { return entry.second.first == 1; });
-    REQUIRE(first_on_plate1 != loaded.plates[1]->obj_inst_map.end());
-    const auto first_on_plate0 = loaded.plates[0]->obj_inst_map.find(first_on_plate1->first);
-    REQUIRE(first_on_plate0 != loaded.plates[0]->obj_inst_map.end());
-    CHECK(first_on_plate0->second.first == 0);
-    for (const auto& [key, row] : loaded.plates[0]->obj_inst_map)
-        if (key != first_on_plate1->first)
-            CHECK(row.first == 0);
-    for (const auto& [key, row] : loaded.plates[1]->obj_inst_map)
-        if (key != first_on_plate1->first)
-            CHECK(row.first == 0);
+    check_row(*loaded.plates[0], *first, 0, 0);
+    check_row(*loaded.plates[0], *second, 1, 1);
+    check_row(*loaded.plates[1], *first, 1, 1);
+    check_row(*loaded.plates[1], *second, 0, 0);
     CHECK_THAT(loaded.config.opt_float("layer_height"), WithinAbs(0.24, 1e-6));
 }
 
@@ -6139,10 +6140,10 @@ TEST_CASE("BBS project lifecycle preserves project identity beside embedded pres
     REQUIRE(loaded.presets.size() == 3);
     const auto find_preset = [&](const Preset& expected) -> const Preset& {
         const auto found = std::find_if(loaded.presets.begin(), loaded.presets.end(),
-                                        [&](const Preset* actual) { return actual->name == expected.name; });
+                                        [&](const Preset* actual) { return actual->name == expected.name && actual->type == expected.type; });
         REQUIRE(found != loaded.presets.end());
         CHECK((*found)->type == expected.type);
-        CHECK((*found)->is_project_embedded);
+        CHECK((*found)->is_project_embedded); // set by the importer for every embedded preset
         return **found;
     };
     CHECK_THAT(find_preset(print).config.opt_float("layer_height"), WithinAbs(0.31, 1e-6));
