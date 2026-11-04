@@ -2790,6 +2790,62 @@ std::string read_file(const std::string &path)
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 }
 
+bool load_bbs_with_backup(const std::string &path, Model &model, BbsLoaded &loaded,
+                          const std::filesystem::path &backup_root)
+{
+    model.set_backup_path(backup_root.string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates,
+                        &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version,
+                        nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+}
+
+void check_metadata_sidecar_traversal_is_confined(const std::string &extension, bool include_png)
+{
+    ScopedTemporaryDir fixture("orca_bbs_metadata_path");
+    const std::filesystem::path fixture_root(fixture.string());
+    const std::filesystem::path archive_path = fixture_root / "project.3mf";
+    const std::filesystem::path store_backup = fixture_root / "store-backup";
+    const std::filesystem::path import_backup = fixture_root / "import-backup";
+    REQUIRE(std::filesystem::create_directories(store_backup));
+    REQUIRE(std::filesystem::create_directories(import_backup / "Metadata"));
+
+    Model source = make_cube_model();
+    source.set_backup_path(store_backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    std::string safe_payload = "metadata-sidecar-contract";
+    if (include_png) {
+        ThumbnailData thumbnail;
+        thumbnail.set(2, 2);
+        std::fill(thumbnail.pixels.begin(), thumbnail.pixels.end(), 0x7f);
+        StoreParams extras;
+        extras.thumbnail_data = {&thumbnail};
+        store_bbs(archive_path.string(), source, config, plate, &extras);
+        REQUIRE(read_3mf_entry(archive_path.string(), safe_payload, "Metadata/plate_1.png"));
+    } else {
+        store_bbs(archive_path.string(), source, config, plate);
+    }
+
+    // The two parent components unwind Metadata and import-backup, landing inside this fixture.
+    const std::string escaped_name = "Metadata/../../escaped" + extension;
+    const std::string safe_name = "Metadata/safe" + extension;
+    REQUIRE(rewrite_3mf_entries(archive_path.string(), [](std::string &, std::string &) { return false; },
+        {{escaped_name, "traversal-probe"}, {safe_name, safe_payload}}));
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs_with_backup(archive_path.string(), loaded_model, loaded, import_backup));
+    REQUIRE(loaded_model.objects.size() == 1);
+
+    const std::filesystem::path escaped_path = fixture_root / ("escaped" + extension);
+    const std::filesystem::path safe_path = import_backup / "Metadata" / ("safe" + extension);
+    CHECK_FALSE(std::filesystem::exists(escaped_path));
+    REQUIRE(std::filesystem::exists(safe_path));
+    CHECK(read_file(safe_path.string()) == safe_payload);
+    CHECK_FALSE(std::filesystem::exists(import_backup / ("safe" + extension)));
+}
+
 bool replace_once(const std::string &path, const std::string &entry,
                   const std::string &from, const std::string &to)
 {
@@ -3152,6 +3208,16 @@ TEST_CASE("BBS 3MF ignores auxiliary path traversal entries", "[3MFArchiveVarian
     const std::filesystem::path escaped = std::filesystem::path(loaded_model.get_auxiliary_file_temp_path()).parent_path() / "escaped.txt";
     REQUIRE(escaped.parent_path() == std::filesystem::path(loaded.backup->string()));
     CHECK_FALSE(std::filesystem::exists(escaped));
+}
+
+TEST_CASE("BBS 3MF confines metadata G-code sidecars to the import backup", "[3MFArchiveVariants][Bbs3mfVariants][Metadata][Security]")
+{
+    check_metadata_sidecar_traversal_is_confined(".gcode", false);
+}
+
+TEST_CASE("BBS 3MF confines metadata thumbnail sidecars to the import backup", "[3MFArchiveVariants][Bbs3mfVariants][Metadata][Security]")
+{
+    check_metadata_sidecar_traversal_is_confined(".png", true);
 }
 
 TEST_CASE("BBS 3MF thumbnail accessor returns the stored plate PNG", "[3MFArchiveVariants][Bbs3mfVariants][Thumbnail]")
