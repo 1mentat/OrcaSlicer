@@ -33,6 +33,43 @@
       ],
       "reason": "PrintConfig.cpp registers a minimum with no maximum. The public SLAPrint lifecycle test applies minimum 0, representative 2.5 and default 1, checks CHANGED for changed metadata and UNCHANGED on immediate repetition, and retains completed print/object stages, exact model slices, layer levels, material volumes, layer timing order and total time. This covers metadata storage and pipeline independence at these values. No bottle price, mass, unit conversion or filename behavior is claimed."
     },
+    "material_density": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialArchive]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum of 0 with default 1 and no maximum. The public SLAPrint-to-SL1Archive export and import_sla_archive round-trip preserves 0, 1 and 1.25 in the imported DynamicPrintConfig. This claim is limited to archive persistence; no resin-mass, geometry, GUI, or slicing-consumer behavior is claimed."
+    },
+    "material_colour": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialArchive]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public SLAPrint-to-SL1Archive export and import_sla_archive round-trip preserves the registered default #29B2B2 and a representative valid hex color #1673C9 in the imported DynamicPrintConfig. This claim is limited to archive persistence; GUI color presentation and slicing effects are not claimed."
+    },
+    "material_type": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialArchive]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The open coString setting round-trips its registered default Tough and the custom value ToughFlex 93 through public SLAPrint export and import_sla_archive into DynamicPrintConfig. This claim covers archive persistence only; material filtering or slicing behavior is not claimed."
+    },
+    "material_vendor": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialArchive]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public SLAPrint-to-SL1Archive export and import_sla_archive round-trip preserves the default empty vendor and representative Unicode value Résine 雪 in the imported DynamicPrintConfig. This claim is limited to archive persistence; vendor UI, lookup, and slicing behavior are not claimed."
+    },
     "support_base_diameter": {
       "test": "tests/sla_print/sla_supptgen_tests.cpp",
       "tag": "[SLAPrint][SLASupportSettingsVariance]",

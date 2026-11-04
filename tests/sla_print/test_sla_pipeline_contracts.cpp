@@ -2806,6 +2806,10 @@ struct ExportProfile
     std::string printer_variant;
     std::string printer_profile;
     std::string print_profile;
+    double material_density = 1.0;
+    std::string material_colour = "#29B2B2";
+    std::string material_type = "Tough";
+    std::string material_vendor;
 };
 
 struct RasterRun
@@ -2813,6 +2817,7 @@ struct RasterRun
     std::vector<RasterLayerSummary> layers;
     std::vector<coord_t>             levels;
     std::string                      config_ini;
+    DynamicPrintConfig               imported_profile;
 };
 
 RasterRun run_raster_export(ExportProfile profile = {})
@@ -2824,6 +2829,10 @@ RasterRun run_raster_export(ExportProfile profile = {})
     config.set_key_value("printer_variant", new ConfigOptionString(profile.printer_variant));
     config.set_key_value("printer_settings_id", new ConfigOptionString(profile.printer_profile));
     config.set_key_value("sla_print_settings_id", new ConfigOptionString(profile.print_profile));
+    config.set_key_value("material_density", new ConfigOptionFloat(profile.material_density));
+    config.set_key_value("material_colour", new ConfigOptionString(profile.material_colour));
+    config.set_key_value("material_type", new ConfigOptionString(profile.material_type));
+    config.set_key_value("material_vendor", new ConfigOptionString(profile.material_vendor));
     config.set_key_value("layer_height", new ConfigOptionFloat(1.0));
     config.set_key_value("initial_layer_height", new ConfigOptionFloat(1.0));
     config.set_key_value("display_width", new ConfigOptionFloat(32.0));
@@ -2881,12 +2890,14 @@ RasterRun run_raster_export(ExportProfile profile = {})
     ScopedTemporaryFile output(".sl1");
     archive.export_print(output.string(), print, "raster-contract");
 
+    RasterRun result;
+    import_sla_archive(output.string(), result.imported_profile);
+
     ArchiveReader reader(output.string());
     REQUIRE(reader.is_open());
     REQUIRE(mz_zip_reader_locate_file(&reader.archive.arch, "config.ini", nullptr, 0) >= 0);
     REQUIRE(mz_zip_reader_locate_file(&reader.archive.arch, "prusaslicer.ini", nullptr, 0) >= 0);
 
-    RasterRun result;
     const auto config_ini = read_entry(reader, "config.ini");
     result.config_ini.assign(reinterpret_cast<const char *>(config_ini.data()), config_ini.size());
     result.levels.reserve(print.print_layers().size());
@@ -2952,6 +2963,40 @@ TEST_CASE("SLA SL1 export records material speed and profile identity values",
     CHECK(run.config_ini.find("printerVariant = " + profile.printer_variant + "\n") != std::string::npos);
     CHECK(run.config_ini.find("printerProfile = " + profile.printer_profile + "\n") != std::string::npos);
     CHECK(run.config_ini.find("printProfile = " + profile.print_profile + "\n") != std::string::npos);
+}
+
+TEST_CASE("SLA SL1 archive preserves material metadata through public config import",
+          "[SLAPrint][SLAPipeline][SLAMaterialArchive]")
+{
+    const auto check_imported_metadata = [](const sla_raster_active_contracts::RasterRun &run,
+                                            const sla_raster_active_contracts::ExportProfile &expected) {
+        const DynamicPrintConfig &imported = run.imported_profile;
+        REQUIRE(imported.option("material_density") != nullptr);
+        REQUIRE(imported.option("material_colour") != nullptr);
+        REQUIRE(imported.option("material_type") != nullptr);
+        REQUIRE(imported.option("material_vendor") != nullptr);
+        CHECK_THAT(imported.opt_float("material_density"),
+                   Catch::Matchers::WithinAbs(expected.material_density, 1e-12));
+        CHECK(imported.opt_string("material_colour") == expected.material_colour);
+        CHECK(imported.opt_string("material_type") == expected.material_type);
+        CHECK(imported.opt_string("material_vendor") == expected.material_vendor);
+    };
+
+    const sla_raster_active_contracts::ExportProfile defaults;
+    check_imported_metadata(sla_raster_active_contracts::run_raster_export(defaults), defaults);
+
+    auto density_minimum = defaults;
+    density_minimum.material_density = 0.0;
+    check_imported_metadata(sla_raster_active_contracts::run_raster_export(density_minimum),
+                            density_minimum);
+
+    auto representative = defaults;
+    representative.material_density = 1.25;
+    representative.material_colour = "#1673C9";
+    representative.material_type = "ToughFlex 93";
+    representative.material_vendor = "Résine 雪";
+    check_imported_metadata(sla_raster_active_contracts::run_raster_export(representative),
+                            representative);
 }
 
 
