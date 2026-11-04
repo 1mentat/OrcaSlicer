@@ -75,6 +75,7 @@
 #include <regex>
 #include <set>
 #include <vector>
+#include <tuple>
 #include <utility>
 
 namespace Catch {
@@ -8794,3 +8795,104 @@ TEST_CASE("BBS plate thumbnails downsample tall source blocks into the small pre
 }
 
 } // namespace bbs_plate_thumbnail_contracts
+
+namespace bbs_plate_relationship_contracts {
+using namespace Slic3r;
+
+namespace {
+
+using Relationship = std::tuple<std::string, std::string, std::string>; // target, type, id
+
+// Parses the package relationships; every element is one {target, type, id} entry.
+std::multiset<Relationship> read_relationships(const std::string& archive)
+{
+    std::string xml;
+    REQUIRE(read_3mf_entry(archive, xml, "_rels/.rels"));
+    std::istringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::multiset<Relationship> result;
+    for (const auto& child : tree.get_child("Relationships"))
+        if (child.first == "Relationship") {
+            const auto& attributes = child.second.get_child("<xmlattr>");
+            result.emplace(attributes.get<std::string>("Target"), attributes.get<std::string>("Type"), attributes.get<std::string>("Id"));
+        }
+    return result;
+}
+
+// Decodes a PNG entry and returns whether it is a size x size image whose every byte equals `value`.
+bool is_uniform_png(const std::string& archive, const std::string& entry, int size, unsigned char value)
+{
+    std::string bytes;
+    if (!read_3mf_entry(archive, bytes, entry))
+        return false;
+    png::ImageColorscale decoded;
+    if (!png::decode_colored_png(png::ReadBuf{bytes.data(), bytes.size()}, decoded))
+        return false;
+    return decoded.cols == size_t(size) && decoded.rows == size_t(size) && decoded.bytes_per_pixel == 4 &&
+           std::all_of(decoded.buf.begin(), decoded.buf.end(), [value](unsigned char byte) { return byte == value; });
+}
+
+} // namespace
+
+TEST_CASE("BBS package relationships target the generated thumbnails of the exported plate", "[3MF][Bbs3mfMetadata][BbsPlateRelationships]")
+{
+    // -1 exports no particular plate (the relationships name plate 1's files); 0 and 1 select a plate.
+    const int export_plate = GENERATE(-1, 0, 1);
+    CAPTURE(export_plate);
+    const std::string number = std::to_string(export_plate < 0 ? 1 : export_plate + 1);
+
+    ScopedTemporaryDir backup("orca_bbs_plate_relationships");
+    Model model;
+    model.set_backup_path(backup.string());
+    ScopeGuard detach([&model] { model.set_backup_path("detach"); });
+    model.add_object("first-plate-object", "first.stl", make_cube(4., 5., 6.))->add_instance();
+    model.add_object("second-plate-object", "second.stl", make_cube(6., 5., 4.))->add_instance();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate0;
+    PlateData plate1;
+    plate0.config                = config;
+    plate1.config                = config;
+    plate0.plate_index           = 0;
+    plate1.plate_index           = 1;
+    plate0.objects_and_instances = {{0, 0}};
+    plate1.objects_and_instances = {{1, 0}};
+
+    // Each plate has a uniform thumbnail of its own value, at the small preview size.
+    ThumbnailData thumbnail0;
+    ThumbnailData thumbnail1;
+    thumbnail0.set(PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT);
+    thumbnail1.set(PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT);
+    std::fill(thumbnail0.pixels.begin(), thumbnail0.pixels.end(), 0x11);
+    std::fill(thumbnail1.pixels.begin(), thumbnail1.pixels.end(), 0x22);
+
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params;
+    params.path             = archive.string();
+    params.model            = &model;
+    params.config           = &config;
+    params.plate_data_list  = {&plate0, &plate1};
+    params.thumbnail_data   = {&thumbnail0, &thumbnail1};
+    params.export_plate_idx = export_plate;
+    params.strategy         = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    // The standard thumbnail and the Bambu cover-middle relationship both name the full-size PNG; the
+    // Bambu cover-small relationship names the small preview. Each element is matched whole.
+    const std::multiset<Relationship> expected = {
+        {"/3D/3dmodel.model", "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel", "rel-1"},
+        {"/Metadata/plate_" + number + ".png", "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail", "rel-2"},
+        {"/Metadata/plate_" + number + ".png", "http://schemas.bambulab.com/package/2021/cover-thumbnail-middle", "rel-4"},
+        {"/Metadata/plate_" + number + "_small.png", "http://schemas.bambulab.com/package/2021/cover-thumbnail-small", "rel-5"},
+    };
+    CHECK(read_relationships(archive.string()) == expected);
+
+    // Both plates' thumbnails are in the archive, each with its own value.
+    CHECK(is_uniform_png(archive.string(), "Metadata/plate_1.png", PLATE_THUMBNAIL_SMALL_WIDTH, 0x11));
+    CHECK(is_uniform_png(archive.string(), "Metadata/plate_1_small.png", PLATE_THUMBNAIL_SMALL_WIDTH, 0x11));
+    CHECK(is_uniform_png(archive.string(), "Metadata/plate_2.png", PLATE_THUMBNAIL_SMALL_WIDTH, 0x22));
+    CHECK(is_uniform_png(archive.string(), "Metadata/plate_2_small.png", PLATE_THUMBNAIL_SMALL_WIDTH, 0x22));
+}
+
+} // namespace bbs_plate_relationship_contracts
