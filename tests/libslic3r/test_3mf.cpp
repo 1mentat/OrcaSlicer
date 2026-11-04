@@ -53,6 +53,9 @@
 #include <boost/property_tree/xml_parser.hpp>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <functional>
 
@@ -6593,3 +6596,237 @@ TEST_CASE("BBS 3MF drops a plate row without an instance id", "[3MF][Bbs3mfPlate
 }
 
 } // namespace bbs_plate_map_recovery_contracts
+
+namespace bbs_backup_contracts {
+using namespace Slic3r;
+using boost::property_tree::ptree;
+
+namespace {
+
+struct BackupCounts
+{
+    std::size_t worker_callbacks    = 0;
+    std::size_t ui_backup_callbacks = 0;
+};
+
+// The worker copies the callback before invoking it, so the state is shared-owned: a callback
+// that outlives a timed-out test stays valid until the worker destroys its copy.
+struct BackupEvents
+{
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::size_t worker_callbacks    = 0;
+    std::size_t ui_backup_callbacks = 0;
+
+    void notify(int type)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (type == 0)
+            ++worker_callbacks;
+        else if (type == 1)
+            ++ui_backup_callbacks;
+        condition.notify_all();
+    }
+
+    BackupCounts snapshot()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return {worker_callbacks, ui_backup_callbacks};
+    }
+};
+
+// A Backup task is a queue barrier: it runs after all earlier work and its type-1 callback is
+// emitted only once the UI task pump has processed that prefix. Pumping happens on the calling
+// thread, so no assertion runs on the worker. Queued object snapshots are delayed by the worker
+// for a few seconds, hence the generous timeout.
+bool flush_backup_barrier(const std::shared_ptr<BackupEvents>& events, std::chrono::milliseconds timeout = std::chrono::seconds(30))
+{
+    const std::size_t target_ui_callbacks = events->snapshot().ui_backup_callbacks + 1;
+    backup_soon();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const BackupCounts before_pump = events->snapshot();
+        run_backup_ui_tasks();
+        if (events->snapshot().ui_backup_callbacks >= target_ui_callbacks)
+            return true;
+        // A worker callback wakes the wait so the next iteration pumps the matching UI task.
+        std::unique_lock<std::mutex> lock(events->mutex);
+        events->condition.wait_until(lock, deadline, [&] {
+            return events->ui_backup_callbacks >= target_ui_callbacks || events->worker_callbacks > before_pump.worker_callbacks;
+        });
+    }
+    run_backup_ui_tasks();
+    return events->snapshot().ui_backup_callbacks >= target_ui_callbacks;
+}
+
+// Restores the process-wide backup manager settings and removes the model's backup folder.
+struct BackupCleanup
+{
+    Model& model;
+    std::shared_ptr<BackupEvents> events;
+
+    ~BackupCleanup()
+    {
+        remove_backup(model, true);
+        (void) flush_backup_barrier(events);
+        set_backup_callback({});
+        set_backup_interval(60);
+        model.set_backup_path("detach");
+    }
+};
+
+bool parse_xml_double(const ptree::value_type& node, const char* attribute, double& value)
+{
+    const auto raw = node.second.get_optional<std::string>(std::string("<xmlattr>.") + attribute);
+    if (!raw)
+        return false;
+    char* end = nullptr;
+    value     = std::strtod(raw->c_str(), &end);
+    return end != raw->c_str() && *end == '\0' && std::isfinite(value);
+}
+
+bool parse_xml_index(const ptree::value_type& node, const char* attribute, long& value)
+{
+    const auto raw = node.second.get_optional<std::string>(std::string("<xmlattr>.") + attribute);
+    if (!raw)
+        return false;
+    char* end = nullptr;
+    value     = std::strtol(raw->c_str(), &end, 10);
+    return end != raw->c_str() && *end == '\0';
+}
+
+} // namespace
+
+TEST_CASE("BBS backup snapshots need backup enabled, a volume and an instance", "[3MF][Bbs3mfBackup][Guard]")
+{
+    const std::string shape = GENERATE("complete", "backup disabled", "missing volume", "missing instance");
+    CAPTURE(shape);
+
+    // Declared before the model so the model is detached before the directory dies.
+    ScopedTemporaryDir backup("orca_bbs_backup_guard");
+    Model model;
+    model.set_backup_path(backup.string());
+    boost::filesystem::create_directories(backup.path() / "3D" / "Objects");
+
+    ModelObject* object = model.add_object();
+    object->name        = "guarded-backup";
+    object->input_file  = "guarded.stl";
+    if (shape != "missing volume")
+        object->add_volume(make_cube(4., 5., 6.));
+    if (shape != "missing instance")
+        object->add_instance();
+    if (shape != "backup disabled")
+        model.set_need_backup();
+
+    const auto events = std::make_shared<BackupEvents>();
+    set_backup_interval(0);
+    set_backup_callback([events](int type) { events->notify(type); });
+    BackupCleanup cleanup{model, events};
+
+    REQUIRE(flush_backup_barrier(events));
+    const int backup_id = model.get_object_backup_id(*object);
+    const boost::filesystem::path expected = backup.path() / "3D" / "Objects" / (object->name + "_" + std::to_string(backup_id) + ".model");
+
+    const BackupCounts before = events->snapshot();
+    save_object_mesh(*object);
+    REQUIRE(flush_backup_barrier(events));
+    CHECK(events->snapshot().ui_backup_callbacks == before.ui_backup_callbacks + 1);
+    CHECK(boost::filesystem::exists(expected) == (shape == "complete"));
+}
+
+TEST_CASE("BBS backup writes valid mesh geometry for an object snapshot", "[3MF][Bbs3mfBackup][Snapshot]")
+{
+    ScopedTemporaryDir backup("orca_bbs_backup_snapshot");
+    Model model;
+    model.set_backup_path(backup.string());
+    boost::filesystem::create_directories(backup.path() / "3D" / "Objects");
+
+    ModelObject* object = model.add_object("snapshot-part", "snapshot.stl", make_cube(10., 11., 12.));
+    object->add_instance();
+    model.set_need_backup();
+    const int backup_id     = model.get_object_backup_id(*object);
+    const std::string entry = "3D/Objects/" + object->name + "_" + std::to_string(backup_id) + ".model";
+    const boost::filesystem::path snapshot = backup.path() / entry;
+
+    const auto events = std::make_shared<BackupEvents>();
+    set_backup_interval(0);
+    set_backup_callback([events](int type) { events->notify(type); });
+    BackupCleanup cleanup{model, events};
+
+    REQUIRE(flush_backup_barrier(events));
+    save_object_mesh(*object);
+    REQUIRE(flush_backup_barrier(events));
+
+    REQUIRE(boost::filesystem::exists(snapshot));
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(snapshot.string(), model_xml, entry));
+    ptree tree;
+    std::stringstream model_stream(model_xml);
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(model_stream, tree));
+
+    const auto resources = tree.get_child_optional("model.resources");
+    REQUIRE(static_cast<bool>(resources));
+    std::size_t object_count = 0;
+    const ptree* mesh_object = nullptr;
+    for (const auto& node : *resources)
+        if (node.first == "object") {
+            ++object_count;
+            mesh_object = &node.second;
+        }
+    REQUIRE(object_count == 1);
+    // The backup writer numbers a part's first volume object (1 << 16) | backup id; Restore relies on it.
+    const auto object_id = mesh_object->get_optional<unsigned>("<xmlattr>.id");
+    REQUIRE(object_id);
+    CHECK(*object_id == ((1u << 16) | static_cast<unsigned>(backup_id)));
+
+    const auto mesh = mesh_object->get_child_optional("mesh");
+    REQUIRE(static_cast<bool>(mesh));
+    const auto vertices  = mesh->get_child_optional("vertices");
+    const auto triangles = mesh->get_child_optional("triangles");
+    REQUIRE(static_cast<bool>(vertices));
+    REQUIRE(static_cast<bool>(triangles));
+
+    std::size_t vertex_count = 0;
+    bool vertex_values_ok    = true;
+    Vec3d min_corner(std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(),
+                     std::numeric_limits<double>::infinity());
+    Vec3d max_corner = -min_corner;
+    for (const auto& node : *vertices) {
+        if (node.first != "vertex")
+            continue;
+        ++vertex_count;
+        Vec3d v;
+        if (!parse_xml_double(node, "x", v.x()) || !parse_xml_double(node, "y", v.y()) || !parse_xml_double(node, "z", v.z())) {
+            vertex_values_ok = false;
+            continue;
+        }
+        min_corner = min_corner.cwiseMin(v);
+        max_corner = max_corner.cwiseMax(v);
+    }
+    CHECK(vertex_count == 8);
+    CHECK(vertex_values_ok);
+    // add_volume centers the geometry, so the 10x11x12 cube is stored around the origin.
+    CHECK(min_corner.isApprox(Vec3d(-5., -5.5, -6.), 1e-9));
+    CHECK(max_corner.isApprox(Vec3d(5., 5.5, 6.), 1e-9));
+
+    std::size_t triangle_count = 0;
+    std::set<long> used_vertices;
+    bool triangle_indices_ok   = true;
+    for (const auto& node : *triangles) {
+        if (node.first != "triangle")
+            continue;
+        ++triangle_count;
+        for (const char* attribute : {"v1", "v2", "v3"}) {
+            long index = -1;
+            if (!parse_xml_index(node, attribute, index) || index < 0 || index >= static_cast<long>(vertex_count))
+                triangle_indices_ok = false;
+            else
+                used_vertices.insert(index);
+        }
+    }
+    CHECK(triangle_count == 12);
+    CHECK(triangle_indices_ok);
+    CHECK(used_vertices.size() == 8);
+}
+
+} // namespace bbs_backup_contracts
