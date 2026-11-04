@@ -8166,4 +8166,83 @@ TEST_CASE("G-code archive streams retain the encoded plate thumbnail bytes", "[3
     CHECK(std::string(bytes.begin(), bytes.end()) == png_signature);
 }
 
+
+// Two plates holding different instances of one object: the first has no explicit thumbnail and
+// falls back to the PNG named after its G-code file, the second names its own thumbnail. Each plate
+// must get its own entry (the second plate's derived-name PNG is a decoy that must be ignored).
+TEST_CASE("G-code archive streams keep explicit and fallback thumbnails on their own plates", "[3MF][3MFStream][BBSStreamThumbnailFallback]")
+{
+    const bool fallback_present = GENERATE(false, true);
+    CAPTURE(fallback_present);
+    ScopedTemporaryDir backup("orca_stream_two_plates");
+    ScopedTemporaryFile archive(".3mf");
+    Model source;
+    bbs_archive_contracts::make_model(source);
+    source.set_backup_path(backup.string());
+    ScopeGuard detach_source([&source] { source.set_backup_path("detach"); });
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData first;
+    PlateData second;
+    bbs_archive_contracts::make_plate(first, 0, {{0, 0}});
+    bbs_archive_contracts::make_plate(second, 1, {{0, 1}});
+    first.locked  = false;
+    second.locked = true;
+    PlateDataPtrs plates{&first, &second};
+    bbs_archive_contracts::store_model(archive.string(), source, config, plates);
+    REQUIRE(source.objects.front()->instances.size() == 2);
+
+    // The stream API retains the encoded entry bytes without decoding a PNG, so distinct bytes
+    // per entry identify which entry each plate received.
+    const std::string fallback_bytes = std::string("\x89PNG\r\n\x1a\n", 8) + "fallback-first";
+    const std::string explicit_bytes = std::string("\x89PNG\r\n\x1a\n", 8) + "explicit-second";
+    std::vector<std::pair<std::string, std::string>> extra{{"Metadata/explicit-second.png", explicit_bytes},
+                                                           {"Metadata/second.png", "unused-gcode-derived-decoy"}};
+    if (fallback_present)
+        extra.emplace_back("Metadata/first.png", fallback_bytes);
+    size_t plate_ends = 0;
+    REQUIRE(rewrite_3mf_entries(archive.string(), [&plate_ends](std::string& name, std::string& data) {
+        if (name != "Metadata/model_settings.config")
+            return false;
+        const size_t first_end = data.find("</plate>");
+        REQUIRE(first_end != std::string::npos);
+        const size_t second_end = data.find("</plate>", first_end + 8);
+        REQUIRE(second_end != std::string::npos);
+        REQUIRE(data.find("</plate>", second_end + 8) == std::string::npos);
+        // Insert the later one first so the earlier offset stays valid.
+        data.insert(second_end, "<metadata key=\"gcode_file\" value=\"Metadata/second.gcode\"/>"
+                                "<metadata key=\"thumbnail_file\" value=\"Metadata/explicit-second.png\"/>");
+        data.insert(first_end, "<metadata key=\"gcode_file\" value=\"Metadata/first.gcode\"/>");
+        plate_ends = 2;
+        return true;
+    }, extra));
+    REQUIRE(plate_ends == 2);
+
+    StreamLoad stream;
+    REQUIRE(stream.load(read_all(archive.string())));
+    REQUIRE(stream.loaded.plates.size() == 2);
+    const PlateData& first_loaded  = *stream.loaded.plates[0];
+    const PlateData& second_loaded = *stream.loaded.plates[1];
+    CHECK(first_loaded.plate_index == 0);
+    CHECK(second_loaded.plate_index == 1);
+    CHECK_FALSE(first_loaded.locked);
+    CHECK(second_loaded.locked);
+    CHECK(first_loaded.gcode_file == "Metadata/first.gcode");
+    CHECK(second_loaded.gcode_file == "Metadata/second.gcode");
+    // The first plate derives its thumbnail name from its G-code file; the second keeps its explicit one.
+    CHECK(first_loaded.thumbnail_file == "Metadata/first.png");
+    CHECK(second_loaded.thumbnail_file == "Metadata/explicit-second.png");
+    const auto bytes_of = [](const PlateData& plate) {
+        return std::string(plate.plate_thumbnail.pixels.begin(), plate.plate_thumbnail.pixels.end());
+    };
+    CHECK(bytes_of(first_loaded) == (fallback_present ? fallback_bytes : std::string()));
+    CHECK(bytes_of(second_loaded) == explicit_bytes);
+    // Both plates address the object's instances by their own index and source instance id.
+    REQUIRE(first_loaded.obj_inst_map.size() == 1);
+    REQUIRE(second_loaded.obj_inst_map.size() == 1);
+    CHECK(first_loaded.obj_inst_map.begin()->first == second_loaded.obj_inst_map.begin()->first);
+    CHECK(first_loaded.obj_inst_map.begin()->second.first == 0);
+    CHECK(second_loaded.obj_inst_map.begin()->second.first == 1);
+    CHECK(first_loaded.obj_inst_map.begin()->second.second == int(source.objects.front()->instances[0]->id().id));
+    CHECK(second_loaded.obj_inst_map.begin()->second.second == int(source.objects.front()->instances[1]->id().id));
+}
 } // namespace stream_archive_contracts
