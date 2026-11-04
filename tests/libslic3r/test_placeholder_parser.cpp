@@ -1459,3 +1459,21 @@ TEST_CASE("Placeholder parser assigns repeat() to a percent output vector or rep
     }
     CHECK((reported_error || outputs.option<ConfigOptionPercents>("percents")->values == std::vector<double>{ 5., 5. }));
 }
+
+TEST_CASE("Placeholder parser passes valid multibyte UTF-8 through free text unchanged",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    // The bytes of each sequence are spelled out by hand; adjacent literals keep a following letter from being
+    // read as part of a hex escape. Each sequence ends the text, so a wrong sequence length is observable.
+    const std::string two_byte("caf\xC3\xA9", 5);                          // U+00E9
+    const std::string three_byte("price \xE2\x82\xAC", 9);                 // U+20AC
+    const std::string four_byte("smile \xF0\x9F\x98\x80", 10);             // U+1F600
+    CHECK(parser.process(two_byte) == two_byte);
+    CHECK(parser.process(three_byte) == three_byte);
+    CHECK(parser.process(four_byte) == four_byte);
+
+    // A sequence followed by more text and by a macro block is kept as well.
+    const std::string mixed("a\xC3\xA9" "b {1 + 1}", 12);
+    CHECK(parser.process(mixed) == std::string("a\xC3\xA9" "b 2", 6));
+}
