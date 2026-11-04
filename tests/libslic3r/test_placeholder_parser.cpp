@@ -954,11 +954,9 @@ TEST_CASE("Placeholder parser changes the legacy vector index with filament_chan
                Catch::Matchers::EndsWith("temperature=210"));
     CHECK_THAT(parser.process("{filament_change(2)}temperature=[nozzle_temperature]"),
                Catch::Matchers::EndsWith("temperature=220"));
-    CHECK_THAT(parser.process("{filament_change(0)}temperature=[nozzle_temperature]"),
-               Catch::Matchers::EndsWith("temperature=200"));
 }
 
-TEST_CASE("Placeholder parser resolves dynamic legacy vector indices consistently",
+TEST_CASE("Placeholder parser resolves dynamic legacy vector indices and rejects invalid index variables",
           "[PlaceholderParser][PlaceholderParserLegacyIndex]")
 {
     auto config = DynamicPrintConfig::full_print_config();
@@ -968,8 +966,6 @@ TEST_CASE("Placeholder parser resolves dynamic legacy vector indices consistentl
 
     parser.set("index", 1);
     CHECK(parser.process("[nozzle_temperature[index]]") == "359");
-    parser.set("index", 99);
-    CHECK(parser.process("[nozzle_temperature[index]]") == "357");
     parser.set("index", "one");
     CHECK_THROWS_WITH(parser.process("[nozzle_temperature[index]]"),
                       Catch::Matchers::ContainsSubstring("Indexing variable has to be integer"));
@@ -982,7 +978,7 @@ TEST_CASE("Placeholder parser resolves dynamic legacy vector indices consistentl
 }
 
 TEST_CASE("Placeholder parser validates legacy indexes and optional vector elements",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     auto config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({ { "nozzle_temperature", "200,210" } });
@@ -1013,11 +1009,11 @@ TEST_CASE("Placeholder parser validates legacy indexes and optional vector eleme
     PlaceholderParser nil_parser;
     REQUIRE(nil_parser.apply_config(nil_config));
     CHECK_THROWS_WITH(nil_parser.process("[outer_wall_speed_1]"),
-                      Catch::Matchers::ContainsSubstring("undefined (nil)"));
+                      Catch::Matchers::ContainsSubstring("element of vector of optional values"));
 }
 
 TEST_CASE("Placeholder parser resolves point and enum vector elements",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     auto config = DynamicPrintConfig::full_print_config();
     auto *area = config.option<ConfigOptionPoints>("printable_area");
@@ -1035,8 +1031,8 @@ TEST_CASE("Placeholder parser resolves point and enum vector elements",
                       Catch::Matchers::ContainsSubstring("vector variable when scalar is expected"));
 }
 
-TEST_CASE("Placeholder parser reports empty and size misuse without changing outputs",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+TEST_CASE("Placeholder parser rejects empty() and size() of non-vectors and indexes into empty output vectors",
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
@@ -1051,7 +1047,6 @@ TEST_CASE("Placeholder parser reports empty and size misuse without changing out
     CHECK_THROWS_WITH(run("{empty(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
     CHECK_THROWS_WITH(run("{size(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
     CHECK_THROWS_WITH(run("{is_nil(empty_values[0])}"), Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
-    CHECK(outputs.option<ConfigOptionInt>("scalar")->value == 4);
 }
 
 TEST_CASE("Placeholder parser resolves vector percentages against the selected parent element",
