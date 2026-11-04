@@ -5952,3 +5952,202 @@ TEST_CASE("Split restore component graphs preserve geometry with and without BBS
 }
 
 } // namespace split_model_contracts
+
+namespace bbs_project_lifecycle_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+struct LoadedArchive
+{
+    // Declared first so it outlives Model, whose destructor cleans the backup directory.
+    ScopedTemporaryDir backup{"orca_bbs_lifecycle_load"};
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    bool is_bbl{false};
+    bool is_orca{false};
+    Semver version;
+
+    LoadedArchive() { model.set_backup_path(backup.string()); }
+
+    ~LoadedArchive()
+    {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    }
+
+    bool load(const std::string& path, BBLProject* project)
+    {
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+        return load_bbs_3mf(path.c_str(), &config, &substitutions, &model, &plates, &presets, &is_bbl, &is_orca, &version, nullptr,
+                            LoadStrategy::LoadModel | LoadStrategy::LoadConfig, project, 0);
+    }
+};
+
+void store_archive(const std::string& path, Model& model, DynamicPrintConfig& config, PlateDataPtrs plates,
+                   std::vector<Preset*> presets, BBLProject* project)
+{
+    StoreParams params;
+    params.path             = path;
+    params.model            = &model;
+    params.config           = &config;
+    params.plate_data_list  = std::move(plates);
+    params.project_presets  = std::move(presets);
+    params.project          = project;
+    params.strategy         = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+}
+
+Preset make_embedded_preset(Preset::Type type, const std::string& name, double value)
+{
+    Preset preset(type, name);
+    if (type == Preset::TYPE_PRINT) {
+        preset.config.set_key_value("print_settings_id", new ConfigOptionString(name));
+        preset.config.set_key_value("layer_height", new ConfigOptionFloat(value));
+    } else if (type == Preset::TYPE_FILAMENT) {
+        preset.config.set_key_value("filament_settings_id", new ConfigOptionStrings({name}));
+        preset.config.set_key_value("filament_diameter", new ConfigOptionFloats({value}));
+    } else if (type == Preset::TYPE_PRINTER) {
+        preset.config.set_key_value("printer_settings_id", new ConfigOptionString(name));
+        preset.config.set_key_value("nozzle_diameter", new ConfigOptionFloats({value}));
+    }
+    return preset;
+}
+
+} // namespace
+
+TEST_CASE("BBS project lifecycle preserves model identity, metadata, and two plates", "[3MF][Bbs3mfLifecycle][Project]")
+{
+    ScopedTemporaryDir backup{"orca_bbs_lifecycle_store"};
+    ScopedTemporaryFile archive{".3mf"};
+    Model source;
+    source.set_backup_path(backup.string());
+    source.design_info = std::make_shared<ModelDesignInfo>();
+    source.design_info->Designer = "fixture-designer";
+    source.model_info = std::make_shared<ModelInfo>();
+    source.model_info->model_name = "Lifecycle model";
+    source.model_info->origin = "project-import";
+    source.model_info->description = "metadata survives <xml> escaping";
+    source.model_info->metadata_items["lifecycle-key"] = "lifecycle-value";
+    // The exporter does not serialize Model::profile_info; the importer fills it from these metadata keys.
+    source.model_info->metadata_items["ProfileTitle"]       = "Profile title";
+    source.model_info->metadata_items["ProfileDescription"] = "Profile description";
+
+    ModelObject* first = source.add_object("first-part", "first.stl", make_cube(10., 11., 12.));
+    first->add_instance();
+    first->add_instance();
+    ModelObject* second = source.add_object("second-part", "second.stl", make_cube(6., 7., 8.));
+    second->add_instance();
+
+    PlateData plate0;
+    plate0.plate_index           = 0;
+    plate0.plate_name            = "first plate";
+    plate0.objects_and_instances = {{0, 0}, {1, 0}};
+    plate0.locked                = false;
+    PlateData plate1;
+    plate1.plate_index           = 1;
+    plate1.plate_name            = "second plate";
+    plate1.objects_and_instances = {{0, 1}, {1, 0}};
+    plate1.locked                = true;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.24));
+    BBLProject project("Lifecycle project");
+    project.project_model_id     = "model-42";
+    project.project_country_code = "US";
+
+    store_archive(archive.string(), source, config, {&plate0, &plate1}, {}, &project);
+
+    LoadedArchive loaded;
+    BBLProject loaded_project;
+    REQUIRE(loaded.load(archive.string(), &loaded_project));
+    REQUIRE(loaded.model.objects.size() == 2);
+    REQUIRE(loaded.plates.size() == 2);
+
+    REQUIRE(loaded.model.model_info != nullptr);
+    CHECK(loaded.model.model_info->model_name == "Lifecycle model");
+    CHECK(loaded.model.model_info->origin == "project-import");
+    CHECK(loaded.model.model_info->description == "metadata survives <xml> escaping");
+    CHECK(loaded.model.model_info->metadata_items.at("lifecycle-key") == "lifecycle-value");
+    REQUIRE(loaded.model.design_info != nullptr);
+    CHECK(loaded.model.design_info->Designer == "fixture-designer");
+    REQUIRE(loaded.model.profile_info != nullptr);
+    CHECK(loaded.model.profile_info->ProfileTile == "Profile title");
+    CHECK(loaded.model.profile_info->ProfileDescription == "Profile description");
+    CHECK(loaded.model.objects[0]->name == "first-part");
+    CHECK(loaded.model.objects[1]->name == "second-part");
+    CHECK(loaded.model.objects[0]->instances.size() == 2);
+    CHECK(loaded.model.objects[1]->instances.size() == 1);
+
+    CHECK(loaded_project.project_model_id == "model-42");
+    CHECK(loaded_project.project_country_code == "US");
+    CHECK(loaded.plates[0]->plate_name == "first plate");
+    CHECK(loaded.plates[1]->plate_name == "second plate");
+    CHECK_FALSE(loaded.plates[0]->locked);
+    CHECK(loaded.plates[1]->locked);
+    REQUIRE(loaded.plates[0]->obj_inst_map.size() == 2);
+    REQUIRE(loaded.plates[1]->obj_inst_map.size() == 2);
+    // The importer keeps plate rows as {object key -> {instance index, instance id}}. Identify the
+    // first object by the row that selects its second instance on the second plate.
+    const auto first_on_plate1 = std::find_if(loaded.plates[1]->obj_inst_map.begin(), loaded.plates[1]->obj_inst_map.end(),
+                                              [](const auto& entry) { return entry.second.first == 1; });
+    REQUIRE(first_on_plate1 != loaded.plates[1]->obj_inst_map.end());
+    const auto first_on_plate0 = loaded.plates[0]->obj_inst_map.find(first_on_plate1->first);
+    REQUIRE(first_on_plate0 != loaded.plates[0]->obj_inst_map.end());
+    CHECK(first_on_plate0->second.first == 0);
+    for (const auto& [key, row] : loaded.plates[0]->obj_inst_map)
+        if (key != first_on_plate1->first)
+            CHECK(row.first == 0);
+    for (const auto& [key, row] : loaded.plates[1]->obj_inst_map)
+        if (key != first_on_plate1->first)
+            CHECK(row.first == 0);
+    CHECK_THAT(loaded.config.opt_float("layer_height"), WithinAbs(0.24, 1e-6));
+}
+
+TEST_CASE("BBS project lifecycle preserves project identity beside embedded presets", "[3MF][Bbs3mfLifecycle][Presets]")
+{
+    ScopedTemporaryDir backup{"orca_bbs_lifecycle_preset_store"};
+    ScopedTemporaryFile archive{".3mf"};
+    Model source;
+    source.set_backup_path(backup.string());
+    ModelObject* object = source.add_object();
+    object->add_volume(make_cube(4., 5., 6.));
+    object->add_instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.plate_index           = 0;
+    plate.objects_and_instances = {{0, 0}};
+
+    BBLProject project("Preset project");
+    project.project_model_id     = "preset-model-7";
+    project.project_country_code = "DE";
+
+    Preset print    = make_embedded_preset(Preset::TYPE_PRINT, "embedded-print", 0.31);
+    Preset filament = make_embedded_preset(Preset::TYPE_FILAMENT, "embedded-filament", 1.82);
+    Preset printer  = make_embedded_preset(Preset::TYPE_PRINTER, "embedded-printer", 0.25);
+    store_archive(archive.string(), source, config, {&plate}, {&print, &filament, &printer}, &project);
+
+    LoadedArchive loaded;
+    BBLProject loaded_project;
+    REQUIRE(loaded.load(archive.string(), &loaded_project));
+    CHECK(loaded_project.project_model_id == "preset-model-7");
+    CHECK(loaded_project.project_country_code == "DE");
+    REQUIRE(loaded.presets.size() == 3);
+    const auto find_preset = [&](const Preset& expected) -> const Preset& {
+        const auto found = std::find_if(loaded.presets.begin(), loaded.presets.end(),
+                                        [&](const Preset* actual) { return actual->name == expected.name; });
+        REQUIRE(found != loaded.presets.end());
+        CHECK((*found)->type == expected.type);
+        CHECK((*found)->is_project_embedded);
+        return **found;
+    };
+    CHECK_THAT(find_preset(print).config.opt_float("layer_height"), WithinAbs(0.31, 1e-6));
+    CHECK_THAT(find_preset(filament).config.opt_float("filament_diameter", 0), WithinAbs(1.82, 1e-6));
+    CHECK_THAT(find_preset(printer).config.opt_float("nozzle_diameter", 0), WithinAbs(0.25, 1e-6));
+}
+
+} // namespace bbs_project_lifecycle_contracts
