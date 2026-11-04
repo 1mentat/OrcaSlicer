@@ -1478,13 +1478,16 @@ TEST_CASE("Placeholder parser passes valid multibyte UTF-8 through free text unc
     CHECK(parser.process(mixed) == std::string("a\xC3\xA9" "b 2", 6));
 }
 
-// Known bug: expr::floor and expr::ceil have no TYPE_EMPTY case (unlike round and the other unary functions), so
-// an operand that evaluates to the empty expression inside a branch that is not taken reaches the non-numeric error
-// instead of being skipped ("Cannot floor a non-numeric value." / "Cannot ceil a non-numeric value.").
 TEST_CASE("Placeholder parser skips floor and ceil in inactive branches",
-          "[PlaceholderParser][PlaceholderParserExpressions][!shouldfail]")
+          "[PlaceholderParser][PlaceholderParserExpressions]")
 {
     PlaceholderParser parser;
     CHECK(parser.process(R"({if false}{floor("x")}{endif}ready)") == "ready");
     CHECK(parser.process(R"({if false}{ceil("x")}{endif}ready)") == "ready");
+    // In a branch that is taken they still evaluate, and still reject non-numeric operands.
+    CHECK(parser.process("{if true}{floor(2.7)},{ceil(2.1)}{endif}") == "2,3");
+    CHECK_THROWS_WITH(parser.process(R"({if true}{floor("x")}{endif})"),
+                      Catch::Matchers::ContainsSubstring("Cannot floor a non-numeric value"));
+    CHECK_THROWS_WITH(parser.process(R"({if true}{ceil("x")}{endif})"),
+                      Catch::Matchers::ContainsSubstring("Cannot ceil a non-numeric value"));
 }
