@@ -7664,3 +7664,103 @@ TEST_CASE("BBS extracts each plate's persisted bounding-box JSON file on load", 
 }
 
 } // namespace bbs_plate_bbox_contracts
+
+namespace foreign_instance_split_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
+
+namespace {
+
+// Two build items reference the same 10 mm cube resource, the second shifted by (20, 7, 3).
+std::string two_build_item_cube_model()
+{
+    const std::string items =
+        "  <item objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/>\n"
+        "  <item objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 20 7 3\"/>\n";
+    return legacy_3mf_contracts::cube_model_xml("ThirdParty", items);
+}
+
+// Checks that two instances of one resource were split into two independent objects, one at the
+// origin and one shifted by (20, 7, 3), whatever order the importer lists them in.
+void check_split_into_two_objects(const Model& loaded)
+{
+    REQUIRE(loaded.objects.size() == 2);
+    std::vector<const ModelObject*> objects(loaded.objects.begin(), loaded.objects.end());
+    std::sort(objects.begin(), objects.end(), [](const ModelObject* a, const ModelObject* b) {
+        return a->bounding_box_exact().min.x() < b->bounding_box_exact().min.x();
+    });
+    const Vec3d expected_min[2] = {Vec3d(0., 0., 0.), Vec3d(20., 7., 3.)};
+    for (size_t i = 0; i < 2; ++i) {
+        INFO("object " << i);
+        const ModelObject* object = objects[i];
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(object->volumes.size() == 1);
+        CHECK(object->instances.front()->get_object() == object);
+        CHECK_THAT(object->raw_mesh().volume(), WithinRel(1000., 1e-6));
+        const BoundingBoxf3 box = object->bounding_box_exact();
+        CHECK(box.min.isApprox(expected_min[i], 1e-5));
+        CHECK((box.max - box.min).isApprox(Vec3d(10., 10., 10.), 1e-5));
+    }
+}
+
+} // namespace
+
+TEST_CASE("Legacy importer splits a handcrafted multi-build-item resource", "[3MF][Legacy3MFInstanceSplit]")
+{
+    // No slic3rpe:Version3mf metadata is intentional: this is the third-party path.
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(legacy_3mf_contracts::write_archive(archive.string(), two_build_item_cube_model()));
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(legacy_3mf_contracts::load_generic(archive.string(), loaded, config));
+    check_split_into_two_objects(loaded);
+}
+
+TEST_CASE("BBS importer splits a handcrafted foreign multi-build-item resource", "[3MF][Bbs3mfForeignInstanceSplit]")
+{
+    const std::string relationships = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>)XML";
+    const std::string model = two_build_item_cube_model();
+    ScopedTemporaryFile archive(".3mf");
+    {
+        Zipper zip(archive.string());
+        zip.add_entry("_rels/.rels", relationships.data(), relationships.size());
+        zip.add_entry("3D/3dmodel.model", model.data(), model.size());
+        zip.finalize();
+    }
+    Model loaded;
+    bbs_archive_contracts::LoadedProject state;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded, state));
+    CHECK_FALSE(state.is_bbl);
+    check_split_into_two_objects(loaded);
+}
+
+TEST_CASE("BBS importer loads a component-aliased second build item as an independent object", "[3MF][Bbs3mfForeignMultiInstance]")
+{
+    // store_3mf writes the second instance as its own object whose only component is the first
+    // object's mesh, and one build item per object; only its Application marker is
+    // rewritten so the BBS importer takes the third-party path. Unlike the handcrafted cases above, no
+    // resource is shared by two build items, so the importer's split-by-instance step is not needed here.
+    Model source;
+    ModelObject* object = source.add_object();
+    object->name        = "foreign-cube";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_instance();
+    object->add_instance()->set_offset(Vec3d(20., 7., 3.));
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    REQUIRE(replace_in_3mf_entry(archive.string(), "3dmodel.model", "OrcaSlicer-", "ThirdParty-"));
+
+    Model loaded;
+    bbs_archive_contracts::LoadedProject state;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded, state));
+    CHECK_FALSE(state.is_bbl);
+    CHECK_FALSE(state.is_orca);
+    check_split_into_two_objects(loaded);
+}
+
+} // namespace foreign_instance_split_contracts
