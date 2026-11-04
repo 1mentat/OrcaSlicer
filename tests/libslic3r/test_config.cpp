@@ -5662,11 +5662,7 @@ TEST_CASE("ConfigBase get_abs_value_at reads the requested slot of a float vecto
     CHECK_THROWS_AS(config.get_abs_value_at("layer_height", 0), ConfigurationError);
 }
 
-// Hidden: travel_speed and initial_layer_travel_speed are nullable vectors, but get_abs_value_at
-// casts them to the non-nullable ConfigOptionFloats / ConfigOptionFloatsOrPercents (an invalid
-// cast, undefined behavior). The values come out right in practice, so this passes today by
-// accident of the object layout; there is no non-nullable percent vector option to test with.
-TEST_CASE("ConfigBase get_abs_value_at resolves nullable travel speed slots against the matching base slot", "[Config][ConfigGetter][.]")
+TEST_CASE("ConfigBase get_abs_value_at resolves nullable travel speed slots against the matching base slot", "[Config][ConfigGetter]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     auto *travel_speed = config.option<ConfigOptionFloatsNullable>("travel_speed");
@@ -5681,7 +5677,6 @@ TEST_CASE("ConfigBase get_abs_value_at resolves nullable travel speed slots agai
         FloatOrPercent(12., false)
     };
 
-    // Known bug: the nullable options are cast to their non-nullable template instantiations.
     CHECK_THAT(config.get_abs_value_at("travel_speed", 1), Catch::Matchers::WithinAbs(60., 1e-12));
     CHECK_THAT(config.get_abs_value_at("initial_layer_travel_speed", 0), Catch::Matchers::WithinAbs(20., 1e-12));
     CHECK_THAT(config.get_abs_value_at("initial_layer_travel_speed", 1), Catch::Matchers::WithinAbs(45., 1e-12));
