@@ -828,3 +828,77 @@ TEST_CASE("Placeholder parser protects local and global variable scopes",
     CHECK(context.global_config->option("scoped") == nullptr);
 }
 
+TEST_CASE("Placeholder parser preserves UTF-8 literals and validates escapes",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    std::string utf8 = "{\"caf";
+    utf8.append("\xC3\xA9", 2);
+    utf8 += " ";
+    utf8.append("\xF0\x9F\x98\x80", 4);
+    utf8 += "\"}";
+    std::string expected = "caf";
+    expected.append("\xC3\xA9", 2);
+    expected += " ";
+    expected.append("\xF0\x9F\x98\x80", 4);
+    CHECK(parser.process(utf8) == expected);
+    CHECK(parser.process(R"({"line\nnext"})") == "line\nnext");
+
+    CHECK_THROWS_WITH(parser.process(R"({"bad\q"})"),
+                      Catch::Matchers::ContainsSubstring("Invalid escape sequence"));
+    std::string invalid = "{\"";
+    invalid.append("\xE2\x28\xA1", 3);
+    invalid += "\"}";
+    CHECK_THROWS_WITH(parser.process(invalid),
+                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
+
+TEST_CASE("Placeholder parser rejects non-ASCII code and reports malformed macro lines",
+          "[PlaceholderParser][PlaceholderParserErrors]")
+{
+    PlaceholderParser parser;
+    std::string non_ascii_code = "{";
+    non_ascii_code.append("\xC3\xA9", 2);
+    non_ascii_code += "}";
+    CHECK_THROWS_WITH(parser.process(non_ascii_code),
+                      Catch::Matchers::ContainsSubstring("Non-ASCII7 characters"));
+    CHECK_THROWS_WITH(parser.process("prefix\n{if true}\nvalue"),
+                      Catch::Matchers::ContainsSubstring("Parsing error at line"));
+}
+
+TEST_CASE("Placeholder parser unescapes carriage returns, quotes, and backslashes",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    const std::string actual = parser.process(R"({"quote:\" slash:\\ line:\n carriage:\r"})");
+    CHECK(actual == std::string("quote:\" slash:\\ line:\n carriage:\r"));
+}
+
+TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuation bytes",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    std::string truncated = "truncated ";
+    truncated.append("\xE2\x82", 2);
+    CHECK_THROWS_WITH(parser.process(truncated),
+                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+
+    std::string continuation = "{\"";
+    continuation.push_back(static_cast<char>(0x80));
+    continuation += "\"}";
+    CHECK_THROWS_WITH(parser.process(continuation),
+                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
+
+// Known bug: utf8_char_parser only checks continuation bytes before the last one, so a truncated-by-substitution
+// sequence such as E2 82 28 is accepted; fixed by the follow-up fix PR.
+TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is not a continuation",
+          "[PlaceholderParser][PlaceholderParserUnicode][!shouldfail]")
+{
+    PlaceholderParser parser;
+    // Euro sign E2 82 AC with the final continuation byte replaced by ASCII '('.
+    std::string literal = "{\"";
+    literal.append("\xE2\x82\x28", 3);
+    literal += "\"}";
+    CHECK_THROWS_WITH(parser.process(literal), Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
