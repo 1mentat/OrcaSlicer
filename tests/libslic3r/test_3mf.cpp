@@ -7447,3 +7447,65 @@ TEST_CASE("BBS text metadata defaults unknown alignment names to center", "[.][3
 }
 
 } // namespace bbs_text_alignment_compat_contracts
+
+namespace bbs_object_type_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
+
+namespace {
+
+// Writes a minimal third-party style package (no slicer metadata) whose only object is the
+// 10 mm cube from the legacy fixtures, with the object's type attribute replaced.
+void write_cube_archive_with_type(const std::string& path, const std::string& type)
+{
+    const std::string relationships = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>)XML";
+    std::string model = legacy_3mf_contracts::cube_model_xml("ThirdParty");
+    const std::string original = "type=\"model\"";
+    const size_t at            = model.find(original);
+    REQUIRE(at != std::string::npos);
+    model.replace(at, original.size(), "type=\"" + type + "\"");
+
+    Zipper archive(path);
+    archive.add_entry("_rels/.rels", relationships.data(), relationships.size());
+    archive.add_entry("3D/3dmodel.model", model.data(), model.size());
+    archive.finalize();
+}
+
+} // namespace
+
+TEST_CASE("BBS accepts a valid 3MF object with the model or other object type", "[3MF][Bbs3mfImportMetadata][ObjectType]")
+{
+    const std::string type = GENERATE(std::string("model"), std::string("other"));
+    CAPTURE(type);
+    ScopedTemporaryFile archive(".3mf");
+    write_cube_archive_with_type(archive.string(), type);
+
+    bbs_archive_contracts::LoadedProject state;
+    Model loaded;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded, state));
+    CHECK_FALSE(state.is_bbl);
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.objects.front()->volumes.size() == 1);
+    CHECK(loaded.objects.front()->name == "Cube");
+    CHECK_THAT(loaded.objects.front()->raw_mesh().volume(), WithinRel(1000., 1e-6));
+    const Vec3d size = loaded.objects.front()->raw_mesh().bounding_box().size();
+    CHECK(size.isApprox(Vec3d(10., 10., 10.), 1e-5));
+}
+
+TEST_CASE("BBS import rejects a package whose only object has a non-model object type", "[3MF][Bbs3mfImportMetadata][ObjectType]")
+{
+    const std::string type = GENERATE(std::string("support"), std::string("solidsupport"), std::string("surface"));
+    CAPTURE(type);
+    ScopedTemporaryFile archive(".3mf");
+    write_cube_archive_with_type(archive.string(), type);
+
+    bbs_archive_contracts::LoadedProject state;
+    Model loaded;
+    CHECK_FALSE(bbs_archive_contracts::load_model(archive.string(), loaded, state));
+}
+
+} // namespace bbs_object_type_contracts
