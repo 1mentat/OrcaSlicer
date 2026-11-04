@@ -9069,7 +9069,10 @@ TEST_CASE("BBS export skips a calibration thumbnail it does not store", "[3MF][B
                                              SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipStatic));
     for (const std::string& path : {with_invalid.string(), with_valid_skip_static.string()}) {
         const std::vector<std::string> names = entry_names(path);
-        // Positive control: a real 3MF with its model part, and no image entry of any kind.
+        // Positive control: a real 3MF with its model part. The image check below is a forward guard:
+        // today the writer is a stub that never writes anything and no other thumbnails are passed, so it
+        // only starts to discriminate once calibration thumbnails are implemented. What this case pins
+        // today is that the stub is not invoked (the export succeeds above).
         CHECK(std::count(names.begin(), names.end(), "3D/3dmodel.model") == 1);
         CHECK(std::none_of(names.begin(), names.end(), [](const std::string& name) { return boost::algorithm::iends_with(name, ".png"); }));
     }
