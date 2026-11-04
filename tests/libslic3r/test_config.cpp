@@ -5547,3 +5547,49 @@ TEST_CASE("ConfigBase setenv_ exports each option as a SLIC3R_ variable with its
 }
 
 } // namespace config_environment_contracts
+
+namespace config_static_definition_contracts {
+
+TEST_CASE("Static print configs expose the options of their own class only", "[Config][ConfigContracts]")
+{
+    // layer_height is declared by PrintObjectConfig, skirt_distance by PrintConfig.
+    const PrintObjectConfig object_config;
+    CHECK(object_config.has("layer_height"));
+    CHECK_FALSE(object_config.has("skirt_distance"));
+    CHECK_FALSE(object_config.has("not_a_print_object_option"));
+
+    const PrintConfig print_config;
+    CHECK(print_config.has("skirt_distance"));
+    CHECK_FALSE(print_config.has("layer_height"));
+
+    const auto keys = object_config.keys();
+    CHECK(std::find(keys.begin(), keys.end(), "layer_height") != keys.end());
+    CHECK(std::find(keys.begin(), keys.end(), "skirt_distance") == keys.end());
+}
+
+TEST_CASE("Definition metadata of a static option matches its default-constructed value", "[Config][ConfigContracts]")
+{
+    const PrintObjectConfig object_config;
+    const ConfigDef *def = object_config.def();
+    REQUIRE(def != nullptr);
+
+    const ConfigOptionDef *layer_height = def->get("layer_height");
+    const ConfigOption *layer_height_value = object_config.option("layer_height");
+    REQUIRE(layer_height != nullptr);
+    REQUIRE(static_cast<bool>(layer_height->default_value));
+    REQUIRE(layer_height_value != nullptr);
+    CHECK(layer_height->type == coFloat);
+    CHECK(layer_height->default_value->serialize() == "0.2");
+    CHECK(layer_height_value->serialize() == "0.2");
+
+    const ConfigOptionDef *seam = def->get("seam_position");
+    const ConfigOption *seam_value = object_config.option("seam_position");
+    REQUIRE(seam != nullptr);
+    REQUIRE(static_cast<bool>(seam->default_value));
+    REQUIRE(seam_value != nullptr);
+    CHECK(seam->type == coEnum);
+    CHECK(seam->default_value->serialize() == "aligned");
+    CHECK(seam_value->serialize() == "aligned");
+}
+
+} // namespace config_static_definition_contracts
