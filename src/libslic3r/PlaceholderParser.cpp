@@ -429,6 +429,9 @@ namespace client
         expr floor(const Iterator start_pos)const
         {
             switch (this->type()) {
+            case TYPE_EMPTY:
+                // Inside an if / else block to be skipped.
+                return expr();
             case TYPE_INT:
                 return expr(this->i(), start_pos, this->it_range.end());
             case TYPE_DOUBLE:
@@ -444,6 +447,9 @@ namespace client
         expr ceil(const Iterator start_pos)const
         {
             switch (this->type()) {
+            case TYPE_EMPTY:
+                // Inside an if / else block to be skipped.
+                return expr();
             case TYPE_INT:
                 return expr(this->i(), start_pos, this->it_range.end());
             case TYPE_DOUBLE:
