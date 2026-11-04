@@ -5489,7 +5489,9 @@ namespace config_environment_contracts {
 
 namespace {
 
-// Restores one environment variable to its prior state (set to a value, or unset).
+// Restores one named environment variable to its prior state (set to a value, or unset).
+// Only the variables it is constructed for are restored, so it is not enough for a test that
+// exports a whole print config.
 struct EnvironmentRestore {
     std::string name;
     std::string old_value;
@@ -5514,7 +5516,7 @@ struct EnvironmentRestore {
 
 } // namespace
 
-TEST_CASE("ConfigBase setenv_ exports every option as an upper-case SLIC3R_ variable with its serialized value", "[Config][ConfigContracts]")
+TEST_CASE("ConfigBase setenv_ exports each option as a SLIC3R_ variable with its serialized value", "[Config][ConfigContracts]")
 {
     DynamicConfig config;
     config.set_key_value("layer_height", new ConfigOptionFloat(0.275));
@@ -5527,13 +5529,15 @@ TEST_CASE("ConfigBase setenv_ exports every option as an upper-case SLIC3R_ vari
         {"SLIC3R_NOTES", "plain text"},
     };
     std::vector<std::unique_ptr<EnvironmentRestore>> restores;
-    for (const auto &[name, value] : expected) {
-        restores.push_back(std::make_unique<EnvironmentRestore>(name));
-        REQUIRE(boost::nowide::unsetenv(name) == 0);
+    for (const auto &entry : expected) {
+        restores.push_back(std::make_unique<EnvironmentRestore>(entry.first));
+        REQUIRE(boost::nowide::unsetenv(entry.first) == 0);
     }
 
     config.setenv_();
 
+    // The names are looked up in upper case. getenv is case-insensitive on Windows, so the
+    // capitalisation itself is only enforced where environment names are case-sensitive.
     for (const auto &[name, value] : expected) {
         CAPTURE(name);
         const char *actual = boost::nowide::getenv(name);
