@@ -3883,6 +3883,7 @@ TEST_CASE("Scalar apply_override reports whether the value differs and leaves th
     CHECK(point_base.apply_override(&replacement_point, default_index));
 
     ConfigOptionFloatOrPercent absolute(12.5, false);
+    // Same number, different percent flag: still a different option.
     const ConfigOptionFloatOrPercent same_value_percentage(12.5, true);
     ConfigOption &absolute_base = absolute;
     CHECK(absolute_base.apply_override(&same_value_percentage, default_index));
@@ -3948,9 +3949,11 @@ TEST_CASE("Derived scalar options preserve subtype state through override", "[Co
     ConfigOption &generic_base = generic;
     generic_base.apply_override(&specialized, default_index);
 
+    // An independent source, so this row does not depend on the one above.
+    const ConfigOptionEnumGeneric generic_source(&keys, int(gcfRepRapFirmware));
     ConfigOptionEnum<GCodeFlavor> specialized_target(gcfMarlinLegacy);
     ConfigOption &specialized_base = specialized_target;
-    specialized_base.apply_override(&generic, default_index);
+    specialized_base.apply_override(&generic_source, default_index);
 
     // Known bug: the base ConfigOption::apply_override reports a change without copying any value
     // or subtype state; fixed by the follow-up fix PR
