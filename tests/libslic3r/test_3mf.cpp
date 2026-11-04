@@ -7509,3 +7509,158 @@ TEST_CASE("BBS import rejects a package whose only object has a non-model object
 }
 
 } // namespace bbs_object_type_contracts
+
+namespace bbs_plate_bbox_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using json = nlohmann::json;
+
+namespace {
+
+PlateBBoxData make_bbox(const std::vector<double>& all, const std::vector<int>& filaments, const std::vector<std::string>& colors,
+                        bool sequential, int first_extruder, float nozzle, int version, const std::string& bed_type, float first_layer_time,
+                        const BBoxData& object)
+{
+    PlateBBoxData bbox;
+    bbox.bbox_all         = all;
+    bbox.filament_ids     = filaments;
+    bbox.filament_colors  = colors;
+    bbox.is_seq_print     = sequential;
+    bbox.first_extruder   = first_extruder;
+    bbox.nozzle_diameter  = nozzle;
+    bbox.version          = version;
+    bbox.bed_type         = bed_type;
+    bbox.first_layer_time = first_layer_time;
+    bbox.bbox_objs.push_back(object);
+    return bbox;
+}
+
+json read_json(const std::string& path)
+{
+    boost::nowide::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    return json::parse(input);
+}
+
+// Compares two JSON values field by field; numbers compare within a tolerance (floats go through double).
+void check_same_json(const json& actual, const json& expected, const std::string& where)
+{
+    INFO(where);
+    if (expected.is_number()) {
+        REQUIRE(actual.is_number());
+        CHECK_THAT(actual.get<double>(), WithinAbs(expected.get<double>(), 1e-5));
+    } else if (expected.is_array()) {
+        REQUIRE(actual.is_array());
+        REQUIRE(actual.size() == expected.size());
+        for (size_t i = 0; i < expected.size(); ++i)
+            check_same_json(actual.at(i), expected.at(i), where + "[" + std::to_string(i) + "]");
+    } else if (expected.is_object()) {
+        REQUIRE(actual.is_object());
+        CHECK(actual.size() == expected.size());
+        for (const auto& [key, value] : expected.items()) {
+            REQUIRE(actual.contains(key));
+            check_same_json(actual.at(key), value, where + "." + key);
+        }
+    } else {
+        CHECK(actual == expected);
+    }
+}
+
+} // namespace
+
+TEST_CASE("BBS extracts each plate's persisted bounding-box JSON file on load", "[3MF][Bbs3mfImportMetadata][PlateBBox]")
+{
+    // Two plates with different data in every field, so a plate loading the other's file fails.
+    PlateBBoxData bboxes[2] = {
+        make_bbox({1, 2, 31, 42}, {0, 2}, {"#110111", "#220222"}, false, 0, 0.4f, 1, "Textured PEI Plate", 8.5f,
+                  {7, {3, 4, 21, 22}, 120.f, .2f, "bbox-cube-a"}),
+        make_bbox({101, 102, 131, 142}, {1, 3}, {"#111111", "#221222"}, true, 1, 0.6f, 2, "Cool Plate", 9.5f,
+                  {9, {103, 104, 121, 122}, 220.f, .24f, "bbox-cube-b"}),
+    };
+    // Written by hand, independently of PlateBBoxData::to_json, so a field dropped by the serializer is caught.
+    const json expected[2] = {
+        {{"bbox_all", {1, 2, 31, 42}},
+         {"filament_ids", {0, 2}},
+         {"filament_colors", {"#110111", "#220222"}},
+         {"is_seq_print", false},
+         {"first_extruder", 0},
+         {"nozzle_diameter", 0.4},
+         {"version", 1},
+         {"bed_type", "Textured PEI Plate"},
+         {"first_layer_time", 8.5},
+         {"bbox_objects", {{{"id", 7}, {"bbox", {3, 4, 21, 22}}, {"area", 120}, {"layer_height", 0.2}, {"name", "bbox-cube-a"}}}}},
+        {{"bbox_all", {101, 102, 131, 142}},
+         {"filament_ids", {1, 3}},
+         {"filament_colors", {"#111111", "#221222"}},
+         {"is_seq_print", true},
+         {"first_extruder", 1},
+         {"nozzle_diameter", 0.6},
+         {"version", 2},
+         {"bed_type", "Cool Plate"},
+         {"first_layer_time", 9.5},
+         {"bbox_objects", {{{"id", 9}, {"bbox", {103, 104, 121, 122}}, {"area", 220}, {"layer_height", 0.24}, {"name", "bbox-cube-b"}}}}},
+    };
+
+    ScopedTemporaryDir store_backup("orca_bbs_plate_bbox_store");
+    Model source;
+    source.set_backup_path(store_backup.string());
+    ScopeGuard detach_source([&source] { source.set_backup_path("detach"); });
+    source.add_object("bbox-a", "a.stl", make_cube(4., 5., 6.))->add_instance();
+    source.add_object("bbox-b", "b.stl", make_cube(6., 5., 4.))->add_instance();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // The exporter only needs pattern_bbox_file to be non-empty: it records the generated
+    // Metadata/plate_<n>.json entry, never this source value.
+    PlateData plate0;
+    plate0.plate_index           = 0;
+    plate0.objects_and_instances = {{0, 0}};
+    plate0.pattern_bbox_file     = "source-0.json";
+    PlateData plate1;
+    plate1.plate_index           = 1;
+    plate1.objects_and_instances = {{1, 0}};
+    plate1.pattern_bbox_file     = "source-1.json";
+
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &source;
+    params.config          = &config;
+    params.plate_data_list = {&plate0, &plate1};
+    params.id_bboxes       = {&bboxes[0], &bboxes[1]};
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    // The importer extracts Metadata/* payloads below the backup root and fails if that folder is
+    // missing, so the test creates it first.
+    ScopedTemporaryDir load_backup("orca_bbs_plate_bbox_load");
+    boost::filesystem::create_directories(load_backup.path() / "Metadata");
+    Model loaded_model;
+    loaded_model.set_backup_path(load_backup.string());
+    ScopeGuard detach_loaded([&loaded_model] { loaded_model.set_backup_path("detach"); });
+    bbs_archive_contracts::LoadedProject loaded;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    REQUIRE(load_bbs_3mf(archive.string().c_str(), &loaded.config, &substitutions, &loaded_model, &loaded.plates, &loaded.presets,
+                         &loaded.is_bbl, &loaded.is_orca, &loaded.version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig,
+                         nullptr, 0));
+    REQUIRE(loaded.plates.size() == 2);
+
+    for (size_t i = 0; i < 2; ++i) {
+        INFO("plate " << i);
+        const PlateData& plate = *loaded.plates[i];
+        const boost::filesystem::path expected_path = load_backup.path() / "Metadata" / ("plate_" + std::to_string(i + 1) + ".json");
+        REQUIRE_FALSE(plate.pattern_bbox_file.empty());
+        CHECK(boost::filesystem::path(plate.pattern_bbox_file).lexically_normal().generic_string() ==
+              expected_path.lexically_normal().generic_string());
+        REQUIRE(boost::filesystem::exists(plate.pattern_bbox_file));
+
+        const json actual = read_json(plate.pattern_bbox_file);
+        check_same_json(actual, expected[i], "plate " + std::to_string(i));
+        // Secondary: the file is exactly what the exporter's own serializer produces for this plate's data.
+        json serialized;
+        bboxes[i].to_json(serialized);
+        CHECK(actual == serialized);
+    }
+    CHECK(loaded.plates[0]->pattern_bbox_file != loaded.plates[1]->pattern_bbox_file);
+}
+
+} // namespace bbs_plate_bbox_contracts
