@@ -5082,4 +5082,77 @@ TEST_CASE("A static grouping supplies plate nozzle metadata but is not kept as t
     CHECK_FALSE(plate.nozzle_group_result.has_value());
 }
 
+TEST_CASE("Plate metadata is untouched when no processor result is supplied", "[3MF][PlateMetadata]")
+{
+    PlateData plate;
+    FilamentInfo first;
+    first.id = 7;
+    first.type = "PETG";
+    first.color = "#102030";
+    first.used_m = 1.5f;
+    first.used_g = 2.f;
+    first.group_id = {4, 1};
+    first.nozzle_diameter = .6;
+    first.nozzle_volume_type = "High Flow";
+    first.used_for_support = true;
+    FilamentInfo second;
+    second.id = 3;
+    second.used_g = 9.f;
+    plate.slice_filaments_info = {first, second};
+    plate.warnings = {{2, "existing", "E1", {"parameter", "other"}}, {0, "note", "N2", {}}};
+    auto grouping = MultiNozzleUtils::LayeredNozzleGroupResult::create(std::vector<int>{0}, std::vector<MultiNozzleUtils::NozzleInfo>{{"0.6", nvtStandard, 0, 0}},
+                                                                       std::vector<unsigned int>{0});
+    REQUIRE(grouping.has_value());
+    plate.nozzle_group_result = *grouping;
+
+    plate.parse_filament_info(nullptr);
+
+    REQUIRE(plate.slice_filaments_info.size() == 2);
+    const FilamentInfo &kept = filament_info(plate, 7);
+    CHECK(kept.type == "PETG");
+    CHECK(kept.color == "#102030");
+    CHECK_THAT(kept.used_m, Catch::Matchers::WithinAbs(1.5, 0.));
+    CHECK_THAT(kept.used_g, Catch::Matchers::WithinAbs(2., 0.));
+    CHECK(kept.group_id == std::vector<int>{4, 1});
+    CHECK_THAT(kept.nozzle_diameter, Catch::Matchers::WithinAbs(.6, 0.));
+    CHECK(kept.nozzle_volume_type == "High Flow");
+    CHECK(kept.used_for_support);
+    CHECK_FALSE(kept.used_for_object);
+    CHECK_THAT(filament_info(plate, 3).used_g, Catch::Matchers::WithinAbs(9., 0.));
+    REQUIRE(plate.warnings.size() == 2);
+    CHECK(plate.warnings[0].level == 2);
+    CHECK(plate.warnings[0].msg == "existing");
+    CHECK(plate.warnings[0].error_code == "E1");
+    CHECK(plate.warnings[0].params == std::vector<std::string>{"parameter", "other"});
+    CHECK(plate.warnings[1].msg == "note");
+    CHECK(plate.nozzle_group_result.has_value());
+}
+
+TEST_CASE("Plate warnings keep every field of each processor warning and hold their own copy", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    result.warnings = {{2, "first", "E42", {"a", "b"}}, {1, "second", "W3", {"c"}}, {0, "third", "", {}}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    // Changing the processor result afterwards must not reach the plate.
+    result.warnings.front().params.front() = "changed";
+    result.warnings.front().msg = "changed";
+    result.warnings.pop_back();
+
+    REQUIRE(plate.warnings.size() == 3);
+    CHECK(plate.warnings[0].level == 2);
+    CHECK(plate.warnings[0].msg == "first");
+    CHECK(plate.warnings[0].error_code == "E42");
+    CHECK(plate.warnings[0].params == std::vector<std::string>{"a", "b"});
+    CHECK(plate.warnings[1].level == 1);
+    CHECK(plate.warnings[1].msg == "second");
+    CHECK(plate.warnings[1].error_code == "W3");
+    CHECK(plate.warnings[1].params == std::vector<std::string>{"c"});
+    CHECK(plate.warnings[2].level == 0);
+    CHECK(plate.warnings[2].msg == "third");
+    CHECK(plate.warnings[2].error_code.empty());
+    CHECK(plate.warnings[2].params.empty());
+    CHECK(plate.slice_filaments_info.empty());
+}
+
 } // namespace plate_metadata_contracts
