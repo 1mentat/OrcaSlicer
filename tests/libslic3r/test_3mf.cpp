@@ -7887,10 +7887,16 @@ TEST_CASE("BBS foreign import keeps the rotated extents of a rotated component",
     CHECK((nested_size - Vec3d(10., 20., 30.)).norm() < 1e-5);
 }
 
-// Known bug: a rotated component is positioned wrongly. The rotated part spans x in [-25, -5] and
-// y in [1, 11] (its center stays at the component translation plus the unrotated box center, as if
-// it were rotated about its own center), but the transform rotates about the component origin, so
-// the box should span x in [-40, -20] and y in [-4, 6]; fixed by a follow-up fix PR.
+// Known bug: a rotated component that reuses an already loaded mesh is positioned wrongly. Such a
+// part goes through the shared-mesh path in _generate_volumes_new (add_volume_with_shared_mesh), which
+// starts from an identity volume transform, and the importer then translates the volume by the mesh's
+// init shift (the centering offset c = (5, 10, 15)) in world space after the component transform is
+// set. The part's offset becomes t + c = (-15, 6, 7) instead of t + R*c = (-30, 1, 7), so it spans
+// x in [-25, -5] and y in [1, 11] instead of x in [-40, -20] and y in [-4, 6]. Unrotated shared
+// parts coincide (R*c = c), which is why the translation case passes. This test relies on the
+// rotated part being the second use of mesh 1 (the shared-mesh path) and on the sort by min x
+// placing it at parts[0]; reordering the components would silently stop covering that path.
+// Fixed by a follow-up fix PR.
 TEST_CASE("BBS foreign import places a rotated component by its transform", "[3MF][Bbs3mfComponents][Bbs3mfForeign][!shouldfail]")
 {
     NestedResult r;
