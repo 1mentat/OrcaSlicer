@@ -8411,7 +8411,8 @@ const std::string drain_header   = "drain_holes_format_version=" + std::to_strin
 TEST_CASE("Generic 3MF metadata uses one-based model object indexes", "[3MF][Generic3MFMetadata]")
 {
     // Each kind of metadata sits on a different object (indexes 2, 1, 0 and 2), so an
-    // index mix-up between kinds fails as well as a zero-based index.
+    // index mix-up between kinds fails as well as a zero-based index. Ids count every model object by
+    // position; a model with an instance-less object (not written to the archive) is not covered.
     Model source = make_three_object_model();
     source.objects[2]->layer_height_profile.set(height_profile);
     DynamicPrintConfig range_config;
@@ -8458,21 +8459,23 @@ TEST_CASE("Generic 3MF stores SLA support points with their radius and island fl
     ScopedTemporaryFile archive(".3mf");
     REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
 
-    // The source points are untouched by the export.
+    // The export leaves every field of every source point as it was.
     REQUIRE(source.objects[0]->sla_support_points.size() == support_points.size());
+    for (size_t i = 0; i < support_points.size(); ++i) {
+        const auto& kept     = source.objects[0]->sla_support_points[i];
+        const auto& original = support_points[i];
+        CHECK(kept.pos == original.pos);
+        CHECK(kept.head_front_radius == original.head_front_radius);
+        CHECK(kept.is_new_island == original.is_new_island);
+    }
     // The header names the current support_points_format_version; each point is x y z radius island.
     const auto [object_id, numbers] = parse_object_line(read_entry(archive.string(), "Metadata/Slic3r_PE_sla_support_points.txt"),
                                                         support_header, ' ');
     CHECK(object_id == 1);
-    REQUIRE(numbers.size() == 5 * support_points.size());
-    for (size_t i = 0; i < support_points.size(); ++i) {
-        const auto& expected = support_points[i];
-        CHECK_THAT(numbers[5 * i + 0], WithinAbs(expected.pos.x(), 1e-5));
-        CHECK_THAT(numbers[5 * i + 1], WithinAbs(expected.pos.y(), 1e-5));
-        CHECK_THAT(numbers[5 * i + 2], WithinAbs(expected.pos.z(), 1e-5));
-        CHECK_THAT(numbers[5 * i + 3], WithinAbs(expected.head_front_radius, 1e-5));
-        CHECK(numbers[5 * i + 4] == (expected.is_new_island ? 1. : 0.));
-    }
+    const std::vector<double> expected = {1.25, 2.5, 3.75, 0.42, 0., -4.5, 5.25, 6.75, 0.83, 1.};
+    REQUIRE(numbers.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+        CHECK_THAT(numbers[i], WithinAbs(expected[i], 1e-5));
 }
 
 TEST_CASE("Generic 3MF stores SLA drain holes 1 mm above the mesh for compatibility", "[3MF][Generic3MFMetadata]")
@@ -8482,27 +8485,26 @@ TEST_CASE("Generic 3MF stores SLA drain holes 1 mm above the mesh for compatibil
     ScopedTemporaryFile archive(".3mf");
     REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
 
-    // The source holes are untouched by the export.
+    // The export leaves the source holes as they were.
     REQUIRE(source.objects[2]->sla_drain_holes.size() == drain_holes.size());
     for (size_t i = 0; i < drain_holes.size(); ++i) {
-        CHECK((source.objects[2]->sla_drain_holes[i].pos - drain_holes[i].pos).norm() < 1e-6);
+        CHECK(source.objects[2]->sla_drain_holes[i].pos == drain_holes[i].pos);
+        CHECK(source.objects[2]->sla_drain_holes[i].normal == drain_holes[i].normal);
         CHECK(source.objects[2]->sla_drain_holes[i].height == drain_holes[i].height);
     }
-    // Stored form: position moved back by one unit along the normal, height one larger, normal as given.
+    // The exporter keeps the elevated position of the first implementation for compatibility (see the
+    // comment in _add_sla_drain_holes_file_to_archive): the stored position is moved back one unit
+    // along the normalized normal and the stored height is one larger. Hand-computed values:
+    // hole 1: normal (0, 3, 4)/5 = (0, 0.6, 0.8) -> (10, 19.4, 29.2), height 8.5;
+    // hole 2: normal (2, -1, 2)/3 -> (-4 - 2/3, 8 + 1/3, 12 - 2/3), height 4.25.
+    const std::vector<double> expected = {10., 19.4, 29.2, 0., 3., 4., 1.25, 8.5,
+                                          -4. - 2. / 3., 8. + 1. / 3., 12. - 2. / 3., 2., -1., 2., 2.75, 4.25};
     const auto [object_id, numbers] = parse_object_line(read_entry(archive.string(), "Metadata/Slic3r_PE_sla_drain_holes.txt"),
                                                         drain_header, ' ');
     CHECK(object_id == 3);
-    REQUIRE(numbers.size() == 8 * drain_holes.size());
-    for (size_t i = 0; i < drain_holes.size(); ++i) {
-        const auto& expected = drain_holes[i];
-        const Vec3f stored   = expected.pos - expected.normal.normalized();
-        for (int axis = 0; axis < 3; ++axis) {
-            CHECK_THAT(numbers[8 * i + axis], WithinAbs(stored[axis], 1e-5));
-            CHECK_THAT(numbers[8 * i + 3 + axis], WithinAbs(expected.normal[axis], 1e-5));
-        }
-        CHECK_THAT(numbers[8 * i + 6], WithinAbs(expected.radius, 1e-5));
-        CHECK_THAT(numbers[8 * i + 7], WithinAbs(expected.height + 1.f, 1e-5));
-    }
+    REQUIRE(numbers.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+        CHECK_THAT(numbers[i], WithinAbs(expected[i], 1e-5));
 }
 
 TEST_CASE("Generic 3MF omits empty optional metadata entries", "[3MF][Generic3MFMetadata]")
@@ -8518,10 +8520,13 @@ TEST_CASE("Generic 3MF omits empty optional metadata entries", "[3MF][Generic3MF
     CHECK_FALSE(has_entry(archive.string(), "Metadata/Slic3r_PE_sla_drain_holes.txt"));
 }
 
-TEST_CASE("Generic 3MF writes height profiles only when they contain complete pairs", "[3MF][Generic3MFMetadata]")
+TEST_CASE("Generic 3MF writes height profiles of six or eight values and drops shorter or odd ones", "[3MF][Generic3MFMetadata]")
 {
-    // The exporter stores a profile with at least four values and an even count (x, z pairs).
-    const size_t count = GENERATE(0, 2, 3, 4, 5, 6, 7, 8);
+    // Counts 0, 2, 3, 5 and 7 are not stored; 6 and 8 are stored.
+    // A count of 4 is deliberately left out: the exporter writes it (size >= 4) while the profile reader
+    // in 3mf.cpp rejects it (size <= 4 is invalid), an unresolved asymmetry (and that reader is not
+    // called by the generic loader at all), so the count 4 outcome is not pinned here.
+    const size_t count = GENERATE(0, 2, 3, 5, 6, 7, 8);
     CAPTURE(count);
     std::vector<double> profile;
     for (size_t i = 0; i < count; ++i)
@@ -8531,7 +8536,7 @@ TEST_CASE("Generic 3MF writes height profiles only when they contain complete pa
     ScopedTemporaryFile archive(".3mf");
     REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
 
-    const bool expect_stored = count >= 4 && count % 2 == 0;
+    const bool expect_stored = count >= 6 && count % 2 == 0;
     REQUIRE(has_entry(archive.string(), "Metadata/Slic3r_PE_layer_heights_profile.txt") == expect_stored);
     if (expect_stored) {
         const auto [object_id, numbers] = parse_object_line(read_entry(archive.string(), "Metadata/Slic3r_PE_layer_heights_profile.txt"), "", ';');
