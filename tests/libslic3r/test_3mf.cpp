@@ -7921,10 +7921,15 @@ TEST_CASE("BBS foreign import places a rotated component with its own mesh by it
     CHECK((r.parts[1].max - Vec3d(40., 29., 44.)).norm() < 1e-5);
 }
 
-// Files written by this application (the other caller of the shared-mesh import path) keep the
-// placement of a rotated volume that shares its mesh with another object.
-TEST_CASE("BBS shared-mesh export round-trips a rotated volume's placement", "[3MF][Bbs3mfComponents][ShareMesh]")
+// Application-written files keep the placement of a rotated volume, with and without ShareMesh.
+// The meshes this application writes are already centered, so the importer's init shift is zero and
+// the changed shift logic is not exercised here: this guards that the shared-mesh import path (and
+// the first-use path for the non-shared control) still places such a file exactly as before. The case
+// with a non-zero shift is covered by the handcrafted third-party package above.
+TEST_CASE("BBS ShareMesh export of a rotated volume keeps its placement", "[3MF][Bbs3mfComponents][ShareMesh]")
 {
+    const bool share_mesh = GENERATE(false, true);
+    CAPTURE(share_mesh);
     ScopedTemporaryDir backup("orca_bbs_shared_rotated_store");
     Model source;
     source.set_backup_path(backup.string());
@@ -7938,6 +7943,8 @@ TEST_CASE("BBS shared-mesh export round-trips a rotated volume's placement", "[3
     ModelObject* second = source.add_object(*first);
     second->name        = "shared-copy";
     second->instances.front()->set_offset(Vec3d(-80., 5., 0.));
+    // The copy really reuses the mesh in memory.
+    REQUIRE(first->volumes.front()->mesh_ptr() == second->volumes.front()->mesh_ptr());
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     PlateData plate;
@@ -7949,24 +7956,39 @@ TEST_CASE("BBS shared-mesh export round-trips a rotated volume's placement", "[3
     params.model           = &source;
     params.config          = &config;
     params.plate_data_list = {&plate};
-    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::ShareMesh;
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | (share_mesh ? SaveStrategy::ShareMesh : SaveStrategy::Default);
     REQUIRE(store_bbs_3mf(params));
+
+    // With ShareMesh the archive stores the mesh once and the second object refers to it.
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+    size_t mesh_elements = 0;
+    for (size_t at = model_xml.find("<mesh>"); at != std::string::npos; at = model_xml.find("<mesh>", at + 1))
+        ++mesh_elements;
+    CHECK(mesh_elements == (share_mesh ? 1u : 2u));
 
     Model loaded;
     bbs_archive_contracts::LoadedProject state;
     REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded, state));
     REQUIRE(loaded.objects.size() == 2);
-    for (const ModelObject* expected : source.objects) {
+    const ModelObject* loaded_objects[2] = {nullptr, nullptr};
+    for (size_t i = 0; i < 2; ++i) {
+        const ModelObject* expected = source.objects[i];
         const auto found = std::find_if(loaded.objects.begin(), loaded.objects.end(),
                                         [&](const ModelObject* object) { return object->name == expected->name; });
         REQUIRE(found != loaded.objects.end());
+        loaded_objects[i] = *found;
         const BoundingBoxf3 actual_box   = (*found)->bounding_box_exact();
         const BoundingBoxf3 expected_box = expected->bounding_box_exact();
         CHECK((actual_box.min - expected_box.min).norm() < 1e-4);
         CHECK((actual_box.max - expected_box.max).norm() < 1e-4);
     }
     // The 90 degree turn swaps the 10 x 20 extents, so the placed boxes differ from an unrotated one.
-    CHECK((source.objects.front()->bounding_box_exact().size() - Vec3d(20., 10., 30.)).norm() < 1e-4);
+    CHECK((loaded_objects[0]->bounding_box_exact().size() - Vec3d(20., 10., 30.)).norm() < 1e-4);
+    // The importer reuses the mesh for the second object exactly when the archive shares it.
+    REQUIRE(loaded_objects[0]->volumes.size() == 1);
+    REQUIRE(loaded_objects[1]->volumes.size() == 1);
+    CHECK((loaded_objects[0]->volumes.front()->mesh_ptr() == loaded_objects[1]->volumes.front()->mesh_ptr()) == share_mesh);
 }
 
 } // namespace bbs_nested_component_contracts
