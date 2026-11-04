@@ -7191,8 +7191,10 @@ std::vector<SliceInfoObject> sliced_objects(const std::string& first, const std:
 
 TEST_CASE("BBS slice metadata labels external-firmware objects with safe names", "[3MF][Bbs3mfSliceInfoNames]")
 {
-    // Klipper, Marlin and RepRapFirmware label objects in the g-code as
-    // "<sanitized name>_id_<object index>_copy_<instance index>"; slice_info.config repeats those labels.
+    // For these flavors on a non-Bambu printer, slice_info.config names each instance
+    // "<sanitized name>_id_<object index>_copy_<instance index>". The format mirrors
+    // GCode::get_instance_name() and must stay in sync with it; this test exports a 3MF only and
+    // does not generate or inspect g-code.
     const GCodeFlavor flavor = GENERATE(gcfKlipper, gcfMarlinLegacy, gcfMarlinFirmware, gcfRepRapFirmware);
     CAPTURE(flavor);
     const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
