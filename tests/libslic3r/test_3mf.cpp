@@ -5616,6 +5616,74 @@ TEST_CASE("Split model part units scale each part's vertex geometry by its own u
     }
 }
 
+// Loads the intact archive as a control, applies `edit` to the first object part and expects
+// the load to be refused afterwards.
+static void check_part_edit_rejected(Fixture& f, const std::function<void(std::string& name, std::string& data)>& edit)
+{
+    f.store();
+    {
+        LoadedSplit intact;
+        REQUIRE(f.load(intact));
+        REQUIRE(intact.model.objects.size() == 2);
+    }
+    bool edited = false;
+    REQUIRE(rewrite_3mf_entries(f.archive.string(), [&](std::string& name, std::string& data) {
+        if (edited || !is_part(name))
+            return false;
+        edited = true;
+        edit(name, data);
+        return true;
+    }));
+    LoadedSplit loaded;
+    CHECK_FALSE(f.load(loaded));
+}
+
+TEST_CASE("Split model loading rejects a missing referenced object part", "[3MF][SplitModel]")
+{
+    Fixture f;
+    // Renaming the part leaves the archive's relationship pointing at nothing.
+    check_part_edit_rejected(f, [](std::string& name, std::string&) { name = "Metadata/unreferenced_part.model"; });
+}
+
+TEST_CASE("Split model loading rejects malformed XML within an object part", "[3MF][SplitModel]")
+{
+    Fixture f;
+    check_part_edit_rejected(f, [](std::string&, std::string& data) { data.resize(data.size() / 2); });
+}
+
+TEST_CASE("Split model loading rejects nonfinite vertex coordinates", "[3MF][SplitModel]")
+{
+    const auto coordinate = GENERATE(std::string("nan"), std::string("inf"), std::string("-inf"));
+    // Several importer paths each refuse a non-finite vertex; the load must fail whichever acts first.
+    CAPTURE(coordinate);
+    Fixture f;
+    check_part_edit_rejected(f, [&](std::string&, std::string& data) {
+        const auto vertex = data.find("<vertex ");
+        REQUIRE(vertex != std::string::npos);
+        const auto start = data.find("x=\"", vertex);
+        REQUIRE(start != std::string::npos);
+        const auto end = data.find('"', start + 3);
+        REQUIRE(end != std::string::npos);
+        data.replace(start + 3, end - start - 3, coordinate);
+    });
+}
+
+TEST_CASE("Split model loading rejects duplicate object identifiers within one part", "[3MF][SplitModel]")
+{
+    Fixture f;
+    // Appending a verbatim copy of the part's only object repeats its id.
+    check_part_edit_rejected(f, [](std::string&, std::string& data) {
+        const auto start = data.find("<object ");
+        REQUIRE(start != std::string::npos);
+        const auto end = data.find("</object>", start);
+        REQUIRE(end != std::string::npos);
+        const auto object    = data.substr(start, end + 9 - start);
+        const auto resources = data.find("</resources>");
+        REQUIRE(resources != std::string::npos);
+        data.insert(resources, object);
+    });
+}
+
 TEST_CASE("Shared meshes in split archives retain separate object identities and placements", "[3MF][SplitModel]")
 {
     Fixture f;
