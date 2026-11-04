@@ -7334,3 +7334,116 @@ TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metada
 }
 
 } // namespace bbs_maker_metadata_contracts
+
+namespace bbs_text_alignment_compat_contracts {
+using namespace Slic3r;
+
+namespace {
+
+// Stores a project whose only volume carries a text configuration aligned right/bottom.
+void store_right_bottom_text(const std::string& path)
+{
+    ScopedTemporaryDir backup("orca_bbs_text_alignment_store");
+    Model model;
+    model.set_backup_path(backup.string());
+    ScopeGuard detach([&model] { model.set_backup_path("detach"); });
+    ModelObject* object = model.add_object("text-part", "text.stl", make_cube(8., 6., 4.));
+    object->add_instance();
+    TextConfiguration text;
+    text.text            = "legacy alignment";
+    text.style.name      = "compatibility style";
+    text.style.path      = "font.ttf";
+    text.style.type      = EmbossStyle::Type::file_path;
+    text.style.prop.size_in_mm = 8.f;
+    text.style.prop.align      = {FontProp::HorizontalAlign::right, FontProp::VerticalAlign::bottom};
+    object->volumes.front()->text_configuration = std::move(text);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.plate_index           = 0;
+    plate.objects_and_instances = {{0, 0}};
+    StoreParams params;
+    params.path            = path;
+    params.model           = &model;
+    params.config          = &config;
+    params.plate_data_list = {&plate};
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+}
+
+// Loads the archive and returns the text alignment of its only volume.
+FontProp::Align load_alignment(const std::string& path)
+{
+    Model loaded_model;
+    bbs_archive_contracts::LoadedProject loaded;
+    REQUIRE(bbs_archive_contracts::load_model(path, loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+    const auto& text = loaded_model.objects.front()->volumes.front()->text_configuration;
+    REQUIRE(text.has_value());
+    return text->style.prop.align;
+}
+
+void set_alignment(const std::string& path, const std::string& horizontal, const std::string& vertical)
+{
+    REQUIRE(replace_in_3mf_entry(path, "model_settings.config", "horizontal=\"right\"", horizontal));
+    REQUIRE(replace_in_3mf_entry(path, "model_settings.config", "vertical=\"bottom\"", vertical));
+}
+
+} // namespace
+
+TEST_CASE("BBS text metadata keeps stored alignment names", "[3MF][Bbs3mfTextAlignment]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_right_bottom_text(archive.string());
+    const auto align = load_alignment(archive.string());
+    CHECK(align.first == FontProp::HorizontalAlign::right);
+    CHECK(align.second == FontProp::VerticalAlign::bottom);
+}
+
+TEST_CASE("BBS text metadata maps legacy numeric alignment indexes", "[3MF][Bbs3mfTextAlignment]")
+{
+    // PrusaSlicer 2.6.1 stored the enum index instead of the name.
+    const int index = GENERATE(0, 1, 2);
+    CAPTURE(index);
+    const std::array<FontProp::HorizontalAlign, 3> horizontal{FontProp::HorizontalAlign::left, FontProp::HorizontalAlign::center,
+                                                              FontProp::HorizontalAlign::right};
+    const std::array<FontProp::VerticalAlign, 3> vertical{FontProp::VerticalAlign::top, FontProp::VerticalAlign::center,
+                                                          FontProp::VerticalAlign::bottom};
+    ScopedTemporaryFile archive(".3mf");
+    store_right_bottom_text(archive.string());
+    const int vertical_index = (index + 2) % 3; // differs from the horizontal index so swapped axes fail
+    set_alignment(archive.string(), "horizontal=\"" + std::to_string(index) + "\"", "vertical=\"" + std::to_string(vertical_index) + "\"");
+    const auto align = load_alignment(archive.string());
+    CHECK(align.first == horizontal[index]);
+    CHECK(align.second == vertical[vertical_index]);
+}
+
+TEST_CASE("BBS text metadata defaults missing or empty alignment to center", "[3MF][Bbs3mfTextAlignment]")
+{
+    // PrusaSlicer 2.6.0 stored no alignment at all.
+    const bool remove_attributes = GENERATE(false, true);
+    CAPTURE(remove_attributes);
+    ScopedTemporaryFile archive(".3mf");
+    store_right_bottom_text(archive.string());
+    set_alignment(archive.string(), remove_attributes ? "" : "horizontal=\"\"", remove_attributes ? "" : "vertical=\"\"");
+    const auto align = load_alignment(archive.string());
+    CHECK(align.first == FontProp::HorizontalAlign::center);
+    CHECK(align.second == FontProp::VerticalAlign::center);
+}
+
+// Known bug: the importer's bimap_cvt() asserts that the name is known before it applies its own
+// documented fallback (src/libslic3r/Format/bbs_3mf.cpp, `assert(found_item != map.end())`), so in
+// a build without NDEBUG this input aborts instead of falling back to center; hidden so Debug runs
+// do not crash. In Release the fallback to center/center holds.
+TEST_CASE("BBS text metadata defaults unknown alignment names to center", "[.][3MF][Bbs3mfTextAlignment][Bbs3mfTextAlignmentUnknown]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_right_bottom_text(archive.string());
+    set_alignment(archive.string(), "horizontal=\"diagonal\"", "vertical=\"upright\"");
+    const auto align = load_alignment(archive.string());
+    CHECK(align.first == FontProp::HorizontalAlign::center);
+    CHECK(align.second == FontProp::VerticalAlign::center);
+}
+
+} // namespace bbs_text_alignment_compat_contracts
