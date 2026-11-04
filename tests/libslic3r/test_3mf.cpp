@@ -30,6 +30,7 @@
 #include "test_utils.hpp"
 
 #include "libslic3r/Config.hpp"
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/Geometry.hpp"
 #include <cstddef>
 #include "libslic3r/Point.hpp"
@@ -8246,3 +8247,87 @@ TEST_CASE("G-code archive streams keep explicit and fallback thumbnails on their
     CHECK(second_loaded.obj_inst_map.begin()->second.second == int(source.objects.front()->instances[1]->id().id));
 }
 } // namespace stream_archive_contracts
+
+namespace generic_3mf_compat_contracts {
+using namespace Slic3r;
+
+namespace {
+
+// The 10 mm cube package from the legacy fixtures, with extra top-level markup spliced in before
+// <resources> (metadata elements) and the model's unit attribute replaced.
+std::string cube_package(const std::string& metadata, const std::string& unit = "millimeter")
+{
+    std::string xml = legacy_3mf_contracts::cube_model_xml("ThirdParty");
+    const std::string original_unit = "unit=\"millimeter\"";
+    const size_t unit_at            = xml.find(original_unit);
+    REQUIRE(unit_at != std::string::npos);
+    xml.replace(unit_at, original_unit.size(), "unit=\"" + unit + "\"");
+    const size_t resources = xml.find(" <resources>");
+    REQUIRE(resources != std::string::npos);
+    xml.insert(resources, metadata);
+    return xml;
+}
+
+// Loads a package through the legacy importer; the error is a thrown FileIOError for version problems.
+bool load_package(const std::string& xml, bool check_version, Model& model)
+{
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(legacy_3mf_contracts::write_archive(archive.string(), xml));
+    DynamicPrintConfig config;
+    return legacy_3mf_contracts::load_generic(archive.string(), model, config, check_version);
+}
+
+std::string metadata_element(const std::string& name, int value)
+{
+    return " <metadata name=\"" + name + "\">" + std::to_string(value) + "</metadata>\n";
+}
+
+} // namespace
+
+TEST_CASE("Generic 3MF defaults an unknown or empty unit to millimeters", "[3MF][Generic3MFCompat][Units]")
+{
+    const std::string unit = GENERATE(std::string("furlong"), std::string(""));
+    CAPTURE(unit);
+    Model model;
+    REQUIRE(load_package(cube_package("", unit), false, model));
+    REQUIRE(model.objects.size() == 1);
+    const Vec3d size = model.objects.front()->raw_mesh().bounding_box().size();
+    CHECK((size - Vec3d(10., 10., 10.)).norm() < 1e-5);
+}
+
+TEST_CASE("Generic 3MF check_version accepts file versions up to 2 and rejects newer ones", "[3MF][Generic3MFCompat][Compatibility]")
+{
+    const int version = GENERATE(1, 2, 3, 99);
+    CAPTURE(version);
+    const std::string xml = cube_package(metadata_element("slic3rpe:Version3mf", version));
+    {
+        // Without version checking every version loads.
+        Model unchecked;
+        CHECK(load_package(xml, false, unchecked));
+        CHECK(unchecked.objects.size() == 1);
+    }
+    Model checked;
+    if (version <= 2) {
+        CHECK(load_package(xml, true, checked));
+        CHECK(checked.objects.size() == 1);
+    } else {
+        CHECK_THROWS_AS(load_package(xml, true, checked), Slic3r::FileIOError);
+    }
+}
+
+TEST_CASE("Generic 3MF rejects a newer painting data version whether or not versions are checked", "[3MF][Generic3MFCompat][Compatibility]")
+{
+    // Unlike the file version, the painting versions are enforced unconditionally by the importer.
+    const std::string name = GENERATE(std::string("slic3rpe:FdmSupportsPaintingVersion"), std::string("slic3rpe:SeamPaintingVersion"),
+                                      std::string("slic3rpe:MmPaintingVersion"));
+    CAPTURE(name);
+    for (const bool check_version : {false, true}) {
+        CAPTURE(check_version);
+        Model supported;
+        CHECK(load_package(cube_package(metadata_element(name, 1)), check_version, supported));
+        Model newer;
+        CHECK_THROWS_AS(load_package(cube_package(metadata_element(name, 2)), check_version, newer), Slic3r::FileIOError);
+    }
+}
+
+} // namespace generic_3mf_compat_contracts
