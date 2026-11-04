@@ -6985,3 +6985,144 @@ TEST_CASE("BBS 3MF preserves source-volume provenance and path policy", "[3MF][B
 }
 
 } // namespace bbs_source_metadata_contracts
+
+namespace bbs_import_color_contracts {
+using namespace Slic3r;
+
+// Root objects load from 3D/3dmodel.model while a build item addresses the object in the related
+// 3D/Objects/part.model. Color groups of both models feed one table; ids are unique package-wide.
+
+namespace {
+std::string tetra_mesh_xml()
+{
+    return R"(<mesh>
+      <vertices>
+        <vertex x="0" y="0" z="0"/>
+        <vertex x="10" y="0" z="0"/>
+        <vertex x="0" y="10" z="0"/>
+        <vertex x="0" y="0" z="10"/>
+      </vertices>
+      <triangles>
+        <triangle v1="0" v2="2" v3="1"/>
+        <triangle v1="0" v2="1" v3="3"/>
+        <triangle v1="0" v2="3" v3="2"/>
+        <triangle v1="1" v2="2" v3="3"/>
+      </triangles>
+    </mesh>)";
+}
+
+void write_color_group_archive(const std::string &path)
+{
+    const std::string root_model =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:m="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+       requiredextensions="p">
+  <metadata name="Application">OrcaSlicer-2.0.0</metadata>
+  <resources>
+    <m:colorgroup id="22"><m:color color="#2244AAFF"/></m:colorgroup>
+    <m:colorgroup id="33"><m:color color="#CC3322FF"/></m:colorgroup>
+    <object id="200" name="root blue part" type="model" pid="22">)" +
+        tetra_mesh_xml() +
+        R"(</object>
+    <object id="300" name="root reused red part" type="model" pid="33">)" +
+        tetra_mesh_xml() +
+        R"(</object>
+  </resources>
+  <build>
+    <item p:path="/3D/Objects/part.model" objectid="1" printable="1"/>
+    <item objectid="200" printable="1"/>
+    <item objectid="300" printable="1"/>
+  </build>
+</model>)";
+
+    const std::string extension_model =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:m="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+       requiredextensions="p">
+  <metadata name="Application">OrcaSlicer-2.0.0</metadata>
+  <resources>
+    <m:colorgroup id="11"><m:color color="#CC3322FF"/></m:colorgroup>
+    <object id="1" name="extension red part" type="model" pid="11">)" +
+        tetra_mesh_xml() +
+        R"(</object>
+  </resources>
+</model>)";
+
+    const std::string content_types =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+</Types>)";
+    const std::string package_relationships =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" Target="/3D/3dmodel.model" Id="rel-root"/>
+</Relationships>)";
+    const std::string model_relationships =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" Target="/3D/Objects/part.model" Id="rel-part"/>
+</Relationships>)";
+
+    Zipper archive(path);
+    archive.add_entry("[Content_Types].xml", content_types.data(), content_types.size());
+    archive.add_entry("_rels/.rels", package_relationships.data(), package_relationships.size());
+    archive.add_entry("3D/3dmodel.model", root_model.data(), root_model.size());
+    archive.add_entry("3D/_rels/3dmodel.model.rels", model_relationships.data(), model_relationships.size());
+    archive.add_entry("3D/Objects/part.model", extension_model.data(), extension_model.size());
+    archive.finalize();
+}
+
+std::set<std::array<int, 3>> normalized_tetra_faces(const TriangleMesh& mesh)
+{
+    std::set<std::array<int, 3>> faces;
+    for (const Vec3i32& face : mesh.its.indices) {
+        std::array<int, 3> normalized{face[0], face[1], face[2]};
+        std::sort(normalized.begin(), normalized.end());
+        faces.insert(normalized);
+    }
+    return faces;
+}
+
+} // namespace
+
+TEST_CASE("BBS import honors sub-model color groups and reuses equal colors", "[3MF][Bbs3mfImportGaps][ColorGroups]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    write_color_group_archive(archive.string());
+
+    // Declared before the model so the model is destroyed before the backup directory it uses.
+    bbs_archive_contracts::LoadedProject loaded_project;
+    Model loaded_model;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded_model, loaded_project));
+    REQUIRE(loaded_model.objects.size() == 3);
+
+    const std::set<std::array<int, 3>> expected_faces{{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
+    // The red groups (extension group 11, root group 33) share a color and so an extruder; the
+    // blue group (22) gets another. The extruder numbers themselves are not part of the contract.
+    std::map<std::string, int> actual_extruders;
+    for (const ModelObject* object : loaded_model.objects) {
+        REQUIRE(object->volumes.size() == 1);
+        const TriangleMesh& mesh = object->volumes.front()->mesh();
+        REQUIRE(mesh.facets_count() == 4);
+        CHECK(mesh.its.vertices.size() == 4);
+        CHECK(normalized_tetra_faces(mesh) == expected_faces);
+        CHECK_THAT(its_volume(mesh.its), Catch::Matchers::WithinAbs(1000.0 / 6.0, 1e-3));
+        REQUIRE(object->config.has("extruder"));
+        CHECK(object->instances.size() == 1);
+        actual_extruders.emplace(object->name, object->config.opt_int("extruder"));
+    }
+    REQUIRE(actual_extruders.size() == 3);
+    const int red_extension = actual_extruders.at("extension red part");
+    const int red_root      = actual_extruders.at("root reused red part");
+    const int blue_root     = actual_extruders.at("root blue part");
+    CHECK(red_extension > 0);
+    CHECK(blue_root > 0);
+    CHECK(red_extension == red_root);
+    CHECK(blue_root != red_extension);
+}
+
+} // namespace bbs_import_color_contracts
