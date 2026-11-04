@@ -11,6 +11,7 @@
 #include <memory>
 #include "libslic3r/CommonDefs.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Point.hpp"
 
@@ -1299,7 +1300,7 @@ TEST_CASE("Placeholder parser assigns vectors by initializer list and repeat cou
         0, nullptr, &outputs, nullptr) == "7,8,9|1.25,1.25,1.25,3|new,9|true,false");
 }
 
-TEST_CASE("Placeholder parser preserves scalar assignments and rejects vector-shaped values",
+TEST_CASE("Placeholder parser assigns scalar outputs and rejects vector-shaped values for them",
           "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
@@ -1318,12 +1319,18 @@ TEST_CASE("Placeholder parser preserves scalar assignments and rejects vector-sh
                       Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
     CHECK_THROWS_WITH(run("{number = repeat(2,1)}"),
                       Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK(outputs.option<ConfigOptionBool>("flag")->value == false);
+    CHECK(outputs.option<ConfigOptionInt>("number")->value == 7);
+}
+
+TEST_CASE("Placeholder parser rejects scalar and vector mismatches between local variables",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
     CHECK_THROWS_WITH(parser.process("{local scalar = 1}{local vector = (1,2)}{local vector = scalar}"),
                       Catch::Matchers::ContainsSubstring("Cannot assign scalar to a vector"));
     CHECK_THROWS_WITH(parser.process("{local vector = (1,2)}{local vector = 1}"),
-                      Catch::Matchers::ContainsSubstring("Cannot assign a scalar value to a vector variable."));
-    CHECK(outputs.option<ConfigOptionBool>("flag")->value == false);
-    CHECK(outputs.option<ConfigOptionInt>("number")->value == 7);
+                      Catch::Matchers::ContainsSubstring("Cannot assign a scalar value to a vector variable"));
 }
 
 TEST_CASE("Placeholder parser converts vector elements and preserves unsupported output vectors",
@@ -1399,11 +1406,10 @@ TEST_CASE("Placeholder parser converts initializer lists and rejects incompatibl
     CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 0, 0 });
 }
 
-
-// Known bug: a one-element initializer list assigned to a scalar output variable is assigned, then control falls out
-// of the scalar branch into the vector switch of vector_variable_assign_initializer_list, which ends in
-// `default: assert(false)` (PlaceholderParser.cpp, line 1626). Built without NDEBUG this test aborts there;
-// in a Release build it passes, because the assertion is compiled out after the value was stored.
+// Known bug: a one-element initializer list assigned to a scalar output variable ("scalar_var = ( scalar )") is
+// assigned, then the scalar branch of vector_variable_assign_initializer_list lacks a return and falls into the vector
+// switch, which ends in `default: assert(false)` (PlaceholderParser.cpp, line 1626). Built without NDEBUG this
+// test aborts there; in a Release build it passes, because the assertion is compiled out after the value was stored.
 TEST_CASE("Placeholder parser assigns a one-element initializer list to a scalar output",
           "[PlaceholderParser][PlaceholderParserVectors][.]")
 {
@@ -1415,29 +1421,41 @@ TEST_CASE("Placeholder parser assigns a one-element initializer list to a scalar
 }
 
 // Known bug: an initializer list assigned to a percent output vector reaches `default: assert(false)` in
-// vector_variable_assign_initializer_list (PlaceholderParser.cpp, line 1626) instead of the "Unsupported output
-// vector variable type" error that an element write to the same vector reports. Built without NDEBUG this test
-// aborts at that assertion; in a Release build the assignment is silently ignored and no error is reported.
-TEST_CASE("Placeholder parser rejects an initializer list assigned to a percent output vector",
+// vector_variable_assign_initializer_list (PlaceholderParser.cpp, line 1626), because the switch has no coPercents
+// case. Whether the fix supports percent vectors or rejects them, the call must not assert and must not be ignored:
+// it either reports an error or stores the values. Built without NDEBUG this test aborts at that assertion; in a
+// Release build the assignment is silently ignored (no error, vector unchanged), so the check fails.
+TEST_CASE("Placeholder parser assigns an initializer list to a percent output vector or reports an error",
           "[PlaceholderParser][PlaceholderParserVectors][.]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
     outputs.set_key_value("percents", new ConfigOptionPercents({ 10., 20. }));
-    CHECK_THROWS_WITH(parser.process("{percents = (1,2)}", 0, nullptr, &outputs, nullptr),
-                      Catch::Matchers::ContainsSubstring("Unsupported output vector variable type"));
+    bool reported_error = false;
+    try {
+        parser.process("{percents = (1,2)}", 0, nullptr, &outputs, nullptr);
+    } catch (const PlaceholderParserError &) {
+        reported_error = true;
+    }
+    CHECK((reported_error || outputs.option<ConfigOptionPercents>("percents")->values == std::vector<double>{ 1., 2. }));
 }
 
 // Known bug: repeat() assigned to a percent output vector reaches `default: assert(false)` in
-// vector_variable_assign_expr_with_count (PlaceholderParser.cpp, line 1420) instead of reporting an unsupported type.
+// vector_variable_assign_expr_with_count (PlaceholderParser.cpp, line 1420), because the switch has no coPercents
+// case. As above, a fix may support or reject percent vectors, but the call must not assert and must not be ignored.
 // Built without NDEBUG this test aborts at that assertion; in a Release build the assignment is silently ignored
-// and no error is reported.
-TEST_CASE("Placeholder parser rejects repeat() assigned to a percent output vector",
+// (no error, vector unchanged), so the check fails.
+TEST_CASE("Placeholder parser assigns repeat() to a percent output vector or reports an error",
           "[PlaceholderParser][PlaceholderParserVectors][.]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
     outputs.set_key_value("percents", new ConfigOptionPercents({ 10., 20. }));
-    CHECK_THROWS_WITH(parser.process("{percents = repeat(2, 5)}", 0, nullptr, &outputs, nullptr),
-                      Catch::Matchers::ContainsSubstring("Unsupported output vector variable type"));
+    bool reported_error = false;
+    try {
+        parser.process("{percents = repeat(2, 5)}", 0, nullptr, &outputs, nullptr);
+    } catch (const PlaceholderParserError &) {
+        reported_error = true;
+    }
+    CHECK((reported_error || outputs.option<ConfigOptionPercents>("percents")->values == std::vector<double>{ 5., 5. }));
 }
