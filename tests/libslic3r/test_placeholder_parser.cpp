@@ -1,11 +1,18 @@
 #include <catch2/catch_all.hpp>
+#include <catch2/catch_message.hpp>
+#include <array>
+#include <cmath>
+#include <random>
+#include <utility>
 #include <string>
 #include <memory>
 #include "libslic3r/Config.hpp"
+#include "libslic3r/libslic3r.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "libslic3r/PlaceholderParser.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -398,3 +405,287 @@ SCENARIO("Placeholder parser names in branches that are not taken", "[Placeholde
         CHECK(PlaceholderParser::evaluate_boolean_expression("false ? no_such_var == 1 : true", config));
     }
 }
+
+TEST_CASE("Placeholder parser preserves nullable vector nil semantics", "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "outer_wall_speed", "60,70" },
+        { "nozzle_diameter", "0.4,0.4" }
+    });
+    auto *outer_wall_speed = config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(outer_wall_speed != nullptr);
+    REQUIRE(outer_wall_speed->values.size() == 2);
+    outer_wall_speed->set_at_to_nil(1);
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    CHECK(parser.process("{is_nil(outer_wall_speed[0])}") == "false");
+    CHECK(parser.process("{is_nil(outer_wall_speed[1])}") == "true");
+    // Indexed config access clamps out-of-range indexes to element zero; nil inspection follows that rule.
+    CHECK(parser.process("{is_nil(outer_wall_speed[99])}") == "false");
+    CHECK_THROWS_WITH(parser.process("{outer_wall_speed[1]}"),
+                      Catch::Matchers::ContainsSubstring("undefined (nil)"));
+    CHECK_THROWS_WITH(parser.process("{is_nil(outer_wall_speed)}"),
+                      Catch::Matchers::ContainsSubstring("vector variable when scalar is expected"));
+}
+
+TEST_CASE("Placeholder parser validates one_of literal and regex operands", "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{one_of(\"ABS\", \"NO\", \"ABS\")}") == "true");
+    CHECK(parser.process("{one_of(\"ABS\", \"NO\", \"OTHER\")}") == "false");
+    CHECK(parser.process("{one_of(\"ABS-12\", /ABS-[0-9]+/)}") == "true");
+    CHECK_THROWS_WITH(parser.process("{one_of(12, \"12\")}"),
+                      Catch::Matchers::ContainsSubstring("First parameter"));
+    CHECK_THROWS_WITH(parser.process("{one_of(\"12\", 12)}"),
+                      Catch::Matchers::ContainsSubstring("Pattern has to be a string"));
+}
+
+TEST_CASE("Placeholder random values respect numeric bounds and their supplied context",
+          "[PlaceholderParser][PlaceholderParserRandom]")
+{
+    PlaceholderParser parser;
+    PlaceholderParser::ContextData context;
+    PlaceholderParser::ContextData replay;
+    context.rng.seed(20261017u);
+    replay.rng.seed(20261017u);
+
+    struct Bounds {
+        const char *expression;
+        double lower;
+        double upper;
+        bool integral;
+    };
+    const std::array<Bounds, 4> bounds = {{
+        {"{random(2,7)}", 2., 7., true},
+        {"{random(1.25,2.75)}", 1.25, 2.75, false},
+        {"{random(2.25,3)}", 2.25, 3., false},
+        {"{random(2,2.75)}", 2., 2.75, false},
+    }};
+    for (const auto &row : bounds) {
+        INFO(row.expression);
+        for (int draw = 0; draw < 8; ++draw) {
+            INFO(draw);
+            const std::mt19937 before = context.rng;
+            const std::string value_text = parser.process(row.expression, 0, nullptr, &context);
+            CHECK(value_text == parser.process(row.expression, 0, nullptr, &replay));
+            const double value = std::stod(value_text);
+            REQUIRE(std::isfinite(value));
+            CHECK(value >= row.lower);
+            CHECK(value <= row.upper);
+            if (row.integral)
+                CHECK_THAT(value, Catch::Matchers::WithinAbs(std::floor(value), 1e-12));
+            CHECK_FALSE(context.rng == before);
+            CHECK(context.rng == replay.rng);
+        }
+    }
+
+    CHECK(parser.process("{random(1,1)/2}", 0, nullptr, &context) == "0");
+    CHECK_THAT(std::stod(parser.process("{random(1,1.0)/2}", 0, nullptr, &context)),
+               Catch::Matchers::WithinAbs(0.5, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{random(1.0,1)/2}", 0, nullptr, &context)),
+               Catch::Matchers::WithinAbs(0.5, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{random(1.25,1.25)}", 0, nullptr, &context)),
+               Catch::Matchers::WithinAbs(1.25, 1e-12));
+}
+
+TEST_CASE("Skipped and rejected random expressions leave the supplied generator unchanged",
+          "[PlaceholderParser][PlaceholderParserRandom]")
+{
+    PlaceholderParser parser;
+    PlaceholderParser::ContextData context;
+    context.rng.seed(173u);
+    const std::mt19937 before = context.rng;
+    CHECK(parser.process("{if false}{random(2,7)}{endif}ready", 0, nullptr, &context) == "ready");
+    CHECK(context.rng == before);
+    CHECK(parser.process("{if false}{random(2,7)}{endif}ready") == "ready");
+    CHECK_THROWS_WITH(parser.process("{random(2,7)}"),
+                      Catch::Matchers::ContainsSubstring("Random number generator not available"));
+
+    const std::array<const char *, 4> rejected = {{
+        "{random(\"invalid\",7)}", "{random(2,\"invalid\")}",
+        "{random(true,7)}", "{random(2,false)}",
+    }};
+    for (const char *expression : rejected) {
+        INFO(expression);
+        CHECK_THROWS_WITH(parser.process(expression, 0, nullptr, &context),
+                          Catch::Matchers::ContainsSubstring("Not a numeric type"));
+        CHECK(context.rng == before);
+    }
+    CHECK(parser.process("{random(4,4)}", 0, nullptr, &context) == "4");
+}
+
+TEST_CASE("Placeholder interpolation clamps rounding error at both table endpoints",
+          "[PlaceholderParser][PlaceholderParserInterpolation]")
+{
+    PlaceholderParser parser;
+    const std::array<std::pair<double, double>, 5> rows = {{
+        {-0.5 * EPSILON, 10.}, {0., 10.}, {1., 20.},
+        {2., 30.}, {2. + 0.5 * EPSILON, 30.},
+    }};
+    for (const auto &row : rows) {
+        INFO(row.first);
+        parser.set("probe", row.first);
+        CHECK_THAT(std::stod(parser.process("{interpolate_table(probe,(0,10),(2,30))}")),
+                   Catch::Matchers::WithinAbs(row.second, 1e-9));
+    }
+    for (double outside : {-2. * EPSILON, 2. + 2. * EPSILON}) {
+        INFO(outside);
+        parser.set("probe", outside);
+        CHECK_THROWS_WITH(parser.process("{interpolate_table(probe,(0,10),(2,30))}"),
+                          Catch::Matchers::ContainsSubstring("outside the table range"));
+    }
+    parser.set("probe", 0.5);
+    CHECK_THAT(std::stod(parser.process("{interpolate_table(probe,(0,10),(2,30))}")),
+               Catch::Matchers::WithinAbs(15., 1e-9));
+}
+
+TEST_CASE("Placeholder interpolation rejects nonnumeric and decreasing table coordinates",
+          "[PlaceholderParser][PlaceholderParserInterpolation]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{interpolate_table(\"invalid\",(0,10),(2,30))}"),
+                      Catch::Matchers::ContainsSubstring("Interpolation value must be a number"));
+    CHECK_THROWS_WITH(parser.process("{interpolate_table(1,(\"invalid\",10),(2,30))}"),
+                      Catch::Matchers::ContainsSubstring("X value of a table point must be a number"));
+    CHECK_THROWS_WITH(parser.process("{interpolate_table(1,(0,\"invalid\"),(2,30))}"),
+                      Catch::Matchers::ContainsSubstring("Y value of a table point must be a number"));
+    CHECK_THROWS_WITH(parser.process("{interpolate_table(1,(2,30),(0,10))}"),
+                      Catch::Matchers::ContainsSubstring("X coordinates of the table must be increasing"));
+    CHECK_THAT(std::stod(parser.process("{interpolate_table(1,(0,10),(2,30))}")),
+               Catch::Matchers::WithinAbs(20., 1e-9));
+}
+
+TEST_CASE("Placeholder one_of evaluates supplied regex patterns as whole-string matches",
+          "[PlaceholderParser][PlaceholderParserRegexBranches]")
+{
+    PlaceholderParser parser;
+    parser.set("material_pattern", std::string("ABS-[0-9]+"));
+    parser.set("invalid_pattern", std::string("["));
+
+    CHECK(parser.process(R"({one_of("ABS-12", ~material_pattern)})") == "true");
+    CHECK(parser.process(R"({one_of("PLA-12", ~material_pattern)})") == "false");
+    CHECK(parser.process(R"({one_of("prefixABS-12", ~material_pattern)})") == "false");
+    CHECK(parser.process(R"({one_of("ABS-12", "PLA", ~material_pattern)})") == "true");
+    // A successful earlier alternative avoids compiling a later pattern.
+    CHECK(parser.process(R"({one_of("ABS-12", "ABS-12", ~invalid_pattern)})") == "true");
+    CHECK_THROWS_WITH(parser.process(R"({one_of("ABS-12", ~invalid_pattern)})"),
+                      Catch::Matchers::ContainsSubstring("Regular expression compilation failed"));
+    CHECK_THROWS_WITH(parser.process(R"({one_of(12, ~material_pattern)})"),
+                      Catch::Matchers::ContainsSubstring("First parameter"));
+    CHECK_THROWS_WITH(parser.process(R"({one_of("ABS-12", ~12)})"),
+                      Catch::Matchers::ContainsSubstring("Pattern has to be a string"));
+    CHECK(parser.process(R"({if false}{one_of("ABS-12", ~invalid_pattern)}{endif}ready)") == "ready");
+    // Rejected and skipped expressions must not corrupt later evaluations.
+    CHECK(parser.process(R"({one_of("ABS-12", ~material_pattern)})") == "true");
+}
+
+TEST_CASE("Placeholder regex negation complements a whole-string match",
+          "[PlaceholderParser][PlaceholderParserRegexBranches]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process(R"({"ABS-12" !~ /ABS-[0-9]+/})") == "false");
+    CHECK(parser.process(R"({"PLA-12" !~ /ABS-[0-9]+/})") == "true");
+    CHECK(parser.process(R"({"prefixABS-12" !~ /ABS-[0-9]+/})") == "true");
+    CHECK_THROWS_WITH(parser.process(R"({12 !~ /ABS-[0-9]+/})"),
+                      Catch::Matchers::ContainsSubstring("Left hand side of a regex match must be a string"));
+    CHECK_THROWS_WITH(parser.process(R"({"ABS-12" !~ /[/})"),
+                      Catch::Matchers::ContainsSubstring("Regular expression compilation failed"));
+    CHECK(parser.process(R"({if false}{"ABS-12" !~ /[/}{endif}ready)") == "ready");
+    CHECK(parser.process(R"({"ABS-12" !~ /ABS-[0-9]+/})") == "false");
+}
+
+TEST_CASE("Placeholder parser preserves mixed numeric and string expression behavior",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process(R"({17 % 5}|{5 + 0.25}|{6.5 - 1.25}|{2 + "mm"}|{"size=" + 2})") ==
+          "2|5.25|5.25|2mm|size=2");
+    CHECK_THROWS_WITH(parser.process("{2 / 0}"),
+                      Catch::Matchers::ContainsSubstring("Division by zero"));
+    CHECK_THROWS_WITH(parser.process("{2.0 % 0.0}"),
+                      Catch::Matchers::ContainsSubstring("Division by zero"));
+    CHECK_THROWS_WITH(parser.process("{1 - \"two\"}"),
+                      Catch::Matchers::ContainsSubstring("Cannot subtract non-numeric types"));
+    CHECK_THROWS_WITH(parser.process("{1 * \"two\"}"),
+                      Catch::Matchers::ContainsSubstring("Cannot multiply with non-numeric type"));
+}
+
+TEST_CASE("Placeholder parser converts only numeric expressions",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{-(7)}|{int(7)}|{round(7)}|{floor(7)}|{ceil(7)}") == "-7|7|7|7|7");
+    CHECK_THROWS_WITH(parser.process("{-\"x\"}"),
+                      Catch::Matchers::ContainsSubstring("Cannot apply unary minus operator"));
+    CHECK_THROWS_WITH(parser.process("{int(\"x\")}"),
+                      Catch::Matchers::ContainsSubstring("Cannot convert to integer"));
+    CHECK_THROWS_WITH(parser.process("{round(\"x\")}"),
+                      Catch::Matchers::ContainsSubstring("Cannot round a non-numeric value"));
+    CHECK_THROWS_WITH(parser.process("{floor(\"x\")}"),
+                      Catch::Matchers::ContainsSubstring("Cannot floor a non-numeric value"));
+    CHECK_THROWS_WITH(parser.process("{ceil(\"x\")}"),
+                      Catch::Matchers::ContainsSubstring("Cannot ceil a non-numeric value"));
+    CHECK_THROWS_WITH(parser.process("{not \"x\"}"),
+                      Catch::Matchers::ContainsSubstring("Cannot apply a not operator"));
+}
+
+TEST_CASE("Placeholder parser skips supported lazy expressions in inactive branches",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    const std::string skipped =
+        R"({if false}{-"x"}{int("x")}{round("x")})"
+        R"({not "x"}{1 + 2}{1 - 2}{1 * 2})"
+        R"({1 / 0}{1 % 0}{true and false}{digits("x",2)}{min("x",2)})"
+        R"({interpolate_table("x",("y",1))}{true}{endif}ready)";
+    CHECK(parser.process(skipped) == "ready");
+}
+
+TEST_CASE("Placeholder boolean expressions compare strings and reject incompatible operands",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    const auto evaluate = [&parser](const std::string &expression) {
+        return PlaceholderParser::evaluate_boolean_expression(expression, parser.config());
+    };
+    CHECK(evaluate(R"("alpha" < "beta")"));
+    CHECK(evaluate(R"("same" == "same")"));
+    CHECK(evaluate(R"("1" == 1)"));
+    CHECK(evaluate("true == true"));
+    CHECK_FALSE(evaluate("false == true"));
+    CHECK_THROWS_WITH(evaluate("true < false"),
+                      Catch::Matchers::ContainsSubstring("Cannot compare the types"));
+    CHECK_THROWS_WITH(evaluate("true == 1"),
+                      Catch::Matchers::ContainsSubstring("Cannot compare the types"));
+    CHECK_THROWS_WITH(evaluate("1 and 2"),
+                      Catch::Matchers::ContainsSubstring("Cannot apply logical operation to non-boolean operators"));
+    CHECK_THROWS_WITH(evaluate("1"),
+                      Catch::Matchers::ContainsSubstring("Not a boolean expression"));
+    CHECK_THROWS_WITH(parser.process("{if 1}never{endif}"),
+                      Catch::Matchers::ContainsSubstring("Not a boolean expression"));
+}
+
+TEST_CASE("Placeholder digit formatting rounds values and validates width arguments",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{digits(12.6,2)}|{zdigits(3.4,2)}") == "13|03");
+    CHECK_THROWS_WITH(parser.process("{digits(1,2.5)}"),
+                      Catch::Matchers::ContainsSubstring("digits: second parameter must be integer"));
+    CHECK_THROWS_WITH(parser.process("{digits(1,2,0.5)}"),
+                      Catch::Matchers::ContainsSubstring("digits: third parameter must be integer"));
+    CHECK_THROWS_WITH(parser.process("{digits(\"one\",2)}"),
+                      Catch::Matchers::ContainsSubstring("Not a numeric type"));
+}
+
+TEST_CASE("Placeholder interpolation averages nearly coincident table coordinates",
+          "[PlaceholderParser][PlaceholderParserInterpolation]")
+{
+    PlaceholderParser parser;
+    parser.set("probe", 0.0000025);
+    CHECK_THAT(std::stod(parser.process("{interpolate_table(probe,(0,10),(0.00001,30))}")),
+               Catch::Matchers::WithinAbs(20., 1e-9));
+}
+
