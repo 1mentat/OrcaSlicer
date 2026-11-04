@@ -2333,6 +2333,38 @@ class ProcessCaptureTests(unittest.TestCase):
 
 
 class CleanupTests(unittest.TestCase):
+    @staticmethod
+    def _git_reset_fixture(root):
+        root = root.resolve()
+        repo = root / "original"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (repo / "marker.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                              stdout=subprocess.PIPE, text=True).stdout.strip()
+
+        harness_dir = repo / "tests" / "controls"
+        harness_dir.mkdir(parents=True)
+        (harness_dir / "harness.json").write_text("known harness bytes\n", encoding="utf-8")
+        (harness_dir / "harness-link.json").write_text("link placeholder\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tests"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "harness"], cwd=repo, check=True)
+        harness = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                 stdout=subprocess.PIPE, text=True).stdout.strip()
+
+        worktree = root / "worktree"
+        subprocess.run(["git", "worktree", "add", "--detach", str(worktree), harness],
+                       cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        build = worktree / "build"
+        build.mkdir()
+        (build / "cache-sentinel").write_text("keep\n", encoding="utf-8")
+        return repo, worktree, base, harness
+
     def test_reset_operations_are_recorded_and_do_not_touch_original_checkout(self):
         with tempfile.TemporaryDirectory() as temp:
             original = Path(temp) / "original"
@@ -2354,6 +2386,101 @@ class CleanupTests(unittest.TestCase):
             removed = slicer_pr_validation._git(original, "worktree", "remove", "--force", str(worktree))
             self.assertEqual(removed.returncode, 0)
             self.assertEqual(marker.read_text(encoding="utf-8"), "untouched")
+
+    def test_real_reset_removes_harness_paths_and_preserves_ignored_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, worktree, base, _ = self._git_reset_fixture(Path(temp))
+            operations = slicer_pr_validation._reset_worktree(
+                worktree, base, preserve_build_dir="build", allowed_staged_paths=())
+            self.assertEqual(len(operations), 1)
+            self.assertEqual(operations[0]["returncode"], 0)
+            self.assertNotIn("path_cleanup_diagnostics", operations[0])
+            self.assertIsNone(slicer_pr_validation._reset_operations_failure(operations))
+            self.assertFalse((worktree / "tests/controls/harness.json").exists())
+            self.assertFalse((worktree / "tests/controls/harness-link.json").exists())
+            self.assertEqual((worktree / "build/cache-sentinel").read_text(encoding="utf-8"),
+                             "keep\n")
+            self.assertEqual(subprocess.run(
+                ["git", "status", "--short", "--untracked-files=all"], cwd=worktree,
+                check=True, stdout=subprocess.PIPE, text=True).stdout, "")
+            removed = slicer_pr_validation._git(
+                repo, "worktree", "remove", "--force", str(worktree))
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+
+    def test_reset_unlink_warning_is_actionable_and_never_runs_git_clean(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, worktree, base, _ = self._git_reset_fixture(root)
+            external = root / "external-sentinel"
+            external.write_text("outside stays\n", encoding="utf-8")
+            real_git = slicer_pr_validation._git
+            calls = []
+
+            def simulate_permission_failure(git_repo, *git_args, **git_kwargs):
+                calls.append(git_args)
+                result = real_git(git_repo, *git_args, **git_kwargs)
+                if git_args[:2] == ("reset", "--hard"):
+                    stale = worktree / "tests/controls/harness.json"
+                    stale.parent.mkdir(parents=True, exist_ok=True)
+                    stale.write_text("changed bytes must survive\n", encoding="utf-8")
+                    stale_link = stale.parent / "harness-link.json"
+                    stale_link.symlink_to(external)
+                    (worktree / "unexpected-after-reset.txt").write_text(
+                        "unknown state must survive\n", encoding="utf-8")
+                    return slicer_pr_validation.CommandResult(
+                        ["git", *git_args], result.returncode, result.duration_seconds,
+                        result.stdout,
+                        "warning: unable to unlink old 'tests/controls/harness.json': Permission denied\n"
+                        "warning: unable to unlink old 'tests/controls/harness-link.json': Permission denied\n",
+                    )
+                return result
+
+            try:
+                with mock.patch.object(slicer_pr_validation, "_git",
+                                       side_effect=simulate_permission_failure):
+                    operations = slicer_pr_validation._reset_worktree(worktree, base)
+                failure = slicer_pr_validation._reset_operations_failure(operations)
+                self.assertIn("incomplete path cleanup", failure)
+                self.assertIn("Permission denied", failure)
+                self.assertEqual(len(operations), 1)
+                self.assertEqual(operations[0]["returncode"], 0)
+                self.assertEqual(len(operations[0]["path_cleanup_diagnostics"]), 2)
+                self.assertEqual(calls, [("reset", "--hard", base)])
+                self.assertEqual((worktree / "tests/controls/harness.json").read_text(
+                    encoding="utf-8"), "changed bytes must survive\n")
+                self.assertTrue((worktree / "tests/controls/harness-link.json").is_symlink())
+                self.assertEqual(external.read_text(encoding="utf-8"), "outside stays\n")
+                self.assertTrue((worktree / "unexpected-after-reset.txt").is_file())
+                self.assertEqual((worktree / "build/cache-sentinel").read_text(encoding="utf-8"),
+                                 "keep\n")
+            finally:
+                removed = real_git(repo, "worktree", "remove", "--force", str(worktree))
+                self.assertEqual(removed.returncode, 0, removed.stderr)
+
+    def test_real_reset_permission_warning_is_recorded_and_keeps_build(self):
+        if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() == 0:
+            self.skipTest("directory permission denial requires an unprivileged POSIX user")
+        with tempfile.TemporaryDirectory() as temp:
+            repo, worktree, base, _ = self._git_reset_fixture(Path(temp))
+            harness_dir = worktree / "tests/controls"
+            try:
+                harness_dir.chmod(0o555)
+                operations = slicer_pr_validation._reset_worktree(worktree, base)
+                self.assertEqual(len(operations), 1)
+                self.assertEqual(operations[0]["returncode"], 0)
+                self.assertTrue(any("unable to unlink" in item
+                                    for item in operations[0]["path_cleanup_diagnostics"]))
+                self.assertIn("incomplete path cleanup",
+                              slicer_pr_validation._reset_operations_failure(operations))
+                self.assertTrue((harness_dir / "harness.json").is_file())
+                self.assertEqual((harness_dir / "harness.json").read_text(encoding="utf-8"),
+                                 "known harness bytes\n")
+                self.assertTrue((worktree / "build/cache-sentinel").is_file())
+            finally:
+                harness_dir.chmod(0o755)
+                removed = slicer_pr_validation._git(
+                    repo, "worktree", "remove", "--force", str(worktree))
+                self.assertEqual(removed.returncode, 0, removed.stderr)
 
     def test_invalid_commit_ref_is_reported_without_guessing(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -3433,6 +3560,45 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             self.assertEqual(report["reference"]["status"], "not_run")
             self.assertEqual([call.args[2] for call in run_tree.call_args_list],
                              ["baseline", "pr-1"])
+
+    def test_configure_defaults_focused_discovery_off_and_preserves_explicit_override(self):
+        for override in (None, "ON"):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                repo, base, harness_ref, head = self._fixture(root)
+                snapshot = self._write_snapshot(root, head, base)
+                output = root / "evidence"
+                args = self._args(repo, snapshot, output)
+                args.harness_base = base
+                args.harness_ref = harness_ref
+                args.reference_baseline = False
+                args.cmake_arg = ([] if override is None else [
+                    f"-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY={override}",
+                ])
+                captured_configure_args = []
+
+                def capture_configure(_worktree, _output, _name, _args,
+                                      configure_args, _build_args, **_kwargs):
+                    captured_configure_args.append(list(configure_args))
+                    return self._fake_run_tree(
+                        _worktree, _output, _name, _args, configure_args, _build_args,
+                        **_kwargs)
+
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=capture_configure):
+                    self.assertEqual(slicer_pr_validation.run_validation(args), 0)
+                report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+                configure_args = report["commands"]["configure"]
+                focused_args = [arg for arg in configure_args
+                                if arg.startswith("-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=")]
+                self.assertEqual(focused_args,
+                                 ["-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=OFF"]
+                                 if override is None else [
+                                     "-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=OFF",
+                                     "-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=ON",
+                                 ])
+                self.assertEqual(captured_configure_args,
+                                 [configure_args, configure_args])
 
     def test_each_snapshot_base_drives_reference_and_is_reported(self):
         with tempfile.TemporaryDirectory() as temp:

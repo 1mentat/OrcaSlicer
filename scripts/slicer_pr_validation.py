@@ -1211,6 +1211,7 @@ def _default_configure(root: Path, build: Path, deps_prefix: str, uv: str) -> li
         "-DCMAKE_BUILD_TYPE=Release", "-DSLIC3R_GUI=OFF", "-DBUILD_TESTS=ON",
         "-DSLIC3R_CAD=ON", f"-DCMAKE_PREFIX_PATH={deps_prefix}",
         f"-DORCA_BUNDLED_UV_EXECUTABLE={uv}",
+        "-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=OFF",
     ]
 
 
@@ -1542,11 +1543,19 @@ def _reset_worktree(worktree: Path, commit: str, *, preserve_build_dir: str | No
     if preserve_build_dir is not None:
         _check_reused_reset_preconditions(worktree, preserve_build_dir, allowed_staged_paths)
     reset = _git(worktree, "reset", "--hard", commit)
-    operations.append(reset.json())
-    if reset.returncode == 0 and preserve_build_dir is None:
+    reset_diagnostics = _git_path_cleanup_diagnostics(reset.stderr)
+    reset_record = reset.json()
+    if reset_diagnostics:
+        reset_record["path_cleanup_diagnostics"] = reset_diagnostics
+    operations.append(reset_record)
+    if reset.returncode == 0 and not reset_diagnostics and preserve_build_dir is None:
         clean = _git(worktree, "clean", "-fd")
-        operations.append(clean.json())
-    elif reset.returncode == 0:
+        clean_diagnostics = _git_path_cleanup_diagnostics(clean.stderr)
+        clean_record = clean.json()
+        if clean_diagnostics:
+            clean_record["path_cleanup_diagnostics"] = clean_diagnostics
+        operations.append(clean_record)
+    elif reset.returncode == 0 and not reset_diagnostics:
         _check_build_directory(worktree, preserve_build_dir)
         _check_no_untracked_files_outside_build(worktree, preserve_build_dir)
         _check_no_ignored_files_outside_build(worktree, preserve_build_dir)
@@ -2409,6 +2418,27 @@ def _check_reused_reset_preconditions(worktree: Path, build_dir: str,
     _check_no_ignored_files_outside_build(worktree, build_dir)
 
 
+_GIT_PATH_CLEANUP_WARNING = re.compile(
+    r"\b(?:unable to (?:unlink|rmdir)|failed to remove)\b", re.IGNORECASE)
+
+
+def _git_path_cleanup_diagnostics(stderr: str) -> list[str]:
+    """Return Git's path-removal warnings, which may accompany exit status 0."""
+    return [line.strip() for line in stderr.splitlines()
+            if _GIT_PATH_CLEANUP_WARNING.search(line)]
+
+
+def _reset_operations_failure(operations: Sequence[dict[str, Any]]) -> str | None:
+    for operation in operations:
+        diagnostics = operation.get("path_cleanup_diagnostics")
+        if diagnostics:
+            details = "; ".join(str(item) for item in diagnostics)
+            return f"Git reported incomplete path cleanup during reset: {details}"
+        if operation.get("returncode") != 0:
+            return "Git reset/cleanup command failed"
+    return None
+
+
 def _validate_reusable_worktree(repo: Path, worktree: Path, previous: dict[str, Any],
                                 build_dir: str, output: Path) -> dict[str, Any]:
     expected_state = previous["worktree"]["final_state"]
@@ -2880,8 +2910,10 @@ def _run_reference_entry(worktree: Path, output: Path, reference_name: str,
         worktree, base_sha, preserve_build_dir=preserve_build_dir,
         allowed_staged_paths=allowed_staged_paths)
     reference["reset"] = reset
-    if any(item.get("returncode") != 0 for item in reset):
+    reset_failure = _reset_operations_failure(reset)
+    if reset_failure is not None:
         reference["status"] = "reset_failed"
+        reference["reset_error"] = reset_failure
         record_mtime_state("reset_failed")
         return reference
     before, before_result = _tracked_source_index_hash(worktree)
@@ -3224,9 +3256,17 @@ def run_validation(args: argparse.Namespace) -> int:
             _check_reused_reset_preconditions(worktree, args.build_dir, None)
             if reuse_mode:
                 reset = _git(worktree, "reset", "--hard", harness_ref)
-                report["worktree"]["reset_to_harness"] = reset.json()
+                reset_record = reset.json()
+                reset_diagnostics = _git_path_cleanup_diagnostics(reset.stderr)
+                if reset_diagnostics:
+                    reset_record["path_cleanup_diagnostics"] = reset_diagnostics
+                report["worktree"]["reset_to_harness"] = reset_record
                 if reset.returncode != 0:
                     raise ValidationError(f"cannot reset reused worktree to harness: {reset.stderr.strip()}")
+                if reset_diagnostics:
+                    details = "; ".join(reset_diagnostics)
+                    raise ValidationError(
+                        f"cannot reset reused worktree to harness; Git reported incomplete path cleanup: {details}")
             build_path = _check_build_directory(worktree, args.build_dir)
             _check_no_untracked_files_outside_build(worktree, args.build_dir)
             _check_no_ignored_files_outside_build(worktree, args.build_dir)
@@ -3519,8 +3559,10 @@ def run_validation(args: argparse.Namespace) -> int:
                     allowed_staged_paths=applied_paths if preserve_build_mode else None)
                 entry["reset"] = reset_ops
                 last_tree_run = None
-                if any(item.get("returncode") != 0 for item in reset_ops):
+                reset_failure = _reset_operations_failure(reset_ops)
+                if reset_failure is not None:
                     entry["status"] = "reset_failed"
+                    entry["reset_error"] = reset_failure
                     record_head_mtime_state("reset_failed")
                     report["heads"].append(entry)
                     return_code = 2
