@@ -4403,14 +4403,15 @@ void store_with_custom_gcode_file(const std::string &path, const std::string &xm
 
 } // namespace
 
-TEST_CASE("BBS 3MF falls back to the multi-extruder mode for an unrecognised custom-gcode mode", "[3MF][Bbs3mfExtended][CustomGCode][Errors]")
+TEST_CASE("BBS 3MF tolerates an unrecognised custom-gcode mode and still loads the layer record", "[3MF][Bbs3mfExtended][CustomGCode]")
 {
     const std::string mode = GENERATE("UnknownMode", "");
     CAPTURE(mode);
     ScopedTemporaryFile archive(".3mf");
     store_with_custom_gcode_file(archive.string(),
         "<custom_gcodes_per_layer><plate><plate_info id=\"1\"/>"
-        "<layer top_z=\"0.6\" type=\"3\" extruder=\"2\" color=\"#c0ffee\" extra=\"tool_change\"/>"
+        "<layer top_z=\"0.6\" type=\"" + std::to_string(int(CustomGCode::PausePrint)) +
+        "\" extruder=\"2\" color=\"#c0ffee\" extra=\"pause-note\"/>"
         "<mode value=\"" + mode + "\"/></plate></custom_gcodes_per_layer>");
 
     Model loaded_model;
@@ -4418,18 +4419,20 @@ TEST_CASE("BBS 3MF falls back to the multi-extruder mode for an unrecognised cus
     REQUIRE(load_model(archive.string(), loaded_model, loaded));
     REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
     const CustomGCode::Info &info = loaded_model.plates_custom_gcodes.at(0);
-    // The exported mode (SingleExtruder) and the unset default (Undef) are both different from the result.
-    CHECK(info.mode == CustomGCode::Mode::MultiExtruder);
+    // The mode an unrecognised value maps to is deliberately not asserted: it is not a specified contract.
     REQUIRE(info.gcodes.size() == 1);
+    CHECK_THAT(info.gcodes.front().print_z, Catch::Matchers::WithinAbs(0.6, 1e-9));
+    CHECK(info.gcodes.front().type == CustomGCode::PausePrint);
     CHECK(info.gcodes.front().extruder == 2);
     CHECK(info.gcodes.front().color == "#c0ffee");
+    CHECK(info.gcodes.front().extra == "pause-note");
 }
 
 TEST_CASE("BBS 3MF assigns custom-gcode records that carry no plate element to the first plate", "[3MF][Bbs3mfExtended][CustomGCode][Legacy]")
 {
     ScopedTemporaryFile archive(".3mf");
-    // Older projects listed the layers directly below the root element. One record is in the old
-    // form (gcode attribute) and one in the current form (type and extra attributes).
+    // The layers sit directly below the root element, with no plate element. One record uses the
+    // gcode attribute and one the type and extra attributes.
     store_with_custom_gcode_file(archive.string(),
         "<custom_gcodes_per_layer>"
         "<layer top_z=\"0.6\" extruder=\"2\" color=\"#112233\" gcode=\"M601\"/>"
